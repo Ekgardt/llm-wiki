@@ -6,8 +6,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python \"$LLM_WIKI_ROOT/scripts/codex_memory.py\" hook",
-            "commandWindows": "uv run --directory \"%LLM_WIKI_ROOT%\" python \"%LLM_WIKI_ROOT%\\scripts\\codex_memory.py\" hook",
+            "command": "uv run --locked --no-sync --directory \"$LLM_WIKI_ROOT\" python \"$LLM_WIKI_ROOT/scripts/codex_memory.py\" hook",
+            "commandWindows": "uv run --locked --no-sync --directory \"%LLM_WIKI_ROOT%\" python \"%LLM_WIKI_ROOT%\\scripts\\codex_memory.py\" hook",
             "timeout": 15
           }
         ]
@@ -19,8 +19,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python \"$LLM_WIKI_ROOT/scripts/codex_memory.py\" hook",
-            "commandWindows": "uv run --directory \"%LLM_WIKI_ROOT%\" python \"%LLM_WIKI_ROOT%\\scripts\\codex_memory.py\" hook",
+            "command": "uv run --locked --no-sync --directory \"$LLM_WIKI_ROOT\" python \"$LLM_WIKI_ROOT/scripts/codex_memory.py\" hook",
+            "commandWindows": "uv run --locked --no-sync --directory \"%LLM_WIKI_ROOT%\" python \"%LLM_WIKI_ROOT%\\scripts\\codex_memory.py\" hook",
             "timeout": 15
           }
         ]
@@ -32,8 +32,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python \"$LLM_WIKI_ROOT/scripts/codex_memory.py\" hook",
-            "commandWindows": "uv run --directory \"%LLM_WIKI_ROOT%\" python \"%LLM_WIKI_ROOT%\\scripts\\codex_memory.py\" hook",
+            "command": "uv run --locked --no-sync --directory \"$LLM_WIKI_ROOT\" python \"$LLM_WIKI_ROOT/scripts/codex_memory.py\" hook",
+            "commandWindows": "uv run --locked --no-sync --directory \"%LLM_WIKI_ROOT%\" python \"%LLM_WIKI_ROOT%\\scripts\\codex_memory.py\" hook",
             "timeout": 15
           }
         ]
@@ -44,8 +44,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python \"$LLM_WIKI_ROOT/scripts/codex_memory.py\" hook",
-            "commandWindows": "uv run --directory \"%LLM_WIKI_ROOT%\" python \"%LLM_WIKI_ROOT%\\scripts\\codex_memory.py\" hook",
+            "command": "uv run --locked --no-sync --directory \"$LLM_WIKI_ROOT\" python \"$LLM_WIKI_ROOT/scripts/codex_memory.py\" hook",
+            "commandWindows": "uv run --locked --no-sync --directory \"%LLM_WIKI_ROOT%\" python \"%LLM_WIKI_ROOT%\\scripts\\codex_memory.py\" hook",
             "timeout": 15
           }
         ]

@@ -111,3 +111,61 @@ def test_state_lock_fails_fast_for_acl_permission_error(tmp_path, monkeypatch):
     with pytest.raises(PermissionError):
         with memory_state._state_lock(timeout=0.2, poll=0):
             pass
+
+
+def test_atomic_write_uses_unique_recoverable_durable_staging(tmp_path, monkeypatch):
+    import memory_state
+    from reliable_memory import MetadataDurabilityUnavailable
+
+    target = tmp_path / "run" / "state.json"
+    target.parent.mkdir()
+    target.write_text("old", encoding="utf-8")
+    observed = []
+
+    def fail(staged, destination, **options):
+        observed.append((staged, destination, options))
+        raise MetadataDurabilityUnavailable("move failed")
+
+    monkeypatch.setattr(memory_state, "durable_publish_file", fail)
+    with pytest.raises(MetadataDurabilityUnavailable):
+        memory_state.atomic_write(target, "new")
+
+    assert target.read_text(encoding="utf-8") == "old"
+    assert len(observed) == 1
+    staged, destination, options = observed[0]
+    assert destination == target
+    assert staged.parent == target.parent
+    assert staged.name.startswith(".state.json.")
+    assert staged.read_bytes() == b"new"
+    assert options["replace"] is True
+
+
+def test_atomic_write_replaces_longer_existing_file(tmp_path):
+    import memory_state
+
+    target = tmp_path / "run" / "state.json"
+    target.parent.mkdir()
+    target.write_text("existing payload is longer", encoding="utf-8")
+
+    memory_state.atomic_write(target, "new")
+
+    assert target.read_text(encoding="utf-8") == "new"
+
+
+def test_save_state_routes_through_atomic_write(tmp_path, monkeypatch):
+    import memory_state
+
+    state_dir = tmp_path / "run"
+    state_file = state_dir / "state.json"
+    calls = []
+    monkeypatch.setattr(memory_state, "STATE_DIR", state_dir)
+    monkeypatch.setattr(memory_state, "STATE_FILE", state_file)
+    monkeypatch.setattr(
+        memory_state,
+        "atomic_write",
+        lambda path, content, encoding="utf-8": calls.append((path, content, encoding)),
+    )
+
+    memory_state.save_state({"value": 1})
+
+    assert calls == [(state_file, '{\n  "value": 1\n}', "utf-8")]

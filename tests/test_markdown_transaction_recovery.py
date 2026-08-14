@@ -16,7 +16,7 @@ import markdown_transaction
 import pytest
 from markdown_transaction import ABSENT, MarkdownChange, MarkdownCoordinator
 from project_journal import ProjectStore
-from reliable_memory import sha256_bytes
+from reliable_memory import OperationalDatabaseContractError, sha256_bytes
 
 
 @pytest.fixture
@@ -76,6 +76,224 @@ def _crash_process(
         text=True,
         env=env,
         timeout=20,
+    )
+
+
+def test_coordinator_v2_rows_survive_candidate_migration_exactly(
+    vault: Path, state_root: Path
+) -> None:
+    coordinator = MarkdownCoordinator(vault, state_root)
+    transaction_columns = (
+        "id",
+        "operation_id",
+        "request_hash",
+        "state",
+        "preconditions_json",
+        "plan_hash",
+        "created_at",
+        "updated_at",
+        "parent_transaction_id",
+        "error_code",
+        "artifacts_pruned_at",
+        "owner_pid",
+    )
+    operation_columns = (
+        "transaction_id",
+        "position",
+        "kind",
+        "path",
+        "before_hash",
+        "after_hash",
+        "parent_device",
+        "parent_inode",
+        "applied",
+    )
+    states = (
+        "preparing",
+        "prepared",
+        "applying",
+        "committed",
+        "discarded",
+        "conflicted",
+        "quarantined",
+    )
+    with sqlite3.connect(coordinator.database_path) as database:
+        for position, state in enumerate(states):
+            database.execute(
+                'INSERT INTO "transaction" '
+                "(id, operation_id, request_hash, state, preconditions_json, plan_hash, "
+                "created_at, updated_at, parent_transaction_id, error_code, "
+                "artifacts_pruned_at, owner_pid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    f"tx-{state}",
+                    f"operation-{state}",
+                    f"request-{state}",
+                    state,
+                    f'{{"state":"{state}"}}',
+                    f"plan-{state}",
+                    f"created-{position}",
+                    f"updated-{position}",
+                    "tx-preparing" if position else None,
+                    f"error-{state}" if state in {"conflicted", "quarantined"} else None,
+                    f"pruned-{position}" if state == "committed" else None,
+                    1000 + position if state == "preparing" else None,
+                ),
+            )
+        for position, kind in enumerate(("create", "replace", "delete")):
+            database.execute(
+                'INSERT INTO "operation" '
+                "(transaction_id, position, kind, path, before_hash, after_hash, "
+                "parent_device, parent_inode, applied) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    f"tx-{states[position]}",
+                    position,
+                    kind,
+                    f"knowledge/notes/{kind}.md",
+                    f"before-{kind}",
+                    f"after-{kind}",
+                    10 + position,
+                    20 + position,
+                    position % 2,
+                ),
+            )
+        database.execute(
+            "INSERT INTO project_checkpoints "
+            "(project, sequence, occurrence_id, idempotency_key, event_json, "
+            "lease_token, fencing_epoch, operation_id, attempt_number, "
+            "parent_operation_id, transaction_id, state) "
+            "VALUES ('demo', 1, 'occurrence', 'key', '{}', 'lease', 7, "
+            "'checkpoint-operation', 1, NULL, 'tx-committed', 'committed')"
+        )
+        database.execute(
+            "INSERT INTO project_checkpoint_attempts "
+            "(project, sequence, attempt_number, operation_id, parent_operation_id, "
+            "lease_token, fencing_epoch, transaction_id, state, created_at) "
+            "VALUES ('demo', 1, 1, 'checkpoint-operation', NULL, 'lease', 7, "
+            "'tx-committed', 'committed', 'checkpoint-created')"
+        )
+        database.execute(
+            "INSERT INTO writer_fences(gate_name, last_epoch) VALUES ('global', 9)"
+        )
+        database.commit()
+        expected_transactions = database.execute(
+            f'SELECT {", ".join(transaction_columns)} FROM "transaction" ORDER BY id'
+        ).fetchall()
+        expected_operations = database.execute(
+            f'SELECT {", ".join(operation_columns)} FROM "operation" '
+            "ORDER BY transaction_id, position"
+        ).fetchall()
+        expected_checkpoints = database.execute(
+            "SELECT * FROM project_checkpoints ORDER BY project, sequence"
+        ).fetchall()
+        expected_attempts = database.execute(
+            "SELECT * FROM project_checkpoint_attempts "
+            "ORDER BY project, sequence, attempt_number"
+        ).fetchall()
+
+    candidate = state_root / "run" / "markdown-transactions-v3.candidate.sqlite3"
+    summary = markdown_transaction.initialize_coordinator_v3_candidate(
+        candidate, source_v2=coordinator.database_path
+    )
+
+    with sqlite3.connect(candidate) as database:
+        actual_transactions = database.execute(
+            f'SELECT {", ".join(transaction_columns)} FROM "transaction" ORDER BY id'
+        ).fetchall()
+        new_fields = database.execute(
+            "SELECT intent_id, intent_fence_token, intent_fence_epoch, "
+            "capture_link_digest, capture_seal_digest, abort_operation_id, "
+            "abort_manifest_sha256, abort_receipt_sha256, abort_chosen_at, aborted_at "
+            'FROM "transaction"'
+        ).fetchall()
+        actual_operations = database.execute(
+            f'SELECT {", ".join(operation_columns)} FROM "operation" '
+            "ORDER BY transaction_id, position"
+        ).fetchall()
+        actual_checkpoints = database.execute(
+            "SELECT * FROM project_checkpoints ORDER BY project, sequence"
+        ).fetchall()
+        actual_attempts = database.execute(
+            "SELECT * FROM project_checkpoint_attempts "
+            "ORDER BY project, sequence, attempt_number"
+        ).fetchall()
+
+    assert summary == {
+        "operations": 3,
+        "project_checkpoint_attempts": 1,
+        "project_checkpoints": 1,
+        "transactions": len(states),
+        "writer_fences": 1,
+    }
+    assert actual_transactions == expected_transactions
+    assert actual_operations == expected_operations
+    assert actual_checkpoints == expected_checkpoints
+    assert actual_attempts == expected_attempts
+    assert all(row == (None,) * 10 for row in new_fields)
+
+
+@pytest.mark.parametrize(
+    ("table", "insert_sql"),
+    [
+        (
+            "project_leases",
+            "INSERT INTO project_leases VALUES "
+            "('demo', 'token', 1, 'actor', '2099-01-01Z', '2026-08-12Z')",
+        ),
+        (
+            "writer_owners",
+            "INSERT INTO writer_owners VALUES "
+            "('global', 'token', 1, 2, '2026-08-12Z', '2026-08-12Z', "
+            "'2099-01-01Z', 1)",
+        ),
+        (
+            "maintenance_owners",
+            "INSERT INTO maintenance_owners VALUES "
+            "('doctor', 'token', 1, '2026-08-12Z')",
+        ),
+    ],
+)
+def test_coordinator_migration_rejects_ambiguous_historical_owner(
+    vault: Path, state_root: Path, table: str, insert_sql: str
+) -> None:
+    coordinator = MarkdownCoordinator(vault, state_root)
+    with sqlite3.connect(coordinator.database_path) as database:
+        database.execute(insert_sql)
+        database.commit()
+    candidate = state_root / "run" / f"candidate-{table}.sqlite3"
+
+    with pytest.raises(OperationalDatabaseContractError) as raised:
+        markdown_transaction.initialize_coordinator_v3_candidate(
+            candidate, source_v2=coordinator.database_path
+        )
+
+    assert getattr(raised.value, "code", None) == "coordinator_v2_ambiguous_ownership"
+    with sqlite3.connect(candidate) as database:
+        assert database.execute("PRAGMA application_id").fetchone()[0] == 0
+        assert database.execute("PRAGMA user_version").fetchone()[0] == 0
+
+
+def test_coordinator_migration_rejects_incomplete_checkpoint_attempt_history(
+    vault: Path, state_root: Path
+) -> None:
+    coordinator = MarkdownCoordinator(vault, state_root)
+    with sqlite3.connect(coordinator.database_path) as database:
+        database.execute(
+            "INSERT INTO project_checkpoints "
+            "(project, sequence, occurrence_id, idempotency_key, event_json, "
+            "lease_token, fencing_epoch, operation_id, attempt_number, state) "
+            "VALUES ('demo', 1, 'occurrence', 'key', '{}', 'lease', 1, "
+            "'checkpoint-operation', 1, 'reserved')"
+        )
+        database.commit()
+    candidate = state_root / "run" / "incomplete-checkpoint.sqlite3"
+
+    with pytest.raises(OperationalDatabaseContractError) as raised:
+        markdown_transaction.initialize_coordinator_v3_candidate(
+            candidate, source_v2=coordinator.database_path
+        )
+
+    assert getattr(raised.value, "code", None) == (
+        "coordinator_v2_checkpoint_history_incomplete"
     )
 
 

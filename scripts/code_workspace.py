@@ -246,16 +246,20 @@ def _stat_metadata(info: os.stat_result) -> FileStatMetadata:
 def _same_file(left: os.stat_result, right: os.stat_result) -> bool:
     if min(left.st_dev, left.st_ino, right.st_dev, right.st_ino) <= 0:
         return False
-    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino) and (
+    metadata_matches = (
         stat.S_IFMT(left.st_mode),
         left.st_size,
         left.st_mtime_ns,
-        left.st_ctime_ns,
     ) == (
         stat.S_IFMT(right.st_mode),
         right.st_size,
         right.st_mtime_ns,
-        right.st_ctime_ns,
+    )
+    change_time_matches = os.name == "nt" or left.st_ctime_ns == right.st_ctime_ns
+    return (
+        (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+        and metadata_matches
+        and change_time_matches
     )
 
 

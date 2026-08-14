@@ -106,7 +106,10 @@ class _FakeNodeTree:
 
 class _CloseErrorBytesIO(io.BytesIO):
     def close(self) -> None:
-        raise ValueError("close failed")
+        if not getattr(self, "_failed_close", False):
+            self._failed_close = True
+            raise ValueError("close failed")
+        super().close()
 
 
 def _install_node_probe(

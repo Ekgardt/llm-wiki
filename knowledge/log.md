@@ -27,6 +27,8 @@
 - 2026-07-24 — Qualified LSP process containment by platform: Windows Job Objects own assigned trees, POSIX process groups cover pinned Pyright descendants only while they remain in-group, and hostile `setsid()` escape remains unsupported.
 - 2026-08-05 — Recorded the proposed exact V4 reliability contract after approval of its direction and implementation base; production implementation remains blocked on final architecture sign-off.
 - 2026-08-05 — Activated the reviewed V4 reliability contract after the user delegated exact architecture decisions based on current-source research; implementation may proceed through TDD gates.
+- 2026-08-12 — Recorded explicit approval to implement the Reliability V3 runtime database pair and offline adoption backend required by installer repair; Markdown authority, runtime roots, and the 12-tool MCP surface remain unchanged.
+- 2026-08-14 — Recorded the approved bounded sibling-preimage contract for Claude and Codex configuration merges: byte-exact verification, exact LLM-Wiki ownership prefixes, simultaneous 10-file/90-day/100-MiB retention, and preservation of the newest or sole restore point.
 
 ## Editorial note
 This log is vault metadata — an append-only editorial changelog of compile passes and hygiene actions over `knowledge/`, not content derived from `knowledge/raw/` or `knowledge/inbox/`. New entries are appended at the bottom by compile passes and by hand; entries are never rewritten or removed.

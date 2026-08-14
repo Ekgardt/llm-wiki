@@ -35,10 +35,13 @@ ROOT = Path(__file__).resolve().parent.parent
 def test_opencode_plugin_is_lifecycle_only():
     plugin = (ROOT / "scripts" / "llm-wiki-memory-opencode.js").read_text(encoding="utf-8")
     assert "integration_adapter.py" in plugin
+    assert "event: async" in plugin
     assert '"session.created"' in plugin
     assert '"tool.execute.after"' in plugin
     assert '"session.idle"' in plugin
     assert '"experimental.session.compacting"' in plugin
+    assert '"session.created": async' not in plugin
+    assert '"session.idle": async' not in plugin
     assert '"memory.context"' not in plugin
     assert '"memory.recall"' not in plugin
     assert "Classify this transcript" not in plugin
@@ -52,6 +55,120 @@ def test_opencode_plugin_is_lifecycle_only():
     assert "state-path" not in plugin
     assert 'directory: typeof directory === "string" ? directory : null' in plugin
     assert "project" not in plugin
+
+
+def test_opencode_roleless_user_message_is_forwarded_once():
+    plugin_url = (ROOT / "scripts" / "llm-wiki-memory-opencode.js").resolve().as_uri()
+    root = "D:/vault"
+    directory = "D:/project"
+    script = textwrap.dedent(
+        f"""
+        process.env.LLM_WIKI_ROOT = {json.dumps(root)};
+        const calls = [];
+        globalThis.Bun = {{ spawn(args) {{
+          const record = {{ args, stdin: "" }};
+          calls.push(record);
+          let finish;
+          const exited = new Promise((resolve) => {{ finish = resolve; }});
+          return {{
+            stdin: {{
+              write(value) {{ record.stdin += value; }},
+              end() {{ finish(0); }},
+            }},
+            stdout: new ReadableStream({{ start(controller) {{ controller.close(); }} }}),
+            exited,
+            kill() {{ finish(143); }},
+          }};
+        }} }};
+        const {{ LlmWikiMemoryPlugin }} = await import(
+          {json.dumps(plugin_url)} + "?harness=roleless-user-message"
+        );
+        const hooks = await LlmWikiMemoryPlugin({{ client: {{}}, directory: {json.dumps(directory)} }});
+        const roleless = [
+          {{ sessionID: "session-1" }},
+          {{
+            message: {{ id: "message-1" }},
+            parts: [
+              {{ type: "text", text: "Preserve this request" }},
+              {{ type: "file", text: "ignore this attachment text" }},
+              {{ type: "text", text: "and this second part" }},
+            ],
+          }},
+        ];
+        await hooks["chat.message"](...roleless);
+        await hooks["chat.message"](
+          {{ sessionID: "session-1" }},
+          {{
+            message: {{ id: "message-2", role: "assistant" }},
+            parts: [{{ type: "text", text: "do not capture" }}],
+          }},
+        );
+        console.log(JSON.stringify(calls));
+        """
+    )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = json.loads(result.stdout)
+    assert len(calls) == 1
+    assert calls[0]["args"][-4:] == ["--source", "opencode", "--event", "user_prompt"]
+    assert json.loads(calls[0]["stdin"]) == {
+        "directory": directory,
+        "event_id": "message-1",
+        "prompt": "Preserve this request\nand this second part",
+        "sessionID": "session-1",
+    }
+
+
+def test_user_prompt_ingestion_runs_prompt_and_feedback_capture_once(monkeypatch):
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import integration_adapter
+
+    calls = []
+    monkeypatch.setattr(integration_adapter, "_observe_checkpoint_fail_open", lambda event: None)
+    monkeypatch.setattr(
+        integration_adapter,
+        "_project_context",
+        lambda event: ("demo", Path("D:/project")),
+    )
+    monkeypatch.setattr(
+        integration_adapter,
+        "_run_delegate",
+        lambda name, payload, **kwargs: calls.append((name, payload, kwargs)),
+    )
+    envelope = integration_adapter.normalize_event(
+        "opencode",
+        "user_prompt",
+        {
+            "sessionID": "session-1",
+            "directory": "D:/project",
+            "event_id": "message-1",
+            "prompt": "Preserve this request",
+        },
+    )
+
+    integration_adapter.ingest_event(envelope)
+
+    assert [name for name, _, _ in calls] == [
+        "user_prompt_capture.py",
+        "feedback_capture.py",
+    ]
+    assert calls[0][1]["prompt"] == "Preserve this request"
+    assert calls[1][1] == {
+        "text": "Preserve this request",
+        "session_id": "session-1",
+        "slug": "demo",
+        "trigger": "opencode-user-message",
+    }
 
 
 def test_normalization_preserves_only_available_checkpoint_signals():
@@ -1301,7 +1418,10 @@ def test_opencode_node_injects_shared_bounded_legacy_handoff_for_unicode_slug(
         }} }};
         const {{ LlmWikiMemoryPlugin }} = await import({json.dumps(plugin_url)});
         const hooks = await LlmWikiMemoryPlugin({{ client: {{}}, directory: {json.dumps(str(project))} }});
-        await hooks["session.created"]({{ sessionInfo: {{ id: "unicode-session" }} }});
+        await hooks.event({{ event: {{
+          type: "session.created",
+          properties: {{ sessionID: "unicode-session", info: {{ id: "unicode-session" }} }},
+        }} }});
         const output = {{ system: [] }};
         await hooks["experimental.chat.system.transform"](
           {{ sessionInfo: {{ id: "unicode-session" }} }}, output
@@ -1656,7 +1776,7 @@ def test_codex_hook_merge_preserves_user_hooks_and_is_idempotent(tmp_path):
 
     source = ROOT / "integrations" / "codex" / "hooks.json"
     destination = tmp_path / "hooks.json"
-    destination.write_text(
+    original = (
         json.dumps(
             {
                 "custom": {"preserved": True},
@@ -1674,16 +1794,21 @@ def test_codex_hook_merge_preserves_user_hooks_and_is_idempotent(tmp_path):
                     ]
                 },
             }
-        ),
-        encoding="utf-8",
+        )
+        + "\r\n"
     )
+    destination.write_bytes(original.encode("utf-8"))
 
     codex_memory.merge_codex_hooks(source, destination)
     first = destination.read_bytes()
+    backups = list(tmp_path.glob("hooks.json.bak-llm-wiki-*"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == original.encode("utf-8")
     codex_memory.merge_codex_hooks(source, destination)
     merged = json.loads(destination.read_text(encoding="utf-8"))
 
     assert destination.read_bytes() == first
+    assert list(tmp_path.glob("hooks.json.bak-llm-wiki-*")) == backups
     assert merged["custom"] == {"preserved": True}
     assert any(
         hook.get("command") == "echo user"
@@ -1698,6 +1823,39 @@ def test_codex_hook_merge_preserves_user_hooks_and_is_idempotent(tmp_path):
         if "codex_memory.py" in hook.get("command", "")
     ]
     assert len(ours) == 4
+
+
+def test_codex_hook_merge_prunes_owned_backups_but_keeps_newest_and_unrelated(tmp_path):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import codex_memory
+
+    source = ROOT / "integrations" / "codex" / "hooks.json"
+    destination = tmp_path / "hooks.json"
+    original = b'{"hooks":{}}\n'
+    destination.write_bytes(original)
+    now = time.time()
+    old = None
+    for index in range(11):
+        backup = tmp_path / f"hooks.json.bak-llm-wiki-20260801-000000-{index:06d}"
+        backup.write_bytes(str(index).encode("ascii"))
+        modified = now - (91 * 24 * 60 * 60 if index == 0 else 11 - index)
+        os.utime(backup, (modified, modified))
+        if index == 0:
+            old = backup
+    unrelated = tmp_path / "hooks.json.backup"
+    unrelated.write_bytes(b"keep")
+
+    codex_memory.merge_codex_hooks(source, destination)
+
+    backups = list(tmp_path.glob("hooks.json.bak-llm-wiki-*"))
+    assert old is not None and not old.exists()
+    assert len(backups) <= 10
+    assert any(path.read_bytes() == original for path in backups)
+    assert unrelated.read_bytes() == b"keep"
 
 
 def _codex_inline_hooks_toml(*, include_stop: bool = True) -> str:
@@ -1916,7 +2074,7 @@ def test_codex_mcp_config_state_accepts_exact_enabled_table(tmp_path, quoted):
     table = '[mcp_servers."llm-wiki"]' if quoted else "[mcp_servers.llm-wiki]"
     config.write_text(
         f'{table}\ncommand = "uv"\n'
-        f'args = ["run", "--directory", {json.dumps(str(ROOT))}, '
+        f'args = ["run", "--locked", "--no-sync", "--directory", {json.dumps(str(ROOT))}, '
         '"python", "scripts/mcp_server.py"]\nenabled = true\n',
         encoding="utf-8",
     )
@@ -1935,7 +2093,7 @@ def test_codex_mcp_config_state_accepts_exact_enabled_table(tmp_path, quoted):
         ),
         (
             '[mcp_servers.llm-wiki]\ncommand = "uv"\n'
-            'args = ["run", "--directory", "wrong", "python", '
+            'args = ["run", "--locked", "--no-sync", "--directory", "wrong", "python", '
             '"scripts/mcp_server.py"]\nenabled = false\n',
             "conflict",
         ),
@@ -1978,7 +2136,7 @@ def _shell_function(source: str, name: str) -> str:
 
 
 def _installer_test_section(source: str) -> str:
-    section = source.split("4. Run tests", 1)[1].split(
+    section = source.split("4. Run production smoke", 1)[1].split(
         "5. Set environment variables", 1
     )[0]
     return section.split("\n", 1)[1]
@@ -2108,6 +2266,8 @@ def _write_stubborn_fake_uv_tree(directory: Path) -> None:
 
 
 def _find_working_bash() -> str | None:
+    if os.name == "nt":
+        return None
     search_paths = [None]
     git = shutil.which("git")
     if git:
@@ -2128,15 +2288,15 @@ def _find_working_bash() -> str | None:
 
 
 @pytest.mark.parametrize(
-    ("fake_exit", "fake_output", "expected_marker"),
+    ("fake_exit", "fake_output", "expected_exit", "expected_marker"),
     [
-        (1, "3081 passed", "[WARN] Test suite failed; installation continues in degraded state"),
-        (0, "1 failed", "[OK] Test suite passed"),
+        (1, "smoke ok", 1, "[FAIL] Production smoke failed; installation aborted"),
+        (0, "smoke failed", 0, "[OK] Production smoke passed"),
     ],
-    ids=["pytest_exit_1_success_output", "pytest_exit_0_failure_output"],
+    ids=["smoke_exit_1_success_output", "smoke_exit_0_failure_output"],
 )
-def test_unix_installer_trusts_pytest_exit_status(
-    tmp_path, fake_exit, fake_output, expected_marker
+def test_unix_installer_trusts_smoke_exit_status(
+    tmp_path, fake_exit, fake_output, expected_exit, expected_marker
 ):
     bash = _find_working_bash()
     if bash is None:
@@ -2158,6 +2318,7 @@ def test_unix_installer_trusts_pytest_exit_status(
             info() {{ echo "[INFO] $1"; }}
             ok() {{ echo "[OK] $1"; }}
             warn() {{ echo "[WARN] $1"; }}
+            fail() {{ echo "[FAIL] $1"; exit 1; }}
             {section}
             case "$-" in *m*) exit 91 ;; esac
             """
@@ -2165,6 +2326,7 @@ def test_unix_installer_trusts_pytest_exit_status(
         encoding="utf-8",
     )
     env = os.environ.copy()
+    env["LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS"] = "5"
 
     result = subprocess.run(
         [bash, str(runner)],
@@ -2177,9 +2339,60 @@ def test_unix_installer_trusts_pytest_exit_status(
         check=False,
     )
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == expected_exit, result.stderr
     assert expected_marker in result.stdout
     assert fake_output in result.stdout
+
+
+def test_unix_installer_timeout_stops_tests_and_aborts(tmp_path):
+    bash = _find_working_bash()
+    if bash is None:
+        pytest.skip("bash unavailable")
+    section = _installer_test_section(
+        (ROOT / "install.sh").read_text(encoding="utf-8")
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_blocking_fake_uv(fake_bin)
+    runner = tmp_path / "installer-timeout-contract.sh"
+    runner.write_text(
+        textwrap.dedent(
+            f"""
+            set -euo pipefail
+            export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS=1
+            PATH="$(dirname "$0")/bin:$PATH"
+            export PATH
+            info() {{ :; }}
+            ok() {{ : > passed.marker; }}
+            warn() {{ :; }}
+            fail() {{ printf '%s' "$1" > failed.message; exit 1; }}
+            {section}
+            : > continued.marker
+            """
+        ),
+        encoding="utf-8",
+    )
+    runner.chmod(0o700)
+
+    result = subprocess.run(
+        [bash, str(runner)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 1, result.stderr
+    assert (tmp_path / "failed.message").read_text() == (
+        "Production smoke timed out after 1s; installation aborted"
+    )
+    assert (tmp_path / "child.stopped").exists()
+    assert not (tmp_path / "child.completed").exists()
+    assert not (tmp_path / "passed.marker").exists()
+    assert not (tmp_path / "continued.marker").exists()
 
 
 @pytest.mark.parametrize(
@@ -2204,6 +2417,7 @@ def test_unix_installer_signal_traps_cleanup_and_exit(
         textwrap.dedent(
             f"""
             set -euo pipefail
+            export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS=30
             PATH="$(dirname "$0")/bin:$PATH"
             export PATH
             info() {{ :; }}
@@ -2281,6 +2495,7 @@ def test_unix_installer_signal_kills_complete_stubborn_test_tree(tmp_path):
         textwrap.dedent(
             f"""
             set -euo pipefail
+            export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS=30
             PATH="$(dirname "$0")/bin:$PATH"
             export PATH
             info() {{ :; }}
@@ -2360,11 +2575,17 @@ def test_unix_installer_initial_monitor_mode_cleans_stopped_test_tree(tmp_path):
             f"""
             set -euo pipefail
             set -m
+            export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS=30
             PATH="$(dirname "$0")/bin:$PATH"
             export PATH
             info() {{ :; }}
             ok() {{ : > passed.marker; }}
             warn() {{ : > warned.marker; }}
+            fail() {{
+              case "$-" in *m*) : > monitor-restored.marker ;; esac
+              : > failed.marker
+              exit 1
+            }}
             {section}
             case "$-" in *m*) : > monitor-restored.marker ;; esac
             : > continued.marker
@@ -2419,12 +2640,12 @@ def test_unix_installer_initial_monitor_mode_cleans_stopped_test_tree(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
-    assert (tmp_path / "installer.status").read_text() == "0"
+    assert (tmp_path / "installer.status").read_text() == "1"
     assert (tmp_path / "survivors").read_text() == ""
-    assert (tmp_path / "warned.marker").exists()
+    assert (tmp_path / "failed.marker").exists()
     assert not (tmp_path / "passed.marker").exists()
     assert (tmp_path / "monitor-restored.marker").exists()
-    assert (tmp_path / "continued.marker").exists()
+    assert not (tmp_path / "continued.marker").exists()
 
 
 @pytest.mark.parametrize("stop_signal", ["STOP", "TTIN"])
@@ -2446,11 +2667,20 @@ def test_unix_installer_initial_monitor_off_cleans_stopped_test_tree(
             f"""
             set -euo pipefail
             set +m
+            export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS=30
             PATH="$(dirname "$0")/bin:$PATH"
             export PATH
             info() {{ :; }}
             ok() {{ : > passed.marker; }}
             warn() {{ : > warned.marker; }}
+            fail() {{
+              case "$-" in
+                *m*) : > monitor-wrong.marker ;;
+                *) : > monitor-restored.marker ;;
+              esac
+              : > failed.marker
+              exit 1
+            }}
             {section}
             case "$-" in
               *m*) : > monitor-wrong.marker ;;
@@ -2518,13 +2748,13 @@ def test_unix_installer_initial_monitor_off_cleans_stopped_test_tree(
 
     assert result.returncode == 0, result.stderr
     assert not (tmp_path / "hung.marker").exists()
-    assert (tmp_path / "installer.status").read_text() == "0"
+    assert (tmp_path / "installer.status").read_text() == "1"
     assert (tmp_path / "survivors").read_text() == ""
-    assert (tmp_path / "warned.marker").exists()
+    assert (tmp_path / "failed.marker").exists()
     assert not (tmp_path / "passed.marker").exists()
     assert (tmp_path / "monitor-restored.marker").exists()
     assert not (tmp_path / "monitor-wrong.marker").exists()
-    assert (tmp_path / "continued.marker").exists()
+    assert not (tmp_path / "continued.marker").exists()
     assert result.stdout == ""
     assert result.stderr == ""
 
@@ -2540,6 +2770,7 @@ def test_unix_installer_sigttin_wait_status_enters_bounded_group_cleanup(tmp_pat
             "restore_test_monitor_mode",
             "test_tree_alive",
             "stop_test_child",
+            "stop_test_timer",
             "wait_test_child",
         )
     )
@@ -2570,6 +2801,7 @@ def test_unix_installer_sigttin_wait_status_enters_bounded_group_cleanup(tmp_pat
             }}
             testPid=4242
             testPgid=4242
+            testTimerPid=""
             testMonitorMode=on
             {functions}
             if wait_test_child; then status=0; else status=$?; fi
@@ -2615,6 +2847,7 @@ def test_unix_installer_signal_trap_restores_initial_monitor_mode(tmp_path):
             "restore_test_monitor_mode",
             "test_tree_alive",
             "stop_test_child",
+            "stop_test_timer",
             "handle_test_signal",
         )
     )
@@ -2626,6 +2859,7 @@ def test_unix_installer_signal_trap_restores_initial_monitor_mode(tmp_path):
             set -m
             testPid=""
             testPgid=""
+            testTimerPid=""
             testMonitorMode=off
             exitStatus=""
             exit() {{ exitStatus="$1"; }}
@@ -2708,21 +2942,27 @@ def test_unix_installer_cleanup_targets_group_with_term_then_kill(tmp_path):
     assert calls.index("kill -s TERM -- -4242") < calls.index(
         "kill -s KILL -- -4242"
     )
-    assert calls.count("sleep 1") == 5
+    assert calls.count("sleep 0.1") == 5
     assert calls[-1] == "wait 4242"
 
 
 @pytest.mark.parametrize(
-    ("fake_exit", "fake_output", "expected_marker"),
+    ("fake_exit", "fake_output", "expected_exit", "expected_marker"),
     [
-        (1, "3081 passed", "[WARN] Test suite failed; installation continues in degraded state"),
-        (0, "1 failed", "[OK] Test suite passed"),
+        (1, "smoke ok", 1, "[FAIL] Production smoke failed; installation aborted"),
+        (0, "smoke failed", 0, "[OK] Production smoke passed"),
     ],
-    ids=["pytest_exit_1_success_output", "pytest_exit_0_failure_output"],
+    ids=["smoke_exit_1_success_output", "smoke_exit_0_failure_output"],
 )
 @pytest.mark.parametrize("powershell_name", ["powershell", "pwsh"])
-def test_windows_installer_trusts_pytest_exit_status(
-    tmp_path, windows_fake_uv, powershell_name, fake_exit, fake_output, expected_marker
+def test_windows_installer_trusts_smoke_exit_status(
+    tmp_path,
+    windows_fake_uv,
+    powershell_name,
+    fake_exit,
+    fake_output,
+    expected_exit,
+    expected_marker,
 ):
     powershell = shutil.which(powershell_name)
     if powershell is None:
@@ -2744,6 +2984,7 @@ def test_windows_installer_trusts_pytest_exit_status(
         function Info($msg) {{ Write-Output "[INFO] $msg" }}
         function Ok($msg) {{ Write-Output "[OK] $msg" }}
         function Warn($msg) {{ Write-Output "[WARN] $msg" }}
+        function Fail($msg) {{ Write-Output "[FAIL] $msg"; exit 1 }}
         {section}
         """
     )
@@ -2765,7 +3006,7 @@ def test_windows_installer_trusts_pytest_exit_status(
         check=False,
     )
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == expected_exit, result.stderr
     assert expected_marker in result.stdout
     assert fake_output in result.stdout
 
@@ -2811,7 +3052,11 @@ def test_windows_installer_error_stops_native_child_and_later_steps(
         throw "injected installer interruption"
         """
     ).strip()
-    section = section.replace("$testProcess.WaitForExit()", injected_wait, 1)
+    section = section.replace(
+        "if (-not $testProcess.WaitForExit($testTimeoutMilliseconds)) {",
+        injected_wait + "\nif ($false) {",
+        1,
+    )
     command = textwrap.dedent(
         f"""
         $ErrorActionPreference = "Stop"
@@ -2870,6 +3115,8 @@ def _codex_mcp_toml(vault: Path, *, quoted: bool, conflicting: bool = False) -> 
     table = '[mcp_servers."llm-wiki"]' if quoted else "[mcp_servers.llm-wiki]"
     args = ["python", "other.py"] if conflicting else [
         "run",
+        "--locked",
+        "--no-sync",
         "--directory",
         str(vault),
         "python",
@@ -3368,9 +3615,14 @@ def test_opencode_node_harness_forwards_bounded_tail_and_escaped_paths(tmp_path)
         }} }} }};
         const {{ LlmWikiMemoryPlugin }} = await import({json.dumps(plugin_url)} + "?harness=1");
         const hooks = await LlmWikiMemoryPlugin({{ client, directory: {json.dumps(directory)} }});
-        await hooks["session.idle"]({{ sessionId: "session-1" }});
+        await hooks.event({{ event: {{
+          type: "session.idle", properties: {{ sessionID: "session-1" }},
+        }} }});
         await hooks["experimental.session.compacting"]({{ sessionId: "session-1" }});
-        await hooks["session.created"]({{ sessionInfo: {{ id: "session-1" }} }});
+        await hooks.event({{ event: {{
+          type: "session.created",
+          properties: {{ sessionID: "session-1", info: {{ id: "session-1" }} }},
+        }} }});
         const system = [];
         await hooks["experimental.chat.system.transform"](
           {{ sessionID: "session-1" }}, {{ system }}
@@ -3404,6 +3656,8 @@ def test_opencode_node_harness_forwards_bounded_tail_and_escaped_paths(tmp_path)
     assert observed["commands"][0]["args"] == [
         "uv",
         "run",
+        "--locked",
+        "--no-sync",
         "--directory",
         root,
         "python",
@@ -3435,7 +3689,9 @@ def test_opencode_node_harness_times_out_stalled_capture(tmp_path):
         const {{ LlmWikiMemoryPlugin }} = await import({json.dumps(plugin_url)} + "?harness=timeout");
         const hooks = await LlmWikiMemoryPlugin({{ client: {{}}, directory: "project" }});
         const started = Date.now();
-        await hooks["session.created"]({{}});
+        await hooks.event({{ event: {{
+          type: "session.created", properties: {{ sessionID: "session-1" }},
+        }} }});
         console.log(JSON.stringify({{ elapsed: Date.now() - started, killed }}));
         """
     )
@@ -3479,7 +3735,9 @@ def test_opencode_forwards_known_mutation_and_dirty_idle_without_fake_progress_s
         await hooks["tool.execute.after"]({{
           sessionId: "session-1", tool: "edit", input: {{ filePath: "src/app.py" }}
         }});
-        await hooks["session.idle"]({{ sessionId: "session-1" }});
+        await hooks.event({{ event: {{
+          type: "session.idle", properties: {{ sessionID: "session-1" }},
+        }} }});
         console.log(JSON.stringify(payloads));
         """
     )
@@ -3547,8 +3805,11 @@ def test_opencode_vault_guard_uses_resolved_path_boundary():
         const {{ LlmWikiMemoryPlugin }} = await import({json.dumps(plugin_url)} + "?harness=vault");
         const sibling = await LlmWikiMemoryPlugin({{ client: {{}}, directory: "/work/wiki-client" }});
         const vault = await LlmWikiMemoryPlugin({{ client: {{}}, directory: "/work/wiki" }});
-        await sibling["session.created"]({{}});
-        await vault["session.created"]({{}});
+        const created = {{ event: {{
+          type: "session.created", properties: {{ sessionID: "session-1" }},
+        }} }};
+        await sibling.event(created);
+        await vault.event(created);
         console.log(commands.length);
         """
     )
@@ -3629,29 +3890,41 @@ def test_install_scripts_generate_context(tmp_path):
     assert "session_start_context" in install_sh, (
         "install.sh must call session_start_context.py during OpenCode setup"
     )
-    locked_mcp_sync = "uv sync --locked --extra mcp-server --quiet"
-    assert locked_mcp_sync in install_sh
-    assert locked_mcp_sync in install_ps1
+    assert "sync-args" in install_sh
+    assert "sync-args" in install_ps1
+    assert "--locked" in install_sh
+    assert "--no-default-groups" in install_sh
+    assert "--locked" in install_ps1
+    assert "--no-default-groups" in install_ps1
 
     sh_codex = install_sh.split("# Codex CLI", 1)[1].split("# Cursor", 1)[0]
-    sh_claude = install_sh.split("# Claude Code", 1)[1].split("# v4.0: OpenCode", 1)[0]
-    sh_opencode = install_sh.split("# v4.0: OpenCode", 1)[1].split("# ─── 9.", 1)[0]
+    sh_claude = install_sh.split("# Claude Code", 1)[1].split(
+        "# OpenCode configuration", 1
+    )[0]
+    sh_opencode = install_sh.split("# OpenCode configuration", 1)[1].split(
+        "# Codex CLI", 1
+    )[0]
     ps_codex = install_ps1.split("# Codex", 1)[1].split("# Claude Code", 1)[0]
     ps_claude = install_ps1.split("# Claude Code", 1)[1].split("# Cursor", 1)[0]
     ps_opencode = install_ps1.split("# OpenCode", 1)[1].split("# Codex", 1)[0]
 
     assert 'CLAUDE_MCP="$HOME/.claude.json"' in sh_claude
-    assert '"mcpServers":{"llm-wiki":{"command":"uv","args":["run","--directory"' in sh_claude
+    assert '"mcpServers":{"llm-wiki":{"command":"uv","args":["run","--locked","--no-sync","--directory"' in sh_claude
     assert ".claude/.mcp.json" not in install_sh
     assert "Existing ~/.claude.json found without llm-wiki" in sh_claude
     assert "grep -q '\"llm-wiki\"'" in sh_claude
 
-    assert 'OPENCODE_CONFIG="$HOME/.config/opencode/opencode.json"' in sh_opencode
-    assert '"mcp":{"llm-wiki":{"type":"local","command":["uv","run","--directory"' in sh_opencode
-    assert '"enabled":true' in sh_opencode
-    assert '"mcpServers"' not in sh_opencode
-    assert "Existing opencode.json found without llm-wiki" in sh_opencode
-    assert "grep -q '\"llm-wiki\"'" in sh_opencode
+    assert "scripts/installer_config.py" in sh_opencode
+    assert "opencode" in sh_opencode
+    assert '--root "$VAULT_ROOT"' in sh_opencode
+    assert '--state-root "$STATE_ROOT"' in sh_opencode
+    assert '--cwd "$CALLER_CWD"' in sh_opencode
+    assert "active)" in sh_opencode
+    assert "conflict)" in sh_opencode
+    assert "configured_unverified)" in sh_opencode
+    assert "not_detected)" in sh_opencode
+    assert "OPENCODE_CONFIG=" not in sh_opencode
+    assert "grep" not in sh_opencode
 
     def parse_shell_json(block: str, destination: str) -> dict:
         line = next(line for line in block.splitlines() if f'> "${destination}"' in line)
@@ -3667,31 +3940,26 @@ def test_install_scripts_generate_context(tmp_path):
             "llm-wiki": {
                 "command": "uv",
                 "args": [
-                    "run", "--directory", "ROOT", "python", "scripts/mcp_server.py"
-                ],
-            }
-        }
-    }
-    opencode_json = parse_shell_json(sh_opencode, "OPENCODE_CONFIG")
-    assert opencode_json == {
-        "mcp": {
-            "llm-wiki": {
-                "type": "local",
-                "command": [
-                    "uv", "run", "--directory", "ROOT", "python",
+                    "run",
+                    "--locked",
+                    "--no-sync",
+                    "--directory",
+                    "ROOT",
+                    "python",
                     "scripts/mcp_server.py",
                 ],
-                "enabled": True,
             }
         }
     }
-
     sh_codex_mcp = _shell_function(install_sh, "configure_codex_mcp")
     assert 'CODEX_CONFIG="$HOME/.codex/config.toml"' in sh_codex
     assert "config-state" in sh_codex_mcp
     assert "[mcp_servers.llm-wiki]" in sh_codex_mcp
     assert 'command = "uv"' in sh_codex_mcp
-    assert 'args = [\\"run\\", \\"--directory\\"' in sh_codex_mcp
+    assert (
+        'args = [\\"run\\", \\"--locked\\", \\"--no-sync\\", '
+        '\\"--directory\\"' in sh_codex_mcp
+    )
     assert "config.bak" in sh_codex_mcp
     assert "grep" not in sh_codex_mcp
     assert "install_codex_hooks" in sh_codex
@@ -3704,20 +3972,23 @@ def test_install_scripts_generate_context(tmp_path):
     assert "Existing ~/.claude.json found without llm-wiki" in ps_claude
     assert "-notmatch '\"llm-wiki\"\\s*:'" in ps_claude
 
-    assert '$openCodeMcp = Join-Path $openCodeConfig "opencode.json"' in ps_opencode
-    assert 'mcp = [ordered]@{' in ps_opencode
-    assert 'type = "local"' in ps_opencode
-    assert 'command = @("uv", "run", "--directory", $VAULT_ROOT, "python", "scripts/mcp_server.py")' in ps_opencode
-    assert "enabled = $true" in ps_opencode
-    assert "mcpServers" not in ps_opencode
-    assert "-notmatch '\"llm-wiki\"\\s*:'" in ps_opencode
+    assert "scripts\\installer_config.py" in ps_opencode
+    assert '"opencode", "--root", $VAULT_ROOT' in ps_opencode
+    assert '"--state-root", $STATE_ROOT' in ps_opencode
+    assert '"--cwd", $callerDirectory' in ps_opencode
+    assert '"active" {' in ps_opencode
+    assert '"conflict" {' in ps_opencode
+    assert '"configured_unverified" {' in ps_opencode
+    assert '"not_detected" {' in ps_opencode
+    assert "$openCodeMcp" not in ps_opencode
+    assert "-notmatch" not in ps_opencode
 
     assert '$codexConfig = Join-Path $env:USERPROFILE ".codex\\config.toml"' in ps_codex
     assert "function Install-CodexMcp" in install_ps1
     assert "config-state" in install_ps1
     assert "[mcp_servers.llm-wiki]" in install_ps1
     assert 'command = "uv"' in install_ps1
-    assert 'args = ["run", "--directory"' in install_ps1
+    assert 'args = ["run", "--locked", "--no-sync", "--directory"' in install_ps1
     assert "Copy-Item -LiteralPath $Config" in install_ps1
     assert "Config.bak" in install_ps1
     assert "codex-memory-wrapper" in ps_codex
@@ -3730,10 +4001,7 @@ def test_install_scripts_generate_context(tmp_path):
     assert "function Write-Utf8NoBom" in install_ps1
     assert "[System.IO.File]::WriteAllText" in install_ps1
     assert "[System.Text.UTF8Encoding]::new($false)" in install_ps1
-    for block, config_var in (
-        (ps_opencode, "$openCodeMcp"),
-        (ps_claude, "$claudeMcp"),
-    ):
+    for block, config_var in ((ps_claude, "$claudeMcp"),):
         assert f"Write-Utf8NoBom {config_var}" in block
         assert f"Set-Content -LiteralPath {config_var}" not in block
         assert f"Add-Content -LiteralPath {config_var}" not in block
@@ -3772,3 +4040,65 @@ def test_install_scripts_generate_context(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == [external, external, external]
+
+
+def test_windows_scheduler_payload_carries_exact_roots_and_uv(tmp_path):
+    script = ROOT / "scripts" / "install-scheduled-tasks.ps1"
+    runner = ROOT / "scripts" / "run-scheduled-task.ps1"
+    root = str(tmp_path / "vault's source")
+    state = str(tmp_path / "state's data")
+    uv_path = str(tmp_path / "bin's tools" / "uv.exe")
+
+    def ps_literal(value: str) -> str:
+        return "'" + value.replace("'", "''") + "'"
+    command = textwrap.dedent(
+        f"""
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            {json.dumps(str(script))}, [ref]$tokens, [ref]$errors)
+        if ($errors.Count) {{ throw ($errors | Out-String) }}
+        $fn = $ast.Find({{ param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'New-LLMWikiScheduledAction'
+        }}, $true)
+        if ($null -eq $fn) {{ throw 'New-LLMWikiScheduledAction missing' }}
+        Invoke-Expression $fn.Extent.Text
+        function New-ScheduledTaskAction {{
+            param($Execute, $Argument)
+            [pscustomobject]@{{ Execute = $Execute; Argument = $Argument }}
+        }}
+        $action = New-LLMWikiScheduledAction `
+            -Kind nightly `
+            -VaultRoot {ps_literal(root)} `
+            -StateRoot {ps_literal(state)} `
+            -UvPath {ps_literal(uv_path)} `
+            -RunnerPath {ps_literal(str(runner))} `
+            -PowerShellPath {ps_literal(shutil.which('pwsh') or 'pwsh')}
+        $encoded = ($action.Argument -split '\\s+')[-1]
+        $decoded = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded))
+        [pscustomobject]@{{ Execute = $action.Execute; Decoded = $decoded }} |
+            ConvertTo-Json -Compress
+        """
+    )
+
+    result = subprocess.run(
+        ["pwsh", "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    value = json.loads(result.stdout)
+    decoded = value["Decoded"]
+    quoted_root = root.replace("'", "''")
+    quoted_state = state.replace("'", "''")
+    quoted_uv = uv_path.replace("'", "''")
+    assert value["Execute"].casefold().endswith(("pwsh.exe", "powershell.exe"))
+    assert "-Kind 'nightly'" in decoded
+    assert f"-VaultRoot '{quoted_root}'" in decoded
+    assert f"-StateRoot '{quoted_state}'" in decoded
+    assert f"-UvPath '{quoted_uv}'" in decoded
+    assert str(runner).replace("'", "''") in decoded

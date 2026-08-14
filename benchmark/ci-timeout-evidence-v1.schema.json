@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/ci-timeout-evidence-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "head_sha",
+    "generated_at",
+    "workflow_attempts",
+    "jobs",
+    "classes",
+    "tests"
+  ],
+  "properties": {
+    "schema_version": {"const": "ci-timeout-evidence/v1"},
+    "head_sha": {"$ref": "#/$defs/head_sha"},
+    "generated_at": {"$ref": "#/$defs/timestamp"},
+    "workflow_attempts": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/workflow_attempt"}
+    },
+    "jobs": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/job"}
+    },
+    "classes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "focused",
+        "clean",
+        "installer",
+        "linux_full",
+        "windows_full",
+        "macos_full"
+      ],
+      "properties": {
+        "focused": {"$ref": "#/$defs/focused_summary"},
+        "clean": {"$ref": "#/$defs/clean_summary"},
+        "installer": {"$ref": "#/$defs/installer_summary"},
+        "linux_full": {"$ref": "#/$defs/linux_full_summary"},
+        "windows_full": {"$ref": "#/$defs/windows_full_summary"},
+        "macos_full": {"$ref": "#/$defs/macos_full_summary"}
+      }
+    },
+    "tests": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/test"}
+    }
+  },
+  "$defs": {
+    "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "timeout_class": {
+      "type": "string",
+      "enum": [
+        "focused",
+        "clean",
+        "installer",
+        "linux_full",
+        "windows_full",
+        "macos_full"
+      ]
+    },
+    "workflow_attempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workflow_run_id", "run_attempt", "head_sha", "conclusion"],
+      "properties": {
+        "workflow_run_id": {"type": "integer", "minimum": 1},
+        "run_attempt": {"type": "integer", "minimum": 1, "maximum": 5},
+        "head_sha": {"$ref": "#/$defs/head_sha"},
+        "conclusion": {"const": "success"}
+      }
+    },
+    "job": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workflow_run_id",
+        "run_attempt",
+        "job_id",
+        "timeout_class",
+        "name",
+        "conclusion",
+        "started_at",
+        "completed_at",
+        "runtime_seconds"
+      ],
+      "properties": {
+        "workflow_run_id": {"type": "integer", "minimum": 1},
+        "run_attempt": {"type": "integer", "minimum": 1, "maximum": 5},
+        "job_id": {"type": "integer", "minimum": 1},
+        "timeout_class": {"$ref": "#/$defs/timeout_class"},
+        "name": {"type": "string", "pattern": "^timing::[a-z_]+::[^:]+$"},
+        "conclusion": {"const": "success"},
+        "started_at": {"$ref": "#/$defs/timestamp"},
+        "completed_at": {"$ref": "#/$defs/timestamp"},
+        "runtime_seconds": {"type": "number", "minimum": 0}
+      }
+    },
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workflow_run_id", "run_attempt", "job_id", "runtime_seconds"],
+      "properties": {
+        "workflow_run_id": {"type": "integer", "minimum": 1},
+        "run_attempt": {"type": "integer", "minimum": 1, "maximum": 5},
+        "job_id": {"type": "integer", "minimum": 1},
+        "runtime_seconds": {"type": "number", "minimum": 0}
+      }
+    },
+    "focused_summary": {"$ref": "#/$defs/summary_900"},
+    "clean_summary": {"$ref": "#/$defs/summary_1200"},
+    "installer_summary": {"$ref": "#/$defs/summary_1200"},
+    "linux_full_summary": {"$ref": "#/$defs/summary_2700"},
+    "windows_full_summary": {"$ref": "#/$defs/summary_3600"},
+    "macos_full_summary": {"$ref": "#/$defs/summary_2700"},
+    "summary_900": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ceiling_seconds", "p95_seconds", "samples"],
+      "properties": {
+        "ceiling_seconds": {"const": 900},
+        "p95_seconds": {"type": "number", "minimum": 0},
+        "samples": {"type": "array", "minItems": 5, "items": {"$ref": "#/$defs/sample"}}
+      }
+    },
+    "summary_1200": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ceiling_seconds", "p95_seconds", "samples"],
+      "properties": {
+        "ceiling_seconds": {"const": 1200},
+        "p95_seconds": {"type": "number", "minimum": 0},
+        "samples": {"type": "array", "minItems": 5, "items": {"$ref": "#/$defs/sample"}}
+      }
+    },
+    "summary_2700": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ceiling_seconds", "p95_seconds", "samples"],
+      "properties": {
+        "ceiling_seconds": {"const": 2700},
+        "p95_seconds": {"type": "number", "minimum": 0},
+        "samples": {"type": "array", "minItems": 5, "items": {"$ref": "#/$defs/sample"}}
+      }
+    },
+    "summary_3600": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ceiling_seconds", "p95_seconds", "samples"],
+      "properties": {
+        "ceiling_seconds": {"const": 3600},
+        "p95_seconds": {"type": "number", "minimum": 0},
+        "samples": {"type": "array", "minItems": 5, "items": {"$ref": "#/$defs/sample"}}
+      }
+    },
+    "test": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workflow_run_id",
+        "run_attempt",
+        "job_id",
+        "artifact_name",
+        "node_id",
+        "duration_seconds"
+      ],
+      "properties": {
+        "workflow_run_id": {"type": "integer", "minimum": 1},
+        "run_attempt": {"type": "integer", "minimum": 1, "maximum": 5},
+        "job_id": {"type": "integer", "minimum": 1},
+        "artifact_name": {
+          "type": "string",
+          "pattern": "^pytest-timings-(linux_full|windows_full|macos_full)-[^:]+-attempt-[1-5]$"
+        },
+        "node_id": {"type": "string", "minLength": 1},
+        "duration_seconds": {"type": "number", "minimum": 0}
+      }
+    }
+  }
+}

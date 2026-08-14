@@ -8,6 +8,7 @@ import io
 import json
 import math
 import os
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -407,46 +408,68 @@ def test_initial_bootstrap_publishes_candidate_lease_and_refreshes_heartbeat(
     monkeypatch.setattr(lsp_process, "_prepare_generation", observe_prepare)
     owner_root = tmp_path / OWNER_NONCE
     lease_path = owner_root / "lease.json"
+    path_read_bytes = Path.read_bytes
+    transient_read_denials = 0
+
+    def deny_one_concurrent_lease_read(path: Path) -> bytes:
+        nonlocal transient_read_denials
+        if path == lease_path and transient_read_denials == 0:
+            transient_read_denials += 1
+            raise PermissionError("simulated concurrent Windows lease replacement")
+        return path_read_bytes(path)
+
+    def read_lease(deadline: float) -> dict[str, object]:
+        while True:
+            try:
+                return json.loads(lease_path.read_bytes())
+            except PermissionError:
+                if os.name != "nt" or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.01)
+
     thread = threading.Thread(target=start)
     thread.start()
-    assert bootstrap_entered.wait(2)
-    coordinator = coordinators[0]
-    owner_exists_during_bootstrap = (owner_root / "owner.json").is_file()
-    lease_exists_during_bootstrap = lease_path.is_file()
-    heartbeat_refreshed = False
-    lease_record: dict[str, object] = {}
-    if lease_exists_during_bootstrap:
-        lease_record = json.loads(lease_path.read_bytes())
-        first_heartbeat = lease_record["heartbeat_at"]
-        refresh_deadline = time.monotonic() + 1
-        while time.monotonic() < refresh_deadline:
-            current = json.loads(lease_path.read_bytes())
-            if current["heartbeat_at"] != first_heartbeat:
-                lease_record = current
-                heartbeat_refreshed = True
-                break
-            time.sleep(0.01)
-    with coordinator.condition:
-        candidate = coordinator.candidate
-        transition_snapshot = (
-            coordinator.phase,
-            coordinator.active,
-            candidate.nonce if candidate is not None else None,
-            (
-                coordinator.lease_generation.nonce
-                if coordinator.lease_generation is not None
-                else None
-            ),
-            coordinator.startup_complete,
-        )
-    release_bootstrap.set()
-    thread.join(5)
     try:
+        assert bootstrap_entered.wait(2)
+        coordinator = coordinators[0]
+        owner_exists_during_bootstrap = (owner_root / "owner.json").is_file()
+        lease_exists_during_bootstrap = lease_path.is_file()
+        if os.name == "nt":
+            monkeypatch.setattr(Path, "read_bytes", deny_one_concurrent_lease_read)
+        heartbeat_refreshed = False
+        lease_record: dict[str, object] = {}
+        if lease_exists_during_bootstrap:
+            lease_record = read_lease(time.monotonic() + 1)
+            first_heartbeat = lease_record["heartbeat_at"]
+            refresh_deadline = time.monotonic() + 1
+            while time.monotonic() < refresh_deadline:
+                current = read_lease(refresh_deadline)
+                if current["heartbeat_at"] != first_heartbeat:
+                    lease_record = current
+                    heartbeat_refreshed = True
+                    break
+                time.sleep(0.01)
+        with coordinator.condition:
+            candidate = coordinator.candidate
+            transition_snapshot = (
+                coordinator.phase,
+                coordinator.active,
+                candidate.nonce if candidate is not None else None,
+                (
+                    coordinator.lease_generation.nonce
+                    if coordinator.lease_generation is not None
+                    else None
+                ),
+                coordinator.startup_complete,
+            )
+        release_bootstrap.set()
+        thread.join(5)
         assert not thread.is_alive()
         assert start_errors == []
         assert len(started) == 1
         assert owner_exists_during_bootstrap is True
         assert lease_exists_during_bootstrap is True
+        assert transient_read_denials == (1 if os.name == "nt" else 0)
         assert heartbeat_refreshed is True
         assert lease_record["generation_nonce"] == bootstrap_nonces[0]
         assert transition_snapshot == (
@@ -466,6 +489,61 @@ def test_initial_bootstrap_publishes_candidate_lease_and_refreshes_heartbeat(
         for error in start_errors:
             if isinstance(error, lsp_process.StartupCleanupError):
                 error.retry_cleanup(time.monotonic() + 5)
+
+
+def test_lsp_publication_uses_canonical_token_and_epoch_in_owner_and_lease_records(
+    tmp_path: Path,
+) -> None:
+    import markdown_transaction
+
+    state_root = tmp_path / "state"
+    candidate = state_root / "run/markdown-transactions-v3.candidate.sqlite3"
+    markdown_transaction.initialize_coordinator_v3_candidate(candidate, source_v2=None)
+    owner_root = state_root / "run/lsp" / OWNER_NONCE
+    owner_root.parent.mkdir(parents=True)
+
+    process = LspProcess._start_with_v3_candidate(
+        _command("--lifecycle"),
+        cwd=tmp_path,
+        owner_root=owner_root,
+        state_root=state_root,
+    )
+    try:
+        owner = json.loads((owner_root / "owner.json").read_bytes())
+        lease = json.loads((owner_root / "lease.json").read_bytes())
+        with sqlite3.connect(candidate) as database:
+            canonical = database.execute(
+                "SELECT role, scope, actor_id, owner_token, fencing_epoch, "
+                "process_start_identity FROM maintenance_owners WHERE role='lsp'"
+            ).fetchone()
+        expected = (
+            owner["canonical_role"],
+            owner["canonical_scope"],
+            owner["actor_id"],
+            owner["owner_token"],
+            owner["fencing_epoch"],
+            owner["process_start_identity"],
+        )
+        assert canonical == expected
+        assert tuple(
+            lease[field]
+            for field in (
+                "canonical_role",
+                "canonical_scope",
+                "actor_id",
+                "owner_token",
+                "fencing_epoch",
+                "process_start_identity",
+            )
+        ) == expected
+    finally:
+        process.close(time.monotonic() + 5)
+
+    assert not (owner_root / "lease.json").exists()
+    with sqlite3.connect(candidate) as database:
+        assert database.execute(
+            "SELECT COUNT(*) FROM maintenance_owners WHERE role='lsp'"
+        ).fetchone() == (0,)
 
 
 def test_startup_commit_rejects_heartbeat_terminal_failure_during_bootstrap(

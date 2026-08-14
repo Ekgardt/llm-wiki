@@ -39,7 +39,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/integration_adapter.py --source claude --event session_start",
+            "command": "uv run --locked --no-sync --directory \"$LLM_WIKI_ROOT\" python scripts/integration_adapter.py --source claude --event session_start",
             "timeout": 15
           }
         ]
@@ -51,7 +51,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/integration_adapter.py --source claude --event pre_compact --delegate precompact_capture.py",
+            "command": "uv run --locked --no-sync --directory \"$LLM_WIKI_ROOT\" python scripts/integration_adapter.py --source claude --event pre_compact --delegate precompact_capture.py",
             "timeout": 15
           }
         ]
@@ -63,7 +63,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/integration_adapter.py --source claude --event session_end",
+            "command": "uv run --locked --no-sync --directory \"$LLM_WIKI_ROOT\" python scripts/integration_adapter.py --source claude --event session_end",
             "timeout": 15
           }
         ]
@@ -75,7 +75,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/integration_adapter.py --source claude --event user_prompt --delegate user_prompt_capture.py",
+            "command": "uv run --locked --no-sync --directory \"$LLM_WIKI_ROOT\" python scripts/integration_adapter.py --source claude --event user_prompt --delegate user_prompt_capture.py",
             "timeout": 5
           }
         ]
@@ -87,7 +87,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/integration_adapter.py --source claude --event post_tool_use --delegate post_tool_capture.py",
+            "command": "uv run --locked --no-sync --directory \"$LLM_WIKI_ROOT\" python scripts/integration_adapter.py --source claude --event post_tool_use --delegate post_tool_capture.py",
             "timeout": 5
           }
         ]
@@ -99,7 +99,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/integration_adapter.py --source claude --event post_tool_use --checkpoint-type significant_failure --delegate post_tool_capture.py",
+            "command": "uv run --locked --no-sync --directory \"$LLM_WIKI_ROOT\" python scripts/integration_adapter.py --source claude --event post_tool_use --checkpoint-type significant_failure --delegate post_tool_capture.py",
             "timeout": 5
           }
         ]
@@ -111,7 +111,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/integration_adapter.py --source claude --event stop",
+            "command": "uv run --locked --no-sync --directory \"$LLM_WIKI_ROOT\" python scripts/integration_adapter.py --source claude --event stop",
             "timeout": 10
           }
         ]

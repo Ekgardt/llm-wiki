@@ -11,6 +11,7 @@ import time
 
 import maybe_compile
 from memory_state import ROOT
+from secret_redact import redact_secrets
 
 
 def run_step(cmd: list[str], log_fn, label: str, timeout: int = 600) -> int:
@@ -29,10 +30,11 @@ def run_step(cmd: list[str], log_fn, label: str, timeout: int = 600) -> int:
         log_fn(f"  {label}: TIMEOUT after {timeout}s — skipping, continuing")
         return 2
     except OSError as e:
-        log_fn(f"  {label}: OS error ({type(e).__name__}: {e}) — skipping, continuing")
+        error = redact_secrets(str(e))
+        log_fn(f"  {label}: OS error ({type(e).__name__}: {error}) — skipping, continuing")
         return 2
-    stdout = r.stdout.strip()
-    stderr = r.stderr.strip()
+    stdout = redact_secrets(r.stdout).strip()
+    stderr = redact_secrets(r.stderr).strip()
     if r.returncode != 0 and stderr:
         log_fn(f"  {label}: {stderr[:300]}")
     if stdout:

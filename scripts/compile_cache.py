@@ -39,10 +39,26 @@ class PlanValidator(Protocol):
 
 
 @dataclass(frozen=True, order=True)
+class SourceOccurrenceBounds:
+    first_event_id: str
+    last_event_id: str
+
+    def canonical(self) -> dict[str, str]:
+        for value in (self.first_event_id, self.last_event_id):
+            if not isinstance(value, str) or not 1 <= len(value.encode()) <= 256:
+                raise ValueError("source event ID is invalid")
+        return {
+            "first_event_id": self.first_event_id,
+            "last_event_id": self.last_event_id,
+        }
+
+
+@dataclass(frozen=True, order=True)
 class SourceDescriptor:
     logical_path: str
     byte_length: int
     sha256: str
+    occurrence_bounds: SourceOccurrenceBounds | None = None
 
     def canonical(self) -> list[object]:
         _validate_logical_path(self.logical_path)
@@ -52,6 +68,19 @@ class SourceDescriptor:
             raise ValueError("source byte length must be non-negative")
         _validate_digest(self.sha256, "source SHA-256")
         return [self.logical_path, self.byte_length, self.sha256]
+
+    def receipt_descriptor(self) -> dict[str, object]:
+        self.canonical()
+        return {
+            "logical_path": self.logical_path,
+            "sha256": self.sha256,
+            "byte_size": self.byte_length,
+            "occurrence_bounds": (
+                None
+                if self.occurrence_bounds is None
+                else self.occurrence_bounds.canonical()
+            ),
+        }
 
 
 @dataclass(frozen=True)

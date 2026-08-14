@@ -144,10 +144,29 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 | `$LLM_WIKI_STATE_ROOT` | **The vault root itself** | Runtime root → `cache/`, `logs/`, `run/` at vault root. Override for multi-disk or hermetic tests. |
 | `$MEMORY_LLM_PROVIDER` | Auto-detected (`opencode` → `codex` → `claude` → `openai` → `ollama`) | LLM backend for compile/flush/query. `fake` for tests. |
 
-## Approved Reliability v3 target (not implemented)
+## External integration configuration preimages
+
+Claude and Codex configuration merges may create byte-exact sibling preimages outside
+the vault zones. Claude uses
+`settings.json.bak-llm-wiki-<YYYYMMDD-HHMMSS-ffffff>` beside `settings.json`; Codex
+uses `hooks.json.bak-llm-wiki-<YYYYMMDD-HHMMSS-ffffff>` beside `hooks.json`. A no-op
+merge creates no backup.
+
+Only files with the destination's exact `.bak-llm-wiki-` prefix are owned by this
+retention contract. After changed configuration is published and verified, each
+integration retains at most 10 backups, no backup older than 90 days when a newer
+restore point exists, and at most 100 MiB in aggregate when older files can be
+removed. The newest verified or sole preimage is never deleted. These files preserve
+bytes only, not owner, ACL, alternate streams, or complete filesystem metadata. They
+are not runtime state and do not replace private-vault backup/restore. See
+`knowledge/notes/integration-config-backup-retention-decision.md`.
+
+## Approved Reliability v3 implementation scope
 
 The user approved the repair direction and delegated the exact architecture decisions
-on 2026-08-05. This target keeps the three root zones and existing runtime environment variables.
+on 2026-08-05, then explicitly approved implementation of the operational database
+pair and offline adoption backend on 2026-08-12. This scope keeps the three root zones
+and existing runtime environment variables.
 Remote installer bootstrap adds mandatory full-OID input `LLM_WIKI_COMMIT`. The only
 new runtime directory is `run/capture-intents/`. New create-only
 `capture-intent/v1` records remain there until an immutable terminal record under
@@ -189,9 +208,10 @@ reports an unconditional legacy-protocol blocker. The snapshot is not a durable 
 Operational migrations execute individual statements under explicit transactions,
 verify their complete invariant on every startup, and remain restartable after any
 statement. Operational databases remain rollback-journal, `synchronous=FULL`, local
-filesystem only, and no WAL. This section remains target state until implementation
-and verification pass. See
+filesystem only, and no WAL. The listed v3 paths remain unavailable to normal runtime
+mutation until implementation and verification pass. See
 `knowledge/notes/v4-reliability-contracts-decision.md` and
+`knowledge/notes/reliability-v3-runtime-adoption-implementation-decision.md` and
 `docs/superpowers/specs/2026-08-05-v4-reliability-repair-design.md`.
 
 ## Implemented corpus-generation checkpoint

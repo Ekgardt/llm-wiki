@@ -131,6 +131,101 @@ def test_generated_projection_preserves_project_slug_ownership(
     assert _compute_slug(project_dir, vault / "knowledge/projects") == "demo"
 
 
+def test_direct_project_acquisition_inserts_canonical_and_domain_rows_atomically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    state_root = tmp_path / "state"
+    (vault / "knowledge/projects").mkdir(parents=True)
+    candidate = state_root / "run/markdown-transactions-v3.candidate.sqlite3"
+    markdown_transaction.initialize_coordinator_v3_candidate(candidate, source_v2=None)
+    store = ProjectStore._from_v3_candidate(vault, state_root=state_root)
+
+    lease = store.acquire_lease("alpha", "test-owner")
+    with sqlite3.connect(candidate) as database:
+        assert database.execute(
+            "SELECT canonical_role, canonical_scope, actor_id, lease_token, "
+            "fencing_epoch, process_id, process_start_identity "
+            "FROM project_leases WHERE project='alpha'"
+        ).fetchone() == database.execute(
+            "SELECT role, scope, actor_id, owner_token, fencing_epoch, "
+            "process_id, process_start_identity FROM maintenance_owners "
+            "WHERE role='project' AND scope='project:alpha'"
+        ).fetchone()
+    renewed = store.heartbeat(lease)
+    assert renewed._ownership is not None
+    assert renewed._ownership.heartbeat_at == renewed.heartbeat_at
+    lease = renewed
+    renewed_by_token = store.acquire_lease(
+        "alpha", "test-owner", token=lease.token
+    )
+    assert renewed_by_token.token == lease.token
+    lease = renewed_by_token
+    store._release(lease)
+
+    def fail_projection(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("injected project projection failure")
+
+    monkeypatch.setattr(store, "_insert_project_projection", fail_projection)
+    with pytest.raises(RuntimeError, match="injected project projection failure"):
+        store.acquire_lease("beta", "test-owner")
+    with sqlite3.connect(candidate) as database:
+        assert database.execute(
+            "SELECT COUNT(*) FROM maintenance_owners "
+            "WHERE role='project' AND scope='project:beta'"
+        ).fetchone() == (0,)
+        assert database.execute(
+            "SELECT COUNT(*) FROM project_leases WHERE project='beta'"
+        ).fetchone() == (0,)
+
+    real_insert = ProjectStore._insert_project_projection
+
+    def fail_after_projection(*args: object, **kwargs: object) -> None:
+        real_insert(*args, **kwargs)
+        raise RuntimeError("injected post-projection failure")
+
+    monkeypatch.setattr(store, "_insert_project_projection", fail_after_projection)
+    with pytest.raises(RuntimeError, match="injected post-projection failure"):
+        store.acquire_lease("gamma", "test-owner")
+    with sqlite3.connect(candidate) as database:
+        assert database.execute(
+            "SELECT COUNT(*) FROM maintenance_owners "
+            "WHERE role='project' AND scope='project:gamma'"
+        ).fetchone() == (0,)
+        assert database.execute(
+            "SELECT COUNT(*) FROM project_leases WHERE project='gamma'"
+        ).fetchone() == (0,)
+
+
+def test_nested_project_lease_projects_parent_without_releasing_it(
+    tmp_path: Path,
+) -> None:
+    import operational_ownership
+
+    vault = tmp_path / "vault"
+    state_root = tmp_path / "state"
+    (vault / "knowledge/projects").mkdir(parents=True)
+    candidate = state_root / "run/markdown-transactions-v3.candidate.sqlite3"
+    markdown_transaction.initialize_coordinator_v3_candidate(candidate, source_v2=None)
+    store = ProjectStore._from_v3_candidate(vault, state_root=state_root)
+    registry = operational_ownership.OwnershipRegistry(state_root)
+    parent = registry.acquire("project", scope="project:alpha")
+
+    lease = store.acquire_lease("alpha", "test-owner", ownership=parent)
+    assert lease._release_canonical is False
+    store._release(lease)
+
+    with sqlite3.connect(candidate) as database:
+        assert database.execute(
+            "SELECT COUNT(*) FROM project_leases WHERE project='alpha'"
+        ).fetchone() == (0,)
+        assert database.execute(
+            "SELECT owner_token FROM maintenance_owners "
+            "WHERE role='project' AND scope='project:alpha'"
+        ).fetchone() == (parent.token,)
+    registry.release(parent)
+
+
 def _parse_test_timestamp(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 

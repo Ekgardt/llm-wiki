@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -11,7 +12,7 @@ import stat
 import subprocess
 import sys
 import time
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from inspect import signature
 from pathlib import Path
@@ -22,6 +23,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+import memory_queue  # noqa: E402
 from memory_queue import (  # noqa: E402
     DeferredResult,
     LeaseFenceError,
@@ -30,7 +32,7 @@ from memory_queue import (  # noqa: E402
     QueueOperationError,
     ResultConflictError,
 )
-from reliable_memory import canonical_json_bytes, sha256_bytes  # noqa: E402
+from reliable_memory import canonical_json_bytes, sha256_bytes, validate_schema  # noqa: E402
 
 
 class FakeClock:
@@ -76,6 +78,88 @@ def clock() -> FakeClock:
 @pytest.fixture
 def queue(tmp_path: Path, clock: FakeClock) -> MemoryQueue:
     return MemoryQueue(tmp_path, clock=clock, rng=random.Random(7))
+
+
+def _v3_queue(tmp_path: Path):
+    candidate = tmp_path / "run" / "queue-v3.candidate.sqlite3"
+    memory_queue.initialize_queue_v3_candidate(candidate, source_v2=None)
+    return MemoryQueue._from_v3_candidate(candidate, state_root=tmp_path)
+
+
+def test_validate_payload_blob_accepts_canonical_object_and_bounded_raw_inspection() -> None:
+    raw = b'{"items":[1,true,null],"name":"ok"}'
+    digest = "364a34cd522634b4ee44cf2d71407e8baf6bc379ad77c3095403f901299820f7"
+
+    parsed = memory_queue.validate_payload_blob(raw, digest, parse=True)
+    inspected = memory_queue.validate_payload_blob(raw, digest, parse=False)
+
+    assert parsed == memory_queue.PayloadValidation(
+        raw=raw,
+        input_hash=digest,
+        payload={"items": [1, True, None], "name": "ok"},
+        code=None,
+    )
+    assert inspected == memory_queue.PayloadValidation(
+        raw=raw,
+        input_hash=digest,
+        payload=None,
+        code=None,
+    )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b'{"duplicate":1,"duplicate":1}',
+        b'{"number":NaN}',
+        b'{"b":1,"a":2}',
+        json.dumps(
+            {f"key-{index:04d}": index for index in range(1025)},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+        json.dumps(
+            {"value": "x" * (256 * 1024 + 1)},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+        b'{"value":' + (b"[" * 33) + b"null" + (b"]" * 33) + b"}",
+    ],
+    ids=(
+        "duplicate-key",
+        "non-finite-number",
+        "non-canonical-order",
+        "too-many-members",
+        "oversized-string",
+        "too-deep",
+    ),
+)
+def test_validate_payload_blob_rejects_noncanonical_or_unbounded_content(
+    raw: bytes,
+) -> None:
+    digest = hashlib.sha256(raw).hexdigest()
+
+    validation = memory_queue.validate_payload_blob(raw, digest, parse=True)
+
+    assert validation.raw == raw
+    assert validation.input_hash == digest
+    assert validation.payload is None
+    assert validation.code == "payload_hash_mismatch"
+
+
+def test_queue_connect_context_commits_rolls_back_and_closes(queue: MemoryQueue) -> None:
+    task_id = queue.enqueue("query", 1, {"value": "original"})
+
+    with pytest.raises(RuntimeError, match="rollback"):
+        with queue._connect() as connection:
+            connection.execute(
+                "UPDATE tasks SET priority = 99 WHERE id = ?", (task_id,)
+            )
+            raise RuntimeError("rollback")
+
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        connection.execute("SELECT 1")
+    assert queue.get(task_id).priority == 0
 
 
 def test_enqueue_stores_closed_canonical_redacted_payload(queue: MemoryQueue) -> None:
@@ -323,10 +407,354 @@ def test_enqueue_rejects_unsupported_collections(
         queue.enqueue("query", 1, {"items": unsupported})
 
 
-def test_enqueue_validates_priority_and_deduplicates(queue: MemoryQueue) -> None:
+def test_exact_dedupe_returns_existing_task_only_for_kind_version_and_hash_match(
+    queue: MemoryQueue,
+) -> None:
     first = queue.enqueue("compile", 1, {"day": "2026-07-14"}, dedupe_key="day:14")
-    second = queue.enqueue("compile", 1, {"day": "changed"}, dedupe_key="day:14")
+    second = queue.enqueue("compile", 1, {"day": "2026-07-14"}, dedupe_key="day:14")
+
     assert second == first
+    with sqlite3.connect(queue.db_path) as database:
+        assert database.execute(
+            "SELECT COUNT(*) FROM tasks WHERE dedupe_key='day:14'"
+        ).fetchone() == (1,)
+
+
+@pytest.mark.parametrize(
+    ("kind", "handler_version", "payload"),
+    [
+        ("query", 1, {"day": "2026-07-14"}),
+        ("compile", 2, {"day": "2026-07-14"}),
+        ("compile", 1, {"day": "changed"}),
+    ],
+    ids=("kind", "handler-version", "payload"),
+)
+def test_dedupe_conflicts_on_kind_handler_or_payload_difference(
+    queue: MemoryQueue,
+    kind: str,
+    handler_version: int,
+    payload: dict[str, object],
+) -> None:
+    original = queue.enqueue(
+        "compile", 1, {"day": "2026-07-14"}, dedupe_key="day:14"
+    )
+
+    with pytest.raises(QueueOperationError, match="dedupe_conflict"):
+        queue.enqueue(kind, handler_version, payload, dedupe_key="day:14")
+
+    task = queue.get(original)
+    assert task.kind == "compile"
+    assert task.handler_version == 1
+    assert task.payload == {"day": "2026-07-14"}
+
+
+def test_v3_exact_dedupe_revalidates_existing_blob_and_rejects_conflicts(
+    tmp_path: Path,
+) -> None:
+    queue = _v3_queue(tmp_path)
+    original = queue.enqueue(
+        "compile", 1, {"day": "2026-07-14"}, dedupe_key="day:14"
+    )
+
+    assert (
+        queue.enqueue(
+            "compile", 1, {"day": "2026-07-14"}, dedupe_key="day:14"
+        )
+        == original
+    )
+    with pytest.raises(QueueOperationError, match="dedupe_conflict"):
+        queue.enqueue("compile", 1, {"day": "changed"}, dedupe_key="day:14")
+
+    with sqlite3.connect(queue.db_path) as database:
+        row = database.execute(
+            "SELECT id, kind, handler_version, payload_blob FROM tasks"
+        ).fetchone()
+    assert row == (
+        original,
+        "compile",
+        1,
+        b'{"day":"2026-07-14"}',
+    )
+
+
+def test_v3_claim_demotes_corrupt_row_and_continues_without_dispatching_it(
+    tmp_path: Path,
+) -> None:
+    queue = _v3_queue(tmp_path)
+    corrupt = queue.enqueue("query", 1, {"prompt": "never dispatch"}, priority=10)
+    expected = queue.enqueue("query", 1, {"prompt": "dispatch"}, priority=0)
+    with sqlite3.connect(queue.db_path) as database:
+        database.execute(
+            "UPDATE tasks SET payload_blob=? WHERE id=?",
+            (b'{"prompt":"tampered"}', corrupt),
+        )
+
+    lease = queue.claim("worker")
+
+    assert lease is not None
+    assert lease.id == expected
+    assert lease.payload == {"prompt": "dispatch"}
+    with sqlite3.connect(queue.db_path) as database:
+        state = database.execute(
+            "SELECT state, error_code, attempts FROM tasks WHERE id=?", (corrupt,)
+        ).fetchone()
+    assert state == ("dead", "payload_hash_mismatch", 0)
+
+
+@pytest.mark.parametrize(
+    "transition",
+    [
+        "heartbeat",
+        "execute-handoff",
+        "result-adoption",
+        "result-publication",
+        "acknowledge",
+        "failure",
+    ],
+)
+def test_v3_leased_transitions_demote_payload_mismatch(
+    tmp_path: Path, transition: str
+) -> None:
+    queue = _v3_queue(tmp_path)
+    task_id = queue.enqueue("query", 1, {"prompt": "original"})
+    lease = queue.claim("worker")
+    assert lease is not None
+    operation_id = f"operation-{transition}"
+    if transition == "acknowledge":
+        queue.publish_result(lease, operation_id=operation_id, result=b"answer")
+    if transition == "result-adoption":
+        result_name = hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
+        result_path = tmp_path / "run" / "queue-results" / f"{result_name}.result"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_bytes(b"answer")
+        memory_queue._harden_owner_only(result_path.parent, 0o700)
+        memory_queue._harden_owner_only(result_path, 0o600)
+    with sqlite3.connect(queue.db_path) as database:
+        database.execute(
+            "UPDATE tasks SET payload_blob=? WHERE id=?",
+            (b'{"prompt":"tampered"}', task_id),
+        )
+
+    actions = {
+        "heartbeat": lambda: queue.heartbeat(lease),
+        "execute-handoff": lambda: queue.payload_for_execution(lease),
+        "result-adoption": lambda: queue.adopt_published_result(
+            lease, operation_id=operation_id
+        ),
+        "result-publication": lambda: queue.publish_result(
+            lease, operation_id=operation_id, result=b"answer"
+        ),
+        "acknowledge": lambda: queue.acknowledge(lease),
+        "failure": lambda: queue.fail(lease, QueueFailure("temporary")),
+    }
+    with pytest.raises(QueueOperationError, match="payload_hash_mismatch"):
+        actions[transition]()
+
+    with sqlite3.connect(queue.db_path) as database:
+        state = database.execute(
+            """SELECT state, error_code, lease_owner, lease_token,
+                      lease_expires_at, result_reference
+               FROM tasks WHERE id=?""",
+            (task_id,),
+        ).fetchone()
+    assert state[:5] == (
+        "dead",
+        "payload_hash_mismatch",
+        None,
+        None,
+        None,
+    )
+    if transition != "acknowledge":
+        assert state[5] is None
+
+
+def test_v3_expiry_cancel_and_redrive_demote_payload_mismatch(tmp_path: Path) -> None:
+    queue = _v3_queue(tmp_path)
+    expiring = queue.enqueue("query", 1, {"case": "expiry"})
+    expiring_lease = queue.claim("worker", lease_seconds=1)
+    assert expiring_lease is not None and expiring_lease.id == expiring
+    redriving = queue.enqueue("query", 1, {"case": "redrive"})
+    redrive_lease = queue.claim("worker")
+    assert redrive_lease is not None and redrive_lease.id == redriving
+    queue.fail(redrive_lease, QueueFailure("invalid_input", permanent=True))
+    cancelling = queue.enqueue("query", 1, {"case": "cancel"})
+    with sqlite3.connect(queue.db_path) as database:
+        database.execute(
+            "UPDATE tasks SET payload_blob=?, lease_expires_at=? WHERE id=?",
+            (b'{"case":"tampered-expiry"}', "2000-01-01T00:00:00+00:00", expiring),
+        )
+        database.execute(
+            "UPDATE tasks SET payload_blob=? WHERE id IN (?,?)",
+            (b'{"case":"tampered"}', cancelling, redriving),
+        )
+
+    assert queue.recover_expired_leases() == 1
+    with pytest.raises(QueueOperationError, match="payload_hash_mismatch"):
+        queue.cancel(cancelling)
+    with pytest.raises(QueueOperationError, match="payload_hash_mismatch"):
+        queue.redrive(redriving)
+
+    with sqlite3.connect(queue.db_path) as database:
+        states = database.execute(
+            "SELECT id, state, error_code FROM tasks ORDER BY id"
+        ).fetchall()
+    assert sorted(states) == sorted(
+        [
+            (expiring, "dead", "payload_hash_mismatch"),
+            (cancelling, "dead", "payload_hash_mismatch"),
+            (redriving, "dead", "payload_hash_mismatch"),
+        ]
+    )
+
+
+def test_v3_claim_stops_before_attempt_history_exceeds_hard_limit(
+    tmp_path: Path,
+) -> None:
+    queue = _v3_queue(tmp_path)
+    task_id = queue.enqueue("query", 1, {"prompt": "bounded"})
+    now = "2026-08-12T12:00:00+00:00"
+    with sqlite3.connect(queue.db_path) as database:
+        database.executemany(
+            """INSERT INTO attempt_history(
+                   task_id,attempt,started_at,finished_at,outcome,error_code
+               ) VALUES (?,1,?,?,'blocked','provider_missing')""",
+            [(task_id, now, now) for _ in range(100)],
+        )
+
+    assert queue.claim("worker") is None
+    with sqlite3.connect(queue.db_path) as database:
+        row = database.execute(
+            "SELECT state,error_code,attempts FROM tasks WHERE id=?", (task_id,)
+        ).fetchone()
+        count = database.execute(
+            "SELECT COUNT(*) FROM attempt_history WHERE task_id=?", (task_id,)
+        ).fetchone()
+    assert row == ("dead", "attempt_history_exhausted", 0)
+    assert count == (100,)
+
+
+def test_v3_exporter_round_trips_real_task_through_queue_task_schema(
+    tmp_path: Path,
+) -> None:
+    queue = _v3_queue(tmp_path)
+    source = ("knowledge/daily/2026-08-12.md", "a" * 64)
+    task_id = queue.enqueue(
+        "query",
+        3,
+        {"prompt": "bounded"},
+        dedupe_key="query:bounded",
+        source_links=[source],
+    )
+    lease = queue.claim("worker")
+    assert lease is not None
+    queue.publish_result(lease, operation_id="query-operation", result=b"answer")
+    queue.acknowledge(lease)
+
+    record = queue.export_task(task_id)
+
+    validate_schema(
+        record,
+        SCRIPTS_DIR / "schemas" / "queue-task-v3.json",
+    )
+    assert record == {
+        "schema_version": "queue-task/v3",
+        "task_id": task_id,
+        "kind": "query",
+        "handler_version": 3,
+        "payload": {"prompt": "bounded"},
+        "input_hash": "370d3edfc1a4876824844f19df756d490dde3a70cbf941e2874eeca637bcfe19",
+        "dedupe_key": "query:bounded",
+        "state": "succeeded",
+        "priority": 0,
+        "created_at": record["created_at"],
+        "updated_at": record["updated_at"],
+        "available_at": record["available_at"],
+        "attempts": 1,
+        "last_attempt_at": None,
+        "lease": None,
+        "error_code": None,
+        "blocked_capability": None,
+        "result": {
+            "reference": record["result"]["reference"],
+            "sha256": "0db52f4076c082518412afd3dd3576e2cb0c63703fd7fed5e23ade60efef31d9",
+            "operation_id": "query-operation",
+        },
+        "redrive_of": None,
+        "lineage_generation": 0,
+        "attempt_history": [
+            {
+                "attempt": 1,
+                "started_at": record["attempt_history"][0]["started_at"],
+                "finished_at": record["attempt_history"][0]["finished_at"],
+                "outcome": "succeeded",
+                "error_code": None,
+            }
+        ],
+        "source_links": [
+            {"logical_path": source[0], "source_digest": source[1]}
+        ],
+        "capture_binding": None,
+    }
+    assert canonical_json_bytes(json.loads(canonical_json_bytes(record))) == canonical_json_bytes(
+        record
+    )
+
+
+def test_v3_ordinary_purge_uses_transactional_authorization_without_schema_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue = _v3_queue(tmp_path)
+    task_id = queue.enqueue("query", 1, {"prompt": "purge"})
+    lease = queue.claim("worker")
+    assert lease is not None
+    queue.publish_result(lease, operation_id="purge-operation", result=b"answer")
+    queue.acknowledge(lease)
+    with sqlite3.connect(queue.db_path) as database:
+        database.execute(
+            "UPDATE tasks SET updated_at='2000-01-01T00:00:00+00:00' WHERE id=?",
+            (task_id,),
+        )
+        schema_before = database.execute(
+            "SELECT type,name,sql FROM sqlite_schema ORDER BY type,name"
+        ).fetchall()
+    statements: list[str] = []
+    real_connect = queue._connect
+
+    def traced_connect():
+        database = real_connect()
+        database.set_trace_callback(statements.append)
+        return database
+
+    monkeypatch.setattr(queue, "_connect", traced_connect)
+    export = tmp_path / "exports" / "ordinary"
+
+    receipt = queue.purge(
+        terminal_before=datetime(2001, 1, 1, tzinfo=timezone.utc),
+        export_path=export,
+    )
+
+    assert receipt == memory_queue.PurgeReceipt(1, (task_id,))
+    records = json.loads((export / "records.json").read_bytes())
+    assert records[0]["schema_version"] == "queue-task/v3"
+    assert records[0]["task_id"] == task_id
+    validate_schema(records[0], SCRIPTS_DIR / "schemas" / "queue-task-v3.json")
+    with sqlite3.connect(queue.db_path) as database:
+        assert database.execute("SELECT COUNT(*) FROM tasks").fetchone() == (0,)
+        assert database.execute("SELECT COUNT(*) FROM attempt_history").fetchone() == (0,)
+        assert database.execute(
+            "SELECT COUNT(*) FROM task_purge_authorizations"
+        ).fetchone() == (0,)
+        schema_after = database.execute(
+            "SELECT type,name,sql FROM sqlite_schema ORDER BY type,name"
+        ).fetchall()
+    assert schema_after == schema_before
+    assert not any(
+        statement.lstrip().upper().startswith(("DROP TRIGGER", "CREATE TRIGGER"))
+        for statement in statements
+    )
+
+
+def test_enqueue_validates_priority_and_handler_version(queue: MemoryQueue) -> None:
     with pytest.raises(ValueError, match="priority"):
         queue.enqueue("query", 1, {}, priority=101)
     with pytest.raises(ValueError, match="handler_version"):
@@ -1128,6 +1556,23 @@ def test_sqlite_uses_required_durability_settings(queue: MemoryQueue) -> None:
         assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
 
 
+def test_queue_v3_candidate_does_not_switch_the_active_v2_path(
+    tmp_path: Path, clock: FakeClock
+) -> None:
+    import memory_queue
+
+    queue = MemoryQueue(tmp_path, clock=clock, rng=random.Random(21))
+    candidate = tmp_path / "run" / "queue-v3.candidate.sqlite3"
+    memory_queue.initialize_queue_v3_candidate(candidate, source_v2=queue.db_path)
+
+    active_task = queue.enqueue("query", 1, {"path": "active-v2"})
+
+    assert queue.db_path == tmp_path.resolve() / "run" / "queue.sqlite3"
+    assert queue.get(active_task).payload == {"path": "active-v2"}
+    with sqlite3.connect(candidate) as database:
+        assert database.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+
+
 def test_schema_upgrades_legacy_eight_attempt_constraint(tmp_path: Path) -> None:
     queue = MemoryQueue(tmp_path)
     with sqlite3.connect(queue.db_path) as connection:
@@ -1166,19 +1611,20 @@ def test_module_facade_preserves_v1_shapes(tmp_path: Path, monkeypatch: pytest.M
 
     queue = memory_queue._queue()
     real_connect = queue._connect
-    claim_connections: list[sqlite3.Connection] = []
+    transaction_states_at_close: list[bool] = []
 
-    def tracked_connect() -> sqlite3.Connection:
-        connection = real_connect()
-        claim_connections.append(connection)
-        return connection
+    @contextmanager
+    def tracked_connect():
+        with real_connect() as connection:
+            yield connection
+            transaction_states_at_close.append(connection.in_transaction)
 
     monkeypatch.setattr(queue, "_connect", tracked_connect)
     monkeypatch.setattr(memory_queue, "_queue", lambda: queue)
     in_transaction: list[bool] = []
 
     def processor(task: dict[str, object]) -> bool:
-        in_transaction.append(claim_connections[-1].in_transaction)
+        in_transaction.append(transaction_states_at_close[-1])
         return True
 
     assert memory_queue.drain_with(processor, max_tasks=1) == {

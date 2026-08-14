@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/reliability-v3-migration-v1.json",
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "identity": {
+      "type": "object",
+      "required": ["platform", "volume", "file_id", "size", "mtime_ns"],
+      "properties": {
+        "platform": {"enum": ["posix", "windows"]},
+        "volume": {"type": "string", "minLength": 1, "maxLength": 512},
+        "file_id": {"type": "string", "minLength": 1, "maxLength": 512},
+        "size": {"type": "integer", "minimum": 0},
+        "mtime_ns": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "fresh_source": {
+      "type": "object",
+      "required": ["database", "legacy_path", "replacement_path"],
+      "properties": {
+        "database": {"enum": ["queue", "coordinator"]},
+        "legacy_path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "replacement_path": {"type": "string", "minLength": 1, "maxLength": 4096}
+      },
+      "additionalProperties": false
+    },
+    "upgrade_source": {
+      "type": "object",
+      "required": ["database", "legacy_path", "replacement_path", "retired_path", "source_identity", "source_sha256"],
+      "properties": {
+        "database": {"enum": ["queue", "coordinator"]},
+        "legacy_path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "replacement_path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "retired_path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "source_identity": {"$ref": "#/$defs/identity"},
+        "source_sha256": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": false
+    },
+    "fresh_record": {
+      "type": "object",
+      "required": ["schema_version", "operation_id", "source_state", "databases", "schemas", "installed_integration_sha256"],
+      "properties": {
+        "schema_version": {"const": "reliability-v3-migration/v1"},
+        "operation_id": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "source_state": {"const": "fresh"},
+        "databases": {"type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": true, "items": {"$ref": "#/$defs/fresh_source"}},
+        "schemas": {"$ref": "#/$defs/schemas"},
+        "installed_integration_sha256": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": false
+    },
+    "upgrade_record": {
+      "type": "object",
+      "required": ["schema_version", "operation_id", "source_state", "databases", "schemas", "installed_integration_sha256"],
+      "properties": {
+        "schema_version": {"const": "reliability-v3-migration/v1"},
+        "operation_id": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "source_state": {"const": "upgrade"},
+        "databases": {"type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": true, "items": {"$ref": "#/$defs/upgrade_source"}},
+        "schemas": {"$ref": "#/$defs/schemas"},
+        "installed_integration_sha256": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": false
+    },
+    "schemas": {
+      "type": "object",
+      "required": ["queue_schema_sha256", "coordinator_schema_sha256", "adoption_schema_sha256"],
+      "properties": {
+        "queue_schema_sha256": {"$ref": "#/$defs/digest"},
+        "coordinator_schema_sha256": {"$ref": "#/$defs/digest"},
+        "adoption_schema_sha256": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "required": ["schema_version", "operation_id", "source_state", "databases", "schemas", "installed_integration_sha256"],
+  "properties": {
+    "schema_version": {"const": "reliability-v3-migration/v1"},
+    "operation_id": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "source_state": {"enum": ["fresh", "upgrade"]},
+    "databases": {"type": "array"},
+    "schemas": {"$ref": "#/$defs/schemas"},
+    "installed_integration_sha256": {"$ref": "#/$defs/digest"}
+  },
+  "oneOf": [{"$ref": "#/$defs/fresh_record"}, {"$ref": "#/$defs/upgrade_record"}],
+  "additionalProperties": false
+}

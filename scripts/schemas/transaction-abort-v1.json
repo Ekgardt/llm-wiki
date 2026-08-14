@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/transaction-abort-v1.json",
+  "$defs": {"digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
+  "type": "object",
+  "required": ["schema_version", "transaction_id", "intent_id", "active_link_digest", "intent_fence_token_sha256", "intent_fence_epoch", "abort_operation_id", "before_manifest_sha256", "restored_target_count", "restored_tree_sha256", "actor_identity", "aborted_at"],
+  "properties": {
+    "schema_version": {"const": "transaction-abort/v1"},
+    "transaction_id": {"type": "string", "minLength": 1, "maxLength": 200},
+    "intent_id": {"$ref": "#/$defs/digest"},
+    "active_link_digest": {"$ref": "#/$defs/digest"},
+    "intent_fence_token_sha256": {"$ref": "#/$defs/digest"},
+    "intent_fence_epoch": {"type": "integer", "minimum": 1},
+    "abort_operation_id": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "before_manifest_sha256": {"$ref": "#/$defs/digest"},
+    "restored_target_count": {"type": "integer", "minimum": 0, "maximum": 100},
+    "restored_tree_sha256": {"$ref": "#/$defs/digest"},
+    "actor_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+    "aborted_at": {"type": "string", "minLength": 20, "maxLength": 40}
+  },
+  "additionalProperties": false
+}

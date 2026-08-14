@@ -406,10 +406,16 @@ def validate_bag(
         ):
             raise EvidenceResolutionError("archive payload hash mismatch")
         receipt_ref = manifest["compile_receipt_ref"]
+        logical_path = f"knowledge/daily/{daily_id}.md"
+        from compile_memory import compile_source_identity
+
+        source_identity = compile_source_identity(logical_path, payload_hash)
         if (
             receipt_ref["path"]
-            != f"knowledge/daily/receipts/{payload_hash}.md"
+            != f"knowledge/daily/receipts/v3-{source_identity}.md"
+            or receipt_ref["logical_path"] != logical_path
             or receipt_ref["source_digest"] != payload_hash
+            or receipt_ref["source_identity"] != source_identity
         ):
             raise EvidenceResolutionError("archive compile receipt reference is invalid")
         embedded_path = receipt_ref.get("embedded_path")
@@ -433,9 +439,13 @@ def validate_bag(
             raise EvidenceResolutionError("archive compile receipt hash mismatch")
         try:
             if self_contained:
-                from compile_memory import parse_compile_receipt
+                from compile_memory import parse_compile_receipt_v3
 
-                receipt = parse_compile_receipt(receipt_bytes, payload_hash)
+                receipt = parse_compile_receipt_v3(
+                    receipt_bytes,
+                    logical_path=logical_path,
+                    source_sha256=payload_hash,
+                )
                 _validate_compile_authority(
                     authority,
                     receipt,
@@ -444,9 +454,10 @@ def validate_bag(
                     receipt_hash=str(receipt_ref["receipt_file_hash"]),
                 )
             else:
-                from compile_memory import read_compile_receipt
+                from compile_memory import read_compile_receipt_v3
 
-                receipt = read_compile_receipt(
+                receipt = read_compile_receipt_v3(
+                    logical_path,
                     payload_hash,
                     coordinator,  # type: ignore[arg-type]
                     path=receipt_path,

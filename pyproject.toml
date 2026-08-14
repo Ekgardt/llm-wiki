@@ -2,10 +2,12 @@
 name = "llm-wiki"
 version = "4.0.0"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "mcp>=1.29,<2",
+    "tomli>=2.4.1,<3; python_version < '3.11'",
+]
 
 # Optional heavy dependencies — install via `uv sync --extra <name>`.
-# Kept optional so the base install stays zero-dep (stdlib only).
 [project.optional-dependencies]
 lexical-benchmark = ["jieba==0.42.1"]
 retrieval-benchmark = [
@@ -14,7 +16,7 @@ retrieval-benchmark = [
     "jieba==0.42.1",
 ]
 semantic = ["sentence-transformers>=2.7,<6"]
-hybrid = ["lancedb>=0.20", "sentence-transformers>=2.7,<6"]
+hybrid = ["numpy>=2.2.6,<3", "lancedb>=0.20", "sentence-transformers>=2.7,<6"]
 cognee = ["cognee>=0.1,<2"]
 # v4.0: tree-sitter code graph (12 languages; grammars remain optional as a group).
 code-graph = [
@@ -34,16 +36,15 @@ code-graph = [
     "tree-sitter-bash>=0.23,<1",
 ]
 # v4.0: MCP server (12 task-shaped tools, stdio transport, 100% local).
-mcp-server = [
-    "mcp>=1.27,<2",
-    "tomli>=2.4.1,<3; python_version < '3.11'",
-]
+mcp-server = []
 # v4.0: Cross-encoder reranker (mxbai-rerank via ONNX, local CPU).
 reranker = [
     "onnxruntime>=1.18,<1.24; python_version < '3.11'",
     "onnxruntime>=1.18,<2; python_version >= '3.11'",
     "optimum>=1.20,<2",
     "tokenizers>=0.19,<1",
+    "torch>=2.2,<3",
+    "transformers>=4.44,<6",
 ]
 # Convenience: install everything.
 full = [
@@ -52,11 +53,30 @@ full = [
 
 [dependency-groups]
 dev = [
+    "jsonschema>=4.26,<5",
+    "numpy>=2.2.6,<3",
+    "jedi>=0.19,<1",
+    "tree-sitter>=0.23,<1",
+    "tree-sitter-python>=0.23,<1",
+    "tree-sitter-javascript>=0.23,<1",
+    "tree-sitter-typescript>=0.23,<1",
+    "tree-sitter-go>=0.23,<1",
+    "tree-sitter-rust>=0.23,<1",
+    "tree-sitter-java>=0.23,<1",
+    "tree-sitter-c>=0.23,<1",
+    "tree-sitter-cpp>=0.23,<1",
+    "tree-sitter-ruby>=0.23,<1",
+    "tree-sitter-php>=0.23,<1",
+    "tree-sitter-c-sharp>=0.23,<1",
+    "tree-sitter-bash>=0.23,<1",
     "pre-commit>=4.5.1",
     "pytest>=8.0.0",
     "pyyaml>=6.0.3,<7",
     "ruff>=0.6.0",
 ]
+
+[tool.uv]
+required-version = "==0.12.3"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

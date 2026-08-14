@@ -799,6 +799,83 @@ def test_exact_title_bypass_before_rerank(monkeypatch):
     assert result.candidates[0].candidate_id == "t1"
 
 
+def test_exact_filename_stays_rank_one_after_dense_fusion():
+    import retrieval
+
+    exact = _hit(
+        "exact",
+        "knowledge/notes/target-contract.md",
+        1.0,
+        title="Unrelated heading",
+    )
+    distractor = _hit(
+        "distractor",
+        "knowledge/notes/distractor.md",
+        0.9,
+        title="Target Contract",
+    )
+
+    result = retrieval.retrieve(
+        "target contract",
+        requested_profile="HYBRID",
+        lexical_backend=lambda **_kwargs: [exact, distractor],
+        dense_backend=lambda **_kwargs: [distractor],
+        graph_enabled=False,
+        rerank_enabled=False,
+    )
+
+    assert result.candidates[0].relative_path == "knowledge/notes/target-contract.md"
+
+
+def test_exact_filename_stays_rank_one_after_reranking(monkeypatch):
+    import reranker
+    import retrieval
+
+    exact = _hit(
+        "exact",
+        "knowledge/notes/target-contract.md",
+        1.0,
+        title="Unrelated heading",
+    )
+    distractor = _hit(
+        "distractor",
+        "knowledge/notes/distractor.md",
+        0.9,
+        title="Other heading",
+    )
+
+    def force_distractor_first(_query, documents, **_kwargs):
+        by_id = {row["candidate_id"]: dict(row) for row in documents}
+        rows = [by_id["distractor"], by_id["exact"]]
+        for index, row in enumerate(rows):
+            row.update(
+                {
+                    "final_score": 2.0 - index,
+                    "rerank_score": 2.0 - index,
+                    "reranker_applied": True,
+                    "reranker_model_id": "test-reranker",
+                    "reranker_model_revision": "1",
+                    "reranker_depth": 2,
+                    "reranker_duration_ms": 1,
+                }
+            )
+        return rows
+
+    monkeypatch.setattr(reranker, "should_rerank", lambda **_kwargs: (True, None))
+    monkeypatch.setattr(reranker, "rerank", force_distractor_first)
+
+    result = retrieval.retrieve(
+        "target contract",
+        requested_profile="HYBRID",
+        lexical_backend=lambda **_kwargs: [exact, distractor],
+        dense_backend=lambda **_kwargs: [exact, distractor],
+        graph_enabled=False,
+        rerank_enabled=True,
+    )
+
+    assert result.candidates[0].relative_path == "knowledge/notes/target-contract.md"
+
+
 def test_reranker_receives_full_chunk_content(monkeypatch):
     import reranker
     import retrieval

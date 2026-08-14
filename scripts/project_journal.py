@@ -10,13 +10,14 @@ import secrets
 import stat
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from context_budget import ContextItem
+    from operational_ownership import OwnerLease
 
 from markdown_transaction import (
     ABSENT,
@@ -99,6 +100,8 @@ class ProjectLease:
     epoch: int
     expires_at: datetime
     heartbeat_at: datetime
+    _ownership: OwnerLease | None = field(default=None, repr=False, compare=False)
+    _release_canonical: bool = field(default=False, repr=False, compare=False)
 
     @property
     def heartbeat_due_at(self) -> datetime:
@@ -719,6 +722,25 @@ class ProjectStore:
         self.state_root = self.coordinator.state_root
         self._clock = clock
 
+    @classmethod
+    def _from_v3_candidate(
+        cls,
+        vault: Path,
+        *,
+        state_root: Path,
+        clock: Callable[[], datetime] = _utc_now,
+    ) -> ProjectStore:
+        candidate = Path(state_root) / "run/markdown-transactions-v3.candidate.sqlite3"
+        store = cls.__new__(cls)
+        store.coordinator = MarkdownCoordinator._from_v3_candidate(
+            candidate, state_root=Path(state_root)
+        )
+        store.vault = Path(vault).resolve(strict=True)
+        store.coordinator.vault = store.vault
+        store.state_root = Path(state_root)
+        store._clock = clock
+        return store
+
     def _project_directory(self, slug: str) -> Path:
         slug = _require_slug(slug)
         projects = self.vault / "knowledge" / "projects"
@@ -745,6 +767,7 @@ class ProjectStore:
         *,
         token: str | None = None,
         now: datetime | None = None,
+        ownership: OwnerLease | None = None,
     ) -> ProjectLease:
         slug = _require_slug(slug)
         self._project_directory(slug)
@@ -753,6 +776,15 @@ class ProjectStore:
             raise ValueError("project lease ttl must be an integer greater than 10 seconds")
         if token is not None and (not isinstance(token, str) or not token):
             raise ValueError("project lease token must be a non-empty string")
+        if getattr(self.coordinator, "_database_contract", None) is not None:
+            return self._acquire_v3_lease(
+                slug,
+                owner,
+                ttl,
+                token=token,
+                now=now,
+                ownership=ownership,
+            )
         current_time = now or self._clock()
         expires_at = current_time + timedelta(seconds=ttl)
         with self.coordinator._connect() as database, begin_immediate(database):
@@ -800,6 +832,136 @@ class ProjectStore:
             )
         return ProjectLease(slug, owner, token, epoch, expires_at, current_time)
 
+    def _acquire_v3_lease(
+        self,
+        slug: str,
+        owner: str,
+        ttl: int,
+        *,
+        token: str | None,
+        now: datetime | None,
+        ownership: OwnerLease | None,
+    ) -> ProjectLease:
+        from operational_ownership import (
+            OwnerLease,
+            OwnershipRegistry,
+        )
+
+        current_time = now or self._clock()
+        registry = OwnershipRegistry(self.state_root, clock=lambda: current_time)
+        with self.coordinator._connect() as database, begin_immediate(database):
+            if ownership is None:
+                row = database.execute(
+                    "SELECT * FROM project_leases WHERE project=?", (slug,)
+                ).fetchone()
+                if row is not None and _parse_timestamp(row["expires_at"]) > current_time:
+                    if row["owner"] != owner or token is None or row["lease_token"] != token:
+                        raise ProjectLeaseBusy(
+                            f"project {slug!r} is leased by another invocation"
+                        )
+                    existing = database.execute(
+                        "SELECT * FROM maintenance_owners "
+                        "WHERE role='project' AND scope=?",
+                        (f"project:{slug}",),
+                    ).fetchone()
+                    if existing is None:
+                        raise ProjectFenceError("project canonical lease is absent")
+                    from operational_ownership import ProcessIdentity
+
+                    canonical = OwnerLease(
+                        state_root=self.state_root,
+                        role="project",
+                        scope=f"project:{slug}",
+                        actor_id=existing["actor_id"],
+                        token=existing["owner_token"],
+                        epoch=existing["fencing_epoch"],
+                        process=ProcessIdentity(
+                            pid=existing["process_id"],
+                            start_identity=existing["process_start_identity"],
+                        ),
+                        acquired_at=_parse_timestamp(existing["acquired_at"]),
+                        heartbeat_at=_parse_timestamp(existing["heartbeat_at"]),
+                        expires_at=_parse_timestamp(existing["expires_at"]),
+                        ttl_seconds=30,
+                        heartbeat_seconds=10,
+                    )
+                    canonical = registry._heartbeat_in_transaction(database, canonical)
+                    expires_at = current_time + timedelta(seconds=ttl)
+                    updated = database.execute(
+                        "UPDATE project_leases SET expires_at=?,heartbeat_at=? "
+                        "WHERE project=? AND lease_token=? AND fencing_epoch=?",
+                        (
+                            _timestamp(expires_at),
+                            _timestamp(current_time),
+                            slug,
+                            token,
+                            row["fencing_epoch"],
+                        ),
+                    ).rowcount
+                    if updated != 1:
+                        raise ProjectFenceError("project lease is stale or expired")
+                    return ProjectLease(
+                        slug,
+                        owner,
+                        canonical.token,
+                        canonical.epoch,
+                        expires_at,
+                        current_time,
+                        canonical,
+                        True,
+                    )
+                if token is not None:
+                    raise ProjectFenceError("project lease token is stale or expired")
+                canonical = registry._acquire_in_transaction(
+                    database, "project", scope=f"project:{slug}"
+                )
+            else:
+                if not isinstance(ownership, OwnerLease):
+                    raise TypeError("ownership must be an OwnerLease")
+                if (
+                    ownership.role != "project"
+                    or ownership.scope != f"project:{slug}"
+                ):
+                    raise ValueError("project ownership role or scope does not match")
+                registry.require(database, ownership)
+                canonical = ownership
+            expires_at = current_time + timedelta(seconds=ttl)
+            lease = ProjectLease(
+                slug,
+                owner,
+                canonical.token,
+                canonical.epoch,
+                expires_at,
+                current_time,
+                canonical,
+                ownership is None,
+            )
+            self._insert_project_projection(database, lease, canonical)
+        return lease
+
+    @staticmethod
+    def _insert_project_projection(database, lease: ProjectLease, ownership) -> None:
+        database.execute(
+            """INSERT INTO project_leases(
+                   project,lease_token,fencing_epoch,owner,expires_at,heartbeat_at,
+                   canonical_role,canonical_scope,actor_id,process_id,
+                   process_start_identity
+               ) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                lease.slug,
+                lease.token,
+                lease.epoch,
+                lease.owner,
+                _timestamp(lease.expires_at),
+                _timestamp(lease.heartbeat_at),
+                ownership.role,
+                ownership.scope,
+                ownership.actor_id,
+                ownership.process.pid,
+                ownership.process.start_identity,
+            ),
+        )
+
     def heartbeat(
         self,
         lease: ProjectLease,
@@ -813,6 +975,35 @@ class ProjectStore:
             raise ValueError("project lease ttl must be an integer greater than 10 seconds")
         current_time = now or self._clock()
         expires_at = current_time + timedelta(seconds=ttl)
+        if getattr(self.coordinator, "_database_contract", None) is not None:
+            from operational_ownership import OwnershipRegistry
+
+            if lease._ownership is None:
+                raise ProjectFenceError("project lease has no canonical ownership")
+            registry = OwnershipRegistry(self.state_root, clock=lambda: current_time)
+            with self.coordinator._connect() as database, begin_immediate(database):
+                canonical = registry._heartbeat_in_transaction(
+                    database, lease._ownership
+                )
+                updated = database.execute(
+                    "UPDATE project_leases SET expires_at=?, heartbeat_at=? "
+                    "WHERE project=? AND lease_token=? AND fencing_epoch=?",
+                    (
+                        _timestamp(expires_at),
+                        _timestamp(current_time),
+                        lease.slug,
+                        lease.token,
+                        lease.epoch,
+                    ),
+                ).rowcount
+                if updated != 1:
+                    raise ProjectFenceError("project lease is stale or expired")
+            return replace(
+                lease,
+                expires_at=expires_at,
+                heartbeat_at=current_time,
+                _ownership=canonical,
+            )
         with self.coordinator._connect() as database, begin_immediate(database):
             updated = database.execute(
                 "UPDATE project_leases SET expires_at = ?, heartbeat_at = ? "
@@ -1627,6 +1818,29 @@ class ProjectStore:
     def _release(self, lease: ProjectLease) -> None:
         now = self._clock()
         with self.coordinator._connect() as database, begin_immediate(database):
+            if getattr(self.coordinator, "_database_contract", None) is not None:
+                from operational_ownership import OwnershipRegistry
+
+                row = database.execute(
+                    "SELECT 1 FROM maintenance_owners WHERE role='project' AND scope=?",
+                    (f"project:{lease.slug}",),
+                ).fetchone()
+                deleted = database.execute(
+                    "DELETE FROM project_leases WHERE project=? AND lease_token=? "
+                    "AND fencing_epoch=?",
+                    (lease.slug, lease.token, lease.epoch),
+                ).rowcount
+                if deleted != 1 or row is None:
+                    raise ProjectFenceError("project lease is stale or expired")
+                if lease._release_canonical:
+                    if lease._ownership is None:
+                        raise ProjectFenceError(
+                            "project lease has no canonical ownership"
+                        )
+                    OwnershipRegistry(self.state_root)._release_in_transaction(
+                        database, lease._ownership
+                    )
+                return
             database.execute(
                 "UPDATE project_leases SET expires_at = ? WHERE project = ? "
                 "AND lease_token = ? AND fencing_epoch = ?",

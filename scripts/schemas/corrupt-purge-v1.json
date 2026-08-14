@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/corrupt-purge-v1.json",
+  "$defs": {"digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
+  "type": "object",
+  "required": ["schema_version", "operation_id", "task_id", "package_key", "package_path", "manifest_sha256", "disposition_sha256", "original_frozen_root", "purge_page_count", "final_rolling_root", "final_generation", "observed_incoming_link_count"],
+  "properties": {
+    "schema_version": {"const": "corrupt-purge/v1"},
+    "operation_id": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "task_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "package_key": {"$ref": "#/$defs/digest"},
+    "package_path": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "manifest_sha256": {"$ref": "#/$defs/digest"},
+    "disposition_sha256": {"$ref": "#/$defs/digest"},
+    "original_frozen_root": {"$ref": "#/$defs/digest"},
+    "purge_page_count": {"type": "integer", "minimum": 0},
+    "final_rolling_root": {"$ref": "#/$defs/digest"},
+    "final_generation": {"type": "integer", "minimum": 0},
+    "observed_incoming_link_count": {"const": 0}
+  },
+  "additionalProperties": false
+}

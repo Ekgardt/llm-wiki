@@ -2433,7 +2433,7 @@ Expected: PASS with no leaked SQLite connections, live child processes, runtime 
 
 ```bash
 uv run --locked --no-sync ruff check scripts tests benchmark
-uv run --locked --no-sync python -m compileall -q scripts tests benchmark
+uv run --locked --no-sync python -m compileall -q -x "tests[\\/]fixtures[\\/]code_kernel[\\/]python[\\/]pkg[\\/]broken[.]py" scripts tests benchmark
 uv run --locked --no-sync pytest tests/test_structure.py tests/test_quality_guards.py -q
 git diff --check
 ```

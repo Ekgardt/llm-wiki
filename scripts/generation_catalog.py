@@ -570,14 +570,9 @@ def _windows_stat_matches_identity(
 def _windows_handle_stat_identity(handle: int) -> tuple[int, int]:
     if os.name != "nt":
         raise OSError("Windows handle stat identity is unavailable")
-    information = _ByHandleFileInformation()
-    if not _get_file_information_by_handle(handle, ctypes.byref(information)):
-        raise ctypes.WinError(ctypes.get_last_error())
-    volume = int(information.volume_serial_number)
-    file_index = (int(information.file_index_high) << 32) | int(
-        information.file_index_low
-    )
-    if volume <= 0 or file_index <= 0:
+    _platform, volume, file_id = _windows_handle_file_identity(handle)
+    file_index = int.from_bytes(file_id, "little")
+    if file_index <= 0:
         raise OSError("Windows stable handle stat identity is unavailable")
     return volume, file_index
 

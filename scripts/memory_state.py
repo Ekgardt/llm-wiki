@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import subprocess
 import sys
 import time
@@ -32,6 +33,8 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+
+from reliable_memory import durable_publish_file, fsync_directory, sha256_bytes
 
 
 def _resolve_vault_root(start: Path) -> Path:
@@ -141,9 +144,7 @@ def load_state() -> dict[str, Any]:
 
 def save_state(state: dict[str, Any]) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = STATE_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(STATE_FILE)
+    atomic_write(STATE_FILE, json.dumps(state, indent=2, ensure_ascii=False))
 
 
 @contextmanager
@@ -261,16 +262,37 @@ def file_hash(path: Path) -> str:
 
 
 def atomic_write(path: Path, content: str, encoding: str = "utf-8") -> None:
-    """Write content atomically via temp file + os.replace.
-
-    Guarantees that readers never see a partial/truncated file: either
-    the old version is intact or the new version is fully written.
-    Used for all durable writes (notes, locks, index, cache files).
-    """
+    """Write content through the checked durable publication boundary."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(content, encoding=encoding)
-    os.replace(str(tmp), str(path))
+    payload = content.encode(encoding)
+    staged = path.parent / f".{path.name}.{secrets.token_hex(16)}.tmp"
+    descriptor = os.open(
+        staged,
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    try:
+        destination_size = path.lstat().st_size
+    except FileNotFoundError:
+        destination_size = 0
+    outcome = durable_publish_file(
+        staged,
+        path,
+        replace=True,
+        expected_sha256=sha256_bytes(payload),
+        max_bytes=max(1, len(payload), destination_size),
+    )
+    if outcome == "duplicate":
+        staged.unlink()
+        fsync_directory(path.parent)
 
 
 def spawn_detached(

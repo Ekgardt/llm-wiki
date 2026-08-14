@@ -6,13 +6,12 @@
 #   $env:LLM_WIKI_ROOT = (Get-Location).Path
 #   .\install.ps1
 #
-# Remote bootstrap is not published. The approved replacement will require a
-# full commit OID before fetching or executing installer code.
+# Remote bootstrap requires LLM_WIKI_COMMIT to be a full commit OID.
 #
 # What this does:
 #   1. Checks prerequisites (Python 3.10+, uv, git)
-#   2. Installs locked Python deps with the MCP server baseline
-#   3. Runs tests
+#   2. Installs the locked production dependency baseline
+#   3. Runs a bounded production smoke
 #   4. Sets LLM_WIKI_ROOT environment variable (user-level)
 #   5. Registers Windows Task Scheduler (nightly + weekly)
 #   6. Detects agents (OpenCode, Codex, Claude Code, Cursor)
@@ -22,12 +21,72 @@
 #
 # Safe to re-run. Idempotent.
 
+[CmdletBinding()]
+param(
+    [switch]$ProtectPush
+)
+
 $ErrorActionPreference = "Stop"
+$UvVersion = "0.12.3"
 
 function Info($msg) { Write-Host "[INFO] $msg" -ForegroundColor Blue }
 function Ok($msg)   { Write-Host "[OK] $msg"   -ForegroundColor Green }
 function Warn($msg) { Write-Host "[WARN] $msg"  -ForegroundColor Yellow }
 function Fail($msg) { Write-Host "[FAIL] $msg"  -ForegroundColor Red; exit 1 }
+function Invoke-NativeCommand {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [string[]]$ArgumentList = @(),
+        [int[]]$AllowedExitCodes = @(0),
+        [switch]$CaptureOutput,
+        [switch]$ReturnResult
+    )
+    if ($CaptureOutput) {
+        $output = @(& $FilePath @ArgumentList)
+    } else {
+        & $FilePath @ArgumentList
+    }
+    $nativeExit = $LASTEXITCODE
+    if ($AllowedExitCodes -notcontains $nativeExit) {
+        throw "$FilePath failed with exit code $nativeExit"
+    }
+    if ($ReturnResult) {
+        return [pscustomobject]@{
+            ExitCode = $nativeExit
+            Output = if ($CaptureOutput) { $output -join [Environment]::NewLine } else { $null }
+        }
+    }
+    if ($CaptureOutput) { return ($output -join [Environment]::NewLine) }
+}
+function Protect-PushUrls([string]$VaultRoot) {
+    $remoteResult = Invoke-NativeCommand git @("-C", $VaultRoot, "remote") -CaptureOutput -ReturnResult
+    $remotes = @($remoteResult.Output -split "`r?`n" | Where-Object { $_ })
+    foreach ($remote in $remotes) {
+        $key = "remote.$remote.pushurl"
+        $probe = Invoke-NativeCommand git @("-C", $VaultRoot, "config", "--get-all", $key) `
+            -AllowedExitCodes @(0, 1) -CaptureOutput -ReturnResult
+        if ($probe.ExitCode -eq 0) {
+            Invoke-NativeCommand git @("-C", $VaultRoot, "config", "--unset-all", $key)
+        }
+        Invoke-NativeCommand git @("-C", $VaultRoot, "config", "--add", $key, "no-push")
+        $verify = Invoke-NativeCommand git @("-C", $VaultRoot, "remote", "get-url", "--all", "--push", $remote) `
+            -CaptureOutput -ReturnResult
+        $urls = @($verify.Output -split "`r?`n" | Where-Object { $_ })
+        if ($urls.Count -ne 1 -or $urls[0] -ne "no-push") {
+            throw "Could not protect push URLs for remote $remote"
+        }
+    }
+}
+function Protect-PushUrlsIfAuthorized(
+    [string]$VaultRoot,
+    [bool]$InstallerCreatedClone,
+    [bool]$ProtectPush
+) {
+    if ($InstallerCreatedClone -or $ProtectPush) {
+        Protect-PushUrls -VaultRoot $VaultRoot
+    }
+}
 function Write-Utf8NoBom([string]$path, [string]$content) {
     [System.IO.File]::WriteAllText(
         $path,
@@ -79,7 +138,7 @@ function Install-CodexMcp(
     $block = @"
 [mcp_servers.llm-wiki]
 command = "uv"
-args = ["run", "--directory", "$tomlVault", "python", "scripts/mcp_server.py"]
+args = ["run", "--locked", "--no-sync", "--directory", "$tomlVault", "python", "scripts/mcp_server.py"]
 "@
     $encoding = [System.Text.UTF8Encoding]::new($false)
     if (Test-Path $Config) {
@@ -101,36 +160,82 @@ args = ["run", "--directory", "$tomlVault", "python", "scripts/mcp_server.py"]
 
 # --- 1. Resolve vault root -----------------------------------------
 
-if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) {
-    Fail "Remote bootstrap is not published. Run this installer from an inspected checkout."
-}
-$VAULT_ROOT = $PSScriptRoot
-$resolvedScriptRoot = (Resolve-Path -LiteralPath $PSScriptRoot).Path
-if (-not [string]::IsNullOrWhiteSpace($env:LLM_WIKI_ROOT)) {
+$repositoryUrl = "https://github.com/Ekgardt/llm-wiki.git"
+$callerDirectory = (Get-Location).Path
+$installerCreatedClone = $env:LLM_WIKI_INSTALLER_CREATED_CLONE -eq "1"
+$scriptDirectory = if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) { $null } else { $PSScriptRoot }
+
+if ($scriptDirectory -and (Test-Path -LiteralPath (Join-Path $scriptDirectory "pyproject.toml"))) {
+    $VAULT_ROOT = if ($env:LLM_WIKI_ROOT) { $env:LLM_WIKI_ROOT } else { $scriptDirectory }
+    $resolvedScriptRoot = (Resolve-Path -LiteralPath $scriptDirectory).Path
     try {
-        $requestedRoot = (Resolve-Path -LiteralPath $env:LLM_WIKI_ROOT).Path
+        $requestedRoot = (Resolve-Path -LiteralPath $VAULT_ROOT).Path
     } catch {
         Fail "LLM_WIKI_ROOT does not identify an accessible checkout."
     }
-    if (-not [string]::Equals(
-        $requestedRoot,
-        $resolvedScriptRoot,
-        [StringComparison]::OrdinalIgnoreCase
-    )) {
+    if (-not [string]::Equals($requestedRoot, $resolvedScriptRoot, [StringComparison]::OrdinalIgnoreCase)) {
         Fail "LLM_WIKI_ROOT points to a different checkout than this installer."
     }
+    $VAULT_ROOT = $resolvedScriptRoot
+} else {
+    if ($env:LLM_WIKI_COMMIT -notmatch '^[0-9a-fA-F]{40}$') {
+        Fail "Remote bootstrap requires LLM_WIKI_COMMIT as a full 40-hex commit OID"
+    }
+    $commit = $env:LLM_WIKI_COMMIT.ToLowerInvariant()
+    $VAULT_ROOT = Join-Path $env:USERPROFILE "LLM-wiki"
+    if (Test-Path -LiteralPath $VAULT_ROOT) { Fail "Remote install target already exists: $VAULT_ROOT" }
+    Invoke-NativeCommand git @("init", $VAULT_ROOT)
+    Invoke-NativeCommand git @("-C", $VAULT_ROOT, "remote", "add", "origin", $repositoryUrl)
+    Invoke-NativeCommand git @("-C", $VAULT_ROOT, "fetch", "--depth", "1", "origin", $commit)
+    Invoke-NativeCommand git @("-C", $VAULT_ROOT, "checkout", "--detach", $commit)
+    $installerCreatedClone = $true
+    $head = (Invoke-NativeCommand git @("-C", $VAULT_ROOT, "rev-parse", "HEAD") -CaptureOutput).Trim()
+    if ($head -ne $commit) { Fail "Checked-out commit does not match LLM_WIKI_COMMIT" }
+    $origin = (Invoke-NativeCommand git @("-C", $VAULT_ROOT, "remote", "get-url", "origin") -CaptureOutput).Trim()
+    if ($origin -ne $repositoryUrl) { Fail "Installed checkout repository identity does not match LLM-Wiki" }
+    foreach ($required in @("pyproject.toml", "uv.lock", "install.sh", "install.ps1", "scripts\installer_config.py")) {
+        if (-not (Test-Path -LiteralPath (Join-Path $VAULT_ROOT $required) -PathType Leaf)) {
+            Fail "Installed checkout is missing $($required.Replace('\', '/'))"
+        }
+    }
+    $env:LLM_WIKI_ROOT = $VAULT_ROOT
+    $env:LLM_WIKI_INSTALLER_CREATED_CLONE = "1"
+    $hostExecutable = if ($PSVersionTable.PSEdition -eq "Core") {
+        Join-Path $PSHOME "pwsh.exe"
+    } else {
+        Join-Path $PSHOME "powershell.exe"
+    }
+    $reexecArguments = @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $VAULT_ROOT "install.ps1")
+    )
+    if ($ProtectPush) { $reexecArguments += "-ProtectPush" }
+    try {
+        & $hostExecutable @reexecArguments
+        $nativeExit = $LASTEXITCODE
+    } finally {
+        Remove-Item Env:LLM_WIKI_INSTALLER_CREATED_CLONE -ErrorAction SilentlyContinue
+    }
+    if ($nativeExit -ne 0) { throw "Checked-out installer failed with exit code $nativeExit" }
+    exit 0
 }
-$VAULT_ROOT = $resolvedScriptRoot
-if (-not (Test-Path "$VAULT_ROOT\pyproject.toml")) {
-    Fail "Remote bootstrap is not published. Clone the repository, inspect it, and run this installer from that checkout."
-}
+
+$VAULT_ROOT = [System.IO.Path]::GetFullPath($VAULT_ROOT)
+$userState = [Environment]::GetEnvironmentVariable("LLM_WIKI_STATE_ROOT", "User")
+$stateInput = Resolve-StateRoot `
+    -ProcessState $env:LLM_WIKI_STATE_ROOT `
+    -UserState $userState `
+    -VaultRoot $VAULT_ROOT
+$stateInput = [System.IO.Path]::GetFullPath($stateInput)
+New-Item -ItemType Directory -Path $stateInput -Force | Out-Null
+$STATE_ROOT = (Resolve-Path -LiteralPath $stateInput).Path
+$env:LLM_WIKI_ROOT = $VAULT_ROOT
+$env:LLM_WIKI_STATE_ROOT = $STATE_ROOT
+[Environment]::SetEnvironmentVariable("LLM_WIKI_ROOT", $VAULT_ROOT, "User")
+[Environment]::SetEnvironmentVariable("LLM_WIKI_STATE_ROOT", $STATE_ROOT, "User")
 
 Set-Location $VAULT_ROOT
 Info "Vault root: $VAULT_ROOT"
-
-# Prevent accidental pushes from the installed vault
-git -C $VAULT_ROOT remote set-url --push origin no-push
-Ok "Push disabled (no-push) - installed vault cannot push to public remote"
+Info "State root: $STATE_ROOT"
 
 # --- 2. Check prerequisites ---------------------------------------
 
@@ -150,36 +255,56 @@ Ok "git installed"
 
 # uv
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
-    Fail "uv is required. Install it from https://docs.astral.sh/uv/ and rerun the installer."
+    Fail "uv is required at version $UvVersion. Install it from https://astral.sh/uv/$UvVersion/install.ps1 and rerun the installer."
 }
-Ok "uv installed"
+$installedUvVersion = ((& uv --version) -split '\s+')[1]
+if ($LASTEXITCODE -ne 0 -or $installedUvVersion -ne $UvVersion) {
+    Fail "uv is required at version $UvVersion, found $installedUvVersion. Upgrade uv explicitly and rerun the installer."
+}
+Ok "uv $installedUvVersion"
 
 # --- 3. Install dependencies --------------------------------------
 
-Info "Installing locked Python dependencies with MCP support..."
-uv sync --locked --extra mcp-server --quiet
-Ok "Dependencies installed (MCP server baseline included)"
+Info "Installing locked production dependencies..."
+$syncPlanJson = Invoke-NativeCommand python @(
+    (Join-Path $VAULT_ROOT "scripts\installer_config.py"),
+    "sync-args", "--root", $VAULT_ROOT, "--environment", [string]$env:UV_PROJECT_ENVIRONMENT
+) -CaptureOutput
+$syncPlan = $syncPlanJson | ConvertFrom-Json
+$env:UV_PROJECT_ENVIRONMENT = $syncPlan.environment
+Invoke-NativeCommand uv @($syncPlan.arguments)
+Ok "Production dependencies installed (MCP included)"
 
-# --- 4. Run tests -------------------------------------------------
+# --- 4. Run production smoke --------------------------------------
 
-Info "Running test suite..."
+Info "Running production smoke..."
+$testTimeoutSeconds = 180
+$configuredTestTimeout = $env:LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS
+if (-not [string]::IsNullOrWhiteSpace($configuredTestTimeout)) {
+    if (-not [int]::TryParse($configuredTestTimeout, [ref]$testTimeoutSeconds) -or $testTimeoutSeconds -le 0) {
+        Fail "LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS must be a positive integer"
+    }
+}
+$testTimeoutMilliseconds = [int]($testTimeoutSeconds * 1000)
 $testProcess = $null
-$testWarning = $false
+$testFailure = $null
 try {
     $testProcess = Start-Process `
         -FilePath "uv" `
-        -ArgumentList "run pytest -q" `
+        -ArgumentList "run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120" `
         -NoNewWindow `
         -PassThru
     # Windows PowerShell 5.1 needs an open handle to retain a fast process's exit code.
     $null = $testProcess.Handle
-    $testProcess.WaitForExit()
-    $testExit = $testProcess.ExitCode
-    if ($testExit -ne 0) {
-        $testWarning = $true
-        Warn "Test suite failed; installation continues in degraded state"
+    if (-not $testProcess.WaitForExit($testTimeoutMilliseconds)) {
+        $testFailure = "Production smoke timed out after ${testTimeoutSeconds}s; installation aborted"
     } else {
-        Ok "Test suite passed"
+        $testExit = $testProcess.ExitCode
+        if ($testExit -ne 0) {
+            $testFailure = "Production smoke failed; installation aborted"
+        } else {
+            Ok "Production smoke passed"
+        }
     }
 } finally {
     if ($null -ne $testProcess) {
@@ -217,32 +342,20 @@ try {
         $testProcess.Close()
     }
 }
+if ($null -ne $testFailure) { Fail $testFailure }
 
 # --- 5. Set environment variables ---------------------------------
 
+# External configuration starts only after the mandatory test gate.
+Protect-PushUrlsIfAuthorized `
+    -VaultRoot $VAULT_ROOT `
+    -InstallerCreatedClone $installerCreatedClone `
+    -ProtectPush ([bool]$ProtectPush)
+if ($installerCreatedClone -or $ProtectPush) {
+    Ok "Push disabled (no-push) for every configured remote"
+}
+
 Info "Setting environment variables..."
-
-# Warn if env vars already point somewhere else (avoid silent clobber)
-$oldRoot = [Environment]::GetEnvironmentVariable("LLM_WIKI_ROOT", "User")
-if ($oldRoot -and $oldRoot -ne $VAULT_ROOT) {
-    Warn "LLM_WIKI_ROOT was '$oldRoot', overwriting to '$VAULT_ROOT'"
-}
-$oldState = [Environment]::GetEnvironmentVariable("LLM_WIKI_STATE_ROOT", "User")
-$processState = $env:LLM_WIKI_STATE_ROOT
-$STATE_ROOT = Resolve-StateRoot `
-    -ProcessState $processState `
-    -UserState $oldState `
-    -VaultRoot $VAULT_ROOT
-
-[Environment]::SetEnvironmentVariable("LLM_WIKI_ROOT", $VAULT_ROOT, "User")
-# Runtime lives inside the vault as gitignored cache/logs/run dirs.
-# LLM_WIKI_STATE_ROOT defaults to the vault itself; only set it explicitly
-# if you want runtime on a different disk.
-if ([string]::IsNullOrWhiteSpace($processState) -and [string]::IsNullOrWhiteSpace($oldState)) {
-    [Environment]::SetEnvironmentVariable("LLM_WIKI_STATE_ROOT", $VAULT_ROOT, "User")
-}
-$env:LLM_WIKI_ROOT = $VAULT_ROOT
-$env:LLM_WIKI_STATE_ROOT = $STATE_ROOT
 
 New-Item -ItemType Directory -Path "$STATE_ROOT\run" -Force | Out-Null
 New-Item -ItemType Directory -Path "$STATE_ROOT\run\queue" -Force | Out-Null
@@ -254,12 +367,20 @@ Ok "LLM_WIKI_ROOT set (User scope); runtime at $STATE_ROOT\{run,logs,cache} (git
 # --- 6. Register Task Scheduler -----------------------------------
 
 Info "Registering Windows Task Scheduler..."
-$pythonExe = (Get-Command python).Source
+$uvPath = (Get-Command uv).Source
+$schedulerWarning = $false
 try {
-    & ".\scripts\install-scheduled-tasks.ps1" 2>$null
+    & ".\scripts\install-scheduled-tasks.ps1" `
+        -VaultRoot $VAULT_ROOT `
+        -StateRoot $STATE_ROOT `
+        -UvPath $uvPath 2>$null
     if ($LASTEXITCODE -eq 0) { Ok "Task Scheduler: nightly 03:00 + weekly Sun 04:00" }
-    else { Warn "Task Scheduler registration failed - run scripts\install-scheduled-tasks.ps1 manually" }
+    else {
+        $schedulerWarning = $true
+        Warn "Task Scheduler registration failed - run scripts\install-scheduled-tasks.ps1 manually"
+    }
 } catch {
+    $schedulerWarning = $true
     Warn "Task Scheduler registration failed - run scripts\install-scheduled-tasks.ps1 manually"
 }
 
@@ -268,44 +389,27 @@ try {
 Info "Detecting agents..."
 $agents = @()
 
-# OpenCode - detect by process OR config dir (process may not be running at install time)
-$openCodeConfig = "$env:USERPROFILE\.config\opencode"
-$openCodePluginSrc = Join-Path $VAULT_ROOT "scripts\llm-wiki-memory-opencode.js"
-if ((Get-Process "OpenCode*" -ErrorAction SilentlyContinue) -or (Test-Path $openCodeConfig) -or (Get-Command opencode -ErrorAction SilentlyContinue)) {
-    $agents += "OpenCode"
-    $pluginDir = Join-Path $openCodeConfig "plugins"
-    New-Item -ItemType Directory -Path $pluginDir -Force | Out-Null
-    $pluginDst = Join-Path $pluginDir "llm-wiki-memory.js"
-    if (Test-Path $openCodePluginSrc) {
-        Copy-Item -LiteralPath $openCodePluginSrc -Destination $pluginDst -Force
-        Ok "OpenCode plugin installed -> $pluginDst"
-        # Generate initial context file so the first session has context
+# OpenCode configuration is merged structurally and verified after all precedence layers.
+$openCodeResult = Invoke-NativeCommand uv @(
+    "run", "--locked", "--no-sync", "--directory", $VAULT_ROOT,
+    "python", (Join-Path $VAULT_ROOT "scripts\installer_config.py"),
+    "opencode", "--root", $VAULT_ROOT, "--state-root", $STATE_ROOT,
+    "--cwd", $callerDirectory
+) -CaptureOutput -ReturnResult
+$openCode = $openCodeResult.Output | ConvertFrom-Json
+switch ($openCode.status) {
+    "active" {
+        $agents += "OpenCode(active)"
+        Ok "OpenCode configuration is active"
         $ctxFile = Join-Path $STATE_ROOT "cache\session-context.md"
-        try { & uv run python (Join-Path $VAULT_ROOT "scripts\session_start_context.py") --output-file $ctxFile 2>$null | Out-Null } catch {}
-    } else {
-        Warn "OpenCode detected but plugin source missing: $openCodePluginSrc"
+        & uv run --locked --no-sync --directory $VAULT_ROOT python `
+            (Join-Path $VAULT_ROOT "scripts\session_start_context.py") `
+            --output-file $ctxFile 2>$null | Out-Null
     }
-    $openCodeMcp = Join-Path $openCodeConfig "opencode.json"
-    $openCodeEntryObject = [ordered]@{
-        type = "local"
-        command = @("uv", "run", "--directory", $VAULT_ROOT, "python", "scripts/mcp_server.py")
-        enabled = $true
-    }
-    $openCodeConfigObject = [ordered]@{
-        mcp = [ordered]@{ "llm-wiki" = $openCodeEntryObject }
-    }
-    $openCodeJson = $openCodeConfigObject | ConvertTo-Json -Depth 6 -Compress
-    $openCodeMerge = ([ordered]@{ "llm-wiki" = $openCodeEntryObject } | ConvertTo-Json -Depth 5 -Compress)
-    if (-not (Test-Path $openCodeMcp)) {
-        Write-Utf8NoBom $openCodeMcp $openCodeJson
-        Ok "OpenCode MCP config created -> $openCodeMcp"
-    } else {
-        $openCodeExisting = Get-Content -LiteralPath $openCodeMcp -Raw
-        if ($openCodeExisting -notmatch '"llm-wiki"\s*:') {
-            Warn 'Existing opencode.json found without llm-wiki; merge this under top-level "mcp":'
-            Warn "  $openCodeMerge"
-        }
-    }
+    "conflict" { Warn "OpenCode configuration status: conflict" }
+    "configured_unverified" { Warn "OpenCode configuration status: configured_unverified" }
+    "not_detected" { }
+    default { Fail "OpenCode configuration helper returned an invalid status" }
 }
 
 # Codex
@@ -360,7 +464,7 @@ if ((Get-Command claude -ErrorAction SilentlyContinue) -or (Test-Path $claudeCon
     $claudeMcp = $claudeUserConfig
     $claudeEntryObject = [ordered]@{
         command = "uv"
-        args = @("run", "--directory", $VAULT_ROOT, "python", "scripts/mcp_server.py")
+        args = @("run", "--locked", "--no-sync", "--directory", $VAULT_ROOT, "python", "scripts/mcp_server.py")
     }
     $claudeConfigObject = [ordered]@{
         mcpServers = [ordered]@{ "llm-wiki" = $claudeEntryObject }
@@ -413,7 +517,7 @@ switch ($syncExit) {
 
 Write-Host ""
 Write-Host "==============================================" -ForegroundColor Green
-if ($syncWarning -or $testWarning) {
+if ($syncWarning -or $schedulerWarning) {
     Write-Host "  LLM-Wiki installed with warnings" -ForegroundColor Yellow
 } else {
     Write-Host "  LLM-Wiki installed successfully!" -ForegroundColor Green
@@ -421,9 +525,13 @@ if ($syncWarning -or $testWarning) {
 Write-Host "==============================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "Vault:       $VAULT_ROOT"
-Write-Host "State:       $VAULT_ROOT (cache/logs/run, gitignored)"
+Write-Host "State:       $STATE_ROOT (cache/logs/run, gitignored)"
 Write-Host "Agents:      $($agents -join ', ')"
-Write-Host "Maintenance: Task Scheduler (nightly + weekly)"
+if ($schedulerWarning) {
+    Write-Host "Maintenance: not registered" -ForegroundColor Yellow
+} else {
+    Write-Host "Maintenance: Task Scheduler (nightly + weekly)"
+}
 Write-Host ""
 Write-Host "Next steps:"
 Write-Host "  1. Restart terminal"
@@ -432,8 +540,8 @@ Write-Host "  3. Work normally - capture is automatic"
 Write-Host ""
 Write-Host "MCP baseline: 12 local task-shaped tools (installed)"
 Write-Host "Optional enhancements:"
-Write-Host "  uv sync --extra hybrid        # LanceDB HNSW + semantic search"
-Write-Host "  uv sync --extra code-graph    # tree-sitter code graph"
-Write-Host "  uv sync --extra reranker      # cross-encoder reranker"
-Write-Host "  uv sync --extra full          # all of the above"
+Write-Host "  uv sync --locked --no-default-groups --inexact --extra hybrid"
+Write-Host "  uv sync --locked --no-default-groups --inexact --extra code-graph"
+Write-Host "  uv sync --locked --no-default-groups --inexact --extra reranker"
 Write-Host ""
+if ($schedulerWarning) { exit 1 }

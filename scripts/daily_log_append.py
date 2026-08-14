@@ -208,13 +208,21 @@ def append_daily(
     day = datetime.now().strftime("%Y-%m-%d")
     path = daily_dir / f"{day}.md"
     text = "\n" + block if not block.startswith("\n") else block
-    locked_append(
-        path,
-        text,
-        operation_id=operation_id,
-        deadline=deadline,
-        cancelled=cancelled,
-    )
+    if operation_id:
+        locked_append_once(
+            path,
+            text,
+            operation_id,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+    else:
+        locked_append(
+            path,
+            text,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
     return path
 
 

@@ -94,6 +94,7 @@ def _compile(root: Path, state_root: Path, daily: Path):
 
     coordinator = MarkdownCoordinator(root, state_root)
     inputs = compile_memory.snapshot_compile_inputs([daily])
+    batch = compile_memory.pack_compile_batches(inputs, model=None)[0]
     result = compile_memory.apply_compile_plan(
         inputs,
         _plan(),
@@ -101,6 +102,12 @@ def _compile(root: Path, state_root: Path, daily: Path):
         trigger="manual",
         coordinator=coordinator,
         completed_at="2026-07-14T12:00:00Z",
+        batch=batch,
+        provider_budget={
+            "provider": "fake",
+            "model": "fake-v1",
+            "max_output_tokens": 4000,
+        },
     )
     return coordinator, inputs, result
 
@@ -123,10 +130,14 @@ def test_corrupt_receipt_is_an_error_not_pending(vault):
     root, state_root = vault
     daily = _daily(root)
     digest = sha256_bytes(daily.read_bytes())
-    (root / f"knowledge/daily/receipts/{digest}.md").write_text(
+    import compile_memory
+
+    identity = compile_memory.compile_source_identity(
+        f"knowledge/daily/{daily.name}", digest
+    )
+    (root / f"knowledge/daily/receipts/v3-{identity}.md").write_text(
         "not a receipt", encoding="utf-8"
     )
-    import compile_memory
 
     with pytest.raises(ValueError, match="receipt"):
         compile_memory.select_dailies(
@@ -194,14 +205,24 @@ def test_receipt_copy_is_rejected_without_matching_committed_transaction(vault):
     root, state_root = vault
     daily = _daily(root)
     coordinator, inputs, _result = _compile(root, state_root, daily)
-    receipt = root / f"knowledge/daily/receipts/{inputs.dailies[0].sha256}.md"
-    forged_digest = "f" * 64
-    forged = root / f"knowledge/daily/receipts/{forged_digest}.md"
-    forged.write_bytes(receipt.read_bytes())
     import compile_memory
 
+    source = inputs.dailies[0]
+    identity = compile_memory.compile_source_identity(
+        source.logical_path, source.sha256
+    )
+    receipt = root / f"knowledge/daily/receipts/v3-{identity}.md"
+    forged_path = "knowledge/daily/2099-01-01.md"
+    forged_identity = compile_memory.compile_source_identity(
+        forged_path, source.sha256
+    )
+    forged = root / f"knowledge/daily/receipts/v3-{forged_identity}.md"
+    forged.write_bytes(receipt.read_bytes())
+
     with pytest.raises(ValueError, match="receipt"):
-        compile_memory.read_compile_receipt(forged_digest, coordinator)
+        compile_memory.read_compile_receipt_v3(
+            forged_path, source.sha256, coordinator
+        )
 
 
 def test_snapshot_rejects_symlinked_and_oversized_sources(vault, monkeypatch):
@@ -383,14 +404,20 @@ def test_receipt_evidence_is_source_scoped_and_operation_associated(vault):
     coordinator, inputs, _result = _compile(root, state_root, daily)
     import compile_memory
 
-    record = compile_memory.read_compile_receipt(inputs.dailies[0].sha256, coordinator)
+    source = inputs.dailies[0]
+    record = compile_memory.read_compile_receipt_v3(
+        source.logical_path, source.sha256, coordinator
+    )
     assert record is not None
-    assert record["completed_at"] == "2026-07-14T12:00:00Z"
+    assert "completed_at" not in record
     assert record["evidence"] == [
         {
+            "source_identity": compile_memory.compile_source_identity(
+                source.logical_path, source.sha256
+            ),
             "operation_path": "knowledge/notes/safe-note.md",
             "quote_sha256": sha256_bytes(b"durable fact"),
-            "source_digest": inputs.dailies[0].sha256,
+            "source_digest": source.sha256,
             "source_path": "knowledge/daily/2026-07-14.md",
         }
     ]

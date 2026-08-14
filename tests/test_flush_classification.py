@@ -15,6 +15,8 @@ from __future__ import annotations
 from argparse import Namespace
 from pathlib import Path
 
+import pytest
+
 # ---------------------------------------------------------------------------
 # _classify_response
 # ---------------------------------------------------------------------------
@@ -147,6 +149,93 @@ def test_flush_cleans_ephemeral_transcript_on_early_return(monkeypatch, tmp_path
 
     assert flush_memory.main() == 0
     assert not transient.exists()
+
+
+def test_provider_exception_queues_before_ephemeral_cleanup(monkeypatch, tmp_path):
+    import flush_memory
+    import llm_client
+    import memory_queue
+
+    state_root = tmp_path / "state"
+    transient = state_root / "cache" / "transient-transcripts" / "transient.txt"
+    transient.parent.mkdir(parents=True)
+    transient.write_text("durable decision", encoding="utf-8")
+    queued = []
+    monkeypatch.setattr(flush_memory, "STATE_ROOT", state_root)
+    monkeypatch.setattr(
+        flush_memory,
+        "parse_args",
+        lambda: Namespace(
+            event="session-end",
+            session_id="session-1",
+            transcript=str(transient),
+            trigger="opencode",
+            source_event_id="event-1",
+            checkpoint_reason="session_end",
+            ephemeral_transcript=True,
+        ),
+    )
+    monkeypatch.setattr(flush_memory, "load_state", lambda: {})
+    monkeypatch.setattr(
+        flush_memory,
+        "update_state",
+        lambda callback: (_ for _ in ()).throw(AssertionError("must not record dedupe")),
+    )
+    monkeypatch.setattr(
+        llm_client,
+        "call_llm",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("provider failed")),
+    )
+    monkeypatch.setattr(
+        memory_queue,
+        "enqueue",
+        lambda kind, payload: queued.append((kind, payload)) or "queued-1",
+    )
+
+    assert flush_memory.main() == 0
+    assert [kind for kind, _payload in queued] == ["flush"]
+    assert "durable decision" in queued[0][1]["prompt"]
+    assert not transient.exists()
+
+
+def test_provider_and_queue_failure_preserves_ephemeral_transcript(monkeypatch, tmp_path):
+    import flush_memory
+    import llm_client
+    import memory_queue
+
+    state_root = tmp_path / "state"
+    transient = state_root / "cache" / "transient-transcripts" / "transient.txt"
+    transient.parent.mkdir(parents=True)
+    transient.write_text("durable decision", encoding="utf-8")
+    monkeypatch.setattr(flush_memory, "STATE_ROOT", state_root)
+    monkeypatch.setattr(
+        flush_memory,
+        "parse_args",
+        lambda: Namespace(
+            event="session-end",
+            session_id="session-1",
+            transcript=str(transient),
+            trigger="opencode",
+            source_event_id="event-1",
+            checkpoint_reason="session_end",
+            ephemeral_transcript=True,
+        ),
+    )
+    monkeypatch.setattr(flush_memory, "load_state", lambda: {})
+    monkeypatch.setattr(
+        llm_client,
+        "call_llm",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("provider failed")),
+    )
+    monkeypatch.setattr(
+        memory_queue,
+        "enqueue",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("queue failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="not durably persisted"):
+        flush_memory.main()
+    assert transient.exists()
 
 
 def test_flush_allows_transcript_under_external_state_cache(monkeypatch, tmp_path):

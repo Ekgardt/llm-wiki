@@ -17,6 +17,7 @@ from compile_cache import (
     CompileCache,
     CompileCallDescriptor,
     SourceDescriptor,
+    SourceOccurrenceBounds,
 )
 from reliable_memory import canonical_json_bytes, sha256_bytes
 
@@ -126,6 +127,27 @@ def test_source_manifest_is_sorted_in_canonical_action(tmp_path):
     assert canonical["source_manifest"] == sorted(canonical["source_manifest"])
     assert len(canonical["source_manifest_hash"]) == 64
     assert cache.key(action) is not None
+
+
+def test_occurrence_bounds_do_not_change_compile_cache_source_preimage() -> None:
+    base = SourceDescriptor("knowledge/daily/2026-08-13.md", 12, "a" * 64)
+    bounded = SourceDescriptor(
+        "knowledge/daily/2026-08-13.md",
+        12,
+        "a" * 64,
+        SourceOccurrenceBounds("event-first", "event-last"),
+    )
+
+    assert base.canonical() == bounded.canonical()
+    assert bounded.receipt_descriptor() == {
+        "logical_path": "knowledge/daily/2026-08-13.md",
+        "sha256": "a" * 64,
+        "byte_size": 12,
+        "occurrence_bounds": {
+            "first_event_id": "event-first",
+            "last_event_id": "event-last",
+        },
+    }
 
 
 def test_stable_golden_action_key_uses_exact_canonical_descriptor(tmp_path):

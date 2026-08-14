@@ -91,7 +91,7 @@ def _dependency_action(
             "Dependency lock inputs are unreadable.",
             {"lock": "unreadable", "environment": "unknown", "error": type(exc).__name__},
         )
-    if "mcp-server" not in project_text or "mcp-server" not in lock_text:
+    if "mcp>=1.29,<2" not in project_text or 'name = "mcp"' not in lock_text:
         return _result(
             "dependencies",
             "error",
@@ -145,8 +145,7 @@ def _dependency_action(
         "sync",
         "--locked",
         "--inexact",
-        "--extra",
-        "mcp-server",
+        "--no-default-groups",
         "--dry-run",
         "--output-format",
         "json",
@@ -222,8 +221,7 @@ def _dependency_action(
         "sync",
         "--locked",
         "--inexact",
-        "--extra",
-        "mcp-server",
+        "--no-default-groups",
         "--no-python-downloads",
         "--quiet",
     ]

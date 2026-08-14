@@ -11,6 +11,9 @@ Locks in:
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
+import subprocess
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -65,6 +68,58 @@ def test_lock_write_and_read_roundtrip(fake_env, tmp_path):
     assert lock is not None
     assert lock["pid"] == 12345
     assert lock["started_at"]  # ISO timestamp present
+
+
+def test_compile_marker_stays_three_lines_and_is_published_before_canonical_owner(
+    fake_env, monkeypatch
+) -> None:
+    import markdown_transaction
+    import operational_ownership
+
+    candidate = fake_env.STATE_ROOT / "run/markdown-transactions-v3.candidate.sqlite3"
+    markdown_transaction.initialize_coordinator_v3_candidate(candidate, source_v2=None)
+    observed: list[str] = []
+    real_acquire = operational_ownership.OwnershipRegistry.acquire
+    parser = (
+        "import datetime,os,pathlib,sys;"
+        "p=pathlib.Path(sys.argv[1]); lines=p.read_bytes().splitlines();"
+        "assert len(lines)==3; pid=int(lines[0]);"
+        "datetime.datetime.fromisoformat(lines[1].decode().replace('Z','+00:00'));"
+        "assert pid==int(sys.argv[2]);"
+        "assert lines[2] and p.read_bytes().endswith(b'\\n');"
+        "print('running')"
+    )
+
+    def observe_acquire(registry, role, **kwargs):
+        result = subprocess.run(
+            [sys.executable, "-c", parser, str(fake_env.LOCK_FILE), str(os.getpid())],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        observed.append(result.stdout.strip())
+        with sqlite3.connect(candidate) as database:
+            assert database.execute(
+                "SELECT COUNT(*) FROM maintenance_owners WHERE role='compile'"
+            ).fetchone() == (0,)
+        return real_acquire(registry, role, **kwargs)
+
+    monkeypatch.setattr(operational_ownership.OwnershipRegistry, "acquire", observe_acquire)
+    lease, marker = fake_env.acquire_compile_owner(state_root=fake_env.STATE_ROOT)
+    try:
+        assert observed == ["running"]
+        assert fake_env.LOCK_FILE.read_bytes() == (
+            f"{os.getpid()}\n".encode()
+            + lease.acquired_at.isoformat(timespec="seconds")
+            .replace("+00:00", "Z")
+            .encode()
+            + b"\n"
+            + lease.token.encode()
+            + b"\n"
+        )
+    finally:
+        fake_env.release_marker_owner(lease, marker)
+    assert not fake_env.LOCK_FILE.exists()
 
 
 def test_clear_lock(fake_env):

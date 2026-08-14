@@ -24,7 +24,10 @@ from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from operational_ownership import OwnerLease
 
 from bounded_io import read_stable_bytes
 from claim_tree_manifest import (
@@ -35,13 +38,21 @@ from claim_tree_manifest import (
 )
 from reliable_memory import (
     DEFAULTS,
+    MigrationStatement,
+    OperationalDatabaseContract,
+    OperationalDatabaseContractError,
     _set_owner_only,
     begin_immediate,
     canonical_json_bytes,
+    durable_publish_file,
     fsync_directory,
     fsync_file,
     open_operational_db,
+    open_readonly_operational_db,
+    publish_runtime_file,
+    read_runtime_bytes,
     restricted_relative_path,
+    run_resumable_migration,
     sha256_bytes,
     validate_schema,
     validate_state_root,
@@ -84,6 +95,1094 @@ _BLACKBOARD_JSONL_RE = re.compile(
 _SQLITE_INT64_MIN = -(1 << 63)
 _SQLITE_INT64_MAX = (1 << 63) - 1
 _UINT64_MODULUS = 1 << 64
+_COORDINATOR_V3_CONTRACT = OperationalDatabaseContract(application_id=0x4C575433)
+
+_COORDINATOR_V3_TABLE_SQL = (
+    (
+        "transaction",
+        """CREATE TABLE "transaction" (
+            id TEXT PRIMARY KEY,
+            operation_id TEXT NOT NULL UNIQUE,
+            request_hash TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (state IN (
+                'preparing','prepared','applying','committed','discarded',
+                'conflicted','quarantined','aborting','aborted'
+            )),
+            preconditions_json TEXT NOT NULL,
+            plan_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            parent_transaction_id TEXT,
+            error_code TEXT,
+            artifacts_pruned_at TEXT,
+            owner_pid INTEGER,
+            intent_id TEXT,
+            intent_fence_token TEXT,
+            intent_fence_epoch INTEGER,
+            capture_link_digest TEXT,
+            capture_seal_digest TEXT,
+            abort_operation_id TEXT UNIQUE,
+            abort_manifest_sha256 TEXT,
+            abort_receipt_sha256 TEXT,
+            abort_chosen_at TEXT,
+            aborted_at TEXT
+        )""",
+    ),
+    (
+        "operation",
+        """CREATE TABLE "operation" (
+            transaction_id TEXT NOT NULL REFERENCES "transaction"(id) ON DELETE CASCADE,
+            position INTEGER NOT NULL,
+            kind TEXT NOT NULL CHECK (kind IN ('create','replace','delete')),
+            path TEXT NOT NULL,
+            before_hash TEXT NOT NULL,
+            after_hash TEXT NOT NULL,
+            parent_device INTEGER NOT NULL,
+            parent_inode INTEGER NOT NULL,
+            applied INTEGER NOT NULL DEFAULT 0 CHECK (applied IN (0,1)),
+            PRIMARY KEY(transaction_id, position),
+            UNIQUE(transaction_id, path)
+        )""",
+    ),
+    (
+        "maintenance_owner_epochs",
+        """CREATE TABLE maintenance_owner_epochs (
+            role TEXT NOT NULL CHECK (role IN (
+                'capture','project','markdown-writer','queue-worker','compile','doctor',
+                'nightly','weekly','lsp','queue-operator','repair','runtime-deletion-check'
+            )),
+            scope TEXT NOT NULL CHECK (length(CAST(scope AS BLOB)) BETWEEN 1 AND 512),
+            last_epoch INTEGER NOT NULL CHECK (last_epoch >= 0),
+            PRIMARY KEY(role, scope)
+        )""",
+    ),
+    (
+        "maintenance_owners",
+        """CREATE TABLE maintenance_owners (
+            role TEXT NOT NULL CHECK (role IN (
+                'capture','project','markdown-writer','queue-worker','compile','doctor',
+                'nightly','weekly','lsp','queue-operator','repair','runtime-deletion-check'
+            )),
+            scope TEXT NOT NULL CHECK (length(CAST(scope AS BLOB)) BETWEEN 1 AND 512),
+            actor_id TEXT NOT NULL UNIQUE CHECK (
+                length(CAST(actor_id AS BLOB)) BETWEEN 1 AND 256
+            ),
+            owner_token TEXT NOT NULL UNIQUE CHECK (
+                length(CAST(owner_token AS BLOB)) BETWEEN 1 AND 256
+            ),
+            process_id INTEGER NOT NULL CHECK (process_id > 0),
+            process_start_identity TEXT NOT NULL CHECK (
+                length(CAST(process_start_identity AS BLOB)) BETWEEN 1 AND 512
+            ),
+            fencing_epoch INTEGER NOT NULL CHECK (fencing_epoch >= 1),
+            acquired_at TEXT NOT NULL,
+            heartbeat_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            marker_path TEXT CHECK (
+                marker_path IS NULL OR length(CAST(marker_path AS BLOB)) BETWEEN 1 AND 4096
+            ),
+            marker_sha256 TEXT CHECK (
+                marker_sha256 IS NULL OR (
+                    length(marker_sha256) = 64
+                    AND marker_sha256 NOT GLOB '*[^0-9a-f]*'
+                )
+            ),
+            marker_identity_json BLOB CHECK (
+                marker_identity_json IS NULL OR length(marker_identity_json) <= 4096
+            ),
+            PRIMARY KEY(role, scope),
+            UNIQUE(role, scope, fencing_epoch),
+            UNIQUE(role, scope, actor_id, owner_token, fencing_epoch),
+            CHECK (
+                (
+                    role NOT IN ('compile','nightly','weekly')
+                    AND marker_path IS NULL
+                    AND marker_sha256 IS NULL
+                    AND marker_identity_json IS NULL
+                )
+                OR
+                (
+                    role IN ('compile','nightly','weekly')
+                    AND marker_path IS NOT NULL
+                    AND marker_sha256 IS NOT NULL
+                    AND marker_identity_json IS NOT NULL
+                )
+            )
+        )""",
+    ),
+    (
+        "intent_fence_epochs",
+        """CREATE TABLE intent_fence_epochs (
+            intent_id TEXT NOT NULL PRIMARY KEY CHECK (
+                length(intent_id) = 64 AND intent_id NOT GLOB '*[^0-9a-f]*'
+            ),
+            last_epoch INTEGER NOT NULL CHECK (last_epoch >= 0)
+        )""",
+    ),
+    (
+        "intent_fences",
+        """CREATE TABLE intent_fences (
+            intent_id TEXT NOT NULL PRIMARY KEY CHECK (
+                length(intent_id) = 64 AND intent_id NOT GLOB '*[^0-9a-f]*'
+            ),
+            mode TEXT NOT NULL CHECK (mode IN ('capture','worker','operator')),
+            token TEXT NOT NULL UNIQUE CHECK (
+                length(CAST(token AS BLOB)) BETWEEN 1 AND 256
+            ),
+            fencing_epoch INTEGER NOT NULL CHECK (fencing_epoch >= 1),
+            canonical_role TEXT NOT NULL CHECK (canonical_role IN (
+                'capture','queue-worker','compile','doctor','nightly','weekly',
+                'queue-operator','repair'
+            )),
+            canonical_scope TEXT NOT NULL CHECK (
+                length(CAST(canonical_scope AS BLOB)) BETWEEN 1 AND 512
+            ),
+            canonical_actor_id TEXT NOT NULL CHECK (
+                length(CAST(canonical_actor_id AS BLOB)) BETWEEN 1 AND 256
+            ),
+            canonical_owner_token TEXT NOT NULL CHECK (
+                length(CAST(canonical_owner_token AS BLOB)) BETWEEN 1 AND 256
+            ),
+            canonical_fencing_epoch INTEGER NOT NULL CHECK (
+                canonical_fencing_epoch >= 1
+            ),
+            process_id INTEGER NOT NULL CHECK (process_id > 0),
+            process_start_identity TEXT NOT NULL CHECK (
+                length(CAST(process_start_identity AS BLOB)) BETWEEN 1 AND 512
+            ),
+            heartbeat_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            FOREIGN KEY(
+                canonical_role,
+                canonical_scope,
+                canonical_actor_id,
+                canonical_owner_token,
+                canonical_fencing_epoch
+            ) REFERENCES maintenance_owners(
+                role,
+                scope,
+                actor_id,
+                owner_token,
+                fencing_epoch
+            ),
+            CHECK (
+                (mode = 'capture' AND canonical_role = 'capture')
+                OR
+                (mode = 'worker' AND canonical_role IN (
+                    'queue-worker','compile','doctor','nightly','weekly'
+                ))
+                OR
+                (mode = 'operator' AND canonical_role IN ('queue-operator','repair'))
+            )
+        )""",
+    ),
+    (
+        "capture_binding_projections",
+        """CREATE TABLE capture_binding_projections (
+            intent_id TEXT NOT NULL PRIMARY KEY CHECK (
+                length(intent_id) = 64 AND intent_id NOT GLOB '*[^0-9a-f]*'
+            ),
+            task_id TEXT NOT NULL UNIQUE CHECK (
+                length(CAST(task_id AS BLOB)) BETWEEN 1 AND 256
+            ),
+            active_link_digest TEXT NOT NULL CHECK (
+                length(active_link_digest) = 64
+                AND active_link_digest NOT GLOB '*[^0-9a-f]*'
+            ),
+            seal_digest TEXT NOT NULL UNIQUE CHECK (
+                length(seal_digest) = 64 AND seal_digest NOT GLOB '*[^0-9a-f]*'
+            ),
+            projected_at TEXT NOT NULL,
+            intent_fence_token TEXT NOT NULL CHECK (
+                length(CAST(intent_fence_token AS BLOB)) BETWEEN 1 AND 256
+            ),
+            intent_fence_epoch INTEGER NOT NULL CHECK (intent_fence_epoch >= 1)
+        )""",
+    ),
+    (
+        "project_leases",
+        """CREATE TABLE project_leases (
+            project TEXT PRIMARY KEY,
+            lease_token TEXT NOT NULL CHECK (
+                length(CAST(lease_token AS BLOB)) BETWEEN 1 AND 256
+            ),
+            fencing_epoch INTEGER NOT NULL CHECK (fencing_epoch >= 1),
+            owner TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            heartbeat_at TEXT NOT NULL,
+            canonical_role TEXT NOT NULL CHECK (
+                length(CAST(canonical_role AS BLOB)) BETWEEN 1 AND 64
+            ),
+            canonical_scope TEXT NOT NULL CHECK (
+                length(CAST(canonical_scope AS BLOB)) BETWEEN 1 AND 512
+            ),
+            actor_id TEXT NOT NULL CHECK (
+                length(CAST(actor_id AS BLOB)) BETWEEN 1 AND 256
+            ),
+            process_id INTEGER NOT NULL CHECK (process_id > 0),
+            process_start_identity TEXT NOT NULL CHECK (
+                length(CAST(process_start_identity AS BLOB)) BETWEEN 1 AND 512
+            ),
+            FOREIGN KEY(
+                canonical_role,
+                canonical_scope,
+                actor_id,
+                lease_token,
+                fencing_epoch
+            ) REFERENCES maintenance_owners(
+                role,
+                scope,
+                actor_id,
+                owner_token,
+                fencing_epoch
+            )
+        )""",
+    ),
+    (
+        "writer_fences",
+        """CREATE TABLE writer_fences (
+            gate_name TEXT PRIMARY KEY,
+            last_epoch INTEGER NOT NULL CHECK (last_epoch >= 0)
+        )""",
+    ),
+    (
+        "writer_owners",
+        """CREATE TABLE writer_owners (
+            gate_name TEXT PRIMARY KEY,
+            owner_token TEXT NOT NULL CHECK (
+                length(CAST(owner_token AS BLOB)) BETWEEN 1 AND 256
+            ),
+            process_id INTEGER NOT NULL CHECK (process_id > 0),
+            thread_id INTEGER NOT NULL,
+            acquired_at TEXT NOT NULL,
+            heartbeat_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            fencing_epoch INTEGER NOT NULL CHECK (fencing_epoch >= 1),
+            canonical_role TEXT NOT NULL CHECK (
+                length(CAST(canonical_role AS BLOB)) BETWEEN 1 AND 64
+            ),
+            canonical_scope TEXT NOT NULL CHECK (
+                length(CAST(canonical_scope AS BLOB)) BETWEEN 1 AND 512
+            ),
+            actor_id TEXT NOT NULL CHECK (
+                length(CAST(actor_id AS BLOB)) BETWEEN 1 AND 256
+            ),
+            process_start_identity TEXT NOT NULL CHECK (
+                length(CAST(process_start_identity AS BLOB)) BETWEEN 1 AND 512
+            ),
+            FOREIGN KEY(
+                canonical_role,
+                canonical_scope,
+                actor_id,
+                owner_token,
+                fencing_epoch
+            ) REFERENCES maintenance_owners(
+                role,
+                scope,
+                actor_id,
+                owner_token,
+                fencing_epoch
+            )
+        )""",
+    ),
+    (
+        "project_checkpoints",
+        """CREATE TABLE project_checkpoints (
+            project TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            occurrence_id TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            event_json TEXT NOT NULL,
+            lease_token TEXT NOT NULL,
+            fencing_epoch INTEGER NOT NULL,
+            operation_id TEXT NOT NULL UNIQUE,
+            attempt_number INTEGER NOT NULL DEFAULT 1,
+            parent_operation_id TEXT,
+            transaction_id TEXT REFERENCES "transaction"(id),
+            state TEXT NOT NULL CHECK (state IN (
+                'reserved','prepared','committed','quarantined'
+            )),
+            PRIMARY KEY(project, sequence),
+            UNIQUE(project, occurrence_id),
+            UNIQUE(project, idempotency_key)
+        )""",
+    ),
+    (
+        "project_checkpoint_attempts",
+        """CREATE TABLE project_checkpoint_attempts (
+            project TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            attempt_number INTEGER NOT NULL,
+            operation_id TEXT NOT NULL UNIQUE,
+            parent_operation_id TEXT,
+            lease_token TEXT NOT NULL,
+            fencing_epoch INTEGER NOT NULL,
+            transaction_id TEXT REFERENCES "transaction"(id),
+            state TEXT NOT NULL CHECK (state IN (
+                'reserved','prepared','committed','quarantined'
+            )),
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(project, sequence, attempt_number),
+            FOREIGN KEY(project, sequence)
+                REFERENCES project_checkpoints(project, sequence) ON DELETE CASCADE
+        )""",
+    ),
+)
+
+COORDINATOR_V3_SCHEMA_SHA256 = sha256_bytes(
+    canonical_json_bytes(
+        {
+            "tables": [list(item) for item in _COORDINATOR_V3_TABLE_SQL],
+            "application_id": _COORDINATOR_V3_CONTRACT.application_id,
+            "user_version": _COORDINATOR_V3_CONTRACT.user_version,
+        }
+    )
+)
+
+_COORDINATOR_V2_COLUMNS = {
+    "transaction": (
+        "id",
+        "operation_id",
+        "request_hash",
+        "state",
+        "preconditions_json",
+        "plan_hash",
+        "created_at",
+        "updated_at",
+        "parent_transaction_id",
+        "error_code",
+        "artifacts_pruned_at",
+        "owner_pid",
+    ),
+    "operation": (
+        "transaction_id",
+        "position",
+        "kind",
+        "path",
+        "before_hash",
+        "after_hash",
+        "parent_device",
+        "parent_inode",
+        "applied",
+    ),
+    "project_checkpoints": (
+        "project",
+        "sequence",
+        "occurrence_id",
+        "idempotency_key",
+        "event_json",
+        "lease_token",
+        "fencing_epoch",
+        "operation_id",
+        "attempt_number",
+        "parent_operation_id",
+        "transaction_id",
+        "state",
+    ),
+    "project_checkpoint_attempts": (
+        "project",
+        "sequence",
+        "attempt_number",
+        "operation_id",
+        "parent_operation_id",
+        "lease_token",
+        "fencing_epoch",
+        "transaction_id",
+        "state",
+        "created_at",
+    ),
+    "writer_fences": ("gate_name", "last_epoch"),
+}
+
+_COORDINATOR_V2_SCHEMA_OBJECTS = {
+    ("index", "project_checkpoint_operation"),
+    ("table", "maintenance_owners"),
+    ("table", "operation"),
+    ("table", "project_checkpoint_attempts"),
+    ("table", "project_checkpoints"),
+    ("table", "project_leases"),
+    ("table", "transaction"),
+    ("table", "writer_fences"),
+    ("table", "writer_owners"),
+}
+
+
+def _normalized_coordinator_sql(value: str | None) -> str:
+    return " ".join((value or "").split()).casefold()
+
+
+def _coordinator_v3_object_matches(
+    database: sqlite3.Connection, name: str, sql: str
+) -> bool:
+    row = database.execute(
+        "SELECT sql FROM sqlite_schema WHERE type='table' AND name=?", (name,)
+    ).fetchone()
+    return row is not None and _normalized_coordinator_sql(
+        row[0]
+    ) == _normalized_coordinator_sql(sql)
+
+
+def _coordinator_v3_schema_complete(database: sqlite3.Connection) -> bool:
+    objects = database.execute(
+        """SELECT type, name FROM sqlite_schema
+           WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"""
+    ).fetchall()
+    expected = {("table", name) for name, _sql in _COORDINATOR_V3_TABLE_SQL}
+    return {(str(row[0]), str(row[1])) for row in objects} == expected and all(
+        _coordinator_v3_object_matches(database, name, sql)
+        for name, sql in _COORDINATOR_V3_TABLE_SQL
+    )
+
+
+def _coordinator_v3_statements() -> tuple[MigrationStatement, ...]:
+    return tuple(
+        MigrationStatement(
+            name=f"create_{name}",
+            sql=sql,
+            completed=lambda database, expected_name=name, expected_sql=sql: (
+                _coordinator_v3_object_matches(
+                    database, expected_name, expected_sql
+                )
+            ),
+        )
+        for name, sql in _COORDINATOR_V3_TABLE_SQL
+    )
+
+
+def _coordinator_migration_error(
+    code: str, message: str
+) -> OperationalDatabaseContractError:
+    error = OperationalDatabaseContractError(message)
+    error.code = code
+    return error
+
+
+def _coordinator_table_columns(
+    database: sqlite3.Connection, table: str
+) -> tuple[str, ...]:
+    return tuple(str(row[1]) for row in database.execute(f'PRAGMA table_info("{table}")'))
+
+
+def _coordinator_table_exists(database: sqlite3.Connection, table: str) -> bool:
+    return database.execute(
+        "SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?", (table,)
+    ).fetchone() is not None
+
+
+def _validate_coordinator_v2_schema_objects(database: sqlite3.Connection) -> None:
+    objects = {
+        (str(row[0]), str(row[1]))
+        for row in database.execute(
+            """SELECT type, name FROM sqlite_schema
+               WHERE name NOT LIKE 'sqlite_%'"""
+        )
+    }
+    if not objects <= _COORDINATOR_V2_SCHEMA_OBJECTS:
+        raise _coordinator_migration_error(
+            "coordinator_v2_schema_unknown",
+            "coordinator v2 source has unknown schema objects",
+        )
+
+
+def _repair_partial_coordinator_v3_schema(
+    database: sqlite3.Connection, *, allow_populated_rebuild: bool
+) -> None:
+    if _coordinator_v3_schema_complete(database):
+        return
+    application_id = int(database.execute("PRAGMA application_id").fetchone()[0])
+    user_version = int(database.execute("PRAGMA user_version").fetchone()[0])
+    if (application_id, user_version) != (0, 0):
+        raise _coordinator_migration_error(
+            "coordinator_v3_schema_conflict",
+            "published coordinator v3 database has an incomplete schema",
+        )
+    objects = database.execute(
+        """SELECT type, name FROM sqlite_schema
+           WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"""
+    ).fetchall()
+    if not objects:
+        return
+    expected = {name: sql for name, sql in _COORDINATOR_V3_TABLE_SQL}
+    exact = all(
+        kind == "table"
+        and name in expected
+        and _coordinator_v3_object_matches(database, str(name), expected[str(name)])
+        for kind, name in objects
+    )
+    if exact:
+        return
+    populated = False
+    for kind, name in objects:
+        if kind != "table":
+            continue
+        try:
+            if database.execute(f'SELECT 1 FROM "{name}" LIMIT 1').fetchone() is not None:
+                populated = True
+                break
+        except sqlite3.DatabaseError:
+            populated = True
+            break
+    if populated and not allow_populated_rebuild:
+        raise _coordinator_migration_error(
+            "coordinator_v3_source_conflict",
+            "fresh coordinator v3 initialization found existing rows",
+        )
+    database.execute("PRAGMA foreign_keys=OFF")
+    try:
+        for kind in ("trigger", "index", "view"):
+            keyword = kind.upper()
+            for object_kind, name in reversed(objects):
+                if object_kind == kind:
+                    with begin_immediate(database):
+                        database.execute(f'DROP {keyword} "{name}"')
+        for object_kind, name in reversed(objects):
+            if object_kind == "table":
+                with begin_immediate(database):
+                    database.execute(f'DROP TABLE "{name}"')
+    finally:
+        database.execute("PRAGMA foreign_keys=ON")
+        if database.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
+            raise _coordinator_migration_error(
+                "coordinator_v3_validation_failed",
+                "coordinator v3 candidate did not restore foreign keys",
+            )
+
+
+def _coordinator_v2_project_history(
+    source: sqlite3.Connection,
+) -> tuple[list[tuple[object, ...]], list[tuple[object, ...]]]:
+    checkpoint_exists = _coordinator_table_exists(source, "project_checkpoints")
+    attempt_exists = _coordinator_table_exists(source, "project_checkpoint_attempts")
+    checkpoints: list[tuple[object, ...]] = []
+    attempts: list[tuple[object, ...]] = []
+    if checkpoint_exists:
+        expected = _COORDINATOR_V2_COLUMNS["project_checkpoints"]
+        if not set(expected).issubset(_coordinator_table_columns(source, "project_checkpoints")):
+            raise _coordinator_migration_error(
+                "coordinator_v2_checkpoint_history_incomplete",
+                "coordinator v2 checkpoint schema is incomplete",
+            )
+        checkpoints = [
+            tuple(row[column] for column in expected)
+            for row in source.execute(
+                "SELECT * FROM project_checkpoints ORDER BY project, sequence"
+            )
+        ]
+    if attempt_exists:
+        expected = _COORDINATOR_V2_COLUMNS["project_checkpoint_attempts"]
+        if not set(expected).issubset(
+            _coordinator_table_columns(source, "project_checkpoint_attempts")
+        ):
+            raise _coordinator_migration_error(
+                "coordinator_v2_checkpoint_history_incomplete",
+                "coordinator v2 checkpoint attempt schema is incomplete",
+            )
+        attempts = [
+            tuple(row[column] for column in expected)
+            for row in source.execute(
+                """SELECT * FROM project_checkpoint_attempts
+                   ORDER BY project, sequence, attempt_number"""
+            )
+        ]
+    if bool(checkpoints) != bool(attempts):
+        raise _coordinator_migration_error(
+            "coordinator_v2_checkpoint_history_incomplete",
+            "coordinator v2 checkpoint and attempt history are incomplete",
+        )
+    attempts_by_checkpoint: dict[tuple[object, object], list[tuple[object, ...]]] = {}
+    for attempt in attempts:
+        attempts_by_checkpoint.setdefault((attempt[0], attempt[1]), []).append(attempt)
+    for checkpoint in checkpoints:
+        history = attempts_by_checkpoint.pop((checkpoint[0], checkpoint[1]), [])
+        current_attempt = checkpoint[8]
+        if (
+            type(current_attempt) is not int
+            or current_attempt < 1
+            or [attempt[2] for attempt in history] != list(range(1, current_attempt + 1))
+        ):
+            raise _coordinator_migration_error(
+                "coordinator_v2_checkpoint_history_incomplete",
+                "coordinator v2 checkpoint attempts are not complete",
+            )
+        for position, attempt in enumerate(history):
+            if not isinstance(attempt[9], str) or not attempt[9]:
+                raise _coordinator_migration_error(
+                    "coordinator_v2_checkpoint_history_incomplete",
+                    "coordinator v2 checkpoint attempt lacks its original timestamp",
+                )
+            expected_parent = None if position == 0 else history[position - 1][3]
+            if attempt[4] != expected_parent or (
+                position < len(history) - 1 and attempt[8] != "quarantined"
+            ):
+                raise _coordinator_migration_error(
+                    "coordinator_v2_checkpoint_history_incomplete",
+                    "coordinator v2 checkpoint attempt lineage is inconsistent",
+                )
+        latest = history[-1]
+        if (
+            checkpoint[7],
+            checkpoint[9],
+            checkpoint[5],
+            checkpoint[6],
+            checkpoint[10],
+            checkpoint[11],
+        ) != (latest[3], latest[4], latest[5], latest[6], latest[7], latest[8]):
+            raise _coordinator_migration_error(
+                "coordinator_v2_checkpoint_history_incomplete",
+                "coordinator v2 checkpoint does not match its latest attempt",
+            )
+    if attempts_by_checkpoint:
+        raise _coordinator_migration_error(
+            "coordinator_v2_checkpoint_history_incomplete",
+            "coordinator v2 attempt history has no checkpoint",
+        )
+    return checkpoints, attempts
+
+
+def _coordinator_v2_rows(
+    source: sqlite3.Connection,
+) -> tuple[dict[str, list[tuple[object, ...]]], dict[str, int]]:
+    for table in ("project_leases", "writer_owners", "maintenance_owners"):
+        if _coordinator_table_exists(source, table) and source.execute(
+            f'SELECT 1 FROM "{table}" LIMIT 1'
+        ).fetchone() is not None:
+            raise _coordinator_migration_error(
+                "coordinator_v2_ambiguous_ownership",
+                "coordinator v2 contains ownership that cannot be canonicalized",
+            )
+    transaction_columns = _coordinator_table_columns(source, "transaction")
+    required_transactions = _COORDINATOR_V2_COLUMNS["transaction"][:8]
+    if not set(required_transactions).issubset(transaction_columns):
+        raise _coordinator_migration_error(
+            "coordinator_v2_schema_incomplete",
+            "coordinator v2 transaction schema is incomplete",
+        )
+    transaction_select = tuple(
+        column if column in transaction_columns else f"NULL AS {column}"
+        for column in _COORDINATOR_V2_COLUMNS["transaction"]
+    )
+    transaction_rows = [
+        tuple(row)
+        for row in source.execute(
+            f'SELECT {", ".join(transaction_select)} FROM "transaction" ORDER BY id'
+        )
+    ]
+    allowed_states = {
+        "preparing",
+        "prepared",
+        "applying",
+        "committed",
+        "discarded",
+        "conflicted",
+        "quarantined",
+    }
+    if any(row[3] not in allowed_states for row in transaction_rows):
+        raise _coordinator_migration_error(
+            "coordinator_v2_transaction_invalid",
+            "coordinator v2 transaction state is invalid",
+        )
+    operation_columns = _COORDINATOR_V2_COLUMNS["operation"]
+    if not set(operation_columns).issubset(
+        _coordinator_table_columns(source, "operation")
+    ):
+        raise _coordinator_migration_error(
+            "coordinator_v2_schema_incomplete",
+            "coordinator v2 operation schema is incomplete",
+        )
+    operation_rows = [
+        tuple(row[column] for column in operation_columns)
+        for row in source.execute(
+            'SELECT * FROM "operation" ORDER BY transaction_id, position'
+        )
+    ]
+    transaction_ids = {row[0] for row in transaction_rows}
+    if any(
+        row[0] not in transaction_ids
+        or row[2] not in {"create", "replace", "delete"}
+        or row[6] is None
+        or row[7] is None
+        or row[8] not in {0, 1}
+        for row in operation_rows
+    ):
+        raise _coordinator_migration_error(
+            "coordinator_v2_operation_invalid",
+            "coordinator v2 operation history is incomplete",
+        )
+    checkpoints, attempts = _coordinator_v2_project_history(source)
+    if any(row[10] is not None and row[10] not in transaction_ids for row in checkpoints):
+        raise _coordinator_migration_error(
+            "coordinator_v2_checkpoint_history_incomplete",
+            "coordinator v2 checkpoint transaction is missing",
+        )
+    writer_fences: list[tuple[object, ...]] = []
+    if _coordinator_table_exists(source, "writer_fences"):
+        columns = _COORDINATOR_V2_COLUMNS["writer_fences"]
+        if not set(columns).issubset(_coordinator_table_columns(source, "writer_fences")):
+            raise _coordinator_migration_error(
+                "coordinator_v2_schema_incomplete",
+                "coordinator v2 writer fence schema is incomplete",
+            )
+        writer_fences = [
+            tuple(row[column] for column in columns)
+            for row in source.execute("SELECT * FROM writer_fences ORDER BY gate_name")
+        ]
+    rows = {
+        "transaction": transaction_rows,
+        "operation": operation_rows,
+        "project_checkpoints": checkpoints,
+        "project_checkpoint_attempts": attempts,
+        "writer_fences": writer_fences,
+    }
+    summary = {
+        "transactions": len(transaction_rows),
+        "operations": len(operation_rows),
+        "project_checkpoints": len(checkpoints),
+        "project_checkpoint_attempts": len(attempts),
+        "writer_fences": len(writer_fences),
+    }
+    return rows, summary
+
+
+def _coordinator_v3_insert_statement(
+    *, table: str, columns: tuple[str, ...], values: tuple[object, ...], identity: object
+) -> MigrationStatement:
+    placeholders = ", ".join("?" for _column in columns)
+    column_sql = ", ".join(f'"{column}"' for column in columns)
+    if table == "transaction":
+        key_columns = ("id",)
+        key_values = (values[0],)
+    elif table == "operation":
+        key_columns = ("transaction_id", "position")
+        key_values = values[:2]
+    elif table in {"project_checkpoints", "project_checkpoint_attempts"}:
+        key_columns = ("project", "sequence") + (
+            ("attempt_number",) if table == "project_checkpoint_attempts" else ()
+        )
+        key_values = values[: len(key_columns)]
+    else:
+        key_columns = ("gate_name",)
+        key_values = (values[0],)
+    where = " AND ".join(f'"{column}"=?' for column in key_columns)
+    digest = sha256_bytes(repr(identity).encode("utf-8"))[:16]
+
+    def completed(database: sqlite3.Connection) -> bool:
+        row = database.execute(
+            f'SELECT {column_sql} FROM "{table}" WHERE {where}', key_values
+        ).fetchone()
+        return row is not None and tuple(row) == values
+
+    return MigrationStatement(
+        name=f"migrate_{table}_{digest}",
+        sql=f'INSERT OR IGNORE INTO "{table}" ({column_sql}) VALUES ({placeholders})',
+        parameters=values,
+        completed=completed,
+    )
+
+
+def _coordinator_v2_migration_statements(
+    source: sqlite3.Connection,
+) -> tuple[tuple[MigrationStatement, ...], dict[str, int]]:
+    _validate_coordinator_v2_schema_objects(source)
+    rows, summary = _coordinator_v2_rows(source)
+    statements: list[MigrationStatement] = []
+    for table in (
+        "transaction",
+        "operation",
+        "project_checkpoints",
+        "project_checkpoint_attempts",
+        "writer_fences",
+    ):
+        columns = _COORDINATOR_V2_COLUMNS[table]
+        for values in rows[table]:
+            statements.append(
+                _coordinator_v3_insert_statement(
+                    table=table,
+                    columns=columns,
+                    values=values,
+                    identity=values[:3],
+                )
+            )
+    return tuple(statements), summary
+
+
+def _coordinator_v3_row_counts(database: sqlite3.Connection) -> dict[str, int]:
+    return {
+        name: int(database.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0])
+        for name, _sql in _COORDINATOR_V3_TABLE_SQL
+    }
+
+
+def _coordinator_v2_reconciliation_complete(
+    database: sqlite3.Connection,
+    statements: tuple[MigrationStatement, ...],
+    summary: Mapping[str, int],
+) -> bool:
+    expected = {
+        "transaction": summary["transactions"],
+        "operation": summary["operations"],
+        "project_checkpoints": summary["project_checkpoints"],
+        "project_checkpoint_attempts": summary["project_checkpoint_attempts"],
+        "writer_fences": summary["writer_fences"],
+    }
+    empty = {
+        "capture_binding_projections",
+        "intent_fence_epochs",
+        "intent_fences",
+        "maintenance_owner_epochs",
+        "maintenance_owners",
+        "project_leases",
+        "writer_owners",
+    }
+    new_transaction_fields = (
+        "intent_id",
+        "intent_fence_token",
+        "intent_fence_epoch",
+        "capture_link_digest",
+        "capture_seal_digest",
+        "abort_operation_id",
+        "abort_manifest_sha256",
+        "abort_receipt_sha256",
+        "abort_chosen_at",
+        "aborted_at",
+    )
+    populated_new_fields = " OR ".join(
+        f'"{field}" IS NOT NULL' for field in new_transaction_fields
+    )
+    return (
+        all(statement.completed(database) for statement in statements)
+        and all(
+            database.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+            == count
+            for table, count in expected.items()
+        )
+        and all(
+            database.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] == 0
+            for table in empty
+        )
+        and database.execute(
+            f'SELECT COUNT(*) FROM "transaction" WHERE {populated_new_fields}'
+        ).fetchone()[0]
+        == 0
+    )
+
+
+def _coordinator_v3_cross_table_invariant(database: sqlite3.Connection) -> bool:
+    owner_projection_violations = database.execute(
+        """SELECT COUNT(*) FROM (
+               SELECT process_id, process_start_identity, canonical_role,
+                      canonical_scope, actor_id, owner_token, fencing_epoch
+               FROM writer_owners
+               UNION ALL
+               SELECT process_id, process_start_identity, canonical_role,
+                      canonical_scope, actor_id, lease_token, fencing_epoch
+               FROM project_leases
+               UNION ALL
+               SELECT process_id, process_start_identity, canonical_role,
+                      canonical_scope, canonical_actor_id, canonical_owner_token,
+                      canonical_fencing_epoch
+               FROM intent_fences
+           ) AS projection
+           LEFT JOIN maintenance_owners AS owner
+             ON owner.role=projection.canonical_role
+            AND owner.scope=projection.canonical_scope
+            AND owner.actor_id=projection.actor_id
+            AND owner.owner_token=projection.owner_token
+            AND owner.fencing_epoch=projection.fencing_epoch
+           WHERE owner.role IS NULL
+              OR owner.process_id != projection.process_id
+              OR owner.process_start_identity != projection.process_start_identity"""
+    ).fetchone()[0]
+    capture_projection_violations = database.execute(
+        """SELECT COUNT(*) FROM capture_binding_projections AS binding
+           LEFT JOIN intent_fences AS fence
+             ON fence.intent_id=binding.intent_id
+            AND fence.token=binding.intent_fence_token
+            AND fence.fencing_epoch=binding.intent_fence_epoch
+           WHERE fence.intent_id IS NULL"""
+    ).fetchone()[0]
+    owner_epoch_violations = database.execute(
+        """SELECT COUNT(*) FROM maintenance_owners AS owner
+           LEFT JOIN maintenance_owner_epochs AS epoch
+             ON epoch.role=owner.role AND epoch.scope=owner.scope
+           WHERE epoch.role IS NULL OR epoch.last_epoch < owner.fencing_epoch"""
+    ).fetchone()[0]
+    intent_epoch_violations = database.execute(
+        """SELECT COUNT(*) FROM intent_fences AS fence
+           LEFT JOIN intent_fence_epochs AS epoch ON epoch.intent_id=fence.intent_id
+           WHERE epoch.intent_id IS NULL OR epoch.last_epoch < fence.fencing_epoch"""
+    ).fetchone()[0]
+    return not any(
+        (
+            owner_projection_violations,
+            capture_projection_violations,
+            owner_epoch_violations,
+            intent_epoch_violations,
+        )
+    )
+
+
+def _reject_coordinator_source_alias(candidate: Path, source: Path) -> None:
+    if candidate.absolute() == source.absolute():
+        raise ValueError("coordinator v3 candidate and v2 source are the same file")
+    try:
+        candidate_present = candidate.exists() or candidate.is_symlink()
+        if candidate_present and os.path.samefile(candidate, source):
+            raise ValueError("coordinator v3 candidate and v2 source are the same file")
+    except ValueError:
+        raise
+    except OSError as exc:
+        raise PermissionError(
+            "coordinator v3 candidate identity could not be verified"
+        ) from exc
+
+
+def initialize_coordinator_v3_candidate(
+    path: Path,
+    *,
+    source_v2: Path | None,
+    killpoint: Callable[[str], None] | None = None,
+) -> dict[str, int]:
+    """Create or resume an unpublished coordinator v3 candidate database."""
+    candidate = Path(path)
+    source_path = Path(source_v2) if source_v2 is not None else None
+    with contextlib.ExitStack() as stack:
+        migration: tuple[MigrationStatement, ...] = ()
+        summary = {
+            "operations": 0,
+            "project_checkpoint_attempts": 0,
+            "project_checkpoints": 0,
+            "transactions": 0,
+            "writer_fences": 0,
+        }
+        if source_path is not None:
+            _reject_coordinator_source_alias(candidate, source_path)
+            source = stack.enter_context(
+                contextlib.closing(
+                    open_readonly_operational_db(
+                        source_path,
+                        source_path.parent.parent,
+                        max_bytes=1 << 50,
+                    )
+                )
+            )
+            source.row_factory = sqlite3.Row
+            source.execute("BEGIN")
+            migration, summary = _coordinator_v2_migration_statements(source)
+            _reject_coordinator_source_alias(candidate, source_path)
+        database = stack.enter_context(
+            contextlib.closing(
+                open_operational_db(candidate, busy_ms=DEFAULTS.markdown_busy_ms)
+            )
+        )
+        if source_path is not None:
+            _reject_coordinator_source_alias(candidate, source_path)
+        _repair_partial_coordinator_v3_schema(
+            database, allow_populated_rebuild=source_v2 is not None
+        )
+        run_resumable_migration(
+            database,
+            _coordinator_v3_statements(),
+            final_invariant=_coordinator_v3_schema_complete,
+            killpoint=killpoint,
+        )
+        if source_v2 is None:
+            if any(_coordinator_v3_row_counts(database).values()):
+                raise _coordinator_migration_error(
+                    "coordinator_v3_source_conflict",
+                    "fresh coordinator v3 initialization found existing rows",
+                )
+        else:
+            run_resumable_migration(
+                database,
+                migration,
+                final_invariant=lambda current: (
+                    _coordinator_v2_reconciliation_complete(
+                        current, migration, summary
+                    )
+                ),
+                killpoint=killpoint,
+            )
+        integrity = database.execute("PRAGMA integrity_check").fetchall()
+        foreign_keys = database.execute("PRAGMA foreign_key_check").fetchall()
+        if (
+            len(integrity) != 1
+            or integrity[0][0] != "ok"
+            or foreign_keys
+            or not _coordinator_v3_cross_table_invariant(database)
+        ):
+            raise _coordinator_migration_error(
+                "coordinator_v3_validation_failed",
+                "coordinator v3 candidate validation failed",
+            )
+    with contextlib.closing(
+        open_operational_db(
+            candidate,
+            busy_ms=DEFAULTS.markdown_busy_ms,
+            contract=_COORDINATOR_V3_CONTRACT,
+            initialize_contract=True,
+        )
+    ):
+        pass
+    _harden_owner_only(candidate, 0o600)
+    validate_coordinator_v3_database(
+        candidate, state_root=candidate.parent.parent
+    )
+    return summary
+
+
+def validate_coordinator_v3_database(
+    path: Path, *, state_root: Path
+) -> dict[str, object]:
+    """Validate one unpublished or active coordinator v3 database fail-closed."""
+    try:
+        Path(path).resolve(strict=True).relative_to(Path(state_root).resolve(strict=True))
+    except (OSError, ValueError) as exc:
+        raise PermissionError("coordinator v3 database is outside the state root") from exc
+    with contextlib.closing(
+        open_readonly_operational_db(
+            Path(path),
+            Path(state_root),
+            max_bytes=1 << 50,
+            owner_only=True,
+            busy_ms=DEFAULTS.markdown_busy_ms,
+            contract=_COORDINATOR_V3_CONTRACT,
+        )
+    ) as database:
+        if not _coordinator_v3_schema_complete(database):
+            raise _coordinator_migration_error(
+                "coordinator_v3_schema_incomplete",
+                "coordinator v3 schema is incomplete",
+            )
+        integrity = database.execute("PRAGMA integrity_check").fetchall()
+        foreign_keys = database.execute("PRAGMA foreign_key_check").fetchall()
+        operation_violations = database.execute(
+            """SELECT COUNT(*) FROM "operation"
+               WHERE position < 0
+                  OR parent_device IS NULL
+                  OR parent_inode IS NULL
+                  OR applied NOT IN (0,1)"""
+        ).fetchone()[0]
+        if (
+            len(integrity) != 1
+            or integrity[0][0] != "ok"
+            or foreign_keys
+            or operation_violations
+            or not _coordinator_v3_cross_table_invariant(database)
+        ):
+            raise _coordinator_migration_error(
+                "coordinator_v3_validation_failed",
+                "coordinator v3 database invariant failed",
+            )
+        return {
+            "application_id": database.execute("PRAGMA application_id").fetchone()[0],
+            "foreign_key_check": [],
+            "integrity_check": "ok",
+            "journal_mode": database.execute("PRAGMA journal_mode").fetchone()[0],
+            "row_counts": _coordinator_v3_row_counts(database),
+            "synchronous": database.execute("PRAGMA synchronous").fetchone()[0],
+            "trusted_schema": database.execute("PRAGMA trusted_schema").fetchone()[0],
+            "user_version": database.execute("PRAGMA user_version").fetchone()[0],
+        }
 
 
 def _unsigned_filesystem_id(value: object) -> int:
@@ -168,6 +1267,26 @@ class TransactionRecord:
     updated_at: str
     parent_transaction_id: str | None = None
     error_code: str | None = None
+
+
+@dataclass(frozen=True)
+class IntentFence:
+    intent_id: str
+    mode: Literal["capture", "worker", "operator"]
+    token: str
+    epoch: int
+    owner: OwnerLease
+    expires_at: datetime
+
+
+@dataclass(frozen=True)
+class TransactionAbortReceipt:
+    transaction_id: str
+    intent_id: str
+    abort_operation_id: str
+    receipt_path: str
+    receipt_sha256: str
+    aborted_at: str
 
 
 @dataclass(frozen=True)
@@ -627,6 +1746,10 @@ def _future_timestamp(seconds: float) -> str:
     return value.isoformat().replace("+00:00", "Z")
 
 
+def _timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def _parse_timestamp(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
@@ -736,21 +1859,8 @@ class _WindowsFileInformation(ctypes.Structure):
     ]
 
 
-class _WindowsRenameInformation(ctypes.Structure):
-    _fields_ = [
-        ("flags", wintypes.DWORD),
-        ("root_directory", wintypes.HANDLE),
-        ("file_name_length", wintypes.DWORD),
-        ("file_name", wintypes.WCHAR * 1),
-    ]
-
-
 class _WindowsDispositionInformation(ctypes.Structure):
     _fields_ = [("delete_file", wintypes.BOOL)]
-
-
-class _WindowsIoStatusBlock(ctypes.Structure):
-    _fields_ = [("status", ctypes.c_ssize_t), ("information", ctypes.c_size_t)]
 
 
 def _open_windows_directory(path: Path) -> int:
@@ -821,40 +1931,6 @@ def _open_windows_file_for_mutation(path: Path) -> int:
     return handle
 
 
-def _rename_windows_handle(
-    file_handle: int, parent_handle: int, target_name: str, *, replace: bool
-) -> None:
-    encoded_name = target_name.encode("utf-16-le")
-    name_offset = _WindowsRenameInformation.file_name.offset
-    buffer = ctypes.create_string_buffer(ctypes.sizeof(_WindowsRenameInformation) + len(encoded_name))
-    information = _WindowsRenameInformation.from_buffer(buffer)
-    information.flags = int(replace)
-    information.root_directory = parent_handle
-    information.file_name_length = len(encoded_name)
-    ctypes.memmove(ctypes.addressof(buffer) + name_offset, encoded_name, len(encoded_name))
-    file_rename_information = 10
-    io_status = _WindowsIoStatusBlock()
-    ntdll = ctypes.windll.ntdll
-    ntdll.NtSetInformationFile.argtypes = (
-        wintypes.HANDLE,
-        ctypes.POINTER(_WindowsIoStatusBlock),
-        wintypes.LPVOID,
-        wintypes.ULONG,
-        ctypes.c_int,
-    )
-    ntdll.NtSetInformationFile.restype = ctypes.c_long
-    status = ntdll.NtSetInformationFile(
-        file_handle,
-        ctypes.byref(io_status),
-        buffer,
-        len(buffer),
-        file_rename_information,
-    )
-    if status < 0:
-        error = ntdll.RtlNtStatusToDosError(status)
-        raise OSError(error, f"cannot publish Windows target: {target_name}")
-
-
 def _delete_windows_handle(file_handle: int) -> None:
     information = _WindowsDispositionInformation(True)
     file_disposition_info = 4
@@ -870,6 +1946,21 @@ def _delete_windows_handle(file_handle: int) -> None:
 
 class MarkdownCoordinator:
     """Prepare and apply durable multi-file Markdown transactions."""
+
+    @classmethod
+    def _from_v3_candidate(
+        cls, path: Path, *, state_root: Path
+    ) -> MarkdownCoordinator:
+        validate_coordinator_v3_database(path, state_root=state_root)
+        coordinator = cls.__new__(cls)
+        coordinator.vault = Path(state_root).resolve()
+        coordinator.state_root = Path(state_root)
+        coordinator.run_root = Path(path).parent
+        coordinator.transaction_root = coordinator.run_root / "transactions"
+        coordinator.database_path = Path(path)
+        coordinator._local = threading.local()
+        coordinator._database_contract = _COORDINATOR_V3_CONTRACT
+        return coordinator
 
     def __init__(self, vault: Path, state_root: Path):
         self.vault = Path(vault).resolve(strict=True)
@@ -887,19 +1978,199 @@ class MarkdownCoordinator:
         self._local = threading.local()
         self._initialize_database()
 
-    def _connect(self, *, busy_ms: int | None = None) -> sqlite3.Connection:
+    @contextlib.contextmanager
+    def _connect(
+        self, *, busy_ms: int | None = None
+    ) -> Iterator[sqlite3.Connection]:
         database = open_operational_db(
             self.database_path,
             busy_ms=DEFAULTS.markdown_busy_ms if busy_ms is None else busy_ms,
+            contract=getattr(self, "_database_contract", None),
         )
-        schema = database.execute(
-            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'transaction'"
-        ).fetchone()
-        if schema is not None and "conflicted" not in (schema["sql"] or ""):
-            # Stage 2 Task 2 shipped a narrower state constraint. Preserve those
-            # databases while allowing their rows to enter recovery-only states.
-            database.execute("PRAGMA ignore_check_constraints = ON")
-        return database
+        try:
+            # Preserve this legacy context manager's implicit commit/rollback API.
+            database.isolation_level = "DEFERRED"
+            schema = database.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'transaction'"
+            ).fetchone()
+            if schema is not None and "conflicted" not in (schema["sql"] or ""):
+                # Stage 2 Task 2 shipped a narrower state constraint. Preserve those
+                # databases while allowing their rows to enter recovery-only states.
+                database.execute("PRAGMA ignore_check_constraints = ON")
+            with database:
+                yield database
+        finally:
+            database.close()
+
+    @staticmethod
+    def _validate_intent_fence_owner(
+        owner: OwnerLease, mode: Literal["capture", "worker", "operator"]
+    ) -> None:
+        from operational_ownership import OwnerLease
+
+        if not isinstance(owner, OwnerLease):
+            raise TypeError("owner must be an OwnerLease")
+        allowed = {
+            "capture": {"capture"},
+            "worker": {"queue-worker", "compile", "doctor", "nightly", "weekly"},
+            "operator": {"queue-operator", "repair"},
+        }
+        if mode not in allowed or owner.role not in allowed[mode]:
+            raise ValueError("owner cannot acquire the requested intent fence")
+
+    def acquire_intent_fence(
+        self,
+        intent_id: str,
+        *,
+        mode: Literal["capture", "worker", "operator"],
+        owner: OwnerLease,
+    ) -> IntentFence:
+        self._validate_intent_fence_owner(owner, mode)
+        if re.fullmatch(r"[0-9a-f]{64}", intent_id) is None:
+            raise ValueError("intent_id must be lowercase 64-hex")
+        from operational_ownership import OwnershipRegistry
+
+        registry = OwnershipRegistry(self.state_root)
+        now = datetime.now(timezone.utc)
+        expires_at = min(owner.expires_at, now + timedelta(seconds=30))
+        token = uuid.uuid4().hex
+        with self._connect() as database, begin_immediate(database):
+            registry.require(database, owner)
+            if database.execute(
+                "SELECT 1 FROM intent_fences WHERE intent_id=?", (intent_id,)
+            ).fetchone() is not None:
+                raise RuntimeError("intent_fenced")
+            epoch = int(
+                database.execute(
+                    """INSERT INTO intent_fence_epochs(intent_id,last_epoch)
+                       VALUES (?,1)
+                       ON CONFLICT(intent_id) DO UPDATE
+                       SET last_epoch=intent_fence_epochs.last_epoch+1
+                       RETURNING last_epoch""",
+                    (intent_id,),
+                ).fetchone()[0]
+            )
+            inserted = database.execute(
+                """INSERT INTO intent_fences(
+                       intent_id,mode,token,fencing_epoch,canonical_role,
+                       canonical_scope,canonical_actor_id,canonical_owner_token,
+                       canonical_fencing_epoch,process_id,process_start_identity,
+                       heartbeat_at,expires_at
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    intent_id,
+                    mode,
+                    token,
+                    epoch,
+                    owner.role,
+                    owner.scope,
+                    owner.actor_id,
+                    owner.token,
+                    owner.epoch,
+                    owner.process.pid,
+                    owner.process.start_identity,
+                    now.isoformat().replace("+00:00", "Z"),
+                    expires_at.isoformat().replace("+00:00", "Z"),
+                ),
+            ).rowcount
+            if inserted != 1:
+                raise RuntimeError("intent_fence_failed")
+        return IntentFence(intent_id, mode, token, epoch, owner, expires_at)
+
+    def release_intent_fence(self, fence: IntentFence) -> None:
+        if not isinstance(fence, IntentFence):
+            raise TypeError("fence must be an IntentFence")
+        with self._connect() as database, begin_immediate(database):
+            deleted = database.execute(
+                """DELETE FROM intent_fences
+                   WHERE intent_id=? AND mode=? AND token=? AND fencing_epoch=?
+                     AND canonical_role=? AND canonical_scope=?
+                     AND canonical_actor_id=? AND canonical_owner_token=?
+                     AND canonical_fencing_epoch=? AND process_id=?
+                     AND process_start_identity=?""",
+                (
+                    fence.intent_id,
+                    fence.mode,
+                    fence.token,
+                    fence.epoch,
+                    fence.owner.role,
+                    fence.owner.scope,
+                    fence.owner.actor_id,
+                    fence.owner.token,
+                    fence.owner.epoch,
+                    fence.owner.process.pid,
+                    fence.owner.process.start_identity,
+                ),
+            ).rowcount
+            if deleted != 1:
+                raise RuntimeError("intent_fence_lost")
+
+    def project_capture_binding(
+        self, binding: object, *, intent_fence: IntentFence
+    ) -> None:
+        from memory_queue import CaptureTaskBinding
+
+        if not isinstance(binding, CaptureTaskBinding) or binding.seal_digest is None:
+            raise ValueError("capture binding must be sealed")
+        if (
+            not isinstance(intent_fence, IntentFence)
+            or binding.intent_id != intent_fence.intent_id
+        ):
+            raise ValueError("intent fence does not match capture binding")
+        now = datetime.now(timezone.utc)
+        with self._connect() as database, begin_immediate(database):
+            row = database.execute(
+                """SELECT 1 FROM intent_fences WHERE intent_id=? AND mode=?
+                   AND token=? AND fencing_epoch=? AND expires_at>?""",
+                (
+                    intent_fence.intent_id,
+                    intent_fence.mode,
+                    intent_fence.token,
+                    intent_fence.epoch,
+                    now.isoformat().replace("+00:00", "Z"),
+                ),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("intent_fence_lost")
+            existing = database.execute(
+                "SELECT * FROM capture_binding_projections WHERE intent_id=?",
+                (binding.intent_id,),
+            ).fetchone()
+            expected = (
+                binding.task_id,
+                binding.active_digest,
+                binding.seal_digest,
+                intent_fence.token,
+                intent_fence.epoch,
+            )
+            if existing is not None:
+                current = (
+                    existing["task_id"],
+                    existing["active_link_digest"],
+                    existing["seal_digest"],
+                    existing["intent_fence_token"],
+                    existing["intent_fence_epoch"],
+                )
+                if current != expected:
+                    raise RuntimeError("capture_binding_conflict")
+                return
+            inserted = database.execute(
+                """INSERT INTO capture_binding_projections(
+                       intent_id,task_id,active_link_digest,seal_digest,
+                       projected_at,intent_fence_token,intent_fence_epoch
+                   ) VALUES (?,?,?,?,?,?,?)""",
+                (
+                    binding.intent_id,
+                    binding.task_id,
+                    binding.active_digest,
+                    binding.seal_digest,
+                    now.isoformat().replace("+00:00", "Z"),
+                    intent_fence.token,
+                    intent_fence.epoch,
+                ),
+            ).rowcount
+            if inserted != 1:
+                raise RuntimeError("capture_binding_projection_failed")
 
     def _initialize_database(self) -> None:
         with self._connect() as database:
@@ -1906,9 +3177,280 @@ class MarkdownCoordinator:
             self._apply_operation(inverse, {"after": before_state})
             self._require_operation_state(inverse, row["before_hash"], "restored state")
 
+    def abort_for_discard(
+        self,
+        transaction_id: str,
+        *,
+        intent_fence: IntentFence,
+        active_link_digest: str,
+        actor_identity: str,
+        deadline: float = float("inf"),
+        cancelled: Callable[[], bool] | None = None,
+    ) -> TransactionAbortReceipt:
+        self._require_operation_active(deadline, cancelled)
+        if not isinstance(intent_fence, IntentFence) or intent_fence.mode != "operator":
+            raise ValueError("abort requires an operator intent fence")
+        if re.fullmatch(r"[0-9a-f]{64}", active_link_digest) is None:
+            raise ValueError("active link digest must be lowercase 64-hex")
+        if (
+            not isinstance(actor_identity, str)
+            or not 1 <= len(actor_identity.encode("utf-8")) <= 512
+        ):
+            raise ValueError("actor identity is invalid")
+        before_manifest = [
+            {
+                "position": int(row["position"]),
+                "kind": str(row["kind"]),
+                "path": str(row["path"]),
+                "before_hash": str(row["before_hash"]),
+                "after_hash": str(row["after_hash"]),
+            }
+            for row in self._operation_rows(transaction_id)
+        ]
+        if not before_manifest:
+            raise KeyError(transaction_id)
+        manifest_sha256 = sha256_bytes(canonical_json_bytes(before_manifest))
+        now = datetime.now(timezone.utc)
+        chosen_at = now.isoformat().replace("+00:00", "Z")
+        operation_identity = {
+            "active_link_digest": active_link_digest,
+            "before_manifest_sha256": manifest_sha256,
+            "intent_fence_epoch": intent_fence.epoch,
+            "intent_id": intent_fence.intent_id,
+            "transaction_id": transaction_id,
+        }
+        abort_operation_id = f"transaction-abort:{sha256_bytes(canonical_json_bytes(operation_identity))}"
+        with self.writer_gate():
+            with self._connect() as database, begin_immediate(database):
+                row = database.execute(
+                    'SELECT * FROM "transaction" WHERE id=?', (transaction_id,)
+                ).fetchone()
+                if row is None:
+                    raise KeyError(transaction_id)
+                if row["state"] == "committed":
+                    raise TransactionFailure(
+                        "committed transaction cannot be aborted",
+                        "abort_committed",
+                        "committed",
+                    )
+                if row["state"] in {"conflicted", "quarantined"}:
+                    raise TransactionFailure(
+                        "conflicted transaction cannot be aborted",
+                        "abort_state_refused",
+                        str(row["state"]),
+                    )
+                fence = database.execute(
+                    """SELECT 1 FROM intent_fences AS fence
+                       JOIN capture_binding_projections AS binding
+                         ON binding.intent_id=fence.intent_id
+                        AND binding.intent_fence_token=fence.token
+                        AND binding.intent_fence_epoch=fence.fencing_epoch
+                       WHERE fence.intent_id=? AND fence.mode='operator'
+                         AND fence.token=? AND fence.fencing_epoch=?
+                         AND fence.expires_at>? AND binding.active_link_digest=?""",
+                    (
+                        intent_fence.intent_id,
+                        intent_fence.token,
+                        intent_fence.epoch,
+                        chosen_at,
+                        active_link_digest,
+                    ),
+                ).fetchone()
+                if fence is None:
+                    raise TransactionFailure(
+                        "abort intent fence is stale",
+                        "intent_fence_lost",
+                        str(row["state"]),
+                    )
+                if row["state"] != "aborting":
+                    changed = database.execute(
+                        """UPDATE "transaction" SET state='aborting',error_code=NULL,
+                               abort_operation_id=?,abort_manifest_sha256=?,
+                               abort_chosen_at=?,updated_at=?
+                           WHERE id=? AND state IN ('preparing','prepared','applying')""",
+                        (
+                            abort_operation_id,
+                            manifest_sha256,
+                            chosen_at,
+                            chosen_at,
+                            transaction_id,
+                        ),
+                    ).rowcount
+                    if changed != 1:
+                        raise TransactionFailure(
+                            "transaction cannot enter aborting",
+                            "abort_state_refused",
+                            str(row["state"]),
+                        )
+                else:
+                    abort_operation_id = str(row["abort_operation_id"])
+                    manifest_sha256 = str(row["abort_manifest_sha256"])
+                    chosen_at = str(row["abort_chosen_at"])
+            self._killpoint("after_aborting")
+            rows = self._operation_rows(transaction_id)
+            try:
+                for operation in reversed(rows):
+                    self._require_operation_active(deadline, cancelled)
+                    current = self._operation_hash(operation)
+                    if current == operation["before_hash"]:
+                        continue
+                    if current != operation["after_hash"]:
+                        raise TransactionFailure(
+                            "abort target has third-party bytes",
+                            "abort_target_conflict",
+                            "aborting",
+                        )
+                    before_state: object = ABSENT
+                    if operation["before_hash"] != ABSENT:
+                        artifact = (
+                            self.transaction_root
+                            / transaction_id
+                            / "before"
+                            / f"{int(operation['position']):06d}.bin"
+                        )
+                        content = artifact.read_bytes()
+                        if sha256_bytes(content) != operation["before_hash"]:
+                            raise TransactionFailure(
+                                "abort before-image is corrupt",
+                                "abort_before_image_corrupt",
+                                "aborting",
+                            )
+                        before_state = {
+                            "sha256": operation["before_hash"],
+                            "artifact": f"before/{int(operation['position']):06d}.bin",
+                        }
+                    inverse = dict(operation)
+                    inverse.update(
+                        kind="delete"
+                        if operation["before_hash"] == ABSENT
+                        else "create"
+                        if operation["after_hash"] == ABSENT
+                        else "replace",
+                        before_hash=operation["after_hash"],
+                        after_hash=operation["before_hash"],
+                    )
+                    self._apply_operation(inverse, {"after": before_state})
+                    self._require_operation_state(
+                        inverse, operation["before_hash"], "restored state"
+                    )
+                    self._killpoint("after_each_abort_target")
+            except TransactionFailure as exc:
+                self._set_transaction_state(
+                    transaction_id, "aborting", error_code=exc.code
+                )
+                raise
+            restored = [
+                {"path": str(row["path"]), "sha256": str(row["before_hash"])}
+                for row in rows
+            ]
+            restored_tree_sha256 = sha256_bytes(canonical_json_bytes(restored))
+            receipt_record = {
+                "schema_version": "transaction-abort/v1",
+                "transaction_id": transaction_id,
+                "intent_id": intent_fence.intent_id,
+                "active_link_digest": active_link_digest,
+                "intent_fence_token_sha256": sha256_bytes(
+                    intent_fence.token.encode("utf-8")
+                ),
+                "intent_fence_epoch": intent_fence.epoch,
+                "abort_operation_id": abort_operation_id,
+                "before_manifest_sha256": manifest_sha256,
+                "restored_target_count": len(rows),
+                "restored_tree_sha256": restored_tree_sha256,
+                "actor_identity": actor_identity,
+                "aborted_at": chosen_at,
+            }
+            validate_schema(
+                receipt_record,
+                Path(__file__).with_name("schemas") / "transaction-abort-v1.json",
+            )
+            receipt_bytes = canonical_json_bytes(receipt_record)
+            if len(receipt_bytes) > 64 * 1024:
+                raise TransactionFailure(
+                    "abort receipt exceeds its bound",
+                    "abort_receipt_oversized",
+                    "aborting",
+                )
+            relative_path = f"run/transactions/{transaction_id}/abort-receipt.json"
+            receipt_path = self.state_root / relative_path
+            self._killpoint("before_abort_receipt")
+            publish_runtime_file(
+                receipt_path,
+                receipt_bytes,
+                state_root=self.state_root,
+                create_only=True,
+            )
+            read_back = read_runtime_bytes(
+                receipt_path, self.state_root, max_bytes=64 * 1024, owner_only=True
+            )
+            if read_back != receipt_bytes:
+                raise TransactionFailure(
+                    "abort receipt read-back failed",
+                    "abort_receipt_conflict",
+                    "aborting",
+                )
+            receipt_sha256 = sha256_bytes(read_back)
+            self._killpoint("after_abort_receipt")
+            with self._connect() as database, begin_immediate(database):
+                fence = database.execute(
+                    """SELECT 1 FROM intent_fences AS fence
+                       JOIN capture_binding_projections AS binding
+                         ON binding.intent_id=fence.intent_id
+                        AND binding.intent_fence_token=fence.token
+                        AND binding.intent_fence_epoch=fence.fencing_epoch
+                       WHERE fence.intent_id=? AND fence.token=?
+                         AND fence.fencing_epoch=? AND fence.expires_at>?
+                         AND binding.active_link_digest=?""",
+                    (
+                        intent_fence.intent_id,
+                        intent_fence.token,
+                        intent_fence.epoch,
+                        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        active_link_digest,
+                    ),
+                ).fetchone()
+                if fence is None or any(
+                    self._operation_hash(row) != row["before_hash"] for row in rows
+                ):
+                    raise TransactionFailure(
+                        "abort final verification failed",
+                        "abort_final_verification_failed",
+                        "aborting",
+                    )
+                self._killpoint("before_aborted")
+                changed = database.execute(
+                    """UPDATE "transaction" SET state='aborted',error_code=NULL,
+                           abort_receipt_sha256=?,aborted_at=?,updated_at=?
+                       WHERE id=? AND state='aborting' AND abort_operation_id=?
+                         AND abort_manifest_sha256=?""",
+                    (
+                        receipt_sha256,
+                        chosen_at,
+                        chosen_at,
+                        transaction_id,
+                        abort_operation_id,
+                        manifest_sha256,
+                    ),
+                ).rowcount
+                if changed != 1:
+                    raise TransactionFailure(
+                        "abort fence was lost",
+                        "abort_fence_lost",
+                        "aborting",
+                    )
+        return TransactionAbortReceipt(
+            transaction_id=transaction_id,
+            intent_id=intent_fence.intent_id,
+            abort_operation_id=abort_operation_id,
+            receipt_path=relative_path,
+            receipt_sha256=receipt_sha256,
+            aborted_at=chosen_at,
+        )
+
     def recover(
         self,
         *,
+        owner: OwnerLease | None = None,
         writer_wait_seconds: float | None = None,
         max_transactions: int | None = None,
         deadline: float = float("inf"),
@@ -1924,13 +3466,14 @@ class MarkdownCoordinator:
         if max_transactions == 0 or self._recovery_stopped(deadline, cancelled):
             return []
         recovered: list[TransactionRecord] = []
-        with self.writer_gate(wait_seconds=writer_wait_seconds):
+        with self.writer_gate(owner=owner, wait_seconds=writer_wait_seconds):
             if self._recovery_stopped(deadline, cancelled):
                 return []
             query = (
                 'SELECT id, state, owner_pid FROM "transaction" '
-                "WHERE state IN ('preparing', 'prepared', 'applying') "
-                "ORDER BY created_at, id"
+                "WHERE state IN ('aborting','aborted','preparing','prepared','applying') "
+                "ORDER BY CASE state WHEN 'aborting' THEN 0 WHEN 'aborted' THEN 1 ELSE 2 END, "
+                "created_at, id"
             )
             parameters: tuple[object, ...] = ()
             if max_transactions is not None:
@@ -1947,6 +3490,14 @@ class MarkdownCoordinator:
                 for transaction_id, selected_state, owner_pid in rows:
                     if self._recovery_stopped(deadline, cancelled):
                         break
+                    if selected_state == "aborting":
+                        self._recover_aborting(transaction_id)
+                        recovered.append(self._record(transaction_id))
+                        continue
+                    if selected_state == "aborted":
+                        self._validate_aborted(transaction_id)
+                        recovered.append(self._record(transaction_id))
+                        continue
                     if (
                         selected_state == "preparing"
                         and owner_pid is not None
@@ -2015,6 +3566,94 @@ class MarkdownCoordinator:
                 self._local.recovery_deadline = None
                 self._local.recovery_cancelled = None
         return recovered
+
+    def _recover_aborting(self, transaction_id: str) -> None:
+        rows = self._operation_rows(transaction_id)
+        error_code = "abort_receipt_pending"
+        for operation in reversed(rows):
+            current = self._operation_hash(operation)
+            if current == operation["before_hash"]:
+                continue
+            if current != operation["after_hash"]:
+                error_code = "abort_target_conflict"
+                break
+            before_state: object = ABSENT
+            if operation["before_hash"] != ABSENT:
+                artifact = (
+                    self.transaction_root
+                    / transaction_id
+                    / "before"
+                    / f"{int(operation['position']):06d}.bin"
+                )
+                try:
+                    content = artifact.read_bytes()
+                except OSError:
+                    error_code = "abort_before_image_corrupt"
+                    break
+                if sha256_bytes(content) != operation["before_hash"]:
+                    error_code = "abort_before_image_corrupt"
+                    break
+                before_state = {
+                    "sha256": operation["before_hash"],
+                    "artifact": f"before/{int(operation['position']):06d}.bin",
+                }
+            inverse = dict(operation)
+            inverse.update(
+                kind="delete"
+                if operation["before_hash"] == ABSENT
+                else "create"
+                if operation["after_hash"] == ABSENT
+                else "replace",
+                before_hash=operation["after_hash"],
+                after_hash=operation["before_hash"],
+            )
+            self._apply_operation(inverse, {"after": before_state})
+            self._require_operation_state(
+                inverse, operation["before_hash"], "restored state"
+            )
+        self._set_transaction_state(transaction_id, "aborting", error_code=error_code)
+
+    def _validate_aborted(self, transaction_id: str) -> None:
+        with self._connect() as database:
+            row = database.execute(
+                'SELECT * FROM "transaction" WHERE id=?', (transaction_id,)
+            ).fetchone()
+        invalid = row is None
+        if row is not None:
+            receipt_path = (
+                self.transaction_root / transaction_id / "abort-receipt.json"
+            )
+            try:
+                receipt_bytes = read_runtime_bytes(
+                    receipt_path,
+                    self.state_root,
+                    max_bytes=64 * 1024,
+                    owner_only=True,
+                )
+                receipt = json.loads(receipt_bytes)
+                validate_schema(
+                    receipt,
+                    Path(__file__).with_name("schemas")
+                    / "transaction-abort-v1.json",
+                )
+                invalid = (
+                    canonical_json_bytes(receipt) != receipt_bytes
+                    or receipt["transaction_id"] != transaction_id
+                    or receipt["abort_operation_id"] != row["abort_operation_id"]
+                    or receipt["before_manifest_sha256"]
+                    != row["abort_manifest_sha256"]
+                    or sha256_bytes(receipt_bytes) != row["abort_receipt_sha256"]
+                    or any(
+                        self._operation_hash(operation) != operation["before_hash"]
+                        for operation in self._operation_rows(transaction_id)
+                    )
+                )
+            except (OSError, TypeError, ValueError):
+                invalid = True
+        if invalid:
+            self._set_transaction_state(
+                transaction_id, "aborted", error_code="abort_receipt_invalid"
+            )
 
     @staticmethod
     def _recovery_stopped(
@@ -2560,14 +4199,25 @@ class MarkdownCoordinator:
             )
 
     @contextlib.contextmanager
-    def writer_gate(self, *, wait_seconds: float | None = None) -> Iterator[None]:
+    def writer_gate(
+        self,
+        *,
+        owner: OwnerLease | None = None,
+        wait_seconds: float | None = None,
+    ) -> Iterator[OwnerLease]:
+        if owner is not None:
+            yield from self._nested_writer_gate(owner)
+            return
         depth = getattr(self._local, "gate_depth", 0)
         if depth:
             self._local.gate_depth = depth + 1
             try:
-                yield
+                yield getattr(self._local, "gate_owner", None)
             finally:
                 self._local.gate_depth -= 1
+            return
+        if getattr(self, "_database_contract", None) == _COORDINATOR_V3_CONTRACT:
+            yield from self._canonical_writer_gate(wait_seconds)
             return
 
         if wait_seconds is not None and (
@@ -2650,7 +4300,7 @@ class MarkdownCoordinator:
         )
         heartbeat_thread.start()
         try:
-            yield
+            yield None
         finally:
             heartbeat_stop.set()
             heartbeat_thread.join(timeout=_WRITER_HEARTBEAT_SECONDS * 2)
@@ -2662,6 +4312,181 @@ class MarkdownCoordinator:
                 self._local.gate_depth = 0
                 self._local.gate_token = None
                 self._local.gate_fence = None
+
+    def _canonical_writer_gate(
+        self, wait_seconds: float | None
+    ) -> Iterator[OwnerLease]:
+        from operational_ownership import OwnershipRegistry
+
+        if wait_seconds is not None and (
+            isinstance(wait_seconds, bool)
+            or not isinstance(wait_seconds, (int, float))
+            or wait_seconds < 0
+        ):
+            raise ValueError("writer gate wait_seconds must be non-negative or None")
+        registry = OwnershipRegistry(self.state_root)
+        deadline = time.monotonic() + (
+            _WRITER_WAIT_SECONDS if wait_seconds is None else wait_seconds
+        )
+        attempt = 0
+        while True:
+            try:
+                with self._connect() as database, begin_immediate(database):
+                    lease = registry._acquire_in_transaction(
+                        database, "markdown-writer", scope="global"
+                    )
+                    self._insert_writer_projection(database, lease)
+                break
+            except Exception as exc:
+                if getattr(exc, "code", None) != "owner_busy":
+                    raise
+                delay = _writer_retry_delay(attempt, deadline)
+                if delay <= 0:
+                    raise TimeoutError(
+                        "timed out waiting for the global Markdown writer gate"
+                    ) from exc
+                time.sleep(delay)
+                attempt += 1
+        self._local.gate_depth = 1
+        self._local.gate_token = lease.token
+        self._local.gate_fence = lease.epoch
+        self._local.gate_owner = lease
+        stop = threading.Event()
+        lost = threading.Event()
+        heartbeat = threading.Thread(
+            target=self._heartbeat_canonical_writer_gate,
+            args=(registry, lease, stop, lost),
+            name="markdown-writer-heartbeat",
+            daemon=True,
+        )
+        heartbeat.start()
+        try:
+            yield lease
+        finally:
+            stop.set()
+            heartbeat.join(timeout=lease.heartbeat_seconds * 2)
+            try:
+                with self._connect() as database, begin_immediate(database):
+                    self._delete_writer_projection(database, lease)
+                    registry._release_in_transaction(database, lease)
+                if lost.is_set():
+                    raise RuntimeError("Markdown writer gate ownership was lost")
+            finally:
+                self._local.gate_depth = 0
+                self._local.gate_token = None
+                self._local.gate_fence = None
+                self._local.gate_owner = None
+
+    @staticmethod
+    def _insert_writer_projection(database: sqlite3.Connection, owner: OwnerLease) -> None:
+        now = _timestamp(owner.heartbeat_at)
+        database.execute(
+            """INSERT INTO writer_owners(
+                   gate_name,owner_token,process_id,thread_id,acquired_at,
+                   heartbeat_at,expires_at,fencing_epoch,canonical_role,
+                   canonical_scope,actor_id,process_start_identity
+               ) VALUES ('global',?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                owner.token,
+                owner.process.pid,
+                threading.get_ident(),
+                _timestamp(owner.acquired_at),
+                now,
+                _timestamp(owner.expires_at),
+                owner.epoch,
+                owner.role,
+                owner.scope,
+                owner.actor_id,
+                owner.process.start_identity,
+            ),
+        )
+
+    @staticmethod
+    def _delete_writer_projection(
+        database: sqlite3.Connection, owner: OwnerLease
+    ) -> None:
+        deleted = database.execute(
+            """DELETE FROM writer_owners
+               WHERE gate_name='global' AND owner_token=? AND fencing_epoch=?
+                 AND canonical_role=? AND canonical_scope=? AND actor_id=?
+                 AND process_id=? AND process_start_identity=?""",
+            (
+                owner.token,
+                owner.epoch,
+                owner.role,
+                owner.scope,
+                owner.actor_id,
+                owner.process.pid,
+                owner.process.start_identity,
+            ),
+        ).rowcount
+        if deleted != 1:
+            raise RuntimeError("Markdown writer gate ownership was lost")
+
+    def _heartbeat_canonical_writer_gate(
+        self,
+        registry: object,
+        owner: OwnerLease,
+        stop: threading.Event,
+        lost: threading.Event,
+    ) -> None:
+        while not stop.wait(owner.heartbeat_seconds):
+            try:
+                with self._connect() as database, begin_immediate(database):
+                    renewed = registry._heartbeat_in_transaction(database, owner)
+                    updated = database.execute(
+                        """UPDATE writer_owners SET heartbeat_at=?,expires_at=?
+                           WHERE gate_name='global' AND owner_token=?
+                             AND fencing_epoch=?""",
+                        (
+                            _timestamp(renewed.heartbeat_at),
+                            _timestamp(renewed.expires_at),
+                            owner.token,
+                            owner.epoch,
+                        ),
+                    ).rowcount
+                    if updated != 1:
+                        raise RuntimeError("writer projection was lost")
+                owner = renewed
+            except BaseException:
+                lost.set()
+                return
+
+    def _nested_writer_gate(self, owner: OwnerLease) -> Iterator[OwnerLease]:
+        from operational_ownership import OwnerLease, OwnershipRegistry
+
+        if not isinstance(owner, OwnerLease):
+            raise TypeError("owner must be an OwnerLease")
+        if getattr(self, "_database_contract", None) != _COORDINATOR_V3_CONTRACT:
+            raise RuntimeError("canonical writer projection requires a v3 coordinator")
+        depth = getattr(self._local, "gate_depth", 0)
+        if depth:
+            if getattr(self._local, "gate_owner", None) != owner:
+                raise RuntimeError("nested writer owner changed")
+            self._local.gate_depth = depth + 1
+            try:
+                yield owner
+            finally:
+                self._local.gate_depth -= 1
+            return
+
+        registry = OwnershipRegistry(self.state_root)
+        with self._connect() as database, begin_immediate(database):
+            registry.require(database, owner)
+            self._insert_writer_projection(database, owner)
+        self._local.gate_depth = 1
+        self._local.gate_token = owner.token
+        self._local.gate_fence = owner.epoch
+        self._local.gate_owner = owner
+        try:
+            yield owner
+        finally:
+            with self._connect() as database, begin_immediate(database):
+                self._delete_writer_projection(database, owner)
+            self._local.gate_depth = 0
+            self._local.gate_token = None
+            self._local.gate_fence = None
+            self._local.gate_owner = None
 
     def _release_writer_gate(
         self, owner_token: str, fencing_epoch: int, heartbeat_lost: bool
@@ -2941,6 +4766,59 @@ class MarkdownCoordinator:
                 _parse_timestamp(expected["expires_at"])
                 result[path] = dict(expected)
                 continue
+            if path == "intent_fence":
+                if not isinstance(expected, Mapping):
+                    raise TypeError("intent_fence precondition must be a mapping")
+                required = {
+                    "intent_id",
+                    "mode",
+                    "token",
+                    "fencing_epoch",
+                    "expires_at",
+                }
+                if set(expected) != required:
+                    raise ValueError("intent_fence precondition has invalid fields")
+                if (
+                    re.fullmatch(r"[0-9a-f]{64}", str(expected["intent_id"]))
+                    is None
+                    or expected["mode"] not in {"capture", "worker", "operator"}
+                    or not isinstance(expected["token"], str)
+                    or not expected["token"]
+                    or not isinstance(expected["fencing_epoch"], int)
+                    or isinstance(expected["fencing_epoch"], bool)
+                    or expected["fencing_epoch"] < 1
+                    or not isinstance(expected["expires_at"], str)
+                ):
+                    raise ValueError("intent_fence precondition has invalid values")
+                _parse_timestamp(str(expected["expires_at"]))
+                result[path] = dict(expected)
+                continue
+            if path == "capture_binding":
+                if not isinstance(expected, Mapping):
+                    raise TypeError("capture_binding precondition must be a mapping")
+                required = {
+                    "intent_id",
+                    "task_id",
+                    "active_link_digest",
+                    "seal_digest",
+                }
+                if set(expected) != required:
+                    raise ValueError("capture_binding precondition has invalid fields")
+                if (
+                    re.fullmatch(r"[0-9a-f]{64}", str(expected["intent_id"]))
+                    is None
+                    or not isinstance(expected["task_id"], str)
+                    or not expected["task_id"]
+                    or re.fullmatch(
+                        r"[0-9a-f]{64}", str(expected["active_link_digest"])
+                    )
+                    is None
+                    or re.fullmatch(r"[0-9a-f]{64}", str(expected["seal_digest"]))
+                    is None
+                ):
+                    raise ValueError("capture_binding precondition has invalid values")
+                result[path] = dict(expected)
+                continue
             self._target(path)
             if expected != ABSENT and (
                 not isinstance(expected, str)
@@ -3156,16 +5034,22 @@ class MarkdownCoordinator:
 
     @classmethod
     def _same_capture_snapshot(cls, left: os.stat_result, right: os.stat_result) -> bool:
-        return cls._same_capture_identity(left, right) and (
+        metadata_matches = (
             left.st_mode,
             left.st_size,
             left.st_mtime_ns,
-            left.st_ctime_ns,
         ) == (
             right.st_mode,
             right.st_size,
             right.st_mtime_ns,
-            right.st_ctime_ns,
+        )
+        # Python exposes creation time as st_ctime on Windows, where descriptor and
+        # path views may differ. It is not a content-change signal on that platform.
+        change_time_matches = os.name == "nt" or left.st_ctime_ns == right.st_ctime_ns
+        return (
+            cls._same_capture_identity(left, right)
+            and metadata_matches
+            and change_time_matches
         )
 
     @contextlib.contextmanager
@@ -3381,6 +5265,15 @@ class MarkdownCoordinator:
                     with self._connect() as lease_database:
                         self._check_project_lease(lease_database, expected)
                 continue
+            if path in {"intent_fence", "capture_binding"}:
+                if database is None:
+                    with self._connect() as precondition_database:
+                        self._check_capture_preconditions(
+                            precondition_database, preconditions
+                        )
+                else:
+                    self._check_capture_preconditions(database, preconditions)
+                continue
             current = self._current_hash(path)
             if current == expected:
                 continue
@@ -3393,6 +5286,47 @@ class MarkdownCoordinator:
                 continue
             raise TransactionFailure(
                 f"persisted precondition failed for {path}",
+                "precondition_failed",
+                "quarantined",
+            )
+
+    @staticmethod
+    def _check_capture_preconditions(
+        database: sqlite3.Connection, preconditions: Mapping[str, object]
+    ) -> None:
+        fence = preconditions.get("intent_fence")
+        binding = preconditions.get("capture_binding")
+        if not isinstance(fence, Mapping) or not isinstance(binding, Mapping):
+            raise TransactionFailure(
+                "capture preconditions are incomplete",
+                "precondition_failed",
+                "quarantined",
+            )
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        row = database.execute(
+            """SELECT 1 FROM intent_fences AS fence
+               JOIN capture_binding_projections AS binding
+                 ON binding.intent_id=fence.intent_id
+                AND binding.intent_fence_token=fence.token
+                AND binding.intent_fence_epoch=fence.fencing_epoch
+               WHERE fence.intent_id=? AND fence.mode=? AND fence.token=?
+                 AND fence.fencing_epoch=? AND fence.expires_at>?
+                 AND binding.task_id=? AND binding.active_link_digest=?
+                 AND binding.seal_digest=?""",
+            (
+                fence["intent_id"],
+                fence["mode"],
+                fence["token"],
+                fence["fencing_epoch"],
+                now,
+                binding["task_id"],
+                binding["active_link_digest"],
+                binding["seal_digest"],
+            ),
+        ).fetchone()
+        if row is None:
+            raise TransactionFailure(
+                "persisted capture precondition failed",
                 "precondition_failed",
                 "quarantined",
             )
@@ -3564,6 +5498,48 @@ class MarkdownCoordinator:
     def _assert_writer_ownership(self, database: sqlite3.Connection) -> None:
         owner_token = getattr(self._local, "gate_token", None)
         fencing_epoch = getattr(self._local, "gate_fence", None)
+        owner = getattr(self._local, "gate_owner", None)
+        if (
+            getattr(self, "_database_contract", None) == _COORDINATOR_V3_CONTRACT
+            and owner is not None
+        ):
+            from operational_ownership import OwnershipRegistry
+
+            registry = OwnershipRegistry(self.state_root)
+            registry.require(database, owner)
+            cursor = database.execute(
+                """UPDATE writer_owners
+                   SET heartbeat_at=(
+                           SELECT heartbeat_at FROM maintenance_owners
+                           WHERE role=? AND scope=? AND actor_id=? AND owner_token=?
+                             AND fencing_epoch=?
+                       ),
+                       expires_at=(
+                           SELECT expires_at FROM maintenance_owners
+                           WHERE role=? AND scope=? AND actor_id=? AND owner_token=?
+                             AND fencing_epoch=?
+                       )
+                   WHERE gate_name='global' AND owner_token=? AND fencing_epoch=?""",
+                (
+                    owner.role,
+                    owner.scope,
+                    owner.actor_id,
+                    owner.token,
+                    owner.epoch,
+                    owner.role,
+                    owner.scope,
+                    owner.actor_id,
+                    owner.token,
+                    owner.epoch,
+                    owner_token,
+                    fencing_epoch,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(
+                    "Markdown writer gate ownership was lost before mutation"
+                )
+            return
         heartbeat = _now()
         cursor = database.execute(
             "UPDATE writer_owners SET heartbeat_at = ?, expires_at = ? "
@@ -3667,27 +5643,17 @@ class MarkdownCoordinator:
             raise RuntimeError(f"transaction after-image is corrupt for {row['path']}")
         temporary = target.parent / f".{target.name}.{uuid.uuid4().hex}.tmp"
         self._write_new_file(temporary, content, owner_only=False)
-        try:
-            temporary_handle = _open_windows_file_for_mutation(temporary)
-        except BaseException:
+        self._before_target_mutation(target)
+        outcome = durable_publish_file(
+            temporary,
+            target,
+            replace=row["kind"] == "replace",
+            expected_sha256=row["after_hash"],
+            max_bytes=MAX_KNOWLEDGE_TARGET_BYTES,
+        )
+        if outcome == "duplicate":
             temporary.unlink()
-            raise
-        renamed = False
-        try:
-            self._before_target_mutation(target)
-            _rename_windows_handle(
-                temporary_handle,
-                parent_handle,
-                target.name,
-                replace=row["kind"] == "replace",
-            )
-            renamed = True
             fsync_directory(target.parent)
-        finally:
-            if not renamed:
-                with contextlib.suppress(OSError):
-                    _delete_windows_handle(temporary_handle)
-            _close_windows_handle(temporary_handle)
 
     def _before_target_mutation(self, target: Path) -> None:
         """Failure-injection boundary after parent binding and before mutation."""

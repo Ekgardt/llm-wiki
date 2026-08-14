@@ -18,11 +18,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
-from datetime import datetime
 from pathlib import Path
 
+from integration_config_backup import publish_configuration
+
 OUR_SCRIPT_MARKERS = (
+    "integration_adapter.py",
     "session_start_context.py",
     "precompact_capture.py",
     "session_end_capture.py",
@@ -42,14 +43,20 @@ def _default_user_settings() -> Path:
     return home / ".claude" / "settings.json"
 
 
-def _load_json(path: Path) -> dict:
+def _load_json(path: Path, *, label: str, missing_ok: bool = False) -> dict:
     if not path.exists():
-        return {}
+        if missing_ok:
+            return {}
+        raise ValueError(f"{label} is missing: {path}")
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    except OSError as exc:
+        raise ValueError(f"{label} could not be read: {path}") from exc
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{label} is not valid JSON: {path}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"{label} must contain a JSON object: {path}")
+    return data
 
 
 def _command_is_ours(command: str) -> bool:
@@ -144,10 +151,10 @@ def apply_merge(
     state_root: str,
     dry_run: bool = False,
 ) -> dict:
-    user = _load_json(user_settings)
-    tmpl = _load_json(template)
+    user = _load_json(user_settings, label="user settings", missing_ok=True)
+    tmpl = _load_json(template, label="template")
     if not tmpl:
-        raise SystemExit(f"merge_claude_settings: template missing or empty: {template}")
+        raise ValueError(f"template is empty: {template}")
 
     merged = merge_settings(user, tmpl, vault_root, state_root)
     text = json.dumps(merged, indent=2, ensure_ascii=False) + "\n"
@@ -156,15 +163,11 @@ def apply_merge(
         print(text)
         return merged
 
-    user_settings.parent.mkdir(parents=True, exist_ok=True)
-    if user_settings.exists():
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        bak = user_settings.with_name(f"settings.json.bak-llm-wiki-{stamp}")
-        shutil.copy2(user_settings, bak)
+    changed, bak = publish_configuration(user_settings, text.encode("utf-8"))
+    if bak is not None:
         print(f"merge_claude_settings: backup → {bak}")
-
-    user_settings.write_text(text, encoding="utf-8")
-    print(f"merge_claude_settings: wrote {user_settings}")
+    if changed:
+        print(f"merge_claude_settings: wrote {user_settings}")
     return merged
 
 

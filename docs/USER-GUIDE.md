@@ -47,9 +47,31 @@ $env:LLM_WIKI_ROOT = (Get-Location).Path
 .\install.ps1
 ```
 
-Remote bootstrap is not published. The approved replacement will require a full
-40-hex `LLM_WIKI_COMMIT` before fetching or executing installer code. The local
-installer detects your agents and wires them up automatically.
+Remote bootstrap accepts only a full 40-hex `LLM_WIKI_COMMIT`. It fetches that exact
+commit into a new `~/LLM-wiki`, verifies `HEAD`, repository identity, and required files,
+then executes the checked-out installer. Branches and tags are rejected. Existing
+checkouts retain all remote settings unless `--protect-push` or `-ProtectPush` is explicit.
+The installer detects agents. It configures OpenCode, Codex, and Claude only when their
+configuration verifies; Cursor and Antigravity require the manual copy steps below, and
+Obsidian is a viewer-only integration.
+
+### Installed-vault reliability check
+
+Run the shared installed-vault validator without mutation:
+
+```bash
+uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json
+```
+
+The check performs bounded reads and does not create `run/`, change Git, or delete
+knowledge, operational state, retired databases, legacy caches, tombstones, or
+compatibility markers. It reports Reliability V3 fresh, upgrade-required, partial,
+adopted, and conflict evidence in a closed JSON envelope.
+
+Mutating Reliability V3 adoption remains disabled until the v3 queue mutation and
+canonical ownership tasks are complete. Supplying the full offline apply gate currently
+fails closed with `reliability_v3_runtime_activation_incomplete`; do not treat that as a
+successful cutover and do not remove v2 state manually.
 
 ### Option B: Manual setup
 
@@ -197,7 +219,10 @@ uv run python scripts/search_memory.py --project my-app "decisions"
 uv run python scripts/query_memory.py "why did we choose Postgres?" --file-back
 ```
 
-`search_memory.py` runs hybrid BM25 + Vector + Graph fusion.
+Plain `search_memory.py` always runs BM25. `--semantic` enables vectors when the
+optional model is available; graph-neighbor fusion applies only when graph evidence
+is available. If optional signals are unavailable, search returns the BM25 result
+instead of claiming triple-fusion.
 `query_memory.py` asks the LLM to answer from the knowledge index and
 optionally files the answer as a Q&A page.
 

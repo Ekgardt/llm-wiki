@@ -105,8 +105,8 @@ LLM Wiki даёт каждому AI-агенту, которым вы польз
 - **5 LLM-бэкендов** (авто-детекция): OpenCode → Codex → Claude CLI → OpenAI → Ollama
 - **Кросс-платформенность**: Windows, macOS, Linux, WSL2
 - **Локально и без daemon-процессов** — установленный baseline включает MCP-пакет; vector search и Cognee остаются опциональными
-- **Кросс-платформенная CI-матрица**: Ubuntu + Windows + macOS, Python 3.10 + 3.13
-- **Pre-commit хуки**: ruff (статический анализ) + структурный lint + gitleaks (сканирование секретов)
+- **Кросс-платформенная CI-матрица**: Ubuntu + Windows + macOS, Python 3.10–3.14
+- **Pre-commit хуки (opt-in)**: ruff (статический анализ) + структурный lint + gitleaks (сканирование секретов). Опционально; установщик не активирует эти хуки. Включение: `uv run --locked --no-sync pre-commit install --hook-type pre-commit --hook-type pre-push`.
 
 ---
 
@@ -119,11 +119,9 @@ LLM Wiki даёт каждому AI-агенту, которым вы польз
 - [uv](https://docs.astral.sh/uv/)
 - AI-агент, которым вы уже пользуетесь (OpenCode, Codex, Claude Code, Cursor или Antigravity)
 
-### Ручная установка из исходников
+### Установка из исходников
 
-Production URL для удалённого bootstrap пока не опубликован. Утверждённый, но ещё
-не реализованный bootstrap потребует, чтобы `LLM_WIKI_COMMIT` был полным 40-значным
-commit OID в hex-формате. До его выпуска клонируйте и проверьте исходники перед установкой:
+Рекомендуемый путь по-прежнему состоит в клонировании и проверке исходников перед установкой:
 
 ```bash
 git clone https://github.com/Ekgardt/llm-wiki.git
@@ -143,9 +141,52 @@ $env:LLM_WIKI_ROOT = (Get-Location).Path
 .\install.ps1
 ```
 
-Локальный установщик синхронизирует locked-зависимости базового MCP, запускает полный регрессионный набор
-для диагностики, создаёт runtime-директории и подключает поддерживаемых агентов. Удалённый
-bootstrap останется отключённым до реализации immutable-проверки полного commit OID.
+Удалённый bootstrap поддерживается только когда `LLM_WIKI_COMMIT` является точным
+40-значным commit OID в hex-формате. Передавайте установщик только из доверенного источника
+и задавайте это значение: bootstrap получает точный commit, проверяет `HEAD`, identity
+репозитория и обязательные файлы, затем запускает только установщик из checkout. Имена
+веток и тегов отклоняются.
+
+Локальный установщик синхронизирует locked production baseline, запускает ограниченный
+production smoke, создаёт runtime-директории и подключает поддерживаемых агентов. Полный
+регрессионный набор остаётся отдельным development- и release-gate. Существующие checkout
+сохраняют все Git remotes; `--protect-push` или `-ProtectPush` заменяет push URL каждого
+remote на `no-push`.
+
+### Профили зависимостей
+
+MCP входит в production baseline; `mcp-server` остаётся compatibility alias. Свежая
+production-установка использует точный lock без development-групп:
+
+```bash
+uv sync --locked --no-default-groups
+uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120
+uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json
+```
+
+Команда repair по умолчанию работает только на чтение и сообщает о fresh,
+upgrade-required, partial, adopted или conflicting состоянии Reliability V3, не создавая
+`run/`. Изменяющая adoption пока намеренно не активирована: даже с offline apply-флагами
+backend завершается fail-closed с `reliability_v3_runtime_activation_incomplete`, пока не
+готовы v3 queue writers и канонический ownership protocol. Команда никогда не удаляет
+`run/`, knowledge, retired databases, legacy caches или compatibility markers.
+
+Опциональные extras добавляются без удаления уже выбранных оператором пакетов:
+
+```bash
+uv sync --locked --no-default-groups --inexact --extra hybrid
+uv sync --locked --no-default-groups --inexact --extra code-graph
+```
+
+Разработчики устанавливают locked development group и запускают полный регрессионный набор
+без неявной синхронизации:
+
+```bash
+uv sync --locked
+uv run --locked --no-sync pytest -q
+```
+
+Node 22 опционален и нужен только для квалифицированной precise Python navigation через Pyright.
 
 ### Проверка работы
 
@@ -158,16 +199,16 @@ uv run python scripts/lookup_mode.py
 
 ## Подключение агентов
 
-LLM Wiki авто-детектирует установленных агентов во время установки. Вот что подключается:
+LLM Wiki обнаруживает установленных агентов и сообщает, выполняется ли интеграция автоматически или требует ручного шага:
 
-| Агент | Интеграция | Как |
-|-------|------------|-----|
-| **OpenCode** | MCP + тонкий JS lifecycle-плагин | MCP выполняет чтение/действия; плагин передаёт события в `integration_adapter.py` |
-| **Codex CLI** | MCP + тонкая обёртка | MCP выполняет чтение/действия; обёртка передаёт lifecycle-события |
-| **Claude Code** | MCP + тонкие settings.json хуки | MCP выполняет чтение/действия; пять хуков передают lifecycle-события |
-| **Cursor** | MCP + rules-файл | Настройте MCP; скопируйте `integrations/cursor/rules/llm-wiki.mdc` для инструкций |
-| **Antigravity** | MCP + AGENTS.md snippet | Настройте MCP; скопируйте `integrations/antigravity/AGENTS.md` для инструкций |
-| **Obsidian** | Опциональный Markdown viewer | Откройте vault напрямую; UI или ingestion-функции Obsidian не требуются |
+| Агент | Статус | Интеграция | Как |
+|-------|--------|------------|-----|
+| **OpenCode** | Автоматически после успешной проверки конфигурации | MCP + тонкий JS lifecycle-плагин | MCP выполняет чтение/действия; плагин передаёт события в `integration_adapter.py` |
+| **Codex CLI** | Автоматически после успешной проверки; доверие к хукам подтверждается в `/hooks` | MCP + официальные lifecycle-хуки | MCP выполняет чтение/действия; хуки передают lifecycle-события |
+| **Claude Code** | Автоматически после успешного merge и проверки settings | MCP + тонкие settings.json хуки | MCP выполняет чтение/действия; пять хуков передают lifecycle-события |
+| **Cursor** | Вручную | MCP + rules-файл | Настройте MCP; скопируйте `integrations/cursor/rules/llm-wiki.mdc` для инструкций |
+| **Antigravity** | Вручную | MCP + AGENTS.md snippet | Настройте MCP; скопируйте `integrations/antigravity/AGENTS.md` для инструкций |
+| **Obsidian** | Только viewer | Опциональный Markdown viewer | Откройте vault напрямую; UI или ingestion-функции Obsidian не требуются |
 
 Все агенты используют общий vault — решение, записанное Cursor, видно OpenCode в следующей сессии.
 
@@ -176,7 +217,7 @@ LLM Wiki авто-детектирует установленных агенто
 Для гибридного BM25 + Vector поиска (находит семантически связанные страницы даже без совпадения ключевых слов):
 
 ```bash
-uv sync --extra semantic
+uv sync --locked --no-default-groups --inexact --extra semantic
 ```
 
 ### Опционально: Cognee-граф (300+ страниц)
@@ -184,7 +225,7 @@ uv sync --extra semantic
 Для entity extraction + relationship graph в масштабе:
 
 ```bash
-uv sync --extra cognee
+uv sync --locked --no-default-groups --inexact --extra cognee
 ```
 
 См. [docs/SETUP-COGNEE.md](docs/SETUP-COGNEE.md) для настройки Ollama.

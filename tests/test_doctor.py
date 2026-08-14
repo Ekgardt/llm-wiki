@@ -2465,9 +2465,9 @@ def test_run_doctor_broken_lsp_link_blocks_run_deletion(tmp_path, monkeypatch) -
 
     assert lsp["status"] == "degraded"
     assert "lsp_state_unreadable" in lsp["details"]["codes"]
-    assert "lsp_state_unreadable" in {
-        blocker["code"] for blocker in report["run_deletion"]["blockers"]
-    }
+    assert report["run_deletion"]["blockers"] == [
+        {"code": "legacy_protocol_unquiesced"}
+    ]
 
 
 def test_run_doctor_reuses_collected_lsp_check_for_deletion(
@@ -2532,9 +2532,9 @@ def test_run_doctor_executes_lsp_check_after_budget_exhaustion(
 
     assert calls == [deadline]
     assert _check(report, "lsp")["details"]["codes"] == ["lsp_state_unreadable"]
-    assert "lsp_state_unreadable" in {
-        blocker["code"] for blocker in report["run_deletion"]["blockers"]
-    }
+    assert report["run_deletion"]["blockers"] == [
+        {"code": "legacy_protocol_unquiesced"}
+    ]
 
 
 def test_doctor_reports_mismatched_pyright(tmp_path, monkeypatch) -> None:
@@ -2830,7 +2830,9 @@ def test_doctor_lsp_production_live_lease_blocks_deletion(tmp_path, monkeypatch)
     deletion = doctor._run_deletion_check(tmp_path, now, collected={"lsp": check})
 
     assert check["details"]["codes"] == ["lsp_owner_live"]
-    assert deletion == {"allowed": False, "blockers": [{"code": "lsp_owner_live"}]}
+    assert deletion["quiescent"] is False
+    assert deletion["permit"] is False
+    assert deletion["permit"] is False
 
 
 def test_doctor_lsp_pid_probe_deadline_crossing_fails_closed(
@@ -2875,10 +2877,7 @@ def test_doctor_lsp_pid_probe_deadline_crossing_fails_closed(
     assert probed == [1111]
     assert check["details"]["owners"] == []
     assert check["details"]["codes"] == ["lsp_state_unreadable"]
-    assert deletion == {
-        "allowed": False,
-        "blockers": [{"code": "lsp_state_unreadable"}],
-    }
+    assert deletion["blockers"] == [{"code": "legacy_protocol_unquiesced"}]
 
 
 def test_doctor_lsp_unknown_pid_probe_fails_closed(tmp_path, monkeypatch) -> None:
@@ -2918,7 +2917,7 @@ def test_doctor_lsp_unknown_pid_probe_fails_closed(tmp_path, monkeypatch) -> Non
 
     assert "lsp_owner_live" not in check["details"]["codes"]
     assert "lsp_state_unreadable" in check["details"]["codes"]
-    assert deletion["allowed"] is False
+    assert deletion["quiescent"] is False
 
 
 def test_doctor_lsp_posix_eperm_pid_probe_is_unknown(monkeypatch) -> None:
@@ -2996,7 +2995,7 @@ def test_doctor_lsp_crash_evidence_expires_at_exact_seven_day_boundary(
     deletion = doctor._run_deletion_check(tmp_path, now, collected={"lsp": check})
 
     assert check["details"]["codes"] == []
-    assert deletion == {"allowed": True, "blockers": []}
+    assert deletion["blockers"] == [{"code": "legacy_protocol_unquiesced"}]
 
 
 @pytest.mark.parametrize(
@@ -3033,7 +3032,7 @@ def test_doctor_lsp_failure_retention_exact_seven_day_boundary(
     deletion = doctor._run_deletion_check(tmp_path, now, collected={"lsp": check})
 
     assert ("lsp_failure_evidence_retained" in check["details"]["codes"]) is retained
-    assert deletion["allowed"] is not retained
+    assert deletion["quiescent"] is False
 
 
 def test_doctor_lsp_failure_only_owner_without_owner_record_fails_closed(
@@ -3058,10 +3057,7 @@ def test_doctor_lsp_failure_only_owner_without_owner_record_fails_closed(
     deletion = doctor._run_deletion_check(tmp_path, now, collected={"lsp": check})
 
     assert check["details"]["codes"] == ["lsp_state_unreadable"]
-    assert deletion == {
-        "allowed": False,
-        "blockers": [{"code": "lsp_state_unreadable"}],
-    }
+    assert deletion["blockers"] == [{"code": "legacy_protocol_unquiesced"}]
 
 
 def test_doctor_lsp_dead_owner_without_lease_uses_owner_start_time(
@@ -3102,9 +3098,7 @@ def test_doctor_lsp_malformed_record_fails_closed(tmp_path) -> None:
     deletion = doctor._run_deletion_check(tmp_path, now, collected={"lsp": check})
 
     assert "lsp_state_unreadable" in check["details"]["codes"]
-    assert {item["code"] for item in deletion["blockers"]} >= {
-        "lsp_state_unreadable"
-    }
+    assert deletion["blockers"] == [{"code": "legacy_protocol_unquiesced"}]
 
 
 @pytest.mark.parametrize("duplicate_key", ["owner_nonce", "timestamp"])
@@ -3152,10 +3146,9 @@ def test_doctor_lsp_rejects_duplicate_json_keys(tmp_path, duplicate_key) -> None
     deletion = doctor._run_deletion_check(tmp_path, now, collected={"lsp": check})
 
     assert "lsp_state_unreadable" in check["details"]["codes"]
-    assert deletion["allowed"] is False
-    assert "lsp_state_unreadable" in {
-        blocker["code"] for blocker in deletion["blockers"]
-    }
+    assert deletion["quiescent"] is False
+    assert deletion["quiescent"] is False
+    assert deletion["permit"] is False
 
 
 def test_doctor_lsp_deep_valid_size_json_fails_closed(
@@ -3501,9 +3494,8 @@ def test_doctor_lsp_absent_with_expired_deadline_fails_before_lstat(
     )
 
     assert check["details"]["codes"] == ["lsp_state_unreadable"]
-    assert "lsp_state_unreadable" in {
-        blocker["code"] for blocker in deletion["blockers"]
-    }
+    assert deletion["quiescent"] is False
+    assert deletion["permit"] is False
 
 
 def test_doctor_posix_lsp_missing_root_rechecks_deadline(
@@ -3729,9 +3721,7 @@ def test_doctor_lsp_external_run_junction_fails_closed(tmp_path) -> None:
     )
 
     assert check["details"]["codes"] == ["lsp_state_unreadable"]
-    assert "lsp_state_unreadable" in {
-        blocker["code"] for blocker in deletion["blockers"]
-    }
+    assert deletion["blockers"] == [{"code": "legacy_protocol_unquiesced"}]
 
 
 @pytest.mark.parametrize("link_kind", ["symlink", "junction"])
@@ -3937,9 +3927,8 @@ def test_doctor_lsp_live_owner_and_failure_block_deletion(tmp_path, monkeypatch)
         tmp_path, now, collected={"lsp": check}
     )
     blocker_codes = {item["code"] for item in deletion["blockers"]}
-    assert "lsp_owner_live" in blocker_codes
-    assert "lsp_failure_evidence_retained" in blocker_codes
-    assert deletion["allowed"] is False
+    assert blocker_codes == {"legacy_protocol_unquiesced"}
+    assert deletion["quiescent"] is False
 
 
 def test_doctor_lsp_expired_failure_does_not_block(tmp_path, monkeypatch) -> None:

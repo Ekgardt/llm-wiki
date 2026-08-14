@@ -66,6 +66,7 @@ except Exception:  # noqa: BLE001
     def spawn_detached(args):  # type: ignore[misc]
         return None
 
+from capture_operation import claim_operation, complete_operation  # noqa: E402
 from event_envelope import build_event_envelope  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
@@ -163,6 +164,35 @@ def _record_dedupe(slug: str, prompt_hash: str) -> None:
         pass  # never fail the hook on dedupe-bookkeeping
 
 
+def _claim_prompt_operation(
+    slug: str, prompt_hash: str, *, source_event_id: str | None = None
+) -> str | None:
+    key = f"{slug}::{prompt_hash}"
+    return claim_operation(
+        lambda mutate: update_state(mutate, lock_timeout=HOOK_STATE_LOCK_TIMEOUT),
+        namespace="prompt_capture_dedupe",
+        key=key,
+        prefix="user-prompt",
+        source_event_id=source_event_id,
+        rate_limit_seconds=RATE_LIMIT_SECONDS,
+        max_entries=100,
+        now=datetime.now(),
+    )
+
+
+def _complete_prompt_operation(
+    slug: str, prompt_hash: str, operation_id: str
+) -> None:
+    key = f"{slug}::{prompt_hash}"
+    complete_operation(
+        lambda mutate: update_state(mutate, lock_timeout=HOOK_STATE_LOCK_TIMEOUT),
+        namespace="prompt_capture_dedupe",
+        key=key,
+        operation_id=operation_id,
+        now=datetime.now(),
+    )
+
+
 def _claim_prompt_dedupe(slug: str, prompt_hash: str) -> bool:
     """Atomically reserve a prompt key; return True only for the first caller."""
     claimed = False
@@ -250,7 +280,7 @@ def _write_advisory_output(advisory: str) -> None:
 
 def _append_prompt_tag(
     slug: str, session_id: str, preview: str, operation_id: str | None = None
-) -> None:
+) -> bool:
     """Append a one-line breadcrumb to today's daily log."""
     try:
         from daily_log_append import append_daily
@@ -262,8 +292,9 @@ def _append_prompt_tag(
             f"{safe}"
         )
         append_daily(slug, session_id, block, operation_id=operation_id)
+        return True
     except Exception:  # noqa: BLE001
-        pass  # never fail the hook on disk-write
+        return False
 
 
 def main() -> int:
@@ -302,6 +333,9 @@ def main() -> int:
                 if isinstance(hook.get("parent_event_id"), str)
                 else None
             ),
+            source_event_id=(
+                hook.get("event_id") if isinstance(hook.get("event_id"), str) else None
+            ),
         )
 
         prompt_count = _increment_prompt_count(str(session_id), slug)
@@ -313,15 +347,22 @@ def main() -> int:
         # Rate-limit by the redacted payload hash so capture state cannot
         # become a side channel for source secrets.
         prompt_hash = envelope.content_hash[:12]
-        if not _claim_prompt_dedupe(slug, prompt_hash):
+        operation_id = _claim_prompt_operation(
+            slug,
+            prompt_hash,
+            source_event_id=envelope.source_event_id,
+        )
+        if operation_id is None:
             return 0
 
-        _append_prompt_tag(
+        appended = _append_prompt_tag(
             slug,
             session_id,
             envelope.payload["prompt"],
-            operation_id=f"user-prompt:{envelope.event_id}",
+            operation_id=operation_id,
         )
+        if appended:
+            _complete_prompt_operation(slug, prompt_hash, operation_id)
     except Exception:  # noqa: BLE001
         # Last-resort: never break the user's session over a logging hook.
         pass

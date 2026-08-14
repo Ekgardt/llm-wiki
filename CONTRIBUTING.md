@@ -23,15 +23,22 @@ This is a personal memory system that grew into something others might find usef
 ```bash
 git clone git@github.com:Ekgardt/llm-wiki.git
 cd llm-wiki
-uv sync                              # install Python deps
-uv run pytest -q                     # all tests should pass before you start
-uv run pytest tests/test_xxx.py -v   # run a specific test file
+uv sync --locked                                      # install the development group
+uv run --locked --no-sync pytest -q                   # full regression suite
+uv run --locked --no-sync pytest tests/test_xxx.py -v # run a specific test file
+uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json
 ```
+
+The installed-vault repair surface is check-only until the Reliability V3 runtime
+writers and canonical ownership protocol are complete. Tests must use explicit temporary
+`--root` and `--state-root` paths. Do not point repair verification at this public source
+checkout or an operator's installed vault, and do not weaken the current
+`reliability_v3_runtime_activation_incomplete` fail-closed gate.
 
 Pre-commit hooks (recommended, not mandatory):
 
 ```bash
-uv run pre-commit install --hook-type pre-commit --hook-type pre-push
+uv run --locked --no-sync pre-commit install --hook-type pre-commit --hook-type pre-push
 ```
 
 This runs structural lint + gitleaks on every commit, and the LLM-judged
@@ -78,16 +85,16 @@ The principles below summarize the non-negotiable invariants.
 
 ```bash
 # Fast subset (pre-commit)
-uv run pytest -q
+uv run --locked --no-sync pytest -q
 
 # Full suite
-uv run pytest -v
+uv run --locked --no-sync pytest -v
 
 # Specific module
-uv run pytest tests/test_search_ranking.py -v
+uv run --locked --no-sync pytest tests/test_search_ranking.py -v
 
 # With coverage
-uv run pytest --cov=scripts --cov-report=term-missing
+uv run --locked --no-sync pytest --cov=scripts --cov-report=term-missing
 ```
 
 ### real-Pyright CI
@@ -97,8 +104,8 @@ protocol, process-tree, security, session, facade, and benchmark checks. Tests a
 queries must never download it themselves:
 
 ```bash
-uv run python scripts/install_pyright.py --state-root "$LLM_WIKI_STATE_ROOT"
-uv run python benchmark/run_code_navigation.py --fixture --correctness-only --require-gates
+uv run --locked --no-sync python scripts/install_pyright.py --state-root "$LLM_WIKI_STATE_ROOT"
+uv run --locked --no-sync python benchmark/run_code_navigation.py --fixture --correctness-only --require-gates
 ```
 
 Linux Python 3.10 additionally runs the fixed 100 KLOC qualification gate with
@@ -117,7 +124,7 @@ Before tagging a release or updating public marketing numbers:
     - architecture (three-zone / `knowledge/`)
     - reliable operations commands and contracts
    - benchmark headline numbers (MRR, latency) if changed
-3. **Run the i18n guard test** — `uv run pytest tests/test_readme_i18n.py -q` must pass.
+3. **Run the i18n guard test** — `uv run --locked --no-sync pytest tests/test_readme_i18n.py -q` must pass.
 4. **CHANGELOG** — newest version at top (Keep a Changelog).
 5. **pyproject.toml version** + `uv.lock` package version must match the tag.
 6. If benchmark numbers changed, update `docs/ARCHITECTURE.md` search section + `benchmark/report.md` in the same change.

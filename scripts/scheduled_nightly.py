@@ -11,6 +11,7 @@ All output goes to $LLM_WIKI_STATE_ROOT/logs/nightly-YYYY-MM-DD.md.
 
 from __future__ import annotations
 
+import inspect
 import os
 import sys
 import time
@@ -29,19 +30,26 @@ from memory_state import (  # noqa: E402
     REPORTS_DIR,
     ROOT,
     STATE_ROOT,
-    _is_pid_alive,
     update_state,
+)
+from operational_ownership import (  # noqa: E402
+    OwnerLease,
+    heartbeat_owner,
 )
 
 
-def _refresh_generation(log) -> int:
+def _refresh_generation(log, *, ownership: OwnerLease | None = None) -> int:
     """Run the shared bounded builder under its fenced maintenance owner."""
-    result = run_generation_maintenance(
-        root=ROOT,
-        state_root=STATE_ROOT,
-        time_budget_seconds=60,
-        max_sources=DEFAULT_GENERATION_SOURCE_LIMIT,
-    )
+    arguments = {
+        "root": ROOT,
+        "state_root": STATE_ROOT,
+        "time_budget_seconds": 60,
+        "max_sources": DEFAULT_GENERATION_SOURCE_LIMIT,
+    }
+    if ownership is not None and _accepts_ownership(run_generation_maintenance):
+        result = run_generation_maintenance(**arguments, ownership=ownership)
+    else:
+        result = run_generation_maintenance(**arguments)
     status = result["status"]
     generation = result.get("generation_id") or "none"
     log(f"  generation: {status} (id={generation}, partial={bool(result.get('partial'))})")
@@ -90,52 +98,31 @@ def _record_nightly_skip(today: str, reason: str) -> None:
     update_state(_mutate)
 
 
-def main() -> int:
+def _accepts_ownership(function) -> bool:
+    parameters = inspect.signature(function).parameters
+    return "ownership" in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+
+
+def _run_nightly_body(*, ownership: OwnerLease | None) -> int:
     today = datetime.now().strftime("%Y-%m-%d")
+    if ownership is not None and (
+        ownership.role not in {"nightly", "weekly"} or ownership.scope != "global"
+    ):
+        raise ValueError("nightly work requires a nightly or weekly global owner")
 
-    def _skip_for_maintenance(message: str) -> int:
-        print(message, file=sys.stderr)
-        try:
-            _record_nightly_skip(today, "maintenance_lock_held")
-        except Exception as exc:
-            print(f"scheduled_nightly: could not record skip: {exc}", file=sys.stderr)
-        return 0
-
-    # Maintenance lease: prevent concurrent nightly/weekly runs.
-    maint_lock = STATE_ROOT / "run" / "maintenance.lock"
-    maint_lock.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        fd = os.open(str(maint_lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(fd, str(os.getpid()).encode())
-        os.close(fd)
-    except FileExistsError:
-        # Check if the lock is stale (older than 30 minutes) and the
-        # holder PID is dead. If so, steal it; otherwise skip.
-        stolen = False
-        try:
-            age = time.time() - maint_lock.stat().st_mtime
-            if age > 1800:  # 30 minutes
-                try:
-                    old_pid = int(maint_lock.read_text(encoding="utf-8").strip())
-                    if not _is_pid_alive(old_pid):
-                        maint_lock.unlink()
-                        # Retry acquisition
-                        fd = os.open(str(maint_lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                        os.write(fd, str(os.getpid()).encode())
-                        os.close(fd)
-                        stolen = True
-                    else:
-                        return _skip_for_maintenance(
-                            "scheduled_nightly: maintenance running (stale but PID alive), skipping."
-                        )
-                except (ValueError, OSError):
-                    maint_lock.unlink()
-        except OSError:
-            pass
-        if not stolen:
-            return _skip_for_maintenance(
-                "scheduled_nightly: maintenance already running, skipping."
+    def run_step(command, log, name, *, timeout):
+        if ownership is not None and _accepts_ownership(_run_step):
+            return _run_step(
+                command,
+                log,
+                name,
+                timeout=timeout,
+                ownership=ownership,
             )
+        return _run_step(command, log, name, timeout=timeout)
 
     failures = 1
     terminal_error = None
@@ -154,7 +141,7 @@ def main() -> int:
 
         # Step 1: run the bounded deferred queue worker.
         log("Step 1: working deferred memory queue...")
-        rc = _run_step(
+        rc = run_step(
             [sys.executable, str(ROOT / "scripts" / "memory_queue.py"), "work"],
             log,
             "work",
@@ -166,7 +153,7 @@ def main() -> int:
         # Step 2: maybe_compile (will spawn compile if there's pending work).
         _wait_for_compile_idle(log)
         log("Step 2: triggering compile (if needed)...")
-        rc = _run_step(
+        rc = run_step(
             [sys.executable, str(ROOT / "scripts" / "maybe_compile.py")],
             log,
             "maybe_compile",
@@ -196,7 +183,7 @@ def main() -> int:
         else:
             # Step 3: structural lint (cheap, no LLM).
             log("Step 3: structural lint...")
-            rc = _run_step(
+            rc = run_step(
                 [sys.executable, str(ROOT / "scripts" / "lint_memory.py")],
                 log,
                 "lint",
@@ -207,7 +194,7 @@ def main() -> int:
 
             # Step 3b: rebuild FTS5 search index (cheap, no LLM, <1s for 100 pages).
             log("Step 3b: rebuilding FTS5 search index...")
-            rc = _run_step(
+            rc = run_step(
                 [sys.executable, str(ROOT / "scripts" / "search_memory.py"), "--rebuild"],
                 log,
                 "search",
@@ -218,7 +205,7 @@ def main() -> int:
 
             # Step 3c: refresh one immutable generation under the shared fence.
             log("Step 3c: refreshing immutable evidence generation...")
-            failures += _refresh_generation(log)
+            failures += _refresh_generation(log, ownership=ownership)
 
             # Step 3d: compact disposable telemetry without touching knowledge.
             log("Step 3d: compacting retrieval telemetry...")
@@ -253,12 +240,69 @@ def main() -> int:
             _record_nightly_result(today, failures, terminal_error)
         except Exception as exc:
             print(f"scheduled_nightly: could not record result: {exc}", file=sys.stderr)
+
+
+def run_nightly(*, ownership: OwnerLease | None) -> int:
+    if ownership is None or ownership.role == "weekly":
+        return _run_nightly_body(ownership=ownership)
+    with heartbeat_owner(ownership):
+        return _run_nightly_body(ownership=ownership)
+
+
+def _acquire_legacy_maintenance_marker() -> Path | None:
+    marker = STATE_ROOT / "run/maintenance.lock"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        descriptor = os.open(str(marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         try:
-            current = maint_lock.read_text(encoding="utf-8").strip()
-            if current == str(os.getpid()):
-                maint_lock.unlink()
-        except OSError:
+            os.write(descriptor, str(os.getpid()).encode("ascii"))
+        finally:
+            os.close(descriptor)
+        return marker
+    except FileExistsError:
+        try:
+            age = time.time() - marker.stat().st_mtime
+            if age > 1800:
+                from memory_state import _is_pid_alive
+
+                old_pid = int(marker.read_text(encoding="utf-8").strip())
+                if not _is_pid_alive(old_pid):
+                    marker.unlink()
+                    descriptor = os.open(
+                        str(marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                    )
+                    try:
+                        os.write(descriptor, str(os.getpid()).encode("ascii"))
+                    finally:
+                        os.close(descriptor)
+                    return marker
+        except (OSError, ValueError):
             pass
+        return None
+
+
+def _release_legacy_maintenance_marker(marker: Path) -> None:
+    try:
+        if marker.read_text(encoding="utf-8").strip() == str(os.getpid()):
+            marker.unlink()
+    except OSError:
+        pass
+
+
+def main() -> int:
+    today = datetime.now().strftime("%Y-%m-%d")
+    marker = _acquire_legacy_maintenance_marker()
+    if marker is None:
+        print("scheduled_nightly: maintenance already running, skipping.", file=sys.stderr)
+        try:
+            _record_nightly_skip(today, "maintenance_lock_held")
+        except Exception as exc:
+            print(f"scheduled_nightly: could not record skip: {exc}", file=sys.stderr)
+        return 0
+    try:
+        return run_nightly(ownership=None)
+    finally:
+        _release_legacy_maintenance_marker(marker)
 
 
 if __name__ == "__main__":

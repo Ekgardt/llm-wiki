@@ -14,6 +14,27 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 
+def test_archived_pages_are_documented_as_excluded_from_active_search(tmp_path):
+    import archive_stale
+    import search_memory
+
+    notes = tmp_path / "knowledge" / "notes"
+    notes.mkdir(parents=True)
+    active = notes / "active.md"
+    archived = notes / "archived.md"
+    active.write_text("---\ntype: concept\n---\n# Active\n", encoding="utf-8")
+    archived.write_text(
+        "---\ntype: concept\nstatus: archived\n---\n# Archived\n",
+        encoding="utf-8",
+    )
+
+    assert search_memory._collect_pages(knowledge_dir=notes, root=tmp_path) == [active]
+    documentation = (archive_stale.__doc__ or "").casefold()
+    assert "excluded from active search" in documentation
+    assert "remain searchable" not in documentation
+    assert "de-prioritize" not in documentation
+
+
 @pytest.fixture
 def fake_file(tmp_path):
     """Create a fake markdown file with frontmatter."""

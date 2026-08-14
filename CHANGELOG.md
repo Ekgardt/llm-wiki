@@ -6,6 +6,26 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Made the v4 reliability platform fail closed: Windows path/handle identity no
+  longer truncates IDs or compares incompatible creation/change times; SQLite
+  readers close explicitly; MCP timeout tests drain late workers; metadata
+  publication checks POSIX directory sync and Win32 flush/write-through moves;
+  and locked production, optional, and development profiles directly own their
+  required dependencies. Installers now run a bounded production MCP smoke
+  instead of requiring pytest.
+- Added a nonmutating installed-vault Reliability V3 inspector and redacted CLI,
+  deterministic fresh/upgrade cutover validation, retained byte-identical v2 evidence,
+  tombstone and crash-resume checks, and read-only SQLite validation. Public apply/adoption
+  remains fail-closed with `reliability_v3_runtime_activation_incomplete` until compatible
+  v3 queue writers and canonical ownership are complete; no runtime state is deleted.
+- Bounded Claude and Codex integration configuration backups to 10 files, 90 days,
+  and 100 MiB per integration. Changed merges now verify a byte-exact sibling
+  preimage before atomic publication, preserve the newest restore point, prune only
+  exact LLM-Wiki-owned backup names after verification, and create no backup for a
+  no-op merge.
+
 ### Added
 
 - Read-only Python code navigation through pinned Pyright 1.1.411: bounded stdlib

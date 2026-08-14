@@ -897,9 +897,9 @@ def test_selection_requires_all_gates_pareto_and_raw_result_evidence():
     assert selection["baseline"] == {
         "overall_basis_points": 9348,
         "parent_recall_at_10_basis_points": 10000,
-        "policy_sha256": "98730a79f843c6d54041bcdbf6dcb8234b832c3a7000e097765afa50a02c472a",
+        "policy_sha256": "28ef83ac73141b57caf08539b55420a539294c31a7cc152d9e057e88141fa5d7",
         "raw_report_path": "benchmark/baseline-2026-07-16-retrieval.json",
-        "raw_report_sha256": "15367e69907ed7dfee6a96ddd47c85b8eef348c5c5e0012c8b311d063b11dfd6",
+        "raw_report_sha256": "efc07b3f50a529adb3b64ac4733d47888a8a464152b76738f48a119966400a0a",
     }
     assert selection["limits"] == {
         "peak_rss_bytes": 4 * 1024**3,

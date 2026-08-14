@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import patch
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
@@ -13,6 +16,145 @@ from reranker import (  # noqa: E402
     reranker_available,
     should_rerank,
 )
+
+
+def _reset_bundle(monkeypatch: pytest.MonkeyPatch) -> None:
+    import reranker
+
+    monkeypatch.setattr(reranker, "_reranker_bundle", None)
+
+
+def test_no_environment_configuration_means_no_reranker_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import reranker
+
+    monkeypatch.delenv("LLMWIKI_RERANKER_MODEL", raising=False)
+    monkeypatch.delenv("LLMWIKI_RERANKER_REVISION", raising=False)
+    _reset_bundle(monkeypatch)
+    monkeypatch.setattr(
+        reranker,
+        "_have_reranker_deps",
+        lambda: pytest.fail("dependency probe ran without a configured identity"),
+    )
+
+    assert reranker.configured_reranker_identity() is None
+    assert reranker._get_reranker_bundle() is None
+
+
+@pytest.mark.parametrize(
+    ("model", "revision"),
+    [
+        ("model", ""),
+        ("", "a" * 40),
+        ("model", "main"),
+        ("model", "v1"),
+        ("model", "A" * 40),
+    ],
+)
+def test_partial_or_mutable_identity_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, model: str, revision: str
+) -> None:
+    import reranker
+
+    monkeypatch.setenv("LLMWIKI_RERANKER_MODEL", model)
+    monkeypatch.setenv("LLMWIKI_RERANKER_REVISION", revision)
+    _reset_bundle(monkeypatch)
+
+    assert reranker.configured_reranker_identity() is None
+
+
+def _fake_reranker_modules(monkeypatch: pytest.MonkeyPatch, calls: list[tuple]) -> None:
+    optimum = ModuleType("optimum")
+    optimum.__path__ = []
+    optimum_onnx = ModuleType("optimum.onnxruntime")
+    transformers = ModuleType("transformers")
+
+    class Model:
+        @classmethod
+        def from_pretrained(cls, model: str, **options):
+            calls.append(("model", model, options))
+            return object()
+
+    class Tokenizer:
+        @classmethod
+        def from_pretrained(cls, model: str, **options):
+            calls.append(("tokenizer", model, options))
+            return object()
+
+    optimum_onnx.ORTModelForSequenceClassification = Model
+    transformers.AutoTokenizer = Tokenizer
+    monkeypatch.setitem(sys.modules, "optimum", optimum)
+    monkeypatch.setitem(sys.modules, "optimum.onnxruntime", optimum_onnx)
+    monkeypatch.setitem(sys.modules, "transformers", transformers)
+
+
+def test_explicit_immutable_model_load_is_local_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import reranker
+
+    revision = "a" * 40
+    monkeypatch.setenv("LLMWIKI_RERANKER_MODEL", "org/model")
+    monkeypatch.setenv("LLMWIKI_RERANKER_REVISION", revision)
+    _reset_bundle(monkeypatch)
+    monkeypatch.setattr(reranker, "_have_reranker_deps", lambda: True)
+    calls: list[tuple] = []
+    _fake_reranker_modules(monkeypatch, calls)
+
+    bundle = reranker._get_reranker_bundle()
+
+    assert bundle is not None
+    assert bundle["model_id"] == "org/model"
+    assert bundle["model_revision"] == revision
+    assert calls == [
+        (
+            "model",
+            "org/model",
+            {
+                "file_name": "onnx/model.onnx",
+                "revision": revision,
+                "local_files_only": True,
+                "trust_remote_code": False,
+            },
+        ),
+        (
+            "tokenizer",
+            "org/model",
+            {
+                "revision": revision,
+                "local_files_only": True,
+                "trust_remote_code": False,
+            },
+        ),
+    ]
+
+
+def test_missing_local_artifact_degrades_without_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import reranker
+
+    revision = "b" * 40
+    monkeypatch.setenv("LLMWIKI_RERANKER_MODEL", "org/missing")
+    monkeypatch.setenv("LLMWIKI_RERANKER_REVISION", revision)
+    _reset_bundle(monkeypatch)
+    monkeypatch.setattr(reranker, "_have_reranker_deps", lambda: True)
+    calls: list[tuple] = []
+    _fake_reranker_modules(monkeypatch, calls)
+
+    def missing(model: str, **options):
+        calls.append(("missing", model, options))
+        raise OSError("not cached")
+
+    sys.modules[
+        "optimum.onnxruntime"
+    ].ORTModelForSequenceClassification.from_pretrained = missing
+
+    assert reranker._get_reranker_bundle() is None
+    assert len(calls) == 1
+    assert calls[0][2]["local_files_only"] is True
+    assert calls[0][2]["trust_remote_code"] is False
 
 
 class TestGracefulDegradation:

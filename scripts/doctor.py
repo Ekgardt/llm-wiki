@@ -19,6 +19,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -1295,49 +1296,91 @@ def _filesystem_check(state_root: Path, deadline: float = float("inf")) -> dict:
     )
 
 
-def _append_blocker(blockers: list[dict[str, str]], code: str) -> None:
-    if not any(item["code"] == code for item in blockers):
-        blockers.append({"code": code})
-
-
 def _run_deletion_check(
     state_root: Path,
     now: datetime,
     *,
+    root: Path | None = None,
     deadline: float = float("inf"),
     collected: dict[str, dict] | None = None,
 ) -> dict:
-    """Return every reason the operational ``run/`` tree must be retained."""
-    blockers: list[dict[str, str]] = []
-    checks = dict(collected or {})
-    if "transactions" not in checks:
-        checks["transactions"] = _transaction_check(state_root, now, deadline)
-    if "queue" not in checks:
-        checks["queue"] = _queue_check(state_root, now, deadline)
-    if "archives" not in checks:
-        checks["archives"] = {
-            "id": "archives",
-            "status": "ok",
-            "details": {"deletion_codes": []},
+    """Return an immediate, non-permitting observation of adopted runtime state."""
+    del collected
+    from installed_memory_repair import (
+        ReliabilityV3ValidationError,
+        require_reliability_v3_adopted,
+        validate_reliability_v3_runtime,
+    )
+    from operational_ownership import (
+        OperationalOwnershipError,
+        OwnershipRegistry,
+    )
+
+    def result(codes: list[str]) -> dict[str, object]:
+        blockers = [{"code": code} for code in sorted(set(codes))]
+        return {
+            "schema_version": "run-deletion-snapshot/v1",
+            "quiescent": not blockers,
+            "permit": False,
+            "offline_action_required": True,
+            "blockers": blockers,
         }
-    for check_id in ("transactions", "queue", "archives"):
-        check = checks[check_id]
-        details = check.get("details", {})
-        for code in details.get("deletion_codes", []):
-            _append_blocker(blockers, str(code))
-        if details.get("read_error") and not details.get("deletion_codes"):
-            _append_blocker(blockers, f"{check_id}_state_unreadable")
-    if "lsp" not in checks:
-        checks["lsp"] = _lsp_runtime_check(state_root, now, deadline=deadline)
-    lsp_check = checks["lsp"]
-    lsp_details = lsp_check.get("details", {})
-    for code in lsp_details.get("deletion_codes", []):
-        _append_blocker(blockers, str(code))
-    if lsp_details.get("read_error") and not lsp_details.get("deletion_codes"):
-        _append_blocker(blockers, "lsp_state_unreadable")
-    if _deadline_reached(deadline):
-        _append_blocker(blockers, "run_deletion_state_unknown")
-    return {"allowed": not blockers, "blockers": blockers}
+
+    state_path = Path(state_root)
+    root_path = Path(root) if root is not None else state_path
+    try:
+        require_reliability_v3_adopted(root=root_path, state_root=state_path)
+    except ReliabilityV3ValidationError as exc:
+        code = (
+            "legacy_protocol_unquiesced"
+            if exc.code == "legacy_protocol_unquiesced"
+            else exc.code
+        )
+        return result([code])
+
+    snapshot_deadline = min(deadline, time.monotonic() + 20.0)
+    if _deadline_reached(snapshot_deadline):
+        return result(["run_deletion_state_unknown"])
+    registry = OwnershipRegistry._from_adopted_database(
+        state_path,
+        state_path / "run" / "markdown-transactions-v3.sqlite3",
+    )
+    try:
+        owner = registry.acquire("runtime-deletion-check", scope="global")
+    except (OperationalOwnershipError, OSError, sqlite3.Error, ValueError) as exc:
+        code = getattr(exc, "code", "runtime_deletion_check_unavailable")
+        return result([str(code)])
+
+    codes: list[str] = []
+    try:
+        try:
+            codes.extend(
+                validate_reliability_v3_runtime(
+                    root=root_path,
+                    state_root=state_path,
+                    now=now,
+                    deadline=snapshot_deadline,
+                    excluded_owner=owner,
+                )
+            )
+            for check in (
+                _archive_check(root_path, state_path, snapshot_deadline),
+                _lsp_runtime_check(state_path, now, deadline=snapshot_deadline),
+            ):
+                details = check.get("details", {})
+                codes.extend(str(code) for code in details.get("deletion_codes", []))
+                if details.get("read_error") and not details.get("deletion_codes"):
+                    codes.append(f"{check['id']}_state_unreadable")
+        except (OSError, PermissionError, sqlite3.Error, TimeoutError, ValueError):
+            codes.append("run_deletion_state_unknown")
+        if _deadline_reached(snapshot_deadline):
+            codes.append("run_deletion_state_unknown")
+    finally:
+        try:
+            registry.release(owner)
+        except (OperationalOwnershipError, OSError, sqlite3.Error, ValueError):
+            codes.append("runtime_deletion_check_release_failed")
+    return result(codes)
 
 
 LSP_FAILURE_RETENTION = timedelta(days=7)
@@ -2835,7 +2878,9 @@ def _codex_config_state(path: Path) -> tuple[bool | None, str]:
         command == "uv"
         and isinstance(args, list)
         and all(isinstance(item, str) for item in args)
-        and "scripts/mcp_server.py" in args
+        and len(args) == 8
+        and args[:4] == ["run", "--locked", "--no-sync", "--directory"]
+        and args[5:] == ["python", "scripts/mcp_server.py"]
         and enabled is True
     )
     return configured, "configured" if configured else "target_missing_or_invalid"
@@ -3751,7 +3796,9 @@ def _repair_generation_catalog(
     ):
         return
     catalog = generation_catalog.GenerationCatalog(state_root)
-    with catalog._readonly() as database:  # noqa: SLF001 - repair needs pointer comparison
+    with closing(
+        catalog._readonly()  # noqa: SLF001 - repair needs pointer comparison
+    ) as database:
         row = database.execute(
             "SELECT active_generation_id FROM catalog_state WHERE singleton=1"
         ).fetchone()
@@ -3771,7 +3818,7 @@ def _repair_generation_catalog(
             }
         )
 
-    with catalog._readonly() as database:  # noqa: SLF001 - bounded catalog repair
+    with closing(catalog._readonly()) as database:  # noqa: SLF001 - bounded catalog repair
         rows = database.execute(
             "SELECT generation_id FROM generations LIMIT ?",
             (generation_catalog.MAX_GENERATIONS + 1,),
@@ -3821,7 +3868,7 @@ def _partition_code_extraction(
     deadline: float | None = None,
     cancelled=None,
 ):
-    """Partition one workspace extraction by the source that proves each record."""
+    """Partition one multi-source extraction by the source proving each record."""
     from evidence_graph_builder import SourceExtraction
 
     source_ids = tuple(source.record.logical_id for source in code_sources)
@@ -3882,14 +3929,17 @@ def _partition_code_extraction(
         source_node = observation.get("source_node_id")
         if source_node is not None:
             node_references.setdefault(str(source_node), set()).add(owner)
+        observation_dependencies = getattr(result, "observation_source_dependencies", {})
         if (
             observation["reason"] in {"missing_dependency", "unresolved_reference"}
             and str(observation["observation_id"])
-            not in result.observation_source_dependencies
+            not in observation_dependencies
         ):
             workspace_sensitive.add(owner)
 
-    for observation_id, candidate_sources in result.observation_source_dependencies.items():
+    for observation_id, candidate_sources in getattr(
+        result, "observation_source_dependencies", {}
+    ).items():
         check_stop()
         dependencies[record_sources[str(observation_id)]].update(candidate_sources)
     for dependency in getattr(result, "dependencies", ()):
@@ -3955,10 +4005,17 @@ def _generation_source_extractor(snapshot, repository_id: str):
             ),
         )
     )
+    knowledge_sources = tuple(
+        source
+        for source in snapshot.sources
+        if source.record.relative_path.startswith("knowledge/")
+        and not source.record.relative_path.startswith("knowledge/projects/")
+    )
     code_partitions = None
+    knowledge_partitions = None
 
     def extract(source, content, *, sources, source_bytes, deadline, cancelled):
-        nonlocal code_partitions
+        nonlocal code_partitions, knowledge_partitions
         del sources
         captured = by_id[str(source["source_id"])]
         if captured.content != content:
@@ -3971,7 +4028,24 @@ def _generation_source_extractor(snapshot, repository_id: str):
         elif path.startswith("knowledge/"):
             from knowledge_extractor import extract_knowledge
 
-            result = extract_knowledge((captured,), deadline=deadline, cancelled=cancelled)
+            if knowledge_partitions is None:
+                if any(
+                    item.content != source_bytes[item.record.logical_id]
+                    for item in knowledge_sources
+                ):
+                    raise ValueError("knowledge extraction bytes differ from snapshot")
+                workspace_result = extract_knowledge(
+                    knowledge_sources,
+                    deadline=deadline,
+                    cancelled=cancelled,
+                )
+                knowledge_partitions = _partition_code_extraction(
+                    workspace_result,
+                    knowledge_sources,
+                    deadline=deadline,
+                    cancelled=cancelled,
+                )
+            result = knowledge_partitions[captured.record.logical_id]
         else:
             from code_extractor import extract_code
 
@@ -4684,6 +4758,7 @@ def run_doctor(
     run_deletion = _run_deletion_check(
         state_path,
         generated_at,
+        root=root_path,
         deadline=deadline,
         collected=collected,
     )
@@ -4691,8 +4766,8 @@ def run_doctor(
         _result(
             "run_deletion",
             "ok",
-            "Runtime history may be deleted."
-            if run_deletion["allowed"]
+            "Runtime state was observed quiescent; offline action is still required."
+            if run_deletion["quiescent"]
             else "Runtime history must be retained.",
             run_deletion,
         )

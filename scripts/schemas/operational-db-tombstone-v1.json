@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/operational-db-tombstone-v1.json",
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "fresh": {
+      "type": "object",
+      "required": ["schema_version", "database", "source_state", "legacy_path", "replacement_path", "operation_id", "adoption_schema_sha256"],
+      "properties": {
+        "schema_version": {"const": "operational-db-tombstone/v1"},
+        "database": {"enum": ["queue", "coordinator"]},
+        "source_state": {"const": "fresh"},
+        "legacy_path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "replacement_path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "operation_id": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "adoption_schema_sha256": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": false
+    },
+    "upgrade": {
+      "type": "object",
+      "required": ["schema_version", "database", "source_state", "legacy_path", "replacement_path", "retired_path", "retired_sha256", "operation_id", "adoption_schema_sha256"],
+      "properties": {
+        "schema_version": {"const": "operational-db-tombstone/v1"},
+        "database": {"enum": ["queue", "coordinator"]},
+        "source_state": {"const": "upgrade"},
+        "legacy_path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "replacement_path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "retired_path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "retired_sha256": {"$ref": "#/$defs/digest"},
+        "operation_id": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "adoption_schema_sha256": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "required": ["schema_version", "database", "source_state", "legacy_path", "replacement_path", "operation_id", "adoption_schema_sha256"],
+  "properties": {
+    "schema_version": {"const": "operational-db-tombstone/v1"},
+    "database": {"enum": ["queue", "coordinator"]},
+    "source_state": {"enum": ["fresh", "upgrade"]},
+    "legacy_path": {"type": "string"},
+    "replacement_path": {"type": "string"},
+    "retired_path": {"type": "string"},
+    "retired_sha256": {"$ref": "#/$defs/digest"},
+    "operation_id": {"type": "string"},
+    "adoption_schema_sha256": {"$ref": "#/$defs/digest"}
+  },
+  "oneOf": [{"$ref": "#/$defs/fresh"}, {"$ref": "#/$defs/upgrade"}],
+  "additionalProperties": false
+}

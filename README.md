@@ -105,8 +105,8 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 - **5 LLM backends** (auto-detected): OpenCode → Codex → Claude CLI → OpenAI → Ollama
 - **Cross-platform**: Windows, macOS, Linux, WSL2
 - **Local and zero-daemon** — the installed baseline includes the MCP package; vector search and Cognee remain optional
-- **Cross-platform CI matrix**: Ubuntu + Windows + macOS, Python 3.10 + 3.13
-- **Pre-commit hooks**: ruff (static analysis) + structural lint + gitleaks (secret scanning)
+- **Cross-platform CI matrix**: Ubuntu + Windows + macOS, Python 3.10 through 3.14
+- **Pre-commit hooks (opt-in)**: ruff (static analysis) + structural lint + gitleaks (secret scanning). Opt-in; the installer does not activate these hooks. Enable them with `uv run --locked --no-sync pre-commit install --hook-type pre-commit --hook-type pre-push`.
 
 ---
 
@@ -119,11 +119,9 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 - [uv](https://docs.astral.sh/uv/)
 - An AI agent you already use (OpenCode, Codex, Claude Code, Cursor, or Antigravity)
 
-### Manual source install
+### Source install
 
-No production remote bootstrap is currently published. The approved but
-not-yet-implemented bootstrap target will require `LLM_WIKI_COMMIT` to be a full
-40-hex commit OID. Until that ships, clone and inspect the source before installing:
+The recommended path is still to clone and inspect the source before installing:
 
 ```bash
 git clone https://github.com/Ekgardt/llm-wiki.git
@@ -143,9 +141,50 @@ $env:LLM_WIKI_ROOT = (Get-Location).Path
 .\install.ps1
 ```
 
-The local installer syncs locked MCP baseline dependencies, runs the full regression suite
-for diagnostics, creates runtime directories, and wires supported agents. Remote bootstrap
-remains disabled until immutable full-OID verification is implemented.
+The installer also supports remote bootstrap only when `LLM_WIKI_COMMIT` is an exact
+40-hex commit OID. Pipe the installer from a trusted location while setting that value;
+the bootstrap fetches that exact commit, verifies `HEAD`, repository identity, and required
+files, then executes only the checked-out installer. Branch and tag names are rejected.
+
+The local installer syncs the locked production baseline, runs a bounded production smoke,
+creates runtime directories, and wires supported agents. The full regression suite remains
+a separate development and release gate. Existing checkouts keep all Git remote settings;
+pass `--protect-push` or `-ProtectPush` to replace every remote's push URLs with `no-push`.
+
+### Dependency profiles
+
+MCP is part of the production baseline; `mcp-server` remains a compatibility alias. Fresh
+production installs use the exact lock without development groups:
+
+```bash
+uv sync --locked --no-default-groups
+uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120
+uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json
+```
+
+The repair command is read-only by default and reports fresh, upgrade-required,
+partial, adopted, or conflicting Reliability V3 evidence without creating `run/`.
+Mutating adoption is intentionally not activated yet: even with the offline apply
+flags, the backend fails closed with `reliability_v3_runtime_activation_incomplete`
+until the v3 queue writers and canonical ownership protocol are complete. It never
+deletes `run/`, knowledge, retired databases, legacy caches, or compatibility markers.
+
+Optional extras are additive and preserve packages already selected by the operator:
+
+```bash
+uv sync --locked --no-default-groups --inexact --extra hybrid
+uv sync --locked --no-default-groups --inexact --extra code-graph
+```
+
+Contributors install the locked development group and run the full regression suite without
+an implicit sync:
+
+```bash
+uv sync --locked
+uv run --locked --no-sync pytest -q
+```
+
+Node 22 is optional and is needed only for qualified precise Python navigation with Pyright.
 
 ### Verify it works
 
@@ -158,16 +197,16 @@ uv run python scripts/lookup_mode.py
 
 ## Wire up your agents
 
-LLM Wiki auto-detects installed agents during install. Here's what gets wired:
+LLM Wiki detects installed agents during install and reports whether integration is automatic or still requires a manual step:
 
-| Agent | Integration | How |
-|-------|-------------|-----|
-| **OpenCode** | MCP + thin JS lifecycle plugin | MCP provides reads/actions; the plugin forwards lifecycle events to `integration_adapter.py` |
-| **Codex CLI** | MCP + thin wrapper | MCP provides reads/actions; the wrapper forwards lifecycle events |
-| **Claude Code** | MCP + thin settings.json hooks | MCP provides reads/actions; five hooks forward lifecycle events |
-| **Cursor** | MCP + rules file | Configure MCP; copy `integrations/cursor/rules/llm-wiki.mdc` for guidance |
-| **Antigravity** | MCP + AGENTS.md snippet | Configure MCP; copy `integrations/antigravity/AGENTS.md` for guidance |
-| **Obsidian** | Optional Markdown viewer | Open the vault directly; no Obsidian UI or ingestion feature is required |
+| Agent | Status | Integration | How |
+|-------|--------|-------------|-----|
+| **OpenCode** | Automatic when configuration verifies | MCP + thin JS lifecycle plugin | MCP provides reads/actions; the plugin forwards lifecycle events to `integration_adapter.py` |
+| **Codex CLI** | Automatic when configuration verifies; review hook trust in `/hooks` | MCP + official lifecycle hooks | MCP provides reads/actions; hooks forward lifecycle events |
+| **Claude Code** | Automatic when settings merge verifies | MCP + thin settings.json hooks | MCP provides reads/actions; five hooks forward lifecycle events |
+| **Cursor** | Manual | MCP + rules file | Configure MCP; copy `integrations/cursor/rules/llm-wiki.mdc` for guidance |
+| **Antigravity** | Manual | MCP + AGENTS.md snippet | Configure MCP; copy `integrations/antigravity/AGENTS.md` for guidance |
+| **Obsidian** | Viewer only | Optional Markdown viewer | Open the vault directly; no Obsidian UI or ingestion feature is required |
 
 All agents share the same vault — a decision recorded by Cursor is visible to OpenCode in its next session.
 
@@ -176,7 +215,7 @@ All agents share the same vault — a decision recorded by Cursor is visible to 
 For hybrid BM25 + Vector search (finds semantically related pages even when keywords don't match):
 
 ```bash
-uv sync --extra semantic
+uv sync --locked --no-default-groups --inexact --extra semantic
 ```
 
 ### Optional: Cognee graph (300+ pages)
@@ -184,7 +223,7 @@ uv sync --extra semantic
 For entity extraction + relationship graph at scale:
 
 ```bash
-uv sync --extra cognee
+uv sync --locked --no-default-groups --inexact --extra cognee
 ```
 
 See [docs/SETUP-COGNEE.md](docs/SETUP-COGNEE.md) for Ollama setup.

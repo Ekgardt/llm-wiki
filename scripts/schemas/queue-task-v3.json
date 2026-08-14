@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/queue-task-v3.json",
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "timestamp": {"type": "string", "minLength": 20, "maxLength": 40, "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$"},
+    "nullable_timestamp": {"oneOf": [{"$ref": "#/$defs/timestamp"}, {"type": "null"}]},
+    "nullable_digest": {"oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+    "lease": {
+      "type": "object",
+      "required": ["owner", "token", "expires_at", "heartbeat_at"],
+      "properties": {
+        "owner": {"type": "string", "minLength": 1, "maxLength": 256},
+        "token": {"type": "string", "minLength": 1, "maxLength": 256},
+        "expires_at": {"$ref": "#/$defs/timestamp"},
+        "heartbeat_at": {"$ref": "#/$defs/timestamp"}
+      },
+      "additionalProperties": false
+    },
+    "result": {
+      "type": "object",
+      "required": ["reference", "sha256", "operation_id"],
+      "properties": {
+        "reference": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "sha256": {"$ref": "#/$defs/digest"},
+        "operation_id": {"type": "string", "minLength": 1, "maxLength": 4096}
+      },
+      "additionalProperties": false
+    },
+    "attempt": {
+      "type": "object",
+      "required": ["attempt", "started_at", "finished_at", "outcome", "error_code"],
+      "properties": {
+        "attempt": {"type": "integer", "minimum": 1, "maximum": 100},
+        "started_at": {"$ref": "#/$defs/timestamp"},
+        "finished_at": {"$ref": "#/$defs/timestamp"},
+        "outcome": {"enum": ["succeeded", "failed", "blocked", "cancelled", "lease_expired"]},
+        "error_code": {"oneOf": [{"type": "string", "minLength": 1, "maxLength": 64}, {"type": "null"}]}
+      },
+      "additionalProperties": false
+    },
+    "source_link": {
+      "type": "object",
+      "required": ["logical_path", "source_digest"],
+      "properties": {
+        "logical_path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "source_digest": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": false
+    },
+    "capture_binding": {
+      "type": "object",
+      "required": ["intent_id", "intent_sha256", "handler_version", "active_digest", "seal_digest"],
+      "properties": {
+        "intent_id": {"$ref": "#/$defs/nullable_digest"},
+        "intent_sha256": {"$ref": "#/$defs/nullable_digest"},
+        "handler_version": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+        "active_digest": {"$ref": "#/$defs/digest"},
+        "seal_digest": {"$ref": "#/$defs/nullable_digest"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "required": ["schema_version", "task_id", "kind", "handler_version", "payload", "input_hash", "dedupe_key", "state", "priority", "created_at", "updated_at", "available_at", "attempts", "last_attempt_at", "lease", "error_code", "blocked_capability", "result", "redrive_of", "lineage_generation", "attempt_history", "source_links", "capture_binding"],
+  "properties": {
+    "schema_version": {"const": "queue-task/v3"},
+    "task_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "kind": {"type": "string", "minLength": 1, "maxLength": 64},
+    "handler_version": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+    "payload": {"type": "object", "maxProperties": 1024},
+    "input_hash": {"$ref": "#/$defs/digest"},
+    "dedupe_key": {"oneOf": [{"type": "string", "minLength": 1, "maxLength": 512}, {"type": "null"}]},
+    "state": {"enum": ["ready", "leased", "blocked", "succeeded", "dead", "cancelled", "quarantine_pending", "quarantined", "purge_pending"]},
+    "priority": {"type": "integer", "minimum": -100, "maximum": 100},
+    "created_at": {"$ref": "#/$defs/timestamp"},
+    "updated_at": {"$ref": "#/$defs/timestamp"},
+    "available_at": {"$ref": "#/$defs/timestamp"},
+    "attempts": {"type": "integer", "minimum": 0, "maximum": 100},
+    "last_attempt_at": {"$ref": "#/$defs/nullable_timestamp"},
+    "lease": {"oneOf": [{"$ref": "#/$defs/lease"}, {"type": "null"}]},
+    "error_code": {"oneOf": [{"type": "string", "minLength": 1, "maxLength": 64}, {"type": "null"}]},
+    "blocked_capability": {"oneOf": [{"type": "string", "minLength": 1, "maxLength": 128}, {"type": "null"}]},
+    "result": {"oneOf": [{"$ref": "#/$defs/result"}, {"type": "null"}]},
+    "redrive_of": {"oneOf": [{"type": "string", "minLength": 1, "maxLength": 256}, {"type": "null"}]},
+    "lineage_generation": {"type": "integer", "minimum": 0},
+    "attempt_history": {"type": "array", "maxItems": 100, "items": {"$ref": "#/$defs/attempt"}},
+    "source_links": {"type": "array", "maxItems": 1024, "uniqueItems": true, "items": {"$ref": "#/$defs/source_link"}},
+    "capture_binding": {"oneOf": [{"$ref": "#/$defs/capture_binding"}, {"type": "null"}]}
+  },
+  "additionalProperties": false
+}

@@ -559,7 +559,7 @@ def scan_source(path: Path, source: str) -> list[WriterFinding]:
                 for call in (node for node in ast.walk(function) if isinstance(node, ast.Call)):
                     name = _call_name(call)
                     if name in {
-                        "unlink", "replace", "_rename_windows_handle",
+                        "unlink", "replace", "durable_publish_file",
                         "_delete_windows_handle",
                     }:
                         findings.append(WriterFinding(path, call.lineno, name, True))

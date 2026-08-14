@@ -20,7 +20,11 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 import memory_queue  # noqa: E402
 from memory_queue import MemoryQueue, MigrationBusy, QueueFailure  # noqa: E402
-from reliable_memory import canonical_json_bytes, sha256_bytes  # noqa: E402
+from reliable_memory import (  # noqa: E402
+    OperationalDatabaseContractError,
+    canonical_json_bytes,
+    sha256_bytes,
+)
 
 
 def _legacy_task(task_id: str = "legacy-1", **changes: object) -> dict[str, object]:
@@ -42,6 +46,183 @@ def _write_legacy(root: Path, name: str, task: object) -> Path:
     path = queue_dir / name
     path.write_text(json.dumps(task), encoding="utf-8")
     return path
+
+
+def test_queue_v2_backup_migrates_canonical_text_payload_to_identical_blob(
+    tmp_path: Path,
+) -> None:
+    queue = MemoryQueue(tmp_path)
+    task_id = queue.enqueue(
+        "query",
+        3,
+        {"city": "München", "prompt": "こんにちは", "items": ["é", "中"]},
+    )
+    expected = canonical_json_bytes(queue.get(task_id).payload)
+    candidate = tmp_path / "run" / "queue-v3.candidate.sqlite3"
+
+    summary = memory_queue.initialize_queue_v3_candidate(
+        candidate, source_v2=queue.db_path
+    )
+    with sqlite3.connect(candidate) as database:
+        stored = database.execute(
+            "SELECT typeof(payload_blob), payload_blob, input_hash FROM tasks WHERE id=?",
+            (task_id,),
+        ).fetchone()
+    assert summary["tasks"] == 1
+    assert stored == ("blob", expected, sha256_bytes(expected))
+
+
+def test_queue_v2_source_rows_reconcile_to_exact_v3_links_and_failures(
+    tmp_path: Path,
+) -> None:
+    queue = MemoryQueue(tmp_path)
+    logical_path = "knowledge/daily/2026-08-05.md"
+    source_digest = "a" * 64
+    task_id = queue.enqueue(
+        "compile",
+        1,
+        {"source_path": logical_path, "source_digest": source_digest},
+    )
+    queue.record_source_failure(
+        logical_path,
+        source_digest,
+        error_code="provider_failed",
+        producer="queue",
+    )
+    candidate = tmp_path / "run" / "queue-v3.candidate.sqlite3"
+
+    summary = memory_queue.initialize_queue_v3_candidate(
+        candidate, source_v2=queue.db_path
+    )
+
+    with sqlite3.connect(candidate) as database:
+        links = database.execute(
+            """SELECT task_id, logical_path, source_digest
+               FROM task_source_links ORDER BY task_id, logical_path, source_digest"""
+        ).fetchall()
+        failures = database.execute(
+            """SELECT logical_path, source_digest, error_code, producer
+               FROM source_failures ORDER BY logical_path, source_digest"""
+        ).fetchall()
+    assert summary["task_source_links"] == 1
+    assert summary["source_failures"] == 1
+    assert links == [(task_id, logical_path, source_digest)]
+    assert failures == [
+        (logical_path, source_digest, "provider_failed", "queue")
+    ]
+
+
+def test_fresh_queue_candidate_rejects_existing_migrated_rows(tmp_path: Path) -> None:
+    queue = MemoryQueue(tmp_path)
+    queue.enqueue("query", 1, {"prompt": "already migrated"})
+    candidate = tmp_path / "run" / "queue-v3.candidate.sqlite3"
+    memory_queue.initialize_queue_v3_candidate(candidate, source_v2=queue.db_path)
+
+    with pytest.raises(OperationalDatabaseContractError) as raised:
+        memory_queue.initialize_queue_v3_candidate(candidate, source_v2=None)
+
+    assert raised.value.code == "queue_v3_source_conflict"
+
+
+def test_queue_v2_hash_mismatch_is_preserved_dead_and_never_claimable(
+    tmp_path: Path,
+) -> None:
+    queue = MemoryQueue(tmp_path)
+    task_id = queue.enqueue("query", 1, {"prompt": "retain these exact bytes"})
+    expected = canonical_json_bytes(queue.get(task_id).payload)
+    with sqlite3.connect(queue.db_path) as database:
+        database.execute(
+            """INSERT INTO attempt_history(
+                   task_id, attempt, started_at, finished_at, outcome, error_code
+               ) VALUES (?, 1, ?, ?, 'failed', 'provider_failed')""",
+            (
+                task_id,
+                "2026-08-05T12:00:00+00:00",
+                "2026-08-05T12:00:01+00:00",
+            ),
+        )
+        database.execute(
+            "UPDATE tasks SET input_hash=?, state='ready', error_code=NULL WHERE id=?",
+            ("0" * 64, task_id),
+        )
+    candidate = tmp_path / "run" / "queue-v3.candidate.sqlite3"
+
+    summary = memory_queue.initialize_queue_v3_candidate(
+        candidate, source_v2=queue.db_path
+    )
+    candidate_queue = MemoryQueue._from_v3_candidate(candidate, state_root=tmp_path)
+
+    with sqlite3.connect(candidate) as database:
+        task = database.execute(
+            "SELECT payload_blob, input_hash, state, error_code FROM tasks WHERE id=?",
+            (task_id,),
+        ).fetchone()
+        history = database.execute(
+            """SELECT attempt, started_at, finished_at, outcome, error_code
+               FROM attempt_history WHERE task_id=? ORDER BY sequence""",
+            (task_id,),
+        ).fetchall()
+        claimable = database.execute(
+            """SELECT id FROM tasks
+               WHERE state='ready' AND available_at <= '9999-12-31T23:59:59+00:00'
+               ORDER BY priority DESC, available_at, created_at, id LIMIT 1"""
+        ).fetchone()
+
+    assert summary["payload_hash_mismatches"] == 1
+    assert task == (expected, "0" * 64, "dead", "payload_hash_mismatch")
+    assert history == [
+        (
+            1,
+            "2026-08-05T12:00:00+00:00",
+            "2026-08-05T12:00:01+00:00",
+            "failed",
+            "provider_failed",
+        )
+    ]
+    assert claimable is None
+    assert candidate_queue.claim("worker") is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b'{"b":1,"a":2}',
+        json.dumps(
+            {"value": "x" * (256 * 1024 + 1)},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+    ],
+    ids=("noncanonical", "oversized-string"),
+)
+def test_queue_v2_hash_valid_invalid_payload_is_preserved_dead(
+    tmp_path: Path, payload: bytes
+) -> None:
+    queue = MemoryQueue(tmp_path)
+    task_id = queue.enqueue("query", 1, {"prompt": "replace me"})
+    with sqlite3.connect(queue.db_path) as database:
+        database.execute(
+            "UPDATE tasks SET payload_json=?, input_hash=? WHERE id=?",
+            (payload.decode("utf-8"), sha256_bytes(payload), task_id),
+        )
+    candidate = tmp_path / "run" / "queue-v3.candidate.sqlite3"
+
+    summary = memory_queue.initialize_queue_v3_candidate(
+        candidate, source_v2=queue.db_path
+    )
+
+    with sqlite3.connect(candidate) as database:
+        row = database.execute(
+            "SELECT payload_blob, input_hash, state, error_code FROM tasks WHERE id=?",
+            (task_id,),
+        ).fetchone()
+    assert summary["payload_hash_mismatches"] == 1
+    assert row == (
+        payload,
+        sha256_bytes(payload),
+        "dead",
+        "payload_hash_mismatch",
+    )
 
 
 def test_migration_imports_json_and_dead_processing_before_marker(
@@ -555,6 +736,8 @@ def test_redrive_links_new_task_without_changing_dead_history(tmp_path: Path) ->
 
 
 def test_redrive_insert_and_link_commit_in_one_transaction(tmp_path: Path) -> None:
+    from contextlib import contextmanager
+
     queue = MemoryQueue(tmp_path)
     original = queue.enqueue("query", 1, {"prompt": "again"})
     lease = queue.claim("worker")
@@ -563,10 +746,11 @@ def test_redrive_insert_and_link_commit_in_one_transaction(tmp_path: Path) -> No
     statements: list[str] = []
     real_connect = queue._connect
 
+    @contextmanager
     def traced_connect():
-        connection = real_connect()
-        connection.set_trace_callback(statements.append)
-        return connection
+        with real_connect() as connection:
+            connection.set_trace_callback(statements.append)
+            yield connection
 
     queue._connect = traced_connect  # type: ignore[method-assign]
 

@@ -1539,7 +1539,7 @@ def _operator_file_state(info: object) -> tuple[int, int, int, int, int, int]:
         stat.S_IFMT(info.st_mode),
         info.st_size,
         info.st_mtime_ns,
-        info.st_ctime_ns,
+        0 if os.name == "nt" else info.st_ctime_ns,
     )
 
 

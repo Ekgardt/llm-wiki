@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/capture-task-link-resolution-v1.json",
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nullable_digest": {"oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]}
+  },
+  "type": "object",
+  "required": ["schema_version", "task_id", "supersedes_digest", "observed", "selected_intent", "actor_identity", "reason", "created_at"],
+  "properties": {
+    "schema_version": {"const": "capture-task-link-resolution/v1"},
+    "task_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "supersedes_digest": {"$ref": "#/$defs/nullable_digest"},
+    "observed": {
+      "type": "object",
+      "required": ["link_digest", "index_digest", "intent_file_digest"],
+      "properties": {
+        "link_digest": {"$ref": "#/$defs/nullable_digest"},
+        "index_digest": {"$ref": "#/$defs/nullable_digest"},
+        "intent_file_digest": {"$ref": "#/$defs/nullable_digest"}
+      },
+      "additionalProperties": false
+    },
+    "selected_intent": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["intent_id", "intent_sha256", "handler_version"],
+          "properties": {
+            "intent_id": {"$ref": "#/$defs/digest"},
+            "intent_sha256": {"$ref": "#/$defs/digest"},
+            "handler_version": {"type": "integer", "minimum": 1, "maximum": 2147483647}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "actor_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+    "reason": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "created_at": {"type": "string", "minLength": 20, "maxLength": 40}
+  },
+  "additionalProperties": false
+}

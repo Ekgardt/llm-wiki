@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -562,6 +563,107 @@ def test_cli_cancel_redrive_migrate_and_purge(
     assert set(json.loads(capsys.readouterr().out)) == {"counts", "ids"}
 
 
+@pytest.mark.parametrize("reason", ["", "x" * 4097])
+def test_cli_quarantine_rejects_reason_before_database_work(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    reason: str,
+) -> None:
+    monkeypatch.setattr(
+        memory_queue,
+        "_v3_queue_for_cli",
+        lambda: pytest.fail("database must not open for an invalid reason"),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["memory_queue.py", "quarantine-corrupt", "task-secret", "--reason", reason],
+    )
+
+    assert memory_queue._cli() == 2
+    output = capsys.readouterr().out
+    assert output == '{"codes":["invalid_input"]}\n'
+    if reason:
+        assert reason not in output
+
+
+def test_cli_quarantine_outputs_only_stable_progress_fields(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class Queue:
+        def quarantine_corrupt(self, task_id, *, reason, owner):
+            assert (task_id, reason, owner) == ("requested-task", "retain", "owner")
+            return memory_queue.CorruptExportProgress(
+                task_id=task_id,
+                operation_id="corrupt-export:" + "a" * 64,
+                state="quarantine_pending",
+                pages_written=2,
+                links_exported=1500,
+                complete=False,
+                code="capture_link_conflicted",
+            )
+
+    monkeypatch.setattr(memory_queue, "_v3_queue_for_cli", Queue)
+    monkeypatch.setattr(memory_queue, "_repair_owner_for_cli", lambda: nullcontext("owner"))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "memory_queue.py",
+            "quarantine-corrupt",
+            "requested-task",
+            "--reason",
+            "retain",
+        ],
+    )
+
+    assert memory_queue._cli() == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "code": "capture_link_conflicted",
+        "complete": False,
+        "operation_id": "corrupt-export:" + "a" * 64,
+        "page_count": 2,
+        "state": "quarantine_pending",
+        "task_id": "requested-task",
+    }
+
+
+def test_cli_purge_corrupt_outputs_only_stable_progress_fields(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class Queue:
+        def purge_quarantined(self, task_id, *, owner):
+            assert (task_id, owner) == ("requested-task", "owner")
+            return memory_queue.CorruptPurgeProgress(
+                task_id=task_id,
+                operation_id="corrupt-purge:" + "b" * 64,
+                state="purge_pending",
+                pages_written=3,
+                links_deleted=2500,
+                complete=False,
+                code="corrupt_child_retention_active",
+            )
+
+    monkeypatch.setattr(memory_queue, "_v3_queue_for_cli", Queue)
+    monkeypatch.setattr(memory_queue, "_repair_owner_for_cli", lambda: nullcontext("owner"))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["memory_queue.py", "purge-corrupt", "requested-task"],
+    )
+
+    assert memory_queue._cli() == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "code": "corrupt_child_retention_active",
+        "complete": False,
+        "links_deleted": 2500,
+        "operation_id": "corrupt-purge:" + "b" * 64,
+        "page_count": 3,
+        "state": "purge_pending",
+        "task_id": "requested-task",
+    }
+
+
 def test_cli_work_uses_operational_defaults(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -586,6 +688,43 @@ def test_cli_work_uses_operational_defaults(
         "retry_cap_seconds": 3600,
     }
     assert set(json.loads(capsys.readouterr().out)) == {"counts"}
+
+
+def test_cli_work_reports_nonzero_when_task_limit_leaves_ready_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    queue = MemoryQueue(tmp_path)
+    queue.enqueue("query", 1, {"number": 1})
+    queue.enqueue("query", 1, {"number": 2})
+    real_run_worker = memory_queue.run_worker
+
+    def worker(processor, **kwargs):
+        del processor
+        return real_run_worker(
+            lambda task: True,
+            processor_runner=memory_queue._run_processor_inline,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(memory_queue, "_queue", lambda **kwargs: queue)
+    monkeypatch.setattr(memory_queue, "run_worker", worker)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["memory_queue.py", "work", "--max-tasks", "1", "--idle-seconds", "0"],
+    )
+
+    assert memory_queue._cli() == 1
+    assert json.loads(capsys.readouterr().out)["counts"] == {
+        "dead": 0,
+        "failed": 0,
+        "processed": 1,
+        "remaining_eligible": 1,
+        "skipped": 0,
+        "succeeded": 1,
+    }
 
 
 def test_cli_work_forwards_policy_overrides(

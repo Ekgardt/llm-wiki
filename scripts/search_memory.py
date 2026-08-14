@@ -33,7 +33,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -121,6 +121,11 @@ GENERATION_METADATA_KEYS = frozenset(
 MAX_GENERATION_FTS_CHUNKS = 100_000
 GENERATION_FTS_PROGRESS_OPCODES = 1_000
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
+
+
+class LegacySearchUnavailable(RuntimeError):
+    """The derived SQLite index failed and direct Markdown found no match."""
+
 
 KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
 # Legacy alias retained for tests and external callers. Post-three-zone
@@ -830,9 +835,9 @@ VALID_TO_FIELD_RE = re.compile(r"^valid_to:\s*(.+?)\s*$", re.MULTILINE)
 AUTHORITY_WEIGHTS = {
     "user": 1.35,
     "human": 1.35,
+    "web": 1.1,
     "ai-derived": 1.0,
     "ai": 1.0,
-    "web": 0.9,
     "inferred": 0.8,
     "unknown": 1.0,
 }
@@ -877,7 +882,7 @@ def _needs_rebuild(
         connect_options = {}
         if deadline is not None:
             connect_options["timeout"] = max(0.0, min(5.0, deadline - time.monotonic()))
-        with sqlite3.connect(str(current_index), **connect_options) as conn:
+        with closing(sqlite3.connect(str(current_index), **connect_options)) as conn:
             with _legacy_sqlite_guard(conn, deadline, cancelled):
                 columns = tuple(
                     row[1] for row in conn.execute("PRAGMA table_info(pages)")
@@ -1607,7 +1612,7 @@ def _generation_authoritative_sources(
     source_metadata: list[tuple[str, str, str, int]] = []
     seen_source_ids: set[str] = set()
     total_bytes = 0
-    with sqlite3.connect(uri, uri=True, timeout=0) as database:
+    with closing(sqlite3.connect(uri, uri=True, timeout=0)) as database:
         with _generation_sqlite_guard(database, deadline, cancelled):
             rows = database.execute(
                 "SELECT source_id, relative_path, sha256, size, length(content) FROM source "
@@ -1688,7 +1693,7 @@ def validate_generation_fts_artifact(
     artifact = Path(generation_path) / GENERATION_FTS_ARTIFACT
     validate_runtime_file(artifact, state_root, max_bytes=16 * 1024 * 1024 * 1024)
     uri = f"{artifact.resolve(strict=True).as_uri()}?mode=ro&immutable=1"
-    with sqlite3.connect(uri, uri=True, timeout=0) as connection:
+    with closing(sqlite3.connect(uri, uri=True, timeout=0)) as connection:
         if not _valid_generation_fts(
             connection,
             manifest,
@@ -1921,6 +1926,13 @@ def _fts_query(query: str) -> str:
     return " ".join(f'"{word.replace(chr(34), chr(34) * 2)}"' for word in query.split() if word)
 
 
+def _normalized_filename_stem(value: str) -> str:
+    name = Path(value.strip()).name.casefold()
+    if name.endswith(".md"):
+        name = name[:-3]
+    return "-".join(part for part in re.split(r"[\s_-]+", name) if part)
+
+
 def _generation_filters(
     *, scope: str, since: str | None, as_of: str | None
 ) -> tuple[str, list[str]]:
@@ -2005,7 +2017,7 @@ def _generation_result(row: sqlite3.Row, generation_id: str) -> dict[str, object
         "title": row["title"] or Path(row["source_path"]).stem,
         "summary": content.strip().splitlines()[0][:120] if content.strip() else "",
         "content": content,
-        "score": round(score, 4),
+        "score": score,
         "project": row["project"] or "",
         "timestamp": (row["valid_from"] or "")[:10],
         "chunk_id": row["chunk_id"],
@@ -2044,6 +2056,21 @@ def _generation_fts_search(
     with _generation_sqlite_guard(connection, deadline, cancelled):
         connection.row_factory = sqlite3.Row
         filters, values = _generation_filters(scope=scope, since=since, as_of=as_of)
+        normalized_stem = _normalized_filename_stem(query)
+        filename = f"{normalized_stem}.md"
+        exact_filters = filters
+        exact_values = list(values)
+        if project:
+            exact_filters += " AND lower(project) = lower(?)"
+            exact_values.append(project)
+        exact_rows = connection.execute(
+            "SELECT chunk_id, chunk_order, source_id, source_path, source_sha256, "
+            "heading_ancestry, type, project, authority, confidence, status, valid_from, "
+            "valid_to, language, title, content, 0.0 AS rank FROM chunks "
+            "WHERE (source_path = ? OR substr(source_path, -length(?)) = ?)"
+            f"{exact_filters} ORDER BY source_path, chunk_order LIMIT 1",
+            [filename, f"/{filename}", f"/{filename}", *exact_values],
+        ).fetchall()
         rows = connection.execute(
             "SELECT chunk_id, chunk_order, source_id, source_path, source_sha256, "
             "heading_ancestry, type, project, authority, confidence, status, valid_from, "
@@ -2053,19 +2080,26 @@ def _generation_fts_search(
         ).fetchall()
     generation_id = str(manifest["generation_id"])
     results = []
-    for row in rows:
+    seen_chunk_ids: set[str] = set()
+    exact_path = str(exact_rows[0]["source_path"]) if exact_rows else None
+    for row in [*exact_rows, *rows]:
         _check_generation_stop(deadline, cancelled)
+        chunk_id = str(row["chunk_id"])
+        if chunk_id in seen_chunk_ids:
+            continue
+        seen_chunk_ids.add(chunk_id)
         results.append(_generation_result(row, generation_id))
     query_words = set(query.casefold().split())
     for result in results:
         _check_generation_stop(deadline, cancelled)
         if project and str(result["project"]).casefold() == project.casefold():
-            result["score"] = round(float(result["score"]) * 2.0, 4)
+            result["score"] = float(result["score"]) * 2.0
         title_words = set(str(result["title"]).casefold().split())
         if query_words and query_words.issubset(title_words):
-            result["score"] = round(float(result["score"]) * 3.0, 4)
+            result["score"] = float(result["score"]) * 3.0
     results.sort(
         key=lambda item: (
+            0 if item["path"] == exact_path else 1,
             -float(item["score"]),
             str(item["path"]),
             int(item["_chunk_order"]),
@@ -2073,6 +2107,7 @@ def _generation_fts_search(
     )
     for result in results:
         _check_generation_stop(deadline, cancelled)
+        result["score"] = round(float(result["score"]), 4)
         result.pop("_chunk_order", None)
     results = apply_hard_filters(
         results, project=project, since=since, as_of=as_of, scope=scope
@@ -2345,41 +2380,78 @@ def _legacy_lexical_hits(
             needs_rebuild = _needs_rebuild(
                 pages, deadline=deadline, cancelled=cancelled
             )
-    if needs_rebuild:
+    def rebuild() -> None:
         if deadline is None and cancelled is None:
             _build_index(pages)
         else:
             _build_index(pages, deadline=deadline, cancelled=cancelled)
 
-    _check_legacy_stop(deadline, cancelled)
-    connect_timeout = 5.0
-    if deadline is not None:
-        connect_timeout = max(0.0, min(connect_timeout, deadline - time.monotonic()))
-    conn = sqlite3.connect(str(INDEX_FILE), timeout=connect_timeout)
-    try:
+    def query_index() -> list[tuple]:
         _check_legacy_stop(deadline, cancelled)
-        with _legacy_sqlite_guard(conn, deadline, cancelled):
-            fts_terms = []
-            for w in query.split():
-                if not w:
-                    continue
-                safe = w.replace('"', '""')
-                fts_terms.append(f'"{safe}"')
-            fts_query = " ".join(fts_terms)
-            query_word_count = len([w for w in query.split() if w])
-            fetch_multiplier = 5 if query_word_count <= 3 else 3
-            bm25_raw = conn.execute(
-                """
-                SELECT path, title, summary, project, timestamp, bm25(pages) as rank
-                FROM pages
-                WHERE pages MATCH ?
-                ORDER BY rank
-                LIMIT ?
-                """,
-                (fts_query, limit * fetch_multiplier),
-            ).fetchall()
-    finally:
-        conn.close()
+        connect_timeout = 5.0
+        if deadline is not None:
+            connect_timeout = max(
+                0.0, min(connect_timeout, deadline - time.monotonic())
+            )
+        conn = sqlite3.connect(str(INDEX_FILE), timeout=connect_timeout)
+        try:
+            _check_legacy_stop(deadline, cancelled)
+            with _legacy_sqlite_guard(conn, deadline, cancelled):
+                fts_terms = []
+                for word in query.split():
+                    if not word:
+                        continue
+                    safe = word.replace('"', '""')
+                    fts_terms.append(f'"{safe}"')
+                fts_query = " ".join(fts_terms)
+                query_word_count = len([word for word in query.split() if word])
+                fetch_multiplier = 5 if query_word_count <= 3 else 3
+                return conn.execute(
+                    """
+                    SELECT path, title, summary, project, timestamp, bm25(pages) as rank
+                    FROM pages
+                    WHERE pages MATCH ?
+                    ORDER BY rank
+                    LIMIT ?
+                    """,
+                    (fts_query, limit * fetch_multiplier),
+                ).fetchall()
+        finally:
+            conn.close()
+
+    def direct_fallback() -> list[dict]:
+        return _direct_markdown_hits(
+            query,
+            pages,
+            limit=limit,
+            project=project,
+            since=since,
+            as_of=as_of,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+
+    rebuilt = False
+    if needs_rebuild:
+        try:
+            rebuild()
+            rebuilt = True
+        except sqlite3.DatabaseError:
+            return direct_fallback()
+
+    try:
+        bm25_raw = query_index()
+    except sqlite3.DatabaseError:
+        if not rebuilt:
+            try:
+                rebuild()
+                rebuilt = True
+            except sqlite3.DatabaseError:
+                return direct_fallback()
+        try:
+            bm25_raw = query_index()
+        except sqlite3.DatabaseError:
+            return direct_fallback()
 
     query_lower = query.lower().strip()
     query_words = set(query_lower.split())
@@ -2425,19 +2497,67 @@ def _legacy_lexical_hits(
                 "path": path,
                 "title": title,
                 "summary": summary[:120] if summary else "",
-                "score": round(score, 2),
-                "bm25_score": round(score, 2),
+                "score": score,
+                "bm25_score": score,
                 "project": proj or "",
                 "timestamp": ts or "",
                 "candidate_id": Path(path).stem,
                 "generation": "legacy",
             }
         )
+    normalized_stem = _normalized_filename_stem(query)
+    exact_page = next(
+        (page for page in pages if _normalized_filename_stem(page.name) == normalized_stem),
+        None,
+    )
+    if exact_page is not None:
+        try:
+            relative_path = exact_page.relative_to(ROOT).as_posix()
+            raw = read_stable_bytes(
+                exact_page, MAX_PAGE_BYTES, label="exact filename search page"
+            )
+            content = raw.decode("utf-8", errors="ignore")
+        except (OSError, ValueError):
+            exact_page = None
+        else:
+            title, summary = _extract_title_and_summary(content, exact_page.stem)
+            page_project = _extract_frontmatter_field(content, PROJECT_FIELD_RE) or ""
+            timestamp = _extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or ""
+            timestamp = timestamp[:10] if timestamp else ""
+            eligible = not project or page_project.casefold() == project.casefold()
+            eligible = eligible and (not since or not timestamp or timestamp >= since[:10])
+            eligible = eligible and (not as_of or _valid_as_of(relative_path, as_of))
+            if eligible and all(item["path"] != relative_path for item in bm25_results):
+                authority = _extract_frontmatter_field(content, AUTHORITY_FIELD_RE) or ""
+                bm25_results.append(
+                    {
+                        "path": relative_path,
+                        "title": title,
+                        "summary": summary[:120],
+                        "score": round(
+                            10.0 * AUTHORITY_WEIGHTS.get(authority.casefold(), 1.0),
+                            2,
+                        ),
+                        "bm25_score": 0.0,
+                        "project": page_project,
+                        "timestamp": timestamp,
+                        "candidate_id": exact_page.stem,
+                        "source_sha256": hashlib.sha256(raw).hexdigest(),
+                        "byte_start": 0,
+                        "byte_end": len(raw),
+                        "generation": "legacy",
+                        "authority": authority,
+                    }
+                )
     bm25_results.sort(key=lambda x: (-x["score"], x["path"]))
+    for result in bm25_results:
+        result["score"] = round(float(result["score"]), 2)
+        result["bm25_score"] = round(float(result["bm25_score"]), 2)
     # Prefer filename exact matches first while remaining a pure ranked list.
-    query_normalized = query.lower().strip().replace(" ", "-")
     filename_matches = [
-        r for r in bm25_results[:10] if Path(r["path"]).stem.lower() == query_normalized
+        result
+        for result in bm25_results
+        if _normalized_filename_stem(str(result["path"])) == normalized_stem
     ]
     if filename_matches:
         filename_matches.sort(
@@ -2451,6 +2571,84 @@ def _legacy_lexical_hits(
         rest = [x for x in bm25_results if x["path"] != best["path"]]
         bm25_results = [best] + rest
     return bm25_results[: max(limit * 3, limit)]
+
+
+def _direct_markdown_hits(
+    query: str,
+    pages: list[Path],
+    *,
+    limit: int,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[dict]:
+    """Return bounded literal matches from authoritative Markdown only."""
+    query_terms = tuple(dict.fromkeys(re.findall(r"\w+", query.casefold())))
+    query_term_set = set(query_terms)
+    results: list[dict] = []
+    for page in pages:
+        _check_legacy_stop(deadline, cancelled)
+        try:
+            relative_path = page.relative_to(ROOT).as_posix()
+            raw = read_stable_bytes(page, MAX_PAGE_BYTES, label="search page")
+            content = raw.decode("utf-8", errors="ignore")
+        except (OSError, ValueError):
+            continue
+        title, summary = _extract_title_and_summary(content, page.stem)
+        body = _strip_frontmatter(content)
+        document_terms = set(
+            re.findall(
+                r"\w+",
+                f"{page.stem.replace('-', ' ')} {title} {summary} {body}".casefold(),
+            )
+        )
+        if not query_terms or not query_term_set.issubset(document_terms):
+            continue
+        page_project = _extract_frontmatter_field(content, PROJECT_FIELD_RE) or ""
+        if project and page_project.casefold() != project.casefold():
+            continue
+        timestamp = _extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or ""
+        timestamp = timestamp[:10] if timestamp else ""
+        if since and timestamp and timestamp < since[:10]:
+            continue
+        if as_of and not _valid_as_of(relative_path, as_of):
+            continue
+        score = float(len(query_terms))
+        title_terms = set(re.findall(r"\w+", title.casefold()))
+        filename_terms = set(re.findall(r"\w+", page.stem.casefold()))
+        if query_term_set.issubset(title_terms):
+            score *= 3.0
+        if query_term_set.issubset(filename_terms):
+            score *= 4.0
+        authority = _extract_frontmatter_field(content, AUTHORITY_FIELD_RE) or ""
+        score *= AUTHORITY_WEIGHTS.get(authority.casefold(), 1.0)
+        results.append(
+            {
+                "path": relative_path,
+                "title": title,
+                "summary": summary[:120],
+                "score": round(score, 2),
+                "bm25_score": round(score, 2),
+                "project": page_project,
+                "timestamp": timestamp,
+                "candidate_id": page.stem,
+                "source_sha256": hashlib.sha256(raw).hexdigest(),
+                "byte_start": 0,
+                "byte_end": len(raw),
+                "generation": "legacy",
+                "authority": authority,
+                "fallback_reason": "legacy_sqlite_unavailable",
+                "partial": True,
+            }
+        )
+    results.sort(key=lambda item: (-float(item["score"]), str(item["path"])))
+    if not results:
+        raise LegacySearchUnavailable(
+            "legacy SQLite unavailable and direct Markdown search found no matching page"
+        )
+    return results[: max(limit * 3, limit)]
 
 
 def _legacy_dense_hits(
@@ -3343,17 +3541,21 @@ def main() -> int:
         return 1
 
     t0 = time.time()
-    results = search(
-        args.query, args.scope, args.limit,
-        force_rebuild=args.rebuild,
-        project=args.project,
-        since=args.since,
-        as_of=args.as_of,
-        semantic=args.semantic,
-        profile=args.profile,
-        graph=not args.no_graph,
-        rerank=not args.no_rerank,
-    )
+    try:
+        results = search(
+            args.query, args.scope, args.limit,
+            force_rebuild=args.rebuild,
+            project=args.project,
+            since=args.since,
+            as_of=args.as_of,
+            semantic=args.semantic,
+            profile=args.profile,
+            graph=not args.no_graph,
+            rerank=not args.no_rerank,
+        )
+    except LegacySearchUnavailable as error:
+        print(f"search_memory: {error}", file=sys.stderr)
+        return 2
     elapsed = time.time() - t0
 
     if not results:

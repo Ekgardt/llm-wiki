@@ -666,6 +666,37 @@ def test_project_state_impossible_cap_is_visible_not_character_sliced():
     assert "truncated for hook injection" not in result
 
 
+@pytest.mark.parametrize(
+    ("platform", "root", "expected"),
+    [
+        ("win32", r"C:\workspace\project", True),
+        ("win32", "C:/workspace/project", True),
+        ("win32", "/workspace/project", False),
+        ("win32", r"relative\project", False),
+        ("linux", "/workspace/project", True),
+        ("linux", r"C:\workspace\project", False),
+        ("linux", "relative/project", False),
+        ("linux", "/workspace/project\nforged", False),
+        ("linux", "", False),
+    ],
+)
+def test_project_root_requires_bounded_native_absolute_path(platform, root, expected):
+    import session_start_project_state
+
+    assert session_start_project_state._is_native_absolute_root(root, platform) is expected
+    oversized = "x" * (session_start_project_state.MAX_PROJECT_ROOT_CHARS + 1)
+    assert session_start_project_state._is_native_absolute_root(oversized, platform) is False
+
+
+def test_project_dir_rejects_relative_env_before_resolution(monkeypatch):
+    import session_start_project_state
+
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "relative/project")
+
+    with pytest.raises(ValueError, match="native absolute"):
+        session_start_project_state._resolve_project_dir()
+
+
 def test_project_state_routes_mandatory_handoff_through_compiler(monkeypatch):
     import context_compiler
     import session_start_project_state

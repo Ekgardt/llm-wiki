@@ -18,10 +18,10 @@ import subprocess
 import time
 import unicodedata
 import warnings
-from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Literal
 
 
 @dataclass(frozen=True)
@@ -58,6 +58,57 @@ class UnsafeStateRoot(ValueError):
 
 class SchemaValidationError(ValueError):
     """Raised when an instance does not satisfy a committed schema."""
+
+
+class MetadataDurabilityUnavailable(OSError):
+    """Raised when the platform cannot prove the requested metadata boundary."""
+
+    code = "metadata_durability_unavailable"
+
+
+class OperationalDatabaseContractError(sqlite3.DatabaseError):
+    """Raised when an operational database or migration violates its contract."""
+
+    code = "operational_database_contract_mismatch"
+
+
+@dataclass(frozen=True)
+class OperationalDatabaseContract:
+    application_id: int
+    user_version: int = 3
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("application_id", self.application_id),
+            ("user_version", self.user_version),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+
+
+@dataclass(frozen=True)
+class MigrationStatement:
+    name: str
+    sql: str
+    completed: Callable[[sqlite3.Connection], bool] = field(compare=False, repr=False)
+    parameters: Sequence[object] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name:
+            raise ValueError("migration statement name must be non-empty")
+        if not isinstance(self.sql, str) or not self.sql.strip():
+            raise ValueError("migration statement SQL must be non-empty")
+        if not callable(self.completed):
+            raise TypeError("migration statement completed invariant must be callable")
+
+
+@dataclass(frozen=True)
+class RuntimeFileIdentity:
+    platform: str
+    volume: str
+    file_id: str
+    size: int
+    mtime_ns: int
 
 
 def _canonical_value(value: object) -> object:
@@ -304,10 +355,27 @@ def _set_owner_only(path: Path, mode: int) -> bool:
     return True
 
 
-def open_operational_db(path: Path, *, busy_ms: int) -> sqlite3.Connection:
+def _harden_runtime_owner_only(path: Path, mode: int) -> None:
+    if os.name == "nt":
+        from memory_queue import _harden_owner_only
+
+        _harden_owner_only(Path(path), mode)
+        return
+    _set_owner_only(Path(path), mode)
+
+
+def open_operational_db(
+    path: Path,
+    *,
+    busy_ms: int,
+    contract: OperationalDatabaseContract | None = None,
+    initialize_contract: bool = False,
+) -> sqlite3.Connection:
     """Open an owner-restricted rollback-journal operational database."""
     if busy_ms < 0:
         raise ValueError("busy_ms must be non-negative")
+    if initialize_contract and contract is None:
+        raise ValueError("initialize_contract requires an operational database contract")
     path = Path(path)
     validate_state_root(path.parent)
     expected: os.stat_result | None = None
@@ -330,7 +398,11 @@ def open_operational_db(path: Path, *, busy_ms: int) -> sqlite3.Connection:
     else:
         os.close(descriptor)
         expected = path.stat(follow_symlinks=False)
-    connection = sqlite3.connect(path, timeout=busy_ms / 1_000)
+    connection = sqlite3.connect(
+        path,
+        timeout=busy_ms / 1_000,
+        isolation_level=None,
+    )
     try:
         current = path.stat(follow_symlinks=False)
         if expected is None or not os.path.samestat(expected, current):
@@ -342,11 +414,108 @@ def open_operational_db(path: Path, *, busy_ms: int) -> sqlite3.Connection:
             raise sqlite3.OperationalError(f"SQLite refused journal_mode=DELETE: {mode}")
         connection.execute("PRAGMA synchronous=FULL")
         connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA trusted_schema=OFF")
+        _require_pragma(connection, "synchronous", 2)
+        _require_pragma(connection, "foreign_keys", 1)
+        _require_pragma(connection, "trusted_schema", 0)
+        _require_pragma(connection, "busy_timeout", busy_ms)
+        if contract is not None:
+            _validate_or_initialize_operational_contract(
+                connection,
+                contract,
+                initialize=initialize_contract,
+            )
         _set_owner_only(path, 0o600)
         return connection
     except Exception:
         connection.close()
         raise
+
+
+def _pragma_integer(connection: sqlite3.Connection, name: str) -> int:
+    row = connection.execute(f"PRAGMA {name}").fetchone()
+    if row is None or isinstance(row[0], bool) or not isinstance(row[0], int):
+        raise OperationalDatabaseContractError(
+            f"operational database PRAGMA {name} returned an invalid value"
+        )
+    return row[0]
+
+
+def _require_pragma(
+    connection: sqlite3.Connection,
+    name: str,
+    expected: int,
+) -> None:
+    actual = _pragma_integer(connection, name)
+    if actual != expected:
+        raise OperationalDatabaseContractError(
+            f"operational database PRAGMA {name} mismatch: expected {expected}, got {actual}"
+        )
+
+
+def _validate_or_initialize_operational_contract(
+    connection: sqlite3.Connection,
+    contract: OperationalDatabaseContract,
+    *,
+    initialize: bool,
+) -> None:
+    application_id = _pragma_integer(connection, "application_id")
+    user_version = _pragma_integer(connection, "user_version")
+    if initialize:
+        if (application_id, user_version) == (0, 0):
+            connection.execute(f"PRAGMA application_id={contract.application_id:d}")
+            connection.execute(f"PRAGMA user_version={contract.user_version:d}")
+            application_id = _pragma_integer(connection, "application_id")
+            user_version = _pragma_integer(connection, "user_version")
+        elif (application_id, user_version) != (
+            contract.application_id,
+            contract.user_version,
+        ):
+            raise OperationalDatabaseContractError(
+                "cannot initialize a conflicting operational database contract"
+            )
+    if (application_id, user_version) != (
+        contract.application_id,
+        contract.user_version,
+    ):
+        raise OperationalDatabaseContractError(
+            "operational database application_id or user_version mismatch"
+        )
+
+
+def run_resumable_migration(
+    connection: sqlite3.Connection,
+    statements: Sequence[MigrationStatement],
+    *,
+    final_invariant: Callable[[sqlite3.Connection], bool],
+    killpoint: Callable[[str], None] | None = None,
+) -> None:
+    """Apply incomplete migration statements one transaction at a time."""
+    names = [statement.name for statement in statements]
+    if any(not name for name in names):
+        raise ValueError("migration statement name must be non-empty")
+    if len(names) != len(set(names)):
+        raise ValueError("migration statement names must be unique")
+
+    emit = killpoint or (lambda _event: None)
+    for statement in statements:
+        if statement.completed(connection):
+            continue
+        emit(f"before:{statement.name}")
+        with begin_immediate(connection):
+            connection.execute(statement.sql, tuple(statement.parameters))
+            if not statement.completed(connection):
+                error = OperationalDatabaseContractError(
+                    f"migration statement invariant is incomplete: {statement.name}"
+                )
+                error.code = "operational_migration_incomplete"
+                raise error
+            emit(f"after_execute:{statement.name}")
+        emit(f"after_commit:{statement.name}")
+    if not final_invariant(connection):
+        error = OperationalDatabaseContractError("operational migration final invariant is incomplete")
+        error.code = "operational_migration_incomplete"
+        raise error
 
 
 def validate_runtime_file(
@@ -400,18 +569,41 @@ def open_readonly_operational_db(
     *,
     max_bytes: int,
     owner_only: bool = False,
+    busy_ms: int = 0,
+    contract: OperationalDatabaseContract | None = None,
 ) -> sqlite3.Connection:
     """Open a validated runtime SQLite database read-only and fail on path races."""
+    if busy_ms < 0:
+        raise ValueError("busy_ms must be non-negative")
     expected = validate_runtime_file(path, state_root, max_bytes=max_bytes, owner_only=owner_only)
     database = sqlite3.connect(
-        f"{Path(path).resolve(strict=True).as_uri()}?mode=ro", uri=True, timeout=0
+        f"{Path(path).resolve(strict=True).as_uri()}?mode=ro",
+        uri=True,
+        timeout=busy_ms / 1_000,
+        isolation_level=None,
     )
     try:
         current = Path(path).stat(follow_symlinks=False)
         if not os.path.samestat(expected, current):
             raise PermissionError("runtime database identity changed while opening")
         database.row_factory = sqlite3.Row
+        database.execute(f"PRAGMA busy_timeout={busy_ms:d}")
+        database.execute("PRAGMA foreign_keys=ON")
+        database.execute("PRAGMA trusted_schema=OFF")
         database.execute("PRAGMA query_only=ON")
+        mode = database.execute("PRAGMA journal_mode").fetchone()[0]
+        if str(mode).casefold() != "delete":
+            raise OperationalDatabaseContractError(
+                f"operational database journal_mode mismatch: expected delete, got {mode}"
+            )
+        _require_pragma(database, "synchronous", 2)
+        _require_pragma(database, "foreign_keys", 1)
+        _require_pragma(database, "trusted_schema", 0)
+        _require_pragma(database, "busy_timeout", busy_ms)
+        if contract is not None:
+            _validate_or_initialize_operational_contract(
+                database, contract, initialize=False
+            )
         return database
     except Exception:
         database.close()
@@ -446,6 +638,47 @@ def read_runtime_bytes(
         os.close(descriptor)
 
 
+def capture_runtime_file_identity(
+    path: Path, *, state_root: Path
+) -> RuntimeFileIdentity:
+    """Capture stable platform file identity for one runtime artifact."""
+    target = Path(path)
+    root = Path(state_root).resolve(strict=True)
+    metadata = validate_runtime_file(target, root, max_bytes=1 << 50)
+    if os.name == "nt":
+        import windows_workspace
+
+        handle = windows_workspace.open_exclusive_readonly_source_file(target)
+        try:
+            volume, file_id, is_directory = windows_workspace.identity(
+                handle, directory=False
+            )
+            if is_directory:
+                raise PermissionError("runtime artifact must be a regular file")
+        finally:
+            windows_workspace.close_handle(handle)
+        current = target.stat(follow_symlinks=False)
+        if not os.path.samestat(metadata, current):
+            raise PermissionError("runtime file identity changed during capture")
+        platform_name = "windows"
+        volume_name = f"volume:{volume}"
+        file_name = f"file-id:{file_id.hex()}"
+    else:
+        current = target.stat(follow_symlinks=False)
+        if not os.path.samestat(metadata, current):
+            raise PermissionError("runtime file identity changed during capture")
+        platform_name = "posix"
+        volume_name = f"dev:{current.st_dev}"
+        file_name = f"ino:{current.st_ino}"
+    return RuntimeFileIdentity(
+        platform=platform_name,
+        volume=volume_name,
+        file_id=file_name,
+        size=current.st_size,
+        mtime_ns=current.st_mtime_ns,
+    )
+
+
 @contextlib.contextmanager
 def begin_immediate(
     connection: sqlite3.Connection,
@@ -472,25 +705,242 @@ def fsync_file(path: Path) -> None:
 
 
 def fsync_directory(path: Path) -> None:
-    """Sync directory metadata where the platform exposes directory handles."""
+    """Sync directory metadata or fail when the platform cannot prove it."""
+    if os.name == "nt":
+        import windows_workspace
+
+        handle: int | None = None
+        try:
+            handle = windows_workspace.open_writable_directory_path(Path(path))
+            if not windows_workspace.flush_directory(handle):
+                raise ctypes.WinError(ctypes.get_last_error())
+        except (OSError, RuntimeError) as exc:
+            raise _metadata_durability_error("Windows directory flush failed", exc) from exc
+        finally:
+            if handle is not None:
+                windows_workspace.close_handle(handle)
+        return
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     try:
         descriptor = os.open(Path(path), flags)
     except OSError as exc:
-        unsupported = {errno.EINVAL, errno.ENOTSUP}
-        if os.name == "nt":
-            unsupported.update({errno.EACCES, errno.EPERM})
-        if exc.errno in unsupported:
-            return
-        raise
+        raise _metadata_durability_error("directory open for fsync failed", exc) from exc
     try:
         try:
             os.fsync(descriptor)
         except OSError as exc:
-            if exc.errno not in {errno.EBADF, errno.EINVAL, errno.ENOTSUP}:
-                raise
+            raise _metadata_durability_error("directory fsync failed", exc) from exc
     finally:
         os.close(descriptor)
+
+
+def _metadata_durability_error(
+    message: str,
+    error: BaseException,
+) -> MetadataDurabilityUnavailable:
+    error_number = getattr(error, "errno", None)
+    if error_number is None:
+        result = MetadataDurabilityUnavailable(f"{message}: {error}")
+    else:
+        result = MetadataDurabilityUnavailable(error_number, f"{message}: {error}")
+    if getattr(error, "winerror", None) is not None:
+        result.winerror = error.winerror
+    return result
+
+
+def _publication_digest(path: Path, parent: Path, *, max_bytes: int) -> str | None:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    return sha256_bytes(read_runtime_bytes(path, parent, max_bytes=max_bytes))
+
+
+def durable_publish_file(
+    staged: Path,
+    destination: Path,
+    *,
+    replace: bool,
+    expected_sha256: str,
+    max_bytes: int,
+) -> Literal["published", "adopted", "duplicate"]:
+    """Publish one sibling file and return published, adopted, or duplicate."""
+    if not isinstance(replace, bool):
+        raise TypeError("replace must be a boolean")
+    if re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
+        raise ValueError("expected_sha256 must be lowercase 64-hex")
+    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
+        raise ValueError("max_bytes must be a positive integer")
+
+    staged = Path(staged)
+    destination = Path(destination)
+    try:
+        staged_parent = staged.parent.resolve(strict=True)
+        destination_parent = destination.parent.resolve(strict=True)
+    except OSError as exc:
+        raise PermissionError("publication parent must exist") from exc
+    if staged_parent != destination_parent:
+        raise ValueError("staged and destination must be sibling paths")
+    if os.path.normcase(staged.name) == os.path.normcase(destination.name):
+        raise ValueError("staged and destination must be distinct names")
+    if _known_network_path(staged_parent) or _windows_reparse_point(staged_parent):
+        raise UnsafeStateRoot("durable publication requires one local non-reparse parent")
+    staged = staged_parent / staged.name
+    destination = destination_parent / destination.name
+
+    staged_digest = _publication_digest(staged, staged_parent, max_bytes=max_bytes)
+    destination_digest = _publication_digest(
+        destination, staged_parent, max_bytes=max_bytes
+    )
+    if destination_digest == expected_sha256:
+        if staged_digest is None:
+            if os.name != "nt":
+                fsync_directory(staged_parent)
+            return "adopted"
+        if staged_digest == expected_sha256:
+            return "duplicate"
+        raise RuntimeError("durable publication conflict: staged bytes do not match")
+    if staged_digest != expected_sha256:
+        raise RuntimeError("durable publication conflict: expected bytes are unavailable")
+
+    if os.name == "nt":
+        import windows_workspace
+
+        try:
+            windows_workspace.flush_file_path(staged)
+            windows_workspace.move_file_write_through(
+                staged,
+                destination,
+                replace=replace,
+            )
+        except FileExistsError:
+            raise
+        except (OSError, RuntimeError) as exc:
+            raise _metadata_durability_error("Windows metadata publication failed", exc) from exc
+    else:
+        try:
+            fsync_file(staged)
+        except OSError as exc:
+            raise _metadata_durability_error("staged file fsync failed", exc) from exc
+        if replace:
+            try:
+                os.replace(staged, destination)
+            except OSError as exc:
+                raise _metadata_durability_error("metadata replacement failed", exc) from exc
+        else:
+            try:
+                os.link(staged, destination, follow_symlinks=False)
+            except FileExistsError:
+                raise
+            except OSError as exc:
+                raise _metadata_durability_error("metadata publication link failed", exc) from exc
+            try:
+                os.unlink(staged)
+            except OSError:
+                fsync_directory(staged_parent)
+                raise
+        fsync_directory(staged_parent)
+
+    if _publication_digest(destination, staged_parent, max_bytes=max_bytes) != expected_sha256:
+        raise RuntimeError("durable publication conflict: destination read-back failed")
+    return "published"
+
+
+def publish_runtime_file(
+    path: Path,
+    data: bytes,
+    *,
+    state_root: Path,
+    create_only: bool,
+    expected: RuntimeFileIdentity | None = None,
+    expected_sha256: str | None = None,
+    mode: int = 0o600,
+) -> RuntimeFileIdentity:
+    """Publish runtime bytes through the shared checked durability primitive."""
+    if not isinstance(data, bytes):
+        raise TypeError("runtime file data must be bytes")
+    if not isinstance(create_only, bool):
+        raise TypeError("create_only must be a boolean")
+    if isinstance(mode, bool) or not isinstance(mode, int) or not 0 <= mode <= 0o777:
+        raise ValueError("mode must be a valid permission mode")
+    if create_only and (expected is not None or expected_sha256 is not None):
+        raise ValueError("create-only publication does not accept replacement evidence")
+    if not create_only and (expected is None or expected_sha256 is None):
+        raise ValueError("replacement requires expected identity and SHA-256")
+    if expected_sha256 is not None and re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
+        raise ValueError("expected_sha256 must be lowercase 64-hex")
+
+    root = Path(state_root).resolve(strict=True)
+    destination = Path(path)
+    try:
+        parent = destination.parent.resolve(strict=True)
+        parent.relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise PermissionError("runtime publication path is outside the state root") from exc
+    destination = parent / destination.name
+    if not create_only:
+        current = capture_runtime_file_identity(destination, state_root=root)
+        if current != expected:
+            raise PermissionError("runtime file identity changed before publication")
+        current_bytes = read_runtime_bytes(
+            destination, root, max_bytes=max(1, current.size)
+        )
+        if sha256_bytes(current_bytes) != expected_sha256:
+            raise PermissionError("runtime file bytes changed before publication")
+
+    staged = parent / f".{destination.name}.{secrets.token_hex(16)}.tmp"
+    descriptor = os.open(
+        staged,
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+        mode,
+    )
+    try:
+        view = memoryview(data)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("runtime staging write made no progress")
+            view = view[written:]
+        os.fsync(descriptor)
+    except BaseException:
+        os.close(descriptor)
+        with contextlib.suppress(OSError):
+            staged.unlink()
+        raise
+    else:
+        os.close(descriptor)
+    _harden_runtime_owner_only(staged, mode)
+
+    digest = sha256_bytes(data)
+    try:
+        outcome = durable_publish_file(
+            staged,
+            destination,
+            replace=not create_only,
+            expected_sha256=digest,
+            max_bytes=max(1, len(data), 0 if expected is None else expected.size),
+        )
+    except BaseException:
+        with contextlib.suppress(OSError):
+            staged.unlink()
+        raise
+    if outcome == "duplicate":
+        staged.unlink()
+        fsync_directory(parent)
+    _harden_runtime_owner_only(destination, mode)
+    published = capture_runtime_file_identity(destination, state_root=root)
+    if published.size != len(data):
+        raise RuntimeError("published runtime file size changed during read-back")
+    return published
+
+
+def sync_runtime_directory(path: Path) -> None:
+    """Expose the shared checked metadata sync boundary to runtime publishers."""
+    fsync_directory(Path(path))
 
 
 def restricted_relative_path(value: str, allowed_roots: tuple[str, ...]) -> PurePosixPath:

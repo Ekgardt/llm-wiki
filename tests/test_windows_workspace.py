@@ -181,3 +181,126 @@ def test_shared_readonly_source_file_rejects_reparse_and_closes_handle(
 
     assert len(closed) == 2
     assert len(set(closed)) == 2
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows durable publication boundary")
+def test_flush_file_path_uses_checked_no_follow_handle_and_always_closes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "staged.json"
+    target.write_bytes(b"payload")
+    calls: list[tuple[object, ...]] = []
+
+    class FakeApi:
+        def create_file(self, *args: object) -> int:
+            calls.append(("open", *args))
+            return 73
+
+        def flush_file_buffers(self, handle: int) -> bool:
+            calls.append(("flush", handle))
+            return True
+
+        def close_handle(self, handle: int) -> bool:
+            calls.append(("close", handle))
+            return True
+
+    monkeypatch.setattr(windows_workspace, "_API", FakeApi())
+    monkeypatch.setattr(
+        windows_workspace,
+        "identity",
+        lambda handle, *, directory: calls.append(("identity", handle, directory)),
+    )
+
+    windows_workspace.flush_file_path(target)
+
+    opened = calls[0]
+    assert opened[0] == "open"
+    assert opened[1] == f"\\\\?\\{PureWindowsPath(target)}"
+    assert int(opened[2]) & 0x40000000  # GENERIC_WRITE
+    assert int(opened[6]) & 0x00200000  # FILE_FLAG_OPEN_REPARSE_POINT
+    assert calls[-3:] == [("identity", 73, False), ("flush", 73), ("close", 73)]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows durable publication boundary")
+def test_flush_file_path_propagates_native_failure_and_closes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ctypes
+
+    target = tmp_path / "staged.json"
+    target.write_bytes(b"payload")
+    closed: list[int] = []
+
+    class FakeApi:
+        def create_file(self, *_args: object) -> int:
+            return 79
+
+        def flush_file_buffers(self, _handle: int) -> bool:
+            ctypes.set_last_error(5)
+            return False
+
+        def close_handle(self, handle: int) -> bool:
+            closed.append(handle)
+            return True
+
+    monkeypatch.setattr(windows_workspace, "_API", FakeApi())
+    monkeypatch.setattr(windows_workspace, "identity", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(OSError) as raised:
+        windows_workspace.flush_file_path(target)
+
+    assert raised.value.winerror == 5
+    assert closed == [79]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows durable publication boundary")
+def test_move_file_write_through_uses_only_checked_move_flags(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str, int]] = []
+
+    class FakeApi:
+        def move_file_ex(self, source: str, destination: str, flags: int) -> bool:
+            calls.append((source, destination, flags))
+            return True
+
+    monkeypatch.setattr(windows_workspace, "_API", FakeApi())
+    source = tmp_path / "stage.json"
+    destination = tmp_path / "state.json"
+
+    windows_workspace.move_file_write_through(source, destination, replace=False)
+    windows_workspace.move_file_write_through(source, destination, replace=True)
+
+    assert [flags for _source, _destination, flags in calls] == [0x8, 0x9]
+    assert all(flags & 0x2 == 0 for _source, _destination, flags in calls)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows durable publication boundary")
+def test_native_write_through_move_creates_and_replaces_exact_bytes(tmp_path: Path) -> None:
+    supported, reason = windows_workspace.capability()
+    if not supported:
+        pytest.skip(reason or "Windows native workspace APIs unavailable")
+    destination = tmp_path / "state.json"
+    first = tmp_path / "first.tmp"
+    first.write_bytes(b"first")
+    windows_workspace.flush_file_path(first)
+    windows_workspace.move_file_write_through(first, destination, replace=False)
+    assert destination.read_bytes() == b"first"
+    assert not first.exists()
+
+    second = tmp_path / "second.tmp"
+    second.write_bytes(b"second")
+    windows_workspace.flush_file_path(second)
+    windows_workspace.move_file_write_through(second, destination, replace=True)
+    assert destination.read_bytes() == b"second"
+    assert not second.exists()
+
+    third = tmp_path / "third.tmp"
+    third.write_bytes(b"third")
+    with pytest.raises(FileExistsError):
+        windows_workspace.move_file_write_through(third, destination, replace=False)
+    assert third.read_bytes() == b"third"
+    assert destination.read_bytes() == b"second"

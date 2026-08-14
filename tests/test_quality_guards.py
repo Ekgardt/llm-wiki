@@ -139,6 +139,7 @@ def test_install_ps1_no_undefined_vars():
     skip = {
         "_", "args", "LASTEXITCODE", "PROFILE", "env", "PSScriptRoot",
         "ErrorActionPreference", "true", "false", "null", "input",
+        "PSHOME", "PSVersionTable",
     }
 
     # Collect all $varName references.
@@ -158,6 +159,10 @@ def test_install_ps1_no_undefined_vars():
     for fm in re.finditer(r"function\s+[\w-]+\s*\(([^)]*)\)", content):
         for pm in re.finditer(r"\$([A-Za-z_]\w*)", fm.group(1)):
             assigned.add(pm.group(1))
+    for block in re.finditer(r"param\((.*?)\)\s*(?:\{|\r?\n)", content, re.DOTALL):
+        for pm in re.finditer(r"\$([A-Za-z_]\w*)", block.group(1)):
+            assigned.add(pm.group(1))
+    assigned.update(re.findall(r"foreach\s*\(\s*\$([A-Za-z_]\w*)\s+in\b", content))
 
     undefined = sorted(refs - assigned - skip)
     assert not undefined, f"Undefined PowerShell vars in install.ps1: {undefined}"
@@ -171,6 +176,7 @@ def test_install_sh_no_undefined_vars():
 
     skip = {
         "HOME", "PATH", "PROFILE", "LLM_WIKI_ROOT", "LLM_WIKI_STATE_ROOT",
+        "LLM_WIKI_COMMIT", "LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS", "SECONDS",
         # Standard bash/environment builtins not assigned inside the script.
         "SHELL", "BASH_SOURCE", "ZSH_VERSION", "BASH_VERSION", "TMPDIR",
     }
@@ -189,27 +195,29 @@ def test_install_sh_no_undefined_vars():
         r"(?:^|\s|;)(?:export\s+)?([A-Za-z_]\w*)\s*=", content, re.MULTILINE
     ):
         assigned.add(m.group(1))
+    assigned.update(re.findall(r"\blocal\s+([A-Za-z_]\w*)", content))
+    assigned.update(re.findall(r"\bfor\s+([A-Za-z_]\w*)\s+in\b", content))
 
     undefined = sorted(refs - assigned - skip)
     assert not undefined, f"Undefined bash vars in install.sh: {undefined}"
 
 
-def test_installers_do_not_infer_pytest_exit_status_from_output():
+def test_installers_do_not_infer_smoke_exit_status_from_output():
     powershell_source = (ROOT / "install.ps1").read_text(encoding="utf-8")
     assert powershell_source.isascii(), (
         "install.ps1 must remain ASCII-safe for Windows PowerShell 5.1 without a BOM"
     )
-    powershell = powershell_source.split("4. Run tests", 1)[1].split(
+    powershell = powershell_source.split("4. Run production smoke", 1)[1].split(
         "5. Set environment variables", 1
     )[0]
     shell = (ROOT / "install.sh").read_text(encoding="utf-8").split(
-        "4. Run tests", 1
+        "4. Run production smoke", 1
     )[1].split("5. Set environment variables", 1)[0]
 
     assert "Start-Process" in powershell
     assert "-PassThru" in powershell
     assert "$testProcess.Handle" in powershell
-    assert ".WaitForExit()" in powershell
+    assert ".WaitForExit($testTimeoutMilliseconds)" in powershell
     assert ".ExitCode" in powershell
     assert "finally" in powershell
     assert ".HasExited" in powershell
@@ -232,7 +240,10 @@ def test_installers_do_not_infer_pytest_exit_status_from_output():
     assert "tail -n 1" not in shell
     assert "cut -c" not in shell
     assert re.search(r"trap .*EXIT", shell)
-    assert re.search(r"uv run pytest -q\s*&", shell)
+    assert re.search(
+        r"uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120\s*&",
+        shell,
+    )
     assert "testPid=$!" in shell
     assert "testPgid=$!" in shell
     assert 'wait "$testPid"' in shell
@@ -242,16 +253,33 @@ def test_installers_do_not_infer_pytest_exit_status_from_output():
     assert 'kill -s KILL -- "-$testPgid"' in shell
     assert "set -m" in shell
     assert "set +m" in shell
-    assert 'trap \'stop_test_child; restore_test_monitor_mode\' EXIT' in shell
+    assert 'trap \'stop_test_timer; stop_test_child; restore_test_monitor_mode\' EXIT' in shell
     assert "testMonitorMode=off; set -m" in shell
     assert "restore_test_monitor_mode" in shell
     assert "setsid" not in shell
     assert "wait -f" not in shell
-    assert not re.search(r'=\s*"\$\(uv run pytest', shell)
+    assert not re.search(r'=\s*"\$\(uv run .*install_smoke', shell)
     assert "grep" not in shell
     assert "|| true" not in shell
-    assert 'ok "Test suite passed"' in shell
-    assert 'Ok "Test suite passed"' in powershell
+    assert 'ok "Production smoke passed"' in shell
+    assert 'Ok "Production smoke passed"' in powershell
+    assert "LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS" in shell
+    assert "LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS" in powershell
+    assert 'fail "Production smoke failed; installation aborted"' in shell
+    assert '"Production smoke failed; installation aborted"' in powershell
+    assert "Fail $testFailure" in powershell
+
+
+def test_installers_verify_before_external_configuration_mutation():
+    shell = (ROOT / "install.sh").read_text(encoding="utf-8")
+    powershell = (ROOT / "install.ps1").read_text(encoding="utf-8")
+
+    assert shell.index('ok "Production smoke passed"') < shell.index(
+        "protect_push_urls_if_authorized", shell.index('ok "Production smoke passed"')
+    )
+    assert powershell.index('Ok "Production smoke passed"') < powershell.index(
+        "Protect-PushUrlsIfAuthorized", powershell.index('Ok "Production smoke passed"')
+    )
 
 
 # ─── 4. CHANGELOG latest version matches pyproject.toml ─────────────
@@ -539,7 +567,7 @@ def test_installer_version_matches_pyproject():
                 )
 
 
-def test_unpublished_remote_bootstrap_is_fail_closed():
+def test_remote_bootstrap_is_immutable_and_fail_closed():
     sources = {
         name: (ROOT / name).read_text(encoding="utf-8")
         for name in ("install.sh", "install.ps1", "docs/USER-GUIDE.md")
@@ -552,17 +580,18 @@ def test_unpublished_remote_bootstrap_is_fail_closed():
     )
     for name, source in sources.items():
         for value in forbidden:
-            assert value not in source, f"{name}: advertises unpublished bootstrap {value!r}"
+            assert value not in source, f"{name}: advertises mutable bootstrap {value!r}"
 
-    assert "Remote bootstrap is not published" in sources["install.sh"]
-    assert "Remote bootstrap is not published" in sources["install.ps1"]
+    for installer in ("install.sh", "install.ps1"):
+        assert "LLM_WIKI_COMMIT" in sources[installer]
+        assert "full 40-hex commit OID" in sources[installer]
+        assert "scripts/installer_config.py" in sources[installer].replace("\\", "/")
+        assert "protect_push" in sources[installer].casefold().replace("-", "_")
     assert "uv is required" in sources["install.sh"]
     assert "uv is required" in sources["install.ps1"]
-    assert 'VAULT_ROOT="$SCRIPT_DIR"' in sources["install.sh"]
-    assert 'VAULT_ROOT="${LLM_WIKI_ROOT:-$SCRIPT_DIR}"' not in sources["install.sh"]
+    assert 'VAULT_ROOT="${LLM_WIKI_ROOT:-$SCRIPT_DIR}"' in sources["install.sh"]
     assert '${BASH_SOURCE[0]:-}' in sources["install.sh"]
-    assert "$VAULT_ROOT = $PSScriptRoot" in sources["install.ps1"]
-    assert "if ($env:LLM_WIKI_ROOT)" not in sources["install.ps1"]
+    assert "if ($env:LLM_WIKI_ROOT)" in sources["install.ps1"]
     assert "IsNullOrWhiteSpace($PSScriptRoot)" in sources["install.ps1"]
     assert "core features will still work" not in sources["install.sh"]
     assert "core features will still work" not in sources["install.ps1"]

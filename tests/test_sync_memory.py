@@ -112,11 +112,13 @@ def _build_vault(tmp_path: Path) -> tuple[Path, Path, Path]:
     )
     (root / "pyproject.toml").write_text(
         '[project]\nrequires-python = ">=3.10"\n'
-        '[project.optional-dependencies]\nmcp-server = ["mcp>=1.27,<2"]\n',
+        'dependencies = ["mcp>=1.29,<2"]\n'
+        '[project.optional-dependencies]\nmcp-server = []\n',
         encoding="utf-8",
     )
     (root / "uv.lock").write_text(
         'version = 1\nrequires-python = ">=3.10"\n'
+        '[[package]]\nname = "mcp"\nversion = "1.29.0"\n'
         '[[package]]\nname = "llm-wiki"\nprovides-extras = ["mcp-server"]\n',
         encoding="utf-8",
     )
@@ -174,11 +176,13 @@ def test_check_is_default_dry_run_and_actions_are_ordered(tmp_path, monkeypatch)
 def test_dependency_action_checks_lock_and_baseline_environment(tmp_path):
     sync_memory = _load_sync_memory()
     (tmp_path / "pyproject.toml").write_text(
-        '[project.optional-dependencies]\nmcp-server = ["mcp>=1.27,<2"]\n',
+        '[project]\ndependencies = ["mcp>=1.29,<2"]\n'
+        '[project.optional-dependencies]\nmcp-server = []\n',
         encoding="utf-8",
     )
     (tmp_path / "uv.lock").write_text(
-        'version = 1\nprovides-extras = ["mcp-server"]\n', encoding="utf-8"
+        'version = 1\n[[package]]\nname = "mcp"\nversion = "1.29.0"\n',
+        encoding="utf-8",
     )
     commands = []
 
@@ -195,7 +199,7 @@ def test_dependency_action_checks_lock_and_baseline_environment(tmp_path):
     assert commands[0][1]["timeout"] <= sync_memory.DEPENDENCY_TIMEOUT_SECONDS
 
 
-def test_mcp_extra_declares_python310_tomli_parser():
+def test_production_baseline_declares_python310_tomli_parser():
     project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
     assert 'tomli>=2.4.1,<3; python_version < \'3.11\'' in project
@@ -205,8 +209,10 @@ def test_importable_wrong_mcp_version_is_planned_and_repaired(tmp_path, monkeypa
     import importlib.util
 
     sync_memory = _load_sync_memory()
-    (tmp_path / "pyproject.toml").write_text("mcp-server = []\n", encoding="utf-8")
-    (tmp_path / "uv.lock").write_text("mcp-server\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        'dependencies = ["mcp>=1.29,<2"]\nmcp-server = []\n', encoding="utf-8"
+    )
+    (tmp_path / "uv.lock").write_text('name = "mcp"\nmcp-server\n', encoding="utf-8")
     commands = []
     monkeypatch.setattr(importlib.util, "find_spec", lambda name: object())
     def run_uv(command, **kwargs):
@@ -231,8 +237,10 @@ def test_importable_wrong_mcp_version_is_planned_and_repaired(tmp_path, monkeypa
 
 def test_current_locked_environment_is_noop_even_without_import_probe(tmp_path):
     sync_memory = _load_sync_memory()
-    (tmp_path / "pyproject.toml").write_text("mcp-server = []\n", encoding="utf-8")
-    (tmp_path / "uv.lock").write_text("mcp-server\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        'dependencies = ["mcp>=1.29,<2"]\nmcp-server = []\n', encoding="utf-8"
+    )
+    (tmp_path / "uv.lock").write_text('name = "mcp"\nmcp-server\n', encoding="utf-8")
     commands = []
     def run_uv(command, **kwargs):
         commands.append(command)
@@ -249,8 +257,10 @@ def test_current_locked_environment_is_noop_even_without_import_probe(tmp_path):
 
 def test_check_reports_planned_dependency_changes_without_applying(tmp_path):
     sync_memory = _load_sync_memory()
-    (tmp_path / "pyproject.toml").write_text("mcp-server = []\n", encoding="utf-8")
-    (tmp_path / "uv.lock").write_text("mcp-server\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        'dependencies = ["mcp>=1.29,<2"]\nmcp-server = []\n', encoding="utf-8"
+    )
+    (tmp_path / "uv.lock").write_text('name = "mcp"\nmcp-server\n', encoding="utf-8")
     commands = []
 
     def run_uv(command, **kwargs):
@@ -287,10 +297,12 @@ def test_dependency_action_rejects_missing_lock_inputs(tmp_path, missing):
     assert result["details"]["lock"] == "missing"
 
 
-def test_apply_syncs_only_locked_mcp_baseline_without_models(tmp_path):
+def test_apply_syncs_only_locked_production_baseline_without_models(tmp_path):
     sync_memory = _load_sync_memory()
-    (tmp_path / "pyproject.toml").write_text("mcp-server = []\n", encoding="utf-8")
-    (tmp_path / "uv.lock").write_text("mcp-server\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        'dependencies = ["mcp>=1.29,<2"]\nmcp-server = []\n', encoding="utf-8"
+    )
+    (tmp_path / "uv.lock").write_text('name = "mcp"\nmcp-server\n', encoding="utf-8")
     commands = []
     def run_uv(command, **kwargs):
         commands.append(command)
@@ -311,8 +323,7 @@ def test_apply_syncs_only_locked_mcp_baseline_without_models(tmp_path):
             "sync",
             "--locked",
             "--inexact",
-            "--extra",
-            "mcp-server",
+            "--no-default-groups",
             "--dry-run",
             "--output-format",
             "json",
@@ -323,8 +334,7 @@ def test_apply_syncs_only_locked_mcp_baseline_without_models(tmp_path):
             "sync",
             "--locked",
             "--inexact",
-            "--extra",
-            "mcp-server",
+            "--no-default-groups",
             "--no-python-downloads",
             "--quiet",
         ]
@@ -336,8 +346,10 @@ def test_apply_syncs_only_locked_mcp_baseline_without_models(tmp_path):
 
 def test_dependency_commands_share_one_deadline(tmp_path):
     sync_memory = _load_sync_memory()
-    (tmp_path / "pyproject.toml").write_text("mcp-server = []\n", encoding="utf-8")
-    (tmp_path / "uv.lock").write_text("mcp-server\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        'dependencies = ["mcp>=1.29,<2"]\nmcp-server = []\n', encoding="utf-8"
+    )
+    (tmp_path / "uv.lock").write_text('name = "mcp"\nmcp-server\n', encoding="utf-8")
     timeouts = []
     def run_uv(command, **kwargs):
         timeouts.append(kwargs["timeout"])
@@ -382,8 +394,10 @@ def test_uv_commands_use_process_tree_runner(tmp_path, monkeypatch):
 
 def test_apply_rejects_stale_lock_even_when_mcp_is_installed(tmp_path):
     sync_memory = _load_sync_memory()
-    (tmp_path / "pyproject.toml").write_text("mcp-server = []\n", encoding="utf-8")
-    (tmp_path / "uv.lock").write_text("mcp-server\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        'dependencies = ["mcp>=1.29,<2"]\nmcp-server = []\n', encoding="utf-8"
+    )
+    (tmp_path / "uv.lock").write_text('name = "mcp"\nmcp-server\n', encoding="utf-8")
     commands = []
     def run_uv(command, **kwargs):
         commands.append(command)
@@ -758,8 +772,10 @@ def test_retained_descendant_pipes_are_closed_without_unbounded_communicate(monk
 
 def test_dependency_timeout_exposes_cleanup_failure(tmp_path):
     sync_memory = _load_sync_memory()
-    (tmp_path / "pyproject.toml").write_text("mcp-server = []\n", encoding="utf-8")
-    (tmp_path / "uv.lock").write_text("mcp-server\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        'dependencies = ["mcp>=1.29,<2"]\nmcp-server = []\n', encoding="utf-8"
+    )
+    (tmp_path / "uv.lock").write_text('name = "mcp"\nmcp-server\n', encoding="utf-8")
     def timed_out(*args, **kwargs):
         raise sync_memory.ProcessTreeTimeout(["uv"], 1, cleanup_error="taskkill_failed")
 
@@ -771,8 +787,10 @@ def test_dependency_timeout_exposes_cleanup_failure(tmp_path):
 
 def test_dependency_action_reports_expired_deadline_without_starting_uv(tmp_path):
     sync_memory = _load_sync_memory()
-    (tmp_path / "pyproject.toml").write_text("mcp-server = []\n", encoding="utf-8")
-    (tmp_path / "uv.lock").write_text("mcp-server\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        'dependencies = ["mcp>=1.29,<2"]\nmcp-server = []\n', encoding="utf-8"
+    )
+    (tmp_path / "uv.lock").write_text('name = "mcp"\nmcp-server\n', encoding="utf-8")
 
     result = sync_memory._dependency_action(
         root=tmp_path,
@@ -845,7 +863,7 @@ def test_sync_detects_recent_knowledge_source_changes(
     )
 
     action = next(item for item in report["actions"] if item["id"] == "indexes")
-    assert action["status"] == ("changed" if apply else "skipped")
+    assert action["status"] == ("changed" if apply else "skipped"), action
     if not apply:
         assert action["details"]["freshness"] == "stale"
         assert action["details"]["source_rebuild_required"] is True
@@ -1016,6 +1034,53 @@ def test_installers_handle_sync_exit_codes_explicitly():
     assert 'default { Fail "Runtime synchronization failed" }' in powershell
     assert 'LLM-Wiki installed with warnings' in shell
     assert 'LLM-Wiki installed with warnings' in powershell
+
+
+def test_powershell_installer_scheduler_failure_is_partial_and_nonzero(tmp_path):
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("PowerShell 7 is unavailable")
+    source = (ROOT / "install.ps1").read_text(encoding="utf-8")
+    scheduler = source.split(
+        "# --- 6. Register Task Scheduler -----------------------------------", 1
+    )[1].split("# --- 7. Detect and wire up agents ---------------------------------", 1)[0]
+    summary = source.split(
+        "# --- 9. Summary ---------------------------------------------------", 1
+    )[1]
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "install-scheduled-tasks.ps1").write_text(
+        "param($VaultRoot, $StateRoot, $UvPath)\nexit 7\n",
+        encoding="utf-8",
+    )
+    harness = f"""
+function Info([string]$Message) {{ Write-Output "INFO:$Message" }}
+function Warn([string]$Message) {{ Write-Output "WARN:$Message" }}
+function Ok([string]$Message) {{ Write-Output "OK:$Message" }}
+function uv {{ }}
+$VAULT_ROOT = 'C:\\vault'
+$STATE_ROOT = 'C:\\state'
+$agents = @()
+$syncWarning = $false
+{scheduler}
+{summary}
+"""
+
+    completed = subprocess.run(
+        [pwsh, "-NoProfile", "-NonInteractive", "-Command", harness],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=10,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert "LLM-Wiki installed with warnings" in completed.stdout
+    assert "Maintenance: not registered" in completed.stdout
+    assert "LLM-Wiki installed successfully" not in completed.stdout
+    assert "Maintenance: Task Scheduler (nightly + weekly)" not in completed.stdout
 
 
 def test_sync_reports_legacy_change_separately_when_generation_is_deferred(

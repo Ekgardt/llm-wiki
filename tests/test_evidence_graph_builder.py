@@ -23,7 +23,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import sqlite3
 import sys
+from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 
@@ -44,6 +47,33 @@ if str(SCRIPTS) not in sys.path:
 
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def test_parent_records_releases_database(tmp_path: Path) -> None:
+    import evidence_graph_builder
+
+    database_path = tmp_path / "parent.sqlite3"
+    with closing(sqlite3.connect(database_path)) as database:
+        for collection in evidence_graph_builder._RECORD_COLLECTIONS:
+            table = (
+                "dependency"
+                if collection == "dependencies"
+                else collection.removesuffix("s")
+            )
+            key = evidence_graph_builder._RECORD_KEYS[collection]
+            database.execute(f"CREATE TABLE {table} ({key} TEXT PRIMARY KEY)")
+
+    assert evidence_graph_builder._parent_records(
+        database_path,
+        {},
+        set(),
+        deadline=None,
+        cancelled=None,
+    ) == {collection: {} for collection in evidence_graph_builder._RECORD_COLLECTIONS}
+
+    replacement = database_path.with_suffix(".replacement")
+    replacement.write_bytes(database_path.read_bytes())
+    os.replace(replacement, database_path)
 
 
 def test_builder_manifest_matches_database_schema_for_each_mode(tmp_path: Path) -> None:

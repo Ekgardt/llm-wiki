@@ -105,8 +105,8 @@ LLM Wiki 为你使用的每一个 AI 编码智能体——OpenCode、Codex、Cla
 - **5 个 LLM 后端**（自动检测）：OpenCode → Codex → Claude CLI → OpenAI → Ollama
 - **跨平台**：Windows、macOS、Linux、WSL2
 - **本地且零 daemon**——安装基线包含 MCP 包；vector search 和 Cognee 仍为可选项
-- **跨平台 CI 矩阵**：Ubuntu + Windows + macOS，Python 3.10 + 3.13
-- **Pre-commit 钩子**：ruff（静态分析）+ 结构 lint + gitleaks（密钥扫描）
+- **跨平台 CI 矩阵**：Ubuntu + Windows + macOS，Python 3.10–3.14
+- **Pre-commit 钩子（opt-in）**：ruff（静态分析）+ 结构 lint + gitleaks（密钥扫描）。可选；安装程序不会启用这些钩子。启用命令：`uv run --locked --no-sync pre-commit install --hook-type pre-commit --hook-type pre-push`。
 
 ---
 
@@ -119,11 +119,9 @@ LLM Wiki 为你使用的每一个 AI 编码智能体——OpenCode、Codex、Cla
 - [uv](https://docs.astral.sh/uv/)
 - 一个你已在使用的 AI 智能体（OpenCode、Codex、Claude Code、Cursor 或 Antigravity）
 
-### 从源码手动安装
+### 从源码安装
 
-目前尚未发布生产用远程 bootstrap URL。已批准但尚未实现的 bootstrap 目标将要求
-`LLM_WIKI_COMMIT` 为完整的 40 位十六进制 commit OID。在该功能发布前，请先克隆并
-检查源码，再进行安装：
+推荐方式仍然是在安装前先克隆并检查源码：
 
 ```bash
 git clone https://github.com/Ekgardt/llm-wiki.git
@@ -143,8 +141,48 @@ $env:LLM_WIKI_ROOT = (Get-Location).Path
 .\install.ps1
 ```
 
-本地安装程序会同步锁定的 MCP 基线依赖，运行完整回归套件进行诊断，创建 runtime 目录，
-并接入受支持的智能体。在实现基于完整 commit OID 的不可变验证前，远程 bootstrap 保持禁用。
+仅当 `LLM_WIKI_COMMIT` 是精确的 40 位十六进制 commit OID 时，才支持远程 bootstrap。
+请只从可信位置传入安装程序并设置该值；bootstrap 会获取精确 commit，验证 `HEAD`、
+仓库身份和必需文件，然后只执行 checkout 中的安装程序。分支名和标签名会被拒绝。
+
+本地安装程序会同步锁定的 production baseline，运行有界 production smoke，创建 runtime
+目录并接入受支持的智能体。完整回归套件仍是独立的 development 与 release gate。已有
+checkout 会保留全部 Git remote 设置；传入 `--protect-push` 或 `-ProtectPush` 才会把每个
+remote 的 push URL 替换为 `no-push`。
+
+### 依赖配置
+
+MCP 属于 production baseline；`mcp-server` 仍是 compatibility alias。全新 production
+安装使用精确 lock，且不安装 development groups：
+
+```bash
+uv sync --locked --no-default-groups
+uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120
+uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json
+```
+
+repair 命令默认只读；它会报告 Reliability V3 evidence 的 fresh、upgrade-required、
+partial、adopted 或 conflicting 状态，并且不会创建 `run/`。变更性 adoption 目前有意
+未启用：即使提供完整 offline apply 参数，backend 也会以
+`reliability_v3_runtime_activation_incomplete` fail closed，直到 v3 queue writers 与
+canonical ownership protocol 完成。该命令绝不会删除 `run/`、knowledge、retired
+databases、legacy caches 或 compatibility markers。
+
+可选 extras 以 additive 方式安装，并保留操作员已选择的包：
+
+```bash
+uv sync --locked --no-default-groups --inexact --extra hybrid
+uv sync --locked --no-default-groups --inexact --extra code-graph
+```
+
+贡献者安装 locked development group，并在不触发隐式同步的情况下运行完整回归套件：
+
+```bash
+uv sync --locked
+uv run --locked --no-sync pytest -q
+```
+
+Node 22 是可选项，仅 qualified precise Python navigation with Pyright 需要它。
 
 ### 验证可用
 
@@ -157,16 +195,16 @@ uv run python scripts/lookup_mode.py
 
 ## 接入智能体
 
-LLM Wiki 在安装时自动检测已安装的智能体。以下是接入内容：
+LLM Wiki 在安装时检测已安装的智能体，并说明集成是自动完成还是需要手动步骤：
 
-| 智能体 | 集成方式 | 如何接入 |
-|--------|----------|----------|
-| **OpenCode** | MCP + 轻量 JS lifecycle 插件 | MCP 提供读取/操作；插件将事件转发到 `integration_adapter.py` |
-| **Codex CLI** | MCP + 轻量包装器 | MCP 提供读取/操作；包装器转发 lifecycle 事件 |
-| **Claude Code** | MCP + 轻量 settings.json 钩子 | MCP 提供读取/操作；五个钩子转发 lifecycle 事件 |
-| **Cursor** | MCP + 规则文件 | 配置 MCP；复制 `integrations/cursor/rules/llm-wiki.mdc` 作为操作指引 |
-| **Antigravity** | MCP + AGENTS.md 片段 | 配置 MCP；复制 `integrations/antigravity/AGENTS.md` 作为操作指引 |
-| **Obsidian** | 可选 Markdown viewer | 直接打开 vault；不要求 Obsidian UI 或 ingestion 功能 |
+| 智能体 | 状态 | 集成方式 | 如何接入 |
+|--------|------|----------|----------|
+| **OpenCode** | 配置验证成功后自动 | MCP + 轻量 JS lifecycle 插件 | MCP 提供读取/操作；插件将事件转发到 `integration_adapter.py` |
+| **Codex CLI** | 配置验证成功后自动；在 `/hooks` 中审核信任 | MCP + 官方 lifecycle 钩子 | MCP 提供读取/操作；钩子转发 lifecycle 事件 |
+| **Claude Code** | settings 合并并验证成功后自动 | MCP + 轻量 settings.json 钩子 | MCP 提供读取/操作；五个钩子转发 lifecycle 事件 |
+| **Cursor** | 手动 | MCP + 规则文件 | 配置 MCP；复制 `integrations/cursor/rules/llm-wiki.mdc` 作为操作指引 |
+| **Antigravity** | 手动 | MCP + AGENTS.md 片段 | 配置 MCP；复制 `integrations/antigravity/AGENTS.md` 作为操作指引 |
+| **Obsidian** | 仅 viewer | 可选 Markdown viewer | 直接打开 vault；不要求 Obsidian UI 或 ingestion 功能 |
 
 所有智能体共享同一个 vault——Cursor 记录的决策在 OpenCode 的下次会话中可见。
 
@@ -175,7 +213,7 @@ LLM Wiki 在安装时自动检测已安装的智能体。以下是接入内容�
 用于混合 BM25 + Vector 搜索（即使关键词不匹配也能找到语义相关页面）：
 
 ```bash
-uv sync --extra semantic
+uv sync --locked --no-default-groups --inexact --extra semantic
 ```
 
 ### 可选：Cognee 图谱（300+ 页）
@@ -183,7 +221,7 @@ uv sync --extra semantic
 用于大规模实体提取 + 关系图：
 
 ```bash
-uv sync --extra cognee
+uv sync --locked --no-default-groups --inexact --extra cognee
 ```
 
 参见 [docs/SETUP-COGNEE.md](docs/SETUP-COGNEE.md) 了解 Ollama 设置。

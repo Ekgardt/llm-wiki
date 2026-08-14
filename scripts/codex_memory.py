@@ -19,7 +19,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -105,6 +104,7 @@ from integration_adapter import (  # noqa: E402
     ingest_event,
     normalize_occurrence_event,
 )
+from integration_config_backup import publish_configuration  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 from session_start_project_state import _compute_slug  # type: ignore  # noqa: E402
 
@@ -433,6 +433,8 @@ def codex_mcp_config_state(config: Path, vault_root: Path) -> str:
         return "conflict"
     expected_args = [
         "run",
+        "--locked",
+        "--no-sync",
         "--directory",
         str(vault_root),
         "python",
@@ -480,24 +482,8 @@ def _without_llm_wiki_hooks(existing: dict[str, Any]) -> dict[str, Any]:
 
 
 def _write_hooks_document(destination: Path, document: dict[str, Any]) -> None:
-    rendered = json.dumps(document, ensure_ascii=False, indent=2) + "\n"
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.is_symlink():
-        raise ValueError("invalid Codex hooks config")
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
-    )
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(rendered)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary_name, destination)
-    finally:
-        try:
-            os.unlink(temporary_name)
-        except FileNotFoundError:
-            pass
+    rendered = (json.dumps(document, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    publish_configuration(destination, rendered)
 
 
 def merge_codex_hooks(

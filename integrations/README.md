@@ -51,14 +51,24 @@ IDE agents (Cursor, Antigravity; VS Code Copilot — planned, not yet implemente
 ## MCP Server
 
 `scripts/mcp_server.py` exposes 12 task-shaped tools over local stdio. The
-installer baseline includes the MCP package. For manual dependency selection from
-source, run `uv sync --locked --extra mcp-server`, then configure the
-agent to run `uv run python scripts/mcp_server.py` from the vault root.
+installer baseline includes the MCP package; `mcp-server` is only a compatibility
+alias. For manual dependency selection, a production install runs
+`uv sync --locked --no-default-groups`.
+Configure a POSIX-shell agent to run
+`uv run --locked --no-sync --directory "$LLM_WIKI_ROOT" python scripts/mcp_server.py`.
+For PowerShell use
+`uv run --locked --no-sync --directory $env:LLM_WIKI_ROOT python scripts/mcp_server.py`.
 
 The tools include vault search, context, decisions, maintenance, conservative
 code analysis, and `doctor`. Every tool returns the same versioned response
 envelope; health and context are also MCP resources. Automatic SessionStart
 health output appears only for degraded/error checks.
+
+Installed-vault Reliability V3 inspection is a separate read-only operator command:
+`uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json`.
+Mutating adoption is not active until the compatible v3 queue writers and canonical
+ownership protocol land; the current apply path fails closed and never rewrites agent
+integration configuration.
 
 ## Obsidian
 

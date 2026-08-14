@@ -5,14 +5,14 @@ access to the knowledge vault via Model Context Protocol. No server, no cloud,
 no network — stdio subprocess on the same machine.
 
 Install: uv sync --extra mcp-server
-Run:    uv run python scripts/mcp_server.py
+Run:    uv run --locked --no-sync python scripts/mcp_server.py
 
 Agent config (e.g. for Claude Code ~/.claude/.mcp.json):
 {
   "mcpServers": {
     "llm-wiki": {
       "command": "uv",
-      "args": ["run", "--directory", "/path/to/llm-wiki", "python", "scripts/mcp_server.py"]
+      "args": ["run", "--locked", "--no-sync", "--directory", "/path/to/llm-wiki", "python", "scripts/mcp_server.py"]
     }
   }
 }

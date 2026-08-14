@@ -1999,7 +1999,7 @@ Run:
 
 ```bash
 uv run --locked --no-sync pytest tests/test_readme_i18n.py tests/test_quality_guards.py tests/test_structure.py -q
-uv run --locked --no-sync python -m compileall -q scripts tests benchmark
+uv run --locked --no-sync python -m compileall -q -x "tests[\\/]fixtures[\\/]code_kernel[\\/]python[\\/]pkg[\\/]broken[.]py" scripts tests benchmark
 git diff --check
 ```
 
@@ -2026,7 +2026,7 @@ Run:
 uv lock --check --no-python-downloads
 uv run --locked --no-sync pytest tests/test_dependency_contract.py tests/test_installer_bootstrap.py tests/test_installer_config.py tests/test_install_smoke.py tests/test_dependency_environments.py tests/test_cleanup_worktrees.py tests/test_repair_installed_memory.py tests/test_reranker.py tests/test_ci_policy.py tests/test_ci_timing_report.py tests/test_integration_injection.py tests/test_doctor.py tests/test_sync_memory.py tests/test_readme_i18n.py tests/test_quality_guards.py tests/test_structure.py -q
 uv run --locked --no-sync ruff check scripts/ tests/ benchmark/
-uv run --locked --no-sync python -m compileall -q scripts tests benchmark
+uv run --locked --no-sync python -m compileall -q -x "tests[\\/]fixtures[\\/]code_kernel[\\/]python[\\/]pkg[\\/]broken[.]py" scripts tests benchmark
 bash -n install.sh
 node --check scripts/llm-wiki-memory-opencode.js
 git diff --check
@@ -2075,6 +2075,7 @@ export LLM_WIKI_STATE_ROOT="$VERIFY_STATE"
 trap 'rm -rf "$VERIFY_ROOT"' EXIT
 uv sync --locked --no-default-groups
 uv run --locked --no-sync python -c "import importlib.util; assert importlib.util.find_spec('pytest') is None"
+uv run --locked --no-sync python -c "import os; from pathlib import Path; Path(os.environ['LLM_WIKI_STATE_ROOT']).mkdir(parents=True, exist_ok=True)"
 uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120
 rm -rf "$VERIFY_ROOT"
 trap - EXIT
@@ -2101,6 +2102,7 @@ try {
     & uv run --locked --no-sync python -c "import importlib.util; assert importlib.util.find_spec('pytest') is None"
     $nativeExit = $LASTEXITCODE
     if ($nativeExit -ne 0) { throw "production import probe failed with exit code $nativeExit" }
+    New-Item -ItemType Directory -Path $verifyState -Force | Out-Null
     & uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120
     $nativeExit = $LASTEXITCODE
     if ($nativeExit -ne 0) { throw "installer smoke failed with exit code $nativeExit" }

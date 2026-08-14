@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import random
+import sqlite3
 import sys
 import threading
 from datetime import datetime, timedelta, timezone
@@ -14,7 +16,9 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+import markdown_transaction  # noqa: E402
 import memory_queue  # noqa: E402
+import operational_ownership  # noqa: E402
 from memory_queue import LeaseFenceError, MemoryQueue  # noqa: E402
 
 
@@ -73,6 +77,165 @@ def test_expired_lease_is_delivered_again_and_old_worker_is_fenced(tmp_path: Pat
 
     with pytest.raises(LeaseFenceError):
         queue.publish_result(first, operation_id=task_id, result=b"stale")
+
+
+def _v3_queue(tmp_path: Path):
+    coordinator = tmp_path / "run/markdown-transactions-v3.candidate.sqlite3"
+    queue_path = tmp_path / "run/queue-v3.candidate.sqlite3"
+    markdown_transaction.initialize_coordinator_v3_candidate(coordinator, source_v2=None)
+    memory_queue.initialize_queue_v3_candidate(queue_path, source_v2=None)
+    return memory_queue.MemoryQueue._from_v3_candidate(queue_path, state_root=tmp_path)
+
+
+def test_queue_projection_failure_releases_only_the_exact_canonical_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue = _v3_queue(tmp_path)
+    successor: list[operational_ownership.OwnerLease] = []
+    real_release = operational_ownership.OwnershipRegistry.release
+
+    def fail_projection(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("injected queue projection failure")
+
+    def release_then_replace(registry, lease) -> None:
+        real_release(registry, lease)
+        successor.append(
+            registry.acquire(
+                "queue-worker",
+                scope="worker:test",
+                actor_id="successor-actor",
+                token="successor-token",
+            )
+        )
+
+    monkeypatch.setattr(queue, "_insert_queue_projection", fail_projection)
+    monkeypatch.setattr(
+        operational_ownership.OwnershipRegistry, "release", release_then_replace
+    )
+
+    with pytest.raises(RuntimeError, match="injected queue projection failure"):
+        with queue.queue_owner(role="queue-worker", scope="worker:test"):
+            pytest.fail("projection failure must happen before the body")
+
+    with sqlite3.connect(
+        tmp_path / "run/markdown-transactions-v3.candidate.sqlite3"
+    ) as database:
+        assert database.execute(
+            "SELECT owner_token, fencing_epoch FROM maintenance_owners "
+            "WHERE role='queue-worker' AND scope='worker:test'"
+        ).fetchone() == (successor[0].token, successor[0].epoch)
+
+
+def test_queue_release_removes_projection_before_canonical_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue = _v3_queue(tmp_path)
+    observed: list[tuple[int, int]] = []
+    real_remove = queue._remove_queue_projection
+
+    def observe_release(lease) -> None:
+        with sqlite3.connect(queue.db_path) as queue_database, sqlite3.connect(
+            tmp_path / "run/markdown-transactions-v3.candidate.sqlite3"
+        ) as coordinator_database:
+            observed.append(
+                (
+                    queue_database.execute(
+                        "SELECT COUNT(*) FROM queue_ownership WHERE owner_token=?",
+                        (lease.token,),
+                    ).fetchone()[0],
+                    coordinator_database.execute(
+                        "SELECT COUNT(*) FROM maintenance_owners WHERE owner_token=?",
+                        (lease.token,),
+                    ).fetchone()[0],
+                )
+            )
+        real_remove(lease)
+        with sqlite3.connect(queue.db_path) as queue_database, sqlite3.connect(
+            tmp_path / "run/markdown-transactions-v3.candidate.sqlite3"
+        ) as coordinator_database:
+            observed.append(
+                (
+                    queue_database.execute(
+                        "SELECT COUNT(*) FROM queue_ownership WHERE owner_token=?",
+                        (lease.token,),
+                    ).fetchone()[0],
+                    coordinator_database.execute(
+                        "SELECT COUNT(*) FROM maintenance_owners WHERE owner_token=?",
+                        (lease.token,),
+                    ).fetchone()[0],
+                )
+            )
+
+    monkeypatch.setattr(queue, "_remove_queue_projection", observe_release)
+    with queue.queue_owner(role="queue-worker", scope="worker:release") as lease:
+        assert lease.role == "queue-worker"
+        queue.heartbeat_queue_owner(lease)
+        with sqlite3.connect(queue.db_path) as database:
+            projection = database.execute(
+                "SELECT heartbeat_at, expires_at FROM queue_ownership "
+                "WHERE owner_token=?",
+                (lease.token,),
+            ).fetchone()
+        with sqlite3.connect(
+            tmp_path / "run/markdown-transactions-v3.candidate.sqlite3"
+        ) as database:
+            canonical = database.execute(
+                "SELECT heartbeat_at, expires_at FROM maintenance_owners "
+                "WHERE owner_token=?",
+                (lease.token,),
+            ).fetchone()
+        assert tuple(
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+            for value in projection
+        ) == tuple(
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+            for value in canonical
+        )
+
+    assert observed == [(1, 1), (0, 1)]
+    with sqlite3.connect(
+        tmp_path / "run/markdown-transactions-v3.candidate.sqlite3"
+    ) as database:
+        assert database.execute(
+            "SELECT COUNT(*) FROM maintenance_owners WHERE owner_token=?", (lease.token,)
+        ).fetchone() == (0,)
+
+
+def test_nested_queue_owner_projects_parent_without_releasing_it(tmp_path: Path) -> None:
+    queue = _v3_queue(tmp_path)
+    registry = operational_ownership.OwnershipRegistry(tmp_path)
+    parent = registry.acquire("nightly", scope="global", marker=_maintenance_marker(tmp_path))
+
+    with queue.queue_owner(
+        role="queue-worker", scope="worker:nested", parent=parent
+    ) as projected:
+        assert projected == parent
+        with sqlite3.connect(queue.db_path) as database:
+            assert database.execute(
+                "SELECT canonical_role, canonical_scope, owner_token, fencing_epoch "
+                "FROM queue_ownership"
+            ).fetchone() == ("nightly", "global", parent.token, parent.epoch)
+
+    with sqlite3.connect(
+        tmp_path / "run/markdown-transactions-v3.candidate.sqlite3"
+    ) as database:
+        assert database.execute(
+            "SELECT owner_token FROM maintenance_owners WHERE role='nightly'"
+        ).fetchone() == (parent.token,)
+    registry.release(parent)
+
+
+def _maintenance_marker(state_root: Path) -> operational_ownership.MarkerIdentity:
+    path = state_root / "run/maintenance.lock"
+    path.write_bytes(str(os.getpid()).encode("ascii"))
+    from reliable_memory import capture_runtime_file_identity, sha256_bytes
+
+    return operational_ownership.MarkerIdentity(
+        relative_path="run/maintenance.lock",
+        sha256=sha256_bytes(path.read_bytes()),
+        file_identity=capture_runtime_file_identity(path, state_root=state_root),
+        pid=os.getpid(),
+    )
 
 
 def test_drain_heartbeats_long_handler_past_270_seconds(

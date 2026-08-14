@@ -354,6 +354,27 @@ def test_python_scanner_detects_direct_guardrails_atomic_write():
     ]
 
 
+def test_python_scanner_recognizes_checked_markdown_publication_boundary():
+    from check_knowledge_writers import scan_source
+
+    source = '''
+def _apply_windows_operation(staged, destination):
+    durable_publish_file(
+        staged,
+        destination,
+        replace=True,
+        expected_sha256="0" * 64,
+        max_bytes=1024,
+    )
+'''
+
+    findings = scan_source(Path("scripts/markdown_transaction.py"), source)
+
+    assert [(item.api, item.approved) for item in findings] == [
+        ("durable_publish_file", True)
+    ]
+
+
 def test_python_scanner_traces_parameter_sink_alias_and_path_alias():
     from check_knowledge_writers import scan_source
 

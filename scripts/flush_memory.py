@@ -188,21 +188,18 @@ def read_transcript_tail(path: Path, max_chars: int = MAX_TRANSCRIPT_CHARS) -> s
     return data
 
 
-def summarize_with_llm(transcript_excerpt: str, event: str, session_id: str = "") -> str:
+def summarize_with_llm(
+    transcript_excerpt: str, event: str, session_id: str = ""
+) -> str | None:
     """Ask the LLM to classify + distill the transcript into a tier + body.
 
     Uses the unified llm_client (auto-detected backend — no separate API
-    key required on this machine). Falls back gracefully if the LLM is
-    unavailable (returns "" → caller treats as FLUSH_OK).
+    key required on this machine). Returns None only after deferred work is
+    durably queued. Raises if neither immediate nor deferred persistence works.
     """
     if not transcript_excerpt.strip():
         return ""
     transcript_excerpt = redact_secrets(transcript_excerpt)
-    try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from llm_client import call_llm
-    except ImportError:
-        return ""
 
     prompt = f"""You are classifying + distilling a Claude Code session transcript.
 
@@ -274,16 +271,17 @@ non-blank line MUST be the tier token.
         "decision or lesson in the transcript. No preamble, no apologies."
     )
     try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from llm_client import call_llm
+
         text = call_llm(prompt, system_prompt, max_tokens=1500)
     except Exception:
-        return ""
+        text = None
     if not text:
-        # No backend available (call_llm returned None) — enqueue for
-        # deferred processing so the content isn't silently lost as
-        # FLUSH_OK. Drained at the next active session via memory_queue.
         try:
             sys.path.insert(0, str(Path(__file__).resolve().parent))
             from memory_queue import enqueue
+
             enqueue("flush", {
                 "prompt": prompt,
                 "system_prompt": system_prompt,
@@ -293,9 +291,9 @@ non-blank line MUST be the tier token.
                 "session_id": session_id,
                 "day": datetime.now().strftime("%Y-%m-%d"),
             })
-        except Exception:
-            pass  # best-effort — never crash the hook
-        return ""
+        except Exception as exc:
+            raise RuntimeError("flush transcript was not durably persisted") from exc
+        return None
     return text.strip()
 
 
@@ -397,6 +395,8 @@ def _run_flush(args: argparse.Namespace) -> int:
 
     transcript = read_transcript_tail(Path(args.transcript)) if args.transcript else ""
     raw_summary = summarize_with_llm(transcript, args.event, args.session_id) if transcript else ""
+    if raw_summary is None:
+        return 0
 
     # 3-tier classification (Phase 0.5). Replaces binary FLUSH_OK check.
     tier, body = _classify_response(raw_summary)
@@ -476,10 +476,13 @@ def _run_flush(args: argparse.Namespace) -> int:
 
 def main() -> int:
     args = parse_args()
+    completed = False
     try:
-        return _run_flush(args)
+        result = _run_flush(args)
+        completed = result == 0
+        return result
     finally:
-        if args.ephemeral_transcript and args.transcript:
+        if completed and args.ephemeral_transcript and args.transcript:
             _cleanup_ephemeral_transcript(args.transcript)
 
 

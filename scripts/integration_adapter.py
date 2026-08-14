@@ -81,6 +81,7 @@ DELEGATES = frozenset(
         "user_prompt_capture.py",
         "post_tool_capture.py",
         "heartbeat_record.py",
+        "feedback_capture.py",
     }
 )
 
@@ -1414,6 +1415,16 @@ def ingest_event(
         )
     elif envelope.event_type == "user_prompt":
         _run_delegate("user_prompt_capture.py", payload, forward_stdout=True, project_dir=project_dir)
+        _run_delegate(
+            "feedback_capture.py",
+            {
+                "text": payload["prompt"],
+                "session_id": envelope.session or "unknown",
+                "slug": slug or "unknown",
+                "trigger": "opencode-user-message",
+            },
+            project_dir=project_dir,
+        )
     elif envelope.event_type == "post_tool_use":
         _run_delegate("post_tool_capture.py", payload, project_dir=project_dir)
     elif envelope.event_type == "pre_compact":

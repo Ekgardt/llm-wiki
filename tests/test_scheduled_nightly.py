@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -76,6 +80,51 @@ def test_nightly_releases_claim_when_maintenance_lock_prevents_run(tmp_path, mon
     assert state["last_nightly_date"] == "2026-07-11"
     assert state["last_nightly_skip"]["reason"] == "maintenance_lock_held"
     assert "last_nightly_failure" not in state
+
+
+@pytest.mark.parametrize("role", ["nightly", "weekly"])
+def test_maintenance_marker_remains_one_ascii_decimal_pid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, role: str
+) -> None:
+    import markdown_transaction
+    import operational_ownership
+
+    state_root = tmp_path / "state"
+    candidate = state_root / "run/markdown-transactions-v3.candidate.sqlite3"
+    markdown_transaction.initialize_coordinator_v3_candidate(candidate, source_v2=None)
+    marker_path = state_root / "run/maintenance.lock"
+    real_acquire = operational_ownership.OwnershipRegistry.acquire
+    parser = (
+        "import os,pathlib,sys; raw=pathlib.Path(sys.argv[1]).read_bytes();"
+        "assert raw.isascii() and raw.isdigit() and b'\\n' not in raw;"
+        "assert int(raw)==int(sys.argv[2]); print('running')"
+    )
+    observed: list[str] = []
+
+    def observe_acquire(registry, selected_role, **kwargs):
+        result = subprocess.run(
+            [sys.executable, "-c", parser, str(marker_path), str(os.getpid())],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        observed.append(result.stdout.strip())
+        with sqlite3.connect(candidate) as database:
+            assert database.execute(
+                "SELECT COUNT(*) FROM maintenance_owners WHERE role=?", (role,)
+            ).fetchone() == (0,)
+        return real_acquire(registry, selected_role, **kwargs)
+
+    monkeypatch.setattr(operational_ownership.OwnershipRegistry, "acquire", observe_acquire)
+    lease, marker = operational_ownership.acquire_scheduled_owner(
+        role, state_root=state_root
+    )
+    try:
+        assert observed == ["running"]
+        assert marker_path.read_bytes() == str(os.getpid()).encode("ascii")
+    finally:
+        operational_ownership.release_marker_owner(lease, marker)
+    assert not marker_path.exists()
 
 
 def test_nightly_source_compacts_telemetry_and_never_flushes_frontmatter():

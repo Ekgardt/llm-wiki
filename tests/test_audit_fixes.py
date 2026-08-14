@@ -215,7 +215,9 @@ def test_settings_hooks_use_llm_wiki_root():
                 )
     assert cmds, "settings.json wires no hooks"
     assert all("$LLM_WIKI_ROOT" in c for c in cmds)
-    assert all("uv run --directory" in c for c in cmds)
+    assert all(
+        c.startswith("uv run ") and '--directory "$LLM_WIKI_ROOT"' in c for c in cmds
+    )
     assert timeouts and all(isinstance(t, int) and t > 0 for t in timeouts), (
         "every hook must declare a positive numeric timeout"
     )

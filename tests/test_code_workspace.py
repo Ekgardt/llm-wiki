@@ -582,6 +582,24 @@ def test_same_file_fails_closed_without_device_or_inode() -> None:
     assert _same_file(metadata, metadata) is False
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows stat semantics")
+def test_windows_same_file_ignores_deprecated_creation_time() -> None:
+    from code_workspace import _same_file
+
+    left = SimpleNamespace(
+        st_dev=1,
+        st_ino=2,
+        st_mode=stat.S_IFREG,
+        st_size=3,
+        st_mtime_ns=4,
+        st_ctime_ns=5,
+    )
+    right = SimpleNamespace(**vars(left))
+    right.st_ctime_ns = 6
+
+    assert _same_file(left, right)
+
+
 def test_manifest_capture_source_id_enforces_512_byte_boundary(tmp_path: Path) -> None:
     from code_workspace import code_capture_as_dict, validate_code_capture
 
@@ -916,6 +934,25 @@ def test_windows_stat_identity_comparison_fails_closed() -> None:
     assert not _windows_stat_matches_identity(SimpleNamespace(st_dev=11, st_ino=0), (11, 22))
     assert not _windows_stat_matches_identity(metadata, (0, 22))
     assert not _windows_stat_matches_identity(metadata, (11, 0))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle file IDs only")
+def test_windows_handle_stat_identity_matches_path_stat(tmp_path: Path) -> None:
+    from generation_catalog import (
+        _windows_handle_stat_identity,
+        _windows_stat_matches_identity,
+    )
+    from markdown_transaction import _close_windows_handle, _open_windows_directory
+
+    target = tmp_path / "directory"
+    target.mkdir()
+    handle = _open_windows_directory(target)
+    try:
+        identity = _windows_handle_stat_identity(handle)
+    finally:
+        _close_windows_handle(handle)
+
+    assert _windows_stat_matches_identity(target.stat(follow_symlinks=False), identity)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows directory handle identity only")

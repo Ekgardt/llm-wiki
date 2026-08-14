@@ -54,6 +54,7 @@ except Exception:  # noqa: BLE001
     def update_state(mutator):  # type: ignore[misc]
         """No-op stub — safe skip when memory_state is unavailable."""
 
+from capture_operation import claim_operation, complete_operation  # noqa: E402
 from event_envelope import build_event_envelope  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
@@ -166,13 +167,48 @@ def _record_dedupe(slug: str, tool: str, target: str) -> None:
         pass
 
 
+def _tool_operation_key(slug: str, tool: str, target: str) -> str:
+    return f"{slug}::{tool}::{target[:80]}"
+
+
+def _claim_tool_operation(
+    slug: str,
+    tool: str,
+    target: str,
+    *,
+    source_event_id: str | None = None,
+) -> str | None:
+    return claim_operation(
+        update_state,
+        namespace="tool_capture_dedupe",
+        key=_tool_operation_key(slug, tool, target),
+        prefix="post-tool",
+        source_event_id=source_event_id,
+        rate_limit_seconds=RATE_LIMIT_SECONDS,
+        max_entries=200,
+        now=datetime.now(),
+    )
+
+
+def _complete_tool_operation(
+    slug: str, tool: str, target: str, operation_id: str
+) -> None:
+    complete_operation(
+        update_state,
+        namespace="tool_capture_dedupe",
+        key=_tool_operation_key(slug, tool, target),
+        operation_id=operation_id,
+        now=datetime.now(),
+    )
+
+
 def _append_tool_tag(
     slug: str,
     session_id: str,
     tool: str,
     target: str,
     operation_id: str | None = None,
-) -> None:
+) -> bool:
     try:
         from daily_log_append import append_daily
 
@@ -180,8 +216,9 @@ def _append_tool_tag(
         preview = redact_secrets(target)[:MAX_TARGET_PREVIEW] if target else ""
         block = f"- `[{ts}] tool | {session_id[:8]} | {slug} | {tool}` {preview}"
         append_daily(slug, session_id, block, operation_id=operation_id)
+        return True
     except Exception:  # noqa: BLE001
-        pass
+        return False
 
 
 def main() -> int:
@@ -230,17 +267,26 @@ def main() -> int:
             ),
         )
 
-        if _rate_limited(slug, tool_name, envelope.payload["target"]):
+        operation_id = _claim_tool_operation(
+            slug,
+            tool_name,
+            envelope.payload["target"],
+            source_event_id=envelope.source_event_id,
+        )
+        if operation_id is None:
             return 0
 
-        _append_tool_tag(
+        appended = _append_tool_tag(
             slug,
             session_id,
             tool_name,
             envelope.payload["target"],
-            operation_id=f"post-tool:{envelope.event_id}",
+            operation_id=operation_id,
         )
-        _record_dedupe(slug, tool_name, envelope.payload["target"])
+        if appended:
+            _complete_tool_operation(
+                slug, tool_name, envelope.payload["target"], operation_id
+            )
     except Exception:  # noqa: BLE001
         pass
     return 0

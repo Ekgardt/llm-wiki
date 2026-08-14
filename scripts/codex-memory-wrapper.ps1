@@ -83,9 +83,11 @@ function codex {
         # it to read this file for project knowledge state.
         try {
             $contextFile = Join-Path $env:LLM_WIKI_STATE_ROOT "cache\session-context.md"
-            & uv run python "$env:LLM_WIKI_ROOT\scripts\session_start_context.py" --output-file $contextFile 2>$null | Out-Null
+            & uv run --locked --no-sync --directory $env:LLM_WIKI_ROOT python `
+                "$env:LLM_WIKI_ROOT\scripts\session_start_context.py" --output-file $contextFile 2>$null | Out-Null
             # codex_memory.py project-state recovers journals before context injection.
-            & uv run python "$env:LLM_WIKI_ROOT\scripts\codex_memory.py" project-state --cwd $cwdBefore 2>$null |
+            & uv run --locked --no-sync --directory $env:LLM_WIKI_ROOT python `
+                "$env:LLM_WIKI_ROOT\scripts\codex_memory.py" project-state --cwd $cwdBefore 2>$null |
                 Add-Content -LiteralPath $contextFile -Encoding utf8
         } catch {}
 
@@ -104,7 +106,7 @@ function codex {
                 $reason = if ($fwdArgs -contains 'exec') { 'codex-exec' } else { 'codex-session-end' }
                 Push-Location $env:LLM_WIKI_ROOT
                 try {
-                    & uv run python scripts/codex_memory.py daily-log `
+                    & uv run --locked --no-sync --directory $env:LLM_WIKI_ROOT python scripts/codex_memory.py daily-log `
                         --cwd $cwdBefore `
                         --reason $reason `
                         --json 2>$null | Out-Null
@@ -112,16 +114,16 @@ function codex {
                     # Work pending memory-pipeline queue: any tasks that were
                     # enqueued while no backend was available get serviced now
                     # by Codex LLM (via llm_client.py auto-detection).
-                    $workResult = & uv run python scripts/memory_queue.py work 2>&1
+                    $workResult = & uv run --locked --no-sync --directory $env:LLM_WIKI_ROOT python scripts/memory_queue.py work 2>&1
                     if ($workResult) {
                         Write-Host "[codex-memory] $workResult" -ForegroundColor DarkGray
                     }
 
                     # Fire-and-forget compile trigger. Checks concurrency lock
                     # + pending work; spawns detached compile_memory.py if both
-                    # pass. Returns immediately — compile runs in background
+                    # pass. Returns immediately - compile runs in background
                     # and won't block the next codex invocation.
-                    & uv run python scripts/maybe_compile.py 2>&1 | ForEach-Object {
+                    & uv run --locked --no-sync --directory $env:LLM_WIKI_ROOT python scripts/maybe_compile.py 2>&1 | ForEach-Object {
                         Write-Host "[codex-memory] $_" -ForegroundColor DarkGray
                     }
                 }
@@ -152,7 +154,7 @@ function codex-memory-status {
         Write-Host "=== Codex heartbeats (recent activity) ===" -ForegroundColor Cyan
         $statePath = Join-Path $env:LLM_WIKI_STATE_ROOT "run\state.json"
         if (-not (Test-Path -LiteralPath $statePath)) {
-            Write-Host "  (state.json not found — no captures yet)"
+            Write-Host "  (state.json not found - no captures yet)"
             return
         }
         try {
@@ -195,7 +197,7 @@ function codex-memory-status {
         Write-Host "=== Memory queue (deferred tasks) ===" -ForegroundColor Cyan
         Push-Location $env:LLM_WIKI_ROOT
         try {
-            $queueStatus = & uv run python scripts/memory_queue.py status 2>$null | Out-String
+            $queueStatus = & uv run --locked --no-sync --directory $env:LLM_WIKI_ROOT python scripts/memory_queue.py status 2>$null | Out-String
             if ($queueStatus) { Write-Host $queueStatus }
             else { Write-Host "  (queue empty or memory_queue unavailable)" }
         } finally { Pop-Location }
@@ -220,7 +222,10 @@ function codex-memory-compile {
     )
     Push-Location $env:LLM_WIKI_ROOT
     try {
-        $pyArgs = @("run", "python", "scripts/compile_memory.py")
+        $pyArgs = @(
+            "run", "--locked", "--no-sync", "--directory", $env:LLM_WIKI_ROOT,
+            "python", "scripts/compile_memory.py"
+        )
         if ($All) { $pyArgs += "--all" }
         & uv @pyArgs
     }

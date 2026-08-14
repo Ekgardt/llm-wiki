@@ -15,6 +15,12 @@ README_FILES = [
     ROOT / "README.ru.md",
     ROOT / "README.zh-CN.md",
 ]
+SHARED_COMMANDS = (
+    "uv sync --locked --no-default-groups",
+    "uv sync --locked --no-default-groups --inexact --extra hybrid",
+    "uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120",
+    "uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json",
+)
 
 
 def _readmes() -> list[tuple[Path, str]]:
@@ -65,13 +71,13 @@ def test_all_readmes_use_correct_github_repo():
         assert "llm-knowledge/notes" not in text, f"{p.name}: stale llm-knowledge URL"
 
 
-def test_readmes_do_not_advertise_unimplemented_remote_bootstrap():
+def test_readmes_advertise_only_immutable_remote_bootstrap():
     for path, text in _readmes():
         assert "raw.githubusercontent.com/Ekgardt/llm-wiki/main/install." not in text, (
             f"{path.name}: mutable main bootstrap must not be advertised"
         )
         assert "/v4.0.0/install." not in text, (
-            f"{path.name}: unpublished release bootstrap must not be advertised"
+            f"{path.name}: tag bootstrap must not be advertised"
         )
         assert "brightgreen.svg" not in text, f"{path.name}: static green badge is unverified"
         assert "CI green" not in text, f"{path.name}: CI status claim is unverified"
@@ -79,6 +85,41 @@ def test_readmes_do_not_advertise_unimplemented_remote_bootstrap():
             f"{path.name}: approved full-OID bootstrap target must be explicit"
         )
         assert "40" in text, f"{path.name}: full commit OID length must be explicit"
+
+
+def test_readmes_share_locked_install_and_read_only_repair_commands():
+    for path, text in _readmes():
+        for command in SHARED_COMMANDS:
+            assert command in text, f"{path.name}: missing shared command {command!r}"
+        assert "reliability_v3_runtime_activation_incomplete" in text, (
+            f"{path.name}: must state that mutating v3 adoption is not activated"
+        )
+
+
+def test_readmes_mark_precommit_as_opt_in() -> None:
+    command = (
+        "uv run --locked --no-sync pre-commit install "
+        "--hook-type pre-commit --hook-type pre-push"
+    )
+    markers = {
+        "README.md": "Opt-in; the installer does not activate these hooks",
+        "README.ru.md": "Опционально; установщик не активирует эти хуки",
+        "README.zh-CN.md": "可选；安装程序不会启用这些钩子",
+    }
+    for path, text in _readmes():
+        assert markers[path.name] in text, f"{path.name}: pre-commit activation is ambiguous"
+        assert command in text, f"{path.name}: missing opt-in pre-commit command"
+
+
+def test_readmes_distinguish_automatic_manual_and_viewer_integrations() -> None:
+    markers = {
+        "README.md": ("Automatic", "Manual", "Viewer only"),
+        "README.ru.md": ("Автоматически", "Вручную", "Только viewer"),
+        "README.zh-CN.md": ("自动", "手动", "仅 viewer"),
+    }
+    for path, text in _readmes():
+        for marker in markers[path.name]:
+            assert marker in text, f"{path.name}: missing integration status {marker!r}"
 
 
 def test_all_readmes_mention_knowledge_layout():
@@ -158,6 +199,24 @@ def test_all_readmes_share_reliable_memory_operator_commands():
             assert command in text, f"{path.name}: missing operator command {command!r}"
 
 
+def test_all_readmes_share_locked_dependency_profiles_and_smoke_contract() -> None:
+    commands = (
+        "uv sync --locked --no-default-groups",
+        "uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120",
+        "uv sync --locked --no-default-groups --inexact --extra hybrid",
+        "uv sync --locked --no-default-groups --inexact --extra code-graph",
+        "uv sync --locked",
+        "uv run --locked --no-sync pytest -q",
+    )
+    for path, text in _readmes():
+        for command in commands:
+            assert command in text, f"{path.name}: missing dependency command {command!r}"
+        assert "mcp-server" in text, f"{path.name}: missing MCP compatibility alias"
+        assert "compatibility alias" in text, f"{path.name}: alias semantics must be explicit"
+        assert "production smoke" in text, f"{path.name}: missing bounded smoke claim"
+        assert "Node 22" in text, f"{path.name}: missing optional navigation prerequisite"
+
+
 def test_ci_qualifies_real_pyright_on_all_supported_os_families():
     import yaml
 
@@ -165,20 +224,33 @@ def test_ci_qualifies_real_pyright_on_all_supported_os_families():
         (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
     )
     job = workflow["jobs"]["pyright-navigation"]
-    assert job["strategy"]["matrix"]["os"] == [
-        "ubuntu-latest",
-        "windows-latest",
-        "macos-latest",
+    assert job["strategy"]["matrix"]["include"] == [
+        {
+            "os": "ubuntu-24.04",
+            "platform": "linux",
+            "python": "3.10",
+            "node": "22.23.1",
+        },
+        {
+            "os": "windows-2025",
+            "platform": "windows",
+            "python": "3.10",
+            "node": "22.23.1",
+        },
+        {
+            "os": "macos-15",
+            "platform": "macos",
+            "python": "3.10",
+            "node": "22.23.1",
+        },
     ]
-    assert job["strategy"]["matrix"]["python"] == ["3.10"]
-    assert job["strategy"]["matrix"]["node"] == ["22.23.1"]
-    assert "runner.temp" not in str(job.get("env", {}))
-    state_step = next(
-        step for step in job["steps"] if step["name"] == "Configure isolated state root"
+    assert job["env"]["LLM_WIKI_STATE_ROOT"] == "${{ runner.temp }}/llm-wiki-state"
+    assert job["env"]["LLM_WIKI_TEST_USE_EXTERNAL_STATE"] == "1"
+    install_step = next(
+        step for step in job["steps"] if step.get("name") == "Explicit Pyright install"
     )
-    assert state_step["shell"] == "bash"
-    assert "LLM_WIKI_STATE_ROOT=$RUNNER_TEMP/llm-wiki-state" in state_step["run"]
-    assert "LLM_WIKI_TEST_USE_EXTERNAL_STATE=1" in state_step["run"]
+    assert '"${{ runner.temp }}/llm-wiki-state"' in install_step["run"]
+    assert "shell" not in install_step
 
 
 def test_docs_state_security_install_and_market_truth():
@@ -193,6 +265,16 @@ def test_docs_state_security_install_and_market_truth():
         "Market superiority remains unclaimed",
     ):
         assert value in text, f"CODE-NAVIGATION.md missing {value!r}"
+
+
+def test_user_guide_describes_search_signals_conditionally() -> None:
+    text = (ROOT / "docs" / "USER-GUIDE.md").read_text(encoding="utf-8")
+    normalized = " ".join(text.split())
+
+    assert "Plain `search_memory.py` always runs BM25" in normalized
+    assert "`--semantic` enables vectors when the optional model is available" in normalized
+    assert "graph-neighbor fusion applies only when graph evidence is available" in normalized
+    assert "`search_memory.py` runs hybrid BM25 + Vector + Graph fusion." not in normalized
 
 
 def test_all_readmes_share_python_navigation_operator_contract():

@@ -9,7 +9,7 @@ import sqlite3
 import stat
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -57,6 +57,7 @@ def archive_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path
     monkeypatch.setattr(compile_memory, "LOG", root / "knowledge/log.md")
     monkeypatch.setattr(compile_memory, "AGENTS", root / "AGENTS.md")
     inputs = compile_memory.snapshot_compile_inputs([daily])
+    batch = compile_memory.pack_compile_batches(inputs, model=None)[0]
     compile_memory.apply_compile_plan(
         inputs,
         {"schema_version": "compile-plan/v2", "operations": []},
@@ -64,8 +65,16 @@ def archive_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path
         trigger="manual",
         coordinator=MarkdownCoordinator(root, state_root),
         completed_at="2026-07-01T00:00:00Z",
+        batch=batch,
+        provider_budget={
+            "provider": "fake",
+            "model": "fake-v1",
+            "max_output_tokens": 4000,
+        },
     )
-    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as connection:
+    with closing(
+        sqlite3.connect(state_root / "run/markdown-transactions.sqlite3")
+    ) as connection, connection:
         connection.execute(
             'UPDATE "transaction" SET updated_at="2026-05-01T00:00:00Z" '
             'WHERE operation_id LIKE "compile:%"'
@@ -84,7 +93,7 @@ def _archiver(root: Path, state_root: Path, **kwargs):
     )
 
 
-def test_eligibility_requires_age_and_exact_authoritative_v2_receipt(archive_vault) -> None:
+def test_eligibility_requires_age_and_exact_authoritative_v3_receipt(archive_vault) -> None:
     root, state_root, daily = archive_vault
     archiver = _archiver(root, state_root)
     assert archiver.eligible(daily, hot_days=90).eligible
@@ -93,18 +102,44 @@ def test_eligibility_requires_age_and_exact_authoritative_v2_receipt(archive_vau
     daily.write_bytes(daily.read_bytes() + b"uncompiled append\n")
     result = archiver.eligible(daily, hot_days=90)
     assert not result.eligible
-    assert "compile_receipt" in result.reasons
+    assert "compile_receipt_v3_missing" in result.reasons
+
+
+def test_v2_receipt_is_readable_history_but_never_authorizes_archive(
+    archive_vault,
+) -> None:
+    root, state_root, daily = archive_vault
+    import compile_memory
+
+    v3 = next((root / "knowledge/daily/receipts").glob("v3-*.md"))
+    v3.unlink()
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    compile_memory.apply_compile_plan(
+        inputs,
+        {"schema_version": "compile-plan/v2", "operations": []},
+        action_key="9" * 64,
+        trigger="manual",
+        coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-01T00:00:00Z",
+    )
+
+    digest = sha256_bytes(daily.read_bytes())
+    assert compile_memory.read_compile_receipt_v2(
+        digest, MarkdownCoordinator(root, state_root)
+    ) is not None
+    eligibility = _archiver(root, state_root).eligible(daily, hot_days=90)
+    assert not eligibility.eligible
+    assert "compile_receipt_v3_missing" in eligibility.reasons
 
 
 def test_eligibility_rejects_nonterminal_compile_operation(archive_vault) -> None:
     root, state_root, daily = archive_vault
-    digest = sha256_bytes(daily.read_bytes())
-    receipt = root / f"knowledge/daily/receipts/{digest}.md"
+    receipt = next((root / "knowledge/daily/receipts").glob("v3-*.md"))
     record = json.loads(
         receipt.read_text(encoding="utf-8").split("```json\n", 1)[1].split("\n```", 1)[0]
     )
     database = state_root / "run/markdown-transactions.sqlite3"
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute(
             'UPDATE "transaction" SET state="applying" WHERE operation_id=?',
             (record["operation_id"],),
@@ -114,6 +149,22 @@ def test_eligibility_rejects_nonterminal_compile_operation(archive_vault) -> Non
 
     assert not result.eligible
     assert "nonterminal_compile_operation" in result.reasons
+
+
+def test_archive_queries_release_transaction_database(archive_vault) -> None:
+    root, state_root, daily = archive_vault
+    archiver = _archiver(root, state_root)
+    digest = sha256_bytes(daily.read_bytes())
+
+    assert archiver._receipt_operation_state(
+        f"knowledge/daily/{daily.name}", digest
+    ) == "committed"
+    archiver._transaction_references(daily.name, transaction_retention_days=30)
+
+    database = state_root / "run/markdown-transactions.sqlite3"
+    replacement = database.with_suffix(".replacement")
+    replacement.write_bytes(database.read_bytes())
+    os.replace(replacement, database)
 
 
 @pytest.mark.parametrize(
@@ -171,7 +222,9 @@ def test_eligibility_is_bounded_by_active_writer(archive_vault) -> None:
 
 def test_recent_compile_receipt_transaction_pins_source_for_undo(archive_vault) -> None:
     root, state_root, daily = archive_vault
-    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as connection:
+    with closing(
+        sqlite3.connect(state_root / "run/markdown-transactions.sqlite3")
+    ) as connection, connection:
         connection.execute(
             'UPDATE "transaction" SET updated_at="2026-07-14T11:00:00Z" '
             'WHERE operation_id LIKE "compile:%"'
@@ -192,7 +245,7 @@ def test_dead_queue_reference_pins_source(archive_vault) -> None:
     digest = sha256_bytes(daily.read_bytes())
     queue = MemoryQueue(state_root)
     task_id = queue.enqueue("compile", 1, {"daily_id": daily.stem, "digest": digest})
-    with sqlite3.connect(queue.db_path) as connection:
+    with closing(sqlite3.connect(queue.db_path)) as connection, connection:
         connection.execute("UPDATE tasks SET state='dead' WHERE id=?", (task_id,))
 
     result = _archiver(root, state_root).eligible(daily, hot_days=90)
@@ -284,9 +337,11 @@ def test_archived_evidence_resolves_after_eligible_run_state_is_deleted(
     archived = _archiver(root, state_root).archive(daily.stem)
     manifest = json.loads((archived.bag_path / "archive-manifest.json").read_bytes())
     embedded_receipt = archived.bag_path / "compile-receipt.md"
-    assert embedded_receipt.read_bytes() == root.joinpath(
-        f"knowledge/daily/receipts/{archived.source_sha256}.md"
-    ).read_bytes()
+    receipt_ref = manifest["compile_receipt_ref"]
+    assert embedded_receipt.read_bytes() == root.joinpath(receipt_ref["path"]).read_bytes()
+    assert receipt_ref["logical_path"] == f"knowledge/daily/{daily.name}"
+    assert receipt_ref["source_digest"] == archived.source_sha256
+    assert receipt_ref["source_identity"] != archived.source_sha256
     assert set(manifest["compile_authority"]) == {
         "commit_sequence",
         "committed_at",
@@ -329,7 +384,12 @@ def test_forged_embedded_receipt_fails_after_outer_hashes_are_rebuilt(
     for path in (forged, *forged.rglob("*")):
         path.chmod(0o700 if path.is_dir() else 0o600)
     embedded = forged / "compile-receipt.md"
-    embedded.write_bytes(embedded.read_bytes().replace(b'"state":"completed"', b'"state":"forged"'))
+    embedded.write_bytes(
+        embedded.read_bytes().replace(
+            b'"schema_version":"compile-receipt/v3"',
+            b'"schema_version":"compile-receipt/xx"',
+        )
+    )
     manifest_path = forged / "archive-manifest.json"
     manifest = json.loads(manifest_path.read_bytes())
     manifest["compile_receipt_ref"]["receipt_file_hash"] = sha256_bytes(

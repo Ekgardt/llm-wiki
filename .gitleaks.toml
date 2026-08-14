@@ -8,8 +8,19 @@ description = "Deterministic SHA-256 fields in the Reliability v3 JSON fixtures"
 condition = "AND"
 targetRules = ["generic-api-key"]
 regexTarget = "line"
-paths = ['''^docs/superpowers/plans/2026-08-05-v4-reliability-queue\.md$''']
+paths = [
+  '''^docs/superpowers/plans/2026-08-05-v4-reliability-queue\.md$''',
+  '''^tests/test_reliable_memory_schemas\.py$''',
+]
 regexes = ['''^\s+"(?:action_key|package_key)": "[0-9a-f]{64}",$''']
+
+[[allowlists]]
+description = "Synthetic PEM body used only by the maintenance redaction regression"
+condition = "AND"
+targetRules = ["private-key"]
+regexTarget = "match"
+paths = ['''^tests/test_maintenance_helpers\.py$''']
+regexes = ['''c2VjcmV0LWtleS1tYXRlcmlhbA==''']
 
 [[allowlists]]
 description = "Pinned analyzer revisions that resemble Sourcegraph tokens"

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/corrupt-task-manifest-v1.json",
+  "$defs": {"digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
+  "type": "object",
+  "required": ["schema_version", "operation_id", "task_id", "package_key", "package_path", "raw_sha256", "history_sha256", "metadata_sha256", "lineage_generation", "link_count", "page_count", "rolling_root"],
+  "properties": {
+    "schema_version": {"const": "corrupt-task-manifest/v1"},
+    "operation_id": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "task_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "package_key": {"$ref": "#/$defs/digest"},
+    "package_path": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "raw_sha256": {"$ref": "#/$defs/digest"},
+    "history_sha256": {"$ref": "#/$defs/digest"},
+    "metadata_sha256": {"$ref": "#/$defs/digest"},
+    "lineage_generation": {"type": "integer", "minimum": 0},
+    "link_count": {"type": "integer", "minimum": 0},
+    "page_count": {"type": "integer", "minimum": 0},
+    "rolling_root": {"$ref": "#/$defs/digest"}
+  },
+  "additionalProperties": false
+}

@@ -6,13 +6,12 @@
 #   cd llm-wiki
 #   LLM_WIKI_ROOT="$(pwd)" bash ./install.sh
 #
-# Remote bootstrap is not published. The approved replacement will require a
-# full commit OID before fetching or executing installer code.
+# Remote bootstrap requires LLM_WIKI_COMMIT to be a full commit OID.
 #
 # What this does:
 #   1. Checks prerequisites (Python 3.10+, uv, git)
-#   2. Installs locked Python deps with the MCP server baseline
-#   3. Runs tests to verify everything works
+#   2. Installs the locked production dependency baseline
+#   3. Runs a bounded production smoke
 #   4. Sets LLM_WIKI_ROOT in shell profile
 #   5. Sets up cron jobs (nightly + weekly) — cron only (no launchd)
 #   6. Detects installed agents and wires them up
@@ -28,11 +27,49 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
+UV_VERSION="0.12.3"
+REPOSITORY_URL="https://github.com/Ekgardt/llm-wiki.git"
+CALLER_CWD="$(pwd -P)"
+INSTALLER_CREATED_CLONE="${LLM_WIKI_INSTALLER_CREATED_CLONE:-0}"
+PROTECT_PUSH=0
 
 info()  { echo -e "${BLUE}[INFO]${NC} $1"; }
 ok()    { echo -e "${GREEN}[OK]${NC} $1"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 fail()  { echo -e "${RED}[FAIL]${NC} $1"; exit 1; }
+
+for argument in "$@"; do
+  case "$argument" in
+    --protect-push) PROTECT_PUSH=1 ;;
+    *) fail "Unknown installer argument: $argument" ;;
+  esac
+done
+
+protect_push_urls() {
+  local remote remotes status urls
+  remotes="$(git -C "$VAULT_ROOT" remote)" || fail "Could not enumerate Git remotes"
+  while IFS= read -r remote; do
+    [[ -n "$remote" ]] || continue
+    if git -C "$VAULT_ROOT" config --get-all "remote.$remote.pushurl" >/dev/null 2>&1; then
+      git -C "$VAULT_ROOT" config --unset-all "remote.$remote.pushurl" || \
+        fail "Could not clear push URLs for remote $remote"
+    else
+      status=$?
+      [[ "$status" -eq 1 ]] || fail "Could not inspect push URLs for remote $remote"
+    fi
+    git -C "$VAULT_ROOT" config --add "remote.$remote.pushurl" no-push || \
+      fail "Could not protect push URLs for remote $remote"
+    urls="$(git -C "$VAULT_ROOT" remote get-url --all --push "$remote")" || \
+      fail "Could not verify push URLs for remote $remote"
+    [[ "$urls" == "no-push" ]] || fail "Could not protect push URLs for remote $remote"
+  done <<< "$remotes"
+}
+
+protect_push_urls_if_authorized() {
+  if [[ "$INSTALLER_CREATED_CLONE" == "1" || "$PROTECT_PUSH" == "1" ]]; then
+    protect_push_urls
+  fi
+}
 
 install_codex_hooks() {
   local vault_root="$1"
@@ -69,7 +106,7 @@ configure_codex_mcp() {
       block="$(printf '%s\n' \
         '[mcp_servers.llm-wiki]' \
         'command = "uv"' \
-        "args = [\"run\", \"--directory\", $vault_json, \"python\", \"scripts/mcp_server.py\"]")"
+        "args = [\"run\", \"--locked\", \"--no-sync\", \"--directory\", $vault_json, \"python\", \"scripts/mcp_server.py\"]")"
       if [ -f "$config" ]; then
         cp -p "$config" "$config.bak"
         if [ -s "$config" ]; then
@@ -93,30 +130,64 @@ configure_codex_mcp() {
 
 # ─── 1. Resolve vault root ──────────────────────────────────────────
 
-if [[ -z "${BASH_SOURCE[0]:-}" || ! -f "${BASH_SOURCE[0]}" ]]; then
-  fail "Remote bootstrap is not published. Run this installer from an inspected checkout."
+if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+else
+  SCRIPT_DIR=""
 fi
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VAULT_ROOT="$SCRIPT_DIR"
-if [[ -n "${LLM_WIKI_ROOT:-}" ]]; then
-  REQUESTED_ROOT="$(cd "$LLM_WIKI_ROOT" 2>/dev/null && pwd)" || \
+
+if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/pyproject.toml" ]]; then
+  VAULT_ROOT="${LLM_WIKI_ROOT:-$SCRIPT_DIR}"
+  REQUESTED_ROOT="$(cd "$VAULT_ROOT" 2>/dev/null && pwd -P)" || \
     fail "LLM_WIKI_ROOT does not identify an accessible checkout."
   if [[ "$REQUESTED_ROOT" != "$SCRIPT_DIR" ]]; then
     fail "LLM_WIKI_ROOT points to a different checkout than this installer."
   fi
+  VAULT_ROOT="$REQUESTED_ROOT"
+else
+  [[ "${LLM_WIKI_COMMIT:-}" =~ ^[0-9a-fA-F]{40}$ ]] || \
+    fail "Remote bootstrap requires LLM_WIKI_COMMIT as a full 40-hex commit OID"
+  LLM_WIKI_COMMIT_NORMALIZED="$(printf '%s' "$LLM_WIKI_COMMIT" | tr 'ABCDEF' 'abcdef')"
+  INSTALL_DIR="$HOME/LLM-wiki"
+  [[ ! -e "$INSTALL_DIR" ]] || fail "Remote install target already exists: $INSTALL_DIR"
+  git init "$INSTALL_DIR"
+  git -C "$INSTALL_DIR" remote add origin "$REPOSITORY_URL"
+  git -C "$INSTALL_DIR" fetch --depth 1 origin "$LLM_WIKI_COMMIT_NORMALIZED"
+  git -C "$INSTALL_DIR" checkout --detach "$LLM_WIKI_COMMIT_NORMALIZED"
+  VAULT_ROOT="$(cd "$INSTALL_DIR" && pwd -P)"
+  INSTALLER_CREATED_CLONE=1
+  [[ "$(git -C "$VAULT_ROOT" rev-parse HEAD)" == "$LLM_WIKI_COMMIT_NORMALIZED" ]] || \
+    fail "Checked-out commit does not match LLM_WIKI_COMMIT"
+  [[ "$(git -C "$VAULT_ROOT" remote get-url origin)" == "$REPOSITORY_URL" ]] || \
+    fail "Installed checkout repository identity does not match LLM-Wiki"
+  for required in pyproject.toml uv.lock install.sh install.ps1 scripts/installer_config.py; do
+    [[ -f "$VAULT_ROOT/$required" ]] || fail "Installed checkout is missing $required"
+  done
+  export LLM_WIKI_ROOT="$VAULT_ROOT"
+  export LLM_WIKI_INSTALLER_CREATED_CLONE=1
+  exec bash "$VAULT_ROOT/install.sh" "$@"
 fi
 
-# Remote bootstrap stays fail-closed until immutable commit verification ships.
-if [[ ! -f "$VAULT_ROOT/pyproject.toml" ]]; then
-  fail "Remote bootstrap is not published. Clone the repository, inspect it, and run this installer from that checkout."
+STATE_ROOT_INPUT="${LLM_WIKI_STATE_ROOT:-$VAULT_ROOT}"
+mkdir -p "$STATE_ROOT_INPUT"
+STATE_ROOT="$(cd "$STATE_ROOT_INPUT" && pwd -P)"
+export LLM_WIKI_ROOT="$VAULT_ROOT"
+export LLM_WIKI_STATE_ROOT="$STATE_ROOT"
+
+# Detect shell profile before any child process observes the installation roots.
+if [[ -n "${ZSH_VERSION:-}" ]] || [[ "$SHELL" == */zsh ]]; then
+  PROFILE="${HOME}/.zshrc"
+elif [[ -n "${BASH_VERSION:-}" ]] || [[ "$SHELL" == */bash ]]; then
+  PROFILE="${HOME}/.bashrc"
+else
+  PROFILE="${HOME}/.profile"
 fi
+python3 "$VAULT_ROOT/scripts/installer_config.py" profile \
+  --profile "$PROFILE" --root "$VAULT_ROOT" --state-root "$STATE_ROOT"
 
 cd "$VAULT_ROOT"
 info "Vault root: $VAULT_ROOT"
-
-# Prevent accidental pushes from the installed vault
-git -C "$VAULT_ROOT" remote set-url --push origin no-push
-ok "Push disabled (no-push) — installed vault cannot push to public remote"
+info "State root: $STATE_ROOT"
 
 # ─── 2. Check prerequisites ────────────────────────────────────────
 
@@ -142,21 +213,37 @@ ok "git $(git --version)"
 
 # uv
 if ! command -v uv &>/dev/null; then
-  fail "uv is required. Install it from https://docs.astral.sh/uv/ and rerun the installer."
+  fail "uv is required at version ${UV_VERSION}. Install it from https://astral.sh/uv/${UV_VERSION}/install.sh and rerun the installer."
 fi
-ok "uv $(uv --version)"
+installedUvVersion="$(uv --version | awk '{print $2}')"
+if [ "$installedUvVersion" != "$UV_VERSION" ]; then
+  fail "uv is required at version ${UV_VERSION}, found ${installedUvVersion}. Upgrade uv explicitly and rerun the installer."
+fi
+ok "uv ${installedUvVersion}"
 
 # ─── 3. Install dependencies ───────────────────────────────────────
 
-info "Installing locked Python dependencies with MCP support..."
-uv sync --locked --extra mcp-server --quiet
-ok "Dependencies installed (MCP server baseline included)"
+info "Installing locked production dependencies..."
+SYNC_PLAN="$(python3 "$VAULT_ROOT/scripts/installer_config.py" sync-args \
+  --root "$VAULT_ROOT" --environment "${UV_PROJECT_ENVIRONMENT:-}")"
+PROJECT_ENVIRONMENT="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["environment"])' "$SYNC_PLAN")"
+SYNC_ARGS=()
+mapfile -t SYNC_ARGS < <(python3 -c 'import json, sys; print(*json.loads(sys.argv[1])["arguments"], sep="\n")' "$SYNC_PLAN")
+export UV_PROJECT_ENVIRONMENT="$PROJECT_ENVIRONMENT"
+uv "${SYNC_ARGS[@]}"
+ok "Production dependencies installed (MCP included)"
 
-# ─── 4. Run tests ──────────────────────────────────────────────────
+# ─── 4. Run production smoke ───────────────────────────────────────
 
-info "Running test suite..."
+info "Running production smoke..."
+testTimeoutSeconds="${LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS:-180}"
+case "$testTimeoutSeconds" in
+  ""|*[!0-9]*|0) fail "LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS must be a positive integer" ;;
+esac
 testPid=""
 testPgid=""
+testTimerPid=""
+testTimedOut=0
 testMonitorMode=""
 restore_test_monitor_mode() {
   case "$testMonitorMode" in
@@ -192,7 +279,7 @@ stop_test_child() {
         if kill -s CONT -- "-$testPgid" 2>/dev/null; then :; fi
         attempt=0
         while [ "$attempt" -lt 5 ] && test_tree_alive; do
-          sleep 1
+          sleep 0.1
           attempt=$((attempt + 1))
         done
         if test_tree_alive; then
@@ -205,6 +292,20 @@ stop_test_child() {
   testPid=""
   testPgid=""
 }
+stop_test_timer() {
+  if [ -z "$testTimerPid" ]; then
+    return
+  fi
+  case "$testTimerPid" in
+    *[!0-9]*|0|1|"$$") if kill -s TERM "$testTimerPid" 2>/dev/null; then :; fi ;;
+    *)
+      if kill -s TERM -- "-$testTimerPid" 2>/dev/null; then :; fi
+      if kill -s CONT -- "-$testTimerPid" 2>/dev/null; then :; fi
+      ;;
+  esac
+  if wait "$testTimerPid" 2>/dev/null; then :; fi
+  testTimerPid=""
+}
 wait_test_child() {
   local status
   if wait "$testPid"; then
@@ -212,6 +313,7 @@ wait_test_child() {
   else
     status=$?
   fi
+  stop_test_timer
   if test_tree_alive; then
     stop_test_child
   else
@@ -226,80 +328,59 @@ start_test_child() {
     *m*) testMonitorMode=on ;;
     *) testMonitorMode=off; set -m ;;
   esac
-  uv run pytest -q &
+  uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120 &
   testPid=$! testPgid=$!
+  (
+    trap 'exit 0' HUP INT TERM
+    sleep "$testTimeoutSeconds"
+    kill -s USR1 "$$"
+  ) 2>/dev/null &
+  testTimerPid=$!
+}
+handle_test_timeout() {
+  trap - USR1
+  testTimedOut=1
+  stop_test_timer
+  stop_test_child
 }
 handle_test_signal() {
   local status="$1"
-  trap - HUP INT TERM
+  trap - HUP INT TERM USR1
+  stop_test_timer
   stop_test_child
   restore_test_monitor_mode
   exit "$status"
 }
-trap 'stop_test_child; restore_test_monitor_mode' EXIT
+trap 'stop_test_timer; stop_test_child; restore_test_monitor_mode' EXIT
 trap 'handle_test_signal 129' HUP
 trap 'handle_test_signal 130' INT
 trap 'handle_test_signal 143' TERM
+trap 'handle_test_timeout' USR1
 start_test_child
 if wait_test_child; then
   testExit=0
 else
   testExit=$?
 fi
-trap - EXIT HUP INT TERM
-if [ "$testExit" -ne 0 ]; then
-  TEST_WARNING=1
-  warn "Test suite failed; installation continues in degraded state"
-else
-  TEST_WARNING=0
-  ok "Test suite passed"
+trap - EXIT HUP INT TERM USR1
+if [ "$testTimedOut" -eq 1 ]; then
+  fail "Production smoke timed out after ${testTimeoutSeconds}s; installation aborted"
+elif [ "$testExit" -ne 0 ]; then
+  fail "Production smoke failed; installation aborted"
 fi
+ok "Production smoke passed"
 
 # ─── 5. Set environment variables ──────────────────────────────────
 
-info "Setting environment variables..."
-
-# Warn if env vars already point somewhere else (avoid silent clobber)
-if [ -n "${LLM_WIKI_ROOT:-}" ] && [ "$LLM_WIKI_ROOT" != "$VAULT_ROOT" ]; then
-  warn "LLM_WIKI_ROOT was '$LLM_WIKI_ROOT', overwriting to '$VAULT_ROOT'"
-fi
-if [ -n "${LLM_WIKI_STATE_ROOT:-}" ] && [ "$LLM_WIKI_STATE_ROOT" != "$VAULT_ROOT" ]; then
-  warn "LLM_WIKI_STATE_ROOT was '$LLM_WIKI_STATE_ROOT', overwriting to '$VAULT_ROOT'"
+# External configuration starts only after the mandatory test gate.
+protect_push_urls_if_authorized
+if [[ "$INSTALLER_CREATED_CLONE" == "1" || "$PROTECT_PUSH" == "1" ]]; then
+  ok "Push disabled (no-push) for every configured remote"
 fi
 
-# Detect shell profile
-if [[ -n "${ZSH_VERSION:-}" ]] || [[ "$SHELL" == */zsh ]]; then
-  PROFILE="${HOME}/.zshrc"
-elif [[ -n "${BASH_VERSION:-}" ]] || [[ "$SHELL" == */bash ]]; then
-  PROFILE="${HOME}/.bashrc"
-else
-  PROFILE="${HOME}/.profile"
-fi
-
-# Set LLM_WIKI_ROOT (idempotent per-var, so a re-install updates STATE_ROOT
-# even if LLM_WIKI_ROOT was already written by an older installer).
-if ! grep -q "LLM_WIKI_ROOT=" "$PROFILE" 2>/dev/null; then
-  echo "" >> "$PROFILE"
-  echo "# LLM-Wiki memory system" >> "$PROFILE"
-  echo "export LLM_WIKI_ROOT=\"$VAULT_ROOT\"" >> "$PROFILE"
-  ok "Added LLM_WIKI_ROOT to $PROFILE"
-else
-  ok "LLM_WIKI_ROOT already in $PROFILE"
-fi
-
-# Runtime lives inside the vault as gitignored cache/logs/run dirs.
-# LLM_WIKI_STATE_ROOT defaults to the vault itself; set it explicitly only
-# if you want runtime on a different disk.
-STATE_ROOT="$VAULT_ROOT"
-if ! grep -q "LLM_WIKI_STATE_ROOT=" "$PROFILE" 2>/dev/null; then
-  echo "export LLM_WIKI_STATE_ROOT=\"$STATE_ROOT\"" >> "$PROFILE"
-  ok "Added LLM_WIKI_STATE_ROOT to $PROFILE"
-else
-  ok "LLM_WIKI_STATE_ROOT already in $PROFILE"
-fi
+info "Environment roots persisted in $PROFILE"
 
 # Create runtime dirs inside the vault (gitignored)
-STATE_ROOT="${LLM_WIKI_STATE_ROOT:-$VAULT_ROOT}"
 mkdir -p "$STATE_ROOT/run" "$STATE_ROOT/run/queue" "$STATE_ROOT/logs" "$STATE_ROOT/cache" "$STATE_ROOT/cache/cognee"
 ok "Runtime dirs: $STATE_ROOT/{run,logs,cache} (gitignored)"
 
@@ -307,8 +388,15 @@ ok "Runtime dirs: $STATE_ROOT/{run,logs,cache} (gitignored)"
 
 info "Setting up scheduled maintenance..."
 
-CRON_NIGHTLY="0 3 * * * cd '$VAULT_ROOT' && $(which uv) run python scripts/scheduled_nightly.py >> '$STATE_ROOT/logs/cron-nightly.log' 2>&1"
-CRON_WEEKLY="0 4 * * 0 cd '$VAULT_ROOT' && $(which uv) run python scripts/scheduled_weekly.py >> '$STATE_ROOT/logs/cron-weekly.log' 2>&1"
+UV_PATH="$(command -v uv)"
+CRON_NIGHTLY_COMMAND="$(python3 "$VAULT_ROOT/scripts/installer_config.py" cron \
+  --root "$VAULT_ROOT" --state-root "$STATE_ROOT" --uv-path "$UV_PATH" \
+  --kind nightly --log-path "$STATE_ROOT/logs/cron-nightly.log")"
+CRON_WEEKLY_COMMAND="$(python3 "$VAULT_ROOT/scripts/installer_config.py" cron \
+  --root "$VAULT_ROOT" --state-root "$STATE_ROOT" --uv-path "$UV_PATH" \
+  --kind weekly --log-path "$STATE_ROOT/logs/cron-weekly.log")"
+CRON_NIGHTLY="0 3 * * * $CRON_NIGHTLY_COMMAND"
+CRON_WEEKLY="0 4 * * 0 $CRON_WEEKLY_COMMAND"
 
 # Remove old LLM-Wiki cron block (between markers only)
 if crontab -l 2>/dev/null | grep -q "LLM-Wiki-cron-start"; then
@@ -327,21 +415,24 @@ info "Detecting installed agents..."
 AGENTS_FOUND=""
 VAULT_JSON=$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$VAULT_ROOT")
 
-# OpenCode
-if [ -d "$HOME/.config/opencode" ] || command -v opencode &>/dev/null; then
-  AGENTS_FOUND="$AGENTS_FOUND OpenCode"
-  PLUGIN_DIR="$HOME/.config/opencode/plugins"
-  mkdir -p "$PLUGIN_DIR"
-  if [ -f "$VAULT_ROOT/scripts/llm-wiki-memory-opencode.js" ]; then
-    cp -f "$VAULT_ROOT/scripts/llm-wiki-memory-opencode.js" "$PLUGIN_DIR/llm-wiki-memory.js"
-    ok "OpenCode plugin installed/updated"
-    # Generate initial context file so the first session has context
-    mkdir -p "$STATE_ROOT/cache"
-    uv run python "$VAULT_ROOT/scripts/session_start_context.py" --output-file "$STATE_ROOT/cache/session-context.md" 2>/dev/null || true
-  else
-    warn "OpenCode detected but plugin source missing at $VAULT_ROOT/scripts/llm-wiki-memory-opencode.js"
-  fi
-fi
+# OpenCode configuration is merged structurally and verified after all precedence layers.
+OPENCODE_RESULT="$(uv run --locked --no-sync --directory "$VAULT_ROOT" python \
+  "$VAULT_ROOT/scripts/installer_config.py" opencode \
+  --root "$VAULT_ROOT" --state-root "$STATE_ROOT" --cwd "$CALLER_CWD")"
+OPENCODE_STATUS="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["status"])' "$OPENCODE_RESULT")"
+case "$OPENCODE_STATUS" in
+  active)
+    AGENTS_FOUND="$AGENTS_FOUND OpenCode(active)"
+    ok "OpenCode configuration is active"
+    uv run --locked --no-sync --directory "$VAULT_ROOT" python \
+      "$VAULT_ROOT/scripts/session_start_context.py" \
+      --output-file "$STATE_ROOT/cache/session-context.md" 2>/dev/null || true
+    ;;
+  conflict) warn "OpenCode configuration status: conflict" ;;
+  configured_unverified) warn "OpenCode configuration status: configured_unverified" ;;
+  not_detected) : ;;
+  *) fail "OpenCode configuration helper returned an invalid status" ;;
+esac
 
 # Codex CLI
 if command -v codex &>/dev/null; then
@@ -412,25 +503,11 @@ if command -v claude &>/dev/null || [ -d "$HOME/.claude" ] || [ -f "$HOME/.claud
   CLAUDE_MCP="$HOME/.claude.json"
   if [ ! -f "$CLAUDE_MCP" ]; then
     info "Adding MCP server config for Claude Code..."
-    printf '%s\n' '{"mcpServers":{"llm-wiki":{"command":"uv","args":["run","--directory",'"$VAULT_JSON"',"python","scripts/mcp_server.py"]}}}' > "$CLAUDE_MCP"
+    printf '%s\n' '{"mcpServers":{"llm-wiki":{"command":"uv","args":["run","--locked","--no-sync","--directory",'"$VAULT_JSON"',"python","scripts/mcp_server.py"]}}}' > "$CLAUDE_MCP"
     ok "Claude MCP config: ~/.claude.json"
   elif ! grep -q '"llm-wiki"' "$CLAUDE_MCP" 2>/dev/null; then
     warn "Existing ~/.claude.json found without llm-wiki; merge this under top-level mcpServers:"
-    warn '  "llm-wiki":{"command":"uv","args":["run","--directory",'"$VAULT_JSON"',"python","scripts/mcp_server.py"]}'
-  fi
-fi
-
-# v4.0: OpenCode MCP config
-if [ -d "$HOME/.config/opencode" ] || command -v opencode &>/dev/null; then
-  OPENCODE_CONFIG="$HOME/.config/opencode/opencode.json"
-  if [ ! -f "$OPENCODE_CONFIG" ]; then
-    info "Adding MCP server config for OpenCode..."
-    mkdir -p "$HOME/.config/opencode"
-    printf '%s\n' '{"mcp":{"llm-wiki":{"type":"local","command":["uv","run","--directory",'"$VAULT_JSON"',"python","scripts/mcp_server.py"],"enabled":true}}}' > "$OPENCODE_CONFIG"
-    ok "OpenCode MCP config"
-  elif ! grep -q '"llm-wiki"' "$OPENCODE_CONFIG" 2>/dev/null; then
-    warn "Existing opencode.json found without llm-wiki; merge this under top-level mcp:"
-    warn '  "llm-wiki":{"type":"local","command":["uv","run","--directory",'"$VAULT_JSON"',"python","scripts/mcp_server.py"],"enabled":true}'
+    warn '  "llm-wiki":{"command":"uv","args":["run","--locked","--no-sync","--directory",'"$VAULT_JSON"',"python","scripts/mcp_server.py"]}'
   fi
 fi
 
@@ -449,14 +526,15 @@ esac
 # ─── 9. Optional: semantic + hybrid search ─────────────────────────
 
 info "Optional: install hybrid search (BM25 + vector + reranker)?"
-info "  uv sync --extra hybrid      # LanceDB HNSW + sentence-transformers"
-info "  uv sync --extra reranker     # cross-encoder reranker (ONNX)"
+info "  uv sync --locked --no-default-groups --inexact --extra hybrid"
+info "  uv sync --locked --no-default-groups --inexact --extra code-graph"
+info "  uv sync --locked --no-default-groups --inexact --extra reranker"
 
 # ─── 10. Print summary ─────────────────────────────────────────────
 
 echo ""
 echo "=============================================="
-if [ "$SYNC_WARNING" -eq 1 ] || [ "$TEST_WARNING" -eq 1 ]; then
+if [ "$SYNC_WARNING" -eq 1 ]; then
   echo -e "${YELLOW}  LLM-Wiki installed with warnings${NC}"
 else
   echo -e "${GREEN}  LLM-Wiki installed successfully!${NC}"
@@ -482,8 +560,7 @@ echo "  uv run python benchmark/run_benchmark.py              # run benchmark"
 echo ""
 echo "MCP baseline: 12 local task-shaped tools (installed)"
 echo "Optional enhancements:"
-echo "  uv sync --extra hybrid        # LanceDB HNSW + semantic search"
-echo "  uv sync --extra code-graph    # tree-sitter code graph"
-echo "  uv sync --extra reranker      # cross-encoder reranker"
-echo "  uv sync --extra full          # all of the above"
+echo "  uv sync --locked --no-default-groups --inexact --extra hybrid"
+echo "  uv sync --locked --no-default-groups --inexact --extra code-graph"
+echo "  uv sync --locked --no-default-groups --inexact --extra reranker"
 echo ""

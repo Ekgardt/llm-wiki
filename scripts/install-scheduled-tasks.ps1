@@ -1,8 +1,8 @@
 # Installs Windows Task Scheduler entries for fully-automatic memory maintenance.
 #
 # Creates two tasks:
-#   - LLMWiki-Nightly: runs nightly at 03:00 — queue drain + compile + lint
-#   - LLMWiki-Weekly:  runs every Sunday 04:00 — deep maintenance + OKF sweep
+#   - LLMWiki-Nightly: runs nightly at 03:00 - queue drain + compile + lint
+#   - LLMWiki-Weekly:  runs every Sunday 04:00 - deep maintenance + OKF sweep
 #
 # Both run as the current user (no admin elevation needed) and only when
 # the user is logged on. Output goes to $env:LLM_WIKI_STATE_ROOT\logs\.
@@ -15,6 +15,9 @@
 # Requires: Windows Task Scheduler service running (default on).
 
 param(
+    [Parameter(Mandatory = $true)][string]$VaultRoot,
+    [Parameter(Mandatory = $true)][string]$StateRoot,
+    [Parameter(Mandatory = $true)][string]$UvPath,
     [switch]$Uninstall,
     [switch]$Status,
     [switch]$RunNightlyNow,
@@ -30,6 +33,30 @@ $tasks = @("LLMWiki-Nightly", "LLMWiki-Weekly")
 # When dot-sourced: CommandOrigin = 'Internal' (runs in caller's scope).
 # When run as child process: CommandOrigin = 'Runspace'.
 $script:IsDotSourced = $MyInvocation.CommandOrigin -eq 'Internal'
+
+function New-LLMWikiScheduledAction {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("nightly", "weekly")]
+        [string]$Kind,
+        [Parameter(Mandatory = $true)][string]$VaultRoot,
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [Parameter(Mandatory = $true)][string]$UvPath,
+        [Parameter(Mandatory = $true)][string]$RunnerPath,
+        [Parameter(Mandatory = $true)][string]$PowerShellPath
+    )
+    $runnerLiteral = $RunnerPath.Replace("'", "''")
+    $kindLiteral = $Kind.Replace("'", "''")
+    $rootLiteral = $VaultRoot.Replace("'", "''")
+    $stateLiteral = $StateRoot.Replace("'", "''")
+    $uvLiteral = $UvPath.Replace("'", "''")
+    $command = "& '$runnerLiteral' -Kind '$kindLiteral' -VaultRoot '$rootLiteral' " +
+        "-StateRoot '$stateLiteral' -UvPath '$uvLiteral'"
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    return New-ScheduledTaskAction `
+        -Execute $PowerShellPath `
+        -Argument "-NoProfile -NonInteractive -EncodedCommand $encoded"
+}
 
 if ($Status) {
     Write-Host "=== Scheduled task status ===" -ForegroundColor Cyan
@@ -63,27 +90,22 @@ if ($Uninstall) {
 }
 
 # Resolve paths.
-# Prefer vault venv so scheduled tasks see project deps.
-$pythonExe = "$env:LLM_WIKI_ROOT\.venv\Scripts\python.exe"
-if (-not (Test-Path -LiteralPath $pythonExe)) {
-    $pythonExe = (Get-Command python -ErrorAction SilentlyContinue).Source
-}
-if (-not $pythonExe) { throw "No Python found (install uv sync first)" }
-$nightlyScript = "$env:LLM_WIKI_ROOT\scripts\scheduled_nightly.py"
-$weeklyScript = "$env:LLM_WIKI_ROOT\scripts\scheduled_weekly.py"
-
-if (-not (Test-Path $nightlyScript)) { throw "Missing: $nightlyScript" }
-if (-not (Test-Path $weeklyScript)) { throw "Missing: $weeklyScript" }
-
-# Quote script paths so Task Scheduler handles spaces in LLM_WIKI_ROOT correctly.
-$nightlyArgs = '"{0}"' -f $nightlyScript
-$weeklyArgs = '"{0}"' -f $weeklyScript
+$VaultRoot = [System.IO.Path]::GetFullPath($VaultRoot)
+$StateRoot = [System.IO.Path]::GetFullPath($StateRoot)
+$UvPath = [System.IO.Path]::GetFullPath($UvPath)
+$runnerPath = Join-Path $VaultRoot "scripts\run-scheduled-task.ps1"
+if (-not (Test-Path -LiteralPath $runnerPath -PathType Leaf)) { throw "Missing: $runnerPath" }
+if (-not (Test-Path -LiteralPath $UvPath -PathType Leaf)) { throw "Missing: $UvPath" }
+$powerShellPath = (Get-Process -Id $PID).Path
 
 # --- Nightly task: 03:00 every day ---
-$nightlyAction = New-ScheduledTaskAction `
-    -Execute $pythonExe `
-    -Argument $nightlyArgs `
-    -WorkingDirectory "$env:LLM_WIKI_ROOT"
+$nightlyAction = New-LLMWikiScheduledAction `
+    -Kind nightly `
+    -VaultRoot $VaultRoot `
+    -StateRoot $StateRoot `
+    -UvPath $UvPath `
+    -RunnerPath $runnerPath `
+    -PowerShellPath $powerShellPath
 
 $nightlyTrigger = New-ScheduledTaskTrigger -Daily -At 3am
 
@@ -115,10 +137,13 @@ Register-ScheduledTask `
 Write-Host "  registered" -ForegroundColor Green
 
 # --- Weekly task: Sunday 04:00 ---
-$weeklyAction = New-ScheduledTaskAction `
-    -Execute $pythonExe `
-    -Argument $weeklyArgs `
-    -WorkingDirectory "$env:LLM_WIKI_ROOT"
+$weeklyAction = New-LLMWikiScheduledAction `
+    -Kind weekly `
+    -VaultRoot $VaultRoot `
+    -StateRoot $StateRoot `
+    -UvPath $UvPath `
+    -RunnerPath $runnerPath `
+    -PowerShellPath $powerShellPath
 
 $weeklyTrigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At 4am
 

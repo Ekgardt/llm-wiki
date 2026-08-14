@@ -16,6 +16,32 @@ OPTIONAL_STAGE_MAX_SECONDS = 0.5
 _OPTIONAL_STAGE_SLOTS = threading.BoundedSemaphore(MAX_OPTIONAL_STRAGGLERS)
 
 
+def _normalized_filename_stem(value: str) -> str:
+    name = Path(value.strip()).name.casefold()
+    if name.endswith(".md"):
+        name = name[:-3]
+    return "-".join(part for part in re.split(r"[\s_-]+", name) if part)
+
+
+def _promote_exact_filename(
+    candidates: Sequence[RetrievalCandidate], query: str
+) -> tuple[RetrievalCandidate, ...]:
+    normalized = _normalized_filename_stem(query)
+    if not normalized:
+        return tuple(candidates)
+    exact = next(
+        (
+            candidate
+            for candidate in candidates
+            if _normalized_filename_stem(candidate.relative_path) == normalized
+        ),
+        None,
+    )
+    if exact is None:
+        return tuple(candidates)
+    return (exact, *(candidate for candidate in candidates if candidate is not exact))
+
+
 class OptionalStageTimeout(TimeoutError):
     """An optional uninterruptible stage exceeded its isolated budget."""
 
@@ -1147,6 +1173,9 @@ def retrieve(
     candidates, display_meta = fuse_rrf(
         lexical=fuse_lexical, dense=fuse_dense, graph=fuse_graph
     )
+    candidates = _promote_exact_filename(
+        candidates, analysis.normalized_query or analysis.query
+    )
     _check_stopped(deadline_monotonic, cancelled)
     if max_candidates is not None and int(max_candidates) > 0:
         candidates = candidates[: int(max_candidates)]
@@ -1315,6 +1344,9 @@ def retrieve(
         except Exception:
             reranker_fallback_reason = "reranker_error"
 
+    candidates = _promote_exact_filename(
+        candidates, analysis.normalized_query or analysis.query
+    )
     _check_stopped(deadline_monotonic, cancelled)
     if limit > 0:
         candidates = candidates[:limit]
@@ -1651,6 +1683,7 @@ def retrieve_via_search_memory(
     want_vectors = "dense" in wanted_tuple and semantic
     use_generation = _open_generation(want_vectors=want_vectors)
     generation_fallback: str | None = None
+    legacy_fallback: str | None = None
     if use_generation:
         corpus_generation = str(generation_ctx["manifest"]["generation_id"])
     elif catalog_requested:
@@ -1658,7 +1691,7 @@ def retrieve_via_search_memory(
         generation_fallback = "generation_unavailable"
 
     def lexical_backend(**filters: Any) -> Sequence[Mapping[str, Any]]:
-        nonlocal generation_fallback, use_generation
+        nonlocal generation_fallback, legacy_fallback, use_generation
         if use_generation:
             try:
                 if not search_memory._generation_consumption_unchanged(
@@ -1720,6 +1753,14 @@ def retrieve_via_search_memory(
             page_paths=page_paths,
             deadline=deadline_monotonic,
             cancelled=cancelled,
+        )
+        legacy_fallback = next(
+            (
+                str(row["fallback_reason"])
+                for row in rows
+                if row.get("fallback_reason")
+            ),
+            legacy_fallback,
         )
         hits = [_backend_hit_from_legacy(row) for row in rows]
         return search_memory.apply_hard_filters(
@@ -1986,25 +2027,24 @@ def retrieve_via_search_memory(
     dense_fallback = generation_ctx.get("dense_fallback") or generation_fallback
     effective_mode = result.trace.effective_mode
     fallback_reason = result.trace.fallback_reason
-    if dense_fallback and fallback_reason in {None, "dense_unavailable"}:
+    if legacy_fallback:
+        fallback_reason = legacy_fallback
+    elif dense_fallback and fallback_reason in {None, "dense_unavailable"}:
         fallback_reason = str(dense_fallback)
     if generation_fallback and fallback_reason is None:
         fallback_reason = generation_fallback
+    partial = result.trace.partial or legacy_fallback is not None
 
-    # Filename exact short-circuit: stem matches query with spaces→hyphens.
-    if (
-        result.candidates
-        and result.trace.signals_used == ("lexical",)
-        and effective_mode in {"BASE", "EXACT", "DIRECT"}
-    ):
-        query_normalized = query.lower().strip().replace(" ", "-")
-        top_stem = Path(result.candidates[0].relative_path).stem.lower()
-        if top_stem == query_normalized:
-            effective_mode = "EXACT"
+    # Exact filename remains authoritative after optional fusion and reranking.
+    if result.candidates and _normalized_filename_stem(
+        result.candidates[0].relative_path
+    ) == _normalized_filename_stem(query):
+        effective_mode = "EXACT"
 
     if (
         effective_mode != result.trace.effective_mode
         or fallback_reason != result.trace.fallback_reason
+        or partial != result.trace.partial
     ):
         result = RetrievalResult(
             candidates=result.candidates,
@@ -2014,7 +2054,7 @@ def retrieve_via_search_memory(
                 signals_used=result.trace.signals_used,
                 fallback_reason=fallback_reason,
                 corpus_generation=result.trace.corpus_generation,
-                partial=result.trace.partial,
+                partial=partial,
                 reranker_applied=result.trace.reranker_applied,
                 reranker_model_id=result.trace.reranker_model_id,
                 reranker_model_revision=result.trace.reranker_model_revision,

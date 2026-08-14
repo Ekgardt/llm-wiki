@@ -66,7 +66,10 @@ if os.name == "nt":
     _OPEN_EXISTING = 3
     _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
     _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+    _GENERIC_WRITE = 0x40000000
     _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+    _MOVEFILE_REPLACE_EXISTING = 0x00000001
+    _MOVEFILE_WRITE_THROUGH = 0x00000008
 
     class _UnicodeString(ctypes.Structure):
         _fields_ = (
@@ -167,6 +170,7 @@ if os.name == "nt":
                 "WriteFile": kernel32,
                 "SetFilePointerEx": kernel32,
                 "FlushFileBuffers": kernel32,
+                "MoveFileExW": kernel32,
                 "NtCreateFile": ntdll,
                 "NtOpenFile": ntdll,
                 "NtSetInformationFile": ntdll,
@@ -233,6 +237,13 @@ if os.name == "nt":
             self.flush_file_buffers = kernel32.FlushFileBuffers
             self.flush_file_buffers.argtypes = (wintypes.HANDLE,)
             self.flush_file_buffers.restype = wintypes.BOOL
+            self.move_file_ex = kernel32.MoveFileExW
+            self.move_file_ex.argtypes = (
+                wintypes.LPCWSTR,
+                wintypes.LPCWSTR,
+                wintypes.DWORD,
+            )
+            self.move_file_ex.restype = wintypes.BOOL
             self.nt_create_file = ntdll.NtCreateFile
             self.nt_create_file.argtypes = (
                 ctypes.POINTER(wintypes.HANDLE),
@@ -770,10 +781,58 @@ def flush_file(handle: int) -> None:
         raise ctypes.WinError(ctypes.get_last_error())
 
 
+def flush_file_path(path: Path) -> None:
+    """Flush one bounded local regular file through a checked Win32 handle."""
+    require_capability()
+    value, _pure = _bounded_local_absolute_path(path)
+    handle = _API.create_file(
+        f"\\\\?\\{value}",
+        _GENERIC_WRITE | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE,
+        _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
+        None,
+        _OPEN_EXISTING,
+        _FILE_ATTRIBUTE_NORMAL | _FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    if handle == _INVALID_HANDLE_VALUE:
+        raise ctypes.WinError(ctypes.get_last_error())
+    opened = int(handle)
+    try:
+        identity(opened, directory=False)
+        flush_file(opened)
+    finally:
+        close_handle(opened)
+
+
 def flush_directory(handle: int) -> bool:
     if _API.flush_file_buffers(handle):
         return True
     return False
+
+
+def move_file_write_through(
+    source: Path,
+    destination: Path,
+    *,
+    replace: bool,
+) -> None:
+    """Move one local name and wait for the checked Win32 move to flush."""
+    require_capability()
+    source_value, _source_pure = _bounded_local_absolute_path(source)
+    destination_value, _destination_pure = _bounded_local_absolute_path(destination)
+    flags = _MOVEFILE_WRITE_THROUGH
+    if replace:
+        flags |= _MOVEFILE_REPLACE_EXISTING
+    if _API.move_file_ex(
+        f"\\\\?\\{source_value}",
+        f"\\\\?\\{destination_value}",
+        flags,
+    ):
+        return
+    error = ctypes.get_last_error()
+    if not replace and error in {80, 183}:
+        raise FileExistsError(error, "Windows publication destination already exists")
+    raise ctypes.WinError(error)
 
 
 def _rename_file(handle: int, parent: int, name: str, *, replace: bool) -> None:
@@ -832,10 +891,12 @@ __all__ = [
     "file_size",
     "flush_directory",
     "flush_file",
+    "flush_file_path",
     "get_short_path",
     "identity",
     "is_read_only",
     "list_directory",
+    "move_file_write_through",
     "open_directory",
     "open_deletable_directory",
     "open_deletable_file",

@@ -199,7 +199,7 @@ def test_needs_rebuild_fresh_files(tmp_path):
     page.parent.mkdir(parents=True)
     index.parent.mkdir(parents=True)
     page.write_text("# Page\n", encoding="utf-8")
-    with sqlite3.connect(index) as connection:
+    with closing(sqlite3.connect(index)) as connection:
         connection.execute("CREATE TABLE pages (slug TEXT)")
     manifest.write_text(
         json.dumps(["knowledge/notes/page.md"]), encoding="utf-8"
@@ -213,6 +213,27 @@ def test_needs_rebuild_fresh_files(tmp_path):
         index_file=index,
         index_manifest=manifest,
     ) is True
+
+
+def test_needs_rebuild_releases_index_database(tmp_path: Path) -> None:
+    import search_memory
+
+    index = tmp_path / "index.sqlite"
+    manifest = tmp_path / "manifest.json"
+    with closing(sqlite3.connect(index)) as connection:
+        connection.execute(
+            "CREATE VIRTUAL TABLE pages USING fts5("
+            "path UNINDEXED, title, summary, body, project UNINDEXED, "
+            "timestamp UNINDEXED, slug, tokenize = 'porter unicode61')"
+        )
+    manifest.write_text("[]", encoding="utf-8")
+
+    assert not search_memory._needs_rebuild(
+        [], root=tmp_path, index_file=index, index_manifest=manifest
+    )
+    replacement = index.with_suffix(".replacement")
+    replacement.write_bytes(index.read_bytes())
+    os.replace(replacement, index)
 
 
 @pytest.mark.parametrize(
@@ -1020,6 +1041,105 @@ def test_legacy_fts_progress_handler_interrupts_on_cancellation(
     assert connection.progress is None
 
 
+def test_repeated_legacy_sqlite_failure_returns_degraded_markdown_result(
+    tmp_path, monkeypatch
+):
+    import search_memory
+
+    notes = tmp_path / "knowledge" / "notes"
+    notes.mkdir(parents=True)
+    page = notes / "recovery.md"
+    page.write_text(
+        "---\ntype: concept\nproject: recovery\n---\n"
+        "# Recovery\nNeedle content remains authoritative.\n",
+        encoding="utf-8",
+    )
+    connections = 0
+    rebuilds = 0
+
+    class Connection:
+        def execute(self, *_args):
+            raise sqlite3.DatabaseError("corrupt legacy index")
+
+        def close(self):
+            pass
+
+    def connect(*_args, **_kwargs):
+        nonlocal connections
+        connections += 1
+        return Connection()
+
+    def rebuild(_pages, **_kwargs):
+        nonlocal rebuilds
+        rebuilds += 1
+
+    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
+    monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
+    monkeypatch.setattr(search_memory, "WIKI_DIR", notes)
+    monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: None)
+    monkeypatch.setattr(search_memory, "_needs_rebuild", lambda *_a, **_k: False)
+    monkeypatch.setattr(search_memory, "_build_index", rebuild)
+    monkeypatch.setattr(search_memory.sqlite3, "connect", connect)
+
+    results = search_memory.search(
+        "needle content",
+        project="recovery",
+        graph=False,
+        rerank=False,
+        emit_telemetry=False,
+    )
+
+    assert connections == 2
+    assert rebuilds == 1
+    assert [result["path"] for result in results] == [
+        "knowledge/notes/recovery.md"
+    ]
+    assert results[0]["fallback_reason"] == "legacy_sqlite_unavailable"
+    assert results[0]["partial"] is True
+
+
+def test_repeated_legacy_sqlite_failure_without_direct_match_is_nonzero(
+    tmp_path, monkeypatch, capsys
+):
+    import search_memory
+
+    notes = tmp_path / "knowledge" / "notes"
+    notes.mkdir(parents=True)
+    (notes / "page.md").write_text("# Page\nDifferent text.\n", encoding="utf-8")
+
+    class Connection:
+        def execute(self, *_args):
+            raise sqlite3.DatabaseError("corrupt legacy index")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
+    monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
+    monkeypatch.setattr(search_memory, "WIKI_DIR", notes)
+    monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: None)
+    monkeypatch.setattr(search_memory, "_needs_rebuild", lambda *_a, **_k: False)
+    monkeypatch.setattr(search_memory, "_build_index", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        search_memory.sqlite3, "connect", lambda *_a, **_k: Connection()
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["search_memory.py", "missing needle", "--no-graph", "--no-rerank"],
+    )
+
+    try:
+        exit_code = search_memory.main()
+    except sqlite3.DatabaseError:
+        pytest.fail("CLI leaked the second SQLite failure without a diagnostic")
+
+    captured = capsys.readouterr()
+    assert exit_code != 0
+    assert "direct Markdown search" in captured.err
+    assert "corrupt legacy index" not in captured.err
+
+
 def test_legacy_dense_skips_model_and_lance_under_hard_deadline(monkeypatch):
     import search_memory
 
@@ -1259,6 +1379,132 @@ def test_search_prefers_valid_generation_without_rereading_live_markdown(
     assert all(result["effective_mode"] == "BASE" for result in results)
 
 
+def test_generation_exact_filename_is_rank_one_without_fts_content_match(tmp_path):
+    import search_memory
+
+    _vault, snapshot = _generation_snapshot(
+        tmp_path,
+        {
+            "knowledge/notes/target-contract.md": (
+                "# Unrelated heading\nNo query words occur in this page.\n"
+            ),
+            "knowledge/notes/distractor.md": (
+                "# Target Contract\nTarget contract query words occur here.\n"
+            ),
+        },
+    )
+    catalog = search_memory.GenerationCatalog(tmp_path / "state")
+    generation = catalog.generations_path / "gen-search"
+    generation.mkdir()
+    descriptor = search_memory.build_generation_fts(snapshot, generation)
+    catalog, _manifest = _activate_search_generation(tmp_path, snapshot, [descriptor])
+
+    results = search_memory.search(
+        "target contract",
+        catalog=catalog,
+        graph=False,
+        rerank=False,
+        emit_telemetry=False,
+    )
+
+    assert results[0]["path"] == "knowledge/notes/target-contract.md"
+    assert results[0]["effective_mode"] == "EXACT"
+    assert results[0]["generation"] == "gen-search"
+
+
+def test_generation_exact_filename_treats_query_wildcards_literally(tmp_path):
+    import search_memory
+
+    _vault, snapshot = _generation_snapshot(
+        tmp_path,
+        {
+            "knowledge/notes/target-extra-contract.md": (
+                "# Unrelated heading\nNo query words occur in this page.\n"
+            ),
+        },
+    )
+    catalog = search_memory.GenerationCatalog(tmp_path / "state")
+    generation = catalog.generations_path / "gen-search"
+    generation.mkdir()
+    descriptor = search_memory.build_generation_fts(snapshot, generation)
+    catalog, _manifest = _activate_search_generation(tmp_path, snapshot, [descriptor])
+
+    results = search_memory.search(
+        "target% contract",
+        catalog=catalog,
+        graph=False,
+        rerank=False,
+        emit_telemetry=False,
+    )
+
+    assert results == []
+
+
+def test_legacy_exact_filename_is_rank_one_without_fts_content_match(
+    tmp_path, monkeypatch
+):
+    import search_memory
+
+    notes = tmp_path / "knowledge" / "notes"
+    notes.mkdir(parents=True)
+    target = notes / "target-contract.md"
+    target.write_text(
+        "# Unrelated heading\nNo query words occur in this page.\n",
+        encoding="utf-8",
+    )
+    distractor = notes / "distractor.md"
+    distractor.write_text(
+        "# Target Contract\nTarget contract query words occur here.\n",
+        encoding="utf-8",
+    )
+
+    class Cursor:
+        def fetchall(self):
+            return [
+                (
+                    "knowledge/notes/distractor.md",
+                    "Target Contract",
+                    "",
+                    "",
+                    "",
+                    -10.0,
+                )
+            ]
+
+    class Connection:
+        def execute(self, *_args):
+            return Cursor()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
+    monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
+    monkeypatch.setattr(search_memory, "WIKI_DIR", notes)
+    monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: None)
+    monkeypatch.setattr(search_memory, "_needs_rebuild", lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        search_memory,
+        "_build_index",
+        lambda *_a, **_k: pytest.fail("fresh legacy index was rebuilt"),
+    )
+    monkeypatch.setattr(
+        search_memory.sqlite3, "connect", lambda *_a, **_k: Connection()
+    )
+
+    results = search_memory.search(
+        "target contract",
+        page_paths=[target, distractor],
+        graph=False,
+        rerank=False,
+        emit_telemetry=False,
+    )
+
+    assert results[0]["path"] == "knowledge/notes/target-contract.md"
+    assert results[0]["effective_mode"] == "EXACT"
+    assert results[0]["generation"] == "legacy"
+
+
 def test_generation_search_reports_generation_to_telemetry(tmp_path, monkeypatch):
     import retrieval_telemetry
     import search_memory
@@ -1333,6 +1579,40 @@ def test_generation_filters_use_indexed_authority_status_and_validity(tmp_path):
 
     assert [result["path"] for result in results] == ["knowledge/notes/user.md"]
     assert results[0]["authority"] == "user"
+
+
+def test_generation_lexical_ranking_uses_declared_authority_hierarchy(tmp_path):
+    import search_memory
+
+    pages = {}
+    for authority in ("inferred", "ai-derived", "web", "user"):
+        pages[f"knowledge/notes/{authority}.md"] = (
+            "---\n"
+            "type: concept\n"
+            f"source_authority: {authority}\n"
+            "---\n"
+            "# Shared page\n"
+            "Shared ranking needle.\n"
+        )
+    _vault, snapshot = _generation_snapshot(tmp_path, pages)
+    catalog = search_memory.GenerationCatalog(tmp_path / "state")
+    generation = catalog.generations_path / "gen-search"
+    generation.mkdir()
+    descriptor = search_memory.build_generation_fts(snapshot, generation)
+    catalog, _manifest = _activate_search_generation(tmp_path, snapshot, [descriptor])
+
+    results = search_memory.search(
+        "shared ranking needle",
+        catalog=catalog,
+        graph=False,
+        rerank=False,
+        emit_telemetry=False,
+    )
+
+    ranked = [(result["authority"], result["score"]) for result in results]
+    assert [authority for authority, _score in ranked] == [
+        "user", "web", "ai-derived", "inferred"
+    ], ranked
 
 
 def test_missing_or_incompatible_generation_fts_falls_back_to_legacy(

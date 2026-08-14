@@ -28,6 +28,7 @@ from pathlib import Path, PureWindowsPath
 import pyright_profile as _profile
 import windows_workspace as _windows_workspace
 from lsp_paths import managed_pyright_root
+from operational_ownership import process_start_identity as _process_start_identity
 from reliable_memory import (
     _set_owner_only,
     _sqlite_lock_probe,
@@ -54,7 +55,6 @@ MAX_EXTENDED_METADATA_BYTES = 16 * 1024 * 1024
 MAX_RUNTIME_PARENT_ENTRIES = 16_384
 MAX_MOUNT_TABLE_BYTES = 4 * 1024 * 1024
 MAX_LOCK_BYTES = 1024
-MAX_PROCESS_STAT_BYTES = 8192
 
 _DARWIN_MNT_LOCAL = 0x00001000
 _CLOUD_PATH_COMPONENTS = frozenset(
@@ -111,33 +111,6 @@ class _DarwinStatfs(ctypes.Structure):
         ("mounted_on", ctypes.c_char * 1024),
         ("mounted_from", ctypes.c_char * 1024),
         ("reserved", ctypes.c_uint32 * 8),
-    )
-
-
-class _DarwinProcBsdInfo(ctypes.Structure):
-    _fields_ = (
-        ("flags", ctypes.c_uint32),
-        ("status", ctypes.c_uint32),
-        ("xstatus", ctypes.c_uint32),
-        ("pid", ctypes.c_uint32),
-        ("ppid", ctypes.c_uint32),
-        ("uid", ctypes.c_uint32),
-        ("gid", ctypes.c_uint32),
-        ("ruid", ctypes.c_uint32),
-        ("rgid", ctypes.c_uint32),
-        ("svuid", ctypes.c_uint32),
-        ("svgid", ctypes.c_uint32),
-        ("reserved", ctypes.c_uint32),
-        ("command", ctypes.c_char * 16),
-        ("name", ctypes.c_char * 32),
-        ("files", ctypes.c_uint32),
-        ("process_group", ctypes.c_uint32),
-        ("job_control", ctypes.c_uint32),
-        ("tty_device", ctypes.c_uint32),
-        ("tty_process_group", ctypes.c_uint32),
-        ("nice", ctypes.c_int32),
-        ("start_seconds", ctypes.c_uint64),
-        ("start_microseconds", ctypes.c_uint64),
     )
 
 
@@ -493,135 +466,6 @@ def _validated_deadline(deadline: float | None) -> float:
 def _check_deadline(deadline: float) -> None:
     if time.monotonic() >= deadline:
         raise TimeoutError("Pyright installation deadline expired")
-
-
-def _read_bounded_system_file(path: Path, maximum: int) -> bytes:
-    with path.open("rb") as stream:
-        content = stream.read(maximum + 1)
-    if len(content) > maximum:
-        raise OSError(f"system process file exceeded {maximum} bytes")
-    return content
-
-
-def _linux_process_start_identity(pid: int) -> str | None:
-    try:
-        raw = _read_bounded_system_file(Path(f"/proc/{pid}/stat"), MAX_PROCESS_STAT_BYTES)
-    except FileNotFoundError:
-        return None
-    closing = raw.rfind(b")")
-    prefix = f"{pid} (".encode("ascii")
-    if not raw.startswith(prefix) or closing < len(prefix):
-        raise OSError("Linux process stat was malformed")
-    fields = raw[closing + 1 :].split()
-    if len(fields) <= 19:
-        raise OSError("Linux process stat was incomplete")
-    if fields[0] in {b"Z", b"X", b"x"}:
-        return None
-    try:
-        start_ticks = int(fields[19])
-        boot_id = _read_bounded_system_file(
-            Path("/proc/sys/kernel/random/boot_id"), 128
-        ).decode("ascii", errors="strict").strip()
-    except (UnicodeError, ValueError) as exc:
-        raise OSError("Linux process identity was malformed") from exc
-    if start_ticks <= 0 or not re.fullmatch(r"[0-9a-fA-F-]{16,64}", boot_id):
-        raise OSError("Linux process identity was malformed")
-    return f"linux:{boot_id.lower()}:{start_ticks}"
-
-
-def _windows_process_start_identity(pid: int) -> str | None:
-    from ctypes import wintypes
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    open_process = kernel32.OpenProcess
-    open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-    open_process.restype = wintypes.HANDLE
-    get_exit_code = kernel32.GetExitCodeProcess
-    get_exit_code.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
-    get_exit_code.restype = wintypes.BOOL
-    get_process_times = kernel32.GetProcessTimes
-    get_process_times.argtypes = (
-        wintypes.HANDLE,
-        ctypes.POINTER(wintypes.FILETIME),
-        ctypes.POINTER(wintypes.FILETIME),
-        ctypes.POINTER(wintypes.FILETIME),
-        ctypes.POINTER(wintypes.FILETIME),
-    )
-    get_process_times.restype = wintypes.BOOL
-    close_handle = kernel32.CloseHandle
-    close_handle.argtypes = (wintypes.HANDLE,)
-    close_handle.restype = wintypes.BOOL
-    handle = open_process(0x1000, False, pid)
-    if not handle:
-        error = ctypes.get_last_error()
-        if error == 87:  # ERROR_INVALID_PARAMETER: no such process.
-            return None
-        raise ctypes.WinError(error)
-    try:
-        exit_code = wintypes.DWORD()
-        if not get_exit_code(handle, ctypes.byref(exit_code)):
-            raise ctypes.WinError(ctypes.get_last_error())
-        if exit_code.value != 259:  # STILL_ACTIVE
-            return None
-        creation = wintypes.FILETIME()
-        exit_time = wintypes.FILETIME()
-        kernel = wintypes.FILETIME()
-        user = wintypes.FILETIME()
-        if not get_process_times(
-            handle,
-            ctypes.byref(creation),
-            ctypes.byref(exit_time),
-            ctypes.byref(kernel),
-            ctypes.byref(user),
-        ):
-            raise ctypes.WinError(ctypes.get_last_error())
-        created = (int(creation.dwHighDateTime) << 32) | int(creation.dwLowDateTime)
-        if created <= 0:
-            raise OSError("Windows process creation time was unavailable")
-        return f"windows:{created}"
-    finally:
-        close_handle(handle)
-
-
-def _darwin_process_start_identity(pid: int) -> str | None:
-    library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
-    function = library.proc_pidinfo
-    function.argtypes = (
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_uint64,
-        ctypes.c_void_p,
-        ctypes.c_int,
-    )
-    function.restype = ctypes.c_int
-    information = _DarwinProcBsdInfo()
-    size = ctypes.sizeof(information)
-    result = function(pid, 3, 0, ctypes.byref(information), size)
-    if result <= 0:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return None
-        except PermissionError as exc:
-            raise OSError("Darwin process identity was inaccessible") from exc
-        raise OSError("Darwin process identity was unavailable")
-    if result != size or information.pid != pid:
-        raise OSError("Darwin process identity was malformed")
-    if information.start_seconds <= 0 or information.start_microseconds >= 1_000_000:
-        raise OSError("Darwin process start time was unavailable")
-    return f"darwin:{information.start_seconds}:{information.start_microseconds}"
-
-
-def _process_start_identity(pid: int) -> str | None:
-    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
-        return None
-    if os.name == "nt":
-        return _windows_process_start_identity(pid)
-    if sys.platform.startswith("linux"):
-        return _linux_process_start_identity(pid)
-    if sys.platform == "darwin":
-        return _darwin_process_start_identity(pid)
-    raise OSError("process start identity is unsupported on this platform")
 
 
 def _is_reparse_or_link(info: object) -> bool:

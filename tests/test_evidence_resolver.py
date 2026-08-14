@@ -47,7 +47,13 @@ def _write_bag(root: Path, daily_id: str, source: bytes, *, suffix: str = "one")
         "line_end": 4,
         "sha256": _sha(source[block_start:]),
     }
-    receipt_path = root / f"knowledge/daily/receipts/{_sha(source)}.md"
+    import compile_memory
+
+    logical_path = f"knowledge/daily/{daily_id}.md"
+    source_identity = compile_memory.compile_source_identity(
+        logical_path, _sha(source)
+    )
+    receipt_path = root / f"knowledge/daily/receipts/v3-{source_identity}.md"
     receipt_hash = _sha(receipt_path.read_bytes()) if receipt_path.exists() else "a" * 64
     operation_id = "compile:test"
     if receipt_path.exists():
@@ -64,8 +70,10 @@ def _write_bag(root: Path, daily_id: str, source: bytes, *, suffix: str = "one")
         "payload_hash": _sha(source),
         "compile_receipt_ref": {
             "schema": "compile-receipt-ref/v1",
-            "path": f"knowledge/daily/receipts/{_sha(source)}.md",
+            "path": f"knowledge/daily/receipts/v3-{source_identity}.md",
+            "logical_path": logical_path,
             "source_digest": _sha(source),
+            "source_identity": source_identity,
             "receipt_file_hash": receipt_hash,
         },
         "queue_preflight": {
@@ -110,6 +118,7 @@ def _authorize_archive_source(
     monkeypatch.setattr(compile_memory, "LOG", root / "knowledge/log.md")
     monkeypatch.setattr(compile_memory, "AGENTS", root / "AGENTS.md")
     inputs = compile_memory.snapshot_compile_inputs([daily])
+    batch = compile_memory.pack_compile_batches(inputs, model=None)[0]
     compile_memory.apply_compile_plan(
         inputs,
         {"schema_version": "compile-plan/v2", "operations": []},
@@ -117,6 +126,12 @@ def _authorize_archive_source(
         trigger="manual",
         coordinator=MarkdownCoordinator(root, state_root),
         completed_at="2026-07-14T00:00:00Z",
+        batch=batch,
+        provider_budget={
+            "provider": "fake",
+            "model": "fake-v1",
+            "max_output_tokens": 4000,
+        },
     )
     daily.unlink()
     return state_root

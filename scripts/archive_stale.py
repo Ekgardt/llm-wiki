@@ -1,8 +1,9 @@
 """Auto-archive stale knowledge pages.
 
 Moves pages older than `--days` (default 180) from active directories
-into `archive/YYYY/`. Archived pages remain searchable via FTS5 but
-are excluded from index.md and SessionStart context.
+into `archive/YYYY/`. Archived pages remain available as Markdown and in
+Git history, but are excluded from active search, index.md, and SessionStart
+context.
 
 This prevents the vault from becoming a graveyard of obsolete decisions
 — the #1 failure mode of long-lived knowledge bases.
@@ -13,8 +14,7 @@ Usage:
     uv run python scripts/archive_stale.py --days 90    # custom threshold
 
 Pages are NEVER deleted — only moved. Git tracks the move. The page's
-frontmatter gets `status: archived` added so lint and search know to
-de-prioritize it.
+frontmatter gets `status: archived` so active retrieval can exclude it.
 """
 from __future__ import annotations
 

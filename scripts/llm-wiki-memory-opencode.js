@@ -95,6 +95,8 @@ export const LlmWikiMemoryPlugin = async ({ client, directory }) => {
         [
           "uv",
           "run",
+          "--locked",
+          "--no-sync",
           "--directory",
           _LLM_WIKI_ROOT,
           "python",
@@ -119,14 +121,57 @@ export const LlmWikiMemoryPlugin = async ({ client, directory }) => {
     return typeof value === "string" && value ? value : null;
   }
 
+  async function handleSessionCreated(input) {
+    const result = await forwardLifecycle("session_start", input);
+    const id = sessionId(input);
+    if (id && typeof result?.context === "string" && result.context) {
+      sessionContexts.set(id, result.context);
+      if (sessionContexts.size > 32) sessionContexts.delete(sessionContexts.keys().next().value);
+    }
+  }
+
+  async function handleSessionIdle(input) {
+    const id = sessionId(input);
+    const transcriptText = await collectTranscript(input);
+    await forwardLifecycle("session_end", {
+      ...(input || {}),
+      checkpoint_type: "session_idle",
+      dirty: Boolean(id && dirtySessions.has(id)),
+      transcript_text: transcriptText,
+    });
+    if (id) dirtySessions.delete(id);
+  }
+
   return {
-    "session.created": async (input) => {
-      const result = await forwardLifecycle("session_start", input);
-      const id = sessionId(input);
-      if (id && typeof result?.context === "string" && result.context) {
-        sessionContexts.set(id, result.context);
-        if (sessionContexts.size > 32) sessionContexts.delete(sessionContexts.keys().next().value);
+    event: async (input) => {
+      const hostEvent = input?.event;
+      const properties = hostEvent?.properties && typeof hostEvent.properties === "object"
+        ? { ...hostEvent.properties }
+        : {};
+      if (typeof hostEvent?.id === "string" && hostEvent.id) {
+        properties.source_event_id = hostEvent.id;
       }
+      if (hostEvent?.type === "session.created") {
+        await handleSessionCreated(properties);
+      } else if (hostEvent?.type === "session.idle") {
+        await handleSessionIdle(properties);
+      }
+    },
+
+    "chat.message": async (input, output) => {
+      const role = output?.message?.role;
+      if (role !== undefined && role !== "user") return;
+      const prompt = (Array.isArray(output?.parts) ? output.parts : [])
+        .filter((part) => part?.type === "text")
+        .map((part) => typeof part?.text === "string" ? part.text.trim() : "")
+        .filter(Boolean)
+        .join("\n");
+      if (!prompt) return;
+      await forwardLifecycle("user_prompt", {
+        ...(input || {}),
+        event_id: output?.message?.id,
+        prompt,
+      });
     },
 
     "experimental.chat.system.transform": async (input, output) => {
@@ -143,18 +188,6 @@ export const LlmWikiMemoryPlugin = async ({ client, directory }) => {
         ...(input || {}),
         ...(changed ? { changed: true, dirty: true, significant: true } : {}),
       });
-    },
-
-    "session.idle": async (input) => {
-      const id = sessionId(input);
-      const transcriptText = await collectTranscript(input);
-      await forwardLifecycle("session_end", {
-        ...(input || {}),
-        checkpoint_type: "session_idle",
-        dirty: Boolean(id && dirtySessions.has(id)),
-        transcript_text: transcriptText,
-      });
-      if (id) dirtySessions.delete(id);
     },
 
     "experimental.session.compacting": async (input) => {

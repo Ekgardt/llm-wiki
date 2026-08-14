@@ -12,161 +12,139 @@ from __future__ import annotations
 
 import os
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import scheduled_nightly  # noqa: E402
 from maintenance_helpers import run_step as _run_step  # noqa: E402
 from maintenance_helpers import wait_for_compile_idle as _wait_for_compile_idle
-from memory_state import REPORTS_DIR, ROOT, STATE_ROOT  # noqa: E402
+from memory_state import REPORTS_DIR, ROOT  # noqa: E402
+from operational_ownership import (  # noqa: E402
+    OwnerLease,
+    heartbeat_owner,
+)
+
+
+def _run_weekly_body(*, ownership: OwnerLease | None) -> int:
+    if ownership is not None and (
+        ownership.role != "weekly" or ownership.scope != "global"
+    ):
+        raise ValueError("weekly work requires a weekly global owner")
+
+    def run_step(command, log, name, *, timeout):
+        if ownership is not None and scheduled_nightly._accepts_ownership(_run_step):
+            return _run_step(
+                command,
+                log,
+                name,
+                timeout=timeout,
+                ownership=ownership,
+            )
+        return _run_step(command, log, name, timeout=timeout)
+    today = datetime.now().strftime("%Y-%m-%d")
+    log_file = REPORTS_DIR / f"weekly-{today}.md"
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    def log(msg: str) -> None:
+        line = f"[{datetime.now().isoformat(timespec='seconds')}] {msg}"
+        print(line)
+        with log_file.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+
+    log(f"=== Weekly deep maintenance — {today} ===")
+    failures = 0
+
+    # Step 1: full nightly-style pass.
+    _wait_for_compile_idle(log)
+    log("Step 1: work queue + compile + structural lint...")
+    rc = scheduled_nightly.run_nightly(ownership=ownership)
+    if rc:
+        failures += 1
+
+    # Step 2: OKF conformance sweep — backfill missing frontmatter.
+    log("Step 2: OKF conformance sweep (migrate_to_okf --apply)...")
+    rc = run_step(
+        [sys.executable, str(ROOT / "scripts" / "migrate_to_okf.py"), "--apply"],
+        log, "okf", timeout=120,
+    )
+    if rc:
+        failures += 1
+
+    # Step 3: report retained queue tasks. Purge is always explicit and exported.
+    log("Step 3: reporting memory queue status...")
+    rc = run_step(
+        [sys.executable, str(ROOT / "scripts" / "memory_queue.py"), "status"],
+        log, "status", timeout=60,
+    )
+    if rc:
+        failures += 1
+
+    # Step 3b: auto-archive stale pages (>180 days).
+    log("Step 3b: auto-archiving stale pages (>180 days)...")
+    rc = run_step(
+        [sys.executable, str(ROOT / "scripts" / "archive_stale.py"), "--days", "180", "--apply"],
+        log, "archive", timeout=120,
+    )
+    if rc:
+        failures += 1
+
+    # Step 4: optional LLM-judged contradiction check.
+    if os.environ.get("MEMORY_WEEKLY_CONTRADICTIONS", "").lower() in ("1", "true", "yes"):
+        log("Step 4: LLM contradiction check (opt-in)...")
+        rc = run_step(
+            [sys.executable, str(ROOT / "scripts" / "lint_memory.py"), "--contradictions"],
+            log, "contradictions", timeout=1800,
+        )
+        if rc:
+            failures += 1
+    else:
+        log("Step 4: contradiction check SKIPPED (set MEMORY_WEEKLY_CONTRADICTIONS=1 to enable)")
+
+    # Step 5: A-MEM reflection — consolidate pages with multiple updates (v4.0).
+    log("Step 5: A-MEM reflection (page consolidation)...")
+    try:
+        from reflection import find_reflection_candidates, reflect_page
+        candidates = find_reflection_candidates()
+        if candidates:
+            log(f"  Found {len(candidates)} reflection candidate(s)")
+            for c in candidates:
+                result = reflect_page(c["path"], apply=True)
+                log(f"  {result}")
+        else:
+            log("  No reflection candidates found")
+    except Exception as e:
+        log(f"  reflection: failed ({e}) — skipping")
+
+    # Step 6: generate L1 tier overviews (v4.0, best-effort).
+    log("Step 6: generating L1 tier overviews...")
+    try:
+        from build_tiers import build_all_tiers
+        stats = build_all_tiers(use_llm=False, verbose=False)
+        log(f"  tiers: {stats['generated']} generated, {stats['skipped']} skipped")
+    except Exception as e:
+        log(f"  tiers: failed ({e}) — skipping")
+
+    log(f"=== Weekly deep maintenance complete (failures={failures}) ===")
+    return 1 if failures else 0
+
+
+def run_weekly(*, ownership: OwnerLease | None) -> int:
+    if ownership is None:
+        return _run_weekly_body(ownership=None)
+    with heartbeat_owner(ownership):
+        return _run_weekly_body(ownership=ownership)
 
 
 def main() -> int:
-    # Maintenance lease: serialize weekly against concurrent triggers and
-    # cover the migrate/archive steps that run after the nightly subprocess
-    # returns (nightly manages its own lock for step 1 — we yield around it).
-    maint_lock = STATE_ROOT / "run" / "maintenance.lock"
-    maint_lock.parent.mkdir(parents=True, exist_ok=True)
+    marker = scheduled_nightly._acquire_legacy_maintenance_marker()
+    if marker is None:
+        print("scheduled_weekly: maintenance already running, skipping.", file=sys.stderr)
+        return 0
     try:
-        fd = os.open(str(maint_lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(fd, str(os.getpid()).encode())
-        os.close(fd)
-    except FileExistsError:
-        try:
-            age = time.time() - maint_lock.stat().st_mtime
-            if age > 1800:
-                from memory_state import _is_pid_alive
-                try:
-                    old_pid = int(maint_lock.read_text(encoding="utf-8").strip())
-                    if not _is_pid_alive(old_pid):
-                        maint_lock.unlink()
-                        fd = os.open(str(maint_lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                        os.write(fd, str(os.getpid()).encode())
-                        os.close(fd)
-                    else:
-                        print("scheduled_weekly: maintenance running (stale but PID alive), skipping.", file=sys.stderr)
-                        return 0
-                except (ValueError, OSError):
-                    maint_lock.unlink()
-            else:
-                print("scheduled_weekly: maintenance already running, skipping.", file=sys.stderr)
-                return 0
-        except OSError:
-            return 0
-
-    try:
-        today = datetime.now().strftime("%Y-%m-%d")
-        log_file = REPORTS_DIR / f"weekly-{today}.md"
-        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-
-        def log(msg: str) -> None:
-            line = f"[{datetime.now().isoformat(timespec='seconds')}] {msg}"
-            print(line)
-            with log_file.open("a", encoding="utf-8") as f:
-                f.write(line + "\n")
-
-        log(f"=== Weekly deep maintenance — {today} ===")
-        failures = 0
-
-        # Step 1: full nightly-style pass.
-        _wait_for_compile_idle(log)
-        log("Step 1: work queue + compile + structural lint...")
-        # Yield the lock so the nightly subprocess can acquire it for
-        # queue work/compile/lint; re-acquire afterwards for migrate/archive.
-        try:
-            maint_lock.unlink()
-        except OSError:
-            pass
-        rc = _run_step(
-            [sys.executable, str(ROOT / "scripts" / "scheduled_nightly.py")],
-            log, "nightly", timeout=1800,
-        )
-        if rc:
-            failures += 1
-        # Re-acquire for the remaining maintenance steps. If a concurrent
-        # run grabbed it during the window, bail out of the remaining steps.
-        try:
-            fd = os.open(str(maint_lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, str(os.getpid()).encode())
-            os.close(fd)
-        except FileExistsError:
-            log("scheduled_weekly: maintenance lock grabbed during step 1 — aborting remaining steps.")
-            return 1 if failures else 0
-
-        # Step 2: OKF conformance sweep — backfill missing frontmatter.
-        log("Step 2: OKF conformance sweep (migrate_to_okf --apply)...")
-        rc = _run_step(
-            [sys.executable, str(ROOT / "scripts" / "migrate_to_okf.py"), "--apply"],
-            log, "okf", timeout=120,
-        )
-        if rc:
-            failures += 1
-
-        # Step 3: report retained queue tasks. Purge is always explicit and exported.
-        log("Step 3: reporting memory queue status...")
-        rc = _run_step(
-            [sys.executable, str(ROOT / "scripts" / "memory_queue.py"), "status"],
-            log, "status", timeout=60,
-        )
-        if rc:
-            failures += 1
-
-        # Step 3b: auto-archive stale pages (>180 days).
-        log("Step 3b: auto-archiving stale pages (>180 days)...")
-        rc = _run_step(
-            [sys.executable, str(ROOT / "scripts" / "archive_stale.py"), "--days", "180", "--apply"],
-            log, "archive", timeout=120,
-        )
-        if rc:
-            failures += 1
-
-        # Step 4: optional LLM-judged contradiction check.
-        if os.environ.get("MEMORY_WEEKLY_CONTRADICTIONS", "").lower() in ("1", "true", "yes"):
-            log("Step 4: LLM contradiction check (opt-in)...")
-            rc = _run_step(
-                [sys.executable, str(ROOT / "scripts" / "lint_memory.py"), "--contradictions"],
-                log, "contradictions", timeout=1800,
-            )
-            if rc:
-                failures += 1
-        else:
-            log("Step 4: contradiction check SKIPPED (set MEMORY_WEEKLY_CONTRADICTIONS=1 to enable)")
-
-        # Step 5: A-MEM reflection — consolidate pages with multiple updates (v4.0).
-        log("Step 5: A-MEM reflection (page consolidation)...")
-        try:
-            from reflection import find_reflection_candidates, reflect_page
-            candidates = find_reflection_candidates()
-            if candidates:
-                log(f"  Found {len(candidates)} reflection candidate(s)")
-                for c in candidates:
-                    result = reflect_page(c["path"], apply=True)
-                    log(f"  {result}")
-            else:
-                log("  No reflection candidates found")
-        except Exception as e:
-            log(f"  reflection: failed ({e}) — skipping")
-
-        # Step 6: generate L1 tier overviews (v4.0, best-effort).
-        log("Step 6: generating L1 tier overviews...")
-        try:
-            from build_tiers import build_all_tiers
-            stats = build_all_tiers(use_llm=False, verbose=False)
-            log(f"  tiers: {stats['generated']} generated, {stats['skipped']} skipped")
-        except Exception as e:
-            log(f"  tiers: failed ({e}) — skipping")
-
-        log(f"=== Weekly deep maintenance complete (failures={failures}) ===")
-        return 1 if failures else 0
+        return run_weekly(ownership=None)
     finally:
-        # Owner-aware deletion: only unlink if lock still contains our PID
-        try:
-            current = maint_lock.read_text(encoding="utf-8").strip()
-            if current == str(os.getpid()):
-                maint_lock.unlink()
-        except OSError:
-            pass
+        scheduled_nightly._release_legacy_maintenance_marker(marker)
 
 
 if __name__ == "__main__":

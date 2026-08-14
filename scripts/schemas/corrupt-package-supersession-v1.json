@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/corrupt-package-supersession-v1.json",
+  "$defs": {"digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
+  "type": "object",
+  "required": ["schema_version", "package_key", "package_path", "initial_identity", "observed_file_count", "page_count", "observed_root", "actor_identity", "reason", "disposed_at"],
+  "properties": {
+    "schema_version": {"const": "corrupt-package-supersession/v1"},
+    "package_key": {"$ref": "#/$defs/digest"},
+    "package_path": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "initial_identity": {
+      "type": "object",
+      "required": ["platform", "volume", "file_id", "size", "mtime_ns"],
+      "properties": {
+        "platform": {"enum": ["posix", "windows"]},
+        "volume": {"type": "string", "minLength": 1, "maxLength": 512},
+        "file_id": {"type": "string", "minLength": 1, "maxLength": 512},
+        "size": {"type": "integer", "minimum": 0},
+        "mtime_ns": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "observed_file_count": {"type": "integer", "minimum": 0},
+    "page_count": {"type": "integer", "minimum": 0},
+    "observed_root": {"$ref": "#/$defs/digest"},
+    "actor_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+    "reason": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "disposed_at": {"type": "string", "minLength": 20, "maxLength": 40}
+  },
+  "additionalProperties": false
+}

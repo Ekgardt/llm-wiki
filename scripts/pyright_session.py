@@ -83,6 +83,7 @@ _MAX_PROGRESS_EVENTS = 256
 _MAX_PROGRESS_BYTES = 1024 * 1024
 _PROGRESS_EVENT_BASE_BYTES = 32
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+_WINDOWS_STAT_CREATION_TIME = os.name == "nt"
 _LSP_UINTEGER_MAX = 2**31 - 1
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _CAPABILITY_FIELDS = {
@@ -576,7 +577,7 @@ def _launch_file_state(info: os.stat_result) -> tuple[int, int, int, int, int, i
         stat.S_IFMT(info.st_mode),
         info.st_size,
         info.st_mtime_ns,
-        info.st_ctime_ns,
+        0 if _WINDOWS_STAT_CREATION_TIME else info.st_ctime_ns,
     )
 
 

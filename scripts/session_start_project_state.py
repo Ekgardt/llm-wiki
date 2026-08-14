@@ -46,7 +46,7 @@ import sys
 import traceback
 import unicodedata
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from markdown_transaction import mutate_knowledge, stable_operation_id
 from project_journal import (
@@ -64,6 +64,7 @@ if hasattr(sys.stdout, "reconfigure"):
         pass
 
 MAX_CONTEXT_CHARS = 2400  # keep the injection compact
+MAX_PROJECT_ROOT_CHARS = 32 * 1024
 SLUG_UNSAFE_RE = re.compile(r"[\s_/\\:*?\"<>|]+")
 
 # Collision disambiguation cap — try this many candidate slugs before
@@ -304,9 +305,31 @@ def _compute_slug(project_dir: Path, projects_dir: Path) -> str:
     return f"{base}-{_path_hash_suffix(project_dir)}"
 
 
+def _is_native_absolute_root(root: str, platform: str | None = None) -> bool:
+    """Validate project identity before resolution can consult process cwd."""
+    if (
+        not isinstance(root, str)
+        or not root
+        or len(root) > MAX_PROJECT_ROOT_CHARS
+        or any(
+            ord(char) < 32
+            or 127 <= ord(char) <= 159
+            or ord(char) in {0x2028, 0x2029}
+            or 0xD800 <= ord(char) <= 0xDFFF
+            or (ord(char) & 0xFFFE) == 0xFFFE
+            for char in root
+        )
+    ):
+        return False
+    path_type = PureWindowsPath if (platform or sys.platform) == "win32" else PurePosixPath
+    return path_type(root).is_absolute()
+
+
 def _resolve_project_dir() -> Path:
-    """CLAUDE_PROJECT_DIR if set, else cwd."""
+    """Resolve a bounded native absolute CLAUDE_PROJECT_DIR or cwd."""
     raw = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    if not _is_native_absolute_root(raw):
+        raise ValueError("project root must be a bounded native absolute path")
     return Path(raw).resolve()
 
 

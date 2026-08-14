@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/reliability-v3-adoption-v1.json",
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "identity": {
+      "type": "object",
+      "required": ["platform", "volume", "file_id", "size", "mtime_ns"],
+      "properties": {
+        "platform": {"enum": ["posix", "windows"]},
+        "volume": {"type": "string", "minLength": 1, "maxLength": 512},
+        "file_id": {"type": "string", "minLength": 1, "maxLength": 512},
+        "size": {"type": "integer", "minimum": 0},
+        "mtime_ns": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "artifact": {
+      "type": "object",
+      "required": ["path", "sha256", "identity"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "sha256": {"$ref": "#/$defs/digest"},
+        "identity": {"$ref": "#/$defs/identity"}
+      },
+      "additionalProperties": false
+    },
+    "database": {
+      "type": "object",
+      "required": ["database", "active", "tombstone", "application_id", "user_version", "pragmas"],
+      "properties": {
+        "database": {"enum": ["queue", "coordinator"]},
+        "active": {"$ref": "#/$defs/artifact"},
+        "tombstone": {"$ref": "#/$defs/artifact"},
+        "retired": {"oneOf": [{"$ref": "#/$defs/artifact"}, {"type": "null"}]},
+        "application_id": {"enum": [1280790835, 1280791603]},
+        "user_version": {"const": 3},
+        "pragmas": {
+          "type": "object",
+          "required": ["journal_mode", "synchronous", "foreign_keys", "trusted_schema"],
+          "properties": {
+            "journal_mode": {"const": "delete"},
+            "synchronous": {"const": 2},
+            "foreign_keys": {"const": 1},
+            "trusted_schema": {"const": 0}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "fresh_record": {
+      "type": "object",
+      "required": ["schema_version", "operation_id", "source_state", "migration", "databases", "schemas", "installed_integration_sha256"],
+      "properties": {
+        "schema_version": {"const": "reliability-v3-adoption/v1"},
+        "operation_id": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "source_state": {"const": "fresh"},
+        "migration": {"$ref": "#/$defs/migration"},
+        "databases": {"type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": true, "items": {"$ref": "#/$defs/fresh_database"}},
+        "schemas": {"$ref": "#/$defs/schemas"},
+        "installed_integration_sha256": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": false
+    },
+    "upgrade_record": {
+      "type": "object",
+      "required": ["schema_version", "operation_id", "source_state", "migration", "databases", "schemas", "installed_integration_sha256"],
+      "properties": {
+        "schema_version": {"const": "reliability-v3-adoption/v1"},
+        "operation_id": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "source_state": {"const": "upgrade"},
+        "migration": {"$ref": "#/$defs/migration"},
+        "databases": {"type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": true, "items": {"$ref": "#/$defs/upgrade_database"}},
+        "schemas": {"$ref": "#/$defs/schemas"},
+        "installed_integration_sha256": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": false
+    },
+    "fresh_database": {
+      "type": "object",
+      "required": ["database", "active", "tombstone", "application_id", "user_version", "pragmas"],
+      "properties": {
+        "database": {"enum": ["queue", "coordinator"]},
+        "active": {"$ref": "#/$defs/artifact"},
+        "tombstone": {"$ref": "#/$defs/artifact"},
+        "application_id": {"enum": [1280790835, 1280791603]},
+        "user_version": {"const": 3},
+        "pragmas": {"$ref": "#/$defs/pragmas"}
+      },
+      "additionalProperties": false
+    },
+    "upgrade_database": {
+      "type": "object",
+      "required": ["database", "active", "tombstone", "retired", "application_id", "user_version", "pragmas"],
+      "properties": {
+        "database": {"enum": ["queue", "coordinator"]},
+        "active": {"$ref": "#/$defs/artifact"},
+        "tombstone": {"$ref": "#/$defs/artifact"},
+        "retired": {"$ref": "#/$defs/artifact"},
+        "application_id": {"enum": [1280790835, 1280791603]},
+        "user_version": {"const": 3},
+        "pragmas": {"$ref": "#/$defs/pragmas"}
+      },
+      "additionalProperties": false
+    },
+    "migration": {
+      "type": "object",
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "sha256": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": false
+    },
+    "pragmas": {
+      "type": "object",
+      "required": ["journal_mode", "synchronous", "foreign_keys", "trusted_schema"],
+      "properties": {
+        "journal_mode": {"const": "delete"},
+        "synchronous": {"const": 2},
+        "foreign_keys": {"const": 1},
+        "trusted_schema": {"const": 0}
+      },
+      "additionalProperties": false
+    },
+    "schemas": {
+      "type": "object",
+      "required": ["queue_schema_sha256", "coordinator_schema_sha256", "adoption_schema_sha256"],
+      "properties": {
+        "queue_schema_sha256": {"$ref": "#/$defs/digest"},
+        "coordinator_schema_sha256": {"$ref": "#/$defs/digest"},
+        "adoption_schema_sha256": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "required": ["schema_version", "operation_id", "source_state", "migration", "databases", "schemas", "installed_integration_sha256"],
+  "properties": {
+    "schema_version": {"const": "reliability-v3-adoption/v1"},
+    "operation_id": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "source_state": {"enum": ["fresh", "upgrade"]},
+    "migration": {"$ref": "#/$defs/migration"},
+    "databases": {"type": "array"},
+    "schemas": {"$ref": "#/$defs/schemas"},
+    "installed_integration_sha256": {"$ref": "#/$defs/digest"}
+  },
+  "oneOf": [{"$ref": "#/$defs/fresh_record"}, {"$ref": "#/$defs/upgrade_record"}],
+  "additionalProperties": false
+}

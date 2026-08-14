@@ -1240,7 +1240,7 @@ Run:
 
 ```powershell
 uv run --locked --no-sync ruff check scripts/ tests/ benchmark/
-uv run --locked --no-sync python -m compileall -q scripts tests benchmark
+uv run --locked --no-sync python -m compileall -q -x "tests[\\/]fixtures[\\/]code_kernel[\\/]python[\\/]pkg[\\/]broken[.]py" scripts tests benchmark
 node --check scripts/llm-wiki-memory-opencode.js
 bash -n install.sh
 pwsh -NoProfile -NonInteractive -Command '$tokens=$null; $errors=$null; [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path "install.ps1"), [ref]$tokens, [ref]$errors) > $null; if ($errors.Count) { $errors | Out-String | Write-Error; exit 1 }'

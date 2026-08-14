@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/compile-receipt-v3.json",
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_descriptor": {
+      "type": "object",
+      "required": ["logical_path", "sha256", "byte_size", "occurrence_bounds"],
+      "properties": {
+        "logical_path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "sha256": {"$ref": "#/$defs/digest"},
+        "byte_size": {"type": "integer", "minimum": 0, "maximum": 4194304},
+        "occurrence_bounds": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["first_event_id", "last_event_id"],
+              "properties": {
+                "first_event_id": {"type": "string", "minLength": 1, "maxLength": 256},
+                "last_event_id": {"type": "string", "minLength": 1, "maxLength": 256}
+              },
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "disposition": {
+      "type": "object",
+      "required": ["source_identity", "disposition"],
+      "properties": {
+        "source_identity": {"$ref": "#/$defs/digest"},
+        "disposition": {"enum": ["compiled", "no_durable_content"]}
+      },
+      "additionalProperties": false
+    },
+    "operation": {
+      "type": "object",
+      "required": ["kind", "path", "after_sha256"],
+      "properties": {
+        "kind": {"enum": ["create", "replace"]},
+        "path": {"type": "string", "minLength": 1, "maxLength": 500},
+        "after_sha256": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": false
+    },
+    "evidence": {
+      "type": "object",
+      "required": ["source_identity", "operation_path", "source_path", "source_digest", "quote_sha256"],
+      "properties": {
+        "source_identity": {"$ref": "#/$defs/digest"},
+        "operation_path": {"type": "string", "minLength": 1, "maxLength": 500},
+        "source_path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "source_digest": {"$ref": "#/$defs/digest"},
+        "quote_sha256": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "required": ["schema_version", "source", "source_identity", "batch_manifest", "batch_manifest_sha256", "action_key", "operation_id", "packing", "provider_budget", "dispositions", "operations", "evidence"],
+  "properties": {
+    "schema_version": {"const": "compile-receipt/v3"},
+    "source": {"$ref": "#/$defs/source_descriptor"},
+    "source_identity": {"$ref": "#/$defs/digest"},
+    "batch_manifest": {"type": "array", "minItems": 1, "maxItems": 2000, "uniqueItems": true, "items": {"$ref": "#/$defs/source_descriptor"}},
+    "batch_manifest_sha256": {"$ref": "#/$defs/digest"},
+    "action_key": {"$ref": "#/$defs/digest"},
+    "operation_id": {"type": "string", "minLength": 72, "maxLength": 72, "pattern": "^compile:[0-9a-f]{64}$"},
+    "packing": {
+      "type": "object",
+      "required": ["algorithm", "tokenizer_identity", "count_source", "max_input_tokens", "reserved_output_tokens", "safety_margin_tokens", "measured_input_tokens"],
+      "properties": {
+        "algorithm": {"const": "compile-complete-items/v1"},
+        "tokenizer_identity": {"type": "string", "minLength": 1, "maxLength": 256},
+        "count_source": {"enum": ["tokenizer", "estimated"]},
+        "max_input_tokens": {"type": "integer", "minimum": 1},
+        "reserved_output_tokens": {"type": "integer", "minimum": 1},
+        "safety_margin_tokens": {"type": "integer", "minimum": 0},
+        "measured_input_tokens": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "provider_budget": {
+      "type": "object",
+      "required": ["provider", "model", "max_output_tokens"],
+      "properties": {
+        "provider": {"type": "string", "minLength": 1, "maxLength": 128},
+        "model": {"type": "string", "minLength": 1, "maxLength": 256},
+        "max_output_tokens": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "dispositions": {"type": "array", "minItems": 1, "maxItems": 2000, "uniqueItems": true, "items": {"$ref": "#/$defs/disposition"}},
+    "operations": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"$ref": "#/$defs/operation"}},
+    "evidence": {"type": "array", "maxItems": 3200, "uniqueItems": true, "items": {"$ref": "#/$defs/evidence"}}
+  },
+  "additionalProperties": false
+}

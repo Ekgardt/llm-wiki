@@ -12,6 +12,7 @@ import sys
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -153,6 +154,7 @@ class DailyArchiver:
         except (OSError, ValueError) as exc:
             return Eligibility(False, (f"source:{exc}",))
         digest = sha256_bytes(content)
+        logical_path = f"knowledge/daily/{source.name}"
         reasons: list[str] = []
         today = self.clock().astimezone(timezone.utc).date()
         if daily_date == today:
@@ -161,18 +163,26 @@ class DailyArchiver:
             reasons.append("hot_retention")
 
         receipt: dict[str, object] | None = None
-        receipt_operation_state = self._receipt_operation_state(digest)
+        receipt_operation_state = self._receipt_operation_state(logical_path, digest)
         if receipt_operation_state is not None and receipt_operation_state != "committed":
             reasons.append("nonterminal_compile_operation")
         try:
-            from compile_memory import read_compile_receipt
+            from compile_memory import read_compile_receipt_v3
 
-            receipt = read_compile_receipt(digest, self.coordinator)
+            receipt = read_compile_receipt_v3(
+                logical_path, digest, self.coordinator
+            )
         except (OSError, RuntimeError, ValueError):
             receipt = None
-        if receipt is None or receipt.get("source_digest") != digest:
-            reasons.append("compile_receipt")
-        elif receipt.get("state") != "completed":
+        if receipt is None:
+            reasons.append("compile_receipt_v3_missing")
+        elif (
+            not isinstance(receipt.get("source"), dict)
+            or receipt["source"].get("logical_path") != logical_path
+            or receipt["source"].get("sha256") != digest
+        ):
+            reasons.append("compile_receipt_v3_missing")
+        elif receipt.get("schema_version") != "compile-receipt/v3":
             reasons.append("nonterminal_compile_operation")
 
         try:
@@ -201,7 +211,6 @@ class DailyArchiver:
             receipt, digest, transaction_retention_days
         ):
             reasons.append("transaction_retention")
-        logical_path = f"knowledge/daily/{source.name}"
         if (
             not skip_queue_database_checks
             and self.queue.source_failure(logical_path, digest) is not None
@@ -221,8 +230,12 @@ class DailyArchiver:
             tuple(blocking_tasks),
         )
 
-    def _receipt_operation_state(self, digest: str) -> str | None:
-        path = self.daily_root / "receipts" / f"{digest}.md"
+    def _receipt_operation_state(
+        self, logical_path: str, digest: str
+    ) -> str | None:
+        from compile_memory import compile_receipt_path, compile_source_identity
+
+        path = compile_receipt_path(compile_source_identity(logical_path, digest))
         if not path.exists():
             return None
         try:
@@ -233,7 +246,7 @@ class DailyArchiver:
             operation_id = record["operation_id"]
             if not isinstance(operation_id, str):
                 return "invalid"
-            with sqlite3.connect(self.coordinator.database_path) as connection:
+            with closing(sqlite3.connect(self.coordinator.database_path)) as connection:
                 row = connection.execute(
                     'SELECT state FROM "transaction" WHERE operation_id=?',
                     (operation_id,),
@@ -264,7 +277,10 @@ class DailyArchiver:
         if transaction is None or transaction.state != "committed":
             return True
         expected_paths = {
-            f"knowledge/daily/receipts/{digest}.md",
+            str(
+                receipt.get("source_identity")
+                and f"knowledge/daily/receipts/v3-{receipt['source_identity']}.md"
+            ),
             *(
                 str(item.get("path"))
                 for item in receipt.get("operations", [])
@@ -523,13 +539,21 @@ class DailyArchiver:
         )
         receipt = eligibility.receipt
         assert receipt is not None
-        receipt_path = self.daily_root / "receipts" / f"{digest}.md"
+        logical_path = f"knowledge/daily/{daily_id}.md"
+        from compile_memory import (
+            compile_receipt_path,
+            compile_source_identity,
+            read_compile_receipt_v3,
+        )
+
+        source_identity = compile_source_identity(logical_path, digest)
+        receipt_path = compile_receipt_path(source_identity)
         receipt_bytes = read_stable_bytes(
             receipt_path, MAX_POLICY_BYTES, label="compile receipt"
         )
-        from compile_memory import read_compile_receipt
 
-        authoritative_receipt = read_compile_receipt(
+        authoritative_receipt = read_compile_receipt_v3(
+            logical_path,
             digest,
             self.coordinator,
             path=receipt_path,
@@ -573,7 +597,9 @@ class DailyArchiver:
             "compile_receipt_ref": {
                 "schema": "compile-receipt-ref/v1",
                 "path": receipt_path.relative_to(self.vault).as_posix(),
+                "logical_path": logical_path,
                 "source_digest": digest,
+                "source_identity": source_identity,
                 "receipt_file_hash": sha256_bytes(receipt_bytes),
                 "embedded_path": "compile-receipt.md",
             },
@@ -1022,7 +1048,7 @@ class DailyArchiver:
         )
         relative = f"knowledge/daily/{source_name}"
         try:
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection:
                 rows = connection.execute(
                     'SELECT t.state, t.updated_at FROM "transaction" t '
                     'JOIN "operation" o ON o.transaction_id=t.id WHERE o.path=?',

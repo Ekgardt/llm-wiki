@@ -10,135 +10,278 @@ on:
 permissions:
   contents: read
 
+env:
+  UV_VERSION: "0.12.3"
+
 jobs:
   gitleaks:
-    runs-on: ubuntu-latest
+    name: timing::focused::gitleaks
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
-
     steps:
-      - name: Checkout
-        # TODO: SHA-pin before next release. Look up the commit SHA for
-        # v4.2.2 at https://github.com/actions/checkout/releases and replace
-        # the tag with the immutable SHA: uses: actions/checkout@<sha>
-        uses: actions/checkout@v4.2.2
-
-      - name: Gitleaks
-        # Run once on Linux: Gitleaks publishes a Linux tarball but its action
-        # incorrectly requests a Windows tar.gz archive instead of the zip.
-        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_VERSION: 8.30.1
 
-  pytest-and-lint:
-    # Cross-platform matrix: the project ships Windows-specific codepaths
-    # (PowerShell wrappers, win32 PID probes, encoding guards) that
-    # ubuntu-only CI would silently miss.
+  lint:
+    name: timing::focused::lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.12.3"
+          enable-cache: true
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.23.1"
+      - run: uv sync --locked --python 3.14
+      - run: uv run --locked --no-sync ruff check scripts/ tests/ benchmark/
+      - run: uv run --locked --no-sync python -m compileall -q -x "tests[\\/]fixtures[\\/]code_kernel[\\/]python[\\/]pkg[\\/]broken[.]py" scripts tests benchmark
+      - run: uv run --locked --no-sync python scripts/lint_memory.py --scope all --fail-on-findings --allowed-categories orphan_daily_logs missing_backlinks missing_sources_section temporal_validity
+      - run: node --check scripts/llm-wiki-memory-opencode.js
+      - run: bash -n install.sh
+
+  pytest-full:
+    name: timing::${{ matrix.class }}::py${{ matrix.python }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        python: ["3.10", "3.13"]
+        include:
+          - os: ubuntu-24.04
+            python: "3.10"
+            timeout: 45
+            class: linux_full
+          - os: ubuntu-24.04
+            python: "3.14"
+            timeout: 45
+            class: linux_full
+          - os: windows-2025
+            python: "3.10"
+            timeout: 60
+            class: windows_full
+          - os: windows-2025
+            python: "3.11"
+            timeout: 60
+            class: windows_full
+          - os: windows-2025
+            python: "3.12"
+            timeout: 60
+            class: windows_full
+          - os: windows-2025
+            python: "3.13"
+            timeout: 60
+            class: windows_full
+          - os: windows-2025
+            python: "3.14"
+            timeout: 60
+            class: windows_full
+          - os: macos-15
+            python: "3.10"
+            timeout: 45
+            class: macos_full
+          - os: macos-15
+            python: "3.14"
+            timeout: 45
+            class: macos_full
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
-
+    timeout-minutes: ${{ matrix.timeout }}
+    env:
+      UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/llm-wiki-full-${{ matrix.class }}-py${{ matrix.python }}
+      LLM_WIKI_ROOT: ${{ github.workspace }}
+      LLM_WIKI_STATE_ROOT: ${{ runner.temp }}/llm-wiki-state-${{ matrix.class }}-py${{ matrix.python }}
+      LLM_WIKI_TEST_USE_EXTERNAL_STATE: "1"
+      MEMORY_LLM_PROVIDER: fake
     steps:
-      - name: Checkout
-        # TODO: SHA-pin before next release. Look up the commit SHA for
-        # v4.2.2 at https://github.com/actions/checkout/releases and replace
-        # the tag with the immutable SHA: uses: actions/checkout@<sha>
-        uses: actions/checkout@v4.2.2
-
-      - name: Install uv
-        # TODO: SHA-pin before next release. Look up the commit SHA for
-        # v5.4.2 at https://github.com/astral-sh/setup-uv/releases and
-        # replace the tag with the immutable SHA.
-        uses: astral-sh/setup-uv@v5.4.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.12.3"
           enable-cache: true
+      - run: uv python install ${{ matrix.python }}
+      - run: uv python pin ${{ matrix.python }}
+      - run: uv sync --locked
+      - run: uv run --locked --no-sync pytest -q --durations=0 --junitxml="${{ runner.temp }}/pytest-timings/junit.xml"
+      - if: matrix.class == 'linux_full' && matrix.python == '3.14'
+        run: uv run --locked --no-sync python benchmark/run_benchmark.py --legacy-only
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pytest-timings-${{ matrix.class }}-py${{ matrix.python }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pytest-timings/junit.xml
+          if-no-files-found: error
 
-      - name: Install Python ${{ matrix.python }}
-        run: uv python install ${{ matrix.python }}
+  clean-production:
+    name: timing::clean::production-py${{ matrix.python }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.14"]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/llm-wiki-production-${{ matrix.python }}
+      LLM_WIKI_ROOT: ${{ github.workspace }}
+      LLM_WIKI_STATE_ROOT: ${{ runner.temp }}/llm-wiki-production-state-${{ matrix.python }}
+      MEMORY_LLM_PROVIDER: fake
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.12.3"
+          enable-cache: true
+      - run: uv python install ${{ matrix.python }}
+      - run: uv python pin ${{ matrix.python }}
+      - run: uv sync --locked --no-default-groups
+      - run: uv run --locked --no-sync python -c "import importlib.util; assert importlib.util.find_spec('pytest') is None"
+      - run: uv run --locked --no-sync python -c "import os; from pathlib import Path; Path(os.environ['LLM_WIKI_STATE_ROOT']).mkdir(parents=True, exist_ok=True)"
+      - run: uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120
 
-      - name: Pin Python ${{ matrix.python }}
-        run: uv python pin ${{ matrix.python }}
+  clean-hybrid:
+    name: timing::clean::hybrid-py${{ matrix.python }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.14"]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/llm-wiki-hybrid-${{ matrix.python }}
+      LLM_WIKI_ROOT: ${{ github.workspace }}
+      LLM_WIKI_STATE_ROOT: ${{ runner.temp }}/llm-wiki-hybrid-state-${{ matrix.python }}
+      MEMORY_LLM_PROVIDER: fake
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.12.3"
+          enable-cache: true
+      - run: uv python install ${{ matrix.python }}
+      - run: uv python pin ${{ matrix.python }}
+      - run: uv sync --locked --no-default-groups --extra hybrid
+      - run: uv run --locked --no-sync python -c "import importlib.util; assert importlib.util.find_spec('pytest') is None"
+      - run: uv run --locked --no-sync python -c "import os; from pathlib import Path; import numpy as np; path=Path(os.environ['LLM_WIKI_STATE_ROOT'])/'vector.npy'; path.parent.mkdir(parents=True, exist_ok=True); np.save(path, np.array([1,2,3])); assert np.load(path).tolist()==[1,2,3]"
 
-      - name: Sync dev dependencies
-        run: uv sync --locked --dev
+  clean-code-graph:
+    name: timing::clean::code-graph-py${{ matrix.python }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.14"]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/llm-wiki-code-graph-${{ matrix.python }}
+      LLM_WIKI_ROOT: ${{ github.workspace }}
+      LLM_WIKI_STATE_ROOT: ${{ runner.temp }}/llm-wiki-code-graph-state-${{ matrix.python }}
+      MEMORY_LLM_PROVIDER: fake
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.12.3"
+          enable-cache: true
+      - run: uv python install ${{ matrix.python }}
+      - run: uv python pin ${{ matrix.python }}
+      - run: uv sync --locked --no-default-groups --extra code-graph
+      - run: uv run --locked --no-sync python -c "import importlib, importlib.util; modules=('jedi','tree_sitter','tree_sitter_python','tree_sitter_javascript','tree_sitter_typescript','tree_sitter_go','tree_sitter_rust','tree_sitter_java','tree_sitter_c','tree_sitter_cpp','tree_sitter_ruby','tree_sitter_php','tree_sitter_c_sharp','tree_sitter_bash'); assert importlib.util.find_spec('pytest') is None; [importlib.import_module(name) for name in modules]"
+      - run: uv run --locked --no-sync python scripts/code_graph.py tests/fixtures/code_kernel/python
 
-      - name: Ruff (Python static analysis)
-        # Catches undefined names, unused imports, syntax regressions that
-        # the test suite doesn't exercise. Zero config beyond pyproject.toml.
-        run: uv run ruff check scripts/ tests/
-
-      - name: Structural lint (knowledge tree, blocking)
-        # --fail-on-findings enforces structural integrity (broken wikilinks,
-        # missing frontmatter, invalid supersede chains, orphan gaps).
-        # Pre-existing debt categories are exempted — tracked for visibility
-        # but don't block CI.
-        run: uv run python scripts/lint_memory.py --scope all --fail-on-findings --allowed-categories orphan_daily_logs missing_backlinks missing_sources_section temporal_validity
-
-      - name: Regression test suite (hermetic)
-        # conftest.py bootstraps LLM_WIKI_ROOT / LLM_WIKI_STATE_ROOT
-        # and defaults MEMORY_LLM_PROVIDER to "fake" — no live LLM calls.
-        run: uv run pytest tests/ -q
-
-      - name: Fixed BM25 benchmark gate
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.13'
-        run: uv run python benchmark/run_benchmark.py --legacy-only
+  installer:
+    name: timing::installer::${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux
+          - os: windows-2025
+            platform: windows
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/llm-wiki-installer-${{ matrix.platform }}
+      LLM_WIKI_ROOT: ${{ github.workspace }}
+      LLM_WIKI_STATE_ROOT: ${{ runner.temp }}/llm-wiki-installer-state-${{ matrix.platform }}
+      LLM_WIKI_TEST_USE_EXTERNAL_STATE: "1"
+      MEMORY_LLM_PROVIDER: fake
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.12.3"
+          enable-cache: true
+      - run: uv python install 3.13
+      - run: uv python pin 3.13
+      - run: uv sync --locked
+      - run: uv run --locked --no-sync pytest tests/test_installer_bootstrap.py tests/test_installer_config.py tests/test_install_smoke.py -q
+      - run: uv run --locked --no-sync pytest tests/test_integration_injection.py -q -k installer
+      - run: uv run --locked --no-sync pytest tests/test_dependency_environments.py -q -k installer
 
   pyright-navigation:
-    # Cross-platform real-Pyright protocol, process-tree, and security tests.
-    # Pins Node 22.23.1 (qualified release; 22.23.2 exists but is not qualified).
+    name: timing::focused::pyright-${{ matrix.platform }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        python: ["3.10"]
-        node: ["22.23.1"]
+        include:
+          - os: ubuntu-24.04
+            platform: linux
+            python: "3.10"
+            node: "22.23.1"
+          - os: windows-2025
+            platform: windows
+            python: "3.10"
+            node: "22.23.1"
+          - os: macos-15
+            platform: macos
+            python: "3.10"
+            node: "22.23.1"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
-
+    env:
+      UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/llm-wiki-pyright-${{ matrix.platform }}
+      LLM_WIKI_ROOT: ${{ github.workspace }}
+      LLM_WIKI_STATE_ROOT: ${{ runner.temp }}/llm-wiki-state
+      LLM_WIKI_TEST_USE_EXTERNAL_STATE: "1"
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4.2.2
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5.4.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.12.3"
           enable-cache: true
-
-      - name: Install Python ${{ matrix.python }}
-        run: uv python install ${{ matrix.python }}
-
-      - name: Pin Python ${{ matrix.python }}
-        run: uv python pin ${{ matrix.python }}
-
-      - name: Sync dev dependencies
-        run: uv sync --locked --dev
-
-      - name: Setup Node ${{ matrix.node }}
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ matrix.node }}
-
-      - name: Configure isolated state root
-        shell: bash
-        run: |
-          echo "LLM_WIKI_STATE_ROOT=$RUNNER_TEMP/llm-wiki-state" >> "$GITHUB_ENV"
-          echo "LLM_WIKI_TEST_USE_EXTERNAL_STATE=1" >> "$GITHUB_ENV"
-
+      - run: uv python install ${{ matrix.python }}
+      - run: uv python pin ${{ matrix.python }}
+      - run: uv sync --locked
       - name: Explicit Pyright install
-        # The only step that downloads the pinned artifact. No test or query
-        # performs a download.
-        run: uv run python scripts/install_pyright.py --state-root "$LLM_WIKI_STATE_ROOT"
-
+        run: uv run --locked --no-sync python scripts/install_pyright.py --state-root "${{ runner.temp }}/llm-wiki-state"
       - name: Protocol, process-tree, and security tests
-        run: uv run pytest tests/test_lsp_protocol.py tests/test_lsp_process.py tests/test_lsp_process_tree.py tests/test_lsp_security.py tests/test_pyright_session.py tests/test_code_navigation.py tests/test_code_navigation_renderer.py -q
-
+        env:
+          LLM_WIKI_STATE_ROOT: ${{ runner.temp }}/llm-wiki-state
+        run: uv run --locked --no-sync pytest tests/test_lsp_protocol.py tests/test_lsp_process.py tests/test_lsp_process_tree.py tests/test_lsp_security.py tests/test_pyright_session.py tests/test_code_navigation.py tests/test_code_navigation_renderer.py -q
       - name: Correctness benchmark gate
-        run: uv run python benchmark/run_code_navigation.py --fixture --correctness-only --require-gates
-
+        run: uv run --locked --no-sync python benchmark/run_code_navigation.py --fixture --correctness-only --require-gates
       - name: Fixed 100 KLOC Python qualification gate
-        if: matrix.os == 'ubuntu-latest'
-        run: uv run python benchmark/run_code_navigation.py --fixture --qualification --require-gates
+        if: matrix.os == 'ubuntu-24.04'
+        run: uv run --locked --no-sync python benchmark/run_code_navigation.py --fixture --qualification --require-gates

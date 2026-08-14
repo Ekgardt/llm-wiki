@@ -30,6 +30,7 @@ import re
 import sqlite3
 import time
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import closing
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -1036,7 +1037,7 @@ def _parent_records(
         collection: {} for collection in _RECORD_COLLECTIONS
     }
     uri = f"{database_path.resolve(strict=True).as_uri()}?mode=ro&immutable=1"
-    with sqlite3.connect(uri, uri=True, timeout=0) as database:
+    with closing(sqlite3.connect(uri, uri=True, timeout=0)) as database:
         database.row_factory = sqlite3.Row
         database.set_progress_handler(
             lambda: int(

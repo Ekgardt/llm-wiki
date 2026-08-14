@@ -44,6 +44,28 @@ def state_root(tmp_path: Path) -> Path:
     return tmp_path / "state"
 
 
+def test_markdown_connect_context_commits_rolls_back_and_closes(
+    vault: Path, state_root: Path
+):
+    coordinator = MarkdownCoordinator(vault, state_root)
+
+    with pytest.raises(RuntimeError, match="rollback"):
+        with coordinator._connect() as database:
+            database.execute(
+                "INSERT INTO maintenance_owners "
+                "(owner_name, owner_token, process_id, acquired_at) VALUES (?, ?, ?, ?)",
+                ("test", "token", os.getpid(), "2026-08-11T00:00:00Z"),
+            )
+            raise RuntimeError("rollback")
+
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        database.execute("SELECT 1")
+    with coordinator._connect() as verification:
+        assert verification.execute(
+            "SELECT 1 FROM maintenance_owners WHERE owner_name='test'"
+        ).fetchone() is None
+
+
 def test_prepare_and_apply_create_replace_delete(vault: Path, state_root: Path):
     old = vault / "knowledge/inbox/claims/old.md"
     old.write_bytes(b"old\n")
@@ -101,6 +123,22 @@ def _stat_with_identity(metadata: os.stat_result, identity: tuple[int, int]) -> 
         st_ctime_ns=metadata.st_ctime_ns,
         st_file_attributes=getattr(metadata, "st_file_attributes", 0),
     )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows stat semantics")
+def test_windows_capture_snapshot_ignores_deprecated_creation_time():
+    left = SimpleNamespace(
+        st_mode=stat.S_IFREG,
+        st_ino=2,
+        st_dev=1,
+        st_size=7,
+        st_mtime_ns=3,
+        st_ctime_ns=4,
+    )
+    right = SimpleNamespace(**vars(left))
+    right.st_ctime_ns = 5
+
+    assert MarkdownCoordinator._same_capture_snapshot(left, right)
 
 
 def test_read_normalizes_equivalent_signed_and_unsigned_stat_identities(
@@ -588,13 +626,13 @@ def test_replace_uses_random_same_directory_temp_and_os_replace(
     target.write_bytes(b"before")
     replacements = []
     if os.name == "nt":
-        real_replace = markdown_transaction._rename_windows_handle
+        real_replace = markdown_transaction.durable_publish_file
 
-        def recording_replace(handle, parent_handle, destination, *, replace):
-            replacements.append((destination, replace))
-            real_replace(handle, parent_handle, destination, replace=replace)
+        def recording_replace(staged, destination, **options):
+            replacements.append((Path(staged), Path(destination), options))
+            return real_replace(staged, destination, **options)
 
-        monkeypatch.setattr(markdown_transaction, "_rename_windows_handle", recording_replace)
+        monkeypatch.setattr(markdown_transaction, "durable_publish_file", recording_replace)
     else:
         real_replace = os.replace
 
@@ -617,7 +655,9 @@ def test_replace_uses_random_same_directory_temp_and_os_replace(
 
     assert len(replacements) == 2
     if os.name == "nt":
-        assert replacements == [(target.name, True), (target.name, True)]
+        assert all(destination == target for _staged, destination, _options in replacements)
+        assert all(options["replace"] is True for _staged, _destination, options in replacements)
+        assert replacements[0][0] != replacements[1][0]
     elif markdown_transaction._use_posix_dir_fd():
         assert all(source.parent == Path() and destination == Path(target.name) for source, destination in replacements)
     else:
@@ -728,6 +768,81 @@ def test_global_writer_gate_serializes_coordinators(vault: Path, state_root: Pat
         one.result(timeout=5)
         two.result(timeout=5)
     assert order == ["first", "second"]
+
+
+def test_nested_writer_references_parent_without_reacquiring_or_releasing_it(
+    tmp_path: Path,
+) -> None:
+    import operational_ownership
+
+    state_root = tmp_path / "state"
+    candidate = state_root / "run/markdown-transactions-v3.candidate.sqlite3"
+    markdown_transaction.initialize_coordinator_v3_candidate(candidate, source_v2=None)
+    coordinator = MarkdownCoordinator._from_v3_candidate(candidate, state_root=state_root)
+    registry = operational_ownership.OwnershipRegistry(state_root)
+    parent = registry.acquire("doctor", scope="global")
+
+    with coordinator.writer_gate(owner=parent) as projected:
+        assert projected == parent
+        with coordinator.writer_gate(owner=parent) as reentrant:
+            assert reentrant == parent
+            with sqlite3.connect(candidate) as database:
+                assert database.execute(
+                    "SELECT canonical_role, canonical_scope, owner_token, fencing_epoch "
+                    "FROM writer_owners WHERE gate_name='global'"
+                ).fetchone() == ("doctor", "global", parent.token, parent.epoch)
+                assert database.execute(
+                    "SELECT COUNT(*) FROM maintenance_owners"
+                ).fetchone() == (1,)
+
+        with sqlite3.connect(candidate) as database:
+            assert database.execute(
+                "SELECT COUNT(*) FROM writer_owners"
+            ).fetchone() == (1,)
+
+    with sqlite3.connect(candidate) as database:
+        assert database.execute("SELECT COUNT(*) FROM writer_owners").fetchone() == (0,)
+        assert database.execute(
+            "SELECT owner_token, fencing_epoch FROM maintenance_owners "
+            "WHERE role='doctor' AND scope='global'"
+        ).fetchone() == (parent.token, parent.epoch)
+    registry.release(parent)
+
+
+def test_v3_top_level_writer_inserts_and_releases_canonical_projection(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    candidate = state_root / "run/markdown-transactions-v3.candidate.sqlite3"
+    markdown_transaction.initialize_coordinator_v3_candidate(candidate, source_v2=None)
+    coordinator = MarkdownCoordinator._from_v3_candidate(candidate, state_root=state_root)
+
+    with coordinator.writer_gate() as owner:
+        assert owner.role == "markdown-writer"
+        assert owner.scope == "global"
+        with coordinator._connect() as database:
+            coordinator._assert_writer_ownership(database)
+        with sqlite3.connect(candidate) as database:
+            assert database.execute(
+                "SELECT canonical_role, canonical_scope, actor_id, owner_token, "
+                "fencing_epoch FROM writer_owners WHERE gate_name='global'"
+            ).fetchone() == database.execute(
+                "SELECT role, scope, actor_id, owner_token, fencing_epoch "
+                "FROM maintenance_owners WHERE role='markdown-writer' AND scope='global'"
+            ).fetchone()
+            assert database.execute(
+                "SELECT heartbeat_at, expires_at FROM writer_owners "
+                "WHERE gate_name='global'"
+            ).fetchone() == database.execute(
+                "SELECT heartbeat_at, expires_at FROM maintenance_owners "
+                "WHERE role='markdown-writer' AND scope='global'"
+            ).fetchone()
+
+    with sqlite3.connect(candidate) as database:
+        assert database.execute("SELECT COUNT(*) FROM writer_owners").fetchone() == (0,)
+        assert database.execute(
+            "SELECT COUNT(*) FROM maintenance_owners WHERE role='markdown-writer'"
+        ).fetchone() == (0,)
 
 
 def test_crashed_writer_owner_is_reclaimed_with_higher_fence(vault: Path, state_root: Path):
@@ -1125,7 +1240,7 @@ def test_windows_parent_swap_cannot_redirect_handle_relative_mutation(
         assert swapped == [True]
         assert "parent identity" in str(exc)
         assert (notes / "page.md").read_bytes() == b"outside"
-        assert (original / "page.md").read_bytes() == b"after"
+        assert (original / "page.md").read_bytes() == b"before"
     else:
         assert blocked == [True]
         assert result.state == "committed"
@@ -1197,12 +1312,15 @@ def test_apply_fsyncs_changed_directories(vault: Path, state_root: Path, monkeyp
         metadata = (vault / "knowledge/notes").stat()
         assert (metadata.st_dev, metadata.st_ino) in synced_descriptors
     else:
-        assert vault / "knowledge/notes" in synced
+        assert (vault / "knowledge/notes/new.md").read_bytes() == b"new"
 
 
-def test_posix_directory_fsync_unsupported_error_is_tolerated(
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory fsync contract")
+def test_posix_directory_fsync_unsupported_is_durability_failure(
     vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    from reliable_memory import MetadataDurabilityUnavailable
+
     real_open = markdown_transaction.os.open
 
     def unsupported(path, flags, *args, **kwargs):
@@ -1211,7 +1329,9 @@ def test_posix_directory_fsync_unsupported_error_is_tolerated(
         return real_open(path, flags, *args, **kwargs)
 
     monkeypatch.setattr("reliable_memory.os.open", unsupported)
-    markdown_transaction.fsync_directory(vault / "knowledge/notes")
+    with pytest.raises(MetadataDurabilityUnavailable) as raised:
+        markdown_transaction.fsync_directory(vault / "knowledge/notes")
+    assert raised.value.code == "metadata_durability_unavailable"
 
 
 def test_windows_sharing_violation_leaves_unknown_target_unchanged(
@@ -1229,7 +1349,7 @@ def test_windows_sharing_violation_leaves_unknown_target_unchanged(
         raise PermissionError(32, "sharing violation", str(args[-1]))
 
     if os.name == "nt":
-        monkeypatch.setattr(markdown_transaction, "_rename_windows_handle", sharing_violation)
+        monkeypatch.setattr(markdown_transaction, "durable_publish_file", sharing_violation)
     else:
         monkeypatch.setattr(markdown_transaction.os, "replace", sharing_violation)
     with pytest.raises(PermissionError, match="sharing violation"):
@@ -1259,6 +1379,65 @@ def test_database_has_required_tables_and_durability_pragmas(vault: Path, state_
         assert {"parent_device", "parent_inode"} <= operation_columns
         assert database.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
         assert database.execute("PRAGMA synchronous").fetchone()[0] == 2
+
+
+def test_coordinator_candidate_transaction_state_accepts_abort_states_only(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "run" / "markdown-transactions-v3.candidate.sqlite3"
+    markdown_transaction.initialize_coordinator_v3_candidate(path, source_v2=None)
+    values = (
+        "request-hash",
+        "{}",
+        "plan-hash",
+        "2026-08-12T00:00:00Z",
+        "2026-08-12T00:00:00Z",
+    )
+    with sqlite3.connect(path) as database:
+        for state in ("aborting", "aborted"):
+            database.execute(
+                'INSERT INTO "transaction" '
+                "(id, operation_id, request_hash, state, preconditions_json, "
+                "plan_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (state, f"operation-{state}", values[0], state, *values[1:]),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            database.execute(
+                'INSERT INTO "transaction" '
+                "(id, operation_id, request_hash, state, preconditions_json, "
+                "plan_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("unknown", "operation-unknown", values[0], "unknown", *values[1:]),
+            )
+
+
+def test_coordinator_candidate_does_not_switch_active_markdown_path(
+    vault: Path, state_root: Path
+) -> None:
+    active = MarkdownCoordinator(vault, state_root)
+    candidate = state_root / "run" / "markdown-transactions-v3.candidate.sqlite3"
+
+    markdown_transaction.initialize_coordinator_v3_candidate(candidate, source_v2=None)
+    reopened = MarkdownCoordinator(vault, state_root)
+
+    assert active.database_path == state_root / "run" / "markdown-transactions.sqlite3"
+    assert reopened.database_path == active.database_path
+    assert candidate.is_file()
+
+
+def test_coordinator_candidate_test_seam_requires_validation(
+    state_root: Path,
+) -> None:
+    candidate = state_root / "run" / "markdown-transactions-v3.candidate.sqlite3"
+    markdown_transaction.initialize_coordinator_v3_candidate(candidate, source_v2=None)
+
+    opened = MarkdownCoordinator._from_v3_candidate(candidate, state_root=state_root)
+    with opened._connect() as database:
+        assert database.execute("PRAGMA application_id").fetchone()[0] == 0x4C575433
+
+    with sqlite3.connect(candidate) as database:
+        database.execute("PRAGMA user_version=2")
+    with pytest.raises(sqlite3.DatabaseError):
+        MarkdownCoordinator._from_v3_candidate(candidate, state_root=state_root)
 
 
 @pytest.mark.parametrize("target_content", [b"before", b"unknown"])

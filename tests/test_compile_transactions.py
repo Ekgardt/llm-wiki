@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from argparse import Namespace
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 
@@ -146,6 +147,340 @@ def test_snapshot_compile_inputs_preserves_exact_bytes(vault):
         source.logical_path for source in inputs.sources
     )
     assert any(source.content == b"agent contract\r\n" for source in inputs.sources)
+
+
+def test_source_identity_hashes_logical_path_and_digest(vault):
+    root, _state_root = vault
+    import compile_memory
+
+    shared = b"same bytes\n"
+    first = root / "knowledge/daily/2026-07-14.md"
+    second = root / "knowledge/daily/2026-07-15.md"
+    first.write_bytes(shared)
+    second.write_bytes(shared)
+    digest = sha256_bytes(shared)
+
+    first_identity = compile_memory.compile_source_identity(
+        "knowledge/daily/2026-07-14.md", digest
+    )
+    second_identity = compile_memory.compile_source_identity(
+        "knowledge/daily/2026-07-15.md", digest
+    )
+
+    assert first_identity == sha256_bytes(
+        canonical_json_bytes(["knowledge/daily/2026-07-14.md", digest])
+    )
+    assert second_identity == sha256_bytes(
+        canonical_json_bytes(["knowledge/daily/2026-07-15.md", digest])
+    )
+    assert first_identity != second_identity
+    assert compile_memory.compile_receipt_path(first_identity).name == (
+        f"v3-{first_identity}.md"
+    )
+    assert compile_memory.compile_receipt_path(second_identity).name == (
+        f"v3-{second_identity}.md"
+    )
+
+
+def test_complete_item_packer_rejects_oversized_daily_before_dispatch(vault):
+    _root, _state_root = vault
+    import compile_memory
+
+    content = b"x" * 28_000
+    digest = sha256_bytes(content)
+    daily = compile_memory.DailySnapshot(
+        "knowledge/daily/2026-07-14.md", content, digest
+    )
+    inputs = compile_memory.CompileInputs(
+        dailies=(daily,),
+        sources=(
+            compile_memory.SourceSnapshot(daily.logical_path, content, digest),
+        ),
+        targets=(),
+    )
+
+    with pytest.raises(ValueError, match="daily source exceeds compile input budget"):
+        compile_memory.pack_compile_batches(inputs, model=None)
+
+
+def test_complete_item_packer_drops_oversized_optional_context(vault):
+    _root, _state_root = vault
+    import compile_memory
+
+    daily_content = b"## [10:00:00] event\ndurable fact\n"
+    daily = compile_memory.DailySnapshot(
+        "knowledge/daily/2026-07-14.md",
+        daily_content,
+        sha256_bytes(daily_content),
+    )
+    context_content = b"x" * 28_000
+    context = compile_memory.SourceSnapshot(
+        "knowledge/notes/optional.md",
+        context_content,
+        sha256_bytes(context_content),
+    )
+    inputs = compile_memory.CompileInputs(
+        dailies=(daily,),
+        sources=(
+            compile_memory.SourceSnapshot(
+                daily.logical_path, daily.content, daily.sha256
+            ),
+            context,
+        ),
+        targets=(
+            compile_memory.TargetSnapshot(
+                context.logical_path, context.content, context.sha256
+            ),
+        ),
+    )
+
+    batches = compile_memory.pack_compile_batches(inputs, model=None)
+
+    assert len(batches) == 1
+    assert [item.logical_path for item in batches[0].inputs.sources] == [
+        daily.logical_path
+    ]
+    assert batches[0].inputs.targets == inputs.targets
+
+
+def test_critique_receives_cited_evidence_without_uncited_source_blob(vault):
+    root, _state_root = vault
+    daily = _daily(root)
+    import compile_memory
+
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+
+    prompt = compile_memory._critique_prompt(inputs, [operation])
+
+    assert "A durable exact-byte observation." in prompt
+    assert "A second durable exact-byte observation." not in prompt
+    assert "The prior state is blue." not in prompt
+    assert "knowledge/daily/2026-07-14.md" in prompt
+    assert inputs.dailies[0].sha256 in prompt
+
+
+def test_critique_budget_fails_before_second_provider_call(vault, monkeypatch):
+    root, state_root = vault
+    daily = _daily(root)
+    import compile_memory
+
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    batch = compile_memory.pack_compile_batches(inputs, model=None)[0]
+    provider = _provider()
+    calls = []
+
+    monkeypatch.setattr(
+        compile_memory, "provider_candidates", lambda *args, **kwargs: [provider]
+    )
+    monkeypatch.setattr(compile_memory, "probe_candidate", lambda descriptor: True)
+
+    def call(descriptor, prompt, system_prompt, **kwargs):
+        calls.append(prompt)
+        return LLMResult(descriptor, _draft_response(), True, None, "native")
+
+    def token_counter(text):
+        return 30_000 if "CITED EVIDENCE" in text else 100
+
+    monkeypatch.setattr(compile_memory, "call_candidate", call)
+
+    with pytest.raises(RuntimeError, match="validated compile plan"):
+        compile_memory.resolve_compile_plan(
+            batch.inputs,
+            CompileCache(state_root),
+            coordinator=MarkdownCoordinator(root, state_root),
+            batch=batch,
+            token_adapters={provider.model: token_counter},
+        )
+
+    assert len(calls) == 1
+
+
+def test_v3_receipt_path_and_body_bind_source_path_not_only_digest(vault):
+    root, state_root = vault
+    daily = _daily(root)
+    import compile_memory
+
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    batch = compile_memory.pack_compile_batches(inputs, model="fake-v1")[0]
+    result = compile_memory.apply_compile_plan(
+        inputs,
+        _semantic_plan(),
+        action_key="a" * 64,
+        trigger="manual",
+        coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T12:00:00Z",
+        batch=batch,
+        provider_budget={
+            "provider": "fake",
+            "model": "fake-v1",
+            "max_output_tokens": 4000,
+        },
+    )
+    source = batch.manifest[0]
+    source_identity = compile_memory.compile_source_identity(
+        source.logical_path, source.sha256
+    )
+    receipt = root / f"knowledge/daily/receipts/v3-{source_identity}.md"
+
+    assert receipt.is_file()
+    assert not (root / f"knowledge/daily/receipts/{source.sha256}.md").exists()
+    record = compile_memory.parse_compile_receipt_v3(
+        receipt.read_bytes(),
+        logical_path=source.logical_path,
+        source_sha256=source.sha256,
+    )
+    assert record["source_identity"] == source_identity
+    assert record["source"] == source.receipt_descriptor()
+    assert record["batch_manifest_sha256"] == batch.manifest_sha256
+    assert record["operation_id"] == result.operation_id
+    assert "completed_at" not in record
+
+
+def test_oversized_prospective_receipt_fails_before_writer_gate(
+    vault, monkeypatch
+):
+    root, state_root = vault
+    daily = _daily(root)
+    import compile_memory
+
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    batch = compile_memory.pack_compile_batches(inputs, model=None)[0]
+    coordinator = MarkdownCoordinator(root, state_root)
+    entered = False
+
+    @contextmanager
+    def observed_gate(*args, **kwargs):
+        nonlocal entered
+        entered = True
+        pytest.fail("writer gate opened before receipt preflight")
+        yield
+
+    monkeypatch.setattr(coordinator, "writer_gate", observed_gate)
+    monkeypatch.setattr(compile_memory, "MAX_RECEIPT_BYTES", 512)
+
+    with pytest.raises(ValueError, match="receipt exceeds"):
+        compile_memory.apply_compile_plan(
+            inputs,
+            _semantic_plan(),
+            action_key="b" * 64,
+            trigger="manual",
+            coordinator=coordinator,
+            batch=batch,
+            provider_budget={
+                "provider": "fake",
+                "model": "fake-v1",
+                "max_output_tokens": 4000,
+            },
+        )
+
+    assert entered is False
+    assert not list((root / "knowledge/daily/receipts").glob("*.md"))
+
+
+def test_v3_compile_uses_supplied_canonical_owner(vault):
+    root, state_root = vault
+    daily = _daily(root)
+    import compile_memory
+    import markdown_transaction
+    import operational_ownership
+
+    candidate = state_root / "run/markdown-transactions-v3.candidate.sqlite3"
+    markdown_transaction.initialize_coordinator_v3_candidate(
+        candidate, source_v2=None
+    )
+    owner, marker = operational_ownership.acquire_compile_owner(
+        state_root=state_root
+    )
+    coordinator = MarkdownCoordinator._from_v3_candidate(
+        candidate, state_root=state_root
+    )
+    coordinator.vault = root.resolve()
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    batch = compile_memory.pack_compile_batches(inputs, model=None)[0]
+    try:
+        result = compile_memory.apply_compile_plan(
+            inputs,
+            _semantic_plan(),
+            action_key="c" * 64,
+            trigger="manual",
+            coordinator=coordinator,
+            batch=batch,
+            provider_budget={
+                "provider": "fake",
+                "model": "fake-v1",
+                "max_output_tokens": 4000,
+            },
+            owner=owner,
+        )
+    finally:
+        operational_ownership.release_marker_owner(owner, marker)
+
+    assert result.state == "committed"
+
+
+def test_successful_v3_retry_keeps_operation_receipt_path_and_bytes(
+    vault, monkeypatch
+):
+    root, state_root = vault
+    daily = _daily(root)
+    import compile_memory
+
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    batch = compile_memory.pack_compile_batches(inputs, model=None)[0]
+    coordinator = MarkdownCoordinator(root, state_root)
+    real_apply = coordinator.apply
+
+    def commit_then_fail(*args, **kwargs):
+        real_apply(*args, **kwargs)
+        raise OSError("commit return was lost")
+
+    monkeypatch.setattr(coordinator, "apply", commit_then_fail)
+    with pytest.raises(OSError, match="return was lost"):
+        compile_memory.apply_compile_plan(
+            inputs,
+            _semantic_plan(),
+            action_key="d" * 64,
+            trigger="manual",
+            coordinator=coordinator,
+            batch=batch,
+            provider_budget={
+                "provider": "fake",
+                "model": "fake-v1",
+                "max_output_tokens": 4000,
+            },
+            completed_at="2026-07-14T12:00:00Z",
+        )
+    source = batch.manifest[0]
+    identity = compile_memory.compile_source_identity(
+        source.logical_path, source.sha256
+    )
+    receipt = root / f"knowledge/daily/receipts/v3-{identity}.md"
+    first_bytes = receipt.read_bytes()
+    first_record = compile_memory.parse_compile_receipt_v3(
+        first_bytes,
+        logical_path=source.logical_path,
+        source_sha256=source.sha256,
+    )
+
+    monkeypatch.setattr(coordinator, "apply", real_apply)
+    retried = compile_memory.apply_compile_plan(
+        inputs,
+        _semantic_plan(),
+        action_key="d" * 64,
+        trigger="manual",
+        coordinator=coordinator,
+        batch=batch,
+        provider_budget={
+            "provider": "fake",
+            "model": "fake-v1",
+            "max_output_tokens": 4000,
+        },
+        completed_at="2026-08-01T00:00:00Z",
+    )
+
+    assert retried.operation_id == first_record["operation_id"]
+    assert receipt.read_bytes() == first_bytes
 
 
 def test_index_can_be_built_from_in_memory_note_bytes(vault):
@@ -602,7 +937,7 @@ def test_append_after_snapshot_remains_pending_even_after_receipt(vault):
     assert selected == [daily]
 
 
-def test_legacy_hash_without_v2_receipt_forces_compile(vault):
+def test_exact_legacy_diagnostic_suppresses_migration_only_compile(vault):
     root, state_root = vault
     daily = _daily(root)
     import compile_memory
@@ -613,7 +948,91 @@ def test_legacy_hash_without_v2_receipt_forces_compile(vault):
         coordinator=MarkdownCoordinator(root, state_root),
     )
 
+    assert selected == []
+
+
+def test_v2_receipt_alone_never_suppresses_normal_selection(vault):
+    root, state_root = vault
+    daily = _daily(root)
+    import compile_memory
+
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    compile_memory.apply_compile_plan(
+        inputs,
+        {"schema_version": "compile-plan/v2", "operations": []},
+        action_key="7" * 64,
+        trigger="manual",
+        coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T12:00:00Z",
+    )
+
+    selected = compile_memory.select_dailies(
+        Namespace(file=None, all=False),
+        {},
+        coordinator=MarkdownCoordinator(root, state_root),
+    )
+
     assert selected == [daily]
+    assert compile_memory.read_compile_receipt_v2(
+        inputs.dailies[0].sha256,
+        MarkdownCoordinator(root, state_root),
+    ) is not None
+
+
+@pytest.mark.parametrize(
+    "legacy_key",
+    [
+        "knowledge/daily/2026-07-14.md",
+        "../2026-07-14.md",
+        "subdir/2026-07-14.md",
+        r"subdir\2026-07-14.md",
+        ".",
+        "",
+    ],
+)
+def test_legacy_diagnostic_key_must_be_exact_flat_daily_basename(
+    vault, legacy_key
+):
+    root, state_root = vault
+    daily = _daily(root)
+    digest = sha256_bytes(daily.read_bytes())
+    import compile_memory
+
+    selected = compile_memory.select_dailies(
+        Namespace(file=None, all=False),
+        {"compiled_daily_hashes": {legacy_key: digest}},
+        coordinator=MarkdownCoordinator(root, state_root),
+    )
+
+    assert selected == [daily]
+
+
+def test_explicit_file_skips_only_exact_v3_authority(vault):
+    root, state_root = vault
+    daily = _daily(root)
+    import compile_memory
+
+    coordinator = MarkdownCoordinator(root, state_root)
+    args = Namespace(file=str(daily), all=False)
+    assert compile_memory.select_dailies(args, {}, coordinator=coordinator) == [daily]
+
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    batch = compile_memory.pack_compile_batches(inputs, model=None)[0]
+    compile_memory.apply_compile_plan(
+        inputs,
+        {"schema_version": "compile-plan/v2", "operations": []},
+        action_key="8" * 64,
+        trigger="manual",
+        coordinator=coordinator,
+        batch=batch,
+        provider_budget={
+            "provider": "fake",
+            "model": "fake-v1",
+            "max_output_tokens": 4000,
+        },
+    )
+
+    assert compile_memory.select_dailies(args, {}, coordinator=coordinator) == []
 
 
 def test_resolver_refuses_llm_work_under_writer_gate(vault):
@@ -632,7 +1051,9 @@ def test_resolver_refuses_llm_work_under_writer_gate(vault):
             )
 
 
-def test_resolver_uses_exact_snapshot_for_draft_and_critique_and_caches(vault, monkeypatch):
+def test_resolver_uses_exact_snapshot_for_draft_and_cited_critique_and_caches(
+    vault, monkeypatch
+):
     root, state_root = vault
     daily = _daily(root)
     import compile_memory
@@ -657,7 +1078,10 @@ def test_resolver_uses_exact_snapshot_for_draft_and_critique_and_caches(vault, m
 
     exact = inputs.dailies[0].content.decode("utf-8")
     assert len(calls) == 2
-    assert all(exact in prompt for _descriptor, prompt, _schema in calls)
+    assert exact in calls[0][1]
+    assert exact not in calls[1][1]
+    assert "A durable exact-byte observation." in calls[1][1]
+    assert "A second durable exact-byte observation." not in calls[1][1]
     assert all(schema is not None for _descriptor, _prompt, schema in calls)
     assert resolved.action.draft_calls[0].structured_output == "native"
     assert resolved.action.critique_calls[0].structured_output == "native"
@@ -916,12 +1340,20 @@ def test_run_records_snapshot_hash_only_after_commit(vault, monkeypatch):
     )
     monkeypatch.setattr(compile_memory, "_mark_finished", lambda *args, **kwargs: None)
 
-    def resolve(inputs, cache, *, coordinator):
+    captured = {}
+
+    def resolve(inputs, cache, *, coordinator, batch, token_adapters=None):
         daily.write_bytes(original + b"later append\n")
+        captured["batch"] = batch
         return SimpleNamespace(
             plan={"schema_version": "compile-plan/v2", "operations": []},
             action_key="e" * 64,
             cache_hit=False,
+            provider_budget={
+                "provider": "fake",
+                "model": "fake-v1",
+                "max_output_tokens": 4000,
+            },
         )
 
     monkeypatch.setattr(compile_memory, "resolve_compile_plan", resolve)
@@ -930,6 +1362,7 @@ def test_run_records_snapshot_hash_only_after_commit(vault, monkeypatch):
     )
 
     assert result == 0
+    assert captured["batch"].inputs.dailies[0].content == original
     assert state["compiled_daily_hashes"] == {
         daily.name: sha256_bytes(original),
     }
@@ -977,6 +1410,101 @@ def test_run_does_not_record_provider_failure_after_cancellation(vault, monkeypa
     assert finished == []
 
 
+def test_run_packs_before_provider_dispatch(vault, monkeypatch):
+    root, _state_root = vault
+    daily = _daily(root)
+    daily.write_bytes(b"x" * 28_000)
+    import compile_memory
+
+    monkeypatch.setattr(compile_memory, "load_state", lambda: {})
+    monkeypatch.setattr(compile_memory, "_mark_finished", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        compile_memory,
+        "_record_compile_source_failures",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        compile_memory,
+        "resolve_compile_plan",
+        lambda *args, **kwargs: pytest.fail("provider dispatch ran before packing"),
+    )
+    monkeypatch.setattr(
+        compile_memory,
+        "update_state",
+        lambda *args, **kwargs: pytest.fail("compile diagnostics were updated"),
+    )
+
+    result = compile_memory._run(
+        Namespace(file=None, all=False, dry_run=False, trigger="manual")
+    )
+
+    assert result == 1
+    assert not list((root / "knowledge/daily/receipts").glob("*.md"))
+
+
+def test_run_refreshes_context_between_compile_batches(vault, monkeypatch):
+    root, _state_root = vault
+    first = root / "knowledge/daily/2026-07-14.md"
+    second = root / "knowledge/daily/2026-07-15.md"
+    first.write_bytes(b"a" * 14_000)
+    second.write_bytes(b"b" * 14_000)
+    import compile_memory
+
+    state: dict[str, object] = {}
+    seen_index_hashes = []
+
+    def resolve(inputs, cache, *, coordinator, batch, token_adapters=None):
+        index = next(
+            item for item in inputs.sources if item.logical_path == "knowledge/index.md"
+        )
+        seen_index_hashes.append(index.sha256)
+        return SimpleNamespace(
+            plan={"schema_version": "compile-plan/v2", "operations": []},
+            action_key=sha256_bytes(
+                canonical_json_bytes([item.logical_path for item in inputs.dailies])
+            ),
+            cache_hit=False,
+            provider_budget={
+                "provider": "fake",
+                "model": "fake-v1",
+                "max_output_tokens": 4000,
+            },
+        )
+
+    monkeypatch.setattr(compile_memory, "load_state", lambda: state)
+    monkeypatch.setattr(compile_memory, "update_state", lambda mutate: mutate(state))
+    monkeypatch.setattr(compile_memory, "_mark_finished", lambda *args, **kwargs: None)
+    monkeypatch.setattr(compile_memory, "resolve_compile_plan", resolve)
+
+    result = compile_memory._run(
+        Namespace(file=None, all=False, dry_run=False, trigger="manual")
+    )
+
+    assert result == 0
+    assert len(seen_index_hashes) == 2
+    assert seen_index_hashes[0] != seen_index_hashes[1]
+    assert state["compiled_daily_hashes"] == {
+        first.name: sha256_bytes(first.read_bytes()),
+        second.name: sha256_bytes(second.read_bytes()),
+    }
+
+
+def test_run_pending_compile_propagates_supplied_owner(monkeypatch):
+    import compile_memory
+
+    owner = object()
+    captured = {}
+
+    def run(args, **kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(compile_memory, "_run", run)
+
+    assert compile_memory.run_pending_compile(owner=owner) == 0
+    assert captured["owner"] is owner
+
+
 def test_evidence_quote_must_be_inside_cited_timestamp_block(vault):
     root, _state_root = vault
     daily = root / "knowledge/daily/2026-07-14.md"
@@ -990,6 +1518,32 @@ def test_evidence_quote_must_be_inside_cited_timestamp_block(vault):
 
     with pytest.raises(ValueError, match="immutable snapshot"):
         compile_memory.validate_compile_plan(_semantic_plan(), inputs)
+
+
+def test_evidence_quote_rejects_substring_of_complete_bullet(vault):
+    root, _state_root = vault
+    daily = root / "knowledge/daily/2026-07-14.md"
+    daily.write_text(
+        "## [10:00:00] session-end | manual\n"
+        "- Always reject substring citations before durable publication.\n",
+        encoding="utf-8",
+    )
+    import compile_memory
+
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    plan = _semantic_plan()
+    semantic = json.loads(plan["operations"][0]["content"])
+    semantic["evidence"][0]["quoted_text"] = "reject substring citations"
+    plan["operations"][0]["content"] = canonical_json_bytes(semantic).decode()
+
+    with pytest.raises(ValueError, match="complete source line"):
+        compile_memory.validate_compile_plan(plan, inputs)
+
+    semantic["evidence"][0]["quoted_text"] = (
+        "Always reject substring citations before durable publication."
+    )
+    plan["operations"][0]["content"] = canonical_json_bytes(semantic).decode()
+    compile_memory.validate_compile_plan(plan, inputs)
 
 
 def test_prompt_fallback_output_is_schema_checked_before_cache(vault, monkeypatch):

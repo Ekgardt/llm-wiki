@@ -3,27 +3,37 @@
 Re-ranks fused candidates using a cross-encoder that scores each
 (query, document) pair jointly. Runs on CPU via ONNX Runtime when available.
 
-Install: uv sync --extra reranker
-Default model: BAAI/bge-reranker-base (MIT)
+Install: uv sync --locked --no-default-groups --inexact --extra reranker
+Configure one model ID and immutable 40-hex revision in the environment.
 """
 from __future__ import annotations
 
 import math
 import os
+import re
 import time
 from typing import Any
 
 # Lazy-loaded model + tokenizer cache (kept together).
 _reranker_bundle: dict[str, Any] | None = None
 
-DEFAULT_RERANKER = os.environ.get("LLMWIKI_RERANKER_MODEL", "BAAI/bge-reranker-base")
-DEFAULT_RERANKER_REVISION = os.environ.get("LLMWIKI_RERANKER_REVISION", "main")
+IMMUTABLE_REVISION = re.compile(r"^[0-9a-f]{40}$")
 DEFAULT_RERANK_DEPTH = 20
 RERANK_BLEND_RERANK = 0.6
 RERANK_BLEND_RRF = 0.4
 
 # Profiles that may invoke the reranker when conditions match.
 RERANK_PROFILES = frozenset({"HYBRID", "GLOBAL", "GRAPH", "TEMPORAL", "BASE"})
+
+
+def configured_reranker_identity() -> tuple[str, str] | None:
+    model = os.environ.get("LLMWIKI_RERANKER_MODEL", "").strip()
+    revision = os.environ.get("LLMWIKI_RERANKER_REVISION", "").strip()
+    if not model and not revision:
+        return None
+    if not model or not IMMUTABLE_REVISION.fullmatch(revision):
+        return None
+    return model, revision
 
 
 def _have_reranker_deps() -> bool:
@@ -42,18 +52,29 @@ def _get_reranker_bundle() -> dict[str, Any] | None:
     global _reranker_bundle
     if _reranker_bundle is not None:
         return _reranker_bundle
+    identity = configured_reranker_identity()
+    if identity is None:
+        return None
     if not _have_reranker_deps():
         return None
     try:
         from optimum.onnxruntime import ORTModelForSequenceClassification
         from transformers import AutoTokenizer
 
-        model_name = DEFAULT_RERANKER
-        revision = DEFAULT_RERANKER_REVISION
+        model_name, revision = identity
         model = ORTModelForSequenceClassification.from_pretrained(
-            model_name, file_name="onnx/model.onnx", revision=revision
+            model_name,
+            file_name="onnx/model.onnx",
+            revision=revision,
+            local_files_only=True,
+            trust_remote_code=False,
         )
-        tokenizer = AutoTokenizer.from_pretrained(model_name, revision=revision)
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_name,
+            revision=revision,
+            local_files_only=True,
+            trust_remote_code=False,
+        )
         _reranker_bundle = {
             "model": model,
             "tokenizer": tokenizer,
@@ -255,11 +276,12 @@ def reranker_available() -> bool:
 
 
 if __name__ == "__main__":
-    if _have_reranker_deps():
-        print(f"Reranker dependencies available. Model: {DEFAULT_RERANKER}")
-        if reranker_available():
-            print("Reranker loaded successfully.")
-        else:
-            print("Reranker model not yet downloaded. First use will download it.")
+    identity = configured_reranker_identity()
+    if identity is None:
+        print("Reranker not configured.")
+    elif not _have_reranker_deps():
+        print("Reranker dependencies not installed.")
+    elif reranker_available():
+        print("Reranker loaded locally.")
     else:
-        print("Reranker dependencies not installed. Run: uv sync --extra reranker")
+        print("Reranker configured but not present locally.")

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/corrupt-task-disposition-v1.json",
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nullable_digest": {"oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]}
+  },
+  "type": "object",
+  "required": ["schema_version", "operation_id", "task_id", "package_key", "package_path", "manifest_path", "manifest_sha256", "active_link_digest", "actor_identity", "reason", "disposed_at"],
+  "properties": {
+    "schema_version": {"const": "corrupt-task-disposition/v1"},
+    "operation_id": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "task_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "package_key": {"$ref": "#/$defs/digest"},
+    "package_path": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "manifest_path": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "manifest_sha256": {"$ref": "#/$defs/digest"},
+    "active_link_digest": {"$ref": "#/$defs/nullable_digest"},
+    "actor_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+    "reason": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "disposed_at": {"type": "string", "minLength": 20, "maxLength": 40}
+  },
+  "additionalProperties": false
+}

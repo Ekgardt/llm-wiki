@@ -20,6 +20,7 @@ import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -316,6 +317,130 @@ def test_prompt_capture_redacts_and_builds_envelope_before_append(monkeypatch, t
     assert secret not in calls[0][1]["payload"]["prompt"]
     assert secret not in calls[1][1]["preview"]
     assert calls[1][1]["operation_id"].startswith("user-prompt:")
+
+
+def test_prompt_capture_retries_after_failed_append(monkeypatch, tmp_path):
+    import user_prompt_capture
+
+    fake_root = tmp_path / "vault"
+    fake_root.mkdir()
+    project_cwd = tmp_path / "project"
+    project_cwd.mkdir()
+    append_results = iter((False, True))
+    append_calls = []
+    completed = []
+
+    def append(*args, **kwargs):
+        append_calls.append((args, kwargs))
+        return next(append_results)
+
+    monkeypatch.setattr(user_prompt_capture, "ROOT", fake_root)
+    monkeypatch.setattr(
+        user_prompt_capture, "_compute_slug_from_cwd", lambda _cwd: "test-slug"
+    )
+    monkeypatch.setattr(user_prompt_capture, "_increment_prompt_count", lambda *_a: 1)
+    monkeypatch.setattr(user_prompt_capture, "_rate_limited", lambda *_a: False)
+    monkeypatch.setattr(
+        user_prompt_capture,
+        "_claim_prompt_operation",
+        lambda *_args, **_kwargs: "prompt-operation",
+    )
+    monkeypatch.setattr(
+        user_prompt_capture,
+        "_complete_prompt_operation",
+        lambda *args: completed.append(args),
+    )
+    monkeypatch.setattr(user_prompt_capture, "_append_prompt_tag", append)
+    payload = {
+        "prompt": "Retry this meaningful prompt",
+        "session_id": "session-1",
+        "cwd": str(project_cwd),
+    }
+
+    assert _run_capture_with_stdin("user_prompt_capture", payload) == 0
+    assert _run_capture_with_stdin("user_prompt_capture", payload) == 0
+
+    assert len(append_calls) == 2
+    assert len(completed) == 1
+
+
+def test_prompt_capture_replay_after_commit_appends_one_marked_record(
+    monkeypatch, tmp_path, isolated_capture_state
+):
+    import user_prompt_capture
+
+    fake_root = tmp_path / "vault"
+    fake_root.mkdir()
+    project_cwd = tmp_path / "project"
+    project_cwd.mkdir()
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(fake_root))
+    monkeypatch.setattr(user_prompt_capture, "ROOT", fake_root)
+    monkeypatch.setattr(
+        user_prompt_capture, "_compute_slug_from_cwd", lambda _cwd: "test-slug"
+    )
+    monkeypatch.setattr(user_prompt_capture, "_increment_prompt_count", lambda *_a: 1)
+    monkeypatch.setattr(user_prompt_capture, "_rate_limited", lambda *_a: False)
+    monkeypatch.setattr(user_prompt_capture, "_claim_prompt_dedupe", lambda *_a: True)
+    monkeypatch.setattr(user_prompt_capture, "_record_dedupe", lambda *_a: None)
+    payload = {
+        "prompt": "Replay this committed prompt",
+        "session_id": "session-1",
+        "cwd": str(project_cwd),
+    }
+
+    assert _run_capture_with_stdin("user_prompt_capture", payload) == 0
+    assert _run_capture_with_stdin("user_prompt_capture", payload) == 0
+
+    daily = next((fake_root / "knowledge" / "daily").glob("*.md"))
+    content = daily.read_text(encoding="utf-8")
+    assert content.count("Replay this committed prompt") == 1
+    assert content.count("llm-wiki-operation:") == 1
+    assert "user-prompt:" not in content
+
+
+def test_prompt_capture_distinguishes_explicit_host_occurrences(monkeypatch, tmp_path):
+    import user_prompt_capture
+
+    fake_root = tmp_path / "vault"
+    fake_root.mkdir()
+    project_cwd = tmp_path / "project"
+    project_cwd.mkdir()
+    operations = []
+    monkeypatch.setattr(user_prompt_capture, "ROOT", fake_root)
+    monkeypatch.setattr(
+        user_prompt_capture, "_compute_slug_from_cwd", lambda _cwd: "test-slug"
+    )
+    monkeypatch.setattr(user_prompt_capture, "_increment_prompt_count", lambda *_a: 1)
+    monkeypatch.setattr(user_prompt_capture, "_rate_limited", lambda *_a: False)
+    monkeypatch.setattr(
+        user_prompt_capture,
+        "_claim_prompt_operation",
+        lambda _slug, _prompt_hash, *, source_event_id=None: f"prompt:{source_event_id}",
+    )
+    monkeypatch.setattr(
+        user_prompt_capture, "_complete_prompt_operation", lambda *_a: None
+    )
+    monkeypatch.setattr(
+        user_prompt_capture,
+        "_append_prompt_tag",
+        lambda *_args, operation_id=None: operations.append(operation_id) or True,
+    )
+    monkeypatch.setattr(user_prompt_capture, "_record_dedupe", lambda *_a: None)
+    payload = {
+        "prompt": "Repeat this meaningful prompt",
+        "session_id": "session-1",
+        "cwd": str(project_cwd),
+    }
+
+    assert _run_capture_with_stdin(
+        "user_prompt_capture", {**payload, "event_id": "host-event-1"}
+    ) == 0
+    assert _run_capture_with_stdin(
+        "user_prompt_capture", {**payload, "event_id": "host-event-2"}
+    ) == 0
+
+    assert len(operations) == 2
+    assert operations[0] != operations[1]
 
 
 def test_prompt_capture_rejection_has_no_side_effects(monkeypatch, tmp_path):
@@ -660,6 +785,202 @@ def test_tool_capture_redacts_and_builds_envelope_before_append(monkeypatch, tmp
     assert secret not in calls[0][1]["payload"]["target"]
     assert secret not in calls[1][1]["target"]
     assert calls[1][1]["operation_id"].startswith("post-tool:")
+
+
+def test_tool_capture_retries_after_failed_append(monkeypatch, tmp_path):
+    import post_tool_capture
+
+    fake_root = tmp_path / "vault"
+    fake_root.mkdir()
+    project_cwd = tmp_path / "project"
+    project_cwd.mkdir()
+    append_results = iter((False, True))
+    append_calls = []
+    completed = []
+
+    def append(*args, **kwargs):
+        append_calls.append((args, kwargs))
+        return next(append_results)
+
+    monkeypatch.setattr(post_tool_capture, "ROOT", fake_root)
+    monkeypatch.setattr(
+        post_tool_capture, "_compute_slug_from_cwd", lambda _cwd: "test-slug"
+    )
+    monkeypatch.setattr(post_tool_capture, "_rate_limited", lambda *_a: False)
+    monkeypatch.setattr(
+        post_tool_capture,
+        "_claim_tool_operation",
+        lambda *_args, **_kwargs: "tool-operation",
+    )
+    monkeypatch.setattr(
+        post_tool_capture,
+        "_complete_tool_operation",
+        lambda *args: completed.append(args),
+    )
+    monkeypatch.setattr(post_tool_capture, "_append_tool_tag", append)
+    payload = {
+        "tool_name": "Edit",
+        "tool_input": {"filePath": "src/auth.py"},
+        "session_id": "session-1",
+        "cwd": str(project_cwd),
+    }
+
+    assert _run_capture_with_stdin("post_tool_capture", payload) == 0
+    assert _run_capture_with_stdin("post_tool_capture", payload) == 0
+
+    assert len(append_calls) == 2
+    assert len(completed) == 1
+
+
+def test_tool_capture_replay_after_commit_appends_one_marked_record(
+    monkeypatch, tmp_path, isolated_capture_state
+):
+    import daily_log_append
+    import post_tool_capture
+
+    fake_root = tmp_path / "vault"
+    fake_root.mkdir()
+    project_cwd = tmp_path / "project"
+    project_cwd.mkdir()
+    state = {}
+
+    def update(mutator, **_kwargs):
+        mutator(state)
+        return state
+
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(fake_root))
+    monkeypatch.setattr(daily_log_append, "STATE_ROOT", isolated_capture_state)
+    monkeypatch.setattr(post_tool_capture, "ROOT", fake_root)
+    monkeypatch.setattr(post_tool_capture, "update_state", update)
+    monkeypatch.setattr(
+        post_tool_capture, "_compute_slug_from_cwd", lambda _cwd: "test-slug"
+    )
+    payload = {
+        "tool_name": "Edit",
+        "tool_input": {"filePath": "src/auth.py"},
+        "session_id": "session-1",
+        "cwd": str(project_cwd),
+        "event_id": "tool-event-1",
+    }
+
+    assert _run_capture_with_stdin("post_tool_capture", payload) == 0
+    assert _run_capture_with_stdin("post_tool_capture", payload) == 0
+
+    daily = next((fake_root / "knowledge" / "daily").glob("*.md"))
+    content = daily.read_text(encoding="utf-8")
+    assert content.count("src/auth.py") == 1
+    assert content.count("llm-wiki-operation:") == 1
+    assert "post-tool:" not in content
+
+
+@pytest.mark.parametrize("module_name", ["user_prompt_capture", "post_tool_capture"])
+def test_capture_operation_reservation_retries_and_then_advances(
+    monkeypatch, module_name
+):
+    module = __import__(module_name)
+    state = {}
+    current = [datetime(2026, 8, 14, 12, 0, 0)]
+
+    class FrozenDateTime:
+        @classmethod
+        def now(cls):
+            return current[0]
+
+        @classmethod
+        def fromisoformat(cls, value):
+            return datetime.fromisoformat(value)
+
+    def update(mutator, **_kwargs):
+        mutator(state)
+        return state
+
+    monkeypatch.setattr(module, "datetime", FrozenDateTime)
+    monkeypatch.setattr(module, "update_state", update)
+    if module_name == "user_prompt_capture":
+        def claim(source=None):
+            return module._claim_prompt_operation(
+                "slug", "prompt-hash", source_event_id=source
+            )
+
+        def complete(operation):
+            module._complete_prompt_operation("slug", "prompt-hash", operation)
+
+        window = module.RATE_LIMIT_SECONDS
+    else:
+        def claim(source=None):
+            return module._claim_tool_operation(
+                "slug", "Edit", "src/app.py", source_event_id=source
+            )
+
+        def complete(operation):
+            module._complete_tool_operation("slug", "Edit", "src/app.py", operation)
+
+        window = module.RATE_LIMIT_SECONDS
+
+    first = claim()
+    assert first is not None
+    assert claim() == first
+    complete(first)
+    assert claim() is None
+
+    current[0] += timedelta(seconds=window + 1)
+    second = claim()
+    assert second is not None
+    assert second != first
+
+
+@pytest.mark.parametrize("module_name", ["user_prompt_capture", "post_tool_capture"])
+def test_capture_operation_replays_same_host_event_but_rate_limits_another(
+    monkeypatch, module_name
+):
+    module = __import__(module_name)
+    state = {}
+    current = [datetime(2026, 8, 14, 12, 0, 0)]
+
+    class FrozenDateTime:
+        @classmethod
+        def now(cls):
+            return current[0]
+
+        @classmethod
+        def fromisoformat(cls, value):
+            return datetime.fromisoformat(value)
+
+    def update(mutator, **_kwargs):
+        mutator(state)
+        return state
+
+    monkeypatch.setattr(module, "datetime", FrozenDateTime)
+    monkeypatch.setattr(module, "update_state", update)
+    if module_name == "user_prompt_capture":
+        def claim(source):
+            return module._claim_prompt_operation(
+                "slug", "prompt-hash", source_event_id=source
+            )
+
+        def complete(operation):
+            module._complete_prompt_operation("slug", "prompt-hash", operation)
+
+        window = module.RATE_LIMIT_SECONDS
+    else:
+        def claim(source):
+            return module._claim_tool_operation(
+                "slug", "Edit", "src/app.py", source_event_id=source
+            )
+
+        def complete(operation):
+            module._complete_tool_operation("slug", "Edit", "src/app.py", operation)
+
+        window = module.RATE_LIMIT_SECONDS
+
+    first = claim("host-event-1")
+    assert first is not None
+    complete(first)
+    assert claim("host-event-1") == first
+    assert claim("host-event-2") is None
+
+    current[0] += timedelta(seconds=window + 1)
+    assert claim("host-event-2") not in {None, first}
 
 
 def test_tool_capture_bash_filters_short_commands(monkeypatch, tmp_path):

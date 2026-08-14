@@ -8,6 +8,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -61,6 +62,19 @@ TOOL_HELPERS = {
     "get_architecture": "_get_architecture",
     "doctor": "_doctor",
 }
+
+
+class DrainAwareSet(set[object]):
+    """Signal when a test-owned MCP worker set becomes empty."""
+
+    def __init__(self, drained: threading.Event) -> None:
+        super().__init__()
+        self._drained = drained
+
+    def discard(self, item: object) -> None:
+        super().discard(item)
+        if not self:
+            self._drained.set()
 
 MISSING_REQUIRED_CALLS = [
     ("recall", {}),
@@ -1596,43 +1610,63 @@ class TestHandleToolCall:
         assert envelope["data"] == {"error": "operation_timeout"}
 
     def test_blocking_tool_does_not_block_event_loop_and_times_out(self, monkeypatch):
-        import threading
-
         import mcp_server
 
-        started = threading.Event()
         release = threading.Event()
         finished = threading.Event()
-
-        def blocked(*, deadline):
-            started.set()
-            try:
-                release.wait(1.0)
-            finally:
-                finished.set()
-            return {"ok": True}
+        drained = threading.Event()
+        workers = DrainAwareSet(drained)
 
         async def exercise():
+            loop = asyncio.get_running_loop()
+            started = asyncio.Event()
+
+            def blocked(*, deadline):
+                del deadline
+                loop.call_soon_threadsafe(started.set)
+                try:
+                    release.wait(1.0)
+                finally:
+                    finished.set()
+                return {"ok": True}
+
+            monkeypatch.setattr(mcp_server, "_vault_status", blocked)
             task = asyncio.create_task(mcp_server._handle_tool_call("vault_status", {}))
-            await asyncio.sleep(0.01)
-            loop_progressed = started.is_set() and not finished.is_set()
-            return loop_progressed, await task
+            try:
+                await asyncio.wait_for(started.wait(), timeout=0.5)
+                await asyncio.sleep(0.01)
+                loop_progressed = not finished.is_set()
+                return loop_progressed, await task
+            finally:
+                release.set()
+                assert finished.wait(1.0)
+                assert drained.wait(1.0)
+                with mcp_server._MCP_WORKERS_LOCK:
+                    assert not workers
 
         monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 0.2)
-        monkeypatch.setattr(mcp_server, "_MCP_WORKERS", set())
+        monkeypatch.setattr(mcp_server, "_MCP_WORKERS", workers)
         monkeypatch.setattr(mcp_server, "_MCP_WORKERS_LOCK", threading.Lock())
-        monkeypatch.setattr(mcp_server, "_vault_status", blocked)
-        try:
-            loop_progressed, text = asyncio.run(exercise())
-        finally:
-            release.set()
-            finished.wait(0.5)
+        loop_progressed, text = asyncio.run(exercise())
 
         envelope = json.loads(text)
         assert loop_progressed is True
         assert envelope["data"] == {"error": "operation_timeout"}
         assert envelope["partial"] is True
         assert envelope["coverage"] == 0
+
+        expected = {"last_compile": "fresh", "last_compile_status": "ok"}
+        monkeypatch.setattr(
+            mcp_server,
+            "_vault_status",
+            lambda *, deadline: expected,
+        )
+        sentinel = json.loads(
+            asyncio.run(mcp_server._handle_tool_call("vault_status", {}))
+        )
+        assert sentinel["data"] == expected
+        with mcp_server._MCP_WORKERS_LOCK:
+            assert not workers
 
     def test_timed_out_tool_workers_never_exceed_bounded_slots(self, monkeypatch):
         import threading
@@ -2980,14 +3014,13 @@ class TestResources:
     def test_registered_resources_share_one_deadline_and_run_off_loop(
         self, monkeypatch, uri
     ):
-        import threading
-
         import mcp_server
 
         seen = []
-        started = threading.Event()
         release = threading.Event()
         finished = threading.Event()
+        drained = threading.Event()
+        workers = DrainAwareSet(drained)
 
         class Model:
             def __init__(self, **kwargs):
@@ -3003,41 +3036,63 @@ class TestResources:
             def read_resource(self):
                 return lambda function: self.callbacks.setdefault("read", function) or function
 
-        def blocked(*, deadline):
-            seen.append(deadline)
-            started.set()
-            try:
-                release.wait(1.0)
-            finally:
-                finished.set()
-            return {"last_compile": "never", "last_compile_status": "unknown"}
-
         async def exercise(callback):
+            loop = asyncio.get_running_loop()
+            started = asyncio.Event()
+
+            def blocked(*, deadline):
+                seen.append(deadline)
+                loop.call_soon_threadsafe(started.set)
+                try:
+                    release.wait(1.0)
+                finally:
+                    finished.set()
+                return {"last_compile": "never", "last_compile_status": "unknown"}
+
+            monkeypatch.setattr(mcp_server, "_vault_status", blocked)
             task = asyncio.create_task(callback(uri))
-            await asyncio.sleep(0.01)
-            loop_progressed = started.is_set() and not finished.is_set()
-            return loop_progressed, await task
+            try:
+                await asyncio.wait_for(started.wait(), timeout=0.5)
+                await asyncio.sleep(0.01)
+                loop_progressed = not finished.is_set()
+                return loop_progressed, await task
+            finally:
+                release.set()
+                assert finished.wait(1.0)
+                assert drained.wait(1.0)
+                with mcp_server._MCP_WORKERS_LOCK:
+                    assert not workers
 
         server = FakeServer()
         monkeypatch.setattr(mcp_server, "MCP_RESOURCES_AVAILABLE", True)
         monkeypatch.setattr(mcp_server, "Resource", Model)
         monkeypatch.setattr(mcp_server, "TextResourceContents", Model)
         monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 0.2)
-        monkeypatch.setattr(mcp_server, "_MCP_WORKERS", set())
+        monkeypatch.setattr(mcp_server, "_MCP_WORKERS", workers)
         monkeypatch.setattr(mcp_server, "_MCP_WORKERS_LOCK", threading.Lock())
-        monkeypatch.setattr(mcp_server, "_vault_status", blocked)
         monkeypatch.setattr(mcp_server, "_wiki_overview", lambda **kwargs: {"ok": True})
         assert mcp_server._register_resources(server) is True
-        try:
-            loop_progressed, contents = asyncio.run(exercise(server.callbacks["read"]))
-        finally:
-            release.set()
-            finished.wait(0.5)
+        loop_progressed, contents = asyncio.run(exercise(server.callbacks["read"]))
 
         envelope = json.loads(contents[0].text)
         assert loop_progressed is True
         assert len(seen) == 1
         assert envelope["data"] == {"error": "operation_timeout"}
+
+        status = {"last_compile": "fresh", "last_compile_status": "ok"}
+        monkeypatch.setattr(
+            mcp_server,
+            "_vault_status",
+            lambda *, deadline: status,
+        )
+        sentinel_contents = asyncio.run(server.callbacks["read"](uri))
+        sentinel = json.loads(sentinel_contents[0].text)
+        expected = status
+        if uri == mcp_server.CONTEXT_RESOURCE_URI:
+            expected = {"overview": {"ok": True}, "status": status}
+        assert sentinel["data"] == expected
+        with mcp_server._MCP_WORKERS_LOCK:
+            assert not workers
 
 
 class TestCallbackCompatibility:

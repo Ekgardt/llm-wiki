@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,6 +49,7 @@ def _write_python_workspace(root: Path, files: dict[str, str]) -> None:
 
 
 def test_production_opencode_plugin_progresses_through_generation_validation(tmp_path):
+    pytest.importorskip("tree_sitter_javascript")
     import doctor
     from evidence_graph import validate_generation_artifact
     from generation_catalog import GenerationCatalog
@@ -365,6 +369,9 @@ def test_generation_repair_recovers_valid_orphan_cleans_partial_and_falls_back(t
         "cleanup_generation_orphans",
         "fallback_generation",
     }
+    replacement = catalog.catalog_path.with_suffix(".replacement")
+    replacement.write_bytes(catalog.catalog_path.read_bytes())
+    os.replace(replacement, catalog.catalog_path)
 
 
 def test_generation_repair_does_not_create_an_empty_catalog(tmp_path):
@@ -1909,6 +1916,67 @@ def test_nightly_uses_shared_generation_builder_not_process_local_graphs(monkeyp
     source = Path(scheduled_nightly.__file__).read_text(encoding="utf-8")
     assert "rebuild_graph_cache" not in source
     assert "index_directory(ROOT" not in source
+
+
+def test_edited_wikilink_is_visible_after_nightly_in_fresh_processes(
+    tmp_path, monkeypatch
+):
+    import scheduled_nightly
+
+    root, state = _vault(tmp_path)
+    notes = root / "knowledge" / "notes"
+    source = notes / "source.md"
+    source.write_text(
+        "---\ntype: concept\n---\n# Source\n[[target-a]]\n",
+        encoding="utf-8",
+    )
+    for target in ("a", "b"):
+        (notes / f"target-{target}.md").write_text(
+            f"---\ntype: concept\n---\n# Target {target.upper()}\n",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(scheduled_nightly, "ROOT", root)
+    monkeypatch.setattr(scheduled_nightly, "STATE_ROOT", state)
+    logs = []
+
+    def fresh_neighbors() -> list[str]:
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "LLM_WIKI_ROOT": str(root),
+                "LLM_WIKI_STATE_ROOT": str(state),
+                "PYTHONPATH": str(Path(__file__).resolve().parent.parent / "scripts"),
+            }
+        )
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import json; from graph_neighbors import get_neighbors; "
+                    "print(json.dumps(get_neighbors('knowledge/notes/source.md')))"
+                ),
+            ],
+            cwd=root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+        return json.loads(completed.stdout)
+
+    assert scheduled_nightly._refresh_generation(logs.append) == 0
+    assert fresh_neighbors() == ["knowledge/notes/target-a.md"]
+
+    source.write_text(
+        "---\ntype: concept\n---\n# Source\n[[target-b]]\n",
+        encoding="utf-8",
+    )
+
+    assert scheduled_nightly._refresh_generation(logs.append) == 0
+    assert fresh_neighbors() == ["knowledge/notes/target-b.md"]
 
 
 def test_sync_check_reports_stale_generation_and_apply_uses_shared_builder(tmp_path, monkeypatch):

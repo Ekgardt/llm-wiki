@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import errno
 import os
 import sqlite3
@@ -151,10 +152,11 @@ def test_restricted_relative_path_accepts_only_allowed_roots():
 
 def test_operational_connection_uses_required_pragmas_and_row_factory(tmp_path):
     path = tmp_path / "run" / "x.sqlite3"
-    with open_operational_db(path, busy_ms=10_000) as db:
+    with contextlib.closing(open_operational_db(path, busy_ms=10_000)) as db:
         assert db.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
         assert db.execute("PRAGMA synchronous").fetchone()[0] == 2
         assert db.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert db.execute("PRAGMA trusted_schema").fetchone()[0] == 0
         assert db.execute("PRAGMA busy_timeout").fetchone()[0] == 10_000
         db.execute("CREATE TABLE sample (name TEXT)")
         db.execute("INSERT INTO sample VALUES ('row')")
@@ -165,7 +167,9 @@ def test_operational_connection_uses_required_pragmas_and_row_factory(tmp_path):
 
 
 def test_begin_immediate_commits_and_rolls_back(tmp_path):
-    with open_operational_db(tmp_path / "run" / "x.sqlite3", busy_ms=100) as db:
+    with contextlib.closing(
+        open_operational_db(tmp_path / "run" / "x.sqlite3", busy_ms=100)
+    ) as db:
         db.execute("CREATE TABLE sample (value INTEGER)")
         with begin_immediate(db):
             db.execute("INSERT INTO sample VALUES (1)")
@@ -185,6 +189,7 @@ def test_fsync_helpers_accept_files_and_directories(tmp_path):
     fsync_directory(tmp_path)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory fsync contract")
 def test_directory_fsync_does_not_swallow_real_io_errors(tmp_path, monkeypatch):
     monkeypatch.setattr(reliable_memory.os, "open", lambda _path, _flags: 123)
     monkeypatch.setattr(reliable_memory.os, "close", lambda _descriptor: None)
@@ -198,6 +203,304 @@ def test_directory_fsync_does_not_swallow_real_io_errors(tmp_path, monkeypatch):
         fsync_directory(tmp_path)
 
     assert exc_info.value.errno == errno.EACCES
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows directory flush contract")
+def test_windows_directory_flush_failure_is_durability_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import windows_workspace
+
+    closed = []
+    monkeypatch.setattr(windows_workspace, "open_writable_directory_path", lambda _path: 91)
+    monkeypatch.setattr(windows_workspace, "flush_directory", lambda _handle: False)
+    monkeypatch.setattr(windows_workspace, "close_handle", closed.append)
+
+    with pytest.raises(reliable_memory.MetadataDurabilityUnavailable) as raised:
+        fsync_directory(tmp_path)
+
+    assert raised.value.code == "metadata_durability_unavailable"
+    assert closed == [91]
+
+
+def test_metadata_durability_error_has_stable_code() -> None:
+    error = reliable_memory.MetadataDurabilityUnavailable("flush failed")
+
+    assert error.code == "metadata_durability_unavailable"
+
+
+def test_durable_publish_reports_published_adopted_and_duplicate(tmp_path: Path) -> None:
+    expected = b'{"value":1}'
+    digest = sha256_bytes(expected)
+    destination = tmp_path / "state.json"
+    staged = tmp_path / "state.first.tmp"
+    destination.write_bytes(b"old")
+    staged.write_bytes(expected)
+
+    assert reliable_memory.durable_publish_file(
+        staged,
+        destination,
+        replace=True,
+        expected_sha256=digest,
+        max_bytes=len(expected),
+    ) == "published"
+    assert destination.read_bytes() == expected
+    assert not staged.exists()
+
+    assert reliable_memory.durable_publish_file(
+        staged,
+        destination,
+        replace=True,
+        expected_sha256=digest,
+        max_bytes=len(expected),
+    ) == "adopted"
+
+    duplicate = tmp_path / "state.duplicate.tmp"
+    duplicate.write_bytes(expected)
+    assert reliable_memory.durable_publish_file(
+        duplicate,
+        destination,
+        replace=True,
+        expected_sha256=digest,
+        max_bytes=len(expected),
+    ) == "duplicate"
+    assert duplicate.read_bytes() == expected
+    assert destination.read_bytes() == expected
+
+
+def test_runtime_file_identity_round_trips_through_create_only_publication(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    destination = state_root / "run" / "record.json"
+    destination.parent.mkdir()
+
+    published = reliable_memory.publish_runtime_file(
+        destination,
+        b'{"value":1}',
+        state_root=state_root,
+        create_only=True,
+    )
+
+    assert reliable_memory.capture_runtime_file_identity(
+        destination, state_root=state_root
+    ) == published
+    assert published.size == len(b'{"value":1}')
+    assert published.platform in {"posix", "windows"}
+    assert published.volume
+    assert published.file_id
+    assert destination.read_bytes() == b'{"value":1}'
+
+
+def test_runtime_file_publication_is_create_only_and_compare_and_replace_fenced(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    destination = state_root / "run" / "record.json"
+    destination.parent.mkdir()
+    original = reliable_memory.publish_runtime_file(
+        destination,
+        b"original",
+        state_root=state_root,
+        create_only=True,
+    )
+
+    with pytest.raises(FileExistsError):
+        reliable_memory.publish_runtime_file(
+            destination,
+            b"different",
+            state_root=state_root,
+            create_only=True,
+        )
+    with pytest.raises(PermissionError, match="identity changed"):
+        reliable_memory.publish_runtime_file(
+            destination,
+            b"replacement",
+            state_root=state_root,
+            create_only=False,
+            expected=reliable_memory.RuntimeFileIdentity(
+                platform=original.platform,
+                volume=original.volume,
+                file_id=original.file_id,
+                size=original.size + 1,
+                mtime_ns=original.mtime_ns,
+            ),
+            expected_sha256=sha256_bytes(b"original"),
+        )
+
+    replaced = reliable_memory.publish_runtime_file(
+        destination,
+        b"replacement",
+        state_root=state_root,
+        create_only=False,
+        expected=original,
+        expected_sha256=sha256_bytes(b"original"),
+    )
+
+    assert replaced != original
+    assert destination.read_bytes() == b"replacement"
+
+
+@pytest.mark.parametrize(
+    ("staged_bytes", "destination_bytes"),
+    [(None, None), (b"wrong", None), (None, b"wrong"), (b"wrong", b"wrong")],
+)
+def test_durable_publish_never_accepts_missing_or_wrong_bytes(
+    tmp_path: Path,
+    staged_bytes: bytes | None,
+    destination_bytes: bytes | None,
+) -> None:
+    expected = b"expected"
+    staged = tmp_path / "state.tmp"
+    destination = tmp_path / "state.json"
+    if staged_bytes is not None:
+        staged.write_bytes(staged_bytes)
+    if destination_bytes is not None:
+        destination.write_bytes(destination_bytes)
+
+    with pytest.raises(RuntimeError, match="publication conflict"):
+        reliable_memory.durable_publish_file(
+            staged,
+            destination,
+            replace=True,
+            expected_sha256=sha256_bytes(expected),
+            max_bytes=len(expected),
+        )
+
+    assert staged.read_bytes() == staged_bytes if staged_bytes is not None else not staged.exists()
+    assert (
+        destination.read_bytes() == destination_bytes
+        if destination_bytes is not None
+        else not destination.exists()
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory fsync contract")
+def test_posix_sync_failure_after_replace_is_retryable_as_adopted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = b"new"
+    staged = tmp_path / "state.tmp"
+    destination = tmp_path / "state.json"
+    staged.write_bytes(expected)
+    destination.write_bytes(b"old")
+    real_fsync = reliable_memory.os.fsync
+
+    def fail_directory(descriptor: int) -> None:
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise OSError(errno.EINVAL, "directory sync unsupported")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(reliable_memory.os, "fsync", fail_directory)
+    with pytest.raises(reliable_memory.MetadataDurabilityUnavailable):
+        reliable_memory.durable_publish_file(
+            staged,
+            destination,
+            replace=True,
+            expected_sha256=sha256_bytes(expected),
+            max_bytes=len(expected),
+        )
+    assert not staged.exists()
+    assert destination.read_bytes() == expected
+
+    synced_directories = []
+
+    def record_directory(descriptor: int) -> None:
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            synced_directories.append(os.fstat(descriptor).st_ino)
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(reliable_memory.os, "fsync", record_directory)
+    assert reliable_memory.durable_publish_file(
+        staged,
+        destination,
+        replace=True,
+        expected_sha256=sha256_bytes(expected),
+        max_bytes=len(expected),
+    ) == "adopted"
+    assert synced_directories
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX create-only publication contract")
+def test_posix_unlink_failure_retains_observable_duplicate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = b"new"
+    staged = tmp_path / "state.tmp"
+    destination = tmp_path / "state.json"
+    staged.write_bytes(expected)
+    real_unlink = reliable_memory.os.unlink
+
+    def fail_staged_unlink(path: object, *args: object, **kwargs: object) -> None:
+        if Path(path) == staged:
+            raise OSError(errno.EACCES, "cannot remove staged evidence")
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(reliable_memory.os, "unlink", fail_staged_unlink)
+    with pytest.raises(OSError, match="staged evidence"):
+        reliable_memory.durable_publish_file(
+            staged,
+            destination,
+            replace=False,
+            expected_sha256=sha256_bytes(expected),
+            max_bytes=len(expected),
+        )
+    assert staged.read_bytes() == expected
+    assert destination.read_bytes() == expected
+
+    assert reliable_memory.durable_publish_file(
+        staged,
+        destination,
+        replace=False,
+        expected_sha256=sha256_bytes(expected),
+        max_bytes=len(expected),
+    ) == "duplicate"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows write-through publication contract")
+@pytest.mark.parametrize("failure", ["flush", "move"])
+def test_windows_publication_failure_keeps_old_and_staged_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    import windows_workspace
+
+    expected = b"new"
+    staged = tmp_path / "state.tmp"
+    destination = tmp_path / "state.json"
+    staged.write_bytes(expected)
+    destination.write_bytes(b"old")
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise OSError(5, f"{failure} failed")
+
+    monkeypatch.setattr(
+        windows_workspace,
+        "flush_file_path",
+        fail if failure == "flush" else lambda _path: None,
+    )
+    monkeypatch.setattr(
+        windows_workspace,
+        "move_file_write_through",
+        fail if failure == "move" else lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(reliable_memory.MetadataDurabilityUnavailable):
+        reliable_memory.durable_publish_file(
+            staged,
+            destination,
+            replace=True,
+            expected_sha256=sha256_bytes(expected),
+            max_bytes=len(expected),
+        )
+    assert staged.read_bytes() == expected
+    assert destination.read_bytes() == b"old"
 
 
 def test_state_root_accepts_normal_local_sqlite_locking(tmp_path):

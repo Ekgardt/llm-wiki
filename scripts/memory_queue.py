@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import email.utils
+import hashlib
 import json
 import math
 import multiprocessing
@@ -19,22 +20,32 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from operational_ownership import OwnerLease
 
 from reliable_memory import (
     DEFAULTS,
+    MigrationStatement,
+    OperationalDatabaseContract,
+    OperationalDatabaseContractError,
     _set_owner_only,
     begin_immediate,
     canonical_json_bytes,
     fsync_directory,
     fsync_file,
     open_operational_db,
+    open_readonly_operational_db,
+    read_runtime_bytes,
+    run_resumable_migration,
     sha256_bytes,
+    validate_schema,
 )
 from secret_redact import redact_secrets
 
@@ -47,6 +58,11 @@ _MAX_EXPORT_METADATA_BYTES = 64 * 1024 * 1024
 _MAX_LEGACY_RECORD_BYTES = 16 * 1024 * 1024
 _MAX_RUNTIME_ATTEMPTS = 100
 _MAX_MARKER_BYTES = 64
+_MAX_QUEUE_PAYLOAD_BYTES = 1024 * 1024
+_MAX_QUEUE_DEPTH = 32
+_MAX_QUEUE_STRING_BYTES = 256 * 1024
+_MAX_QUEUE_CONTAINER_MEMBERS = 1024
+_QUEUE_V3_CONTRACT = OperationalDatabaseContract(application_id=0x4C575133)
 _SECRET_KEYS = {
     "api_key",
     "apikey",
@@ -63,6 +79,1681 @@ _SECRET_KEYS = {
     "set_cookie",
     "token",
 }
+
+_QUEUE_V3_TABLE_SQL = (
+    (
+        "tasks",
+        """CREATE TABLE tasks (
+            id TEXT NOT NULL PRIMARY KEY CHECK (length(CAST(id AS BLOB)) BETWEEN 1 AND 256),
+            kind TEXT NOT NULL CHECK (length(CAST(kind AS BLOB)) BETWEEN 1 AND 64),
+            handler_version INTEGER NOT NULL CHECK (handler_version BETWEEN 1 AND 2147483647),
+            payload_blob BLOB NOT NULL CHECK (length(payload_blob) <= 1048576),
+            input_hash TEXT NOT NULL CHECK (
+                length(input_hash) = 64 AND input_hash NOT GLOB '*[^0-9a-f]*'
+            ),
+            dedupe_key TEXT CHECK (
+                dedupe_key IS NULL OR length(CAST(dedupe_key AS BLOB)) BETWEEN 1 AND 512
+            ),
+            state TEXT NOT NULL CHECK (state IN (
+                'ready','leased','blocked','succeeded','dead','cancelled',
+                'quarantine_pending','quarantined','purge_pending'
+            )),
+            priority INTEGER NOT NULL DEFAULT 0 CHECK (priority BETWEEN -100 AND 100),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            available_at TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts BETWEEN 0 AND 100),
+            last_attempt_at TEXT,
+            lease_owner TEXT CHECK (
+                lease_owner IS NULL OR length(CAST(lease_owner AS BLOB)) <= 256
+            ),
+            lease_token TEXT CHECK (
+                lease_token IS NULL OR length(CAST(lease_token AS BLOB)) <= 256
+            ),
+            lease_expires_at TEXT,
+            lease_heartbeat_at TEXT,
+            attempt_started_at TEXT,
+            error_code TEXT CHECK (
+                error_code IS NULL OR length(CAST(error_code AS BLOB)) BETWEEN 1 AND 64
+            ),
+            blocked_capability TEXT CHECK (
+                blocked_capability IS NULL OR length(CAST(blocked_capability AS BLOB)) <= 128
+            ),
+            result_reference TEXT CHECK (
+                result_reference IS NULL OR length(CAST(result_reference AS BLOB)) <= 4096
+            ),
+            result_sha256 TEXT CHECK (
+                result_sha256 IS NULL OR (
+                    length(result_sha256) = 64 AND result_sha256 NOT GLOB '*[^0-9a-f]*'
+                )
+            ),
+            result_operation_id TEXT CHECK (
+                result_operation_id IS NULL OR length(CAST(result_operation_id AS BLOB)) <= 4096
+            ),
+            redrive_of TEXT REFERENCES tasks(id),
+            lineage_generation INTEGER NOT NULL DEFAULT 0 CHECK (lineage_generation >= 0)
+        )""",
+    ),
+    (
+        "attempt_history",
+        """CREATE TABLE attempt_history (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL REFERENCES tasks(id),
+            attempt INTEGER NOT NULL CHECK (attempt BETWEEN 1 AND 100),
+            started_at TEXT NOT NULL,
+            finished_at TEXT NOT NULL,
+            outcome TEXT NOT NULL CHECK (outcome IN (
+                'succeeded','failed','blocked','cancelled','lease_expired'
+            )),
+            error_code TEXT CHECK (
+                error_code IS NULL OR length(CAST(error_code AS BLOB)) BETWEEN 1 AND 64
+            )
+        )""",
+    ),
+    (
+        "source_fences",
+        """CREATE TABLE source_fences (
+            logical_path TEXT NOT NULL CHECK (length(CAST(logical_path AS BLOB)) BETWEEN 1 AND 4096),
+            source_digest TEXT NOT NULL CHECK (
+                length(source_digest) = 64 AND source_digest NOT GLOB '*[^0-9a-f]*'
+            ),
+            token TEXT NOT NULL UNIQUE CHECK (length(CAST(token AS BLOB)) BETWEEN 1 AND 256),
+            owner_pid INTEGER NOT NULL CHECK (owner_pid > 0),
+            owner_start_identity TEXT NOT NULL CHECK (
+                length(CAST(owner_start_identity AS BLOB)) BETWEEN 1 AND 512
+            ),
+            acquired_at TEXT NOT NULL,
+            heartbeat_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            PRIMARY KEY(logical_path, source_digest)
+        )""",
+    ),
+    (
+        "source_failures",
+        """CREATE TABLE source_failures (
+            logical_path TEXT NOT NULL CHECK (length(CAST(logical_path AS BLOB)) BETWEEN 1 AND 4096),
+            source_digest TEXT NOT NULL CHECK (
+                length(source_digest) = 64 AND source_digest NOT GLOB '*[^0-9a-f]*'
+            ),
+            error_code TEXT NOT NULL CHECK (length(CAST(error_code AS BLOB)) BETWEEN 1 AND 64),
+            producer TEXT NOT NULL CHECK (producer IN ('compile','queue')),
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(logical_path, source_digest)
+        )""",
+    ),
+    (
+        "task_source_links",
+        """CREATE TABLE task_source_links (
+            task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            logical_path TEXT NOT NULL CHECK (length(CAST(logical_path AS BLOB)) BETWEEN 1 AND 4096),
+            source_digest TEXT NOT NULL CHECK (
+                length(source_digest) = 64 AND source_digest NOT GLOB '*[^0-9a-f]*'
+            ),
+            PRIMARY KEY(task_id, logical_path, source_digest)
+        )""",
+    ),
+    (
+        "queue_ownership",
+        """CREATE TABLE queue_ownership (
+            actor_id TEXT NOT NULL PRIMARY KEY CHECK (length(CAST(actor_id AS BLOB)) BETWEEN 1 AND 256),
+            domain_role TEXT NOT NULL CHECK (domain_role IN ('worker','operator')),
+            canonical_role TEXT NOT NULL CHECK (
+                canonical_role IN (
+                    'queue-worker','queue-operator','repair','compile','doctor','nightly','weekly'
+                )
+            ),
+            canonical_scope TEXT NOT NULL CHECK (
+                length(CAST(canonical_scope AS BLOB)) BETWEEN 1 AND 512
+            ),
+            owner_token TEXT NOT NULL UNIQUE CHECK (length(CAST(owner_token AS BLOB)) BETWEEN 1 AND 256),
+            fencing_epoch INTEGER NOT NULL CHECK (fencing_epoch >= 1),
+            process_id INTEGER NOT NULL CHECK (process_id > 0),
+            process_start_identity TEXT NOT NULL CHECK (
+                length(CAST(process_start_identity AS BLOB)) BETWEEN 1 AND 512
+            ),
+            acquired_at TEXT NOT NULL,
+            heartbeat_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            UNIQUE(canonical_role, canonical_scope),
+            CHECK (
+                (domain_role = 'worker' AND canonical_role IN (
+                    'queue-worker','compile','doctor','nightly','weekly'
+                ))
+                OR
+                (domain_role = 'operator' AND canonical_role IN ('queue-operator','repair'))
+            )
+        )""",
+    ),
+    (
+        "task_purge_authorizations",
+        """CREATE TABLE task_purge_authorizations (
+            task_id TEXT NOT NULL PRIMARY KEY CHECK (
+                length(CAST(task_id AS BLOB)) BETWEEN 1 AND 256
+            ),
+            mode TEXT NOT NULL CHECK (mode IN ('ordinary','corrupt-lineage','corrupt-parent')),
+            operation_id TEXT NOT NULL CHECK (
+                length(CAST(operation_id AS BLOB)) BETWEEN 1 AND 4096
+            ),
+            authorization_digest TEXT NOT NULL CHECK (
+                length(authorization_digest) = 64
+                AND authorization_digest NOT GLOB '*[^0-9a-f]*'
+            ),
+            created_at TEXT NOT NULL
+        )""",
+    ),
+    (
+        "capture_intents",
+        """CREATE TABLE capture_intents (
+            intent_id TEXT NOT NULL PRIMARY KEY CHECK (
+                length(intent_id) = 64 AND intent_id NOT GLOB '*[^0-9a-f]*'
+            ),
+            relative_path TEXT NOT NULL CHECK (length(CAST(relative_path AS BLOB)) BETWEEN 1 AND 4096),
+            intent_sha256 TEXT NOT NULL CHECK (
+                length(intent_sha256) = 64 AND intent_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+            byte_size INTEGER NOT NULL CHECK (byte_size BETWEEN 1 AND 1048576),
+            publication_state TEXT NOT NULL CHECK (publication_state IN ('pending','ready')),
+            updated_at TEXT NOT NULL
+        )""",
+    ),
+    (
+        "capture_task_links",
+        """CREATE TABLE capture_task_links (
+            task_id TEXT NOT NULL PRIMARY KEY REFERENCES tasks(id),
+            intent_id TEXT NOT NULL REFERENCES capture_intents(intent_id),
+            intent_sha256 TEXT NOT NULL CHECK (
+                length(intent_sha256) = 64 AND intent_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+            handler_version INTEGER NOT NULL CHECK (handler_version BETWEEN 1 AND 2147483647),
+            link_digest TEXT NOT NULL UNIQUE CHECK (
+                length(link_digest) = 64 AND link_digest NOT GLOB '*[^0-9a-f]*'
+            ),
+            created_at TEXT NOT NULL
+        )""",
+    ),
+    (
+        "capture_task_link_resolutions",
+        """CREATE TABLE capture_task_link_resolutions (
+            resolution_digest TEXT NOT NULL PRIMARY KEY CHECK (
+                length(resolution_digest) = 64 AND resolution_digest NOT GLOB '*[^0-9a-f]*'
+            ),
+            task_id TEXT NOT NULL REFERENCES tasks(id),
+            supersedes_digest TEXT UNIQUE CHECK (
+                supersedes_digest IS NULL OR (
+                    length(supersedes_digest) = 64
+                    AND supersedes_digest NOT GLOB '*[^0-9a-f]*'
+                )
+            ),
+            observed_json BLOB NOT NULL CHECK (length(observed_json) <= 65536),
+            selected_intent_id TEXT REFERENCES capture_intents(intent_id),
+            actor_identity TEXT NOT NULL CHECK (length(CAST(actor_identity AS BLOB)) BETWEEN 1 AND 512),
+            reason TEXT NOT NULL CHECK (length(CAST(reason AS BLOB)) BETWEEN 1 AND 4096),
+            created_at TEXT NOT NULL
+        )""",
+    ),
+    (
+        "capture_task_link_seals",
+        """CREATE TABLE capture_task_link_seals (
+            task_id TEXT NOT NULL PRIMARY KEY REFERENCES tasks(id),
+            active_digest TEXT NOT NULL CHECK (
+                length(active_digest) = 64 AND active_digest NOT GLOB '*[^0-9a-f]*'
+            ),
+            consumer_kind TEXT NOT NULL CHECK (consumer_kind IN (
+                'semantic-decision','transaction','terminal','corrupt-disposition'
+            )),
+            consumer_id TEXT NOT NULL CHECK (length(CAST(consumer_id AS BLOB)) BETWEEN 1 AND 4096),
+            seal_digest TEXT NOT NULL UNIQUE CHECK (
+                length(seal_digest) = 64 AND seal_digest NOT GLOB '*[^0-9a-f]*'
+            ),
+            sealed_at TEXT NOT NULL
+        )""",
+    ),
+    (
+        "semantic_decisions",
+        """CREATE TABLE semantic_decisions (
+            intent_id TEXT NOT NULL REFERENCES capture_intents(intent_id),
+            stage TEXT NOT NULL CHECK (stage IN ('flush','feedback','feedback-verify')),
+            decision_path TEXT NOT NULL CHECK (length(CAST(decision_path AS BLOB)) BETWEEN 1 AND 4096),
+            decision_sha256 TEXT NOT NULL CHECK (
+                length(decision_sha256) = 64 AND decision_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+            active_link_digest TEXT NOT NULL CHECK (
+                length(active_link_digest) = 64 AND active_link_digest NOT GLOB '*[^0-9a-f]*'
+            ),
+            publication_state TEXT NOT NULL CHECK (publication_state = 'published'),
+            published_at TEXT NOT NULL,
+            PRIMARY KEY(intent_id, stage)
+        )""",
+    ),
+    (
+        "task_fence_epochs",
+        """CREATE TABLE task_fence_epochs (
+            task_id TEXT NOT NULL PRIMARY KEY CHECK (
+                length(CAST(task_id AS BLOB)) BETWEEN 1 AND 256
+            ),
+            last_epoch INTEGER NOT NULL CHECK (last_epoch >= 0)
+        )""",
+    ),
+    (
+        "task_fences",
+        """CREATE TABLE task_fences (
+            task_id TEXT NOT NULL PRIMARY KEY REFERENCES tasks(id),
+            mode TEXT NOT NULL CHECK (mode IN ('worker','queue-operator')),
+            token TEXT NOT NULL UNIQUE CHECK (length(CAST(token AS BLOB)) BETWEEN 1 AND 256),
+            fencing_epoch INTEGER NOT NULL CHECK (fencing_epoch >= 1),
+            canonical_role TEXT NOT NULL CHECK (canonical_role IN (
+                'queue-worker','compile','doctor','nightly','weekly','queue-operator','repair'
+            )),
+            canonical_scope TEXT NOT NULL CHECK (length(CAST(canonical_scope AS BLOB)) BETWEEN 1 AND 512),
+            canonical_actor_id TEXT NOT NULL CHECK (length(CAST(canonical_actor_id AS BLOB)) BETWEEN 1 AND 256),
+            canonical_owner_token TEXT NOT NULL CHECK (length(CAST(canonical_owner_token AS BLOB)) BETWEEN 1 AND 256),
+            canonical_fencing_epoch INTEGER NOT NULL CHECK (canonical_fencing_epoch >= 1),
+            process_id INTEGER NOT NULL CHECK (process_id > 0),
+            process_start_identity TEXT NOT NULL CHECK (
+                length(CAST(process_start_identity AS BLOB)) BETWEEN 1 AND 512
+            ),
+            heartbeat_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            CHECK (
+                (mode = 'worker' AND canonical_role IN (
+                    'queue-worker','compile','doctor','nightly','weekly'
+                ))
+                OR
+                (mode = 'queue-operator' AND canonical_role IN ('queue-operator','repair'))
+            )
+        )""",
+    ),
+    (
+        "corrupt_export_operations",
+        """CREATE TABLE corrupt_export_operations (
+            operation_id TEXT NOT NULL PRIMARY KEY CHECK (
+                length(CAST(operation_id AS BLOB)) BETWEEN 1 AND 4096
+            ),
+            task_id TEXT NOT NULL UNIQUE CHECK (length(CAST(task_id AS BLOB)) BETWEEN 1 AND 256),
+            disposition_key TEXT NOT NULL UNIQUE CHECK (
+                length(disposition_key) = 64 AND disposition_key NOT GLOB '*[^0-9a-f]*'
+            ),
+            task_fence_token_digest TEXT NOT NULL CHECK (
+                length(task_fence_token_digest) = 64
+                AND task_fence_token_digest NOT GLOB '*[^0-9a-f]*'
+            ),
+            task_fence_epoch INTEGER NOT NULL CHECK (task_fence_epoch >= 1),
+            intent_fence_digest TEXT CHECK (
+                intent_fence_digest IS NULL OR (
+                    length(intent_fence_digest) = 64
+                    AND intent_fence_digest NOT GLOB '*[^0-9a-f]*'
+                )
+            ),
+            raw_sha256 TEXT NOT NULL CHECK (length(raw_sha256) = 64 AND raw_sha256 NOT GLOB '*[^0-9a-f]*'),
+            history_sha256 TEXT NOT NULL CHECK (length(history_sha256) = 64 AND history_sha256 NOT GLOB '*[^0-9a-f]*'),
+            metadata_sha256 TEXT NOT NULL CHECK (length(metadata_sha256) = 64 AND metadata_sha256 NOT GLOB '*[^0-9a-f]*'),
+            lineage_generation INTEGER NOT NULL CHECK (lineage_generation >= 0),
+            cursor_task_id TEXT NOT NULL DEFAULT '' CHECK (length(CAST(cursor_task_id AS BLOB)) <= 256),
+            link_count INTEGER NOT NULL DEFAULT 0 CHECK (link_count >= 0),
+            page_count INTEGER NOT NULL DEFAULT 0 CHECK (page_count >= 0),
+            rolling_root TEXT NOT NULL CHECK (length(rolling_root) = 64 AND rolling_root NOT GLOB '*[^0-9a-f]*'),
+            state TEXT NOT NULL CHECK (state IN ('exporting','manifested','disposed')),
+            actor_identity TEXT NOT NULL CHECK (length(CAST(actor_identity AS BLOB)) BETWEEN 1 AND 512),
+            reason TEXT NOT NULL CHECK (length(CAST(reason AS BLOB)) BETWEEN 1 AND 4096),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )""",
+    ),
+    (
+        "corrupt_export_pages",
+        """CREATE TABLE corrupt_export_pages (
+            operation_id TEXT NOT NULL REFERENCES corrupt_export_operations(operation_id),
+            page_number INTEGER NOT NULL CHECK (page_number >= 1),
+            first_task_id TEXT NOT NULL CHECK (length(CAST(first_task_id AS BLOB)) BETWEEN 1 AND 256),
+            last_task_id TEXT NOT NULL CHECK (length(CAST(last_task_id AS BLOB)) BETWEEN 1 AND 256),
+            link_count INTEGER NOT NULL CHECK (link_count BETWEEN 1 AND 1000),
+            page_sha256 TEXT NOT NULL CHECK (length(page_sha256) = 64 AND page_sha256 NOT GLOB '*[^0-9a-f]*'),
+            rolling_root TEXT NOT NULL CHECK (length(rolling_root) = 64 AND rolling_root NOT GLOB '*[^0-9a-f]*'),
+            PRIMARY KEY(operation_id, page_number)
+        )""",
+    ),
+    (
+        "corrupt_dispositions",
+        """CREATE TABLE corrupt_dispositions (
+            task_id TEXT NOT NULL PRIMARY KEY CHECK (length(CAST(task_id AS BLOB)) BETWEEN 1 AND 256),
+            operation_id TEXT NOT NULL UNIQUE REFERENCES corrupt_export_operations(operation_id),
+            package_path TEXT NOT NULL CHECK (length(CAST(package_path AS BLOB)) BETWEEN 1 AND 4096),
+            manifest_sha256 TEXT NOT NULL CHECK (length(manifest_sha256) = 64 AND manifest_sha256 NOT GLOB '*[^0-9a-f]*'),
+            disposition_sha256 TEXT NOT NULL CHECK (length(disposition_sha256) = 64 AND disposition_sha256 NOT GLOB '*[^0-9a-f]*'),
+            active_link_digest TEXT CHECK (
+                active_link_digest IS NULL OR (
+                    length(active_link_digest) = 64
+                    AND active_link_digest NOT GLOB '*[^0-9a-f]*'
+                )
+            ),
+            disposed_at TEXT NOT NULL
+        )""",
+    ),
+    (
+        "corrupt_package_supersession_operations",
+        """CREATE TABLE corrupt_package_supersession_operations (
+            operation_id TEXT NOT NULL PRIMARY KEY CHECK (
+                length(CAST(operation_id AS BLOB)) BETWEEN 1 AND 4096
+            ),
+            package_key TEXT NOT NULL UNIQUE CHECK (
+                length(package_key) = 64 AND package_key NOT GLOB '*[^0-9a-f]*'
+            ),
+            package_path TEXT NOT NULL CHECK (length(CAST(package_path AS BLOB)) BETWEEN 1 AND 4096),
+            cursor_name TEXT NOT NULL DEFAULT '' CHECK (
+                length(CAST(cursor_name AS BLOB)) <= 256
+            ),
+            file_count INTEGER NOT NULL DEFAULT 0 CHECK (file_count >= 0),
+            page_count INTEGER NOT NULL DEFAULT 0 CHECK (page_count >= 0),
+            rolling_root TEXT NOT NULL CHECK (length(rolling_root) = 64 AND rolling_root NOT GLOB '*[^0-9a-f]*'),
+            state TEXT NOT NULL CHECK (state IN ('scanning','disposed')),
+            actor_identity TEXT NOT NULL CHECK (length(CAST(actor_identity AS BLOB)) BETWEEN 1 AND 512),
+            reason TEXT NOT NULL CHECK (length(CAST(reason AS BLOB)) BETWEEN 1 AND 4096),
+            chosen_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )""",
+    ),
+    (
+        "corrupt_package_supersession_pages",
+        """CREATE TABLE corrupt_package_supersession_pages (
+            operation_id TEXT NOT NULL REFERENCES corrupt_package_supersession_operations(operation_id),
+            page_number INTEGER NOT NULL CHECK (page_number >= 1),
+            first_name TEXT NOT NULL CHECK (
+                length(CAST(first_name AS BLOB)) BETWEEN 1 AND 256
+            ),
+            last_name TEXT NOT NULL CHECK (
+                length(CAST(last_name AS BLOB)) BETWEEN 1 AND 256
+            ),
+            file_count INTEGER NOT NULL CHECK (file_count BETWEEN 1 AND 1000),
+            page_sha256 TEXT NOT NULL CHECK (length(page_sha256) = 64 AND page_sha256 NOT GLOB '*[^0-9a-f]*'),
+            rolling_root TEXT NOT NULL CHECK (length(rolling_root) = 64 AND rolling_root NOT GLOB '*[^0-9a-f]*'),
+            PRIMARY KEY(operation_id, page_number)
+        )""",
+    ),
+    (
+        "corrupt_package_supersessions",
+        """CREATE TABLE corrupt_package_supersessions (
+            package_key TEXT NOT NULL PRIMARY KEY CHECK (
+                length(package_key) = 64 AND package_key NOT GLOB '*[^0-9a-f]*'
+            ),
+            operation_id TEXT NOT NULL UNIQUE REFERENCES corrupt_package_supersession_operations(operation_id),
+            observed_file_count INTEGER NOT NULL CHECK (observed_file_count >= 0),
+            observed_root TEXT NOT NULL CHECK (length(observed_root) = 64 AND observed_root NOT GLOB '*[^0-9a-f]*'),
+            record_path TEXT NOT NULL CHECK (length(CAST(record_path AS BLOB)) BETWEEN 1 AND 4096),
+            record_sha256 TEXT NOT NULL CHECK (length(record_sha256) = 64 AND record_sha256 NOT GLOB '*[^0-9a-f]*'),
+            disposed_at TEXT NOT NULL
+        )""",
+    ),
+    (
+        "corrupt_purge_operations",
+        """CREATE TABLE corrupt_purge_operations (
+            operation_id TEXT NOT NULL PRIMARY KEY CHECK (
+                length(CAST(operation_id AS BLOB)) BETWEEN 1 AND 4096
+            ),
+            task_id TEXT NOT NULL UNIQUE CHECK (length(CAST(task_id AS BLOB)) BETWEEN 1 AND 256),
+            purge_token TEXT NOT NULL UNIQUE CHECK (length(CAST(purge_token AS BLOB)) BETWEEN 1 AND 256),
+            expected_generation INTEGER NOT NULL CHECK (expected_generation >= 0),
+            cursor_task_id TEXT NOT NULL DEFAULT '' CHECK (length(CAST(cursor_task_id AS BLOB)) <= 256),
+            page_count INTEGER NOT NULL DEFAULT 0 CHECK (page_count >= 0),
+            rolling_root TEXT NOT NULL CHECK (length(rolling_root) = 64 AND rolling_root NOT GLOB '*[^0-9a-f]*'),
+            state TEXT NOT NULL CHECK (state IN ('purging','receipt-published')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )""",
+    ),
+    (
+        "corrupt_purge_pages",
+        """CREATE TABLE corrupt_purge_pages (
+            operation_id TEXT NOT NULL REFERENCES corrupt_purge_operations(operation_id),
+            page_number INTEGER NOT NULL CHECK (page_number >= 1),
+            first_task_id TEXT NOT NULL CHECK (length(CAST(first_task_id AS BLOB)) BETWEEN 1 AND 256),
+            last_task_id TEXT NOT NULL CHECK (length(CAST(last_task_id AS BLOB)) BETWEEN 1 AND 256),
+            deleted_link_count INTEGER NOT NULL CHECK (deleted_link_count BETWEEN 1 AND 1000),
+            page_sha256 TEXT NOT NULL CHECK (length(page_sha256) = 64 AND page_sha256 NOT GLOB '*[^0-9a-f]*'),
+            rolling_root TEXT NOT NULL CHECK (length(rolling_root) = 64 AND rolling_root NOT GLOB '*[^0-9a-f]*'),
+            expected_generation INTEGER NOT NULL CHECK (expected_generation >= 0),
+            PRIMARY KEY(operation_id, page_number)
+        )""",
+    ),
+)
+
+_QUEUE_V3_INDEX_SQL = (
+    (
+        "queue_dedupe_identity",
+        "CREATE UNIQUE INDEX queue_dedupe_identity ON tasks(dedupe_key) WHERE dedupe_key IS NOT NULL",
+    ),
+    (
+        "queue_claim_order",
+        "CREATE INDEX queue_claim_order ON tasks(state, priority DESC, available_at, created_at, id)",
+    ),
+    (
+        "queue_redrive_parent",
+        "CREATE INDEX queue_redrive_parent ON tasks(redrive_of, id)",
+    ),
+    (
+        "queue_attempt_history",
+        "CREATE INDEX queue_attempt_history ON attempt_history(task_id, sequence)",
+    ),
+    (
+        "queue_source_tasks",
+        "CREATE INDEX queue_source_tasks ON task_source_links(logical_path, source_digest, task_id)",
+    ),
+)
+
+_QUEUE_V3_TRIGGER_SQL = (
+    (
+        "attempt_history_immutable_update",
+        """CREATE TRIGGER attempt_history_immutable_update
+        BEFORE UPDATE ON attempt_history
+        BEGIN SELECT RAISE(ABORT, 'attempt history is immutable'); END""",
+    ),
+    (
+        "attempt_history_authorized_delete",
+        """CREATE TRIGGER attempt_history_authorized_delete
+        BEFORE DELETE ON attempt_history
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM task_purge_authorizations AS authorization
+            LEFT JOIN corrupt_purge_operations AS operation
+              ON operation.operation_id=authorization.operation_id
+            LEFT JOIN tasks AS authorized_task
+              ON authorized_task.id=authorization.task_id
+            WHERE authorization.task_id=OLD.task_id AND (
+                authorization.mode='ordinary'
+                OR (
+                    authorization.mode='corrupt-lineage'
+                    AND operation.state='purging'
+                    AND authorized_task.redrive_of=operation.task_id
+                    AND authorization.authorization_digest=operation.purge_token
+                )
+                OR (
+                    authorization.mode='corrupt-parent'
+                    AND operation.state='receipt-published'
+                    AND operation.task_id=authorization.task_id
+                    AND authorization.authorization_digest=operation.purge_token
+                )
+            )
+        )
+        BEGIN SELECT RAISE(ABORT, 'attempt history delete is unauthorized'); END""",
+    ),
+    (
+        "tasks_authorized_delete",
+        """CREATE TRIGGER tasks_authorized_delete
+        BEFORE DELETE ON tasks
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM task_purge_authorizations AS authorization
+            LEFT JOIN corrupt_purge_operations AS operation
+              ON operation.operation_id=authorization.operation_id
+            WHERE authorization.task_id=OLD.id AND (
+                authorization.mode='ordinary'
+                OR (
+                    authorization.mode='corrupt-lineage'
+                    AND operation.state='purging'
+                    AND OLD.redrive_of=operation.task_id
+                    AND authorization.authorization_digest=operation.purge_token
+                )
+                OR (
+                    authorization.mode='corrupt-parent'
+                    AND operation.state='receipt-published'
+                    AND operation.task_id=OLD.id
+                    AND authorization.authorization_digest=operation.purge_token
+                )
+            )
+        )
+        BEGIN SELECT RAISE(ABORT, 'task delete is unauthorized'); END""",
+    ),
+    (
+        "attempt_history_bounded_insert",
+        """CREATE TRIGGER attempt_history_bounded_insert
+        BEFORE INSERT ON attempt_history
+        WHEN (SELECT COUNT(*) FROM attempt_history WHERE task_id=NEW.task_id) >= 100
+        BEGIN SELECT RAISE(ABORT, 'attempt history limit exceeded'); END""",
+    ),
+    (
+        "capture_task_links_immutable_update",
+        """CREATE TRIGGER capture_task_links_immutable_update
+        BEFORE UPDATE ON capture_task_links
+        BEGIN SELECT RAISE(ABORT, 'capture task links are immutable'); END""",
+    ),
+    (
+        "capture_task_links_authorized_delete",
+        """CREATE TRIGGER capture_task_links_authorized_delete
+        BEFORE DELETE ON capture_task_links
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM task_purge_authorizations AS authorization
+            LEFT JOIN corrupt_purge_operations AS operation
+              ON operation.operation_id=authorization.operation_id
+            LEFT JOIN tasks AS authorized_task
+              ON authorized_task.id=authorization.task_id
+            WHERE authorization.task_id=OLD.task_id AND (
+                authorization.mode='ordinary'
+                OR (
+                    authorization.mode='corrupt-lineage'
+                    AND operation.state='purging'
+                    AND authorized_task.redrive_of=operation.task_id
+                    AND authorization.authorization_digest=operation.purge_token
+                )
+                OR (
+                    authorization.mode='corrupt-parent'
+                    AND operation.state='receipt-published'
+                    AND operation.task_id=authorization.task_id
+                    AND authorization.authorization_digest=operation.purge_token
+                )
+            )
+        )
+        BEGIN SELECT RAISE(ABORT, 'capture task link delete is unauthorized'); END""",
+    ),
+    (
+        "capture_task_link_resolutions_immutable_update",
+        """CREATE TRIGGER capture_task_link_resolutions_immutable_update
+        BEFORE UPDATE ON capture_task_link_resolutions
+        BEGIN SELECT RAISE(ABORT, 'capture task link resolutions are immutable'); END""",
+    ),
+    (
+        "capture_task_link_resolutions_authorized_delete",
+        """CREATE TRIGGER capture_task_link_resolutions_authorized_delete
+        BEFORE DELETE ON capture_task_link_resolutions
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM task_purge_authorizations AS authorization
+            LEFT JOIN corrupt_purge_operations AS operation
+              ON operation.operation_id=authorization.operation_id
+            LEFT JOIN tasks AS authorized_task
+              ON authorized_task.id=authorization.task_id
+            WHERE authorization.task_id=OLD.task_id AND (
+                authorization.mode='ordinary'
+                OR (
+                    authorization.mode='corrupt-lineage'
+                    AND operation.state='purging'
+                    AND authorized_task.redrive_of=operation.task_id
+                    AND authorization.authorization_digest=operation.purge_token
+                )
+                OR (
+                    authorization.mode='corrupt-parent'
+                    AND operation.state='receipt-published'
+                    AND operation.task_id=authorization.task_id
+                    AND authorization.authorization_digest=operation.purge_token
+                )
+            )
+        )
+        BEGIN SELECT RAISE(ABORT, 'capture task link resolution delete is unauthorized'); END""",
+    ),
+    (
+        "capture_task_link_seals_immutable_update",
+        """CREATE TRIGGER capture_task_link_seals_immutable_update
+        BEFORE UPDATE ON capture_task_link_seals
+        BEGIN SELECT RAISE(ABORT, 'capture task link seals are immutable'); END""",
+    ),
+    (
+        "capture_task_link_seals_authorized_delete",
+        """CREATE TRIGGER capture_task_link_seals_authorized_delete
+        BEFORE DELETE ON capture_task_link_seals
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM task_purge_authorizations AS authorization
+            LEFT JOIN corrupt_purge_operations AS operation
+              ON operation.operation_id=authorization.operation_id
+            LEFT JOIN tasks AS authorized_task
+              ON authorized_task.id=authorization.task_id
+            WHERE authorization.task_id=OLD.task_id AND (
+                authorization.mode='ordinary'
+                OR (
+                    authorization.mode='corrupt-lineage'
+                    AND operation.state='purging'
+                    AND authorized_task.redrive_of=operation.task_id
+                    AND authorization.authorization_digest=operation.purge_token
+                )
+                OR (
+                    authorization.mode='corrupt-parent'
+                    AND operation.state='receipt-published'
+                    AND operation.task_id=authorization.task_id
+                    AND authorization.authorization_digest=operation.purge_token
+                )
+            )
+        )
+        BEGIN SELECT RAISE(ABORT, 'capture task link seal delete is unauthorized'); END""",
+    ),
+    (
+        "semantic_decisions_immutable_update",
+        """CREATE TRIGGER semantic_decisions_immutable_update
+        BEFORE UPDATE ON semantic_decisions
+        BEGIN SELECT RAISE(ABORT, 'semantic decisions are immutable'); END""",
+    ),
+    (
+        "semantic_decisions_immutable_delete",
+        """CREATE TRIGGER semantic_decisions_immutable_delete
+        BEFORE DELETE ON semantic_decisions
+        BEGIN SELECT RAISE(ABORT, 'semantic decisions are immutable'); END""",
+    ),
+    (
+        "queue_lineage_guard_insert",
+        """CREATE TRIGGER queue_lineage_guard_insert
+        BEFORE INSERT ON tasks
+        WHEN NEW.redrive_of IS NOT NULL AND EXISTS (
+            SELECT 1 FROM tasks parent
+            WHERE parent.id=NEW.redrive_of
+              AND parent.state IN ('quarantine_pending','quarantined','purge_pending')
+        )
+        BEGIN SELECT RAISE(ABORT, 'redrive lineage is frozen'); END""",
+    ),
+    (
+        "queue_lineage_insert",
+        """CREATE TRIGGER queue_lineage_insert
+        AFTER INSERT ON tasks
+        WHEN NEW.redrive_of IS NOT NULL
+        BEGIN
+            UPDATE tasks SET lineage_generation=lineage_generation+1
+            WHERE id=NEW.redrive_of;
+        END""",
+    ),
+    (
+        "queue_lineage_guard_update",
+        """CREATE TRIGGER queue_lineage_guard_update
+        BEFORE UPDATE OF redrive_of ON tasks
+        WHEN OLD.redrive_of IS NOT NEW.redrive_of AND (
+            EXISTS (
+                SELECT 1 FROM tasks parent
+                WHERE parent.id=OLD.redrive_of
+                  AND parent.state IN ('quarantine_pending','quarantined','purge_pending')
+            ) OR EXISTS (
+                SELECT 1 FROM tasks parent
+                WHERE parent.id=NEW.redrive_of
+                  AND parent.state IN ('quarantine_pending','quarantined','purge_pending')
+            )
+        )
+        BEGIN SELECT RAISE(ABORT, 'redrive lineage is frozen'); END""",
+    ),
+    (
+        "queue_lineage_update_old",
+        """CREATE TRIGGER queue_lineage_update_old
+        AFTER UPDATE OF redrive_of ON tasks
+        WHEN OLD.redrive_of IS NOT NEW.redrive_of AND OLD.redrive_of IS NOT NULL
+        BEGIN
+            UPDATE tasks SET lineage_generation=lineage_generation+1
+            WHERE id=OLD.redrive_of;
+        END""",
+    ),
+    (
+        "queue_lineage_update_new",
+        """CREATE TRIGGER queue_lineage_update_new
+        AFTER UPDATE OF redrive_of ON tasks
+        WHEN OLD.redrive_of IS NOT NEW.redrive_of AND NEW.redrive_of IS NOT NULL
+        BEGIN
+            UPDATE tasks SET lineage_generation=lineage_generation+1
+            WHERE id=NEW.redrive_of;
+        END""",
+    ),
+    (
+        "queue_lineage_guard_delete",
+        """CREATE TRIGGER queue_lineage_guard_delete
+        BEFORE DELETE ON tasks
+        WHEN OLD.redrive_of IS NOT NULL
+          AND EXISTS (
+              SELECT 1 FROM tasks parent
+              WHERE parent.id=OLD.redrive_of
+                AND parent.state IN ('quarantine_pending','quarantined','purge_pending')
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM task_purge_authorizations
+              JOIN corrupt_purge_operations
+                ON corrupt_purge_operations.operation_id=task_purge_authorizations.operation_id
+               AND corrupt_purge_operations.task_id=task_purge_authorizations.task_id
+              WHERE task_purge_authorizations.task_id=OLD.redrive_of
+                AND task_purge_authorizations.mode='corrupt-lineage'
+                AND corrupt_purge_operations.state='purging'
+                AND task_purge_authorizations.authorization_digest=
+                    corrupt_purge_operations.purge_token
+          )
+        BEGIN SELECT RAISE(ABORT, 'redrive lineage is frozen'); END""",
+    ),
+    (
+        "queue_lineage_delete",
+        """CREATE TRIGGER queue_lineage_delete
+        AFTER DELETE ON tasks
+        WHEN OLD.redrive_of IS NOT NULL
+        BEGIN
+            UPDATE tasks SET lineage_generation=lineage_generation+1
+            WHERE id=OLD.redrive_of;
+        END""",
+    ),
+)
+
+_QUEUE_V3_TRIGGER_SQL += tuple(
+    (
+        f"{table}_immutable_{operation}",
+        f"""CREATE TRIGGER {table}_immutable_{operation}
+        BEFORE {operation.upper()} ON {table}
+        BEGIN SELECT RAISE(ABORT, '{table} rows are immutable'); END""",
+    )
+    for table in (
+        "corrupt_export_pages",
+        "corrupt_dispositions",
+        "corrupt_package_supersession_pages",
+        "corrupt_package_supersessions",
+        "corrupt_purge_pages",
+    )
+    for operation in ("update", "delete")
+)
+
+_QUEUE_V3_TRIGGER_SQL += (
+    (
+        "corrupt_export_operations_immutable_delete",
+        """CREATE TRIGGER corrupt_export_operations_immutable_delete
+        BEFORE DELETE ON corrupt_export_operations
+        BEGIN SELECT RAISE(ABORT, 'corrupt export operations cannot be deleted'); END""",
+    ),
+    (
+        "corrupt_export_operations_monotonic_update",
+        """CREATE TRIGGER corrupt_export_operations_monotonic_update
+        BEFORE UPDATE ON corrupt_export_operations
+        WHEN NOT (
+            NEW.operation_id IS OLD.operation_id
+            AND NEW.task_id IS OLD.task_id
+            AND NEW.disposition_key IS OLD.disposition_key
+            AND NEW.task_fence_token_digest IS OLD.task_fence_token_digest
+            AND NEW.task_fence_epoch IS OLD.task_fence_epoch
+            AND NEW.intent_fence_digest IS OLD.intent_fence_digest
+            AND NEW.raw_sha256 IS OLD.raw_sha256
+            AND NEW.history_sha256 IS OLD.history_sha256
+            AND NEW.metadata_sha256 IS OLD.metadata_sha256
+            AND NEW.lineage_generation IS OLD.lineage_generation
+            AND NEW.actor_identity IS OLD.actor_identity
+            AND NEW.reason IS OLD.reason
+            AND NEW.created_at IS OLD.created_at
+            AND NEW.cursor_task_id >= OLD.cursor_task_id
+            AND NEW.link_count >= OLD.link_count
+            AND NEW.page_count >= OLD.page_count
+            AND NEW.updated_at >= OLD.updated_at
+            AND (
+                NEW.state = OLD.state
+                OR (OLD.state='exporting' AND NEW.state='manifested')
+                OR (OLD.state='manifested' AND NEW.state='disposed')
+            )
+            AND (
+                NEW.rolling_root IS OLD.rolling_root
+                OR NEW.cursor_task_id > OLD.cursor_task_id
+                OR NEW.link_count > OLD.link_count
+                OR NEW.page_count > OLD.page_count
+            )
+        )
+        BEGIN SELECT RAISE(ABORT, 'corrupt export operation update is not monotonic'); END""",
+    ),
+    (
+        "corrupt_package_supersession_operations_immutable_delete",
+        """CREATE TRIGGER corrupt_package_supersession_operations_immutable_delete
+        BEFORE DELETE ON corrupt_package_supersession_operations
+        BEGIN SELECT RAISE(ABORT, 'package supersession operations cannot be deleted'); END""",
+    ),
+    (
+        "corrupt_package_supersession_operations_monotonic_update",
+        """CREATE TRIGGER corrupt_package_supersession_operations_monotonic_update
+        BEFORE UPDATE ON corrupt_package_supersession_operations
+        WHEN NOT (
+            NEW.operation_id IS OLD.operation_id
+            AND NEW.package_key IS OLD.package_key
+            AND NEW.package_path IS OLD.package_path
+            AND NEW.actor_identity IS OLD.actor_identity
+            AND NEW.reason IS OLD.reason
+            AND NEW.chosen_at IS OLD.chosen_at
+            AND NEW.created_at IS OLD.created_at
+            AND NEW.cursor_name >= OLD.cursor_name
+            AND NEW.file_count >= OLD.file_count
+            AND NEW.page_count >= OLD.page_count
+            AND NEW.updated_at >= OLD.updated_at
+            AND (
+                NEW.state = OLD.state
+                OR (OLD.state='scanning' AND NEW.state='disposed')
+            )
+            AND (
+                NEW.rolling_root IS OLD.rolling_root
+                OR NEW.cursor_name > OLD.cursor_name
+                OR NEW.file_count > OLD.file_count
+                OR NEW.page_count > OLD.page_count
+            )
+        )
+        BEGIN SELECT RAISE(ABORT, 'package supersession update is not monotonic'); END""",
+    ),
+    (
+        "corrupt_purge_operations_immutable_delete",
+        """CREATE TRIGGER corrupt_purge_operations_immutable_delete
+        BEFORE DELETE ON corrupt_purge_operations
+        BEGIN SELECT RAISE(ABORT, 'corrupt purge operations cannot be deleted'); END""",
+    ),
+    (
+        "corrupt_purge_operations_monotonic_update",
+        """CREATE TRIGGER corrupt_purge_operations_monotonic_update
+        BEFORE UPDATE ON corrupt_purge_operations
+        WHEN NOT (
+            NEW.operation_id IS OLD.operation_id
+            AND NEW.task_id IS OLD.task_id
+            AND NEW.purge_token IS OLD.purge_token
+            AND NEW.expected_generation >= OLD.expected_generation
+            AND NEW.created_at IS OLD.created_at
+            AND NEW.cursor_task_id >= OLD.cursor_task_id
+            AND NEW.page_count >= OLD.page_count
+            AND NEW.updated_at >= OLD.updated_at
+            AND (
+                NEW.state = OLD.state
+                OR (OLD.state='purging' AND NEW.state='receipt-published')
+            )
+            AND (
+                NEW.rolling_root IS OLD.rolling_root
+                OR NEW.cursor_task_id > OLD.cursor_task_id
+                OR NEW.page_count > OLD.page_count
+                OR NEW.expected_generation > OLD.expected_generation
+                OR NEW.state != OLD.state
+            )
+        )
+        BEGIN SELECT RAISE(ABORT, 'corrupt purge operation update is not monotonic'); END""",
+    ),
+)
+
+QUEUE_V3_SCHEMA_SHA256 = sha256_bytes(
+    canonical_json_bytes(
+        {
+            "tables": [list(item) for item in _QUEUE_V3_TABLE_SQL],
+            "indexes": [list(item) for item in _QUEUE_V3_INDEX_SQL],
+            "triggers": [list(item) for item in _QUEUE_V3_TRIGGER_SQL],
+            "application_id": _QUEUE_V3_CONTRACT.application_id,
+            "user_version": _QUEUE_V3_CONTRACT.user_version,
+        }
+    )
+)
+
+
+def _normalized_sql(value: str | None) -> str:
+    return " ".join((value or "").split()).casefold()
+
+
+def _queue_v3_object_matches(
+    database: sqlite3.Connection, kind: str, name: str, sql: str
+) -> bool:
+    row = database.execute(
+        "SELECT sql FROM sqlite_schema WHERE type=? AND name=?", (kind, name)
+    ).fetchone()
+    return row is not None and _normalized_sql(row[0]) == _normalized_sql(sql)
+
+
+def _queue_v3_statements(
+    *, include_triggers: bool = True
+) -> tuple[MigrationStatement, ...]:
+    statements: list[MigrationStatement] = []
+    definitions_by_kind = [
+        ("table", _QUEUE_V3_TABLE_SQL),
+        ("index", _QUEUE_V3_INDEX_SQL),
+    ]
+    if include_triggers:
+        definitions_by_kind.append(("trigger", _QUEUE_V3_TRIGGER_SQL))
+    for kind, definitions in definitions_by_kind:
+        for name, sql in definitions:
+            statements.append(
+                MigrationStatement(
+                    name=f"create_{name}",
+                    sql=sql,
+                    completed=lambda database, expected_kind=kind, expected_name=name, expected_sql=sql: (
+                        _queue_v3_object_matches(
+                            database, expected_kind, expected_name, expected_sql
+                        )
+                    ),
+                )
+            )
+    return tuple(statements)
+
+
+def _queue_v3_schema_complete(
+    database: sqlite3.Connection, *, include_triggers: bool = True
+) -> bool:
+    definitions_by_kind = [
+        ("table", _QUEUE_V3_TABLE_SQL),
+        ("index", _QUEUE_V3_INDEX_SQL),
+    ]
+    if include_triggers:
+        definitions_by_kind.append(("trigger", _QUEUE_V3_TRIGGER_SQL))
+    return all(
+        _queue_v3_object_matches(database, kind, name, sql)
+        for kind, definitions in definitions_by_kind
+        for name, sql in definitions
+    )
+
+
+def _migration_error(code: str, message: str) -> OperationalDatabaseContractError:
+    error = OperationalDatabaseContractError(message)
+    error.code = code
+    return error
+
+
+def _repair_partial_queue_v3_schema(
+    database: sqlite3.Connection, *, allow_populated_rebuild: bool
+) -> None:
+    expected = {
+        (kind, name): sql
+        for kind, definitions in (
+            ("table", _QUEUE_V3_TABLE_SQL),
+            ("index", _QUEUE_V3_INDEX_SQL),
+            ("trigger", _QUEUE_V3_TRIGGER_SQL),
+        )
+        for name, sql in definitions
+    }
+    existing = database.execute(
+        """SELECT type, name, sql FROM sqlite_schema
+           WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"""
+    ).fetchall()
+    unexpected = [
+        (str(row["type"]), str(row["name"]))
+        for row in existing
+        if (str(row["type"]), str(row["name"])) not in expected
+    ]
+    if unexpected:
+        if not allow_populated_rebuild:
+            raise _migration_error(
+                "queue_v3_schema_conflict",
+                "queue v3 candidate has unexpected schema objects",
+            )
+        for kind, name in sorted(
+            unexpected,
+            key=lambda item: ({"trigger": 0, "index": 1, "table": 2}.get(item[0], 3), item[1]),
+        ):
+            keyword = {"index": "INDEX", "table": "TABLE", "trigger": "TRIGGER"}.get(
+                kind
+            )
+            if keyword is None:
+                raise _migration_error(
+                    "queue_v3_schema_conflict",
+                    "queue v3 candidate has an unsupported schema object",
+                )
+            with begin_immediate(database):
+                database.execute(f'DROP {keyword} "{name}"')
+        existing = database.execute(
+            """SELECT type, name, sql FROM sqlite_schema
+               WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"""
+        ).fetchall()
+    malformed = [
+        (str(row["type"]), str(row["name"]))
+        for row in existing
+        if not _queue_v3_object_matches(
+            database,
+            str(row["type"]),
+            str(row["name"]),
+            expected[(str(row["type"]), str(row["name"]))],
+        )
+    ]
+    for kind, name in malformed:
+        if kind == "table":
+            try:
+                populated = database.execute(
+                    f'SELECT 1 FROM "{name}" LIMIT 1'
+                ).fetchone()
+            except sqlite3.DatabaseError:
+                populated = True
+            if populated is not None and not allow_populated_rebuild:
+                raise _migration_error(
+                    "queue_v3_schema_conflict",
+                    "queue v3 candidate has a populated partial table",
+                )
+    for kind, name in sorted(
+        malformed,
+        key=lambda item: ({"trigger": 0, "index": 1, "table": 2}[item[0]], item[1]),
+    ):
+        keyword = {"index": "INDEX", "table": "TABLE", "trigger": "TRIGGER"}[kind]
+        with begin_immediate(database):
+            database.execute(f'DROP {keyword} "{name}"')
+
+
+def _queue_v2_tables(database: sqlite3.Connection) -> set[str]:
+    return {
+        str(row[0])
+        for row in database.execute(
+            "SELECT name FROM sqlite_schema WHERE type='table'"
+        ).fetchall()
+    }
+
+
+_QUEUE_V2_SCHEMA_OBJECTS = {
+    ("index", "queue_claim_order"),
+    ("table", "attempt_history"),
+    ("table", "queue_ownership"),
+    ("table", "source_failures"),
+    ("table", "source_fences"),
+    ("table", "tasks"),
+    ("trigger", "attempt_history_immutable_delete"),
+    ("trigger", "attempt_history_immutable_update"),
+}
+
+
+def _validate_queue_v2_schema_objects(database: sqlite3.Connection) -> None:
+    objects = {
+        (str(row[0]), str(row[1]))
+        for row in database.execute(
+            """SELECT type, name FROM sqlite_schema
+               WHERE name NOT LIKE 'sqlite_%'"""
+        )
+    }
+    if not objects <= _QUEUE_V2_SCHEMA_OBJECTS:
+        raise _migration_error(
+            "queue_v2_schema_unknown",
+            "queue v2 source has unknown schema objects",
+        )
+
+
+def _queue_v2_columns(database: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row["name"]) for row in database.execute(f'PRAGMA table_info("{table}")')}
+
+
+def _queue_v3_source_links(payload_bytes: bytes) -> tuple[tuple[str, str], ...]:
+    try:
+        payload = json.loads(payload_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return ()
+    paths: set[str] = set()
+    digests: set[str] = set()
+    daily_ids: set[str] = set()
+
+    def visit(value: object) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                normalized = str(key).casefold()
+                if isinstance(item, str):
+                    if normalized in {"source_path", "logical_path"}:
+                        paths.add(item)
+                    elif normalized in {"source_digest", "digest", "hash"}:
+                        digests.add(item)
+                    elif normalized == "daily_id":
+                        daily_ids.add(item)
+                visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    visit(payload)
+    if not paths and len(daily_ids) == 1:
+        paths.add(f"knowledge/daily/{next(iter(daily_ids))}.md")
+    if not paths and not digests:
+        return ()
+    if len(paths) != 1 or len(digests) != 1:
+        raise _migration_error(
+            "queue_v2_source_identity_ambiguous",
+            "queue v2 payload has an ambiguous source identity",
+        )
+    logical_path = next(iter(paths))
+    source_digest = next(iter(digests))
+    try:
+        MemoryQueue._validate_failure_identity(logical_path, source_digest)
+    except ValueError as exc:
+        raise _migration_error(
+            "queue_v2_source_identity_ambiguous",
+            "queue v2 payload has an invalid source identity",
+        ) from exc
+    return ((logical_path, source_digest),)
+
+
+def _queue_v3_row_matches(
+    database: sqlite3.Connection,
+    table: str,
+    key_column: str,
+    key: object,
+    columns: tuple[str, ...],
+    values: tuple[object, ...],
+) -> bool:
+    selected = ", ".join(f'"{column}"' for column in columns)
+    row = database.execute(
+        f'SELECT {selected} FROM "{table}" WHERE "{key_column}"=?', (key,)
+    ).fetchone()
+    return row is not None and tuple(row) == values
+
+
+def _queue_v3_insert_statement(
+    *,
+    name: str,
+    table: str,
+    columns: tuple[str, ...],
+    values: tuple[object, ...],
+    key_column: str,
+    key: object,
+) -> MigrationStatement:
+    quoted = ", ".join(f'"{column}"' for column in columns)
+    placeholders = ", ".join("?" for _ in columns)
+    return MigrationStatement(
+        name=name,
+        sql=f'INSERT OR IGNORE INTO "{table}" ({quoted}) VALUES ({placeholders})',
+        parameters=values,
+        completed=lambda database: _queue_v3_row_matches(
+            database, table, key_column, key, columns, values
+        ),
+    )
+
+
+def _queue_v2_migration_statements(
+    source: sqlite3.Connection,
+) -> tuple[tuple[MigrationStatement, ...], dict[str, int]]:
+    _validate_queue_v2_schema_objects(source)
+    tables = _queue_v2_tables(source)
+    if "tasks" not in tables:
+        raise _migration_error(
+            "queue_v2_schema_incomplete", "queue v2 source has no tasks table"
+        )
+    required_task_columns = {
+        "id",
+        "kind",
+        "handler_version",
+        "payload_json",
+        "input_hash",
+        "dedupe_key",
+        "state",
+        "priority",
+        "created_at",
+        "updated_at",
+        "available_at",
+        "attempts",
+        "last_attempt_at",
+        "lease_owner",
+        "lease_token",
+        "lease_expires_at",
+        "lease_heartbeat_at",
+        "attempt_started_at",
+        "error_code",
+        "blocked_capability",
+        "result_reference",
+        "result_sha256",
+        "result_operation_id",
+        "redrive_of",
+    }
+    if not required_task_columns <= _queue_v2_columns(source, "tasks"):
+        raise _migration_error(
+            "queue_v2_schema_incomplete", "queue v2 tasks schema is incomplete"
+        )
+    if "source_fences" in tables and source.execute(
+        "SELECT 1 FROM source_fences LIMIT 1"
+    ).fetchone() is not None:
+        raise _migration_error(
+            "queue_v2_source_fence_ambiguous",
+            "queue v2 source fences lack process-start identity",
+        )
+    if "queue_ownership" in tables and source.execute(
+        "SELECT 1 FROM queue_ownership WHERE token IS NOT NULL LIMIT 1"
+    ).fetchone() is not None:
+        raise _migration_error(
+            "queue_v2_owner_ambiguous",
+            "queue v2 ownership lacks canonical process identity",
+        )
+
+    statements: list[MigrationStatement] = []
+    summary = {
+        "attempt_history": 0,
+        "payload_hash_mismatches": 0,
+        "source_failures": 0,
+        "source_fences": 0,
+        "task_source_links": 0,
+        "tasks": 0,
+    }
+    task_columns = (
+        "id",
+        "kind",
+        "handler_version",
+        "payload_blob",
+        "input_hash",
+        "dedupe_key",
+        "state",
+        "priority",
+        "created_at",
+        "updated_at",
+        "available_at",
+        "attempts",
+        "last_attempt_at",
+        "lease_owner",
+        "lease_token",
+        "lease_expires_at",
+        "lease_heartbeat_at",
+        "attempt_started_at",
+        "error_code",
+        "blocked_capability",
+        "result_reference",
+        "result_sha256",
+        "result_operation_id",
+        "redrive_of",
+        "lineage_generation",
+    )
+    task_links: list[tuple[str, str, str]] = []
+    task_rows = list(source.execute("SELECT * FROM tasks ORDER BY id"))
+    rows_by_id = {str(row["id"]): row for row in task_rows}
+    if len(rows_by_id) != len(task_rows):
+        raise _migration_error(
+            "queue_v2_task_identity_conflict", "queue v2 task IDs are not unique"
+        )
+    child_counts = {task_id: 0 for task_id in rows_by_id}
+    for row in task_rows:
+        parent = row["redrive_of"]
+        if parent is not None:
+            if str(parent) not in rows_by_id:
+                raise _migration_error(
+                    "queue_v2_lineage_ambiguous",
+                    "queue v2 redrive parent is missing",
+                )
+            child_counts[str(parent)] += 1
+    ordered_rows: list[sqlite3.Row] = []
+    visited: set[str] = set()
+    visiting: set[str] = set()
+
+    def visit_task(task_id: str) -> None:
+        if task_id in visited:
+            return
+        if task_id in visiting:
+            raise _migration_error(
+                "queue_v2_lineage_ambiguous", "queue v2 redrive lineage is cyclic"
+            )
+        visiting.add(task_id)
+        row = rows_by_id[task_id]
+        parent = row["redrive_of"]
+        if parent is not None:
+            visit_task(str(parent))
+        visiting.remove(task_id)
+        visited.add(task_id)
+        ordered_rows.append(row)
+
+    for task_id in sorted(rows_by_id):
+        visit_task(task_id)
+
+    for row in ordered_rows:
+        payload_text = row["payload_json"]
+        if not isinstance(payload_text, str):
+            raise _migration_error(
+                "queue_v2_payload_not_text", "queue v2 payload is not TEXT"
+            )
+        try:
+            payload_bytes = payload_text.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise _migration_error(
+                "queue_v2_payload_not_utf8", "queue v2 payload is not UTF-8"
+            ) from exc
+        if len(payload_bytes) > _MAX_QUEUE_PAYLOAD_BYTES:
+            raise _migration_error(
+                "queue_v2_payload_too_large", "queue v2 payload exceeds 1 MiB"
+            )
+        attempts = row["attempts"]
+        if not isinstance(attempts, int) or isinstance(attempts, bool) or not 0 <= attempts <= 100:
+            raise _migration_error(
+                "queue_v2_attempts_out_of_range", "queue v2 attempts exceed v3 bounds"
+            )
+        payload_validation = validate_payload_blob(
+            payload_bytes, row["input_hash"], parse=True
+        )
+        mismatch = payload_validation.code is not None
+        state = "dead" if mismatch else row["state"]
+        error_code = "payload_hash_mismatch" if mismatch else row["error_code"]
+        values = (
+            row["id"],
+            row["kind"],
+            row["handler_version"],
+            payload_bytes,
+            row["input_hash"],
+            row["dedupe_key"],
+            state,
+            row["priority"],
+            row["created_at"],
+            row["updated_at"],
+            row["available_at"],
+            attempts,
+            row["last_attempt_at"],
+            row["lease_owner"],
+            row["lease_token"],
+            row["lease_expires_at"],
+            row["lease_heartbeat_at"],
+            row["attempt_started_at"],
+            error_code,
+            row["blocked_capability"],
+            row["result_reference"],
+            row["result_sha256"],
+            row["result_operation_id"],
+            row["redrive_of"],
+            child_counts[str(row["id"])],
+        )
+        task_id = str(row["id"])
+        statements.append(
+            _queue_v3_insert_statement(
+                name=f"migrate_task_{sha256_bytes(task_id.encode('utf-8'))[:16]}",
+                table="tasks",
+                columns=task_columns,
+                values=values,
+                key_column="id",
+                key=row["id"],
+            )
+        )
+        summary["tasks"] += 1
+        if mismatch:
+            summary["payload_hash_mismatches"] += 1
+        else:
+            task_links.extend(
+                (task_id, logical_path, source_digest)
+                for logical_path, source_digest in _queue_v3_source_links(payload_bytes)
+            )
+
+    if "attempt_history" in tables:
+        history_columns = (
+            "sequence",
+            "task_id",
+            "attempt",
+            "started_at",
+            "finished_at",
+            "outcome",
+            "error_code",
+        )
+        if set(history_columns) != _queue_v2_columns(source, "attempt_history"):
+            raise _migration_error(
+                "queue_v2_schema_incomplete", "queue v2 attempt history schema is incomplete"
+            )
+        for row in source.execute("SELECT * FROM attempt_history ORDER BY sequence"):
+            values = tuple(row[column] for column in history_columns)
+            statements.append(
+                _queue_v3_insert_statement(
+                    name=f"migrate_attempt_{int(row['sequence'])}",
+                    table="attempt_history",
+                    columns=history_columns,
+                    values=values,
+                    key_column="sequence",
+                    key=row["sequence"],
+                )
+            )
+            summary["attempt_history"] += 1
+
+    for task_id, logical_path, source_digest in sorted(task_links):
+        values = (task_id, logical_path, source_digest)
+        identity = sha256_bytes(canonical_json_bytes(list(values)))[:16]
+        statements.append(
+            MigrationStatement(
+                name=f"migrate_task_source_link_{identity}",
+                sql="""INSERT OR IGNORE INTO task_source_links(
+                    task_id, logical_path, source_digest
+                ) VALUES (?, ?, ?)""",
+                parameters=values,
+                completed=lambda database, expected=values: database.execute(
+                    """SELECT 1 FROM task_source_links
+                       WHERE task_id=? AND logical_path=? AND source_digest=?""",
+                    expected,
+                ).fetchone()
+                is not None,
+            )
+        )
+        summary["task_source_links"] += 1
+
+    if "source_failures" in tables:
+        failure_columns = (
+            "logical_path",
+            "source_digest",
+            "error_code",
+            "producer",
+            "updated_at",
+        )
+        if set(failure_columns) != _queue_v2_columns(source, "source_failures"):
+            raise _migration_error(
+                "queue_v2_schema_incomplete", "queue v2 source failure schema is incomplete"
+            )
+        for row in source.execute(
+            "SELECT * FROM source_failures ORDER BY logical_path, source_digest"
+        ):
+            values = tuple(row[column] for column in failure_columns)
+            identity = sha256_bytes(canonical_json_bytes(list(values[:2])))[:16]
+            statements.append(
+                MigrationStatement(
+                    name=f"migrate_source_failure_{identity}",
+                    sql="""INSERT OR IGNORE INTO source_failures(
+                        logical_path, source_digest, error_code, producer, updated_at
+                    ) VALUES (?, ?, ?, ?, ?)""",
+                    parameters=values,
+                    completed=lambda database, expected=values: tuple(
+                        database.execute(
+                            """SELECT error_code, producer, updated_at FROM source_failures
+                               WHERE logical_path=? AND source_digest=?""",
+                            expected[:2],
+                        ).fetchone()
+                        or ()
+                    )
+                    == tuple(expected[2:]),
+                )
+            )
+            summary["source_failures"] += 1
+    return tuple(statements), summary
+
+
+def _queue_v2_reconciliation_complete(
+    database: sqlite3.Connection,
+    statements: tuple[MigrationStatement, ...],
+    summary: Mapping[str, int],
+) -> bool:
+    if not all(statement.completed(database) for statement in statements):
+        return False
+    expected = {
+        "attempt_history": summary["attempt_history"],
+        "source_failures": summary["source_failures"],
+        "source_fences": summary["source_fences"],
+        "task_source_links": summary["task_source_links"],
+        "tasks": summary["tasks"],
+    }
+    return all(
+        database.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] == count
+        for table, count in expected.items()
+    ) and all(
+        database.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] == 0
+        for table in (
+            "capture_intents",
+            "capture_task_link_resolutions",
+            "capture_task_link_seals",
+            "capture_task_links",
+            "corrupt_dispositions",
+            "corrupt_export_operations",
+            "corrupt_export_pages",
+            "corrupt_package_supersession_operations",
+            "corrupt_package_supersession_pages",
+            "corrupt_package_supersessions",
+            "corrupt_purge_operations",
+            "corrupt_purge_pages",
+            "queue_ownership",
+            "semantic_decisions",
+            "task_fence_epochs",
+            "task_fences",
+            "task_purge_authorizations",
+        )
+    )
+
+
+def _queue_v3_row_counts(database: sqlite3.Connection) -> dict[str, int]:
+    return {
+        table: int(database.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
+        for table, _sql in _QUEUE_V3_TABLE_SQL
+    }
+
+
+def _reject_queue_source_alias(candidate: Path, source: Path) -> None:
+    if candidate.absolute() == source.absolute():
+        raise ValueError("queue v3 candidate and v2 source are the same file")
+    try:
+        candidate_present = candidate.exists() or candidate.is_symlink()
+        if candidate_present and os.path.samefile(candidate, source):
+            raise ValueError("queue v3 candidate and v2 source are the same file")
+    except ValueError:
+        raise
+    except OSError as exc:
+        raise PermissionError("queue v3 candidate identity could not be verified") from exc
+
+
+def _queue_v3_payloads_valid(database: sqlite3.Connection) -> bool:
+    for row in database.execute(
+        "SELECT payload_blob, input_hash, state, error_code FROM tasks"
+    ):
+        payload_bytes = bytes(row["payload_blob"])
+        validation = validate_payload_blob(
+            payload_bytes, row["input_hash"], parse=True
+        )
+        if validation.code is not None and (
+            row["state"] != "dead" or row["error_code"] != "payload_hash_mismatch"
+        ):
+            return False
+    return True
+
+
+def initialize_queue_v3_candidate(
+    path: Path,
+    *,
+    source_v2: Path | None,
+    killpoint: Callable[[str], None] | None = None,
+) -> dict[str, int]:
+    """Create or resume an unpublished queue v3 candidate database."""
+    candidate = Path(path)
+    source_path = Path(source_v2) if source_v2 is not None else None
+    with ExitStack() as stack:
+        migration_statements: tuple[MigrationStatement, ...] = ()
+        summary = {
+            "attempt_history": 0,
+            "payload_hash_mismatches": 0,
+            "source_failures": 0,
+            "source_fences": 0,
+            "task_source_links": 0,
+            "tasks": 0,
+        }
+        if source_path is not None:
+            _reject_queue_source_alias(candidate, source_path)
+            source = stack.enter_context(
+                closing(
+                    open_readonly_operational_db(
+                        source_path,
+                        source_path.parent.parent,
+                        max_bytes=1 << 50,
+                        owner_only=True,
+                    )
+                )
+            )
+            source.row_factory = sqlite3.Row
+            source.execute("BEGIN")
+            migration_statements, summary = _queue_v2_migration_statements(source)
+            _reject_queue_source_alias(candidate, source_path)
+        database = stack.enter_context(
+            closing(
+                open_operational_db(
+                    candidate,
+                    busy_ms=DEFAULTS.queue_busy_ms,
+                )
+            )
+        )
+        if source_path is not None:
+            _reject_queue_source_alias(candidate, source_path)
+        _repair_partial_queue_v3_schema(
+            database, allow_populated_rebuild=source_v2 is not None
+        )
+        run_resumable_migration(
+            database,
+            _queue_v3_statements(include_triggers=False),
+            final_invariant=lambda current: _queue_v3_schema_complete(
+                current, include_triggers=False
+            ),
+            killpoint=killpoint,
+        )
+        if source_v2 is None:
+            if any(_queue_v3_row_counts(database).values()):
+                raise _migration_error(
+                    "queue_v3_source_conflict",
+                    "fresh queue v3 initialization found existing rows",
+                )
+        else:
+            run_resumable_migration(
+                database,
+                migration_statements,
+                final_invariant=lambda current: _queue_v2_reconciliation_complete(
+                    current, migration_statements, summary
+                ),
+                killpoint=killpoint,
+            )
+        run_resumable_migration(
+            database,
+            tuple(
+                statement
+                for statement in _queue_v3_statements()
+                if statement.name.startswith("create_")
+                and statement.name.removeprefix("create_")
+                in {name for name, _sql in _QUEUE_V3_TRIGGER_SQL}
+            ),
+            final_invariant=_queue_v3_schema_complete,
+            killpoint=killpoint,
+        )
+        integrity = database.execute("PRAGMA integrity_check").fetchall()
+        foreign_keys = database.execute("PRAGMA foreign_key_check").fetchall()
+        if (
+            len(integrity) != 1
+            or integrity[0][0] != "ok"
+            or foreign_keys
+            or not _queue_v3_payloads_valid(database)
+        ):
+            raise _migration_error(
+                "queue_v3_validation_failed", "queue v3 candidate validation failed"
+            )
+    with closing(
+        open_operational_db(
+            candidate,
+            busy_ms=DEFAULTS.queue_busy_ms,
+            contract=_QUEUE_V3_CONTRACT,
+            initialize_contract=True,
+        )
+    ):
+        pass
+    _harden_owner_only(candidate, 0o600)
+    validate_queue_v3_database(candidate, state_root=candidate.parent.parent)
+    return summary
+
+
+def validate_queue_v3_database(
+    path: Path, *, state_root: Path
+) -> dict[str, object]:
+    """Validate one unpublished or active queue v3 database fail-closed."""
+    try:
+        Path(path).resolve(strict=True).relative_to(Path(state_root).resolve(strict=True))
+    except (OSError, ValueError) as exc:
+        raise PermissionError("queue v3 database is outside the state root") from exc
+    with closing(
+        open_readonly_operational_db(
+            Path(path),
+            Path(state_root),
+            max_bytes=1 << 50,
+            owner_only=True,
+            busy_ms=DEFAULTS.queue_busy_ms,
+            contract=_QUEUE_V3_CONTRACT,
+        )
+    ) as database:
+        if not _queue_v3_schema_complete(database):
+            raise _migration_error(
+                "queue_v3_schema_incomplete", "queue v3 schema is incomplete"
+            )
+        integrity = database.execute("PRAGMA integrity_check").fetchall()
+        foreign_keys = database.execute("PRAGMA foreign_key_check").fetchall()
+        payload_violations = database.execute(
+            """SELECT COUNT(*) FROM tasks
+               WHERE typeof(payload_blob) != 'blob'
+                  OR length(payload_blob) > ?
+                  OR attempts NOT BETWEEN 0 AND 100""",
+            (_MAX_QUEUE_PAYLOAD_BYTES,),
+        ).fetchone()[0]
+        purge_authorizations = database.execute(
+            "SELECT COUNT(*) FROM task_purge_authorizations"
+        ).fetchone()[0]
+        if (
+            len(integrity) != 1
+            or integrity[0][0] != "ok"
+            or foreign_keys
+            or payload_violations
+            or purge_authorizations
+            or not _queue_v3_payloads_valid(database)
+        ):
+            raise _migration_error(
+                "queue_v3_validation_failed", "queue v3 database invariant failed"
+            )
+        return {
+            "application_id": database.execute("PRAGMA application_id").fetchone()[0],
+            "foreign_key_check": [],
+            "integrity_check": "ok",
+            "journal_mode": database.execute("PRAGMA journal_mode").fetchone()[0],
+            "row_counts": _queue_v3_row_counts(database),
+            "synchronous": database.execute("PRAGMA synchronous").fetchone()[0],
+            "trusted_schema": database.execute("PRAGMA trusted_schema").fetchone()[0],
+            "user_version": database.execute("PRAGMA user_version").fetchone()[0],
+        }
 
 
 def _require_active(
@@ -86,6 +1777,110 @@ class QueueOperationError(RuntimeError):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+@dataclass(frozen=True)
+class PayloadValidation:
+    raw: bytes
+    input_hash: str
+    payload: dict[str, object] | None
+    code: str | None
+
+
+def _reject_duplicate_payload_keys(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    payload: dict[str, object] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise ValueError("duplicate payload key")
+        payload[key] = value
+    return payload
+
+
+def _reject_payload_constant(_value: str) -> object:
+    raise ValueError("non-finite payload number")
+
+
+def _parse_payload_integer(value: str) -> int:
+    if len(value.encode("ascii")) > _MAX_QUEUE_STRING_BYTES:
+        raise ValueError("payload integer token exceeds its bound")
+    return int(value)
+
+
+def _validate_payload_value(value: object, *, depth: int) -> None:
+    if depth > _MAX_QUEUE_DEPTH:
+        raise ValueError("payload exceeds its depth bound")
+    if value is None or isinstance(value, bool):
+        return
+    if isinstance(value, int):
+        return
+    if isinstance(value, float):
+        raise ValueError("payload floats are not permitted")
+    if isinstance(value, str):
+        if len(value.encode("utf-8", errors="strict")) > _MAX_QUEUE_STRING_BYTES:
+            raise ValueError("payload string exceeds its byte bound")
+        return
+    if isinstance(value, list):
+        if len(value) > _MAX_QUEUE_CONTAINER_MEMBERS:
+            raise ValueError("payload array exceeds its member bound")
+        for item in value:
+            _validate_payload_value(item, depth=depth + 1)
+        return
+    if isinstance(value, dict):
+        if len(value) > _MAX_QUEUE_CONTAINER_MEMBERS:
+            raise ValueError("payload object exceeds its member bound")
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError("payload keys must be strings")
+            if len(key.encode("utf-8", errors="strict")) > _MAX_QUEUE_STRING_BYTES:
+                raise ValueError("payload key exceeds its byte bound")
+            _validate_payload_value(item, depth=depth + 1)
+        return
+    raise ValueError("payload contains an unsupported value")
+
+
+def validate_payload_blob(
+    raw: bytes, stored_hash: str, *, parse: bool
+) -> PayloadValidation:
+    if not isinstance(raw, bytes):
+        raise TypeError("queue payload must be bytes")
+    if not isinstance(parse, bool):
+        raise TypeError("parse must be a boolean")
+    digest = hashlib.sha256()
+    view = memoryview(raw)
+    for offset in range(0, len(view), 64 * 1024):
+        digest.update(view[offset : offset + 64 * 1024])
+    input_hash = digest.hexdigest()
+    if (
+        len(raw) > _MAX_QUEUE_PAYLOAD_BYTES
+        or not isinstance(stored_hash, str)
+        or re.fullmatch(r"[0-9a-f]{64}", stored_hash) is None
+        or input_hash != stored_hash
+    ):
+        return PayloadValidation(raw, input_hash, None, "payload_hash_mismatch")
+    if not parse:
+        return PayloadValidation(raw, input_hash, None, None)
+    try:
+        payload = json.loads(
+            raw.decode("utf-8", errors="strict"),
+            object_pairs_hook=_reject_duplicate_payload_keys,
+            parse_constant=_reject_payload_constant,
+            parse_int=_parse_payload_integer,
+        )
+        _validate_payload_value(payload, depth=1)
+        if not isinstance(payload, dict) or canonical_json_bytes(payload) != raw:
+            raise ValueError("payload is not a canonical object")
+    except (
+        json.JSONDecodeError,
+        OverflowError,
+        RecursionError,
+        TypeError,
+        UnicodeError,
+        ValueError,
+    ):
+        return PayloadValidation(raw, input_hash, None, "payload_hash_mismatch")
+    return PayloadValidation(raw, input_hash, payload, None)
 
 
 class MigrationBusy(QueueOperationError):
@@ -197,6 +1992,60 @@ class QueueOwnerLease:
 
 
 @dataclass(frozen=True)
+class CaptureTaskBinding:
+    task_id: str
+    intent_id: str | None
+    intent_sha256: str | None
+    handler_version: int
+    active_digest: str
+    seal_digest: str | None
+
+
+@dataclass(frozen=True)
+class TaskFence:
+    task_id: str
+    mode: Literal["worker", "queue-operator"]
+    token: str
+    epoch: int
+    owner: OwnerLease
+    expires_at: datetime
+
+
+@dataclass(frozen=True)
+class SemanticDecision:
+    task_id: str
+    intent_id: str
+    stage: Literal["flush", "feedback", "feedback-verify"]
+    decision_path: str
+    decision_sha256: str
+    active_link_digest: str
+    seal_digest: str
+    published_at: datetime
+
+
+@dataclass(frozen=True)
+class CorruptExportProgress:
+    task_id: str
+    operation_id: str
+    state: Literal["quarantine_pending", "quarantined", "blocked"]
+    pages_written: int
+    links_exported: int
+    complete: bool
+    code: str | None
+
+
+@dataclass(frozen=True)
+class CorruptPurgeProgress:
+    task_id: str
+    operation_id: str
+    state: Literal["purge_pending", "purged", "blocked"]
+    pages_written: int
+    links_deleted: int
+    complete: bool
+    code: str | None
+
+
+@dataclass(frozen=True)
 class SourceFence:
     daily_id: str
     source_digest: str
@@ -214,6 +2063,7 @@ class WorkerSummary:
     failed: int
     dead: int
     skipped: int
+    remaining_eligible: int = 0
 
 
 @dataclass(frozen=True)
@@ -348,6 +2198,13 @@ def _validate_worker_policy(
 class MemoryQueue:
     """Durable priority queue with lease-token fencing and at-least-once delivery."""
 
+    @classmethod
+    def _from_v3_candidate(
+        cls, path: Path, *, state_root: Path
+    ) -> _QueueV3CandidateReader:
+        validate_queue_v3_database(path, state_root=state_root)
+        return _QueueV3CandidateReader(Path(path))
+
     def __init__(
         self,
         state_root: Path,
@@ -384,16 +2241,19 @@ class MemoryQueue:
                     connection, _as_utc(self._clock()), self._max_attempts
                 )
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = open_operational_db(self.db_path, busy_ms=DEFAULTS.queue_busy_ms)
-        if not self._db_hardened:
-            try:
+        try:
+            # Preserve this legacy context manager's implicit commit/rollback API.
+            connection.isolation_level = "DEFERRED"
+            if not self._db_hardened:
                 _harden_owner_only(self.db_path, 0o600)
-            except Exception:
-                connection.close()
-                raise
-            self._db_hardened = True
-        return connection
+                self._db_hardened = True
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     @staticmethod
     def _create_schema(connection: sqlite3.Connection) -> None:
@@ -562,41 +2422,58 @@ class MemoryQueue:
         redacted = _redact_payload(dict(payload))
         payload_bytes = canonical_json_bytes(redacted)
         payload_json = payload_bytes.decode("utf-8")
+        input_hash = sha256_bytes(payload_bytes)
         now = _as_utc(self._clock())
         ready_at = _as_utc(available_at or now)
         task_id = uuid.UUID(int=self._rng.getrandbits(128)).hex
-        try:
-            with self._connect() as connection, begin_immediate(connection):
-                self._delete_stale_source_fences(connection)
-                self._assert_payload_not_fenced(connection, payload_json)
-                connection.execute(
-                    """INSERT INTO tasks(
-                           id, kind, handler_version, payload_json, input_hash, dedupe_key,
-                           state, priority, created_at, updated_at, available_at
-                       ) VALUES (?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?, ?)""",
-                    (
-                        task_id,
-                        kind,
-                        handler_version,
-                        payload_json,
-                        sha256_bytes(payload_bytes),
-                        dedupe_key,
-                        priority,
-                        _timestamp(now),
-                        _timestamp(now),
-                        _timestamp(ready_at),
-                    ),
-                )
-        except sqlite3.IntegrityError:
-            if dedupe_key is None:
-                raise
-            with self._connect() as connection:
-                row = connection.execute(
-                    "SELECT id FROM tasks WHERE dedupe_key = ?", (dedupe_key,)
+        with self._connect() as connection, begin_immediate(connection):
+            self._delete_stale_source_fences(connection)
+            self._assert_payload_not_fenced(connection, payload_json)
+            if dedupe_key is not None:
+                existing = connection.execute(
+                    """SELECT id, kind, handler_version, payload_json, input_hash
+                       FROM tasks WHERE dedupe_key=?""",
+                    (dedupe_key,),
                 ).fetchone()
-            if row is None:
-                raise
-            return str(row["id"])
+                if existing is not None:
+                    try:
+                        existing_bytes = str(existing["payload_json"]).encode(
+                            "utf-8", errors="strict"
+                        )
+                    except UnicodeError:
+                        existing_bytes = b""
+                    validation = validate_payload_blob(
+                        existing_bytes, existing["input_hash"], parse=True
+                    )
+                    if (
+                        validation.code is None
+                        and existing["kind"] == kind
+                        and existing["handler_version"] == handler_version
+                        and existing["input_hash"] == input_hash
+                        and existing_bytes == payload_bytes
+                    ):
+                        return str(existing["id"])
+                    raise QueueOperationError("dedupe_conflict")
+            inserted = connection.execute(
+                """INSERT INTO tasks(
+                       id, kind, handler_version, payload_json, input_hash, dedupe_key,
+                       state, priority, created_at, updated_at, available_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?, ?)""",
+                (
+                    task_id,
+                    kind,
+                    handler_version,
+                    payload_json,
+                    input_hash,
+                    dedupe_key,
+                    priority,
+                    _timestamp(now),
+                    _timestamp(now),
+                    _timestamp(ready_at),
+                ),
+            ).rowcount
+            if inserted != 1:
+                raise QueueOperationError("enqueue_failed")
         return task_id
 
     def claim(
@@ -1861,6 +3738,19 @@ class MemoryQueue:
                     histories.setdefault(str(history["task_id"]), []).append(history)
         return [self._task_from_row(row, histories.get(str(row["id"]), [])) for row in rows]
 
+    def count_eligible(self, *, max_attempts: int = DEFAULTS.queue_max_attempts) -> int:
+        _validate_retry_policy(
+            max_attempts, self._retry_base_seconds, self._retry_cap_seconds
+        )
+        now = _as_utc(self._clock())
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT COUNT(*) FROM tasks
+                   WHERE state='ready' AND attempts < ? AND available_at <= ?""",
+                (max_attempts, _timestamp(now)),
+            ).fetchone()
+        return int(row[0])
+
     @staticmethod
     def _task_from_row(row: sqlite3.Row, history: list[sqlite3.Row]) -> QueueTask:
         return QueueTask(
@@ -1897,6 +3787,3503 @@ class MemoryQueue:
                 for item in history
             ),
         )
+
+
+class _QueueV3CandidateReader:
+    """Minimal claim seam for tests against an unpublished v3 candidate."""
+
+    def __init__(self, path: Path) -> None:
+        self.db_path = Path(path)
+        self.state_root = self.db_path.parent.parent
+        self.results_dir = self.state_root / "run" / "queue-results"
+
+    def _connect(self) -> sqlite3.Connection:
+        return open_operational_db(
+            self.db_path,
+            busy_ms=DEFAULTS.queue_busy_ms,
+            contract=_QUEUE_V3_CONTRACT,
+        )
+
+    @staticmethod
+    def _demote_payload_mismatch(
+        database: sqlite3.Connection, row: sqlite3.Row, *, now: datetime
+    ) -> None:
+        changed = database.execute(
+            """UPDATE tasks SET state='dead', error_code='payload_hash_mismatch',
+                   updated_at=?, lease_owner=NULL, lease_token=NULL,
+                   lease_expires_at=NULL, lease_heartbeat_at=NULL,
+                   attempt_started_at=NULL, blocked_capability=NULL
+               WHERE id=? AND state=?""",
+            (_timestamp(now), row["id"], row["state"]),
+        ).rowcount
+        if changed != 1:
+            raise QueueOperationError("payload_demotion_failed")
+
+    @staticmethod
+    def _require_valid_task_payload(
+        database: sqlite3.Connection,
+        row: sqlite3.Row,
+        *,
+        now: datetime,
+        parse: bool,
+    ) -> PayloadValidation | None:
+        validation = validate_payload_blob(
+            bytes(row["payload_blob"]), row["input_hash"], parse=parse
+        )
+        if validation.code is not None:
+            _QueueV3CandidateReader._demote_payload_mismatch(database, row, now=now)
+            return None
+        return validation
+
+    @staticmethod
+    def _require_lease_row(
+        database: sqlite3.Connection, lease: QueueLease, now: datetime
+    ) -> sqlite3.Row:
+        row = database.execute("SELECT * FROM tasks WHERE id=?", (lease.id,)).fetchone()
+        if (
+            row is None
+            or row["state"] != "leased"
+            or row["lease_owner"] != lease.owner
+            or row["lease_token"] != lease.token
+            or row["lease_expires_at"] <= _timestamp(now)
+        ):
+            raise LeaseFenceError(f"lease is stale or not owned: {lease.id}")
+        return row
+
+    @staticmethod
+    def _raise_payload_mismatch() -> None:
+        raise QueueOperationError("payload_hash_mismatch")
+
+    def enqueue(
+        self,
+        kind: str,
+        handler_version: int,
+        payload: Mapping[str, object],
+        *,
+        priority: int = 0,
+        available_at: datetime | None = None,
+        dedupe_key: str | None = None,
+        source_links: tuple[tuple[str, str], ...] | list[tuple[str, str]] = (),
+    ) -> str:
+        if not isinstance(kind, str) or not kind or len(kind.encode("utf-8")) > 64:
+            raise ValueError("kind must be a non-empty bounded string")
+        if (
+            not isinstance(handler_version, int)
+            or isinstance(handler_version, bool)
+            or not 1 <= handler_version <= 2_147_483_647
+        ):
+            raise ValueError("handler_version must be a positive bounded integer")
+        if (
+            not isinstance(priority, int)
+            or isinstance(priority, bool)
+            or not -100 <= priority <= 100
+        ):
+            raise ValueError("priority must be an integer from -100 to 100")
+        if dedupe_key is not None and (
+            not isinstance(dedupe_key, str)
+            or not dedupe_key
+            or len(dedupe_key.encode("utf-8")) > 512
+        ):
+            raise ValueError("dedupe_key must be a non-empty bounded string")
+        normalized_links: list[tuple[str, str]] = []
+        for item in source_links:
+            if not isinstance(item, tuple) or len(item) != 2:
+                raise ValueError("source links must be path and digest pairs")
+            logical_path, source_digest = item
+            if (
+                not isinstance(logical_path, str)
+                or not logical_path
+                or len(logical_path.encode("utf-8")) > 4096
+                or logical_path.startswith(("/", "\\"))
+                or "\\" in logical_path
+                or any(part in {"", ".", ".."} for part in logical_path.split("/"))
+            ):
+                raise ValueError("source link path is invalid")
+            if (
+                not isinstance(source_digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", source_digest) is None
+            ):
+                raise ValueError("source link digest is invalid")
+            normalized_links.append((logical_path, source_digest))
+        if len(normalized_links) != len(set(normalized_links)):
+            raise ValueError("source links must be unique")
+        payload_bytes = canonical_json_bytes(_redact_payload(dict(payload)))
+        input_hash = sha256_bytes(payload_bytes)
+        validation = validate_payload_blob(payload_bytes, input_hash, parse=True)
+        if validation.code is not None:
+            raise ValueError(validation.code)
+        now = _utc_now()
+        ready_at = _as_utc(available_at or now)
+        task_id = uuid.uuid4().hex
+        with closing(self._connect()) as database, begin_immediate(database):
+            if dedupe_key is not None:
+                existing = database.execute(
+                    """SELECT id, kind, handler_version, payload_blob, input_hash
+                       FROM tasks WHERE dedupe_key=?""",
+                    (dedupe_key,),
+                ).fetchone()
+                if existing is not None:
+                    existing_bytes = bytes(existing["payload_blob"])
+                    current = validate_payload_blob(
+                        existing_bytes, existing["input_hash"], parse=True
+                    )
+                    if (
+                        current.code is None
+                        and existing["kind"] == kind
+                        and existing["handler_version"] == handler_version
+                        and existing["input_hash"] == input_hash
+                        and existing_bytes == payload_bytes
+                    ):
+                        return str(existing["id"])
+                    raise QueueOperationError("dedupe_conflict")
+            inserted = database.execute(
+                """INSERT INTO tasks(
+                       id,kind,handler_version,payload_blob,input_hash,dedupe_key,
+                       state,priority,created_at,updated_at,available_at
+                   ) VALUES (?,?,?,?,?,?,'ready',?,?,?,?)""",
+                (
+                    task_id,
+                    kind,
+                    handler_version,
+                    payload_bytes,
+                    input_hash,
+                    dedupe_key,
+                    priority,
+                    _timestamp(now),
+                    _timestamp(now),
+                    _timestamp(ready_at),
+                ),
+            ).rowcount
+            if inserted != 1:
+                raise QueueOperationError("enqueue_failed")
+            for logical_path, source_digest in sorted(normalized_links):
+                linked = database.execute(
+                    """INSERT INTO task_source_links(
+                           task_id,logical_path,source_digest
+                       ) VALUES (?,?,?)""",
+                    (task_id, logical_path, source_digest),
+                ).rowcount
+                if linked != 1:
+                    raise QueueOperationError("source_link_insert_failed")
+        return task_id
+
+    def publish_capture_intent(
+        self,
+        *,
+        intent_id: str,
+        intent_path: str,
+        intent_sha256: str,
+        byte_size: int,
+    ) -> None:
+        if re.fullmatch(r"[0-9a-f]{64}", intent_id) is None:
+            raise ValueError("intent_id must be lowercase 64-hex")
+        if re.fullmatch(r"[0-9a-f]{64}", intent_sha256) is None:
+            raise ValueError("intent_sha256 must be lowercase 64-hex")
+        if (
+            not isinstance(intent_path, str)
+            or not intent_path.startswith("run/capture-intents/")
+            or "\\" in intent_path
+            or len(intent_path.encode("utf-8")) > 4096
+        ):
+            raise ValueError("intent_path is invalid")
+        if (
+            isinstance(byte_size, bool)
+            or not isinstance(byte_size, int)
+            or not 1 <= byte_size <= _MAX_QUEUE_PAYLOAD_BYTES
+        ):
+            raise ValueError("intent byte size is invalid")
+        now = _timestamp(_utc_now())
+        with closing(self._connect()) as database, begin_immediate(database):
+            existing = database.execute(
+                "SELECT * FROM capture_intents WHERE intent_id=?", (intent_id,)
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["relative_path"] != intent_path
+                    or existing["intent_sha256"] != intent_sha256
+                    or existing["byte_size"] != byte_size
+                    or existing["publication_state"] != "ready"
+                ):
+                    raise QueueOperationError("capture_intent_conflict")
+                return
+            inserted = database.execute(
+                """INSERT INTO capture_intents(
+                       intent_id,relative_path,intent_sha256,byte_size,
+                       publication_state,updated_at
+                   ) VALUES (?,?,?,?,'ready',?)""",
+                (intent_id, intent_path, intent_sha256, byte_size, now),
+            ).rowcount
+            if inserted != 1:
+                raise QueueOperationError("capture_intent_insert_failed")
+
+    @staticmethod
+    def _insert_capture_link(
+        database: sqlite3.Connection,
+        *,
+        task_id: str,
+        intent_id: str,
+        intent_sha256: str,
+        handler_version: int,
+        link_digest: str,
+        created_at: str,
+    ) -> None:
+        inserted = database.execute(
+            """INSERT INTO capture_task_links(
+                   task_id,intent_id,intent_sha256,handler_version,
+                   link_digest,created_at
+               ) VALUES (?,?,?,?,?,?)""",
+            (
+                task_id,
+                intent_id,
+                intent_sha256,
+                handler_version,
+                link_digest,
+                created_at,
+            ),
+        ).rowcount
+        if inserted != 1:
+            raise QueueOperationError("capture_link_insert_failed")
+
+    def enqueue_capture_task(
+        self,
+        kind: str,
+        handler_version: int,
+        payload: Mapping[str, object],
+        *,
+        intent_id: str,
+        intent_path: str,
+        intent_sha256: str,
+        capture_fence: object,
+        owner: OwnerLease,
+        priority: int = 0,
+        available_at: datetime | None = None,
+        dedupe_key: str | None = None,
+    ) -> CaptureTaskBinding:
+        if re.fullmatch(r"[0-9a-f]{64}", intent_id) is None:
+            raise ValueError("intent_id must be lowercase 64-hex")
+        if re.fullmatch(r"[0-9a-f]{64}", intent_sha256) is None:
+            raise ValueError("intent_sha256 must be lowercase 64-hex")
+        if not isinstance(intent_path, str) or len(intent_path.encode("utf-8")) > 4096:
+            raise ValueError("intent_path is invalid")
+        from markdown_transaction import IntentFence
+        from operational_ownership import OwnerLease, OwnershipRegistry
+
+        if not isinstance(owner, OwnerLease) or owner.role != "capture":
+            raise ValueError("capture enqueue requires a capture owner")
+        if (
+            not isinstance(capture_fence, IntentFence)
+            or capture_fence.intent_id != intent_id
+            or capture_fence.mode != "capture"
+            or capture_fence.owner != owner
+        ):
+            raise ValueError("capture fence does not match the intent and owner")
+        registry = OwnershipRegistry(self.state_root)
+        with closing(registry._connect()) as coordinator_database:
+            try:
+                registry.require(coordinator_database, owner)
+            except Exception as exc:
+                raise QueueOperationError("intent_fence_lost") from exc
+            fence_row = coordinator_database.execute(
+                """SELECT 1 FROM intent_fences
+                   WHERE intent_id=? AND mode='capture' AND token=?
+                     AND fencing_epoch=? AND canonical_role=?
+                     AND canonical_scope=? AND canonical_actor_id=?
+                     AND canonical_owner_token=? AND canonical_fencing_epoch=?
+                     AND process_id=? AND process_start_identity=? AND expires_at>?""",
+                (
+                    intent_id,
+                    capture_fence.token,
+                    capture_fence.epoch,
+                    owner.role,
+                    owner.scope,
+                    owner.actor_id,
+                    owner.token,
+                    owner.epoch,
+                    owner.process.pid,
+                    owner.process.start_identity,
+                    _timestamp(_utc_now()),
+                ),
+            ).fetchone()
+            if fence_row is None:
+                raise QueueOperationError("intent_fence_lost")
+        if not isinstance(kind, str) or not kind or len(kind.encode("utf-8")) > 64:
+            raise ValueError("kind must be a non-empty bounded string")
+        if (
+            not isinstance(handler_version, int)
+            or isinstance(handler_version, bool)
+            or not 1 <= handler_version <= 2_147_483_647
+        ):
+            raise ValueError("handler_version must be a positive bounded integer")
+        if (
+            not isinstance(priority, int)
+            or isinstance(priority, bool)
+            or not -100 <= priority <= 100
+        ):
+            raise ValueError("priority must be an integer from -100 to 100")
+        payload_bytes = canonical_json_bytes(_redact_payload(dict(payload)))
+        input_hash = sha256_bytes(payload_bytes)
+        if validate_payload_blob(payload_bytes, input_hash, parse=True).code is not None:
+            raise ValueError("payload_hash_mismatch")
+        now = _utc_now()
+        ready_at = _as_utc(available_at or now)
+        task_id = uuid.uuid4().hex
+        link_record = {
+            "schema_version": "capture-task-link/v1",
+            "task_id": task_id,
+            "intent_id": intent_id,
+            "intent_sha256": intent_sha256,
+            "handler_version": handler_version,
+        }
+        link_digest = sha256_bytes(canonical_json_bytes(link_record))
+        with closing(self._connect()) as database, begin_immediate(database):
+            intent = database.execute(
+                "SELECT * FROM capture_intents WHERE intent_id=?", (intent_id,)
+            ).fetchone()
+            if (
+                intent is None
+                or intent["relative_path"] != intent_path
+                or intent["intent_sha256"] != intent_sha256
+                or intent["publication_state"] != "ready"
+            ):
+                raise QueueOperationError("capture_intent_conflict")
+            if dedupe_key is not None and database.execute(
+                "SELECT 1 FROM tasks WHERE dedupe_key=?", (dedupe_key,)
+            ).fetchone() is not None:
+                raise QueueOperationError("dedupe_conflict")
+            inserted = database.execute(
+                """INSERT INTO tasks(
+                       id,kind,handler_version,payload_blob,input_hash,dedupe_key,
+                       state,priority,created_at,updated_at,available_at
+                   ) VALUES (?,?,?,?,?,?,'ready',?,?,?,?)""",
+                (
+                    task_id,
+                    kind,
+                    handler_version,
+                    payload_bytes,
+                    input_hash,
+                    dedupe_key,
+                    priority,
+                    _timestamp(now),
+                    _timestamp(now),
+                    _timestamp(ready_at),
+                ),
+            ).rowcount
+            if inserted != 1:
+                raise QueueOperationError("enqueue_failed")
+            self._insert_capture_link(
+                database,
+                task_id=task_id,
+                intent_id=intent_id,
+                intent_sha256=intent_sha256,
+                handler_version=handler_version,
+                link_digest=link_digest,
+                created_at=_timestamp(now),
+            )
+        return CaptureTaskBinding(
+            task_id=task_id,
+            intent_id=intent_id,
+            intent_sha256=intent_sha256,
+            handler_version=handler_version,
+            active_digest=link_digest,
+            seal_digest=None,
+        )
+
+    @staticmethod
+    def _validate_task_fence_owner(
+        owner: OwnerLease, mode: Literal["worker", "queue-operator"]
+    ) -> None:
+        from operational_ownership import OwnerLease
+
+        if not isinstance(owner, OwnerLease):
+            raise TypeError("owner must be an OwnerLease")
+        allowed = {
+            "worker": {"queue-worker", "compile", "doctor", "nightly", "weekly"},
+            "queue-operator": {"queue-operator", "repair"},
+        }
+        if mode not in allowed or owner.role not in allowed[mode]:
+            raise ValueError("owner cannot acquire the requested task fence")
+
+    def acquire_task_fence(
+        self,
+        task_id: str,
+        *,
+        mode: Literal["worker", "queue-operator"],
+        owner: OwnerLease,
+    ) -> TaskFence:
+        self._validate_task_fence_owner(owner, mode)
+        if not isinstance(task_id, str) or not task_id:
+            raise ValueError("task_id must be non-empty")
+        from operational_ownership import OwnershipRegistry
+
+        registry = OwnershipRegistry(self.state_root)
+        with closing(registry._connect()) as coordinator_database:
+            registry.require(coordinator_database, owner)
+        now = _utc_now()
+        expires_at = min(owner.expires_at, now + timedelta(seconds=120))
+        token = uuid.uuid4().hex
+        with closing(self._connect()) as database, begin_immediate(database):
+            projection = database.execute(
+                """SELECT 1 FROM queue_ownership
+                   WHERE actor_id=? AND canonical_role=? AND canonical_scope=?
+                     AND owner_token=? AND fencing_epoch=? AND process_id=?
+                     AND process_start_identity=? AND expires_at>?""",
+                (
+                    owner.actor_id,
+                    owner.role,
+                    owner.scope,
+                    owner.token,
+                    owner.epoch,
+                    owner.process.pid,
+                    owner.process.start_identity,
+                    _timestamp(now),
+                ),
+            ).fetchone()
+            if projection is None:
+                raise QueueOperationError("queue_owner_fence_lost")
+            if database.execute(
+                "SELECT 1 FROM tasks WHERE id=?", (task_id,)
+            ).fetchone() is None:
+                raise KeyError(task_id)
+            existing = database.execute(
+                "SELECT * FROM task_fences WHERE task_id=?", (task_id,)
+            ).fetchone()
+            if existing is not None:
+                raise QueueOperationError("task_fenced")
+            epoch = int(
+                database.execute(
+                    """INSERT INTO task_fence_epochs(task_id,last_epoch) VALUES (?,1)
+                       ON CONFLICT(task_id) DO UPDATE
+                       SET last_epoch=task_fence_epochs.last_epoch+1
+                       RETURNING last_epoch""",
+                    (task_id,),
+                ).fetchone()[0]
+            )
+            inserted = database.execute(
+                """INSERT INTO task_fences(
+                       task_id,mode,token,fencing_epoch,canonical_role,
+                       canonical_scope,canonical_actor_id,canonical_owner_token,
+                       canonical_fencing_epoch,process_id,process_start_identity,
+                       heartbeat_at,expires_at
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    task_id,
+                    mode,
+                    token,
+                    epoch,
+                    owner.role,
+                    owner.scope,
+                    owner.actor_id,
+                    owner.token,
+                    owner.epoch,
+                    owner.process.pid,
+                    owner.process.start_identity,
+                    _timestamp(now),
+                    _timestamp(expires_at),
+                ),
+            ).rowcount
+            if inserted != 1:
+                raise QueueOperationError("task_fence_failed")
+        return TaskFence(task_id, mode, token, epoch, owner, expires_at)
+
+    def release_task_fence(self, fence: TaskFence) -> None:
+        if not isinstance(fence, TaskFence):
+            raise TypeError("fence must be a TaskFence")
+        with closing(self._connect()) as database, begin_immediate(database):
+            deleted = database.execute(
+                """DELETE FROM task_fences
+                   WHERE task_id=? AND mode=? AND token=? AND fencing_epoch=?
+                     AND canonical_role=? AND canonical_scope=?
+                     AND canonical_actor_id=? AND canonical_owner_token=?
+                     AND canonical_fencing_epoch=? AND process_id=?
+                     AND process_start_identity=?""",
+                (
+                    fence.task_id,
+                    fence.mode,
+                    fence.token,
+                    fence.epoch,
+                    fence.owner.role,
+                    fence.owner.scope,
+                    fence.owner.actor_id,
+                    fence.owner.token,
+                    fence.owner.epoch,
+                    fence.owner.process.pid,
+                    fence.owner.process.start_identity,
+                ),
+            ).rowcount
+            if deleted != 1:
+                raise QueueOperationError("task_fence_lost")
+
+    @contextmanager
+    def task_fence(
+        self,
+        task_id: str,
+        *,
+        mode: Literal["worker", "queue-operator"],
+        owner: OwnerLease,
+    ) -> Iterator[TaskFence]:
+        fence = self.acquire_task_fence(task_id, mode=mode, owner=owner)
+        try:
+            yield fence
+        finally:
+            self.release_task_fence(fence)
+
+    @contextmanager
+    def _corrupt_intent_fence(
+        self, task_id: str, *, owner: OwnerLease
+    ) -> Iterator[tuple[CaptureTaskBinding | None, object | None]]:
+        try:
+            binding = self.active_capture_binding(None, task_id)
+        except QueueOperationError:
+            yield None, None
+            return
+        if binding.intent_id is None:
+            yield binding, None
+            return
+        from markdown_transaction import MarkdownCoordinator
+
+        coordinator = MarkdownCoordinator._from_v3_candidate(
+            self.state_root / "run" / "markdown-transactions-v3.candidate.sqlite3",
+            state_root=self.state_root,
+        )
+        fence = coordinator.acquire_intent_fence(
+            binding.intent_id, mode="operator", owner=owner
+        )
+        try:
+            yield binding, fence
+        finally:
+            coordinator.release_intent_fence(fence)
+
+    def active_capture_binding(
+        self, connection: sqlite3.Connection | None, task_id: str
+    ) -> CaptureTaskBinding:
+        owned = connection is None
+        database = self._connect() if owned else connection
+        try:
+            link = database.execute(
+                "SELECT * FROM capture_task_links WHERE task_id=?", (task_id,)
+            ).fetchone()
+            if link is None:
+                raise QueueOperationError("capture_link_conflicted")
+            resolutions = database.execute(
+                """SELECT * FROM capture_task_link_resolutions
+                   WHERE task_id=? ORDER BY created_at,resolution_digest""",
+                (task_id,),
+            ).fetchall()
+            superseded = {
+                str(row["supersedes_digest"])
+                for row in resolutions
+                if row["supersedes_digest"] is not None
+            }
+            leaves: list[tuple[str, str | None, str | None, int]] = []
+            if str(link["link_digest"]) not in superseded:
+                leaves.append(
+                    (
+                        str(link["link_digest"]),
+                        str(link["intent_id"]),
+                        str(link["intent_sha256"]),
+                        int(link["handler_version"]),
+                    )
+                )
+            for resolution in resolutions:
+                digest = str(resolution["resolution_digest"])
+                if digest in superseded:
+                    continue
+                selected = resolution["selected_intent_id"]
+                if selected is None:
+                    leaves.append((digest, None, None, int(link["handler_version"])))
+                    continue
+                intent = database.execute(
+                    "SELECT * FROM capture_intents WHERE intent_id=?", (selected,)
+                ).fetchone()
+                if intent is None:
+                    raise QueueOperationError("capture_link_conflicted")
+                leaves.append(
+                    (
+                        digest,
+                        str(intent["intent_id"]),
+                        str(intent["intent_sha256"]),
+                        int(link["handler_version"]),
+                    )
+                )
+            if len(leaves) != 1:
+                raise QueueOperationError("capture_link_conflicted")
+            active_digest, intent_id, intent_sha256, handler_version = leaves[0]
+            seal = database.execute(
+                "SELECT * FROM capture_task_link_seals WHERE task_id=?", (task_id,)
+            ).fetchone()
+            return CaptureTaskBinding(
+                task_id=task_id,
+                intent_id=intent_id,
+                intent_sha256=intent_sha256,
+                handler_version=handler_version,
+                active_digest=active_digest,
+                seal_digest=None if seal is None else str(seal["seal_digest"]),
+            )
+        finally:
+            if owned:
+                database.close()
+
+    def append_capture_link_resolution(
+        self,
+        task_id: str,
+        *,
+        supersedes_digest: str | None,
+        observed: Mapping[str, object],
+        selected_intent: Mapping[str, object] | None,
+        owner: OwnerLease,
+        reason: str,
+    ) -> CaptureTaskBinding:
+        from operational_ownership import OwnerLease, OwnershipRegistry, current_actor_identity
+
+        if not isinstance(owner, OwnerLease) or owner.role != "repair":
+            raise ValueError("capture link resolution requires a repair owner")
+        if not isinstance(reason, str) or not 1 <= len(reason.encode("utf-8")) <= 4096:
+            raise ValueError("resolution reason is invalid")
+        actor = current_actor_identity()
+        now = _utc_now()
+        record = {
+            "schema_version": "capture-task-link-resolution/v1",
+            "task_id": task_id,
+            "supersedes_digest": supersedes_digest,
+            "observed": dict(observed),
+            "selected_intent": None if selected_intent is None else dict(selected_intent),
+            "actor_identity": actor,
+            "reason": reason,
+            "created_at": _timestamp(now),
+        }
+        validate_schema(
+            record,
+            Path(__file__).with_name("schemas")
+            / "capture-task-link-resolution-v1.json",
+        )
+        resolution_digest = sha256_bytes(canonical_json_bytes(record))
+        observed_json = canonical_json_bytes(record["observed"])
+        registry = OwnershipRegistry(self.state_root)
+        with closing(registry._connect()) as coordinator_database:
+            registry.require(coordinator_database, owner)
+        with closing(self._connect()) as database, begin_immediate(database):
+            projection = database.execute(
+                """SELECT 1 FROM queue_ownership WHERE owner_token=?
+                   AND fencing_epoch=? AND canonical_role='repair' AND expires_at>?""",
+                (owner.token, owner.epoch, _timestamp(now)),
+            ).fetchone()
+            if projection is None:
+                raise QueueOperationError("queue_owner_fence_lost")
+            if database.execute(
+                "SELECT 1 FROM task_fences WHERE task_id=?", (task_id,)
+            ).fetchone() is not None:
+                raise QueueOperationError("task_fenced")
+            if database.execute(
+                "SELECT 1 FROM capture_task_link_seals WHERE task_id=?", (task_id,)
+            ).fetchone() is not None:
+                raise QueueOperationError("capture_link_sealed")
+            active = self.active_capture_binding(database, task_id)
+            if supersedes_digest != active.active_digest:
+                raise QueueOperationError("capture_link_conflicted")
+            selected_id = None
+            if selected_intent is not None:
+                selected_id = selected_intent["intent_id"]
+                intent = database.execute(
+                    "SELECT * FROM capture_intents WHERE intent_id=?", (selected_id,)
+                ).fetchone()
+                if (
+                    intent is None
+                    or intent["intent_sha256"] != selected_intent["intent_sha256"]
+                ):
+                    raise QueueOperationError("capture_link_conflicted")
+            inserted = database.execute(
+                """INSERT INTO capture_task_link_resolutions(
+                       resolution_digest,task_id,supersedes_digest,observed_json,
+                       selected_intent_id,actor_identity,reason,created_at
+                   ) VALUES (?,?,?,?,?,?,?,?)""",
+                (
+                    resolution_digest,
+                    task_id,
+                    supersedes_digest,
+                    observed_json,
+                    selected_id,
+                    actor,
+                    reason,
+                    _timestamp(now),
+                ),
+            ).rowcount
+            if inserted != 1:
+                raise QueueOperationError("capture_link_resolution_failed")
+            return self.active_capture_binding(database, task_id)
+
+    def seal_capture_binding(
+        self,
+        task_id: str,
+        *,
+        consumer_kind: Literal["transaction", "terminal", "corrupt-disposition"],
+        consumer_id: str,
+        active_link_digest: str,
+        before_side_effect: Callable[[], None] | None = None,
+    ) -> CaptureTaskBinding:
+        if consumer_kind not in {"transaction", "terminal", "corrupt-disposition"}:
+            raise ValueError("consumer kind is invalid")
+        if not isinstance(consumer_id, str) or not 1 <= len(consumer_id.encode("utf-8")) <= 4096:
+            raise ValueError("consumer ID is invalid")
+        now = _utc_now()
+        seal_digest = sha256_bytes(
+            canonical_json_bytes(
+                {
+                    "active_digest": active_link_digest,
+                    "consumer_id": consumer_id,
+                    "consumer_kind": consumer_kind,
+                    "task_id": task_id,
+                }
+            )
+        )
+        with closing(self._connect()) as database, begin_immediate(database):
+            active = self.active_capture_binding(database, task_id)
+            if active.active_digest != active_link_digest:
+                raise QueueOperationError("capture_link_conflicted")
+            existing = database.execute(
+                "SELECT * FROM capture_task_link_seals WHERE task_id=?", (task_id,)
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["active_digest"] != active_link_digest
+                    or existing["consumer_kind"] != consumer_kind
+                    or existing["consumer_id"] != consumer_id
+                    or existing["seal_digest"] != seal_digest
+                ):
+                    raise QueueOperationError("capture_link_sealed")
+            else:
+                inserted = database.execute(
+                    """INSERT INTO capture_task_link_seals(
+                           task_id,active_digest,consumer_kind,consumer_id,
+                           seal_digest,sealed_at
+                       ) VALUES (?,?,?,?,?,?)""",
+                    (
+                        task_id,
+                        active_link_digest,
+                        consumer_kind,
+                        consumer_id,
+                        seal_digest,
+                        _timestamp(now),
+                    ),
+                ).rowcount
+                if inserted != 1:
+                    raise QueueOperationError("capture_link_seal_failed")
+        if before_side_effect is not None:
+            before_side_effect()
+        return CaptureTaskBinding(
+            task_id=active.task_id,
+            intent_id=active.intent_id,
+            intent_sha256=active.intent_sha256,
+            handler_version=active.handler_version,
+            active_digest=active.active_digest,
+            seal_digest=seal_digest,
+        )
+
+    @staticmethod
+    def _insert_semantic_decision(
+        database: sqlite3.Connection,
+        *,
+        intent_id: str,
+        stage: str,
+        decision_path: str,
+        decision_sha256: str,
+        active_link_digest: str,
+        published_at: str,
+    ) -> None:
+        inserted = database.execute(
+            """INSERT INTO semantic_decisions(
+                   intent_id,stage,decision_path,decision_sha256,
+                   active_link_digest,publication_state,published_at
+               ) VALUES (?,?,?,?,?,'published',?)""",
+            (
+                intent_id,
+                stage,
+                decision_path,
+                decision_sha256,
+                active_link_digest,
+                published_at,
+            ),
+        ).rowcount
+        if inserted != 1:
+            raise QueueOperationError("semantic_decision_insert_failed")
+
+    def publish_semantic_decision(
+        self,
+        coordinator: object,
+        *,
+        task_id: str,
+        intent_id: str,
+        stage: Literal["flush", "feedback", "feedback-verify"],
+        decision_path: str,
+        decision_sha256: str,
+        active_link_digest: str,
+        task_fence: TaskFence,
+        intent_fence: object,
+        owner: OwnerLease,
+    ) -> SemanticDecision:
+        from markdown_transaction import IntentFence
+        from operational_ownership import OwnerLease, OwnershipRegistry
+
+        if stage not in {"flush", "feedback", "feedback-verify"}:
+            raise ValueError("semantic decision stage is invalid")
+        if re.fullmatch(r"[0-9a-f]{64}", decision_sha256) is None:
+            raise ValueError("decision_sha256 must be lowercase 64-hex")
+        if not isinstance(task_fence, TaskFence) or task_fence.task_id != task_id:
+            raise ValueError("task fence does not match")
+        if (
+            not isinstance(intent_fence, IntentFence)
+            or intent_fence.intent_id != intent_id
+            or intent_fence.mode != "worker"
+        ):
+            raise ValueError("intent fence does not match")
+        if (
+            not isinstance(owner, OwnerLease)
+            or task_fence.owner != owner
+            or intent_fence.owner != owner
+        ):
+            raise ValueError("semantic decision owner does not match fences")
+        if (
+            not isinstance(decision_path, str)
+            or not decision_path.startswith("run/capture-decisions/")
+            or "\\" in decision_path
+            or len(decision_path.encode("utf-8")) > 4096
+        ):
+            raise ValueError("decision path is invalid")
+        candidate = self.state_root / decision_path
+        data = read_runtime_bytes(
+            candidate,
+            self.state_root,
+            max_bytes=64 * 1024,
+            owner_only=True,
+        )
+        if sha256_bytes(data) != decision_sha256:
+            raise QueueOperationError("semantic_decision_conflict")
+        registry = OwnershipRegistry(self.state_root)
+        now = _utc_now()
+        with closing(registry._connect()) as coordinator_database:
+            registry.require(coordinator_database, owner)
+            intent_row = coordinator_database.execute(
+                """SELECT 1 FROM intent_fences WHERE intent_id=? AND mode='worker'
+                   AND token=? AND fencing_epoch=? AND canonical_owner_token=?
+                   AND canonical_fencing_epoch=? AND expires_at>?""",
+                (
+                    intent_id,
+                    intent_fence.token,
+                    intent_fence.epoch,
+                    owner.token,
+                    owner.epoch,
+                    _timestamp(now),
+                ),
+            ).fetchone()
+            if intent_row is None:
+                raise QueueOperationError("intent_fence_lost")
+        seal_digest = sha256_bytes(
+            canonical_json_bytes(
+                {
+                    "active_digest": active_link_digest,
+                    "consumer_id": f"{intent_id}:{stage}",
+                    "consumer_kind": "semantic-decision",
+                    "task_id": task_id,
+                }
+            )
+        )
+        with closing(self._connect()) as database, begin_immediate(database):
+            projection = database.execute(
+                """SELECT 1 FROM queue_ownership WHERE owner_token=?
+                   AND fencing_epoch=? AND expires_at>?""",
+                (owner.token, owner.epoch, _timestamp(now)),
+            ).fetchone()
+            fence_row = database.execute(
+                """SELECT 1 FROM task_fences WHERE task_id=? AND token=?
+                   AND fencing_epoch=? AND canonical_owner_token=?
+                   AND canonical_fencing_epoch=? AND expires_at>?""",
+                (
+                    task_id,
+                    task_fence.token,
+                    task_fence.epoch,
+                    owner.token,
+                    owner.epoch,
+                    _timestamp(now),
+                ),
+            ).fetchone()
+            if projection is None or fence_row is None:
+                raise QueueOperationError("task_fence_lost")
+            active = self.active_capture_binding(database, task_id)
+            if (
+                active.intent_id != intent_id
+                or active.active_digest != active_link_digest
+                or active.seal_digest is not None
+            ):
+                raise QueueOperationError("capture_link_conflicted")
+            existing = database.execute(
+                """SELECT seal.*, decision.decision_path,
+                          decision.decision_sha256,decision.active_link_digest
+                   FROM capture_task_link_seals AS seal
+                   LEFT JOIN semantic_decisions AS decision
+                     ON decision.intent_id=? AND decision.stage=?
+                   WHERE seal.task_id=?""",
+                (intent_id, stage, task_id),
+            ).fetchone()
+            if existing is None:
+                inserted = database.execute(
+                    """INSERT INTO capture_task_link_seals(
+                           task_id,active_digest,consumer_kind,consumer_id,
+                           seal_digest,sealed_at
+                       ) VALUES (?,?,'semantic-decision',?,?,?)""",
+                    (
+                        task_id,
+                        active_link_digest,
+                        f"{intent_id}:{stage}",
+                        seal_digest,
+                        _timestamp(now),
+                    ),
+                ).rowcount
+                if inserted != 1:
+                    raise QueueOperationError("capture_link_seal_failed")
+                self._insert_semantic_decision(
+                    database,
+                    intent_id=intent_id,
+                    stage=stage,
+                    decision_path=decision_path,
+                    decision_sha256=decision_sha256,
+                    active_link_digest=active_link_digest,
+                    published_at=_timestamp(now),
+                )
+            elif (
+                existing["consumer_kind"] != "semantic-decision"
+                or existing["consumer_id"] != f"{intent_id}:{stage}"
+                or existing["seal_digest"] != seal_digest
+                or existing["decision_path"] != decision_path
+                or existing["decision_sha256"] != decision_sha256
+                or existing["active_link_digest"] != active_link_digest
+            ):
+                raise QueueOperationError("semantic_decision_conflict")
+            published = database.execute(
+                """SELECT published_at FROM semantic_decisions
+                   WHERE intent_id=? AND stage=?""",
+                (intent_id, stage),
+            ).fetchone()
+            if published is None:
+                raise QueueOperationError("semantic_decision_conflict")
+            published_at = _parse_timestamp(str(published["published_at"]))
+            if published_at is None:
+                raise QueueOperationError("semantic_decision_conflict")
+        return SemanticDecision(
+            task_id=task_id,
+            intent_id=intent_id,
+            stage=stage,
+            decision_path=decision_path,
+            decision_sha256=decision_sha256,
+            active_link_digest=active_link_digest,
+            seal_digest=seal_digest,
+            published_at=published_at,
+        )
+
+    @staticmethod
+    def _publish_corrupt_fixed_files(
+        package: Path,
+        *,
+        payload: bytes,
+        history: bytes,
+        metadata: bytes,
+    ) -> None:
+        package.parent.mkdir(parents=True, exist_ok=True)
+        _harden_owner_only(package.parent, 0o700)
+        if not package.exists():
+            package.mkdir()
+            _harden_owner_only(package, 0o700)
+        for name, data in (
+            ("payload.bin", payload),
+            ("attempt-history.json", history),
+            ("task-metadata.json", metadata),
+        ):
+            _write_durable_file(package / name, data)
+
+    @staticmethod
+    def _insert_corrupt_disposition(
+        database: sqlite3.Connection,
+        *,
+        task_id: str,
+        operation_id: str,
+        package_path: str,
+        manifest_sha256: str,
+        disposition_sha256: str,
+        active_link_digest: str | None,
+        disposed_at: str,
+    ) -> None:
+        inserted = database.execute(
+            """INSERT INTO corrupt_dispositions(
+                   task_id,operation_id,package_path,manifest_sha256,
+                   disposition_sha256,active_link_digest,disposed_at
+               ) VALUES (?,?,?,?,?,?,?)""",
+            (
+                task_id,
+                operation_id,
+                package_path,
+                manifest_sha256,
+                disposition_sha256,
+                active_link_digest,
+                disposed_at,
+            ),
+        ).rowcount
+        if inserted != 1:
+            raise QueueOperationError("corrupt_disposition_failed")
+
+    def quarantine_corrupt(
+        self,
+        task_id: str,
+        *,
+        reason: str,
+        owner: OwnerLease,
+        deadline: float = float("inf"),
+        cancelled: Callable[[], bool] | None = None,
+    ) -> CorruptExportProgress:
+        from operational_ownership import OwnerLease, OwnershipRegistry, current_actor_identity
+
+        _require_active(deadline, cancelled)
+        if not isinstance(owner, OwnerLease) or owner.role != "repair":
+            raise ValueError("corrupt quarantine requires a repair owner")
+        if not isinstance(task_id, str) or not 1 <= len(task_id.encode("utf-8")) <= 256:
+            raise ValueError("task ID is invalid")
+        if not isinstance(reason, str) or not 1 <= len(reason.encode("utf-8")) <= 4096:
+            raise ValueError("quarantine reason is invalid")
+        registry = OwnershipRegistry(self.state_root)
+        actor = current_actor_identity()
+        with closing(registry._connect()) as coordinator_database:
+            registry.require(coordinator_database, owner)
+        with self.queue_owner(
+            role="queue-operator",
+            scope=f"task:{sha256_bytes(task_id.encode('utf-8'))}",
+            parent=owner,
+        ), self.task_fence(
+            task_id, mode="queue-operator", owner=owner
+        ) as task_fence, self._corrupt_intent_fence(
+            task_id, owner=owner
+        ) as (capture_binding, intent_fence):
+            now = _utc_now()
+            with closing(self._connect()) as database, begin_immediate(database):
+                row = database.execute(
+                    "SELECT * FROM tasks WHERE id=?", (task_id,)
+                ).fetchone()
+                if row is None:
+                    raise KeyError(task_id)
+                if row["state"] not in {"dead", "quarantine_pending"}:
+                    raise QueueOperationError("corrupt_quarantine_state_invalid")
+                raw = bytes(row["payload_blob"])
+                raw_validation = validate_payload_blob(
+                    raw, row["input_hash"], parse=False
+                )
+                raw_sha256 = raw_validation.input_hash
+                history_rows = database.execute(
+                    """SELECT attempt,started_at,finished_at,outcome,error_code
+                       FROM attempt_history WHERE task_id=? ORDER BY sequence""",
+                    (task_id,),
+                ).fetchall()
+                history = canonical_json_bytes(
+                    [
+                        {
+                            "attempt": int(item["attempt"]),
+                            "started_at": str(item["started_at"]),
+                            "finished_at": str(item["finished_at"]),
+                            "outcome": str(item["outcome"]),
+                            "error_code": item["error_code"],
+                        }
+                        for item in history_rows
+                    ]
+                )
+                metadata = canonical_json_bytes(
+                    {
+                        "task_id": task_id,
+                        "kind": str(row["kind"]),
+                        "handler_version": int(row["handler_version"]),
+                        "input_hash": str(row["input_hash"]),
+                        "state": "dead",
+                        "error_code": row["error_code"],
+                        "lineage_generation": int(row["lineage_generation"]),
+                    }
+                )
+                history_sha256 = sha256_bytes(history)
+                metadata_sha256 = sha256_bytes(metadata)
+                disposition_key = sha256_bytes(
+                    canonical_json_bytes(
+                        {
+                            "actor_identity": actor,
+                            "history_sha256": history_sha256,
+                            "metadata_sha256": metadata_sha256,
+                            "raw_sha256": raw_sha256,
+                            "reason": reason,
+                            "task_id": task_id,
+                        }
+                    )
+                )
+                operation_id = f"corrupt-export:{disposition_key}"
+                existing = database.execute(
+                    "SELECT * FROM corrupt_export_operations WHERE task_id=?",
+                    (task_id,),
+                ).fetchone()
+                if existing is None:
+                    inserted = database.execute(
+                        """INSERT INTO corrupt_export_operations(
+                               operation_id,task_id,disposition_key,
+                               task_fence_token_digest,task_fence_epoch,
+                               intent_fence_digest,raw_sha256,history_sha256,
+                               metadata_sha256,lineage_generation,cursor_task_id,
+                               link_count,page_count,rolling_root,state,
+                               actor_identity,reason,created_at,updated_at
+                           ) VALUES (?,?,?,?,?,NULL,?,?,?,?, '',0,0,?,'exporting',?,?,?,?)""",
+                        (
+                            operation_id,
+                            task_id,
+                            disposition_key,
+                            sha256_bytes(task_fence.token.encode("utf-8")),
+                            task_fence.epoch,
+                            raw_sha256,
+                            history_sha256,
+                            metadata_sha256,
+                            int(row["lineage_generation"]),
+                            sha256_bytes(b""),
+                            actor,
+                            reason,
+                            _timestamp(now),
+                            _timestamp(now),
+                        ),
+                    ).rowcount
+                    if inserted != 1:
+                        raise QueueOperationError("corrupt_export_start_failed")
+                    changed = database.execute(
+                        """UPDATE tasks SET state='quarantine_pending',updated_at=?
+                           WHERE id=? AND state='dead'""",
+                        (_timestamp(now), task_id),
+                    ).rowcount
+                    if changed != 1:
+                        raise QueueOperationError("corrupt_quarantine_start_failed")
+                elif (
+                    existing["operation_id"] != operation_id
+                    or existing["disposition_key"] != disposition_key
+                ):
+                    if existing["state"] == "disposed":
+                        disposition = database.execute(
+                            "SELECT * FROM corrupt_dispositions WHERE task_id=?",
+                            (task_id,),
+                        ).fetchone()
+                        if disposition is not None:
+                            return CorruptExportProgress(
+                                task_id=task_id,
+                                operation_id=str(existing["operation_id"]),
+                                state="quarantined",
+                                pages_written=int(existing["page_count"]),
+                                links_exported=int(existing["link_count"]),
+                                complete=True,
+                                code=None,
+                            )
+                    raise QueueOperationError("corrupt_export_conflict")
+                else:
+                    operation_id = str(existing["operation_id"])
+                    disposition_key = str(existing["disposition_key"])
+            package = self.results_dir / f"corrupt-{disposition_key}"
+            self._publish_corrupt_fixed_files(
+                package, payload=raw, history=history, metadata=metadata
+            )
+            with closing(self._connect()) as database, begin_immediate(database):
+                operation = database.execute(
+                    "SELECT * FROM corrupt_export_operations WHERE task_id=?",
+                    (task_id,),
+                ).fetchone()
+                if operation is None:
+                    raise QueueOperationError("corrupt_export_lost")
+                if operation["state"] == "exporting":
+                    started = time.monotonic()
+                    candidates = database.execute(
+                        """SELECT id,state,created_at,updated_at,input_hash
+                           FROM tasks WHERE redrive_of=? AND id>?
+                           ORDER BY id LIMIT 1001""",
+                        (task_id, operation["cursor_task_id"]),
+                    ).fetchall()
+                    links: list[dict[str, object]] = []
+                    for child in candidates[:1000]:
+                        candidate = {
+                            "created_at": str(child["created_at"]),
+                            "input_hash": str(child["input_hash"]),
+                            "state": str(child["state"]),
+                            "task_id": str(child["id"]),
+                            "updated_at": str(child["updated_at"]),
+                        }
+                        prospective = canonical_json_bytes(
+                            {
+                                "operation_id": operation_id,
+                                "page_number": int(operation["page_count"]) + 1,
+                                "previous_root": str(operation["rolling_root"]),
+                                "links": [*links, candidate],
+                            }
+                        )
+                        if len(prospective) > 1024 * 1024 or time.monotonic() - started >= 5:
+                            break
+                        links.append(candidate)
+                    if links:
+                        page_number = int(operation["page_count"]) + 1
+                        page = {
+                            "operation_id": operation_id,
+                            "page_number": page_number,
+                            "previous_root": str(operation["rolling_root"]),
+                            "links": links,
+                        }
+                        page_bytes = canonical_json_bytes(page)
+                        page_sha256 = sha256_bytes(page_bytes)
+                        rolling_root = sha256_bytes(
+                            bytes.fromhex(str(operation["rolling_root"]))
+                            + bytes.fromhex(page_sha256)
+                        )
+                        page_path = package / f"lineage-page-{page_number:08d}.json"
+                        _write_durable_file(page_path, page_bytes)
+                        if _read_stable_owner_file(page_path, 1024 * 1024) != page_bytes:
+                            raise QueueOperationError("corrupt_page_verification_failed")
+                        inserted = database.execute(
+                            """INSERT INTO corrupt_export_pages(
+                                   operation_id,page_number,first_task_id,last_task_id,
+                                   link_count,page_sha256,rolling_root
+                               ) VALUES (?,?,?,?,?,?,?)""",
+                            (
+                                operation_id,
+                                page_number,
+                                links[0]["task_id"],
+                                links[-1]["task_id"],
+                                len(links),
+                                page_sha256,
+                                rolling_root,
+                            ),
+                        ).rowcount
+                        if inserted != 1:
+                            raise QueueOperationError("corrupt_page_insert_failed")
+                        stable_end = len(candidates) <= len(links)
+                        state = "manifested" if stable_end else "exporting"
+                        updated = database.execute(
+                            """UPDATE corrupt_export_operations
+                               SET cursor_task_id=?,link_count=link_count+?,
+                                   page_count=page_count+1,rolling_root=?,state=?,updated_at=?
+                               WHERE operation_id=? AND state='exporting'
+                                 AND cursor_task_id=? AND page_count=?""",
+                            (
+                                links[-1]["task_id"],
+                                len(links),
+                                rolling_root,
+                                state,
+                                _timestamp(_utc_now()),
+                                operation_id,
+                                operation["cursor_task_id"],
+                                operation["page_count"],
+                            ),
+                        ).rowcount
+                        if updated != 1:
+                            raise QueueOperationError("corrupt_page_fence_lost")
+                    elif not candidates:
+                        updated = database.execute(
+                            """UPDATE corrupt_export_operations
+                               SET state='manifested',updated_at=?
+                               WHERE operation_id=? AND state='exporting'""",
+                            (_timestamp(_utc_now()), operation_id),
+                        ).rowcount
+                        if updated != 1:
+                            raise QueueOperationError("corrupt_manifest_fence_lost")
+            with closing(self._connect()) as database:
+                operation = database.execute(
+                    "SELECT * FROM corrupt_export_operations WHERE task_id=?",
+                    (task_id,),
+                ).fetchone()
+            if operation is None:
+                raise QueueOperationError("corrupt_export_lost")
+            if operation["state"] == "manifested":
+                manifest = {
+                    "schema_version": "corrupt-task-manifest/v1",
+                    "operation_id": operation_id,
+                    "task_id": task_id,
+                    "package_key": disposition_key,
+                    "package_path": f"run/queue-results/corrupt-{disposition_key}",
+                    "raw_sha256": str(operation["raw_sha256"]),
+                    "history_sha256": str(operation["history_sha256"]),
+                    "metadata_sha256": str(operation["metadata_sha256"]),
+                    "lineage_generation": int(operation["lineage_generation"]),
+                    "link_count": int(operation["link_count"]),
+                    "page_count": int(operation["page_count"]),
+                    "rolling_root": str(operation["rolling_root"]),
+                }
+                validate_schema(
+                    manifest,
+                    Path(__file__).with_name("schemas")
+                    / "corrupt-task-manifest-v1.json",
+                )
+                _write_durable_file(package / "manifest.json", canonical_json_bytes(manifest))
+                if capture_binding is None or intent_fence is None:
+                    return CorruptExportProgress(
+                        task_id=task_id,
+                        operation_id=operation_id,
+                        state="blocked",
+                        pages_written=int(operation["page_count"]),
+                        links_exported=int(operation["link_count"]),
+                        complete=False,
+                        code="capture_link_conflicted",
+                    )
+                sealed = self.seal_capture_binding(
+                    task_id,
+                    consumer_kind="corrupt-disposition",
+                    consumer_id=operation_id,
+                    active_link_digest=capture_binding.active_digest,
+                )
+                manifest_bytes = _read_stable_owner_file(
+                    package / "manifest.json", 64 * 1024
+                )
+                manifest_sha256 = sha256_bytes(manifest_bytes)
+                disposed_at = str(operation["created_at"])
+                disposition_record = {
+                    "schema_version": "corrupt-task-disposition/v1",
+                    "operation_id": operation_id,
+                    "task_id": task_id,
+                    "package_key": disposition_key,
+                    "package_path": f"run/queue-results/corrupt-{disposition_key}",
+                    "manifest_path": (
+                        f"run/queue-results/corrupt-{disposition_key}/manifest.json"
+                    ),
+                    "manifest_sha256": manifest_sha256,
+                    "active_link_digest": sealed.active_digest,
+                    "actor_identity": actor,
+                    "reason": reason,
+                    "disposed_at": disposed_at,
+                }
+                validate_schema(
+                    disposition_record,
+                    Path(__file__).with_name("schemas")
+                    / "corrupt-task-disposition-v1.json",
+                )
+                disposition_bytes = canonical_json_bytes(disposition_record)
+                _write_durable_file(package / "disposition.json", disposition_bytes)
+                if (
+                    _read_stable_owner_file(package / "payload.bin", _MAX_QUEUE_PAYLOAD_BYTES)
+                    != raw
+                    or _read_stable_owner_file(
+                        package / "attempt-history.json", _MAX_EXPORT_METADATA_BYTES
+                    )
+                    != history
+                    or _read_stable_owner_file(
+                        package / "task-metadata.json", _MAX_EXPORT_METADATA_BYTES
+                    )
+                    != metadata
+                    or _read_stable_owner_file(
+                        package / "disposition.json", 64 * 1024
+                    )
+                    != disposition_bytes
+                ):
+                    raise QueueOperationError("corrupt_export_verification_failed")
+                disposition_sha256 = sha256_bytes(disposition_bytes)
+                with closing(self._connect()) as database, begin_immediate(database):
+                    current_task = database.execute(
+                        "SELECT * FROM tasks WHERE id=?", (task_id,)
+                    ).fetchone()
+                    current_operation = database.execute(
+                        "SELECT * FROM corrupt_export_operations WHERE operation_id=?",
+                        (operation_id,),
+                    ).fetchone()
+                    current_fence = database.execute(
+                        """SELECT 1 FROM task_fences WHERE task_id=? AND token=?
+                           AND fencing_epoch=? AND expires_at>?""",
+                        (
+                            task_id,
+                            task_fence.token,
+                            task_fence.epoch,
+                            _timestamp(_utc_now()),
+                        ),
+                    ).fetchone()
+                    current_seal = database.execute(
+                        """SELECT 1 FROM capture_task_link_seals
+                           WHERE task_id=? AND active_digest=? AND seal_digest=?
+                             AND consumer_kind='corrupt-disposition' AND consumer_id=?""",
+                        (
+                            task_id,
+                            sealed.active_digest,
+                            sealed.seal_digest,
+                            operation_id,
+                        ),
+                    ).fetchone()
+                    incoming_count = database.execute(
+                        "SELECT COUNT(*) FROM tasks WHERE redrive_of=?", (task_id,)
+                    ).fetchone()[0]
+                    if (
+                        current_task is None
+                        or current_task["state"] != "quarantine_pending"
+                        or current_operation is None
+                        or current_operation["state"] != "manifested"
+                        or current_operation["lineage_generation"]
+                        != current_task["lineage_generation"]
+                        or current_operation["link_count"] != incoming_count
+                        or current_fence is None
+                        or current_seal is None
+                    ):
+                        raise QueueOperationError("corrupt_export_verification_failed")
+                    self._insert_corrupt_disposition(
+                        database,
+                        task_id=task_id,
+                        operation_id=operation_id,
+                        package_path=str(disposition_record["package_path"]),
+                        manifest_sha256=manifest_sha256,
+                        disposition_sha256=disposition_sha256,
+                        active_link_digest=sealed.active_digest,
+                        disposed_at=disposed_at,
+                    )
+                    changed = database.execute(
+                        """UPDATE tasks SET state='quarantined',updated_at=?
+                           WHERE id=? AND state='quarantine_pending'""",
+                        (_timestamp(_utc_now()), task_id),
+                    ).rowcount
+                    advanced = database.execute(
+                        """UPDATE corrupt_export_operations
+                           SET state='disposed',updated_at=?
+                           WHERE operation_id=? AND state='manifested'""",
+                        (_timestamp(_utc_now()), operation_id),
+                    ).rowcount
+                    if (changed, advanced) != (1, 1):
+                        raise QueueOperationError("corrupt_disposition_failed")
+                return CorruptExportProgress(
+                    task_id=task_id,
+                    operation_id=operation_id,
+                    state="quarantined",
+                    pages_written=int(operation["page_count"]),
+                    links_exported=int(operation["link_count"]),
+                    complete=True,
+                    code=None,
+                )
+            return CorruptExportProgress(
+                task_id=task_id,
+                operation_id=operation_id,
+                state="quarantine_pending",
+                pages_written=int(operation["page_count"]),
+                links_exported=int(operation["link_count"]),
+                complete=False,
+                code=None,
+            )
+
+    def _purge_corrupt_lineage_page(
+        self,
+        task_id: str,
+        *,
+        operation_id: str,
+        package: Path,
+        owner: OwnerLease,
+        task_fence: TaskFence,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> CorruptPurgeProgress:
+        del owner
+        _require_active(deadline, cancelled)
+        started = time.monotonic()
+        with closing(self._connect()) as database, begin_immediate(database):
+            operation = database.execute(
+                "SELECT * FROM corrupt_purge_operations WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            parent = database.execute(
+                "SELECT * FROM tasks WHERE id=?", (task_id,)
+            ).fetchone()
+            if operation is None or parent is None:
+                raise QueueOperationError("corrupt_purge_lost")
+            prior_links_deleted = int(
+                database.execute(
+                    """SELECT COALESCE(SUM(deleted_link_count),0)
+                       FROM corrupt_purge_pages WHERE operation_id=?""",
+                    (operation_id,),
+                ).fetchone()[0]
+            )
+            if operation["state"] != "purging" or parent["state"] != "purge_pending":
+                return CorruptPurgeProgress(
+                    task_id=task_id,
+                    operation_id=operation_id,
+                    state="purge_pending",
+                    pages_written=int(operation["page_count"]),
+                    links_deleted=prior_links_deleted,
+                    complete=False,
+                    code=None,
+                )
+            self._require_corrupt_task_fence(database, task_fence)
+            if int(parent["lineage_generation"]) != int(
+                operation["expected_generation"]
+            ):
+                return CorruptPurgeProgress(
+                    task_id=task_id,
+                    operation_id=operation_id,
+                    state="blocked",
+                    pages_written=int(operation["page_count"]),
+                    links_deleted=prior_links_deleted,
+                    complete=False,
+                    code="corrupt_lineage_generation_changed",
+                )
+            candidates = database.execute(
+                """SELECT * FROM tasks WHERE redrive_of=? AND id>?
+                   ORDER BY id LIMIT 1001""",
+                (task_id, operation["cursor_task_id"]),
+            ).fetchall()
+            if not candidates:
+                return CorruptPurgeProgress(
+                    task_id=task_id,
+                    operation_id=operation_id,
+                    state="purge_pending",
+                    pages_written=int(operation["page_count"]),
+                    links_deleted=prior_links_deleted,
+                    complete=False,
+                    code=None,
+                )
+            now = _utc_now()
+            children: list[dict[str, object]] = []
+            blocker_code: str | None = None
+            for child in candidates[:1000]:
+                blocker = self._corrupt_child_purge_blocker(database, child, now=now)
+                if blocker is not None:
+                    blocker_code = blocker
+                    break
+                descriptor = self._corrupt_purge_child_descriptor(database, child)
+                prospective = canonical_json_bytes(
+                    {
+                        "operation_id": operation_id,
+                        "page_number": int(operation["page_count"]) + 1,
+                        "previous_root": str(operation["rolling_root"]),
+                        "before_generation": int(operation["expected_generation"]),
+                        "after_generation": int(operation["expected_generation"])
+                        + len(children)
+                        + 1,
+                        "children": [*children, descriptor],
+                    }
+                )
+                if len(prospective) > 1024 * 1024 or time.monotonic() - started >= 5:
+                    break
+                children.append(descriptor)
+            if not children:
+                return CorruptPurgeProgress(
+                    task_id=task_id,
+                    operation_id=operation_id,
+                    state="blocked" if blocker_code is not None else "purge_pending",
+                    pages_written=int(operation["page_count"]),
+                    links_deleted=prior_links_deleted,
+                    complete=False,
+                    code=blocker_code,
+                )
+            page_number = int(operation["page_count"]) + 1
+            before_generation = int(operation["expected_generation"])
+            after_generation = before_generation + len(children)
+            page = {
+                "operation_id": operation_id,
+                "page_number": page_number,
+                "previous_root": str(operation["rolling_root"]),
+                "before_generation": before_generation,
+                "after_generation": after_generation,
+                "children": children,
+            }
+            page_bytes = canonical_json_bytes(page)
+            if len(page_bytes) > 1024 * 1024:
+                raise QueueOperationError("corrupt_purge_page_too_large")
+            page_sha256 = sha256_bytes(page_bytes)
+            rolling_root = sha256_bytes(
+                bytes.fromhex(str(operation["rolling_root"]))
+                + bytes.fromhex(page_sha256)
+            )
+            page_path = package / f"purge-page-{page_number:08d}.json"
+            try:
+                _write_durable_file(page_path, page_bytes)
+            except QueueOperationError as exc:
+                if exc.code != "durable_file_conflict":
+                    raise
+                return CorruptPurgeProgress(
+                    task_id=task_id,
+                    operation_id=operation_id,
+                    state="blocked",
+                    pages_written=int(operation["page_count"]),
+                    links_deleted=prior_links_deleted,
+                    complete=False,
+                    code="orphan_corrupt_purge_page_conflict",
+                )
+            try:
+                observed_page = _read_stable_owner_file(page_path, 1024 * 1024)
+            except (OSError, PermissionError, ValueError) as exc:
+                raise QueueOperationError("corrupt_purge_page_invalid") from exc
+            if observed_page != page_bytes:
+                raise QueueOperationError("corrupt_purge_page_invalid")
+            self._insert_corrupt_purge_page(
+                database,
+                operation_id=operation_id,
+                page_number=page_number,
+                first_task_id=str(children[0]["task_id"]),
+                last_task_id=str(children[-1]["task_id"]),
+                deleted_link_count=len(children),
+                page_sha256=page_sha256,
+                rolling_root=rolling_root,
+                expected_generation=after_generation,
+            )
+            inserted = database.execute(
+                """INSERT INTO task_purge_authorizations(
+                       task_id,mode,operation_id,authorization_digest,created_at
+                   ) VALUES (?,'corrupt-lineage',?,?,?)""",
+                (
+                    task_id,
+                    operation_id,
+                    operation["purge_token"],
+                    _timestamp(now),
+                ),
+            ).rowcount
+            if inserted != 1:
+                raise QueueOperationError("purge_authorization_failed")
+            for child in children:
+                child_id = str(child["task_id"])
+                inserted = database.execute(
+                    """INSERT INTO task_purge_authorizations(
+                           task_id,mode,operation_id,authorization_digest,created_at
+                       ) VALUES (?,'corrupt-lineage',?,?,?)""",
+                    (
+                        child_id,
+                        operation_id,
+                        operation["purge_token"],
+                        _timestamp(now),
+                    ),
+                ).rowcount
+                if inserted != 1:
+                    raise QueueOperationError("purge_authorization_failed")
+                self._delete_task_owned_evidence(database, child_id)
+                deleted = database.execute(
+                    "DELETE FROM tasks WHERE id=? AND redrive_of=?",
+                    (child_id, task_id),
+                ).rowcount
+                if deleted != 1:
+                    raise QueueOperationError("corrupt_child_delete_failed")
+                cleared = database.execute(
+                    "DELETE FROM task_purge_authorizations WHERE task_id=?",
+                    (child_id,),
+                ).rowcount
+                if cleared != 1:
+                    raise QueueOperationError("purge_authorization_failed")
+            cleared = database.execute(
+                "DELETE FROM task_purge_authorizations WHERE task_id=?",
+                (task_id,),
+            ).rowcount
+            if cleared != 1:
+                raise QueueOperationError("purge_authorization_failed")
+            parent_generation = database.execute(
+                "SELECT lineage_generation FROM tasks WHERE id=?", (task_id,)
+            ).fetchone()
+            if parent_generation is None or int(parent_generation[0]) != after_generation:
+                raise QueueOperationError("corrupt_lineage_generation_changed")
+            updated = database.execute(
+                """UPDATE corrupt_purge_operations
+                   SET expected_generation=?,cursor_task_id=?,page_count=page_count+1,
+                       rolling_root=?,updated_at=?
+                   WHERE operation_id=? AND state='purging'
+                     AND expected_generation=? AND cursor_task_id=? AND page_count=?""",
+                (
+                    after_generation,
+                    children[-1]["task_id"],
+                    rolling_root,
+                    _timestamp(_utc_now()),
+                    operation_id,
+                    before_generation,
+                    operation["cursor_task_id"],
+                    operation["page_count"],
+                ),
+            ).rowcount
+            if updated != 1:
+                raise QueueOperationError("corrupt_purge_page_fence_lost")
+            return CorruptPurgeProgress(
+                task_id=task_id,
+                operation_id=operation_id,
+                state="blocked" if blocker_code is not None else "purge_pending",
+                pages_written=page_number,
+                links_deleted=prior_links_deleted + len(children),
+                complete=False,
+                code=blocker_code,
+            )
+
+    @staticmethod
+    def _insert_corrupt_purge_page(
+        database: sqlite3.Connection,
+        *,
+        operation_id: str,
+        page_number: int,
+        first_task_id: str,
+        last_task_id: str,
+        deleted_link_count: int,
+        page_sha256: str,
+        rolling_root: str,
+        expected_generation: int,
+    ) -> None:
+        inserted = database.execute(
+            """INSERT INTO corrupt_purge_pages(
+                   operation_id,page_number,first_task_id,last_task_id,
+                   deleted_link_count,page_sha256,rolling_root,expected_generation
+               ) VALUES (?,?,?,?,?,?,?,?)""",
+            (
+                operation_id,
+                page_number,
+                first_task_id,
+                last_task_id,
+                deleted_link_count,
+                page_sha256,
+                rolling_root,
+                expected_generation,
+            ),
+        ).rowcount
+        if inserted != 1:
+            raise QueueOperationError("corrupt_purge_page_insert_failed")
+
+    def _corrupt_child_purge_blocker(
+        self,
+        database: sqlite3.Connection,
+        child: sqlite3.Row,
+        *,
+        now: datetime,
+    ) -> str | None:
+        child_id = str(child["id"])
+        if database.execute(
+            "SELECT 1 FROM tasks WHERE redrive_of=? LIMIT 1", (child_id,)
+        ).fetchone() is not None:
+            return "corrupt_child_not_leaf"
+        if child["state"] not in _TERMINAL_STATES:
+            return "corrupt_child_nonterminal"
+        if child["state"] == "dead" and DEFAULTS.dead_task_retention_days is None:
+            return "corrupt_child_retained"
+        updated_at = _parse_timestamp(str(child["updated_at"]))
+        retention_days = (
+            DEFAULTS.dead_task_retention_days
+            if child["state"] == "dead"
+            else DEFAULTS.queue_result_retention_days
+        )
+        if (
+            updated_at is None
+            or retention_days is None
+            or updated_at + timedelta(days=retention_days) > now
+        ):
+            return "corrupt_child_retention_active"
+        if database.execute(
+            "SELECT 1 FROM task_fences WHERE task_id=? LIMIT 1", (child_id,)
+        ).fetchone() is not None:
+            return "corrupt_child_fenced"
+        link_exists = database.execute(
+            "SELECT 1 FROM capture_task_links WHERE task_id=?", (child_id,)
+        ).fetchone() is not None
+        try:
+            binding = self.active_capture_binding(database, child_id)
+        except QueueOperationError:
+            if link_exists:
+                return "corrupt_child_intent_unresolved"
+            binding = None
+        if binding is not None and binding.intent_id is not None:
+            terminal_code = self._capture_terminal_blocker(
+                database, child_id, binding
+            )
+            if terminal_code is not None:
+                return "corrupt_child_intent_unresolved"
+        if database.execute(
+            """SELECT 1 FROM capture_task_link_seals
+               WHERE task_id=? AND consumer_kind='semantic-decision' LIMIT 1""",
+            (child_id,),
+        ).fetchone() is not None:
+            return "corrupt_child_decision_retained"
+        if any(
+            child[field] is not None
+            for field in ("result_reference", "result_sha256", "result_operation_id")
+        ):
+            return "corrupt_child_result_retained"
+        return None
+
+    def _corrupt_purge_child_descriptor(
+        self, database: sqlite3.Connection, child: sqlite3.Row
+    ) -> dict[str, object]:
+        task_id = str(child["id"])
+        history = canonical_json_bytes(
+            [
+                {
+                    "attempt": int(row["attempt"]),
+                    "started_at": str(row["started_at"]),
+                    "finished_at": str(row["finished_at"]),
+                    "outcome": str(row["outcome"]),
+                    "error_code": row["error_code"],
+                }
+                for row in database.execute(
+                    """SELECT attempt,started_at,finished_at,outcome,error_code
+                       FROM attempt_history WHERE task_id=? ORDER BY sequence""",
+                    (task_id,),
+                )
+            ]
+        )
+        task_evidence = canonical_json_bytes(
+            {
+                "task_id": task_id,
+                "state": str(child["state"]),
+                "input_hash": str(child["input_hash"]),
+                "updated_at": str(child["updated_at"]),
+                "lineage_generation": int(child["lineage_generation"]),
+            }
+        )
+        return {
+            "task_id": task_id,
+            "task_sha256": sha256_bytes(task_evidence),
+            "history_sha256": sha256_bytes(history),
+        }
+
+    @staticmethod
+    def _delete_task_owned_evidence(
+        database: sqlite3.Connection, task_id: str
+    ) -> None:
+        for table in (
+            "capture_task_link_seals",
+            "capture_task_link_resolutions",
+            "capture_task_links",
+            "attempt_history",
+            "task_source_links",
+        ):
+            database.execute(f'DELETE FROM "{table}" WHERE task_id=?', (task_id,))
+
+    @contextmanager
+    def _corrupt_purge_task_fence(
+        self, task_id: str, *, owner: OwnerLease
+    ) -> Iterator[TaskFence]:
+        fence = self.acquire_task_fence(task_id, mode="queue-operator", owner=owner)
+        try:
+            yield fence
+        finally:
+            with closing(self._connect()) as database:
+                task = database.execute(
+                    "SELECT 1 FROM tasks WHERE id=?", (task_id,)
+                ).fetchone()
+                current = database.execute(
+                    """SELECT 1 FROM task_fences WHERE task_id=? AND token=?
+                       AND fencing_epoch=?""",
+                    (task_id, fence.token, fence.epoch),
+                ).fetchone()
+            if current is not None:
+                self.release_task_fence(fence)
+            elif task is not None:
+                raise QueueOperationError("task_fence_lost")
+
+    def _capture_terminal_blocker(
+        self,
+        database: sqlite3.Connection,
+        task_id: str,
+        binding: CaptureTaskBinding,
+    ) -> str | None:
+        if binding.intent_id is None or binding.intent_sha256 is None:
+            return "capture_intent_unresolved"
+        path = self.results_dir / f"capture-{binding.intent_id}.json"
+        try:
+            raw = _read_stable_owner_file(path, 64 * 1024)
+            record = json.loads(raw.decode("utf-8", errors="strict"))
+        except (OSError, PermissionError, ValueError, json.JSONDecodeError):
+            return "capture_intent_unresolved"
+        if not isinstance(record, dict) or set(record) != {
+            "schema_version",
+            "intent_id",
+            "intent_sha256",
+            "semantic_decisions",
+            "processing_binding",
+            "disposition",
+        }:
+            return "capture_terminal_invalid"
+        processing = record.get("processing_binding")
+        disposition = record.get("disposition")
+        if (
+            record.get("schema_version") != "capture-terminal/v1"
+            or record.get("intent_id") != binding.intent_id
+            or record.get("intent_sha256") != binding.intent_sha256
+            or not isinstance(record.get("semantic_decisions"), list)
+            or not isinstance(processing, dict)
+            or processing.get("kind") != "task"
+            or processing.get("task_id") != task_id
+            or processing.get("active_link_digest") != binding.active_digest
+            or not isinstance(disposition, dict)
+            or disposition.get("kind")
+            not in {"markdown_committed", "no_durable_content", "operator_discard"}
+        ):
+            return "capture_terminal_invalid"
+        intent = database.execute(
+            "SELECT * FROM capture_intents WHERE intent_id=?", (binding.intent_id,)
+        ).fetchone()
+        if intent is None or intent["intent_sha256"] != binding.intent_sha256:
+            return "capture_terminal_invalid"
+        task = database.execute(
+            """SELECT result_reference,result_sha256,result_operation_id
+               FROM tasks WHERE id=?""",
+            (task_id,),
+        ).fetchone()
+        if (
+            task is None
+            or task["result_reference"]
+            != f"run/queue-results/capture-{binding.intent_id}.json"
+            or task["result_sha256"] != sha256_bytes(raw)
+            or task["result_operation_id"]
+            != f"capture-terminal:{binding.intent_id}"
+        ):
+            return "capture_terminal_unbound"
+        return None
+
+    @staticmethod
+    def _require_corrupt_task_fence(
+        database: sqlite3.Connection, task_fence: TaskFence
+    ) -> None:
+        row = database.execute(
+            """SELECT 1 FROM task_fences WHERE task_id=? AND token=?
+               AND fencing_epoch=? AND canonical_owner_token=?
+               AND canonical_fencing_epoch=? AND expires_at>?""",
+            (
+                task_fence.task_id,
+                task_fence.token,
+                task_fence.epoch,
+                task_fence.owner.token,
+                task_fence.owner.epoch,
+                _timestamp(_utc_now()),
+            ),
+        ).fetchone()
+        if row is None:
+            raise QueueOperationError("task_fence_lost")
+
+    def _publish_corrupt_purge_receipt(
+        self,
+        task_id: str,
+        *,
+        operation_id: str,
+        package: Path,
+        task_fence: TaskFence,
+    ) -> bytes:
+        with closing(self._connect()) as database, begin_immediate(database):
+            operation = database.execute(
+                "SELECT * FROM corrupt_purge_operations WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            task = database.execute(
+                "SELECT * FROM tasks WHERE id=?", (task_id,)
+            ).fetchone()
+            disposition = database.execute(
+                """SELECT disposition.*,export.disposition_key,
+                          export.rolling_root AS original_frozen_root
+                   FROM corrupt_dispositions AS disposition
+                   JOIN corrupt_export_operations AS export
+                     ON export.operation_id=disposition.operation_id
+                   WHERE disposition.task_id=?""",
+                (task_id,),
+            ).fetchone()
+            if operation is None or task is None or disposition is None:
+                raise QueueOperationError("corrupt_purge_lost")
+            self._require_corrupt_task_fence(database, task_fence)
+            incoming_count = int(
+                database.execute(
+                    "SELECT COUNT(*) FROM tasks WHERE redrive_of=?", (task_id,)
+                ).fetchone()[0]
+            )
+            if (
+                task["state"] != "purge_pending"
+                or int(task["lineage_generation"])
+                != int(operation["expected_generation"])
+                or incoming_count != 0
+            ):
+                raise QueueOperationError("corrupt_purge_receipt_precondition_failed")
+            manifest_bytes = _read_stable_owner_file(package / "manifest.json", 64 * 1024)
+            disposition_bytes = _read_stable_owner_file(
+                package / "disposition.json", 64 * 1024
+            )
+            if (
+                sha256_bytes(manifest_bytes) != disposition["manifest_sha256"]
+                or sha256_bytes(disposition_bytes) != disposition["disposition_sha256"]
+            ):
+                raise QueueOperationError("corrupt_package_invalid")
+            receipt = {
+                "schema_version": "corrupt-purge/v1",
+                "operation_id": operation_id,
+                "task_id": task_id,
+                "package_key": str(disposition["disposition_key"]),
+                "package_path": str(disposition["package_path"]),
+                "manifest_sha256": str(disposition["manifest_sha256"]),
+                "disposition_sha256": str(disposition["disposition_sha256"]),
+                "original_frozen_root": str(disposition["original_frozen_root"]),
+                "purge_page_count": int(operation["page_count"]),
+                "final_rolling_root": str(operation["rolling_root"]),
+                "final_generation": int(operation["expected_generation"]),
+                "observed_incoming_link_count": 0,
+            }
+            validate_schema(
+                receipt,
+                Path(__file__).with_name("schemas") / "corrupt-purge-v1.json",
+            )
+            receipt_bytes = canonical_json_bytes(receipt)
+            if len(receipt_bytes) > 64 * 1024:
+                raise QueueOperationError("corrupt_purge_receipt_too_large")
+            _write_durable_file(package / "purge-receipt.json", receipt_bytes)
+            if (
+                _read_stable_owner_file(package / "purge-receipt.json", 64 * 1024)
+                != receipt_bytes
+            ):
+                raise QueueOperationError("corrupt_purge_receipt_invalid")
+            if operation["state"] == "purging":
+                updated = database.execute(
+                    """UPDATE corrupt_purge_operations
+                       SET state='receipt-published',updated_at=?
+                       WHERE operation_id=? AND state='purging'
+                         AND expected_generation=? AND page_count=? AND rolling_root=?""",
+                    (
+                        _timestamp(_utc_now()),
+                        operation_id,
+                        operation["expected_generation"],
+                        operation["page_count"],
+                        operation["rolling_root"],
+                    ),
+                ).rowcount
+                if updated != 1:
+                    raise QueueOperationError("corrupt_purge_receipt_fence_lost")
+            return receipt_bytes
+
+    def _delete_corrupt_parent(
+        self,
+        task_id: str,
+        *,
+        operation_id: str,
+        package: Path,
+        task_fence: TaskFence,
+    ) -> None:
+        with closing(self._connect()) as database, begin_immediate(database):
+            operation = database.execute(
+                "SELECT * FROM corrupt_purge_operations WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            task = database.execute(
+                "SELECT * FROM tasks WHERE id=?", (task_id,)
+            ).fetchone()
+            disposition = database.execute(
+                """SELECT disposition.*,export.raw_sha256,export.history_sha256,
+                          export.metadata_sha256,export.disposition_key,
+                          export.rolling_root AS original_frozen_root
+                   FROM corrupt_dispositions AS disposition
+                   JOIN corrupt_export_operations AS export
+                     ON export.operation_id=disposition.operation_id
+                   WHERE disposition.task_id=?""",
+                (task_id,),
+            ).fetchone()
+            if operation is None or task is None or disposition is None:
+                raise QueueOperationError("corrupt_purge_lost")
+            self._require_corrupt_task_fence(database, task_fence)
+            receipt_bytes = _read_stable_owner_file(
+                package / "purge-receipt.json", 64 * 1024
+            )
+            receipt = json.loads(receipt_bytes.decode("utf-8", errors="strict"))
+            validate_schema(
+                receipt,
+                Path(__file__).with_name("schemas") / "corrupt-purge-v1.json",
+            )
+            raw = _read_stable_owner_file(
+                package / "payload.bin", _MAX_QUEUE_PAYLOAD_BYTES
+            )
+            history = _read_stable_owner_file(
+                package / "attempt-history.json", _MAX_EXPORT_METADATA_BYTES
+            )
+            current_history = canonical_json_bytes(
+                [
+                    {
+                        "attempt": int(row["attempt"]),
+                        "started_at": str(row["started_at"]),
+                        "finished_at": str(row["finished_at"]),
+                        "outcome": str(row["outcome"]),
+                        "error_code": row["error_code"],
+                    }
+                    for row in database.execute(
+                        """SELECT attempt,started_at,finished_at,outcome,error_code
+                           FROM attempt_history WHERE task_id=? ORDER BY sequence""",
+                        (task_id,),
+                    )
+                ]
+            )
+            if (
+                operation["state"] != "receipt-published"
+                or task["state"] != "purge_pending"
+                or int(task["lineage_generation"])
+                != int(operation["expected_generation"])
+                or database.execute(
+                    "SELECT 1 FROM tasks WHERE redrive_of=? LIMIT 1", (task_id,)
+                ).fetchone()
+                is not None
+                or sha256_bytes(raw) != disposition["raw_sha256"]
+                or sha256_bytes(bytes(task["payload_blob"]))
+                != disposition["raw_sha256"]
+                or sha256_bytes(history) != disposition["history_sha256"]
+                or sha256_bytes(current_history) != disposition["history_sha256"]
+                or receipt["operation_id"] != operation_id
+                or receipt["task_id"] != task_id
+                or receipt["package_key"] != disposition["disposition_key"]
+                or receipt["manifest_sha256"] != disposition["manifest_sha256"]
+                or receipt["disposition_sha256"]
+                != disposition["disposition_sha256"]
+                or receipt["original_frozen_root"]
+                != disposition["original_frozen_root"]
+                or receipt["purge_page_count"] != operation["page_count"]
+                or receipt["final_rolling_root"] != operation["rolling_root"]
+                or receipt["final_generation"] != operation["expected_generation"]
+            ):
+                raise QueueOperationError("corrupt_parent_delete_precondition_failed")
+            inserted = database.execute(
+                """INSERT INTO task_purge_authorizations(
+                       task_id,mode,operation_id,authorization_digest,created_at
+                   ) VALUES (?,'corrupt-parent',?,?,?)""",
+                (
+                    task_id,
+                    operation_id,
+                    operation["purge_token"],
+                    _timestamp(_utc_now()),
+                ),
+            ).rowcount
+            if inserted != 1:
+                raise QueueOperationError("purge_authorization_failed")
+            deleted_fence = database.execute(
+                """DELETE FROM task_fences WHERE task_id=? AND token=?
+                   AND fencing_epoch=?""",
+                (task_id, task_fence.token, task_fence.epoch),
+            ).rowcount
+            if deleted_fence != 1:
+                raise QueueOperationError("task_fence_lost")
+            self._delete_task_owned_evidence(database, task_id)
+            deleted_task = database.execute(
+                "DELETE FROM tasks WHERE id=?", (task_id,)
+            ).rowcount
+            if deleted_task != 1:
+                raise QueueOperationError("corrupt_parent_delete_failed")
+            cleared = database.execute(
+                "DELETE FROM task_purge_authorizations WHERE task_id=?", (task_id,)
+            ).rowcount
+            if cleared != 1:
+                raise QueueOperationError("purge_authorization_failed")
+
+    def purge_quarantined(
+        self,
+        task_id: str,
+        *,
+        owner: OwnerLease,
+        deadline: float = float("inf"),
+        cancelled: Callable[[], bool] | None = None,
+    ) -> CorruptPurgeProgress:
+        from operational_ownership import OwnerLease, OwnershipRegistry
+
+        _require_active(deadline, cancelled)
+        if not isinstance(owner, OwnerLease) or owner.role != "repair":
+            raise ValueError("corrupt purge requires a repair owner")
+        if not isinstance(task_id, str) or not 1 <= len(task_id.encode("utf-8")) <= 256:
+            raise ValueError("task ID is invalid")
+        registry = OwnershipRegistry(self.state_root)
+        with closing(registry._connect()) as coordinator_database:
+            registry.require(coordinator_database, owner)
+        completed = self._completed_corrupt_purge_progress(task_id)
+        if completed is not None:
+            return completed
+        with self.queue_owner(
+            role="queue-operator",
+            scope=f"task:{sha256_bytes(task_id.encode('utf-8'))}",
+            parent=owner,
+        ), self._corrupt_purge_task_fence(task_id, owner=owner) as task_fence:
+            now = _utc_now()
+            with closing(self._connect()) as database, begin_immediate(database):
+                task = database.execute(
+                    "SELECT * FROM tasks WHERE id=?", (task_id,)
+                ).fetchone()
+                disposition = database.execute(
+                    """SELECT disposition.*, operation.disposition_key,
+                              operation.rolling_root AS original_frozen_root,
+                              operation.lineage_generation
+                       FROM corrupt_dispositions AS disposition
+                       JOIN corrupt_export_operations AS operation
+                         ON operation.operation_id=disposition.operation_id
+                       WHERE disposition.task_id=?""",
+                    (task_id,),
+                ).fetchone()
+                if task is None or disposition is None or task["state"] not in {
+                    "quarantined",
+                    "purge_pending",
+                }:
+                    raise QueueOperationError("corrupt_purge_state_invalid")
+                existing_operation = database.execute(
+                    "SELECT * FROM corrupt_purge_operations WHERE task_id=?",
+                    (task_id,),
+                ).fetchone()
+                disposed_at = _parse_timestamp(str(disposition["disposed_at"]))
+                if disposed_at is None:
+                    raise QueueOperationError("corrupt_disposition_invalid")
+                if (
+                    existing_operation is None
+                    and disposed_at + timedelta(days=30) > now
+                ):
+                    return CorruptPurgeProgress(
+                        task_id=task_id,
+                        operation_id="",
+                        state="blocked",
+                        pages_written=0,
+                        links_deleted=0,
+                        complete=False,
+                        code="corrupt_retention_active",
+                    )
+                package_key = str(disposition["disposition_key"])
+                package = self.results_dir / f"corrupt-{package_key}"
+                package_code = self._corrupt_package_purge_blocker(
+                    package, disposition
+                )
+                if package_code is not None:
+                    return CorruptPurgeProgress(
+                        task_id=task_id,
+                        operation_id="",
+                        state="blocked",
+                        pages_written=0,
+                        links_deleted=0,
+                        complete=False,
+                        code=package_code,
+                    )
+                operation_key = sha256_bytes(
+                    canonical_json_bytes(
+                        {
+                            "disposition_sha256": disposition["disposition_sha256"],
+                            "package_key": package_key,
+                            "task_id": task_id,
+                        }
+                    )
+                )
+                operation_id = f"corrupt-purge:{operation_key}"
+                if existing_operation is None:
+                    try:
+                        binding = self.active_capture_binding(database, task_id)
+                    except QueueOperationError:
+                        return CorruptPurgeProgress(
+                            task_id=task_id,
+                            operation_id="",
+                            state="blocked",
+                            pages_written=0,
+                            links_deleted=0,
+                            complete=False,
+                            code="capture_intent_unresolved",
+                        )
+                    terminal_code = self._capture_terminal_blocker(
+                        database, task_id, binding
+                    )
+                    if terminal_code is not None:
+                        return CorruptPurgeProgress(
+                            task_id=task_id,
+                            operation_id="",
+                            state="blocked",
+                            pages_written=0,
+                            links_deleted=0,
+                            complete=False,
+                            code=terminal_code,
+                        )
+                    purge_token = sha256_bytes(
+                        canonical_json_bytes(
+                            {
+                                "operation_id": operation_id,
+                                "task_id": task_id,
+                                "task_fence_epoch": task_fence.epoch,
+                            }
+                        )
+                    )
+                    inserted = database.execute(
+                        """INSERT INTO corrupt_purge_operations(
+                               operation_id,task_id,purge_token,expected_generation,
+                               cursor_task_id,page_count,rolling_root,state,created_at,updated_at
+                           ) VALUES (?,?,?,?,'',0,?,'purging',?,?)""",
+                        (
+                            operation_id,
+                            task_id,
+                            purge_token,
+                            int(task["lineage_generation"]),
+                            sha256_bytes(b""),
+                            _timestamp(now),
+                            _timestamp(now),
+                        ),
+                    ).rowcount
+                    changed = database.execute(
+                        """UPDATE tasks SET state='purge_pending',updated_at=?
+                           WHERE id=? AND state='quarantined'""",
+                        (_timestamp(now), task_id),
+                    ).rowcount
+                    if (inserted, changed) != (1, 1):
+                        raise QueueOperationError("corrupt_purge_start_failed")
+                elif (
+                    existing_operation["operation_id"] != operation_id
+                    or task["state"] != "purge_pending"
+                ):
+                    raise QueueOperationError("corrupt_purge_conflict")
+            page_progress = self._purge_corrupt_lineage_page(
+                task_id,
+                operation_id=operation_id,
+                package=package,
+                owner=owner,
+                task_fence=task_fence,
+                deadline=deadline,
+                cancelled=cancelled,
+            )
+            if page_progress.state == "blocked":
+                return page_progress
+            with closing(self._connect()) as database:
+                incoming = database.execute(
+                    "SELECT 1 FROM tasks WHERE redrive_of=? LIMIT 1", (task_id,)
+                ).fetchone()
+            if incoming is not None:
+                return page_progress
+            self._publish_corrupt_purge_receipt(
+                task_id,
+                operation_id=operation_id,
+                package=package,
+                task_fence=task_fence,
+            )
+            self._delete_corrupt_parent(
+                task_id,
+                operation_id=operation_id,
+                package=package,
+                task_fence=task_fence,
+            )
+            return CorruptPurgeProgress(
+                task_id=task_id,
+                operation_id=operation_id,
+                state="purged",
+                pages_written=page_progress.pages_written,
+                links_deleted=page_progress.links_deleted,
+                complete=True,
+                code=None,
+            )
+
+    def _completed_corrupt_purge_progress(
+        self, task_id: str
+    ) -> CorruptPurgeProgress | None:
+        with closing(self._connect()) as database:
+            task_exists = database.execute(
+                "SELECT 1 FROM tasks WHERE id=?", (task_id,)
+            ).fetchone()
+            operation = database.execute(
+                "SELECT * FROM corrupt_purge_operations WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            if task_exists is not None or operation is None:
+                return None
+            if operation["state"] != "receipt-published":
+                raise QueueOperationError("corrupt_purge_completion_invalid")
+            disposition = database.execute(
+                """SELECT disposition.*,export.disposition_key
+                   FROM corrupt_dispositions AS disposition
+                   JOIN corrupt_export_operations AS export
+                     ON export.operation_id=disposition.operation_id
+                   WHERE disposition.task_id=?""",
+                (task_id,),
+            ).fetchone()
+            links_deleted = int(
+                database.execute(
+                    """SELECT COALESCE(SUM(deleted_link_count),0)
+                       FROM corrupt_purge_pages WHERE operation_id=?""",
+                    (operation["operation_id"],),
+                ).fetchone()[0]
+            )
+        if disposition is None:
+            raise QueueOperationError("corrupt_purge_completion_invalid")
+        package = self.results_dir / f"corrupt-{disposition['disposition_key']}"
+        try:
+            receipt_bytes = _read_stable_owner_file(
+                package / "purge-receipt.json", 64 * 1024
+            )
+            receipt = json.loads(receipt_bytes.decode("utf-8", errors="strict"))
+            validate_schema(
+                receipt,
+                Path(__file__).with_name("schemas") / "corrupt-purge-v1.json",
+            )
+        except (OSError, PermissionError, ValueError, json.JSONDecodeError) as exc:
+            raise QueueOperationError("corrupt_purge_completion_invalid") from exc
+        if (
+            receipt["operation_id"] != operation["operation_id"]
+            or receipt["task_id"] != task_id
+            or receipt["package_key"] != disposition["disposition_key"]
+            or receipt["manifest_sha256"] != disposition["manifest_sha256"]
+            or receipt["disposition_sha256"] != disposition["disposition_sha256"]
+            or receipt["purge_page_count"] != operation["page_count"]
+            or receipt["final_rolling_root"] != operation["rolling_root"]
+            or receipt["final_generation"] != operation["expected_generation"]
+        ):
+            raise QueueOperationError("corrupt_purge_completion_invalid")
+        return CorruptPurgeProgress(
+            task_id=task_id,
+            operation_id=str(operation["operation_id"]),
+            state="purged",
+            pages_written=int(operation["page_count"]),
+            links_deleted=links_deleted,
+            complete=True,
+            code=None,
+        )
+
+    def _corrupt_package_purge_blocker(
+        self, package: Path, disposition: sqlite3.Row
+    ) -> str | None:
+        try:
+            metadata = package.lstat()
+            reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            if (
+                stat.S_ISLNK(metadata.st_mode)
+                or getattr(metadata, "st_file_attributes", 0) & reparse_flag
+                or not stat.S_ISDIR(metadata.st_mode)
+                or not _is_owner_only(package)
+            ):
+                return "corrupt_package_invalid"
+            manifest_bytes = _read_stable_owner_file(
+                package / "manifest.json", 64 * 1024
+            )
+            disposition_bytes = _read_stable_owner_file(
+                package / "disposition.json", 64 * 1024
+            )
+            manifest = json.loads(manifest_bytes.decode("utf-8", errors="strict"))
+            disposition_record = json.loads(
+                disposition_bytes.decode("utf-8", errors="strict")
+            )
+            validate_schema(
+                manifest,
+                Path(__file__).with_name("schemas") / "corrupt-task-manifest-v1.json",
+            )
+            validate_schema(
+                disposition_record,
+                Path(__file__).with_name("schemas")
+                / "corrupt-task-disposition-v1.json",
+            )
+        except (OSError, PermissionError, ValueError, json.JSONDecodeError):
+            return "corrupt_package_invalid"
+        if (
+            sha256_bytes(manifest_bytes) != disposition["manifest_sha256"]
+            or sha256_bytes(disposition_bytes) != disposition["disposition_sha256"]
+            or manifest["task_id"] != disposition["task_id"]
+            or disposition_record["task_id"] != disposition["task_id"]
+            or manifest["package_path"] != disposition["package_path"]
+            or disposition_record["package_path"] != disposition["package_path"]
+        ):
+            return "corrupt_package_invalid"
+        try:
+            raw = _read_stable_owner_file(
+                package / "payload.bin", _MAX_QUEUE_PAYLOAD_BYTES
+            )
+            history = _read_stable_owner_file(
+                package / "attempt-history.json", _MAX_EXPORT_METADATA_BYTES
+            )
+            metadata = _read_stable_owner_file(
+                package / "task-metadata.json", _MAX_EXPORT_METADATA_BYTES
+            )
+        except (OSError, PermissionError, ValueError):
+            return "corrupt_package_invalid"
+        if (
+            sha256_bytes(raw) != manifest["raw_sha256"]
+            or sha256_bytes(history) != manifest["history_sha256"]
+            or sha256_bytes(metadata) != manifest["metadata_sha256"]
+            or manifest["rolling_root"] != disposition["original_frozen_root"]
+        ):
+            return "corrupt_package_invalid"
+        return None
+
+    @contextmanager
+    def queue_owner(
+        self,
+        *,
+        role: Literal["queue-worker", "queue-operator"],
+        scope: str,
+        parent: OwnerLease | None = None,
+    ) -> Iterator[OwnerLease]:
+        from operational_ownership import OwnerLease, OwnershipRegistry
+
+        allowed = {
+            "queue-worker": {"queue-worker", "compile", "doctor", "nightly", "weekly"},
+            "queue-operator": {"queue-operator", "repair"},
+        }
+        if role not in allowed:
+            raise ValueError("queue owner role must be queue-worker or queue-operator")
+        registry = OwnershipRegistry(self.state_root)
+        nested = parent is not None
+        if nested:
+            if not isinstance(parent, OwnerLease):
+                raise TypeError("parent must be an OwnerLease")
+            if parent.role not in allowed[role]:
+                raise ValueError("parent role cannot project the requested queue role")
+            with closing(registry._connect()) as database:
+                registry.require(database, parent)
+            lease = parent
+        else:
+            lease = registry.acquire(role, scope=scope)
+        try:
+            self._insert_queue_projection(lease, role=role, scope=scope)
+        except BaseException:
+            if not nested:
+                registry.release(lease)
+            raise
+        try:
+            yield lease
+        finally:
+            self._remove_queue_projection(lease)
+            if not nested:
+                registry.release(lease)
+
+    def _insert_queue_projection(
+        self,
+        lease: OwnerLease,
+        *,
+        role: Literal["queue-worker", "queue-operator"],
+        scope: str,
+    ) -> None:
+        from operational_ownership import OwnerLease
+
+        if not isinstance(lease, OwnerLease):
+            raise TypeError("lease must be an OwnerLease")
+        domain_role = "worker" if role == "queue-worker" else "operator"
+        with closing(
+            open_operational_db(
+                self.db_path,
+                busy_ms=DEFAULTS.queue_busy_ms,
+                contract=_QUEUE_V3_CONTRACT,
+            )
+        ) as database, begin_immediate(database):
+            database.execute(
+                """INSERT INTO queue_ownership(
+                       actor_id,domain_role,canonical_role,canonical_scope,
+                       owner_token,fencing_epoch,process_id,process_start_identity,
+                       acquired_at,heartbeat_at,expires_at
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    lease.actor_id,
+                    domain_role,
+                    lease.role,
+                    lease.scope,
+                    lease.token,
+                    lease.epoch,
+                    lease.process.pid,
+                    lease.process.start_identity,
+                    _timestamp(lease.acquired_at),
+                    _timestamp(lease.heartbeat_at),
+                    _timestamp(lease.expires_at),
+                ),
+            )
+
+    def heartbeat_queue_owner(self, lease: OwnerLease) -> None:
+        from operational_ownership import OwnershipRegistry
+
+        registry = OwnershipRegistry(self.state_root)
+        current = registry.heartbeat(lease)
+        with closing(
+            open_operational_db(
+                self.db_path,
+                busy_ms=DEFAULTS.queue_busy_ms,
+                contract=_QUEUE_V3_CONTRACT,
+            )
+        ) as database, begin_immediate(database):
+            updated = database.execute(
+                """UPDATE queue_ownership SET heartbeat_at=?,expires_at=?
+                   WHERE actor_id=? AND canonical_role=? AND canonical_scope=?
+                     AND owner_token=? AND fencing_epoch=? AND process_id=?
+                     AND process_start_identity=?""",
+                (
+                    _timestamp(current.heartbeat_at),
+                    _timestamp(current.expires_at),
+                    current.actor_id,
+                    current.role,
+                    current.scope,
+                    current.token,
+                    current.epoch,
+                    current.process.pid,
+                    current.process.start_identity,
+                ),
+            ).rowcount
+            if updated != 1:
+                raise QueueOperationError("queue_owner_fence_lost")
+
+    def _remove_queue_projection(self, lease: OwnerLease) -> None:
+        from operational_ownership import OwnerLease
+
+        if not isinstance(lease, OwnerLease):
+            raise TypeError("lease must be an OwnerLease")
+        with closing(
+            open_operational_db(
+                self.db_path,
+                busy_ms=DEFAULTS.queue_busy_ms,
+                contract=_QUEUE_V3_CONTRACT,
+            )
+        ) as database, begin_immediate(database):
+            deleted = database.execute(
+                """DELETE FROM queue_ownership
+                   WHERE actor_id=? AND canonical_role=? AND canonical_scope=?
+                     AND owner_token=? AND fencing_epoch=? AND process_id=?
+                     AND process_start_identity=?""",
+                (
+                    lease.actor_id,
+                    lease.role,
+                    lease.scope,
+                    lease.token,
+                    lease.epoch,
+                    lease.process.pid,
+                    lease.process.start_identity,
+                ),
+            ).rowcount
+            if deleted != 1:
+                raise QueueOperationError("queue_owner_fence_lost")
+
+    def claim(
+        self,
+        owner: str,
+        *,
+        lease_seconds: int = DEFAULTS.queue_lease_seconds,
+        max_attempts: int = DEFAULTS.queue_max_attempts,
+    ) -> QueueLease | None:
+        if not owner:
+            raise ValueError("owner must be non-empty")
+        if lease_seconds <= 0:
+            raise ValueError("lease must be positive")
+        _validate_retry_policy(
+            max_attempts, DEFAULTS.retry_base_seconds, DEFAULTS.retry_cap_seconds
+        )
+        now = _utc_now()
+        with closing(
+            self._connect()
+        ) as database, begin_immediate(database):
+            while True:
+                row = database.execute(
+                    """SELECT * FROM tasks
+                       WHERE state='ready' AND attempts < ? AND available_at <= ?
+                       ORDER BY priority DESC, available_at, created_at, id LIMIT 1""",
+                    (max_attempts, _timestamp(now)),
+                ).fetchone()
+                if row is None:
+                    return None
+                validation = self._require_valid_task_payload(
+                    database, row, now=now, parse=True
+                )
+                if validation is None:
+                    continue
+                history_count = database.execute(
+                    "SELECT COUNT(*) FROM attempt_history WHERE task_id=?",
+                    (row["id"],),
+                ).fetchone()[0]
+                if int(history_count) >= _MAX_RUNTIME_ATTEMPTS:
+                    changed = database.execute(
+                        """UPDATE tasks SET state='dead',
+                               error_code='attempt_history_exhausted',updated_at=?
+                           WHERE id=? AND state='ready'""",
+                        (_timestamp(now), row["id"]),
+                    ).rowcount
+                    if changed != 1:
+                        raise QueueOperationError("attempt_history_demotion_failed")
+                    continue
+                break
+            token = sha256_bytes(os.urandom(32))
+            expires_at = now + timedelta(seconds=lease_seconds)
+            changed = database.execute(
+                """UPDATE tasks SET state='leased', attempts=attempts+1,
+                       lease_owner=?, lease_token=?, lease_expires_at=?,
+                       lease_heartbeat_at=?, attempt_started_at=?, updated_at=?
+                   WHERE id=? AND state='ready' AND attempts < ?""",
+                (
+                    owner,
+                    token,
+                    _timestamp(expires_at),
+                    _timestamp(now),
+                    _timestamp(now),
+                    _timestamp(now),
+                    row["id"],
+                    max_attempts,
+                ),
+            ).rowcount
+            if changed != 1:
+                return None
+        return QueueLease(
+            id=str(row["id"]),
+            kind=str(row["kind"]),
+            handler_version=int(row["handler_version"]),
+            payload=validation.payload or {},
+            input_hash=str(row["input_hash"]),
+            owner=owner,
+            token=token,
+            expires_at=expires_at,
+            attempt=int(row["attempts"]) + 1,
+            created_at=_parse_timestamp(row["created_at"]),  # type: ignore[arg-type]
+            last_attempt_at=_parse_timestamp(row["last_attempt_at"]),
+            prior_attempts=int(row["attempts"]),
+        )
+
+    def heartbeat(
+        self,
+        lease: QueueLease,
+        *,
+        lease_seconds: int = DEFAULTS.queue_lease_seconds,
+    ) -> QueueLease:
+        if lease_seconds <= 0:
+            raise ValueError("lease must be positive")
+        now = _utc_now()
+        expires_at = now + timedelta(seconds=lease_seconds)
+        mismatch = False
+        with closing(self._connect()) as database, begin_immediate(database):
+            row = self._require_lease_row(database, lease, now)
+            validation = self._require_valid_task_payload(
+                database, row, now=now, parse=True
+            )
+            mismatch = validation is None
+            if not mismatch:
+                changed = database.execute(
+                    """UPDATE tasks SET lease_expires_at=?, lease_heartbeat_at=?,
+                           updated_at=? WHERE id=? AND lease_token=? AND state='leased'""",
+                    (
+                        _timestamp(expires_at),
+                        _timestamp(now),
+                        _timestamp(now),
+                        lease.id,
+                        lease.token,
+                    ),
+                ).rowcount
+                if changed != 1:
+                    raise LeaseFenceError(f"lease is stale or not owned: {lease.id}")
+        if mismatch:
+            self._raise_payload_mismatch()
+        return replace(lease, expires_at=expires_at)
+
+    def payload_for_execution(self, lease: QueueLease) -> dict[str, object]:
+        now = _utc_now()
+        payload: dict[str, object] | None = None
+        mismatch = False
+        with closing(self._connect()) as database, begin_immediate(database):
+            row = self._require_lease_row(database, lease, now)
+            validation = self._require_valid_task_payload(
+                database, row, now=now, parse=True
+            )
+            mismatch = validation is None
+            if validation is not None:
+                payload = validation.payload
+        if mismatch:
+            self._raise_payload_mismatch()
+        return payload or {}
+
+    def _validated_result_digest(self, relative: str) -> str | None:
+        try:
+            path = self.state_root / relative
+            if path.parent.resolve(strict=True) != self.results_dir.resolve(strict=True):
+                return None
+            data = _read_stable_owner_file(path, _MAX_RESULT_BYTES)
+            return sha256_bytes(data)
+        except (OSError, PermissionError, ValueError):
+            return None
+
+    def adopt_published_result(
+        self, lease: QueueLease, *, operation_id: str
+    ) -> str | None:
+        if not operation_id:
+            raise ValueError("operation_id must be non-empty")
+        result_name = f"{sha256_bytes(operation_id.encode('utf-8'))}.result"
+        relative = f"run/queue-results/{result_name}"
+        if not (self.state_root / relative).exists():
+            return None
+        now = _utc_now()
+        mismatch = False
+        outcome: str | None = None
+        with closing(self._connect()) as database, begin_immediate(database):
+            row = self._require_lease_row(database, lease, now)
+            validation = self._require_valid_task_payload(
+                database, row, now=now, parse=True
+            )
+            mismatch = validation is None
+            if not mismatch:
+                digest = self._validated_result_digest(relative)
+                if digest is None:
+                    outcome = "corrupt"
+                    database.execute(
+                        """UPDATE tasks SET state='dead',error_code='result_corrupt',
+                               updated_at=?,lease_owner=NULL,lease_token=NULL,
+                               lease_expires_at=NULL,lease_heartbeat_at=NULL,
+                               attempt_started_at=NULL WHERE id=?""",
+                        (_timestamp(now), lease.id),
+                    )
+                else:
+                    changed = database.execute(
+                        """UPDATE tasks SET result_reference=?,result_sha256=?,
+                               result_operation_id=?,updated_at=?
+                           WHERE id=? AND lease_token=? AND state='leased'""",
+                        (
+                            relative,
+                            digest,
+                            operation_id,
+                            _timestamp(now),
+                            lease.id,
+                            lease.token,
+                        ),
+                    ).rowcount
+                    if changed != 1:
+                        raise LeaseFenceError(
+                            f"lease is stale or not owned: {lease.id}"
+                        )
+                    outcome = "adopted"
+        if mismatch:
+            self._raise_payload_mismatch()
+        return outcome
+
+    def publish_result(
+        self, lease: QueueLease, *, operation_id: str, result: bytes
+    ) -> str:
+        if not operation_id:
+            raise ValueError("operation_id must be non-empty")
+        if not isinstance(result, bytes):
+            raise TypeError("result must be bytes")
+        if len(result) > _MAX_RESULT_BYTES:
+            raise ValueError("result exceeds maximum queue result size")
+        now = _utc_now()
+        mismatch = False
+        with closing(self._connect()) as database, begin_immediate(database):
+            row = self._require_lease_row(database, lease, now)
+            mismatch = (
+                self._require_valid_task_payload(
+                    database, row, now=now, parse=True
+                )
+                is None
+            )
+        if mismatch:
+            self._raise_payload_mismatch()
+        self.results_dir.mkdir(parents=True, exist_ok=True)
+        _harden_owner_only(self.results_dir, 0o700)
+        result_name = f"{sha256_bytes(operation_id.encode('utf-8'))}.result"
+        target = self.results_dir / result_name
+        _write_durable_file(target, result)
+        relative = f"run/queue-results/{result_name}"
+        digest = sha256_bytes(result)
+        mismatch = False
+        with closing(self._connect()) as database, begin_immediate(database):
+            row = self._require_lease_row(database, lease, _utc_now())
+            mismatch = (
+                self._require_valid_task_payload(
+                    database, row, now=_utc_now(), parse=True
+                )
+                is None
+            )
+            if not mismatch:
+                existing_operation = row["result_operation_id"]
+                if existing_operation not in {None, operation_id}:
+                    raise ResultConflictError(
+                        "lease already published a different operation"
+                    )
+                existing_digest = self._validated_result_digest(relative)
+                if existing_digest != digest:
+                    raise ResultConflictError(
+                        "operation ID already has different result bytes"
+                    )
+                changed = database.execute(
+                    """UPDATE tasks SET result_reference=?,result_sha256=?,
+                           result_operation_id=?,updated_at=?
+                       WHERE id=? AND lease_token=? AND state='leased'""",
+                    (
+                        relative,
+                        digest,
+                        operation_id,
+                        _timestamp(_utc_now()),
+                        lease.id,
+                        lease.token,
+                    ),
+                ).rowcount
+                if changed != 1:
+                    raise LeaseFenceError(f"lease is stale or not owned: {lease.id}")
+        if mismatch:
+            self._raise_payload_mismatch()
+        return relative
+
+    def acknowledge(self, lease: QueueLease) -> None:
+        now = _utc_now()
+        mismatch = False
+        with closing(self._connect()) as database, begin_immediate(database):
+            row = self._require_lease_row(database, lease, now)
+            mismatch = (
+                self._require_valid_task_payload(
+                    database, row, now=now, parse=True
+                )
+                is None
+            )
+            if not mismatch:
+                digest = row["result_sha256"]
+                reference = row["result_reference"]
+                valid_result = (
+                    isinstance(digest, str)
+                    and isinstance(reference, str)
+                    and self._validated_result_digest(reference) == digest
+                )
+                state = "succeeded" if valid_result else "dead"
+                error_code = None if valid_result else "result_corrupt"
+                database.execute(
+                    """INSERT INTO attempt_history(
+                           task_id,attempt,started_at,finished_at,outcome,error_code
+                       ) VALUES (?,?,?,?,?,?)""",
+                    (
+                        lease.id,
+                        row["attempts"],
+                        row["attempt_started_at"] or _timestamp(now),
+                        _timestamp(now),
+                        "succeeded" if valid_result else "failed",
+                        error_code,
+                    ),
+                )
+                changed = database.execute(
+                    """UPDATE tasks SET state=?,error_code=?,updated_at=?,
+                           lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,
+                           lease_heartbeat_at=NULL,attempt_started_at=NULL
+                       WHERE id=? AND lease_token=? AND state='leased'""",
+                    (state, error_code, _timestamp(now), lease.id, lease.token),
+                ).rowcount
+                if changed != 1:
+                    raise LeaseFenceError(f"lease is stale or not owned: {lease.id}")
+        if mismatch:
+            self._raise_payload_mismatch()
+
+    def fail(self, lease: QueueLease, failure: QueueFailure) -> None:
+        if not isinstance(failure, QueueFailure) or not failure.error_code:
+            raise ValueError("failure must have a non-empty error code")
+        now = _utc_now()
+        mismatch = False
+        with closing(self._connect()) as database, begin_immediate(database):
+            row = self._require_lease_row(database, lease, now)
+            mismatch = (
+                self._require_valid_task_payload(
+                    database, row, now=now, parse=True
+                )
+                is None
+            )
+            if not mismatch:
+                outcome = "blocked" if failure.blocked_capability else "failed"
+                database.execute(
+                    """INSERT INTO attempt_history(
+                           task_id,attempt,started_at,finished_at,outcome,error_code
+                       ) VALUES (?,?,?,?,?,?)""",
+                    (
+                        lease.id,
+                        row["attempts"],
+                        row["attempt_started_at"] or _timestamp(now),
+                        _timestamp(now),
+                        outcome,
+                        failure.error_code,
+                    ),
+                )
+                if failure.blocked_capability:
+                    state = "blocked"
+                    attempts = int(row["attempts"]) - 1
+                elif failure.permanent or failure.error_code in _PERMANENT_CODES:
+                    state = "dead"
+                    attempts = int(row["attempts"])
+                else:
+                    state = "ready"
+                    attempts = int(row["attempts"])
+                changed = database.execute(
+                    """UPDATE tasks SET state=?,attempts=?,error_code=?,
+                           blocked_capability=?,updated_at=?,available_at=?,
+                           lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,
+                           lease_heartbeat_at=NULL,attempt_started_at=NULL
+                       WHERE id=? AND lease_token=? AND state='leased'""",
+                    (
+                        state,
+                        attempts,
+                        failure.error_code,
+                        failure.blocked_capability,
+                        _timestamp(now),
+                        _timestamp(now),
+                        lease.id,
+                        lease.token,
+                    ),
+                ).rowcount
+                if changed != 1:
+                    raise LeaseFenceError(f"lease is stale or not owned: {lease.id}")
+        if mismatch:
+            self._raise_payload_mismatch()
+
+    def recover_expired_leases(self) -> int:
+        now = _utc_now()
+        with closing(self._connect()) as database, begin_immediate(database):
+            rows = database.execute(
+                "SELECT * FROM tasks WHERE state='leased' AND lease_expires_at<=?",
+                (_timestamp(now),),
+            ).fetchall()
+            for row in rows:
+                validation = self._require_valid_task_payload(
+                    database, row, now=now, parse=True
+                )
+                if validation is None:
+                    continue
+                database.execute(
+                    """INSERT INTO attempt_history(
+                           task_id,attempt,started_at,finished_at,outcome,error_code
+                       ) VALUES (?,?,?,?,?,?)""",
+                    (
+                        row["id"],
+                        row["attempts"],
+                        row["attempt_started_at"] or _timestamp(now),
+                        _timestamp(now),
+                        "lease_expired",
+                        "lease_expired",
+                    ),
+                )
+                changed = database.execute(
+                    """UPDATE tasks SET state='ready',error_code='lease_expired',
+                           updated_at=?,available_at=?,lease_owner=NULL,lease_token=NULL,
+                           lease_expires_at=NULL,lease_heartbeat_at=NULL,
+                           attempt_started_at=NULL WHERE id=? AND state='leased'""",
+                    (_timestamp(now), _timestamp(now), row["id"]),
+                ).rowcount
+                if changed != 1:
+                    raise QueueOperationError("lease_expiry_failed")
+        return len(rows)
+
+    def cancel(self, task_id: str) -> bool:
+        now = _utc_now()
+        mismatch = False
+        changed = False
+        with closing(self._connect()) as database, begin_immediate(database):
+            row = database.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if row is None or row["state"] in _TERMINAL_STATES:
+                return False
+            mismatch = (
+                self._require_valid_task_payload(
+                    database, row, now=now, parse=True
+                )
+                is None
+            )
+            if not mismatch:
+                changed = database.execute(
+                    """UPDATE tasks SET state='cancelled',error_code='cancelled',
+                           updated_at=?,lease_owner=NULL,lease_token=NULL,
+                           lease_expires_at=NULL,lease_heartbeat_at=NULL,
+                           attempt_started_at=NULL WHERE id=? AND state=?""",
+                    (_timestamp(now), task_id, row["state"]),
+                ).rowcount == 1
+        if mismatch:
+            self._raise_payload_mismatch()
+        return changed
+
+    def redrive(self, task_id: str) -> str:
+        now = _utc_now()
+        mismatch = False
+        replacement = uuid.uuid4().hex
+        with closing(self._connect()) as database, begin_immediate(database):
+            row = database.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            if row["state"] != "dead":
+                raise QueueOperationError("redrive_requires_dead")
+            validation = self._require_valid_task_payload(
+                database, row, now=now, parse=True
+            )
+            mismatch = validation is None
+            if not mismatch:
+                inserted = database.execute(
+                    """INSERT INTO tasks(
+                           id,kind,handler_version,payload_blob,input_hash,state,
+                           priority,created_at,updated_at,available_at,redrive_of
+                       ) VALUES (?,?,?,?,?,'ready',?,?,?,?,?)""",
+                    (
+                        replacement,
+                        row["kind"],
+                        row["handler_version"],
+                        validation.raw,
+                        validation.input_hash,
+                        row["priority"],
+                        _timestamp(now),
+                        _timestamp(now),
+                        _timestamp(now),
+                        task_id,
+                    ),
+                ).rowcount
+                if inserted != 1:
+                    raise QueueOperationError("redrive_failed")
+        if mismatch:
+            self._raise_payload_mismatch()
+        return replacement
+
+    def export_task(self, task_id: str) -> dict[str, object]:
+        with closing(self._connect()) as database:
+            row = database.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            validation = validate_payload_blob(
+                bytes(row["payload_blob"]), row["input_hash"], parse=True
+            )
+            if validation.code is not None:
+                raise QueueOperationError("payload_hash_mismatch")
+            history = database.execute(
+                """SELECT attempt,started_at,finished_at,outcome,error_code
+                   FROM attempt_history WHERE task_id=? ORDER BY sequence""",
+                (task_id,),
+            ).fetchall()
+            source_links = database.execute(
+                """SELECT logical_path,source_digest FROM task_source_links
+                   WHERE task_id=? ORDER BY logical_path,source_digest""",
+                (task_id,),
+            ).fetchall()
+            link = database.execute(
+                "SELECT * FROM capture_task_links WHERE task_id=?", (task_id,)
+            ).fetchone()
+            seal = database.execute(
+                "SELECT * FROM capture_task_link_seals WHERE task_id=?", (task_id,)
+            ).fetchone()
+        lease_values = (
+            row["lease_owner"],
+            row["lease_token"],
+            row["lease_expires_at"],
+            row["lease_heartbeat_at"],
+        )
+        lease = (
+            None
+            if lease_values == (None, None, None, None)
+            else {
+                "owner": lease_values[0],
+                "token": lease_values[1],
+                "expires_at": lease_values[2],
+                "heartbeat_at": lease_values[3],
+            }
+        )
+        result_values = (
+            row["result_reference"],
+            row["result_sha256"],
+            row["result_operation_id"],
+        )
+        result = (
+            None
+            if result_values == (None, None, None)
+            else {
+                "reference": result_values[0],
+                "sha256": result_values[1],
+                "operation_id": result_values[2],
+            }
+        )
+        capture_binding = None
+        if link is not None:
+            active_digest = str(link["link_digest"])
+            capture_binding = {
+                "intent_id": link["intent_id"],
+                "intent_sha256": link["intent_sha256"],
+                "handler_version": int(link["handler_version"]),
+                "active_digest": active_digest,
+                "seal_digest": None if seal is None else seal["seal_digest"],
+            }
+        record: dict[str, object] = {
+            "schema_version": "queue-task/v3",
+            "task_id": str(row["id"]),
+            "kind": str(row["kind"]),
+            "handler_version": int(row["handler_version"]),
+            "payload": validation.payload,
+            "input_hash": str(row["input_hash"]),
+            "dedupe_key": row["dedupe_key"],
+            "state": str(row["state"]),
+            "priority": int(row["priority"]),
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+            "available_at": str(row["available_at"]),
+            "attempts": int(row["attempts"]),
+            "last_attempt_at": row["last_attempt_at"],
+            "lease": lease,
+            "error_code": row["error_code"],
+            "blocked_capability": row["blocked_capability"],
+            "result": result,
+            "redrive_of": row["redrive_of"],
+            "lineage_generation": int(row["lineage_generation"]),
+            "attempt_history": [
+                {
+                    "attempt": int(item["attempt"]),
+                    "started_at": str(item["started_at"]),
+                    "finished_at": str(item["finished_at"]),
+                    "outcome": str(item["outcome"]),
+                    "error_code": item["error_code"],
+                }
+                for item in history
+            ],
+            "source_links": [
+                {
+                    "logical_path": str(item["logical_path"]),
+                    "source_digest": str(item["source_digest"]),
+                }
+                for item in source_links
+            ],
+            "capture_binding": capture_binding,
+        }
+        validate_schema(
+            record, Path(__file__).with_name("schemas") / "queue-task-v3.json"
+        )
+        if len(canonical_json_bytes(record)) > _MAX_EXPORT_METADATA_BYTES:
+            raise QueueOperationError("export_metadata_too_large")
+        return record
+
+    def purge(
+        self,
+        *,
+        terminal_before: datetime,
+        export_path: Path,
+        deadline: float = float("inf"),
+        cancelled: Callable[[], bool] | None = None,
+    ) -> PurgeReceipt:
+        _require_active(deadline, cancelled)
+        cutoff = _timestamp(_as_utc(terminal_before))
+        export = Path(export_path).absolute()
+        if export.exists() or export.is_symlink():
+            raise QueueOperationError("export_exists")
+        with closing(self._connect()) as database:
+            task_ids = tuple(
+                str(row["id"])
+                for row in database.execute(
+                    """SELECT id FROM tasks
+                       WHERE state IN ('succeeded','cancelled') AND updated_at<?
+                       ORDER BY created_at,id""",
+                    (cutoff,),
+                )
+            )
+        records = [self.export_task(task_id) for task_id in task_ids]
+        records_bytes = canonical_json_bytes(records)
+        if len(records_bytes) > _MAX_EXPORT_METADATA_BYTES:
+            raise QueueOperationError("export_metadata_too_large")
+        parent = export.parent
+        parent.mkdir(parents=True, exist_ok=True)
+        _harden_owner_only(parent, 0o700)
+        if parent.is_symlink() or not parent.is_dir() or not _is_owner_only(parent):
+            raise QueueOperationError("export_parent_permissions_invalid")
+        staging = parent / f".{export.name}.staging-{uuid.uuid4().hex}"
+        staging.mkdir()
+        _harden_owner_only(staging, 0o700)
+        results_export = staging / "results"
+        results_export.mkdir()
+        _harden_owner_only(results_export, 0o700)
+        result_manifest: list[dict[str, str]] = []
+        try:
+            for record in records:
+                _require_active(deadline, cancelled)
+                result = record["result"]
+                if not isinstance(result, dict):
+                    continue
+                reference = str(result["reference"])
+                digest = str(result["sha256"])
+                data = _read_stable_owner_file(
+                    self.state_root / reference, _MAX_RESULT_BYTES
+                )
+                if sha256_bytes(data) != digest:
+                    raise QueueOperationError("result_verification_failed")
+                target = results_export / f"{record['task_id']}.result"
+                _write_durable_file(target, data)
+                result_manifest.append(
+                    {"id": str(record["task_id"]), "sha256": digest}
+                )
+            records_path = staging / "records.json"
+            _write_durable_file(records_path, records_bytes)
+            manifest = {
+                "records_sha256": sha256_bytes(records_bytes),
+                "results": result_manifest,
+                "task_ids": list(task_ids),
+            }
+            manifest_bytes = canonical_json_bytes(manifest)
+            manifest_path = staging / "manifest.json"
+            _write_durable_file(manifest_path, manifest_bytes)
+            if (
+                _read_stable_owner_file(records_path, _MAX_EXPORT_METADATA_BYTES)
+                != records_bytes
+                or _read_stable_owner_file(manifest_path, _MAX_EXPORT_METADATA_BYTES)
+                != manifest_bytes
+            ):
+                raise QueueOperationError("export_verification_failed")
+            fsync_directory(results_export)
+            fsync_directory(staging)
+            _require_active(deadline, cancelled)
+            staging.replace(export)
+            fsync_directory(parent)
+        except BaseException:
+            _remove_export_staging(staging)
+            raise
+        manifest_sha256 = sha256_bytes(manifest_bytes)
+        operation_id = f"ordinary-purge:{manifest_sha256}"
+        try:
+            if task_ids:
+                with closing(self._connect()) as database, begin_immediate(
+                    database,
+                    before_commit=lambda: _require_active(deadline, cancelled),
+                ):
+                    for task_id in task_ids:
+                        row = database.execute(
+                            "SELECT * FROM tasks WHERE id=?", (task_id,)
+                        ).fetchone()
+                        if (
+                            row is None
+                            or row["state"] not in {"succeeded", "cancelled"}
+                            or row["updated_at"] >= cutoff
+                        ):
+                            raise QueueOperationError("purge_selection_changed")
+                        validation = validate_payload_blob(
+                            bytes(row["payload_blob"]), row["input_hash"], parse=True
+                        )
+                        if validation.code is not None:
+                            self._demote_payload_mismatch(database, row, now=_utc_now())
+                            raise QueueOperationError("payload_hash_mismatch")
+                        current_record = self._export_task_in_transaction(
+                            database, row
+                        )
+                        expected_record = records[task_ids.index(task_id)]
+                        if canonical_json_bytes(current_record) != canonical_json_bytes(
+                            expected_record
+                        ):
+                            raise QueueOperationError("purge_selection_changed")
+                        authorization_digest = sha256_bytes(
+                            canonical_json_bytes(
+                                {
+                                    "manifest_sha256": manifest_sha256,
+                                    "operation_id": operation_id,
+                                    "task_id": task_id,
+                                }
+                            )
+                        )
+                        inserted = database.execute(
+                            """INSERT INTO task_purge_authorizations(
+                                   task_id,mode,operation_id,authorization_digest,created_at
+                               ) VALUES (?,'ordinary',?,?,?)""",
+                            (
+                                task_id,
+                                operation_id,
+                                authorization_digest,
+                                _timestamp(_utc_now()),
+                            ),
+                        ).rowcount
+                        if inserted != 1:
+                            raise QueueOperationError("purge_authorization_failed")
+                        for table in (
+                            "capture_task_link_seals",
+                            "capture_task_link_resolutions",
+                            "capture_task_links",
+                            "attempt_history",
+                            "task_source_links",
+                        ):
+                            database.execute(
+                                f'DELETE FROM "{table}" WHERE task_id=?', (task_id,)
+                            )
+                        deleted = database.execute(
+                            "DELETE FROM tasks WHERE id=?", (task_id,)
+                        ).rowcount
+                        if deleted != 1:
+                            raise QueueOperationError("purge_delete_failed")
+                        cleared = database.execute(
+                            "DELETE FROM task_purge_authorizations WHERE task_id=?",
+                            (task_id,),
+                        ).rowcount
+                        if cleared != 1:
+                            raise QueueOperationError("purge_authorization_failed")
+        except BaseException:
+            _remove_export_staging(export)
+            raise
+        for record in records:
+            result = record["result"]
+            if not isinstance(result, dict):
+                continue
+            reference = str(result["reference"])
+            with closing(self._connect()) as database:
+                retained = database.execute(
+                    "SELECT 1 FROM tasks WHERE result_reference=? LIMIT 1", (reference,)
+                ).fetchone()
+            if retained is None:
+                (self.state_root / reference).unlink(missing_ok=True)
+        return PurgeReceipt(len(task_ids), task_ids)
+
+    def _export_task_in_transaction(
+        self, database: sqlite3.Connection, row: sqlite3.Row
+    ) -> dict[str, object]:
+        task_id = str(row["id"])
+        validation = validate_payload_blob(
+            bytes(row["payload_blob"]), row["input_hash"], parse=True
+        )
+        if validation.code is not None:
+            raise QueueOperationError("payload_hash_mismatch")
+        history = database.execute(
+            """SELECT attempt,started_at,finished_at,outcome,error_code
+               FROM attempt_history WHERE task_id=? ORDER BY sequence""",
+            (task_id,),
+        ).fetchall()
+        sources = database.execute(
+            """SELECT logical_path,source_digest FROM task_source_links
+               WHERE task_id=? ORDER BY logical_path,source_digest""",
+            (task_id,),
+        ).fetchall()
+        link = database.execute(
+            "SELECT * FROM capture_task_links WHERE task_id=?", (task_id,)
+        ).fetchone()
+        seal = database.execute(
+            "SELECT * FROM capture_task_link_seals WHERE task_id=?", (task_id,)
+        ).fetchone()
+        lease = None
+        if row["lease_owner"] is not None:
+            lease = {
+                "owner": row["lease_owner"],
+                "token": row["lease_token"],
+                "expires_at": row["lease_expires_at"],
+                "heartbeat_at": row["lease_heartbeat_at"],
+            }
+        result = None
+        if row["result_reference"] is not None:
+            result = {
+                "reference": row["result_reference"],
+                "sha256": row["result_sha256"],
+                "operation_id": row["result_operation_id"],
+            }
+        capture_binding = None
+        if link is not None:
+            capture_binding = {
+                "intent_id": link["intent_id"],
+                "intent_sha256": link["intent_sha256"],
+                "handler_version": int(link["handler_version"]),
+                "active_digest": str(link["link_digest"]),
+                "seal_digest": None if seal is None else seal["seal_digest"],
+            }
+        record: dict[str, object] = {
+            "schema_version": "queue-task/v3",
+            "task_id": task_id,
+            "kind": str(row["kind"]),
+            "handler_version": int(row["handler_version"]),
+            "payload": validation.payload,
+            "input_hash": str(row["input_hash"]),
+            "dedupe_key": row["dedupe_key"],
+            "state": str(row["state"]),
+            "priority": int(row["priority"]),
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+            "available_at": str(row["available_at"]),
+            "attempts": int(row["attempts"]),
+            "last_attempt_at": row["last_attempt_at"],
+            "lease": lease,
+            "error_code": row["error_code"],
+            "blocked_capability": row["blocked_capability"],
+            "result": result,
+            "redrive_of": row["redrive_of"],
+            "lineage_generation": int(row["lineage_generation"]),
+            "attempt_history": [
+                {
+                    "attempt": int(item["attempt"]),
+                    "started_at": str(item["started_at"]),
+                    "finished_at": str(item["finished_at"]),
+                    "outcome": str(item["outcome"]),
+                    "error_code": item["error_code"],
+                }
+                for item in history
+            ],
+            "source_links": [
+                {
+                    "logical_path": str(item["logical_path"]),
+                    "source_digest": str(item["source_digest"]),
+                }
+                for item in sources
+            ],
+            "capture_binding": capture_binding,
+        }
+        validate_schema(
+            record, Path(__file__).with_name("schemas") / "queue-task-v3.json"
+        )
+        return record
+
+
+@contextmanager
+def capture_task_fences(
+    queue: _QueueV3CandidateReader,
+    coordinator: object,
+    task_id: str,
+    *,
+    intent_id: str | None,
+    mode: Literal["worker", "queue-operator"],
+    owner: OwnerLease,
+) -> Iterator[tuple[TaskFence, object | None]]:
+    task_fence = queue.acquire_task_fence(task_id, mode=mode, owner=owner)
+    intent_fence = None
+    try:
+        if intent_id is not None:
+            intent_mode = "worker" if mode == "worker" else "operator"
+            intent_fence = coordinator.acquire_intent_fence(
+                intent_id, mode=intent_mode, owner=owner
+            )
+        yield task_fence, intent_fence
+    finally:
+        if intent_fence is not None:
+            coordinator.release_intent_fence(intent_fence)
+        queue.release_task_fence(task_fence)
 
 
 def _state_root() -> Path:
@@ -2587,6 +7974,26 @@ def _queue(
         retry_base_seconds=retry_base_seconds,
         retry_cap_seconds=retry_cap_seconds,
     )
+
+
+def _v3_queue_for_cli() -> _QueueV3CandidateReader:
+    state_root = _state_root()
+    return MemoryQueue._from_v3_candidate(
+        state_root / "run" / "queue-v3.candidate.sqlite3",
+        state_root=state_root,
+    )
+
+
+@contextmanager
+def _repair_owner_for_cli() -> Iterator[OwnerLease]:
+    from operational_ownership import OwnershipRegistry
+
+    registry = OwnershipRegistry(_state_root())
+    owner = registry.acquire("repair", scope=f"repair:cli:{os.getpid()}")
+    try:
+        yield owner
+    finally:
+        registry.release(owner)
 
 
 def enqueue(task_type: str, payload: dict[str, Any]) -> str:
@@ -3394,6 +8801,7 @@ def run_worker(
         totals["failed"],
         totals["dead"],
         totals["skipped"],
+        queue.count_eligible(max_attempts=max_attempts),
     )
 
 
@@ -3567,7 +8975,17 @@ def _cli() -> int:
     parser = _RedactedArgumentParser()
     parser.add_argument(
         "command",
-        choices=["list", "status", "work", "cancel", "redrive", "migrate", "purge"],
+        choices=[
+            "list",
+            "status",
+            "work",
+            "cancel",
+            "redrive",
+            "migrate",
+            "purge",
+            "quarantine-corrupt",
+            "purge-corrupt",
+        ],
     )
     parser.add_argument("task_id", nargs="?")
     parser.add_argument("--max-tasks", type=int, default=DEFAULTS.worker_max_tasks)
@@ -3586,6 +9004,7 @@ def _cli() -> int:
     )
     parser.add_argument("--terminal-before")
     parser.add_argument("--export", type=Path)
+    parser.add_argument("--reason")
     try:
         args = parser.parse_args()
         if args.command == "list":
@@ -3623,11 +9042,12 @@ def _cli() -> int:
                 "dead": summary.dead,
                 "failed": summary.failed,
                 "processed": summary.processed,
+                "remaining_eligible": summary.remaining_eligible,
                 "skipped": summary.skipped,
                 "succeeded": summary.succeeded,
             }
             print(json.dumps({"counts": counts}, sort_keys=True))
-            return 1 if summary.failed or summary.dead else 0
+            return 1 if summary.failed or summary.dead or summary.remaining_eligible else 0
         if args.command == "migrate":
             receipt = migrate_legacy_queue(_state_root())
             print(
@@ -3645,6 +9065,54 @@ def _cli() -> int:
             return 0
         if args.command in ("cancel", "redrive") and not args.task_id:
             raise QueueOperationError("task_id_required")
+        if args.command == "quarantine-corrupt":
+            if not args.task_id:
+                raise QueueOperationError("task_id_required")
+            if (
+                not isinstance(args.reason, str)
+                or not 1 <= len(args.reason.encode("utf-8")) <= 4096
+            ):
+                raise ValueError("quarantine reason is invalid")
+            queue = _v3_queue_for_cli()
+            with _repair_owner_for_cli() as owner:
+                progress = queue.quarantine_corrupt(
+                    args.task_id, reason=args.reason, owner=owner
+                )
+            print(
+                json.dumps(
+                    {
+                        "code": progress.code,
+                        "complete": progress.complete,
+                        "operation_id": progress.operation_id,
+                        "page_count": progress.pages_written,
+                        "state": progress.state,
+                        "task_id": progress.task_id,
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 0
+        if args.command == "purge-corrupt":
+            if not args.task_id:
+                raise QueueOperationError("task_id_required")
+            queue = _v3_queue_for_cli()
+            with _repair_owner_for_cli() as owner:
+                progress = queue.purge_quarantined(args.task_id, owner=owner)
+            print(
+                json.dumps(
+                    {
+                        "code": progress.code,
+                        "complete": progress.complete,
+                        "links_deleted": progress.links_deleted,
+                        "operation_id": progress.operation_id,
+                        "page_count": progress.pages_written,
+                        "state": progress.state,
+                        "task_id": progress.task_id,
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 0
         if args.command == "cancel":
             changed = cancel(args.task_id)
             state = _queue().get(args.task_id).state if changed else "unchanged"

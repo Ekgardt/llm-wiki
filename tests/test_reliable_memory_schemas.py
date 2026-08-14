@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -33,6 +36,426 @@ SCHEMAS = {
     "archive-manifest-v1.json": (
         "https://llm-wiki.local/schemas/archive-manifest-v1.json",
         "archive-manifest/v1",
+    ),
+    "queue-task-v3.json": (
+        "https://llm-wiki.local/schemas/queue-task-v3.json",
+        "queue-task/v3",
+    ),
+    "compile-receipt-v3.json": (
+        "https://llm-wiki.local/schemas/compile-receipt-v3.json",
+        "compile-receipt/v3",
+    ),
+    "transaction-abort-v1.json": (
+        "https://llm-wiki.local/schemas/transaction-abort-v1.json",
+        "transaction-abort/v1",
+    ),
+    "capture-task-link-resolution-v1.json": (
+        "https://llm-wiki.local/schemas/capture-task-link-resolution-v1.json",
+        "capture-task-link-resolution/v1",
+    ),
+    "corrupt-task-manifest-v1.json": (
+        "https://llm-wiki.local/schemas/corrupt-task-manifest-v1.json",
+        "corrupt-task-manifest/v1",
+    ),
+    "corrupt-task-disposition-v1.json": (
+        "https://llm-wiki.local/schemas/corrupt-task-disposition-v1.json",
+        "corrupt-task-disposition/v1",
+    ),
+    "corrupt-package-supersession-v1.json": (
+        "https://llm-wiki.local/schemas/corrupt-package-supersession-v1.json",
+        "corrupt-package-supersession/v1",
+    ),
+    "corrupt-purge-v1.json": (
+        "https://llm-wiki.local/schemas/corrupt-purge-v1.json",
+        "corrupt-purge/v1",
+    ),
+    "operational-db-tombstone-v1.json": (
+        "https://llm-wiki.local/schemas/operational-db-tombstone-v1.json",
+        "operational-db-tombstone/v1",
+    ),
+    "reliability-v3-migration-v1.json": (
+        "https://llm-wiki.local/schemas/reliability-v3-migration-v1.json",
+        "reliability-v3-migration/v1",
+    ),
+    "reliability-v3-adoption-v1.json": (
+        "https://llm-wiki.local/schemas/reliability-v3-adoption-v1.json",
+        "reliability-v3-adoption/v1",
+    ),
+}
+
+EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+TIMESTAMP = "2026-08-05T12:00:00Z"
+
+QUEUE_V3_FIXTURE = {
+    "schema_version": "queue-task/v3",
+    "task_id": "queue-task-fixture-0001",
+    "kind": "compile",
+    "handler_version": 1,
+    "payload": {},
+    "input_hash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+    "dedupe_key": None,
+    "state": "ready",
+    "priority": 0,
+    "created_at": TIMESTAMP,
+    "updated_at": TIMESTAMP,
+    "available_at": TIMESTAMP,
+    "attempts": 0,
+    "last_attempt_at": None,
+    "lease": None,
+    "error_code": None,
+    "blocked_capability": None,
+    "result": None,
+    "redrive_of": None,
+    "lineage_generation": 0,
+    "attempt_history": [],
+    "source_links": [],
+    "capture_binding": None,
+}
+
+COMPILE_RECEIPT_V3_FIXTURE = {
+    "schema_version": "compile-receipt/v3",
+    "source": {
+        "logical_path": "knowledge/daily/2026-08-05.md",
+        "sha256": EMPTY_SHA256,
+        "byte_size": 0,
+        "occurrence_bounds": None,
+    },
+    "source_identity": "4baadbd599fef9c22e1fed700ba9896e1c7569ad2e3632e907d7ba4b5a3a5d9b",
+    "batch_manifest": [
+        {
+            "logical_path": "knowledge/daily/2026-08-05.md",
+            "sha256": EMPTY_SHA256,
+            "byte_size": 0,
+            "occurrence_bounds": None,
+        },
+        {
+            "logical_path": "knowledge/daily/2026-08-06.md",
+            "sha256": EMPTY_SHA256,
+            "byte_size": 0,
+            "occurrence_bounds": None,
+        },
+    ],
+    "batch_manifest_sha256": "31b1d6e0eae61f2343273c102e78fbc616db5d2b30373e5a5af51b03e7e70c10",
+    "action_key": "e9d6c77149458cf6c916ed40b7ec92986dad7e745598f456ef714bf7896679d8",
+    "operation_id": "compile:7ff26d5b5e1758ccb7afb040c321d93b046bb3885e4a43cf11f521b8c11f6176",
+    "packing": {
+        "algorithm": "compile-complete-items/v1",
+        "tokenizer_identity": "utf8-byte-estimate/v1",
+        "count_source": "estimated",
+        "max_input_tokens": 32768,
+        "reserved_output_tokens": 4000,
+        "safety_margin_tokens": 1024,
+        "measured_input_tokens": 12000,
+    },
+    "provider_budget": {
+        "provider": "fake",
+        "model": "fake-v1",
+        "max_output_tokens": 4000,
+    },
+    "dispositions": [
+        {
+            "source_identity": "4baadbd599fef9c22e1fed700ba9896e1c7569ad2e3632e907d7ba4b5a3a5d9b",
+            "disposition": "no_durable_content",
+        },
+        {
+            "source_identity": "5097e77048c160eeefa7d73325016585c0e5faf7c3ac0d359688a41913615eb8",
+            "disposition": "no_durable_content",
+        },
+    ],
+    "operations": [],
+    "evidence": [],
+}
+
+RECOVERY_FIXTURES = {
+    "transaction-abort-v1.json": (
+        {
+            "schema_version": "transaction-abort/v1",
+            "transaction_id": "transaction-fixture-0001",
+            "intent_id": "1" * 64,
+            "active_link_digest": "2" * 64,
+            "intent_fence_token_sha256": "3" * 64,
+            "intent_fence_epoch": 4,
+            "abort_operation_id": "abort:fixture-0001",
+            "before_manifest_sha256": "5" * 64,
+            "restored_target_count": 3,
+            "restored_tree_sha256": "6" * 64,
+            "actor_identity": "posix-uid:1000",
+            "aborted_at": TIMESTAMP,
+        },
+        [()],
+    ),
+    "capture-task-link-resolution-v1.json": (
+        {
+            "schema_version": "capture-task-link-resolution/v1",
+            "task_id": "queue-task-fixture-0001",
+            "supersedes_digest": None,
+            "observed": {
+                "link_digest": "1" * 64,
+                "index_digest": "2" * 64,
+                "intent_file_digest": "3" * 64,
+            },
+            "selected_intent": {
+                "intent_id": "4" * 64,
+                "intent_sha256": "5" * 64,
+                "handler_version": 1,
+            },
+            "actor_identity": "posix-uid:1000",
+            "reason": "Select the one verified capture intent.",
+            "created_at": TIMESTAMP,
+        },
+        [(), ("observed",), ("selected_intent",)],
+    ),
+    "corrupt-task-manifest-v1.json": (
+        {
+            "schema_version": "corrupt-task-manifest/v1",
+            "operation_id": "corrupt-export:fixture-0001",
+            "task_id": "queue-task-fixture-0001",
+            "package_key": "1" * 64,
+            "package_path": "run/queue-results/corrupt-" + "1" * 64,
+            "raw_sha256": "2" * 64,
+            "history_sha256": "3" * 64,
+            "metadata_sha256": "4" * 64,
+            "lineage_generation": 7,
+            "link_count": 2503,
+            "page_count": 3,
+            "rolling_root": "5" * 64,
+        },
+        [()],
+    ),
+    "corrupt-task-disposition-v1.json": (
+        {
+            "schema_version": "corrupt-task-disposition/v1",
+            "operation_id": "corrupt-export:fixture-0001",
+            "task_id": "queue-task-fixture-0001",
+            "package_key": "1" * 64,
+            "package_path": "run/queue-results/corrupt-" + "1" * 64,
+            "manifest_path": "run/queue-results/corrupt-" + "1" * 64 + "/manifest.json",
+            "manifest_sha256": "2" * 64,
+            "active_link_digest": "3" * 64,
+            "actor_identity": "posix-uid:1000",
+            "reason": "Retain the corrupt task as verified evidence.",
+            "disposed_at": TIMESTAMP,
+        },
+        [()],
+    ),
+    "corrupt-package-supersession-v1.json": (
+        {
+            "schema_version": "corrupt-package-supersession/v1",
+            "package_key": "42fbe6ca5d6056b0ff192b9029e89df6bfa9fb758a3c9e2a142d1392bc35fdde",
+            "package_path": "run/queue-results/corrupt-42fbe6ca5d6056b0ff192b9029e89df6bfa9fb758a3c9e2a142d1392bc35fdde",
+            "initial_identity": {
+                "platform": "posix",
+                "volume": "dev:2049",
+                "file_id": "ino:1048576",
+                "size": 4096,
+                "mtime_ns": 1785931200000000000,
+            },
+            "observed_file_count": 2503,
+            "page_count": 3,
+            "observed_root": "06dedfd36393cf68f9bb0d6588998569561f90105158c5b7c75e9e1361fdfd02",
+            "actor_identity": "posix-uid:1000",
+            "reason": "Retain and supersede the conflicting package fixture.",
+            "disposed_at": TIMESTAMP,
+        },
+        [(), ("initial_identity",)],
+    ),
+    "corrupt-purge-v1.json": (
+        {
+            "schema_version": "corrupt-purge/v1",
+            "operation_id": "corrupt-purge:fixture-0001",
+            "task_id": "queue-task-fixture-0001",
+            "package_key": "1" * 64,
+            "package_path": "run/queue-results/corrupt-" + "1" * 64,
+            "manifest_sha256": "2" * 64,
+            "disposition_sha256": "3" * 64,
+            "original_frozen_root": "4" * 64,
+            "purge_page_count": 3,
+            "final_rolling_root": "5" * 64,
+            "final_generation": 10,
+            "observed_incoming_link_count": 0,
+        },
+        [()],
+    ),
+    "operational-db-tombstone-v1.json": (
+        {
+            "schema_version": "operational-db-tombstone/v1",
+            "database": "queue",
+            "source_state": "upgrade",
+            "legacy_path": "run/queue.sqlite3",
+            "replacement_path": "run/queue-v3.sqlite3",
+            "retired_path": "run/queue-v2-retired.sqlite3",
+            "retired_sha256": "fdc558565db7af20b2575b742eec196aa849376d3187f9dbdc0154e62f6c6999",
+            "operation_id": "reliability-v3:54b59979e2b8a1202629857747bb714d840aab8a77208da637fc6bb81b745751",
+            "adoption_schema_sha256": "02df576bf6a53c1a38c464b0515130924fdb3ae974df6802b7cacb9fdc2e7cad",
+        },
+        [()],
+    ),
+    "reliability-v3-migration-v1.json": (
+        {
+            "schema_version": "reliability-v3-migration/v1",
+            "operation_id": "reliability-v3:54b59979e2b8a1202629857747bb714d840aab8a77208da637fc6bb81b745751",
+            "source_state": "upgrade",
+            "databases": [
+                {
+                    "database": "queue",
+                    "legacy_path": "run/queue.sqlite3",
+                    "replacement_path": "run/queue-v3.sqlite3",
+                    "retired_path": "run/queue-v2-retired.sqlite3",
+                    "source_identity": {
+                        "platform": "posix",
+                        "volume": "dev:2049",
+                        "file_id": "ino:1048576",
+                        "size": 4096,
+                        "mtime_ns": 1785931200000000000,
+                    },
+                    "source_sha256": "1" * 64,
+                },
+                {
+                    "database": "coordinator",
+                    "legacy_path": "run/markdown-transactions.sqlite3",
+                    "replacement_path": "run/markdown-transactions-v3.sqlite3",
+                    "retired_path": "run/markdown-transactions-v2-retired.sqlite3",
+                    "source_identity": {
+                        "platform": "posix",
+                        "volume": "dev:2049",
+                        "file_id": "ino:1048577",
+                        "size": 8192,
+                        "mtime_ns": 1785931200000000001,
+                    },
+                    "source_sha256": "2" * 64,
+                },
+            ],
+            "schemas": {
+                "queue_schema_sha256": "3" * 64,
+                "coordinator_schema_sha256": "4" * 64,
+                "adoption_schema_sha256": "5" * 64,
+            },
+            "installed_integration_sha256": "6" * 64,
+        },
+        [
+            (),
+            ("databases", 0),
+            ("databases", 0, "source_identity"),
+            ("schemas",),
+        ],
+    ),
+    "reliability-v3-adoption-v1.json": (
+        {
+            "schema_version": "reliability-v3-adoption/v1",
+            "operation_id": "reliability-v3:54b59979e2b8a1202629857747bb714d840aab8a77208da637fc6bb81b745751",
+            "source_state": "upgrade",
+            "migration": {
+                "path": "run/reliability-v3-migration.json",
+                "sha256": "1" * 64,
+            },
+            "databases": [
+                {
+                    "database": "queue",
+                    "active": {
+                        "path": "run/queue-v3.sqlite3",
+                        "sha256": "2" * 64,
+                        "identity": {
+                            "platform": "posix",
+                            "volume": "dev:2049",
+                            "file_id": "ino:2048576",
+                            "size": 16384,
+                            "mtime_ns": 1785931200000000002,
+                        },
+                    },
+                    "tombstone": {
+                        "path": "run/queue.sqlite3",
+                        "sha256": "3" * 64,
+                        "identity": {
+                            "platform": "posix",
+                            "volume": "dev:2049",
+                            "file_id": "ino:2048577",
+                            "size": 512,
+                            "mtime_ns": 1785931200000000003,
+                        },
+                    },
+                    "retired": {
+                        "path": "run/queue-v2-retired.sqlite3",
+                        "sha256": "4" * 64,
+                        "identity": {
+                            "platform": "posix",
+                            "volume": "dev:2049",
+                            "file_id": "ino:2048578",
+                            "size": 4096,
+                            "mtime_ns": 1785931200000000004,
+                        },
+                    },
+                    "application_id": 1280790835,
+                    "user_version": 3,
+                    "pragmas": {
+                        "journal_mode": "delete",
+                        "synchronous": 2,
+                        "foreign_keys": 1,
+                        "trusted_schema": 0,
+                    },
+                },
+                {
+                    "database": "coordinator",
+                    "active": {
+                        "path": "run/markdown-transactions-v3.sqlite3",
+                        "sha256": "5" * 64,
+                        "identity": {
+                            "platform": "posix",
+                            "volume": "dev:2049",
+                            "file_id": "ino:2048579",
+                            "size": 24576,
+                            "mtime_ns": 1785931200000000005,
+                        },
+                    },
+                    "tombstone": {
+                        "path": "run/markdown-transactions.sqlite3",
+                        "sha256": "6" * 64,
+                        "identity": {
+                            "platform": "posix",
+                            "volume": "dev:2049",
+                            "file_id": "ino:2048580",
+                            "size": 512,
+                            "mtime_ns": 1785931200000000006,
+                        },
+                    },
+                    "retired": {
+                        "path": "run/markdown-transactions-v2-retired.sqlite3",
+                        "sha256": "7" * 64,
+                        "identity": {
+                            "platform": "posix",
+                            "volume": "dev:2049",
+                            "file_id": "ino:2048581",
+                            "size": 8192,
+                            "mtime_ns": 1785931200000000007,
+                        },
+                    },
+                    "application_id": 1280791603,
+                    "user_version": 3,
+                    "pragmas": {
+                        "journal_mode": "delete",
+                        "synchronous": 2,
+                        "foreign_keys": 1,
+                        "trusted_schema": 0,
+                    },
+                },
+            ],
+            "schemas": {
+                "queue_schema_sha256": "8" * 64,
+                "coordinator_schema_sha256": "9" * 64,
+                "adoption_schema_sha256": "a" * 64,
+            },
+            "installed_integration_sha256": "b" * 64,
+        },
+        [
+            (),
+            ("migration",),
+            ("databases", 0),
+            ("databases", 0, "active"),
+            ("databases", 0, "active", "identity"),
+            ("databases", 0, "tombstone"),
+            ("databases", 0, "retired"),
+            ("databases", 0, "pragmas"),
+            ("schemas",),
+        ],
     ),
 }
 
@@ -196,6 +619,204 @@ def test_queue_attempt_history_rejects_unknown_fields():
         validate_schema(task, SCHEMA_DIR / "queue-task-v2.json")
 
 
+def test_queue_v3_schema_accepts_the_complete_contract_fixture():
+    schema_path = SCHEMA_DIR / "queue-task-v3.json"
+    validate_schema(QUEUE_V3_FIXTURE, schema_path)
+    for field in QUEUE_V3_FIXTURE:
+        missing = copy.deepcopy(QUEUE_V3_FIXTURE)
+        del missing[field]
+        with pytest.raises(SchemaValidationError):
+            validate_schema(missing, schema_path)
+
+    extra = copy.deepcopy(QUEUE_V3_FIXTURE)
+    extra["unknown"] = True
+    with pytest.raises(SchemaValidationError, match="unknown"):
+        validate_schema(extra, schema_path)
+
+
+def test_queue_v3_schema_has_exactly_nine_closed_states():
+    expected = [
+        "ready",
+        "leased",
+        "blocked",
+        "succeeded",
+        "dead",
+        "cancelled",
+        "quarantine_pending",
+        "quarantined",
+        "purge_pending",
+    ]
+    states = _schema("queue-task-v3.json")["properties"]["state"]["enum"]
+    assert states == expected
+    task = copy.deepcopy(QUEUE_V3_FIXTURE)
+    task["state"] = "unknown"
+    with pytest.raises(SchemaValidationError):
+        validate_schema(task, SCHEMA_DIR / "queue-task-v3.json")
+
+
+def _canonical_sha256(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_compile_receipt_v3_contract(receipt: dict) -> None:
+    validate_schema(receipt, SCHEMA_DIR / "compile-receipt-v3.json")
+    manifest = receipt["batch_manifest"]
+    if manifest != sorted(manifest, key=lambda item: item["logical_path"]):
+        raise SchemaValidationError("batch manifest is not path-sorted")
+    source_identities = [
+        _canonical_sha256([source["logical_path"], source["sha256"]])
+        for source in manifest
+    ]
+    disposition_identities = [item["source_identity"] for item in receipt["dispositions"]]
+    if disposition_identities != sorted(source_identities):
+        raise SchemaValidationError("dispositions do not match the batch manifest")
+
+
+def test_compile_receipt_v3_requires_path_bound_source_and_all_dispositions():
+    receipt = copy.deepcopy(COMPILE_RECEIPT_V3_FIXTURE)
+    assert receipt["source_identity"] == _canonical_sha256(
+        [receipt["source"]["logical_path"], receipt["source"]["sha256"]]
+    )
+    assert receipt["batch_manifest_sha256"] == _canonical_sha256(receipt["batch_manifest"])
+    assert receipt["action_key"] == _canonical_sha256({"fixture": "compile-receipt-v3"})
+    operation_preimage = {
+        "action_key": receipt["action_key"],
+        "batch_manifest_sha256": receipt["batch_manifest_sha256"],
+        "dispositions": receipt["dispositions"],
+    }
+    assert receipt["operation_id"] == f"compile:{_canonical_sha256(operation_preimage)}"
+    _validate_compile_receipt_v3_contract(receipt)
+
+    mutations = []
+    missing_path = copy.deepcopy(receipt)
+    del missing_path["batch_manifest"][0]["logical_path"]
+    mutations.append(missing_path)
+    duplicate_source = copy.deepcopy(receipt)
+    duplicate_source["dispositions"][1]["source_identity"] = duplicate_source[
+        "dispositions"
+    ][0]["source_identity"]
+    mutations.append(duplicate_source)
+    missing_disposition = copy.deepcopy(receipt)
+    missing_disposition["dispositions"].pop()
+    mutations.append(missing_disposition)
+    extra_disposition = copy.deepcopy(receipt)
+    extra_disposition["dispositions"].append(
+        {"source_identity": "f" * 64, "disposition": "no_durable_content"}
+    )
+    mutations.append(extra_disposition)
+    unknown_disposition = copy.deepcopy(receipt)
+    unknown_disposition["dispositions"][0]["disposition"] = "skipped"
+    mutations.append(unknown_disposition)
+    for invalid in mutations:
+        with pytest.raises(SchemaValidationError):
+            _validate_compile_receipt_v3_contract(invalid)
+
+
+def _tombstone(source_state: str) -> dict:
+    tombstone = copy.deepcopy(RECOVERY_FIXTURES["operational-db-tombstone-v1.json"][0])
+    tombstone["source_state"] = source_state
+    if source_state == "fresh":
+        del tombstone["retired_path"]
+        del tombstone["retired_sha256"]
+    return tombstone
+
+
+def test_fresh_tombstone_forbids_retired_fields():
+    schema_path = SCHEMA_DIR / "operational-db-tombstone-v1.json"
+    fresh = _tombstone("fresh")
+    validate_schema(fresh, schema_path)
+    for field, value in (
+        ("retired_path", "run/queue-v2-retired.sqlite3"),
+        ("retired_sha256", "f" * 64),
+    ):
+        invalid = copy.deepcopy(fresh)
+        invalid[field] = value
+        with pytest.raises(SchemaValidationError):
+            validate_schema(invalid, schema_path)
+
+
+def test_upgrade_tombstone_requires_retired_path_and_hash():
+    schema_path = SCHEMA_DIR / "operational-db-tombstone-v1.json"
+    upgrade = _tombstone("upgrade")
+    validate_schema(upgrade, schema_path)
+    for field in ("retired_path", "retired_sha256"):
+        invalid = copy.deepcopy(upgrade)
+        del invalid[field]
+        with pytest.raises(SchemaValidationError):
+            validate_schema(invalid, schema_path)
+
+
+def test_fresh_migration_and_adoption_have_no_retired_source_artifacts():
+    migration = copy.deepcopy(RECOVERY_FIXTURES["reliability-v3-migration-v1.json"][0])
+    migration["source_state"] = "fresh"
+    for database in migration["databases"]:
+        for field in ("retired_path", "source_identity", "source_sha256"):
+            del database[field]
+    validate_schema(migration, SCHEMA_DIR / "reliability-v3-migration-v1.json")
+
+    adoption = copy.deepcopy(RECOVERY_FIXTURES["reliability-v3-adoption-v1.json"][0])
+    adoption["source_state"] = "fresh"
+    for database in adoption["databases"]:
+        del database["retired"]
+    validate_schema(adoption, SCHEMA_DIR / "reliability-v3-adoption-v1.json")
+
+    for name, record in (
+        ("reliability-v3-migration-v1.json", migration),
+        ("reliability-v3-adoption-v1.json", adoption),
+    ):
+        invalid = copy.deepcopy(record)
+        invalid["source_state"] = "upgrade"
+        with pytest.raises(SchemaValidationError):
+            validate_schema(invalid, SCHEMA_DIR / name)
+
+    upgrade_migration = copy.deepcopy(
+        RECOVERY_FIXTURES["reliability-v3-migration-v1.json"][0]
+    )
+    upgrade_migration["source_state"] = "fresh"
+    with pytest.raises(SchemaValidationError):
+        validate_schema(
+            upgrade_migration,
+            SCHEMA_DIR / "reliability-v3-migration-v1.json",
+        )
+
+    upgrade_adoption = copy.deepcopy(
+        RECOVERY_FIXTURES["reliability-v3-adoption-v1.json"][0]
+    )
+    upgrade_adoption["source_state"] = "fresh"
+    with pytest.raises(SchemaValidationError):
+        validate_schema(
+            upgrade_adoption,
+            SCHEMA_DIR / "reliability-v3-adoption-v1.json",
+        )
+
+
+def _nested(value: object, path: tuple[object, ...]) -> dict:
+    for part in path:
+        value = value[part]
+    assert isinstance(value, dict)
+    return value
+
+
+@pytest.mark.parametrize(
+    ("name", "fixture", "object_paths"),
+    [(name, *fixture) for name, fixture in RECOVERY_FIXTURES.items()],
+)
+def test_abort_and_corrupt_receipts_reject_unknown_fields(name, fixture, object_paths):
+    schema_path = SCHEMA_DIR / name
+    validate_schema(fixture, schema_path)
+    for path in object_paths:
+        invalid = copy.deepcopy(fixture)
+        _nested(invalid, path)["unknown"] = True
+        with pytest.raises(SchemaValidationError):
+            validate_schema(invalid, schema_path)
+
+
 def test_project_checkpoint_schema_covers_provenance_and_stable_delta_semantics():
     change = {"id": "stable-1", "action": "upsert", "value": "active"}
     checkpoint = {
@@ -242,8 +863,10 @@ def test_archive_manifest_requires_receipt_queue_preflight_and_terminal_operatio
         "payload_hash": "b" * 64,
         "compile_receipt_ref": {
             "schema": "compile-receipt-ref/v1",
-            "path": "knowledge/daily/2026-01-01.md",
+            "path": "knowledge/daily/receipts/v3-" + "e" * 64 + ".md",
+            "logical_path": "knowledge/daily/2026-01-01.md",
             "source_digest": "c" * 64,
+            "source_identity": "e" * 64,
             "receipt_file_hash": "d" * 64,
         },
         "queue_preflight": {
@@ -302,21 +925,44 @@ def test_compile_plan_accepts_absent_content_for_delete():
 @pytest.mark.parametrize("name", SCHEMAS)
 def test_schemas_reject_unknown_top_level_properties(name, tmp_path):
     schema = _schema(name)
-    required = schema["required"]
-    instance = {key: _minimal_value(schema["properties"][key]) for key in required}
+    instance = _minimal_value(schema, root=schema)
     instance["unknown"] = True
-    with pytest.raises(SchemaValidationError, match="unknown"):
+    with pytest.raises(SchemaValidationError):
         validate_schema(instance, SCHEMA_DIR / name)
 
 
-def _minimal_value(rule: dict):
+def _minimal_value(rule: dict, *, root: dict | None = None):
+    if root is None:
+        root = rule
+    if "$ref" in rule:
+        target = root
+        for raw_part in rule["$ref"][2:].split("/"):
+            part = raw_part.replace("~1", "/").replace("~0", "~")
+            target = target[part]
+        return _minimal_value(target, root=root)
     if "const" in rule:
         return rule["const"]
     if "enum" in rule:
         return rule["enum"][0]
+    if "oneOf" in rule:
+        return _minimal_value(rule["oneOf"][0], root=root)
     rule_type = rule.get("type")
     if rule_type == "string":
-        return rule.get("pattern", "x").strip("^$").replace(".*", "x") or "x"
+        minimum = rule.get("minLength", 0)
+        pattern = rule.get("pattern")
+        candidates = (
+            "",
+            "x" * max(1, minimum),
+            "0" * 64,
+            "compile:" + "0" * 64,
+            "2026-08-05T12:00:00Z",
+        )
+        for candidate in candidates:
+            if len(candidate) >= minimum and (pattern is None or re.search(pattern, candidate)):
+                return candidate
+        raise AssertionError(f"No minimal string for {rule}")
+    if rule_type == "null":
+        return None
     if rule_type == "integer":
         return rule.get("minimum", 0)
     if rule_type == "number":
@@ -324,13 +970,15 @@ def _minimal_value(rule: dict):
     if rule_type == "boolean":
         return False
     if rule_type == "array":
-        return []
+        return [
+            _minimal_value(rule["items"], root=root)
+            for _ in range(rule.get("minItems", 0))
+        ]
     if rule_type == "object":
         return {
-            key: _minimal_value(rule["properties"][key]) for key in rule.get("required", [])
+            key: _minimal_value(rule["properties"][key], root=root)
+            for key in rule.get("required", [])
         }
-    if "oneOf" in rule:
-        return _minimal_value(rule["oneOf"][0])
     raise AssertionError(f"No minimal value for {rule}")
 
 
