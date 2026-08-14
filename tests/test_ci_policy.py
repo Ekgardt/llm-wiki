@@ -73,6 +73,16 @@ def test_every_runner_is_an_explicit_supported_generation() -> None:
     assert "-latest" not in WORKFLOW.read_text(encoding="utf-8")
 
 
+def test_job_level_env_avoids_contexts_unavailable_before_runner_assignment() -> None:
+    invalid = []
+    for job_name, job in _workflow()["jobs"].items():
+        for variable, value in job.get("env", {}).items():
+            if "${{ runner." in str(value):
+                invalid.append((job_name, variable, value))
+
+    assert invalid == []
+
+
 def test_full_suite_matrix_contains_every_supported_python_endpoint() -> None:
     job = _workflow()["jobs"]["pytest-full"]
     assert job["runs-on"] == "${{ matrix.os }}"

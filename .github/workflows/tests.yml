@@ -94,9 +94,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.timeout }}
     env:
-      UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/llm-wiki-full-${{ matrix.class }}-py${{ matrix.python }}
+      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/../llm-wiki-full-${{ matrix.class }}-py${{ matrix.python }}
       LLM_WIKI_ROOT: ${{ github.workspace }}
-      LLM_WIKI_STATE_ROOT: ${{ runner.temp }}/llm-wiki-state-${{ matrix.class }}-py${{ matrix.python }}
+      LLM_WIKI_STATE_ROOT: ${{ github.workspace }}/../llm-wiki-state-${{ matrix.class }}-py${{ matrix.python }}
       LLM_WIKI_TEST_USE_EXTERNAL_STATE: "1"
       MEMORY_LLM_PROVIDER: fake
     steps:
@@ -129,9 +129,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/llm-wiki-production-${{ matrix.python }}
+      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/../llm-wiki-production-${{ matrix.python }}
       LLM_WIKI_ROOT: ${{ github.workspace }}
-      LLM_WIKI_STATE_ROOT: ${{ runner.temp }}/llm-wiki-production-state-${{ matrix.python }}
+      LLM_WIKI_STATE_ROOT: ${{ github.workspace }}/../llm-wiki-production-state-${{ matrix.python }}
       MEMORY_LLM_PROVIDER: fake
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -157,9 +157,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/llm-wiki-hybrid-${{ matrix.python }}
+      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/../llm-wiki-hybrid-${{ matrix.python }}
       LLM_WIKI_ROOT: ${{ github.workspace }}
-      LLM_WIKI_STATE_ROOT: ${{ runner.temp }}/llm-wiki-hybrid-state-${{ matrix.python }}
+      LLM_WIKI_STATE_ROOT: ${{ github.workspace }}/../llm-wiki-hybrid-state-${{ matrix.python }}
       MEMORY_LLM_PROVIDER: fake
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -184,9 +184,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/llm-wiki-code-graph-${{ matrix.python }}
+      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/../llm-wiki-code-graph-${{ matrix.python }}
       LLM_WIKI_ROOT: ${{ github.workspace }}
-      LLM_WIKI_STATE_ROOT: ${{ runner.temp }}/llm-wiki-code-graph-state-${{ matrix.python }}
+      LLM_WIKI_STATE_ROOT: ${{ github.workspace }}/../llm-wiki-code-graph-state-${{ matrix.python }}
       MEMORY_LLM_PROVIDER: fake
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -215,9 +215,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     env:
-      UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/llm-wiki-installer-${{ matrix.platform }}
+      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/../llm-wiki-installer-${{ matrix.platform }}
       LLM_WIKI_ROOT: ${{ github.workspace }}
-      LLM_WIKI_STATE_ROOT: ${{ runner.temp }}/llm-wiki-installer-state-${{ matrix.platform }}
+      LLM_WIKI_STATE_ROOT: ${{ github.workspace }}/../llm-wiki-installer-state-${{ matrix.platform }}
       LLM_WIKI_TEST_USE_EXTERNAL_STATE: "1"
       MEMORY_LLM_PROVIDER: fake
     steps:
@@ -256,9 +256,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     env:
-      UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/llm-wiki-pyright-${{ matrix.platform }}
+      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/../llm-wiki-pyright-${{ matrix.platform }}
       LLM_WIKI_ROOT: ${{ github.workspace }}
-      LLM_WIKI_STATE_ROOT: ${{ runner.temp }}/llm-wiki-state
+      LLM_WIKI_STATE_ROOT: ${{ github.workspace }}/../llm-wiki-state
       LLM_WIKI_TEST_USE_EXTERNAL_STATE: "1"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
