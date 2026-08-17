@@ -32,6 +32,27 @@ from workspace_revision import (
 from tests.code_kernel_helpers import copy_python_fixture
 
 
+@pytest.fixture(autouse=True)
+def _isolated_global_git_configuration(tmp_path_factory, monkeypatch) -> None:
+    """Keep the developer's global Git configuration out of these contracts.
+
+    `workspace_revision` deliberately declines its private-index fast path when
+    a global Git configuration could change ignore, attribute or index
+    semantics, and it only tolerates a `[user]` name/email section. Any ordinary
+    `~/.gitconfig` — a credential helper, an alias, `init.defaultBranch` — is
+    therefore enough to move every verifier here onto the exact fallback, so the
+    optimization assertions passed only on a machine whose global configuration
+    happened to be empty.
+    """
+    home = tmp_path_factory.mktemp("git-home")
+    (home / ".config").mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    for name in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG"):
+        monkeypatch.delenv(name, raising=False)
+
+
 def _entries(revision: WorkspaceRevision) -> dict[str, RevisionEntry]:
     return {entry.path: entry for entry in revision.entries}
 
