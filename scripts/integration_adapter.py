@@ -1902,7 +1902,12 @@ def _write_posix_transient(
     try:
         directory_info = _validate_posix_parent_fd(directory_fd, parent_info)
         descriptor, name = _open_posix_transient(directory_fd, envelope.event_id)
-        opened = _write_open_posix_transient(
+        # Capture the identity at creation time. Taking it from the write result
+        # instead would leave `opened` unset whenever the write or the
+        # post-write parent validation fails, and the cleanup below would then
+        # skip an already-created transcript containing session content.
+        opened = os.fstat(descriptor)
+        _write_open_posix_transient(
             descriptor, directory_fd, name, text, state_root, parent, directory_info
         )
         succeeded = True
