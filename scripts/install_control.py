@@ -544,6 +544,19 @@ def _systemd_quote(value: str) -> str:
     return f'"{escaped}"'
 
 
+def _systemd_literal(value: str) -> str:
+    """Render a single-value setting such as ``WorkingDirectory=``.
+
+    systemd applies command-line quoting only to settings that take an argument
+    vector (``ExecStart=``) or a quoted assignment list (``Environment=``).
+    Single-path settings consume the rest of the line verbatim, so a quoted path
+    is rejected with "path is not absolute". Only ``%`` needs escaping there.
+    """
+    if any(character in value for character in ("\x00", "\r", "\n")):
+        raise ValueError("systemd value contains a control character")
+    return value.replace("%", "%%")
+
+
 def _systemd_service(root: Path, state_root: Path, uv_path: Path, kind: str) -> bytes:
     arguments = " ".join(
         _systemd_quote(argument) for argument in _scheduled_arguments(root, uv_path, kind)
@@ -556,7 +569,7 @@ def _systemd_service(root: Path, state_root: Path, uv_path: Path, kind: str) -> 
         "Type=oneshot",
         f"Environment={_systemd_quote(f'LLM_WIKI_ROOT={Path(root).resolve()}')}",
         f"Environment={_systemd_quote(f'LLM_WIKI_STATE_ROOT={Path(state_root).resolve()}')}",
-        f"WorkingDirectory={_systemd_quote(str(Path(root).resolve()))}",
+        f"WorkingDirectory={_systemd_literal(str(Path(root).resolve()))}",
         f"ExecStart={arguments}",
         "",
     )

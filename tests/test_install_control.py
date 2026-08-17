@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import plistlib
+import shutil
 import stat
 import subprocess
 import sys
@@ -776,6 +777,54 @@ def test_systemd_definitions_are_persistent_user_timers_without_shell(tmp_path: 
     assert "OnCalendar=*-*-* 03:00:00" in nightly_timer
     assert "Persistent=true" in nightly_timer
     assert "WantedBy=timers.target" in nightly_timer
+
+
+def test_systemd_working_directory_is_an_unquoted_absolute_path(tmp_path: Path) -> None:
+    root = tmp_path / "vault with space and %percent"
+    uv_path = tmp_path / "bin" / "uv"
+
+    definitions = render_systemd_definitions(root, tmp_path / "state", uv_path)
+
+    resolved = str(root.resolve())
+    for name in ("llm-wiki-nightly.service", "llm-wiki-weekly.service"):
+        lines = definitions[name].decode().splitlines()
+        working = [line for line in lines if line.startswith("WorkingDirectory=")]
+        # systemd parses WorkingDirectory= verbatim: a quoted value is rejected
+        # with "path is not absolute" and the unit never loads.
+        assert working == [f"WorkingDirectory={resolved.replace('%', '%%')}"]
+
+
+def _systemd_verify(unit_directory: Path) -> subprocess.CompletedProcess[str]:
+    units = sorted(str(path) for path in unit_directory.iterdir())
+    return subprocess.run(
+        ["systemd-analyze", "--user", "verify", *units],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux", reason="systemd unit verification is Linux-only"
+)
+def test_systemd_definitions_pass_systemd_analyze_verify(tmp_path: Path) -> None:
+    analyzer = shutil.which("systemd-analyze")
+    if analyzer is None:
+        pytest.skip("systemd-analyze is unavailable")
+    root = tmp_path / "vault with space"
+    root.mkdir()
+    uv_path = tmp_path / "uv"
+    uv_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    uv_path.chmod(0o755)
+    unit_directory = tmp_path / "units"
+    unit_directory.mkdir()
+    for name, data in render_systemd_definitions(root, root, uv_path).items():
+        (unit_directory / name).write_bytes(data)
+
+    completed = _systemd_verify(unit_directory)
+
+    assert completed.returncode == 0, completed.stderr
+    assert "path is not absolute" not in completed.stderr
 
 
 def test_scheduler_definition_is_durable_before_external_file_mutation(
