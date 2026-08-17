@@ -696,7 +696,7 @@ class OwnershipRegistry:
         if selected_role == "runtime-deletion-check":
             other = database.execute(
                 """SELECT 1 FROM maintenance_owners
-                   WHERE NOT (role=? AND scope=?) LIMIT 1""",
+                    WHERE NOT (role=? AND scope=?) LIMIT 1""",
                 (selected_role, selected_scope),
             ).fetchone()
             if other is not None:

@@ -5,11 +5,16 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-4.0.0-blue.svg)](CHANGELOG.md)
 
-**Локальная система памяти для AI-агентов. Markdown-файлы, версионирование в git, без облачных зависимостей.**
+**Локальная система памяти для AI-агентов. Markdown-файлы, версионирование в git и полный контроль пользователя.**
 
 LLM Wiki даёт каждому AI-агенту, которым вы пользуетесь — OpenCode, Codex, Claude Code, Cursor, Antigravity — единый MCP-first интерфейс к общей постоянной базе знаний. MCP отвечает за чтение и действия, а тонкие нативные lifecycle-адаптеры фиксируют события сессии, которые MCP не видит. Знания сохраняются между сессиями, поэтому вам не приходится заново объяснять одно и то же.
 
 Всё хранится на вашем диске в виде обычного markdown: читается в Obsidian, сравнивается в git, полностью принадлежит вам.
+
+Хранение, захват, MCP и retrieval работают локально. Классификация и компиляция с
+моделью используют настроенный провайдер: OpenCode, Codex, Claude и OpenAI могут
+обращаться к облачным сервисам; Ollama может работать локально. Автоопределение не
+гарантирует local-only режим.
 
 **Языки:** [English](README.md) | [Русский](README.ru.md) | [简体中文](README.zh-CN.md)
 
@@ -53,7 +58,7 @@ LLM Wiki даёт каждому AI-агенту, которым вы польз
 ## Возможности
 
 ### Пайплайн захвата
-- **Тонкие lifecycle-адаптеры**: хуки Claude Code, плагин OpenCode и обёртка Codex нормализуют события через `integration_adapter.py`
+- **Тонкие lifecycle-адаптеры**: хуки Claude Code, Codex, Cursor и Antigravity вместе с плагином OpenCode нормализуют события через `integration_adapter.py`
 - **3-уровневая классификация сессий**: FLUSH_MAJOR (решения/уроки → запускает компиляцию), FLUSH_MINOR (гэтчи → только сохранить), FLUSH_OK (болтовня → пропустить)
 - **Non-LLM breadcrumbs** — тегирование промптов и tool-вызовов с ms-латентностью, без API-вызовов
 - **Redaction секретов** — API-ключи, токены, длинные base64 вычищаются до любой записи
@@ -65,6 +70,7 @@ LLM Wiki даёт каждому AI-агенту, которым вы польз
 
 ### Пайплайн компиляции
 - **JSON-протокол компиляции** — не требует tool-use агента, работает с любым LLM-бэкендом
+- **Fail-closed граница модели** — промпты редактируются до transport; чувствительный output провайдера и невалидная обязательная DLP policy блокируют публикацию
 - **VERIFY-BEFORE-WRITE** — детерминированная проверка цитат на стороне Python; LLM не может сфабриковать улики
 - **Семантический дедуп с quarantine** — update предпочтительнее create; неуверенные или спорные противоречия помещаются в quarantine, а automatic semantic supersession остаётся отключённым
 - **Инкрементальность** — SHA-256 хеширование; рекомпилируются только изменённые daily-логи
@@ -98,13 +104,13 @@ LLM Wiki даёт каждому AI-агенту, которым вы польз
 ### Обслуживание
 - **14 lint-проверок (13 структурных + 1 LLM-оцениваемое противоречие)** — битые wikilinks, orphan'ы, missing frontmatter, невалидные supersede-цепочки, temporal validity, gap'ы, sparse pages, missing sources, противоречия
 - **Type-aware архивация** — debugging 60 дн, patterns 180 дн, decisions никогда
-- **Nightly + weekly расписания** — компиляция, lint, архивация, OKF-миграция (Task Scheduler на Windows, cron на Unix)
+- **Nightly + weekly расписания** — компиляция, lint, архивация, OKF-миграция (Task Scheduler на Windows, LaunchAgent на macOS, пользовательский systemd на Linux; cron доступен только как явный degraded fallback)
 - **OKF v0.1 frontmatter** — поля `type`, `confidence`, `source_authority`, `supersede`; авто-миграция с legacy-страниц
 
 ### Инфраструктура
 - **5 LLM-бэкендов** (авто-детекция): OpenCode → Codex → Claude CLI → OpenAI → Ollama
 - **Кросс-платформенность**: Windows, macOS, Linux, WSL2
-- **Локально и без daemon-процессов** — установленный baseline включает MCP-пакет; vector search и Cognee остаются опциональными
+- **Локально и без daemon-процессов** — установленный baseline включает MCP-пакет; vector search остаётся опциональным
 - **Кросс-платформенная CI-матрица**: Ubuntu + Windows + macOS, Python 3.10–3.14
 - **Pre-commit хуки (opt-in)**: ruff (статический анализ) + структурный lint + gitleaks (сканирование секретов). Опционально; установщик не активирует эти хуки. Включение: `uv run --locked --no-sync pre-commit install --hook-type pre-commit --hook-type pre-push`.
 
@@ -206,10 +212,11 @@ LLM Wiki обнаруживает установленных агентов и �
 | **OpenCode** | Автоматически после успешной проверки конфигурации | MCP + тонкий JS lifecycle-плагин | MCP выполняет чтение/действия; плагин передаёт события в `integration_adapter.py` |
 | **Codex CLI** | Автоматически после успешной проверки; доверие к хукам подтверждается в `/hooks` | MCP + официальные lifecycle-хуки | MCP выполняет чтение/действия; хуки передают lifecycle-события |
 | **Claude Code** | Автоматически после успешного merge и проверки settings | MCP + тонкие settings.json хуки | MCP выполняет чтение/действия; пять хуков передают lifecycle-события |
-| **Cursor** | Вручную | MCP + rules-файл | Настройте MCP; скопируйте `integrations/cursor/rules/llm-wiki.mdc` для инструкций |
-| **Antigravity** | Вручную | MCP + AGENTS.md snippet | Настройте MCP; скопируйте `integrations/antigravity/AGENTS.md` для инструкций |
+| **Cursor** | Автоматические локальные хуки после обнаружения | MCP + официальные user-level хуки | MCP настраивается отдельно; установщик владеет только точными handlers в `~/.cursor/hooks.json` |
+| **Antigravity** | Автоматические локальные хуки после обнаружения | MCP + официальные user-level хуки | MCP настраивается отдельно; установщик владеет только фрагментом `llm-wiki` в `~/.gemini/config/hooks.json` |
 | **Obsidian** | Только viewer | Опциональный Markdown viewer | Откройте vault напрямую; UI или ingestion-функции Obsidian не требуются |
 
+Cursor cloud agents не загружают user-level хуки; автоматический захват Cursor относится только к локальному режиму.
 Все агенты используют общий vault — решение, записанное Cursor, видно OpenCode в следующей сессии.
 
 ### Опционально: семантический поиск
@@ -220,16 +227,6 @@ LLM Wiki обнаруживает установленных агентов и �
 uv sync --locked --no-default-groups --inexact --extra semantic
 ```
 
-### Опционально: Cognee-граф (300+ страниц)
-
-Для entity extraction + relationship graph в масштабе:
-
-```bash
-uv sync --locked --no-default-groups --inexact --extra cognee
-```
-
-См. [docs/SETUP-COGNEE.md](docs/SETUP-COGNEE.md) для настройки Ollama.
-
 ---
 
 ## Архитектура
@@ -237,7 +234,7 @@ uv sync --locked --no-default-groups --inexact --extra cognee
 ```
 CODE          scripts/  tests/  docs/  skills/  rules/  integrations/  benchmark/
 KNOWLEDGE     knowledge/{daily,notes,projects,raw,inbox,feedback}
-RUNTIME       cache/  logs/  run/  cache/cognee/   (gitignored, внутри vault)
+RUNTIME       cache/  logs/  run/   (gitignored, внутри vault)
 ```
 
 - **CODE** — отслеживается в git. Пайплайн, тесты, документация, навыки, правила, интеграции.

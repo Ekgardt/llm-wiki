@@ -36,10 +36,8 @@ cat "$LLM_WIKI_ROOT/knowledge/projects/<project-slug>/state.md"
 ```
 
 ### Record a decision
-```bash
-TS=$(date +%H:%M:%S)
-echo '{"slug":"<project-slug>","sessionId":"antigravity","block":"## ['"$TS"'] antigravity-session | decision\n- Decision: <what>\n- Reason: <why>"}' | uv run python "$LLM_WIKI_ROOT/scripts/daily_log_append.py"
-```
+
+Use the LLM-Wiki MCP `log_decision` tool with a concise summary and rationale.
 
 ### Get guard rails (learned rules)
 ```bash
@@ -54,6 +52,6 @@ uv run python "$LLM_WIKI_ROOT/scripts/build_advisory.py" "<project-slug>"
 ## Rules
 
 1. **Search vault before architecture decisions** — past sessions may have solved this
-2. **Record non-trivial decisions** — use daily_log_append.py
+2. **Record non-trivial decisions** — use the MCP `log_decision` tool
 3. **Never edit knowledge/notes/ or knowledge/daily/ files directly** — use scripts
 4. **Read guard rails at start** — prevents repeating past mistakes

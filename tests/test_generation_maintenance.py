@@ -1954,8 +1954,11 @@ def test_edited_wikilink_is_visible_after_nightly_in_fresh_processes(
                 sys.executable,
                 "-c",
                 (
-                    "import json; from graph_neighbors import get_neighbors; "
-                    "print(json.dumps(get_neighbors('knowledge/notes/source.md')))"
+                    "import json, graph_neighbors; "
+                    "graph_neighbors._build_link_graph = lambda *args, **kwargs: "
+                    "(_ for _ in ()).throw(AssertionError('live source fallback')); "
+                    "print(json.dumps(graph_neighbors.get_neighbors("
+                    "'knowledge/notes/source.md')))"
                 ),
             ],
             cwd=root,

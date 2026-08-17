@@ -5,11 +5,15 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-4.0.0-blue.svg)](CHANGELOG.md)
 
-**面向 AI 智能体的本地优先记忆系统。Markdown 文件，git 版本控制，零云依赖。**
+**面向 AI 智能体的本地优先记忆系统。Markdown 文件，git 版本控制，完全由你掌控。**
 
 LLM Wiki 为你使用的每一个 AI 编码智能体——OpenCode、Codex、Claude Code、Cursor、Antigravity——提供统一的 MCP-first 接口和共享的持久知识库。MCP 负责读取与操作；轻量原生 lifecycle adapter 捕获 MCP 无法观察的会话事件。知识跨会话保留，让你无需重复解释同样的事情。
 
 一切以纯 Markdown 文件形式存储在你的磁盘上：可在 Obsidian 中阅读，可用 git 对比，完全归你所有。
+
+存储、捕获、MCP 和检索均在本地运行。模型支持的分类与编译使用已配置的
+provider：OpenCode、Codex、Claude 和 OpenAI 可能使用云服务；Ollama 可以在
+本地运行。自动检测并不保证 local-only 模式。
 
 **语言：** [English](README.md) | [Русский](README.ru.md) | [简体中文](README.zh-CN.md)
 
@@ -53,7 +57,7 @@ LLM Wiki 为你使用的每一个 AI 编码智能体——OpenCode、Codex、Cla
 ## 功能特性
 
 ### 捕获流水线
-- **轻量 lifecycle adapter**：Claude Code 钩子、OpenCode 插件和 Codex 包装器通过 `integration_adapter.py` 规范化事件
+- **轻量 lifecycle adapter**：Claude Code、Codex、Cursor 和 Antigravity 钩子以及 OpenCode 插件通过 `integration_adapter.py` 规范化事件
 - **3 级会话分类**：FLUSH_MAJOR（决策/经验→触发编译）、FLUSH_MINOR（注意事项→仅保存）、FLUSH_OK（闲聊→跳过）
 - **非 LLM breadcrumbs**——prompt 和 tool 调用标记，毫秒级延迟，无 API 调用
 - **密钥脱敏**——API 密钥、令牌、长 base64 字符串在任何写入前清除
@@ -65,6 +69,7 @@ LLM Wiki 为你使用的每一个 AI 编码智能体——OpenCode、Codex、Cla
 
 ### 编译流水线
 - **JSON 协议编译**——无需智能体 tool-use，适用于任何 LLM 后端
+- **Fail-closed 模型边界**——prompt 在传输前脱敏；敏感的 provider output 或无效的必需 DLP policy 会阻止发布
 - **VERIFY-BEFORE-WRITE**——Python 端确定性引用验证；LLM 无法伪造证据
 - **带 quarantine 的语义去重**——优先 update 而非 create；不确定或 evaluator 有分歧的矛盾进入 quarantine，automatic semantic supersession 保持禁用
 - **增量编译**——SHA-256 哈希；仅重新编译变更的 daily 日志
@@ -98,13 +103,13 @@ LLM Wiki 为你使用的每一个 AI 编码智能体——OpenCode、Codex、Cla
 ### 维护
 - **14 项 lint 检查（13 项结构性 + 1 项 LLM 判定矛盾）**——损坏的 wikilinks、孤儿页面、缺失 frontmatter、无效 supersede 链、时间有效性、gap、稀疏页面、缺失来源、矛盾
 - **类型感知归档**——debugging 60 天、patterns 180 天、decisions 永不
-- **Nightly + weekly 计划**——编译、lint、归档、OKF 迁移（Windows 上 Task Scheduler，Unix 上 cron）
+- **Nightly + weekly 计划**——编译、lint、归档、OKF 迁移（Windows 使用 Task Scheduler，macOS 使用 LaunchAgent，Linux 使用用户级 systemd；cron 仅作为显式降级回退）
 - **OKF v0.1 frontmatter**——`type`、`confidence`、`source_authority`、`supersede` 字段；从遗留页面自动迁移
 
 ### 基础设施
 - **5 个 LLM 后端**（自动检测）：OpenCode → Codex → Claude CLI → OpenAI → Ollama
 - **跨平台**：Windows、macOS、Linux、WSL2
-- **本地且零 daemon**——安装基线包含 MCP 包；vector search 和 Cognee 仍为可选项
+- **本地且零 daemon**——安装基线包含 MCP 包；vector search 仍为可选项
 - **跨平台 CI 矩阵**：Ubuntu + Windows + macOS，Python 3.10–3.14
 - **Pre-commit 钩子（opt-in）**：ruff（静态分析）+ 结构 lint + gitleaks（密钥扫描）。可选；安装程序不会启用这些钩子。启用命令：`uv run --locked --no-sync pre-commit install --hook-type pre-commit --hook-type pre-push`。
 
@@ -202,10 +207,11 @@ LLM Wiki 在安装时检测已安装的智能体，并说明集成是自动完�
 | **OpenCode** | 配置验证成功后自动 | MCP + 轻量 JS lifecycle 插件 | MCP 提供读取/操作；插件将事件转发到 `integration_adapter.py` |
 | **Codex CLI** | 配置验证成功后自动；在 `/hooks` 中审核信任 | MCP + 官方 lifecycle 钩子 | MCP 提供读取/操作；钩子转发 lifecycle 事件 |
 | **Claude Code** | settings 合并并验证成功后自动 | MCP + 轻量 settings.json 钩子 | MCP 提供读取/操作；五个钩子转发 lifecycle 事件 |
-| **Cursor** | 手动 | MCP + 规则文件 | 配置 MCP；复制 `integrations/cursor/rules/llm-wiki.mdc` 作为操作指引 |
-| **Antigravity** | 手动 | MCP + AGENTS.md 片段 | 配置 MCP；复制 `integrations/antigravity/AGENTS.md` 作为操作指引 |
+| **Cursor** | 检测到后自动启用本地钩子 | MCP + 官方用户级钩子 | MCP 需单独配置；安装程序只管理 `~/.cursor/hooks.json` 中精确匹配的 handler |
+| **Antigravity** | 检测到后自动启用本地钩子 | MCP + 官方用户级钩子 | MCP 需单独配置；安装程序只管理 `~/.gemini/config/hooks.json` 中的 `llm-wiki` 片段 |
 | **Obsidian** | 仅 viewer | 可选 Markdown viewer | 直接打开 vault；不要求 Obsidian UI 或 ingestion 功能 |
 
+Cursor 云端智能体不会加载用户级钩子；Cursor 自动捕获仅适用于本地模式。
 所有智能体共享同一个 vault——Cursor 记录的决策在 OpenCode 的下次会话中可见。
 
 ### 可选：语义搜索
@@ -216,16 +222,6 @@ LLM Wiki 在安装时检测已安装的智能体，并说明集成是自动完�
 uv sync --locked --no-default-groups --inexact --extra semantic
 ```
 
-### 可选：Cognee 图谱（300+ 页）
-
-用于大规模实体提取 + 关系图：
-
-```bash
-uv sync --locked --no-default-groups --inexact --extra cognee
-```
-
-参见 [docs/SETUP-COGNEE.md](docs/SETUP-COGNEE.md) 了解 Ollama 设置。
-
 ---
 
 ## 架构
@@ -233,7 +229,7 @@ uv sync --locked --no-default-groups --inexact --extra cognee
 ```
 CODE          scripts/  tests/  docs/  skills/  rules/  integrations/  benchmark/
 KNOWLEDGE     knowledge/{daily,notes,projects,raw,inbox,feedback}
-RUNTIME       cache/  logs/  run/  cache/cognee/   （gitignored，vault 内）
+RUNTIME       cache/  logs/  run/   （gitignored，vault 内）
 ```
 
 - **CODE**——git 跟踪。流水线、测试、文档、技能、规则、集成。

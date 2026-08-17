@@ -1761,6 +1761,7 @@ def apply_compile_plan(
         transaction = coordinator.prepare(
             sorted(quarantine_changes, key=lambda item: item.path),
             operation_id=quarantine_operation_id,
+            content_guard="model_output",
             preconditions={
                 **{path: "absent" for path in quarantine_paths},
                 "claim_tree_manifest": snapshot_claim_tree(ROOT),
@@ -2046,6 +2047,7 @@ def apply_compile_plan(
         transaction = coordinator.prepare(
             changes,
             operation_id=operation_id,
+            content_guard="model_output",
             preconditions=preconditions,
             deadline=deadline,
             cancelled=cancelled,

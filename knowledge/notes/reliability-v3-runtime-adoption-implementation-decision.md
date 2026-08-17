@@ -121,5 +121,6 @@ separate marker table. The implementation uses these minimal clarifications:
 
 ## Related
 
+- [[knowledge/notes/audit-closure-security-recovery-control-plane-decision]]
 - [[knowledge/notes/v4-reliability-contracts-decision]]
 - [[knowledge/notes/reliable-memory-stage-2]]

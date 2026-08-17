@@ -10,7 +10,7 @@ from __future__ import annotations
 import io
 import json
 import os
-import stat
+import sqlite3
 import subprocess
 import sys
 from argparse import Namespace
@@ -133,15 +133,23 @@ def test_equivalent_lifecycle_inputs_normalize_to_same_semantics():
         ),
     ]
 
-    assert [_semantic(event) for event in events] == [_semantic(events[0])] * 3
-    assert [event.agent for event in events] == [None, None, None]
+    semantics = [_semantic(event) for event in events]
+    assert [item.pop("agent") for item in semantics] == [
+        "claude",
+        "opencode",
+        "codex",
+    ]
+    for item in semantics:
+        item.pop("event_id")
+        item.pop("content_hash")
+    assert semantics == [semantics[0]] * 3
     assert events[0].payload == {
         "reason": "completed",
         "transcript_path": "C:/tmp/session.jsonl",
     }
 
 
-def test_normalizer_leaves_missing_optional_source_fields_null():
+def test_normalizer_uses_source_identity_when_optional_fields_are_missing():
     from integration_adapter import normalize_event
 
     envelope = normalize_event(
@@ -153,7 +161,7 @@ def test_normalizer_leaves_missing_optional_source_fields_null():
     )
 
     data = envelope.to_dict()
-    assert data["agent"] is None
+    assert data["agent"] == "opencode"
     assert data["session"] is None
     assert data["project"] is None
     assert data["worktree"] is None
@@ -298,7 +306,7 @@ def test_delegate_receives_only_normalized_redacted_payload(monkeypatch, capsys)
                 "--event",
                 "session_end",
                 "--delegate",
-                "session_end_capture.py",
+                "session_end_project_tag.py",
             ]
         )
 
@@ -309,6 +317,42 @@ def test_delegate_receives_only_normalized_redacted_payload(monkeypatch, capsys)
     assert delegated["session_id"] == "[REDACTED_API_KEY]"
     assert delegated["reason"] == "token=[REDACTED]"
     assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize(
+    ("event_type", "delegate"),
+    [
+        ("session_end", "session_end_capture.py"),
+        ("pre_compact", "precompact_capture.py"),
+    ],
+)
+def test_lifecycle_cli_delegate_uses_shared_ingest_boundary(
+    monkeypatch, event_type, delegate
+):
+    import integration_adapter
+
+    envelope = integration_adapter.normalize_event(
+        "claude",
+        event_type,
+        {"session_id": "session-1", "transcript_text": "durable decision"},
+    )
+    calls = []
+    monkeypatch.setattr(
+        integration_adapter,
+        "ingest_event",
+        lambda event: calls.append(event) or {"capture_intent_ids": ["1" * 64]},
+    )
+    monkeypatch.setattr(
+        integration_adapter,
+        "_run_delegate",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("lifecycle delegate bypassed shared ingestion")
+        ),
+    )
+    args = SimpleNamespace(source="claude", event=event_type, delegate=delegate)
+
+    assert integration_adapter._dispatch_cli_event(args, envelope) is None
+    assert calls == [envelope]
 
 
 def test_claude_context_delegate_preserves_stdout(monkeypatch, capsys, tmp_path):
@@ -806,20 +850,22 @@ def test_shared_ingest_materializes_redacted_transient_and_delegates(tmp_path, m
     monkeypatch.setattr(integration_adapter, "ROOT", vault)
     monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
     calls = []
+    captured = []
     monkeypatch.setattr(
         integration_adapter,
         "_run_delegate",
         lambda name, payload, **kwargs: calls.append((name, payload))
-        or SimpleNamespace(
-            returncode=0,
-            stdout=(
-                '{"flush_started": true}'
-                if name == "session_end_capture.py"
-                else ""
-            ),
-            stderr="",
-        ),
+        or SimpleNamespace(returncode=0, stdout="", stderr=""),
     )
+    monkeypatch.setattr(
+        integration_adapter,
+        "_publish_durable_capture_intent",
+        lambda _envelope, payload, _slug, _trigger: captured.append(
+            Path(payload["transcript_path"]).read_text(encoding="utf-8")
+        )
+        or "1" * 64,
+    )
+    monkeypatch.setattr(integration_adapter, "spawn_detached", lambda _args: 123)
     secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
     envelope = integration_adapter.normalize_event(
         "opencode",
@@ -833,19 +879,215 @@ def test_shared_ingest_materializes_redacted_transient_and_delegates(tmp_path, m
 
     result = integration_adapter.ingest_event(envelope, trigger="opencode-idle")
 
-    transient = Path(calls[0][1]["transcript_path"])
-    assert transient.parent == state_root / "cache" / "transient-transcripts"
-    assert secret not in transient.read_text(encoding="utf-8")
-    if os.name != "nt":
-        assert stat.S_IMODE(transient.stat().st_mode) & 0o077 == 0
     assert calls[0][0] == "session_end_project_tag.py"
-    assert calls[1][0] == "session_end_capture.py"
-    assert calls[1][1]["ephemeral_transcript"] is True
+    assert len(calls) == 1
+    assert secret not in captured[0]
+    assert not list((state_root / "cache/transient-transcripts").glob("*.txt"))
     assert result["flush_spawned"] is True
 
 
+def test_shared_ingest_publishes_durable_intent_before_delegate_and_replays(
+    tmp_path, monkeypatch
+):
+    import integration_adapter
+    from installed_memory_repair import repair_installed_vault
+
+    vault = tmp_path / "vault"
+    state_root = tmp_path / "state"
+    project = tmp_path / "project"
+    (vault / "knowledge/projects").mkdir(parents=True)
+    (vault / "scripts").mkdir()
+    (vault / "scripts/integration_adapter.py").write_bytes(
+        (SCRIPTS_DIR / "integration_adapter.py").read_bytes()
+    )
+    project.mkdir()
+    report = repair_installed_vault(
+        root=vault,
+        state_root=state_root,
+        adopt_ownership_v3=True,
+        confirm_all_agents_stopped=True,
+    )
+    assert report["overall_status"] == "ok"
+    monkeypatch.setattr(integration_adapter, "ROOT", vault)
+    monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
+    calls = []
+
+    def delegate(name, payload, **_kwargs):
+        ready = list((state_root / "run/capture-intents/ready").glob("*/*.json"))
+        assert len(ready) == 1
+        with sqlite3.connect(state_root / "run/queue-v3.sqlite3") as database:
+            assert database.execute(
+                "SELECT publication_state FROM capture_intents"
+            ).fetchall() == [("ready",)]
+            assert database.execute("SELECT COUNT(*) FROM capture_task_links").fetchone() == (
+                1,
+            )
+        calls.append((name, payload))
+        return SimpleNamespace(returncode=0, stdout='{"flush_started": true}', stderr="")
+
+    monkeypatch.setattr(integration_adapter, "_run_delegate", delegate)
+    wakes = []
+    monkeypatch.setattr(
+        integration_adapter,
+        "spawn_detached",
+        lambda args: wakes.append(args) or 123,
+    )
+    envelope = integration_adapter.normalize_event(
+        "opencode",
+        "session_end",
+        {
+            "directory": str(project),
+            "sessionId": "session-1",
+            "source_event_id": "host-event-1",
+            "transcript_text": "durable decision",
+        },
+    )
+
+    first = integration_adapter.ingest_event(envelope, trigger="opencode-idle")
+    second = integration_adapter.ingest_event(envelope, trigger="opencode-idle")
+
+    assert first["capture_intent_ids"] == second["capture_intent_ids"]
+    assert len(first["capture_intent_ids"]) == 1
+    with sqlite3.connect(state_root / "run/queue-v3.sqlite3") as database:
+        assert database.execute("SELECT COUNT(*) FROM tasks").fetchone() == (1,)
+        assert database.execute("SELECT COUNT(*) FROM capture_task_links").fetchone() == (
+            1,
+        )
+    assert calls
+    assert len(wakes) == 2
+
+
+def test_durable_session_end_wakes_v3_worker_without_legacy_flush(
+    tmp_path, monkeypatch
+):
+    import integration_adapter
+    from installed_memory_repair import repair_installed_vault
+
+    vault = tmp_path / "vault"
+    state_root = tmp_path / "state"
+    project = tmp_path / "project"
+    (vault / "knowledge/projects").mkdir(parents=True)
+    (vault / "scripts").mkdir()
+    (vault / "scripts/integration_adapter.py").write_bytes(
+        (SCRIPTS_DIR / "integration_adapter.py").read_bytes()
+    )
+    project.mkdir()
+    report = repair_installed_vault(
+        root=vault,
+        state_root=state_root,
+        adopt_ownership_v3=True,
+        confirm_all_agents_stopped=True,
+    )
+    assert report["overall_status"] == "ok"
+    monkeypatch.setattr(integration_adapter, "ROOT", vault)
+    monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
+    spawned = []
+    monkeypatch.setattr(
+        integration_adapter,
+        "spawn_detached",
+        lambda args: spawned.append(args) or 123,
+    )
+
+    def delegate(name, payload, **_kwargs):
+        assert name == "session_end_project_tag.py"
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(integration_adapter, "_run_delegate", delegate)
+    envelope = integration_adapter.normalize_event(
+        "opencode",
+        "session_end",
+        {
+            "directory": str(project),
+            "sessionId": "session-1",
+            "source_event_id": "host-event-1",
+            "transcript_text": "durable decision",
+        },
+    )
+
+    result = integration_adapter.ingest_event(envelope, trigger="opencode-idle")
+
+    assert result["flush_spawned"] is True
+    assert spawned == [
+        [
+            sys.executable,
+            str(integration_adapter.SCRIPTS_DIR / "integration_adapter.py"),
+            "--capture-worker",
+        ]
+    ]
+    transient_dir = state_root / "cache" / "transient-transcripts"
+    assert not list(transient_dir.glob("*.txt"))
+
+
+def test_capture_worker_cli_runs_one_active_worker(monkeypatch):
+    import integration_adapter
+
+    calls = []
+    monkeypatch.setattr(
+        integration_adapter,
+        "_run_active_capture_worker_once",
+        lambda: calls.append("worker") or 0,
+        raising=False,
+    )
+
+    assert integration_adapter.main(["--capture-worker"]) == 0
+    assert calls == ["worker"]
+
+
+def test_active_capture_worker_completes_published_intent(tmp_path, monkeypatch):
+    import integration_adapter
+    from installed_memory_repair import repair_installed_vault
+
+    vault = tmp_path / "vault"
+    state_root = tmp_path / "state"
+    project = tmp_path / "project"
+    (vault / "knowledge/projects").mkdir(parents=True)
+    (vault / "scripts").mkdir()
+    (vault / "scripts/integration_adapter.py").write_bytes(
+        (SCRIPTS_DIR / "integration_adapter.py").read_bytes()
+    )
+    project.mkdir()
+    report = repair_installed_vault(
+        root=vault,
+        state_root=state_root,
+        adopt_ownership_v3=True,
+        confirm_all_agents_stopped=True,
+    )
+    assert report["overall_status"] == "ok"
+    monkeypatch.setattr(integration_adapter, "ROOT", vault)
+    monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
+    monkeypatch.setattr(integration_adapter, "spawn_detached", lambda _args: 123)
+    monkeypatch.setattr(
+        integration_adapter,
+        "_run_delegate",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout="", stderr=""
+        ),
+    )
+    monkeypatch.setenv("MEMORY_LLM_PROVIDER", "fake")
+    monkeypatch.setenv("MEMORY_LLM_FAKE_RESPONSE", "FLUSH_OK")
+    envelope = integration_adapter.normalize_event(
+        "opencode",
+        "session_end",
+        {
+            "directory": str(project),
+            "sessionId": "session-1",
+            "source_event_id": "host-event-1",
+            "transcript_text": "status only",
+        },
+    )
+    result = integration_adapter.ingest_event(envelope, trigger="opencode-idle")
+
+    assert integration_adapter._run_active_capture_worker_once() == 0
+
+    intent_id = result["capture_intent_ids"][0]
+    terminal = state_root / "run" / "queue-results" / f"capture-{intent_id}.json"
+    assert terminal.is_file()
+    with sqlite3.connect(state_root / "run" / "queue-v3.sqlite3") as database:
+        assert database.execute("SELECT state FROM tasks").fetchone() == ("succeeded",)
+
+
 @pytest.mark.parametrize("event_type", ["session_end", "pre_compact"])
-def test_transient_cleanup_on_delegate_exception(tmp_path, monkeypatch, event_type):
+def test_transient_cleanup_after_durable_publication(tmp_path, monkeypatch, event_type):
     import integration_adapter
 
     state_root = tmp_path / "state"
@@ -854,11 +1096,24 @@ def test_transient_cleanup_on_delegate_exception(tmp_path, monkeypatch, event_ty
     monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
     monkeypatch.setattr(
         integration_adapter,
-        "_run_delegate",
-        lambda name, payload, **kwargs: (_ for _ in ()).throw(
-            subprocess.TimeoutExpired(cmd=name, timeout=1)
-        ),
+        "_publish_durable_capture_intent",
+        lambda *_args: "1" * 64,
     )
+    def fail(name, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd=name, timeout=1)
+
+    if event_type == "session_end":
+        monkeypatch.setattr(
+            integration_adapter,
+            "_run_delegate",
+            lambda name, _payload, **kwargs: fail(name, **kwargs),
+        )
+    else:
+        monkeypatch.setattr(
+            integration_adapter,
+            "spawn_detached",
+            lambda args: fail(str(args)),
+        )
     envelope = integration_adapter.normalize_event(
         "opencode",
         event_type,
@@ -869,8 +1124,12 @@ def test_transient_cleanup_on_delegate_exception(tmp_path, monkeypatch, event_ty
         },
     )
 
-    with pytest.raises(subprocess.TimeoutExpired):
-        integration_adapter.ingest_event(envelope)
+    if event_type == "session_end":
+        with pytest.raises(subprocess.TimeoutExpired):
+            integration_adapter.ingest_event(envelope)
+    else:
+        result = integration_adapter.ingest_event(envelope)
+        assert result["flush_spawned"] is False
 
     transient_dir = state_root / "cache" / "transient-transcripts"
     assert not list(transient_dir.glob("*.txt"))
@@ -902,12 +1161,13 @@ def test_precompact_transcript_text_materializes_and_confirms_start(tmp_path, mo
     calls = []
     monkeypatch.setattr(
         integration_adapter,
-        "_run_delegate",
-        lambda name, payload, **kwargs: calls.append((name, payload))
-        or SimpleNamespace(
-            returncode=0, stdout='{"flush_started": true}', stderr=""
-        ),
+        "_publish_durable_capture_intent",
+        lambda _envelope, payload, _slug, _trigger: calls.append(
+            dict(payload)
+        )
+        or "1" * 64,
     )
+    monkeypatch.setattr(integration_adapter, "spawn_detached", lambda _args: 123)
     envelope = integration_adapter.normalize_event(
         "opencode",
         "pre_compact",
@@ -919,10 +1179,9 @@ def test_precompact_transcript_text_materializes_and_confirms_start(tmp_path, mo
 
     result = integration_adapter.ingest_event(envelope)
 
-    assert calls[0][0] == "precompact_capture.py"
-    assert calls[0][1]["ephemeral_transcript"] is True
+    assert calls[0]["ephemeral_transcript"] is True
     assert result["flush_spawned"] is True
-    assert Path(calls[0][1]["transcript_path"]).exists()
+    assert not Path(calls[0]["transcript_path"]).exists()
 
 
 def test_windows_transient_permissions_use_bounded_icacls(monkeypatch, tmp_path):

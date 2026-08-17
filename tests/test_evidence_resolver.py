@@ -291,9 +291,7 @@ def test_archive_validation_rejects_tamper_oversize_and_links(vault: Path) -> No
         EvidenceResolver(vault).resolve(ref)
 
     if hasattr(os, "symlink"):
-        for child in bag.iterdir():
-            if child.is_file() or child.is_symlink():
-                child.unlink()
+        (bag / "archive-manifest.json").unlink()
         outside = vault / "outside.md"
         outside.write_bytes(source)
         try:

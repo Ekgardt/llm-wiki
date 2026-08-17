@@ -539,6 +539,63 @@ def test_compile_transaction_commits_page_index_log_and_receipt(vault):
     )
 
 
+def test_compile_page_preserves_five_agent_evidence_attribution(vault, monkeypatch):
+    root, state_root = vault
+    daily = root / "knowledge/daily/2026-07-14.md"
+    agents = ("opencode", "codex", "claude", "cursor", "antigravity")
+    lines = []
+    evidence = []
+    for index, agent in enumerate(agents):
+        timestamp = f"10:0{index}:00"
+        observation = f"Durable observation from {agent}."
+        lines.extend(
+            [
+                f"## [{timestamp}] {agent}-session | session-{index}",
+                observation,
+            ]
+        )
+        evidence.append(
+            {
+                "daily_date": "2026-07-14",
+                "timestamp": timestamp,
+                "quoted_text": observation,
+                "claim": f"{agent} supplied evidence.",
+            }
+        )
+    daily.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    import compile_memory
+
+    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operation["evidence"] = evidence
+    plan = {
+        "schema_version": "compile-plan/v2",
+        "operations": [
+            {
+                "kind": "create",
+                "path": "knowledge/notes/exact-byte-pattern.md",
+                "content": canonical_json_bytes(operation).decode("utf-8"),
+            }
+        ],
+    }
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+
+    compile_memory.apply_compile_plan(
+        inputs,
+        plan,
+        action_key="b" * 64,
+        trigger="manual",
+        coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-08-16T12:00:00Z",
+    )
+
+    import agent_timeline
+
+    monkeypatch.setattr(agent_timeline, "ROOT", root)
+    monkeypatch.setattr(agent_timeline, "KNOWLEDGE", root / "knowledge/notes")
+    activity = agent_timeline._extract_knowledge_timeline(None, days=36_500)
+    assert {item["agent"] for item in activity} == set(agents)
+
+
 def test_quarantined_compile_publishes_only_idempotent_candidates_and_stays_pending(vault):
     root, state_root = vault
     daily = _daily(root)

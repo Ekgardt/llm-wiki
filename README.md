@@ -5,11 +5,15 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-4.0.0-blue.svg)](CHANGELOG.md)
 
-**A local-first memory system for AI agents. Markdown files, git-tracked, zero cloud dependencies.**
+**A local-first memory system for AI agents. Markdown files, git-tracked, and owned by you.**
 
 LLM Wiki gives every AI coding agent you use — OpenCode, Codex, Claude Code, Cursor, Antigravity — one MCP-first interface to a shared, persistent knowledge base. MCP handles reads and actions; thin native lifecycle adapters capture session events that MCP cannot observe. Durable knowledge survives across sessions so you never re-explain the same thing twice.
 
 Everything lives on your disk as plain markdown: readable in Obsidian, diffable in git, owned entirely by you.
+
+Storage, capture, MCP, and retrieval are local. Model-backed classification and
+compilation use the configured provider: OpenCode, Codex, Claude, and OpenAI may use
+cloud services; Ollama may be local. Auto-detection is not a local-only guarantee.
 
 **Languages:** [English](README.md) | [Русский](README.ru.md) | [简体中文](README.zh-CN.md)
 
@@ -53,7 +57,7 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 ## Features
 
 ### Capture pipeline
-- **Thin lifecycle adapters**: Claude Code hooks, the OpenCode plugin, and the Codex wrapper normalize events through `integration_adapter.py`
+- **Thin lifecycle adapters**: Claude Code, Codex, Cursor, and Antigravity hooks plus the OpenCode plugin normalize events through `integration_adapter.py`
 - **3-tier session classification**: FLUSH_MAJOR (decisions/lessons → triggers compile), FLUSH_MINOR (gotchas → save only), FLUSH_OK (chatter → skip)
 - **Non-LLM breadcrumbs** — prompt + tool-usage tagging at ms-latency, no API calls
 - **Secret redaction** — API keys, tokens, long base64 stripped before any write
@@ -65,6 +69,7 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 
 ### Compile pipeline
 - **JSON-protocol compile** — no agent tool-use required, works with any LLM backend
+- **Fail-closed model boundary** — prompts are redacted before transport; sensitive provider output and invalid required DLP policy block publication
 - **VERIFY-BEFORE-WRITE** — Python-side deterministic citation verification; the LLM cannot fabricate evidence
 - **Semantic dedup with quarantine** — update is preferred over create; uncertain or evaluator-disputed contradictions are quarantined and automatic semantic supersession remains disabled
 - **Incremental** — SHA-256 hashing; only changed daily logs are recompiled
@@ -98,13 +103,13 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 ### Maintenance
 - **14 lint checks (13 structural + 1 LLM-judged contradiction)** — broken wikilinks, orphans, missing frontmatter, invalid supersede chains, temporal validity, gaps, sparse pages, missing sources, contradictions
 - **Type-aware archive** — debugging 60d, patterns 180d, decisions never
-- **Nightly + weekly schedules** — compile, lint, archive, OKF migration (Task Scheduler on Windows, cron on Unix)
+- **Nightly + weekly schedules** — compile, lint, archive, OKF migration (Task Scheduler on Windows, LaunchAgent on macOS, user systemd on Linux; cron is an explicit degraded fallback)
 - **OKF v0.1 frontmatter** — `type`, `confidence`, `source_authority`, `supersede` fields; auto-migration from legacy pages
 
 ### Infrastructure
 - **5 LLM backends** (auto-detected): OpenCode → Codex → Claude CLI → OpenAI → Ollama
 - **Cross-platform**: Windows, macOS, Linux, WSL2
-- **Local and zero-daemon** — the installed baseline includes the MCP package; vector search and Cognee remain optional
+- **Local and zero-daemon** — the installed baseline includes the MCP package; vector search remains optional
 - **Cross-platform CI matrix**: Ubuntu + Windows + macOS, Python 3.10 through 3.14
 - **Pre-commit hooks (opt-in)**: ruff (static analysis) + structural lint + gitleaks (secret scanning). Opt-in; the installer does not activate these hooks. Enable them with `uv run --locked --no-sync pre-commit install --hook-type pre-commit --hook-type pre-push`.
 
@@ -204,10 +209,11 @@ LLM Wiki detects installed agents during install and reports whether integration
 | **OpenCode** | Automatic when configuration verifies | MCP + thin JS lifecycle plugin | MCP provides reads/actions; the plugin forwards lifecycle events to `integration_adapter.py` |
 | **Codex CLI** | Automatic when configuration verifies; review hook trust in `/hooks` | MCP + official lifecycle hooks | MCP provides reads/actions; hooks forward lifecycle events |
 | **Claude Code** | Automatic when settings merge verifies | MCP + thin settings.json hooks | MCP provides reads/actions; five hooks forward lifecycle events |
-| **Cursor** | Manual | MCP + rules file | Configure MCP; copy `integrations/cursor/rules/llm-wiki.mdc` for guidance |
-| **Antigravity** | Manual | MCP + AGENTS.md snippet | Configure MCP; copy `integrations/antigravity/AGENTS.md` for guidance |
+| **Cursor** | Automatic local hooks when detected | MCP + official user hooks | Configure MCP separately; the installer owns exact handlers in `~/.cursor/hooks.json` |
+| **Antigravity** | Automatic local hooks when detected | MCP + official user hooks | Configure MCP separately; the installer owns only the `llm-wiki` fragment in `~/.gemini/config/hooks.json` |
 | **Obsidian** | Viewer only | Optional Markdown viewer | Open the vault directly; no Obsidian UI or ingestion feature is required |
 
+Cursor cloud agents do not load user-level hooks; the automatic Cursor capture claim is local only.
 All agents share the same vault — a decision recorded by Cursor is visible to OpenCode in its next session.
 
 ### Optional: semantic search
@@ -218,16 +224,6 @@ For hybrid BM25 + Vector search (finds semantically related pages even when keyw
 uv sync --locked --no-default-groups --inexact --extra semantic
 ```
 
-### Optional: Cognee graph (300+ pages)
-
-For entity extraction + relationship graph at scale:
-
-```bash
-uv sync --locked --no-default-groups --inexact --extra cognee
-```
-
-See [docs/SETUP-COGNEE.md](docs/SETUP-COGNEE.md) for Ollama setup.
-
 ---
 
 ## Architecture
@@ -235,7 +231,7 @@ See [docs/SETUP-COGNEE.md](docs/SETUP-COGNEE.md) for Ollama setup.
 ```
 CODE          scripts/  tests/  docs/  skills/  rules/  integrations/  benchmark/
 KNOWLEDGE     knowledge/{daily,notes,projects,raw,inbox,feedback}
-RUNTIME       cache/  logs/  run/  cache/cognee/   (gitignored, inside vault)
+RUNTIME       cache/  logs/  run/   (gitignored, inside vault)
 ```
 
 - **CODE** — tracked in git. The pipeline, tests, docs, skills, rules, integrations.

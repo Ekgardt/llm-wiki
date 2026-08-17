@@ -199,11 +199,17 @@ def test_compileall_excludes_the_intentionally_invalid_parser_fixture() -> None:
 def test_pyright_state_passing_is_shell_independent() -> None:
     job = _workflow()["jobs"]["pyright-navigation"]
     install = next(step for step in job["steps"] if step.get("name") == "Explicit Pyright install")
-    assert "${{ runner.temp }}/llm-wiki-state" in install["run"]
+    assert job["env"]["LLM_WIKI_STATE_ROOT"] == (
+        "${{ github.workspace }}/../llm-wiki-state"
+    )
+    assert '"${{ env.LLM_WIKI_STATE_ROOT }}"' in install["run"]
     assert "shell" not in install
     tests = next(
         step
         for step in job["steps"]
         if step.get("name") == "Protocol, process-tree, and security tests"
     )
-    assert tests["env"]["LLM_WIKI_STATE_ROOT"] == "${{ runner.temp }}/llm-wiki-state"
+    assert "LLM_WIKI_STATE_ROOT" not in tests.get("env", {})
+    for name in ("Correctness benchmark gate", "Fixed 100 KLOC Python qualification gate"):
+        step = next(step for step in job["steps"] if step.get("name") == name)
+        assert "LLM_WIKI_STATE_ROOT" not in step.get("env", {})

@@ -20,6 +20,7 @@ param(
     [Parameter(Mandatory = $true)][string]$UvPath,
     [switch]$Uninstall,
     [switch]$Status,
+    [switch]$StateJson,
     [switch]$RunNightlyNow,
     [switch]$RunWeeklyNow
 )
@@ -58,25 +59,133 @@ function New-LLMWikiScheduledAction {
         -Argument "-NoProfile -NonInteractive -EncodedCommand $encoded"
 }
 
-if ($Status) {
-    Write-Host "=== Scheduled task status ===" -ForegroundColor Cyan
-    foreach ($name in $tasks) {
-        $t = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
-        if ($t) {
-            $last = $t | Get-ScheduledTaskInfo
-            Write-Host "  ${name}:" -ForegroundColor Green
-            Write-Host "    State:        $($t.State)"
-            Write-Host "    Last run:     $($last.LastRunTime)"
-            Write-Host "    Last result:  $($last.LastTaskResult)"
-            Write-Host "    Next run:     $($last.NextRunTime)"
-        } else {
+function Test-LLMWikiScheduledTasks {
+    param(
+        [Parameter(Mandatory = $true)][string]$VaultRoot,
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [Parameter(Mandatory = $true)][string]$UvPath
+    )
+    $verified = $true
+    $specifications = @(
+        @{ Name = "LLMWiki-Nightly"; Kind = "nightly" },
+        @{ Name = "LLMWiki-Weekly"; Kind = "weekly" }
+    )
+    foreach ($specification in $specifications) {
+        $name = $specification.Name
+        $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+        if ($null -eq $task) {
             Write-Host "  ${name}: NOT INSTALLED" -ForegroundColor Yellow
+            $verified = $false
+            continue
         }
+        try {
+            $info = $task | Get-ScheduledTaskInfo -ErrorAction Stop
+        } catch {
+            Write-Host "  ${name}: STATUS UNAVAILABLE" -ForegroundColor Yellow
+            $verified = $false
+            continue
+        }
+        $taskValid = $true
+        if ([string]::IsNullOrWhiteSpace([string]$task.State) -or $task.State -eq "Disabled") {
+            $taskValid = $false
+        }
+        if ($task.Actions.Count -ne 1 -or $task.Triggers.Count -ne 1) {
+            $taskValid = $false
+        } else {
+            $action = $task.Actions[0]
+            $trigger = $task.Triggers[0]
+            if ([string]::IsNullOrWhiteSpace([string]$action.Execute) -or
+                [string]$action.Arguments -notmatch '-EncodedCommand\s+(\S+)\s*$') {
+                $taskValid = $false
+            } else {
+                try {
+                    $decoded = [Text.Encoding]::Unicode.GetString(
+                        [Convert]::FromBase64String($Matches[1])
+                    )
+                    foreach ($expected in @(
+                        $specification.Kind,
+                        [System.IO.Path]::GetFullPath($VaultRoot),
+                        [System.IO.Path]::GetFullPath($StateRoot),
+                        [System.IO.Path]::GetFullPath($UvPath)
+                    )) {
+                        if (-not $decoded.Contains($expected)) { $taskValid = $false }
+                    }
+                } catch {
+                    $taskValid = $false
+                }
+            }
+            if ([string]::IsNullOrWhiteSpace([string]$trigger.StartBoundary) -or
+                $trigger.Enabled -eq $false) {
+                $taskValid = $false
+            }
+        }
+        if ([string]$task.Principal.LogonType -ne "Interactive" -or
+            [string]::IsNullOrWhiteSpace([string]$task.Principal.UserId)) {
+            $taskValid = $false
+        }
+        Write-Host "  ${name}:" -ForegroundColor $(if ($taskValid) { "Green" } else { "Yellow" })
+        Write-Host "    State:        $($task.State)"
+        Write-Host "    Logon type:   $($task.Principal.LogonType)"
+        Write-Host "    Last run:     $($info.LastRunTime)"
+        Write-Host "    Last result:  $($info.LastTaskResult)"
+        Write-Host "    Next run:     $($info.NextRunTime)"
+        if (-not $taskValid) { $verified = $false }
     }
+    return $verified
+}
+
+function Get-LLMWikiScheduledTaskState {
+    param(
+        [Parameter(Mandatory = $true)][string]$VaultRoot,
+        [Parameter(Mandatory = $true)][string]$StateRoot,
+        [Parameter(Mandatory = $true)][string]$UvPath
+    )
+    $existing = @(
+        $tasks | ForEach-Object {
+            Get-ScheduledTask -TaskName $_ -ErrorAction SilentlyContinue
+        } | Where-Object { $null -ne $_ }
+    )
+    if ($existing.Count -eq 0) { return "absent" }
+    if ($existing.Count -ne $tasks.Count) { return "conflict" }
+    $verified = Test-LLMWikiScheduledTasks `
+        -VaultRoot $VaultRoot `
+        -StateRoot $StateRoot `
+        -UvPath $UvPath 6>$null
+    if ($verified) { return "equivalent" }
+    return "conflict"
+}
+
+if ($StateJson) {
+    $state = Get-LLMWikiScheduledTaskState `
+        -VaultRoot $VaultRoot `
+        -StateRoot $StateRoot `
+        -UvPath $UvPath
+    [Console]::Out.WriteLine((@{ state = $state } | ConvertTo-Json -Compress))
     if ($script:IsDotSourced) { return } else { exit 0 }
 }
 
+if ($Status) {
+    Write-Host "=== Scheduled task status ===" -ForegroundColor Cyan
+    $verified = Test-LLMWikiScheduledTasks `
+        -VaultRoot $VaultRoot `
+        -StateRoot $StateRoot `
+        -UvPath $UvPath
+    if ($script:IsDotSourced) { return $verified }
+    if ($verified) { exit 0 }
+    exit 1
+}
+
 if ($Uninstall) {
+    $currentState = Get-LLMWikiScheduledTaskState `
+        -VaultRoot $VaultRoot `
+        -StateRoot $StateRoot `
+        -UvPath $UvPath
+    if ($currentState -eq "conflict") {
+        throw "Scheduled task ownership is ambiguous; refusing uninstall"
+    }
+    if ($currentState -eq "absent") {
+        if ($script:IsDotSourced) { return } else { exit 0 }
+    }
     Write-Host "Uninstalling scheduled tasks..." -ForegroundColor Cyan
     foreach ($name in $tasks) {
         try {
@@ -97,6 +206,17 @@ $runnerPath = Join-Path $VaultRoot "scripts\run-scheduled-task.ps1"
 if (-not (Test-Path -LiteralPath $runnerPath -PathType Leaf)) { throw "Missing: $runnerPath" }
 if (-not (Test-Path -LiteralPath $UvPath -PathType Leaf)) { throw "Missing: $UvPath" }
 $powerShellPath = (Get-Process -Id $PID).Path
+$currentState = Get-LLMWikiScheduledTaskState `
+    -VaultRoot $VaultRoot `
+    -StateRoot $StateRoot `
+    -UvPath $UvPath
+if ($currentState -eq "conflict") {
+    throw "Scheduled task ownership is ambiguous; refusing registration"
+}
+if ($currentState -eq "equivalent") {
+    Write-Host "Scheduled tasks already match the LLM-Wiki contract." -ForegroundColor Green
+    if ($script:IsDotSourced) { return } else { exit 0 }
+}
 
 # --- Nightly task: 03:00 every day ---
 $nightlyAction = New-LLMWikiScheduledAction `
@@ -123,17 +243,14 @@ $nightlyPrincipal = New-ScheduledTaskPrincipal `
     -RunLevel Limited
 
 Write-Host "Registering LLMWiki-Nightly (daily 03:00)..." -ForegroundColor Cyan
-try {
-    Unregister-ScheduledTask -TaskName "LLMWiki-Nightly" -Confirm:$false -ErrorAction SilentlyContinue
-} catch {}
 Register-ScheduledTask `
     -TaskName "LLMWiki-Nightly" `
     -Action $nightlyAction `
     -Trigger $nightlyTrigger `
     -Settings $nightlySettings `
     -Principal $nightlyPrincipal `
-    -Description "LLM-wiki: nightly queue drain + compile + lint. No user interaction required." `
-    -Force | Out-Null
+    -Description "LLM-wiki: nightly queue drain + compile + lint. No user interaction required." |
+    Out-Null
 Write-Host "  registered" -ForegroundColor Green
 
 # --- Weekly task: Sunday 04:00 ---
@@ -156,17 +273,14 @@ $weeklySettings = New-ScheduledTaskSettingsSet `
     -RestartInterval (New-TimeSpan -Minutes 30)
 
 Write-Host "Registering LLMWiki-Weekly (Sunday 04:00)..." -ForegroundColor Cyan
-try {
-    Unregister-ScheduledTask -TaskName "LLMWiki-Weekly" -Confirm:$false -ErrorAction SilentlyContinue
-} catch {}
 Register-ScheduledTask `
     -TaskName "LLMWiki-Weekly" `
     -Action $weeklyAction `
     -Trigger $weeklyTrigger `
     -Settings $weeklySettings `
     -Principal $nightlyPrincipal `
-    -Description "LLM-wiki: weekly deep maintenance + OKF conformance sweep + lint." `
-    -Force | Out-Null
+    -Description "LLM-wiki: weekly deep maintenance + OKF conformance sweep + lint." |
+    Out-Null
 Write-Host "  registered" -ForegroundColor Green
 
 # --- Optional: run now to verify ---
@@ -180,7 +294,7 @@ if ($RunWeeklyNow) {
 }
 
 Write-Host ""
-Write-Host "Done. Tasks registered. They will run automatically:" -ForegroundColor Green
+Write-Host "Done. Tasks registered for the current logged-on user:" -ForegroundColor Green
 Write-Host "  LLMWiki-Nightly: every day at 03:00"
 Write-Host "  LLMWiki-Weekly:  every Sunday at 04:00"
 Write-Host ""

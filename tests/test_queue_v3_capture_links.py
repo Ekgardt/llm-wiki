@@ -14,6 +14,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 import markdown_transaction  # noqa: E402
 import memory_queue  # noqa: E402
 import operational_ownership  # noqa: E402
+from installed_memory_repair import repair_installed_vault  # noqa: E402
 from reliable_memory import (  # noqa: E402
     canonical_json_bytes,
     publish_runtime_file,
@@ -38,6 +39,59 @@ def _coordinator(tmp_path: Path):
         tmp_path / "run" / "markdown-transactions-v3.candidate.sqlite3",
         state_root=tmp_path,
     )
+
+
+def _adopted_vault(tmp_path: Path) -> tuple[Path, Path]:
+    root = tmp_path / "vault"
+    state_root = tmp_path / "state"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts/integration_adapter.py").write_bytes(
+        (SCRIPTS_DIR / "integration_adapter.py").read_bytes()
+    )
+    report = repair_installed_vault(
+        root=root,
+        state_root=state_root,
+        adopt_ownership_v3=True,
+        confirm_all_agents_stopped=True,
+    )
+    assert report["overall_status"] == "ok"
+    return root, state_root
+
+
+def test_active_capture_queue_uses_the_validated_adopted_pair(tmp_path: Path) -> None:
+    root, state_root = _adopted_vault(tmp_path)
+
+    queue = memory_queue.active_memory_queue(root, state_root)
+    coordinator = markdown_transaction.active_markdown_coordinator(root, state_root)
+    registry = queue.ownership_registry()
+    owner = registry.acquire("capture", scope="intent:fixture")
+
+    assert queue.db_path == state_root / "run/queue-v3.sqlite3"
+    assert coordinator.database_path == (
+        state_root / "run/markdown-transactions-v3.sqlite3"
+    )
+    assert registry.database_path == coordinator.database_path
+    registry.release(owner)
+
+
+def test_capture_claim_ignores_unlinked_tasks(tmp_path: Path) -> None:
+    queue = _queue(tmp_path)
+    coordinator = _coordinator(tmp_path)
+    registry = operational_ownership.OwnershipRegistry(tmp_path)
+    queue.enqueue("query", 1, {"prompt": "ordinary"}, priority=100)
+    binding = _capture_binding(
+        queue,
+        coordinator,
+        registry,
+        intent_id="f" * 64,
+        intent_sha256="e" * 64,
+    )
+
+    lease = queue.claim_capture("capture-worker")
+
+    assert lease is not None
+    assert lease.id == binding.task_id
+    assert lease.kind == "flush"
 
 
 def _capture_binding(
@@ -357,7 +411,10 @@ def test_semantic_decision_seal_and_index_commit_together_without_terminal_resul
     decision = canonical_json_bytes(
         {"schema_version": "semantic-decision/v1", "stage": stage, "value": "retain"}
     )
-    decision_path = f"run/capture-decisions/{intent_id}-{stage}.json"
+    decision_key = sha256_bytes(
+        canonical_json_bytes({"intent_id": intent_id, "stage": stage})
+    )
+    decision_path = f"run/queue-results/capture-decision-{decision_key}.json"
     target = tmp_path / decision_path
     target.parent.mkdir(parents=True, exist_ok=True)
     publish_runtime_file(

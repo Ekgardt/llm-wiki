@@ -28,7 +28,7 @@ def _operation_id(prefix: str, key: str, source_event_id: str | None) -> str:
 def _fallback_operation_id(
     prefix: str, key: str, source_event_id: str | None
 ) -> str:
-    occurrence = source_event_id or "missing-state"
+    occurrence = source_event_id or uuid.uuid4().hex
     digest = hashlib.sha256(f"{prefix}\0{key}\0{occurrence}".encode()).hexdigest()
     return f"{prefix}:fallback:{digest}"
 
@@ -54,6 +54,15 @@ def claim_operation(
         observed = True
         entries = state.setdefault(namespace, {})
         existing = entries.get(key)
+        previous = _timestamp(existing)
+        recent = False
+        if previous is not None:
+            try:
+                recent = (
+                    now - datetime.fromisoformat(previous)
+                ).total_seconds() < rate_limit_seconds
+            except (TypeError, ValueError):
+                pass
         if isinstance(existing, dict):
             operation = existing.get("operation_id")
             existing_source = existing.get("source_event_id")
@@ -62,16 +71,11 @@ def claim_operation(
                 if source_event_id is not None and existing_source == source_event_id:
                     claimed = operation
                     return
-                if status == "pending":
+                if status == "pending" and source_event_id is None and recent:
                     claimed = operation
                     return
-        previous = _timestamp(existing)
-        if previous is not None:
-            try:
-                if (now - datetime.fromisoformat(previous)).total_seconds() < rate_limit_seconds:
-                    return
-            except (TypeError, ValueError):
-                pass
+        if recent:
+            return
 
         claimed = _operation_id(prefix, key, source_event_id)
         entries[key] = {

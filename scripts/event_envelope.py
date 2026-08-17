@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -10,6 +11,13 @@ from types import MappingProxyType
 from typing import Any
 
 SCHEMA_VERSION = "1.0"
+AGENT_PATTERNS = (
+    (re.compile(r"\bopencode\b", re.IGNORECASE), "opencode"),
+    (re.compile(r"\bcodex\b", re.IGNORECASE), "codex"),
+    (re.compile(r"\bclaude(?:\s+code)?\b", re.IGNORECASE), "claude"),
+    (re.compile(r"\bcursor\b", re.IGNORECASE), "cursor"),
+    (re.compile(r"\bantigravity\b", re.IGNORECASE), "antigravity"),
+)
 ALLOWED_EVENT_TYPES = frozenset(
     {"session_start", "session_end", "pre_compact", "stop", "user_prompt", "post_tool_use"}
 )
@@ -46,6 +54,14 @@ _BOOLEAN_CHECKPOINT_SIGNALS = frozenset(
         "host_progress_signals",
     }
 )
+
+
+def canonical_agent(text: str) -> str:
+    """Return one stable, low-cardinality software-agent identity."""
+    return next(
+        (name for pattern, name in AGENT_PATTERNS if pattern.search(str(text))),
+        "unknown",
+    )
 
 
 def _validate_checkpoint_signals(payload: Mapping[str, Any]) -> None:

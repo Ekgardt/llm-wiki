@@ -22,8 +22,46 @@ when healthy and injects only degraded/error findings.
 what to keep. That brain is **whichever agent you're already using** — the
 `llm_client.py` abstraction auto-detects the first alive backend
 (OpenCode → Codex → Claude CLI → OpenAI → Ollama). **No extra API keys
-required** beyond what you already have; Ollama is optional (only needed for
-the Cognee graph layer at 300+ pages).
+required** beyond what you already have; Ollama is an optional local backend.
+
+Backend disclosure:
+
+| Backend | Processing boundary |
+|---------|---------------------|
+| OpenCode | LLM Wiki calls a loopback OpenCode server; the selected OpenCode model may use a remote service. |
+| Codex / Claude | LLM Wiki invokes a local CLI; the CLI may use its account's remote service. |
+| OpenAI | Prompts are sent to the configured HTTPS API. |
+| Ollama | The configured Ollama endpoint is used. A remote endpoint or cloud model is not local processing. |
+
+All first-party calls pass through the fail-closed model boundary. Built-in secret
+detectors are always active. `LLM_WIKI_DLP_POLICY`, when set, must name an absolute,
+regular UTF-8 JSON file containing exactly `version`, `literals`,
+`allow_fingerprints`, and `sha256`. The digest is SHA-256 of canonical JSON for the
+first three fields. Literals are fixed strings, not regular expressions; fingerprints
+allow only one exact payload. A missing, unreadable, invalid, oversized, or
+digest-mismatched required policy blocks model transport and publication.
+
+For the strict Ollama path, disable cloud in the Ollama server, restart it, and force
+the provider and a literal loopback IP:
+
+```bash
+export MEMORY_LLM_PROVIDER=ollama
+export OLLAMA_NO_CLOUD=1
+export MEMORY_LLM_BASE_URL=http://127.0.0.1:11434/v1
+```
+
+```powershell
+$env:MEMORY_LLM_PROVIDER = "ollama"
+$env:OLLAMA_NO_CLOUD = "1"
+$env:MEMORY_LLM_BASE_URL = "http://127.0.0.1:11434/v1"
+```
+
+This disables provider fallback, rejects non-literal-loopback endpoints, and requires
+the selected model to appear in `/api/tags` with local size/digest metadata and no
+`remote_model` or `remote_host`. The descriptor still reports
+`external_runtime_unverified`: the client cannot prove that an independently managed
+Ollama process was restarted with cloud disabled. Do not describe this state as
+verified network isolation.
 
 ---
 
@@ -52,8 +90,9 @@ commit into a new `~/LLM-wiki`, verifies `HEAD`, repository identity, and requir
 then executes the checked-out installer. Branches and tags are rejected. Existing
 checkouts retain all remote settings unless `--protect-push` or `-ProtectPush` is explicit.
 The installer detects agents. It configures OpenCode, Codex, and Claude only when their
-configuration verifies; Cursor and Antigravity require the manual copy steps below, and
-Obsidian is a viewer-only integration.
+configuration verifies. When local Cursor or Antigravity is detected, it also installs
+and verifies managed user-level hooks. Cursor cloud agents do not load those hooks.
+Obsidian remains a viewer-only integration.
 
 ### Installed-vault reliability check
 
@@ -95,7 +134,7 @@ successful cutover and do not remove v2 state manually.
 
 3. **Create runtime dirs** (gitignored, regenerated on demand):
    ```bash
-   mkdir -p cache logs run cache/cognee
+   mkdir -p cache logs run
    ```
 
 4. **Wire up your agents** (see below).
@@ -107,9 +146,14 @@ successful cutover and do not remove v2 state manually.
 | **Claude Code** | Configure MCP for reads/actions, then run `uv run python scripts/merge_claude_settings.py` for five thin lifecycle hooks. |
 | **OpenCode** | Configure MCP, then copy `scripts/llm-wiki-memory-opencode.js` for lifecycle events. |
 | **Codex CLI** | Configure MCP; on Windows add `. "$env:LLM_WIKI_ROOT\scripts\codex-memory-wrapper.ps1"` to `$PROFILE` for lifecycle capture. |
-| **Cursor** | Configure MCP and copy `integrations/cursor/rules/llm-wiki.mdc` to `.cursor/rules/`. |
-| **Antigravity** | Configure MCP and copy `integrations/antigravity/AGENTS.md` to your project root. |
+| **Cursor** | Configure MCP for reads/actions, install Cursor locally, then rerun the native installer. It manages exact LLM-Wiki handlers in `~/.cursor/hooks.json`; the rules file is optional guidance. |
+| **Antigravity** | Configure MCP for reads/actions, install Antigravity locally, then rerun the native installer. It manages only the top-level `llm-wiki` fragment in `~/.gemini/config/hooks.json`; `AGENTS.md` remains optional guidance. |
 | **Obsidian** | Optional Markdown viewer only: open the vault directly. No Obsidian UI is required. |
+
+Managed IDE hooks preserve unrelated configuration and use verified sibling preimages.
+Malformed configuration, ownership conflicts, or drift fail closed instead of being
+overwritten. `doctor` reports active, absent, or conflicting structural ownership and
+never repairs these files implicitly.
 
 The MCP server exposes 12 task-shaped tools, including `doctor`. All tools use
 one response envelope, and health/context are also available as MCP resources.
@@ -170,16 +214,40 @@ codes, and qualification evidence.
 
 ### Register scheduled maintenance
 
+The installers publish profile/environment, scheduler, and detected Cursor/Antigravity
+hook fragments through one resumable `run/install/` ownership transaction. Version 2
+keeps the pre-first-install projection for uninstall and one latest committed update
+projection for explicit rollback. Recovery uses persisted historical definitions, not
+the current checkout templates. Rerun the native installer to reconcile owned state;
+do not edit generated task, plist, unit, or owned hook definitions in place.
+
+Inspect the control-plane state without mutation:
+
+```bash
+uv run --locked --no-sync python scripts/install_control.py status --state-root "${LLM_WIKI_STATE_ROOT:-$LLM_WIKI_ROOT}"
+```
+
+The `rollback` and `uninstall` subcommands require the same root, state root, home,
+profile or PowerShell path, and `uv` executable used by the installer. They restore an
+owned projection only when the current value still matches the installed value; drift
+blocks mutation. Run `uv run python scripts/install_control.py rollback --help` or
+`uninstall --help` for the platform-specific arguments.
+
 **Windows (Task Scheduler):**
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/install-scheduled-tasks.ps1
+.\install.ps1
 ```
 Creates `LLMWiki-Nightly` (daily 03:00) and `LLMWiki-Weekly` (Sunday 04:00).
 
-**Unix (cron):** add to `crontab -e`:
+**macOS (per-user LaunchAgent) and Linux (user systemd):**
+```bash
+bash ./install.sh
 ```
-0 3 * * *   cd $LLM_WIKI_ROOT && uv run python scripts/scheduled_nightly.py
-0 4 * * 0   cd $LLM_WIKI_ROOT && uv run python scripts/scheduled_weekly.py
+
+Linux requires an available user systemd manager. On a host without one, cron is an
+explicit degraded fallback and is never selected silently:
+```bash
+bash ./install.sh --scheduler cron
 ```
 
 ---
@@ -196,14 +264,22 @@ END OF SESSION (agent idle or you close)
   MAJOR/MINOR content → structured summary appended to daily log
   MAJOR triggers background compile (detached, doesn't block you)
 
-NIGHTLY 03:00 (scheduler, even while you sleep)
+NIGHTLY 03:00 (scheduler, subject to the operating-system login policy)
   Drain deferred queue → compile all pending → structural lint → prune old reports
 
 SUNDAY 04:00 (scheduler)
   Everything nightly does + OKF conformance sweep + archive stale + prune failed queue tasks
 ```
 
-Nothing here requires your attention. If the LLM is offline, work is queued
+Windows tasks run only while the current user is logged on. macOS LaunchAgents use
+the same login-scoped policy.
+`StartWhenAvailable` runs a missed Windows task after the machine wakes and the user
+signs in; it does not run under a logged-out account. Linux user-systemd timers use
+persistent catch-up after the user manager starts. The product does not claim
+wake-from-sleep or logged-out execution. Explicit cron fallback follows the host's
+cron and sleep policy.
+
+If the LLM is offline, work is queued
 in `run/queue.sqlite3` and drained by a short-lived worker at the next session.
 
 ---
@@ -361,6 +437,34 @@ multi-file transaction applies. CAS safety is guaranteed only for cooperating
 transaction-API writers; concurrent external edits are unsupported and detected
 best-effort.
 
+### Encrypted private-vault backup and validated restore
+
+Install exact Restic `0.19.1`, initialize a repository outside the vault, and keep
+its credentials in Restic's standard external environment, protected password file,
+or password command. The repository-file must contain exactly one repository location
+and no inline password. Create an empty protected staging directory before backup:
+
+```bash
+uv run python scripts/private_vault_backup.py backup --staging <empty-staging-dir> --restic-binary <absolute-restic-path> --repository-file <absolute-repository-file>
+```
+
+Preserve the returned `snapshot_id` and `manifest_sha256` as the backup receipt. The
+plaintext staging image is removed after Restic finishes. Backup refuses live or
+unknown owners, source races, invalid Reliability-v3 state, corrupt databases,
+overlapping repository/staging paths, partial Restic exit, or failed repository check.
+
+Restore only to a pre-existing empty directory:
+
+```bash
+uv run python scripts/private_vault_backup.py restore --target <empty-restore-dir> --restic-binary <absolute-restic-path> --repository-file <absolute-repository-file> --snapshot-id <64-hex-id> --manifest-sha256 <64-hex-digest>
+```
+
+Restore verifies the exact receipt, canonical manifest, every file/link member, both
+SQLite schemas and integrity, and Reliability-v3 ownership projections. Failure
+clears restored plaintext; success leaves validated `vault/` and `state/` directories
+for reviewed recovery. This command never overwrites or automatically publishes into
+an installed vault.
+
 ### Queue migration and work
 
 ```bash
@@ -439,17 +543,6 @@ Embeddings are cached in `cache/vectors.npy` with metadata in
 `cache/vectors_meta.json` (both gitignored) and rebuilt automatically when
 pages change.
 
-## Optional: Cognee graph (300+ pages)
-
-For entity extraction + relationship graph at scale:
-
-```bash
-uv sync --extra cognee
-```
-
-Requires Ollama running locally. See [SETUP-COGNEE.md](SETUP-COGNEE.md) for
-setup steps.
-
 ---
 
 ## Troubleshooting
@@ -487,7 +580,7 @@ setup steps.
 |------|------|---------|
 | `scripts/` | CODE | Pipeline + hooks + helpers |
 | `tests/` | CODE | Full hermetic regression suite |
-| `docs/` | CODE | This file + ARCHITECTURE + STRUCTURE + CODE-NAVIGATION + SETUP-COGNEE + EXPORTING |
+| `docs/` | CODE | This file + ARCHITECTURE + STRUCTURE + CODE-NAVIGATION + EXPORTING |
 | `skills/` | CODE | 9 agent skills |
 | `rules/` | CODE | 3 file-handling policies |
 | `integrations/` | CODE | Thin claude-code, cursor, and antigravity host wiring |
@@ -501,6 +594,5 @@ setup steps.
 | `cache/` | RUNTIME | FTS5/vector/graph indexes, compile plans, derived claims index |
 | `logs/` | RUNTIME | Lint reports, compile logs (gitignored) |
 | `run/` | RUNTIME | transactions, receipts, queue database/results, leases, locks |
-| `cache/cognee/` | RUNTIME | Optional semantic graph (gitignored) |
 
 For the full canonical reference, see [STRUCTURE.md](STRUCTURE.md).

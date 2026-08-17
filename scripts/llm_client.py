@@ -38,6 +38,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -52,6 +53,14 @@ from pathlib import Path
 from types import MappingProxyType
 
 from context_budget import TokenCount, TokenCounter, TokenUsage, count_tokens
+from model_dlp import (
+    DLPContentBlocked,
+    DLPPolicyError,
+    load_policy,
+    redact_for_transport,
+    redact_transport_value,
+    require_safe_model_output,
+)
 from reliable_memory import canonical_json_bytes
 
 # ---------------------------------------------------------------------------
@@ -122,13 +131,26 @@ def provider_candidates(
     """Resolve ordered provider identities without probing or calling them."""
     if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens <= 0:
         raise ValueError("max_tokens must be a positive integer")
-    candidates = _candidate_order(forced.lower().strip())
+    forced = forced.lower().strip()
+    candidates = _candidate_order(forced)
     descriptors = []
     for index, provider in enumerate(candidates):
         try:
             model, capabilities, settings, endpoint = _provider_configuration(
                 provider, max_tokens
             )
+            if (
+                provider == "ollama"
+                and forced == "ollama"
+                and os.environ.get("OLLAMA_NO_CLOUD") == "1"
+            ):
+                if endpoint is None or not _is_literal_loopback_endpoint(endpoint):
+                    raise ValueError(
+                        "local-only Ollama requires a literal loopback endpoint"
+                    )
+                capabilities = dict(capabilities)
+                capabilities["local_only_enforced"] = True
+                capabilities["local_only_status"] = "external_runtime_unverified"
         except ValueError:
             descriptors.append(
                 ProviderDescriptor(
@@ -217,7 +239,10 @@ def call_candidate(
     caller = _BACKENDS.get(descriptor.provider)
     if caller is None:
         return LLMResult(descriptor, None, False, "unsupported", structured_output)
-    if available is None:
+    if (
+        available is None
+        or descriptor.capabilities.get("local_only_enforced") is True
+    ):
         available = probe_candidate(descriptor)
     if not available:
         return LLMResult(descriptor, None, False, "unavailable", structured_output)
@@ -237,6 +262,27 @@ def call_candidate(
             )
         except Exception:  # noqa: BLE001 - counting must not replace provider validation
             pass
+    try:
+        dlp_policy = load_policy()
+        call_system_prompt = redact_for_transport(call_system_prompt, dlp_policy)
+        prompt = redact_for_transport(prompt, dlp_policy)
+        protected_schema = redact_transport_value(schema, dlp_policy)
+    except DLPPolicyError:
+        return LLMResult(
+            descriptor,
+            None,
+            False,
+            "dlp_policy_error",
+            structured_output,
+        )
+    except Exception:  # noqa: BLE001 - scanner failure must block transport
+        return LLMResult(
+            descriptor,
+            None,
+            False,
+            "dlp_scan_error",
+            structured_output,
+        )
     counted_parts = [part for part in (call_system_prompt, native_schema_json, prompt) if part]
     pre_call_count = (
         count_tokens(
@@ -249,7 +295,7 @@ def call_candidate(
     )
     try:
         if structured_output == "native":
-            response = caller(descriptor, prompt, call_system_prompt, schema)
+            response = caller(descriptor, prompt, call_system_prompt, protected_schema)
         else:
             response = caller(descriptor, prompt, call_system_prompt, None)
     except Exception as exc:  # noqa: BLE001 - providers must not crash callers
@@ -287,6 +333,28 @@ def call_candidate(
             usage,
             input_token_count,
         )
+    try:
+        require_safe_model_output(text, dlp_policy)
+    except DLPContentBlocked:
+        return LLMResult(
+            descriptor,
+            None,
+            True,
+            "dlp_output_blocked",
+            structured_output,
+            usage,
+            input_token_count,
+        )
+    except Exception:  # noqa: BLE001 - scanner failure must block publication
+        return LLMResult(
+            descriptor,
+            None,
+            True,
+            "dlp_scan_error",
+            structured_output,
+            usage,
+            input_token_count,
+        )
     return LLMResult(
         descriptor,
         text.strip(),
@@ -297,17 +365,29 @@ def call_candidate(
         input_token_count,
     )
 
-def call_llm(prompt: str, system_prompt: str = "", max_tokens: int = 2000) -> str | None:
-    """Synchronous LLM call. Returns response text, "" on soft failure,
-    or None when no backend is available.
+def _llm_prompt_is_empty(prompt: str) -> bool:
+    if not prompt:
+        return True
+    return not prompt.strip()
 
-    When no backend is available, None is returned. Callers treat this
-    gracefully (compile skips, flush treats as FLUSH_OK, query returns
-    error string). The queue (``scripts/memory_queue.py``) is available
-    as an explicit API for callers that want deferred execution.
-    """
-    if not prompt or not prompt.strip():
-        return ""
+
+def _llm_result_is_terminal(result: LLMResult, forced: str) -> bool:
+    if result.text is not None:
+        return True
+    return forced == "fake" and result.failure_class == "empty_response"
+
+
+def _llm_fallback_item(result: LLMResult) -> str:
+    failure = result.failure_class or "provider_error"
+    return f"{result.descriptor.identity}:{failure}"
+
+
+def call_llm_result(
+    prompt: str, system_prompt: str = "", max_tokens: int = 2000
+) -> LLMResult | None:
+    """Return the successful provider outcome with its resolved identity."""
+    if _llm_prompt_is_empty(prompt):
+        return None
 
     forced = os.environ.get("MEMORY_LLM_PROVIDER", "").lower().strip()
     lineage: tuple[str, ...] = ()
@@ -319,17 +399,22 @@ def call_llm(prompt: str, system_prompt: str = "", max_tokens: int = 2000) -> st
             system_prompt,
             max_tokens=max_tokens,
         )
-        if result.text is not None:
-            return result.text
-        if forced == "fake" and result.failure_class == "empty_response":
-            return ""
-        failure = result.failure_class or "provider_error"
-        lineage += (f"{descriptor.identity}:{failure}",)
+        if _llm_result_is_terminal(result, forced):
+            return result
+        lineage += (_llm_fallback_item(result),)
 
-    # No backend available — return None. Callers handle this gracefully
-    # (compile skips, flush treats as FLUSH_OK, query returns error string).
-    # The queue is available as an explicit API for deferred execution.
     return None
+
+
+def call_llm(prompt: str, system_prompt: str = "", max_tokens: int = 2000) -> str | None:
+    """Synchronous LLM call. Returns text, empty soft failure, or no backend."""
+    if not prompt or not prompt.strip():
+        return ""
+    result = call_llm_result(prompt, system_prompt, max_tokens)
+    if result is None:
+        return None
+    return result.text or ""
+
 
 
 def call_llm_json(
@@ -464,6 +549,14 @@ def _resolve_endpoint(endpoint: str) -> tuple[str, str]:
     return normalized, hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+def _is_literal_loopback_endpoint(endpoint: str) -> bool:
+    try:
+        hostname = urllib.parse.urlsplit(endpoint).hostname
+    except ValueError:
+        return False
+    return hostname in {"127.0.0.1", "::1"}
+
+
 # ---------------------------------------------------------------------------
 # Liveness probes (cheap, before attempting real call)
 # ---------------------------------------------------------------------------
@@ -510,9 +603,45 @@ def _probe_ollama(descriptor: ProviderDescriptor) -> bool:
         )
         request = urllib.request.Request(tags_url)
         with urllib.request.urlopen(request, timeout=1.0) as response:
-            return response.status == 200
-    except (OSError, ValueError, urllib.error.URLError):
+            if response.status != 200:
+                return False
+            if descriptor.capabilities.get("local_only_enforced") is not True:
+                return True
+            raw = response.read(1024 * 1024 + 1)
+            if len(raw) > 1024 * 1024:
+                return False
+            return _ollama_has_local_model(json.loads(raw.decode("utf-8")), descriptor.model)
+    except (
+        json.JSONDecodeError,
+        OSError,
+        UnicodeDecodeError,
+        ValueError,
+        urllib.error.URLError,
+    ):
         return False
+
+
+def _ollama_has_local_model(payload: object, model: str | None) -> bool:
+    if not isinstance(payload, Mapping) or not isinstance(model, str) or not model:
+        return False
+    models = payload.get("models")
+    if not isinstance(models, list):
+        return False
+    for item in models:
+        if not isinstance(item, Mapping) or model not in {item.get("name"), item.get("model")}:
+            continue
+        digest = item.get("digest")
+        size = item.get("size")
+        return bool(
+            not item.get("remote_model")
+            and not item.get("remote_host")
+            and isinstance(size, int)
+            and not isinstance(size, bool)
+            and size > 0
+            and isinstance(digest, str)
+            and re.fullmatch(r"[0-9a-f]{64}", digest)
+        )
+    return False
 
 
 def _probe_fake(descriptor: ProviderDescriptor) -> bool:

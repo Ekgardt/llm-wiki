@@ -8,7 +8,9 @@ How to package this repository for distribution, external audit, or migration to
 python scripts/export_vault.py
 ```
 
-Wraps `git archive` with built-in post-export verification: lists the archive contents and fails loudly if any forbidden path slipped in (`.venv/`, `.git/`, `.obsidian/workspace.json`, `settings.local.json`, `gitleaks-report.json`, etc.). Default output is `../llm-wiki-export-<shortsha>.zip`.
+Wraps `git archive` with mandatory fail-closed verification. The script builds a sibling staging file, verifies every bounded member, and only then atomically publishes the final archive. It rejects forbidden, ambiguous, duplicate, and non-regular entries and scans member content and metadata with the built-in secret detector plus the authenticated `LLM_WIKI_DLP_POLICY` literals and exact fingerprints. Default output is `../llm-wiki-export-<shortsha>.zip`.
+
+ZIP, TAR, and TAR.GZ use the same limits: 512 MiB compressed archive size, 10,000 members, 16 MiB per member, and 256 MiB total uncompressed content. Verification failure removes the staging file and does not replace an existing final archive. The deprecated `--no-verify` flag is retained for CLI compatibility but cannot disable security checks.
 
 ## Under the hood — `git archive`
 
@@ -16,7 +18,7 @@ Wraps `git archive` with built-in post-export verification: lists the archive co
 git archive HEAD -o ../llm-wiki-export.zip
 ```
 
-`git archive` packages only the files Git knows about (tracked + committed). It respects `.gitignore` by construction — untracked and ignored files are never included.
+`git archive` packages only the files Git knows about (tracked + committed). It respects `.gitignore` by construction — untracked and ignored files are never included. Running it directly does not perform LLM Wiki's content scan or staged publication, so use `scripts/export_vault.py` for distributable archives.
 
 ## What to NEVER include in an export
 
@@ -43,18 +45,18 @@ This **silently includes** `.venv/`, `.git/`, any `*.local*` files, and every `_
 ### Standard export
 ```bash
 cd $LLM_WIKI_ROOT
-git archive HEAD --format=zip -o ../llm-wiki-export.zip
+uv run python scripts/export_vault.py --output ../llm-wiki-export.zip
 ```
 Produces a clean zip of exactly the committed state. Good for audits and external reviewers.
 
 ### Export with a specific commit / tag
 ```bash
-git archive <commit-or-tag> --format=zip -o ../llm-wiki-<ref>.zip
+uv run python scripts/export_vault.py --ref <commit-or-tag> --output ../llm-wiki-<ref>.zip
 ```
 
 ### Tarball (Unix reviewers)
 ```bash
-git archive HEAD --format=tar.gz -o ../llm-wiki-export.tar.gz
+uv run python scripts/export_vault.py --format tar.gz --output ../llm-wiki-export.tar.gz
 ```
 
 ### Double-check before sharing

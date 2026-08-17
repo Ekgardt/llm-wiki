@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from event_envelope import canonical_agent  # noqa: E402
 from memory_state import ROOT, STATE_ROOT, spawn_detached  # noqa: E402
 
 
@@ -27,25 +28,25 @@ def _cleanup_ephemeral(path: str) -> None:
         pass
 
 
-def main() -> int:
-    if os.environ.get("CLAUDE_INVOKED_BY"):
-        return 0
+def _read_payload() -> dict | None:
     try:
         payload = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
-        payload = {}
-
+        return {}
     if not isinstance(payload, dict):
-        return 0
+        return None
+    return payload
 
+
+def _flush_args(payload: dict) -> list[str]:
     transcript_path = payload.get("transcript_path", "")
     session_id = payload.get("session_id", "unknown")
     trigger = payload.get("trigger", "")
-    ephemeral = payload.get("ephemeral_transcript") is True
     event_id = payload.get("event_id", "")
     checkpoint_reason = payload.get("checkpoint_reason", "")
+    agent = canonical_agent(str(payload.get("agent") or "claude"))
 
-    args = [
+    return [
         sys.executable,
         str(ROOT / "scripts" / "flush_memory.py"),
         "--event", "pre-compact",
@@ -54,16 +55,41 @@ def main() -> int:
         "--trigger", str(trigger),
         "--source-event-id", str(event_id),
         "--checkpoint-reason", str(checkpoint_reason),
+        "--agent", str(agent),
     ]
+
+
+def _spawn_flush(args: list[str]) -> int | None:
+    try:
+        return spawn_detached(args)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _cleanup_failed_ephemeral(payload: dict, spawned: int | None) -> None:
+    if payload.get("ephemeral_transcript") is not True:
+        return
+    if spawned is None:
+        _cleanup_ephemeral(str(payload.get("transcript_path", "")))
+
+
+def _capture(payload: dict) -> None:
+    args = _flush_args(payload)
+    ephemeral = payload.get("ephemeral_transcript") is True
     if ephemeral:
         args.append("--ephemeral-transcript")
-    try:
-        spawned = spawn_detached(args)
-    except Exception:  # noqa: BLE001
-        spawned = None
-    if ephemeral and spawned is None:
-        _cleanup_ephemeral(str(transcript_path))
+    spawned = _spawn_flush(args)
+    _cleanup_failed_ephemeral(payload, spawned)
     print(json.dumps({"flush_started": spawned is not None}))
+
+
+def main() -> int:
+    if os.environ.get("CLAUDE_INVOKED_BY"):
+        return 0
+    payload = _read_payload()
+    if payload is None:
+        return 0
+    _capture(payload)
     return 0
 
 

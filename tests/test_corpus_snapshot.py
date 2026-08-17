@@ -879,7 +879,15 @@ def test_scandir_entry_limit_is_enforced_before_full_iterator_consumption(
             consumed += 1
             return Entry(consumed)
 
+    real_stat = corpus_snapshot.os.stat
+
+    def descriptor_stat(path, *, dir_fd=None, follow_symlinks=True):
+        if dir_fd is not None and str(path).startswith("ignored-"):
+            return SimpleNamespace(st_mode=stat.S_IFREG, st_file_attributes=0)
+        return real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
     monkeypatch.setattr(corpus_snapshot.os, "scandir", lambda path: Scan())
+    monkeypatch.setattr(corpus_snapshot.os, "stat", descriptor_stat)
     with pytest.raises(ValueError, match="entry limit"):
         collect_corpus(vault, max_entries=3)
     assert consumed == 4
@@ -920,7 +928,15 @@ def test_scandir_deadline_is_enforced_during_iterator_consumption(
             clock += 0.25
             return Entry(consumed)
 
+    real_stat = corpus_snapshot.os.stat
+
+    def descriptor_stat(path, *, dir_fd=None, follow_symlinks=True):
+        if dir_fd is not None and str(path).startswith("ignored-"):
+            return SimpleNamespace(st_mode=stat.S_IFREG, st_file_attributes=0)
+        return real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
     monkeypatch.setattr(corpus_snapshot.os, "scandir", lambda path: Scan())
+    monkeypatch.setattr(corpus_snapshot.os, "stat", descriptor_stat)
     monkeypatch.setattr(corpus_snapshot.time, "monotonic", lambda: clock)
     with pytest.raises(TimeoutError, match="deadline"):
         collect_corpus(vault, deadline=2.0)

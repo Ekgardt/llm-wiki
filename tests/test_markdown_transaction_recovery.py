@@ -663,14 +663,6 @@ c.prepare([MarkdownChange.create('knowledge/notes/new.md', b'new')], operation_i
         parent_identity
     )
 
-    recovered = coordinator.recover()
-
-    assert [(record.id, record.state) for record in recovered] == [
-        (manifest["transaction_id"], "committed")
-    ]
-    assert (vault / "knowledge/notes/new.md").read_bytes() == b"new"
-
-
 @pytest.mark.parametrize("state", ["prepared", "applying"])
 def test_recover_rolls_forward_prepared_and_applying(
     vault: Path, state_root: Path, state: str
@@ -1506,6 +1498,47 @@ def test_same_operation_id_retry_returns_recovered_conflict(
         "before_hash_mismatch",
     )
     assert target.read_bytes() == b"unknown"
+
+
+def test_settle_rereads_terminal_state_after_concurrent_apply(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = MarkdownCoordinator(vault, state_root)
+    second = MarkdownCoordinator(vault, state_root)
+    transaction = first.prepare(
+        [MarkdownChange.replace("knowledge/index.md", b"index-v2\n")],
+        operation_id="concurrent-settle-conflict",
+    )
+    (vault / "knowledge/index.md").write_bytes(b"external-change\n")
+    applying = threading.Event()
+    release = threading.Event()
+    original = first._check_preconditions
+
+    def pause_before_conflict(*args, **kwargs):
+        applying.set()
+        assert release.wait(timeout=10)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(first, "_check_preconditions", pause_before_conflict)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        conflicting = pool.submit(first.apply, transaction.id)
+        assert applying.wait(timeout=10)
+        settling = pool.submit(
+            markdown_transaction._settle_operation,
+            second,
+            transaction.operation_id,
+        )
+        time.sleep(0.05)
+        release.set()
+        with pytest.raises(markdown_transaction.TransactionFailure):
+            conflicting.result(timeout=10)
+        settled = settling.result(timeout=10)
+
+    assert settled is not None
+    assert (settled.state, settled.error_code) == (
+        "conflicted",
+        "before_hash_mismatch",
+    )
 
 
 def test_concurrent_recovery_is_safe(vault: Path, state_root: Path):

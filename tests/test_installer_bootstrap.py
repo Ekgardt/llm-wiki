@@ -18,6 +18,7 @@ REQUIRED_FILES = (
     "install.sh",
     "install.ps1",
     "scripts/installer_config.py",
+    "scripts/install_control.py",
 )
 
 

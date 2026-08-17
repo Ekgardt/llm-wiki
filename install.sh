@@ -12,8 +12,8 @@
 #   1. Checks prerequisites (Python 3.10+, uv, git)
 #   2. Installs the locked production dependency baseline
 #   3. Runs a bounded production smoke
-#   4. Sets LLM_WIKI_ROOT in shell profile
-#   5. Sets up cron jobs (nightly + weekly) — cron only (no launchd)
+#   4. Persists roots through the resumable install control plane
+#   5. Sets up native maintenance (cron is explicit degraded fallback)
 #   6. Detects installed agents and wires them up
 #   7. Prints next steps
 #
@@ -32,6 +32,8 @@ REPOSITORY_URL="https://github.com/Ekgardt/llm-wiki.git"
 CALLER_CWD="$(pwd -P)"
 INSTALLER_CREATED_CLONE="${LLM_WIKI_INSTALLER_CREATED_CLONE:-0}"
 PROTECT_PUSH=0
+SCHEDULER_MODE=native
+EXPECT_SCHEDULER_VALUE=0
 
 info()  { echo -e "${BLUE}[INFO]${NC} $1"; }
 ok()    { echo -e "${GREEN}[OK]${NC} $1"; }
@@ -39,11 +41,23 @@ warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 fail()  { echo -e "${RED}[FAIL]${NC} $1"; exit 1; }
 
 for argument in "$@"; do
+  if [[ "$EXPECT_SCHEDULER_VALUE" -eq 1 ]]; then
+    SCHEDULER_MODE="$argument"
+    EXPECT_SCHEDULER_VALUE=0
+    continue
+  fi
   case "$argument" in
     --protect-push) PROTECT_PUSH=1 ;;
+    --scheduler) EXPECT_SCHEDULER_VALUE=1 ;;
+    --scheduler=*) SCHEDULER_MODE="${argument#--scheduler=}" ;;
     *) fail "Unknown installer argument: $argument" ;;
   esac
 done
+[[ "$EXPECT_SCHEDULER_VALUE" -eq 0 ]] || fail "--scheduler requires native or cron"
+case "$SCHEDULER_MODE" in
+  native|cron) ;;
+  *) fail "--scheduler requires native or cron" ;;
+esac
 
 protect_push_urls() {
   local remote remotes status urls
@@ -160,7 +174,7 @@ else
     fail "Checked-out commit does not match LLM_WIKI_COMMIT"
   [[ "$(git -C "$VAULT_ROOT" remote get-url origin)" == "$REPOSITORY_URL" ]] || \
     fail "Installed checkout repository identity does not match LLM-Wiki"
-  for required in pyproject.toml uv.lock install.sh install.ps1 scripts/installer_config.py; do
+  for required in pyproject.toml uv.lock install.sh install.ps1 scripts/installer_config.py scripts/install_control.py; do
     [[ -f "$VAULT_ROOT/$required" ]] || fail "Installed checkout is missing $required"
   done
   export LLM_WIKI_ROOT="$VAULT_ROOT"
@@ -182,9 +196,6 @@ elif [[ -n "${BASH_VERSION:-}" ]] || [[ "$SHELL" == */bash ]]; then
 else
   PROFILE="${HOME}/.profile"
 fi
-python3 "$VAULT_ROOT/scripts/installer_config.py" profile \
-  --profile "$PROFILE" --root "$VAULT_ROOT" --state-root "$STATE_ROOT"
-
 cd "$VAULT_ROOT"
 info "Vault root: $VAULT_ROOT"
 info "State root: $STATE_ROOT"
@@ -378,41 +389,52 @@ if [[ "$INSTALLER_CREATED_CLONE" == "1" || "$PROTECT_PUSH" == "1" ]]; then
   ok "Push disabled (no-push) for every configured remote"
 fi
 
-info "Environment roots persisted in $PROFILE"
-
 # Create runtime dirs inside the vault (gitignored)
-mkdir -p "$STATE_ROOT/run" "$STATE_ROOT/run/queue" "$STATE_ROOT/logs" "$STATE_ROOT/cache" "$STATE_ROOT/cache/cognee"
+mkdir -p "$STATE_ROOT/run" "$STATE_ROOT/run/queue" "$STATE_ROOT/logs" "$STATE_ROOT/cache"
 ok "Runtime dirs: $STATE_ROOT/{run,logs,cache} (gitignored)"
+
+CURSOR_HOOKS=0
+ANTIGRAVITY_HOOKS=0
+if [ -d "$HOME/.cursor" ] || command -v cursor &>/dev/null; then
+  CURSOR_HOOKS=1
+fi
+if [ -d "$HOME/.gemini/antigravity-ide" ] || command -v agy &>/dev/null; then
+  ANTIGRAVITY_HOOKS=1
+fi
+IDE_HOOK_ARGS=()
+if [ "$CURSOR_HOOKS" -eq 1 ]; then
+  IDE_HOOK_ARGS+=(--cursor-hooks)
+fi
+if [ "$ANTIGRAVITY_HOOKS" -eq 1 ]; then
+  IDE_HOOK_ARGS+=(--antigravity-hooks)
+fi
 
 # ─── 6. Set up scheduled maintenance ────────────────────────────────
 
 info "Setting up scheduled maintenance..."
 
 UV_PATH="$(command -v uv)"
-CRON_NIGHTLY_COMMAND="$(python3 "$VAULT_ROOT/scripts/installer_config.py" cron \
-  --root "$VAULT_ROOT" --state-root "$STATE_ROOT" --uv-path "$UV_PATH" \
-  --kind nightly --log-path "$STATE_ROOT/logs/cron-nightly.log")"
-CRON_WEEKLY_COMMAND="$(python3 "$VAULT_ROOT/scripts/installer_config.py" cron \
-  --root "$VAULT_ROOT" --state-root "$STATE_ROOT" --uv-path "$UV_PATH" \
-  --kind weekly --log-path "$STATE_ROOT/logs/cron-weekly.log")"
-CRON_NIGHTLY="0 3 * * * $CRON_NIGHTLY_COMMAND"
-CRON_WEEKLY="0 4 * * 0 $CRON_WEEKLY_COMMAND"
-
-# Remove old LLM-Wiki cron block (between markers only)
-if crontab -l 2>/dev/null | grep -q "LLM-Wiki-cron-start"; then
-  info "Updating existing cron entries..."
-  crontab -l 2>/dev/null | sed '/# LLM-Wiki-cron-start/,/# LLM-Wiki-cron-end/d' | crontab -
-fi
-
-# Add new entries with markers
-( crontab -l 2>/dev/null; echo "# LLM-Wiki-cron-start"; echo "$CRON_NIGHTLY"; echo "$CRON_WEEKLY"; echo "# LLM-Wiki-cron-end" ) | crontab -
-ok "Cron scheduled: nightly 03:00, weekly Sunday 04:00"
+INSTALL_CONTROL_RESULT="$(uv run --locked --no-sync --directory "$VAULT_ROOT" python \
+  "$VAULT_ROOT/scripts/install_control.py" install \
+  --root "$VAULT_ROOT" \
+  --state-root "$STATE_ROOT" \
+  --uv-path "$UV_PATH" \
+  --home "$HOME" \
+  --scheduler "$SCHEDULER_MODE" \
+  --profile "$PROFILE" \
+  "${IDE_HOOK_ARGS[@]}")" || fail "Install ownership transaction failed"
+SCHEDULER_BACKEND="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["scheduler_backend"])' "$INSTALL_CONTROL_RESULT")"
+case "$SCHEDULER_BACKEND" in
+  launchd|systemd_user|cron) ;;
+  *) fail "Install control returned an invalid scheduler backend" ;;
+esac
+ok "Environment roots and $SCHEDULER_BACKEND maintenance are verified"
 
 # ─── 7. Detect and wire up agents ──────────────────────────────────
 
 info "Detecting installed agents..."
 
-AGENTS_FOUND=""
+AGENT_STATUSES=()
 VAULT_JSON=$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$VAULT_ROOT")
 
 # OpenCode configuration is merged structurally and verified after all precedence layers.
@@ -422,24 +444,32 @@ OPENCODE_RESULT="$(uv run --locked --no-sync --directory "$VAULT_ROOT" python \
 OPENCODE_STATUS="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["status"])' "$OPENCODE_RESULT")"
 case "$OPENCODE_STATUS" in
   active)
-    AGENTS_FOUND="$AGENTS_FOUND OpenCode(active)"
+    AGENT_STATUSES+=("OpenCode: active automatic")
     ok "OpenCode configuration is active"
     uv run --locked --no-sync --directory "$VAULT_ROOT" python \
       "$VAULT_ROOT/scripts/session_start_context.py" \
       --output-file "$STATE_ROOT/cache/session-context.md" 2>/dev/null || true
     ;;
-  conflict) warn "OpenCode configuration status: conflict" ;;
-  configured_unverified) warn "OpenCode configuration status: configured_unverified" ;;
+  conflict)
+    AGENT_STATUSES+=("OpenCode: conflict")
+    warn "OpenCode configuration status: conflict"
+    ;;
+  configured_unverified)
+    AGENT_STATUSES+=("OpenCode: configured unverified")
+    warn "OpenCode configuration status: configured_unverified"
+    ;;
   not_detected) : ;;
   *) fail "OpenCode configuration helper returned an invalid status" ;;
 esac
 
 # Codex CLI
 if command -v codex &>/dev/null; then
-  AGENTS_FOUND="$AGENTS_FOUND Codex"
+  CODEX_MCP_READY=0
+  CODEX_HOOKS_READY=0
   CODEX_CONFIG="$HOME/.codex/config.toml"
   mkdir -p "$HOME/.codex"
   if configure_codex_mcp "$VAULT_ROOT" "$CODEX_CONFIG"; then
+    CODEX_MCP_READY=1
     ok "Codex MCP config verified: $CODEX_CONFIG"
   else
     mcp_exit=$?
@@ -451,6 +481,7 @@ if command -v codex &>/dev/null; then
   fi
   CODEX_HOOKS="$HOME/.codex/hooks.json"
   if install_codex_hooks "$VAULT_ROOT" "$HOME/.codex"; then
+    CODEX_HOOKS_READY=1
     ok "Codex official hooks merged: $CODEX_HOOKS"
     info "Open /hooks in Codex to review and trust the LLM-Wiki commands."
   else
@@ -458,6 +489,7 @@ if command -v codex &>/dev/null; then
     if [ "$hook_exit" -eq 2 ]; then
       warn "Active inline Codex hooks require manual merge and /hooks trust review; hooks.json was not changed."
     elif [ "$hook_exit" -eq 3 ]; then
+      CODEX_HOOKS_READY=1
       ok "Equivalent LLM-Wiki hooks are already configured inline; hooks.json was not changed."
       info "Open /hooks in Codex to review and trust the inline LLM-Wiki commands."
     elif [ "$hook_exit" -eq 4 ]; then
@@ -466,35 +498,34 @@ if command -v codex &>/dev/null; then
       warn "Codex hooks were not changed; review the existing hooks configuration manually."
     fi
   fi
+  if [ "$CODEX_MCP_READY" -eq 1 ] && [ "$CODEX_HOOKS_READY" -eq 1 ]; then
+    AGENT_STATUSES+=("Codex: manual /hooks trust review required")
+  else
+    AGENT_STATUSES+=("Codex: conflict or unverified")
+  fi
 fi
 
 # Cursor
-if [ -d "$HOME/.cursor" ] || command -v cursor &>/dev/null; then
-  AGENTS_FOUND="$AGENTS_FOUND Cursor"
-  info "Cursor detected. Copy rules file to each project:"
-  info "  cp $VAULT_ROOT/integrations/cursor/rules/llm-wiki.mdc <project>/.cursor/rules/"
+if [ "$CURSOR_HOOKS" -eq 1 ]; then
+  AGENT_STATUSES+=("Cursor: active automatic local hooks")
+  ok "Cursor local user hooks are active"
+  info "Cursor cloud agents do not load user-level hooks."
 fi
 
 # Antigravity
-if [ -d "$HOME/.config/Antigravity" ] || command -v agy &>/dev/null; then
-  AGENTS_FOUND="$AGENTS_FOUND Antigravity"
-  info "Antigravity detected. Copy AGENTS.md to each project:"
-  info "  cp $VAULT_ROOT/integrations/antigravity/AGENTS.md <project>/"
-fi
-
-if [ -z "$AGENTS_FOUND" ]; then
-  warn "No supported agents detected. Install OpenCode, Codex CLI, Claude Code, Cursor, or Antigravity."
-else
-  ok "Agents detected:$AGENTS_FOUND"
+if [ "$ANTIGRAVITY_HOOKS" -eq 1 ]; then
+  AGENT_STATUSES+=("Antigravity: active automatic local hooks")
+  ok "Antigravity local user hooks are active"
 fi
 
 # Claude Code — merge hooks if CLI or config dir present (safe: backup + non-destructive)
 if command -v claude &>/dev/null || [ -d "$HOME/.claude" ] || [ -f "$HOME/.claude.json" ]; then
-  AGENTS_FOUND="$AGENTS_FOUND Claude"
+  CLAUDE_AUTOMATIC=0
   info "Merging LLM-wiki hooks into Claude user settings (backup first)..."
   if uv run python "$VAULT_ROOT/scripts/merge_claude_settings.py" \
       --vault-root "$VAULT_ROOT" \
       --state-root "$STATE_ROOT"; then
+    CLAUDE_AUTOMATIC=1
     ok "Claude settings merged → ~/.claude/settings.json"
   else
     warn "Claude settings merge failed — run: uv run python scripts/merge_claude_settings.py"
@@ -509,6 +540,18 @@ if command -v claude &>/dev/null || [ -d "$HOME/.claude" ] || [ -f "$HOME/.claud
     warn "Existing ~/.claude.json found without llm-wiki; merge this under top-level mcpServers:"
     warn '  "llm-wiki":{"command":"uv","args":["run","--locked","--no-sync","--directory",'"$VAULT_JSON"',"python","scripts/mcp_server.py"]}'
   fi
+  if [ "$CLAUDE_AUTOMATIC" -eq 1 ]; then
+    AGENT_STATUSES+=("Claude Code: active automatic")
+  else
+    AGENT_STATUSES+=("Claude Code: conflict or unverified")
+  fi
+fi
+
+if [ "${#AGENT_STATUSES[@]}" -eq 0 ]; then
+  warn "No supported agents detected. Install OpenCode, Codex CLI, Claude Code, Cursor, or Antigravity."
+else
+  ok "Agent integrations:"
+  printf '  - %s\n' "${AGENT_STATUSES[@]}"
 fi
 
 # ─── 8. Bounded runtime sync ───────────────────────────────────────
@@ -544,13 +587,18 @@ echo ""
 echo "Vault:          $VAULT_ROOT"
 echo "State:          $STATE_ROOT"
 echo "Profile:        $PROFILE"
-echo "Agents:        ${AGENTS_FOUND:-none detected}"
-echo "Maintenance:    cron (nightly 03:00 + weekly Sun 04:00)"
+echo "Agent integrations:"
+if [ "${#AGENT_STATUSES[@]}" -eq 0 ]; then
+  echo "  - none detected"
+else
+  printf '  - %s\n' "${AGENT_STATUSES[@]}"
+fi
+echo "Maintenance:    $SCHEDULER_BACKEND (nightly 03:00 + weekly Sun 04:00)"
 echo ""
 echo "Next steps:"
 echo "  1. Restart your terminal (to pick up env vars)"
 echo "  2. Open a project in your agent"
-echo "  3. The system captures automatically — just work normally"
+echo "  3. Review the integration states above; automatic capture runs only for active automatic entries"
 echo ""
 echo "Useful commands:"
 echo "  uv run python scripts/search_memory.py 'your query'  # search vault"

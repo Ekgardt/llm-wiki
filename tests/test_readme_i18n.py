@@ -2,6 +2,7 @@
 
 Prevents shipping EN updates while RU/ZH lag (release regression).
 """
+
 from __future__ import annotations
 
 import re
@@ -76,9 +77,7 @@ def test_readmes_advertise_only_immutable_remote_bootstrap():
         assert "raw.githubusercontent.com/Ekgardt/llm-wiki/main/install." not in text, (
             f"{path.name}: mutable main bootstrap must not be advertised"
         )
-        assert "/v4.0.0/install." not in text, (
-            f"{path.name}: tag bootstrap must not be advertised"
-        )
+        assert "/v4.0.0/install." not in text, f"{path.name}: tag bootstrap must not be advertised"
         assert "brightgreen.svg" not in text, f"{path.name}: static green badge is unverified"
         assert "CI green" not in text, f"{path.name}: CI status claim is unverified"
         assert "LLM_WIKI_COMMIT" in text, (
@@ -98,8 +97,7 @@ def test_readmes_share_locked_install_and_read_only_repair_commands():
 
 def test_readmes_mark_precommit_as_opt_in() -> None:
     command = (
-        "uv run --locked --no-sync pre-commit install "
-        "--hook-type pre-commit --hook-type pre-push"
+        "uv run --locked --no-sync pre-commit install --hook-type pre-commit --hook-type pre-push"
     )
     markers = {
         "README.md": "Opt-in; the installer does not activate these hooks",
@@ -111,15 +109,54 @@ def test_readmes_mark_precommit_as_opt_in() -> None:
         assert command in text, f"{path.name}: missing opt-in pre-commit command"
 
 
-def test_readmes_distinguish_automatic_manual_and_viewer_integrations() -> None:
+def test_readmes_describe_managed_local_ide_hooks_and_viewer_integration() -> None:
     markers = {
-        "README.md": ("Automatic", "Manual", "Viewer only"),
-        "README.ru.md": ("Автоматически", "Вручную", "Только viewer"),
-        "README.zh-CN.md": ("自动", "手动", "仅 viewer"),
+        "README.md": (
+            "Automatic local hooks when detected",
+            "Cursor cloud agents do not load user-level hooks",
+            "Viewer only",
+        ),
+        "README.ru.md": (
+            "Автоматические локальные хуки после обнаружения",
+            "Cursor cloud agents не загружают user-level хуки",
+            "Только viewer",
+        ),
+        "README.zh-CN.md": (
+            "检测到后自动启用本地钩子",
+            "Cursor 云端智能体不会加载用户级钩子",
+            "仅 viewer",
+        ),
     }
     for path, text in _readmes():
         for marker in markers[path.name]:
             assert marker in text, f"{path.name}: missing integration status {marker!r}"
+
+
+def test_installers_report_agent_activation_and_scheduler_limits_truthfully() -> None:
+    shell = (ROOT / "install.sh").read_text(encoding="utf-8")
+    powershell = (ROOT / "install.ps1").read_text(encoding="utf-8")
+    guide = (ROOT / "docs/USER-GUIDE.md").read_text(encoding="utf-8")
+
+    for installer in (shell, powershell):
+        assert "OpenCode: active automatic" in installer
+        assert "Cursor: active automatic local hooks" in installer
+        assert "Antigravity: active automatic local hooks" in installer
+        assert "Agent integrations:" in installer
+    assert "captures automatically" not in shell
+    assert "capture is automatic" not in powershell
+    assert "even while you sleep" not in guide
+    assert "Windows tasks run only while the current user is logged on" in guide
+
+
+def test_windows_scheduler_status_validates_registered_contract() -> None:
+    source = (ROOT / "scripts/install-scheduled-tasks.ps1").read_text(encoding="utf-8")
+
+    assert "function Test-LLMWikiScheduledTasks" in source
+    assert ".Principal.LogonType" in source
+    assert ".Actions.Count" in source
+    assert ".Triggers.Count" in source
+    assert "if ($verified)" in source
+    assert "exit 1" in source
 
 
 def test_all_readmes_mention_knowledge_layout():
@@ -136,7 +173,9 @@ def test_all_readmes_mention_current_version():
     import re as _re
 
     pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
-    m = _re.search(r'^version\s*=\s*"([^"]+)"', pyproject.read_text(encoding="utf-8"), _re.MULTILINE)
+    m = _re.search(
+        r'^version\s*=\s*"([^"]+)"', pyproject.read_text(encoding="utf-8"), _re.MULTILINE
+    )
     assert m, "could not parse version from pyproject.toml"
     current = m.group(1)
     required = ("MCP", "12", "doctor", "envelope", "resource", "integration_adapter.py")
@@ -188,8 +227,7 @@ def test_all_readmes_share_reliable_memory_operator_commands():
         "--idle-seconds 2 --lease-seconds 120 --heartbeat-seconds 40 "
         "--max-attempts 8 --retry-base-seconds 30 --retry-cap-seconds 3600",
         "uv run python scripts/memory_queue.py redrive <task-id>",
-        "uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> "
-        "--export <path>",
+        "uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> --export <path>",
         "uv run python scripts/archive_daily.py --commit --hot-days 90",
         "uv run python benchmark/run_contradiction_benchmark.py --corpus "
         "benchmark/contradiction-v1.json",
@@ -244,12 +282,12 @@ def test_ci_qualifies_real_pyright_on_all_supported_os_families():
             "node": "22.23.1",
         },
     ]
-    assert job["env"]["LLM_WIKI_STATE_ROOT"] == "${{ runner.temp }}/llm-wiki-state"
+    assert job["env"]["LLM_WIKI_STATE_ROOT"] == ("${{ github.workspace }}/../llm-wiki-state")
     assert job["env"]["LLM_WIKI_TEST_USE_EXTERNAL_STATE"] == "1"
     install_step = next(
         step for step in job["steps"] if step.get("name") == "Explicit Pyright install"
     )
-    assert '"${{ runner.temp }}/llm-wiki-state"' in install_step["run"]
+    assert '"${{ env.LLM_WIKI_STATE_ROOT }}"' in install_step["run"]
     assert "shell" not in install_step
 
 

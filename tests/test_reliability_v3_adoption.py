@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import sqlite3
 from pathlib import Path
 
 import markdown_transaction
 import memory_queue
 import pytest
-from installed_memory_repair import inspect_installed_vault, repair_installed_vault
+from installed_memory_repair import (
+    inspect_installed_vault,
+    repair_installed_vault,
+    require_reliability_v3_adopted,
+)
 from markdown_transaction import MarkdownCoordinator
 from memory_queue import MemoryQueue
 from reliable_memory import (
@@ -260,12 +265,17 @@ def test_partial_v3_artifacts_are_reported_without_opening_writable(
     assert _inventory(state_root) == before
 
 
-def test_apply_never_mutates_until_runtime_activation_is_complete(tmp_path: Path) -> None:
+def test_offline_apply_adopts_v2_pair_and_retains_exact_sources(tmp_path: Path) -> None:
     root, state_root = _vault(tmp_path)
     queue = MemoryQueue(state_root)
-    queue.enqueue("query", 1, {})
+    queue.enqueue("query", 1, {"prompt": "retained"})
     MarkdownCoordinator(root, state_root)
-    before = _inventory(state_root)
+    queue_source = state_root / "run/queue.sqlite3"
+    coordinator_source = state_root / "run/markdown-transactions.sqlite3"
+    source_bytes = {
+        "queue": queue_source.read_bytes(),
+        "coordinator": coordinator_source.read_bytes(),
+    }
 
     report = repair_installed_vault(
         root=root,
@@ -276,12 +286,96 @@ def test_apply_never_mutates_until_runtime_activation_is_complete(tmp_path: Path
 
     assert report == {
         "mode": "apply",
-        "overall_status": "error",
-        "actions": [],
-        "blockers": [{"code": "reliability_v3_runtime_activation_incomplete"}],
-        "details": {"adoption_state": "upgrade-required"},
+        "overall_status": "ok",
+        "actions": [{"code": "reliability_v3_adopted"}],
+        "blockers": [],
+        "details": {"adoption_state": "adopted"},
     }
+    assert (state_root / "run/queue-v2-retired.sqlite3").read_bytes() == source_bytes[
+        "queue"
+    ]
+    assert (
+        state_root / "run/markdown-transactions-v2-retired.sqlite3"
+    ).read_bytes() == source_bytes["coordinator"]
+    for legacy_path in (queue_source, coordinator_source):
+        assert json.loads(legacy_path.read_bytes())["schema_version"] == (
+            "operational-db-tombstone/v1"
+        )
+    queue_validation = memory_queue.validate_queue_v3_database(
+        state_root / "run/queue-v3.sqlite3", state_root=state_root
+    )
+    coordinator_validation = markdown_transaction.validate_coordinator_v3_database(
+        state_root / "run/markdown-transactions-v3.sqlite3", state_root=state_root
+    )
+    assert queue_validation["row_counts"]["tasks"] == 1
+    assert coordinator_validation["integrity_check"] == "ok"
+    assert require_reliability_v3_adopted(root=root, state_root=state_root)[
+        "source_state"
+    ] == "upgrade"
+
+
+def test_upgrade_rejects_sqlite_sidecar_before_first_publication(tmp_path: Path) -> None:
+    root, state_root = _vault(tmp_path)
+    MemoryQueue(state_root)
+    MarkdownCoordinator(root, state_root)
+    sidecar = state_root / "run/queue.sqlite3-wal"
+    sidecar.write_bytes(b"uncheckpointed")
+    before = _inventory(state_root)
+
+    report = repair_installed_vault(
+        root=root,
+        state_root=state_root,
+        adopt_ownership_v3=True,
+        confirm_all_agents_stopped=True,
+    )
+
+    assert report["overall_status"] == "error"
+    assert report["blockers"] == [{"code": "reliability_v3_adoption_failed"}]
     assert _inventory(state_root) == before
+    assert not (state_root / "run/reliability-v3-migration.json").exists()
+
+
+def test_upgrade_rejects_leased_v2_task_before_first_publication(tmp_path: Path) -> None:
+    root, state_root = _vault(tmp_path)
+    queue = MemoryQueue(state_root)
+    queue.enqueue("query", 1, {"prompt": "in flight"})
+    assert queue.claim("worker") is not None
+    MarkdownCoordinator(root, state_root)
+    before = _inventory(state_root)
+
+    report = repair_installed_vault(
+        root=root,
+        state_root=state_root,
+        adopt_ownership_v3=True,
+        confirm_all_agents_stopped=True,
+    )
+
+    assert report["overall_status"] == "error"
+    assert report["blockers"] == [{"code": "reliability_v3_adoption_failed"}]
+    assert _inventory(state_root) == before
+    assert not (state_root / "run/reliability-v3-migration.json").exists()
+
+
+def test_upgrade_rejects_live_legacy_owner_marker_before_publication(
+    tmp_path: Path,
+) -> None:
+    root, state_root = _vault(tmp_path)
+    MemoryQueue(state_root)
+    MarkdownCoordinator(root, state_root)
+    marker = state_root / "run/compile.pid"
+    marker.write_text(f"{os.getpid()}\n2026-08-16T12:00:00\nowner-token\n", encoding="ascii")
+    before = _inventory(state_root)
+
+    report = repair_installed_vault(
+        root=root,
+        state_root=state_root,
+        adopt_ownership_v3=True,
+        confirm_all_agents_stopped=True,
+    )
+
+    assert report["overall_status"] == "error"
+    assert _inventory(state_root) == before
+    assert not (state_root / "run/reliability-v3-migration.json").exists()
 
 
 def test_valid_v3_database_artifact_is_inspected_read_only(tmp_path: Path) -> None:

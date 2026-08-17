@@ -875,9 +875,18 @@ def _needs_rebuild(
     _check_legacy_stop(deadline, cancelled)
     source_root = root or ROOT
     current_index = index_file or INDEX_FILE
-    current_manifest = index_manifest or INDEX_MANIFEST
     if not current_index.exists():
         return True
+    if index_file is None and index_manifest is None:
+        with _index_swap_lock(deadline=deadline, cancelled=cancelled):
+            return _needs_rebuild(
+                pages,
+                root=source_root,
+                index_file=current_index,
+                index_manifest=INDEX_MANIFEST,
+                deadline=deadline,
+                cancelled=cancelled,
+            )
     try:
         connect_options = {}
         if deadline is not None:
@@ -890,6 +899,9 @@ def _needs_rebuild(
                 schema_row = conn.execute(
                     "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?",
                     ("pages",),
+                ).fetchone()
+                manifest_row = conn.execute(
+                    "SELECT value FROM index_metadata WHERE key = 'paths'"
                 ).fetchone()
         schema_sql = schema_row[0] if schema_row and isinstance(schema_row[0], str) else ""
         normalized_schema = " ".join(schema_sql.casefold().split())
@@ -907,27 +919,18 @@ def _needs_rebuild(
             )
         ):
             return True
+        if manifest_row is None:
+            return True
+        manifest_paths = json.loads(manifest_row[0])
     except sqlite3.Error:
         return True
-    # Manifest check: if the set of indexed paths differs from the
-    # current set (e.g. a page was deleted), trigger rebuild.
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return True
+    # The manifest is stored inside the SQLite candidate, so index and source
+    # membership become active through the same atomic file replacement.
     _check_legacy_stop(deadline, cancelled)
     current_paths = sorted(p.relative_to(source_root).as_posix() for p in pages)
-    if current_manifest.exists():
-        try:
-            manifest_paths = json.loads(
-                read_stable_bytes(
-                    current_manifest,
-                    MAX_PATH_MANIFEST_BYTES,
-                    label="index path manifest",
-                ).decode("utf-8")
-            )
-            if manifest_paths != current_paths:
-                return True
-        except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
-            return True
-    else:
-        # No manifest from a prior build — rebuild to create one.
+    if manifest_paths != current_paths:
         return True
     _check_legacy_stop(deadline, cancelled)
     index_mtime = current_index.stat().st_mtime
@@ -1080,6 +1083,8 @@ def _build_index(
     os.close(fd)
     tmp_file = Path(tmp_name)
     conn = None
+    source_digests: dict[Path, str] = {}
+    manifest_paths = sorted(p.relative_to(ROOT).as_posix() for p in pages)
     try:
         conn = sqlite3.connect(str(tmp_file))
         conn.execute(
@@ -1096,15 +1101,23 @@ def _build_index(
             )
             """
         )
+        conn.execute(
+            "CREATE TABLE index_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL) "
+            "WITHOUT ROWID"
+        )
+        conn.execute(
+            "INSERT INTO index_metadata (key, value) VALUES ('paths', ?)",
+            (json.dumps(manifest_paths, separators=(",", ":")),),
+        )
 
         for p in pages:
             _check_legacy_stop(deadline, cancelled)
             try:
-                content = read_stable_bytes(p, MAX_PAGE_BYTES, label="search page").decode(
-                    "utf-8", errors="ignore"
-                )
+                source = read_stable_bytes(p, MAX_PAGE_BYTES, label="search page")
             except (OSError, ValueError):
                 continue
+            source_digests[p] = hashlib.sha256(source).hexdigest()
+            content = source.decode("utf-8", errors="ignore")
             title, summary = _extract_title_and_summary(content, p.stem)
             body = _strip_frontmatter(content)
             rel_path = p.relative_to(ROOT).as_posix()
@@ -1126,6 +1139,16 @@ def _build_index(
         # Builders do the expensive work independently, then briefly serialize
         # the atomic live-index swap. Windows readers may transiently deny it.
         with _index_swap_lock(deadline=deadline, cancelled=cancelled):
+            for path, expected_digest in source_digests.items():
+                _check_legacy_stop(deadline, cancelled)
+                try:
+                    current = read_stable_bytes(
+                        path, MAX_PAGE_BYTES, label="search page publication"
+                    )
+                except (OSError, ValueError):
+                    return
+                if hashlib.sha256(current).hexdigest() != expected_digest:
+                    return
             _replace_live_index(
                 tmp_file, deadline=deadline, cancelled=cancelled
             )
@@ -1134,9 +1157,7 @@ def _build_index(
             try:
                 atomic_write(
                     INDEX_MANIFEST,
-                    json.dumps(
-                        sorted(p.relative_to(ROOT).as_posix() for p in pages)
-                    ),
+                    json.dumps(manifest_paths),
                 )
             except OSError:
                 pass  # best-effort
@@ -2057,7 +2078,14 @@ def _generation_fts_search(
         connection.row_factory = sqlite3.Row
         filters, values = _generation_filters(scope=scope, since=since, as_of=as_of)
         normalized_stem = _normalized_filename_stem(query)
-        filename = f"{normalized_stem}.md"
+        connection.create_function(
+            "llm_wiki_filename_stem",
+            1,
+            lambda value: (
+                _normalized_filename_stem(value) if isinstance(value, str) else ""
+            ),
+            deterministic=True,
+        )
         exact_filters = filters
         exact_values = list(values)
         if project:
@@ -2067,9 +2095,9 @@ def _generation_fts_search(
             "SELECT chunk_id, chunk_order, source_id, source_path, source_sha256, "
             "heading_ancestry, type, project, authority, confidence, status, valid_from, "
             "valid_to, language, title, content, 0.0 AS rank FROM chunks "
-            "WHERE (source_path = ? OR substr(source_path, -length(?)) = ?)"
+            "WHERE llm_wiki_filename_stem(source_path) = ?"
             f"{exact_filters} ORDER BY source_path, chunk_order LIMIT 1",
-            [filename, f"/{filename}", f"/{filename}", *exact_values],
+            [normalized_stem, *exact_values],
         ).fetchall()
         rows = connection.execute(
             "SELECT chunk_id, chunk_order, source_id, source_path, source_sha256, "

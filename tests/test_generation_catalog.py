@@ -37,6 +37,14 @@ def _rewrite_preserving_metadata(path: Path, content: bytes) -> None:
     assert len(content) == before.st_size
     path.write_bytes(content)
     os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    if os.name == "posix":
+        deadline = time.monotonic() + 1
+        while path.stat(follow_symlinks=False).st_ctime_ns == before.st_ctime_ns:
+            if time.monotonic() >= deadline:
+                raise AssertionError("filesystem did not expose the test mutation")
+            time.sleep(0.001)
+            path.write_bytes(content)
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
 
 
 def _catalog(tmp_path: Path):
@@ -195,6 +203,7 @@ def _publish_v2(catalog, generation_id: str) -> tuple[Path, dict[str, object]]:
         (None, [], []),
     ],
 )
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows handle conversion")
 def test_windows_read_descriptor_closes_exact_owner_on_conversion_failure(
     tmp_path, monkeypatch, failure, closed_handles, closed_descriptors
 ):

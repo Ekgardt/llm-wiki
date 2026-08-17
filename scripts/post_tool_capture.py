@@ -55,7 +55,7 @@ except Exception:  # noqa: BLE001
         """No-op stub — safe skip when memory_state is unavailable."""
 
 from capture_operation import claim_operation, complete_operation  # noqa: E402
-from event_envelope import build_event_envelope  # noqa: E402
+from event_envelope import build_event_envelope, canonical_agent  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
 DAILY_DIR = ROOT / "knowledge" / "daily"
@@ -83,18 +83,23 @@ MIN_BASH_CMD_CHARS = 8
 MAX_TARGET_PREVIEW = 100
 
 
-def _read_hook_input() -> dict:
-    try:
-        raw = sys.stdin.read()
-    except Exception:  # noqa: BLE001
-        return {}
-    if not raw or not raw.strip():
+def _parse_hook_input(raw: str) -> dict:
+    if not raw.strip():
         return {}
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
         return {}
-    return result if isinstance(result, dict) else {}
+    if not isinstance(result, dict):
+        return {}
+    return result
+
+
+def _read_hook_input() -> dict:
+    try:
+        return _parse_hook_input(sys.stdin.read())
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def _compute_slug_from_cwd(cwd: str) -> str:
@@ -111,21 +116,31 @@ def _compute_slug_from_cwd(cwd: str) -> str:
             return "unknown"
 
 
+def _file_target(tool_input: dict) -> str:
+    return str(tool_input.get("filePath") or tool_input.get("file_path") or "")
+
+
+def _bash_target(tool_input: dict) -> str:
+    command = str(tool_input.get("command") or "").strip()
+    if not command:
+        return ""
+    return command.splitlines()[0]
+
+
 def _extract_target(tool_name: str, tool_input: dict) -> str:
     """Pull out the meaningful target identifier for the tool call.
 
     For file tools → relative file path. For Bash → first line of the
     command (truncated). For unknown → tool name alone.
     """
-    if tool_name in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
-        return str(tool_input.get("filePath") or tool_input.get("file_path") or "")
-    if tool_name == "Bash":
-        cmd = str(tool_input.get("command") or "").strip()
-        # First line (full — redaction + truncation happens in _append_tool_tag
-        # so secrets are redacted BEFORE truncation, not after).
-        first_line = cmd.splitlines()[0] if cmd else ""
-        return first_line
-    return ""
+    readers = {
+        "Edit": _file_target,
+        "Write": _file_target,
+        "MultiEdit": _file_target,
+        "NotebookEdit": _file_target,
+        "Bash": _bash_target,
+    }
+    return readers.get(tool_name, lambda _value: "")(tool_input)
 
 
 def _rate_limited(slug: str, tool: str, target: str) -> bool:
@@ -208,85 +223,146 @@ def _append_tool_tag(
     tool: str,
     target: str,
     operation_id: str | None = None,
+    *,
+    agent: str = "unknown",
 ) -> bool:
     try:
         from daily_log_append import append_daily
 
         ts = datetime.now().strftime("%H:%M:%S")
         preview = redact_secrets(target)[:MAX_TARGET_PREVIEW] if target else ""
-        block = f"- `[{ts}] tool | {session_id[:8]} | {slug} | {tool}` {preview}"
+        source = canonical_agent(agent)
+        block = (
+            f"- `[{ts}] tool | {source} | {session_id[:8]} | "
+            f"{slug} | {tool}` {preview}"
+        )
         append_daily(slug, session_id, block, operation_id=operation_id)
         return True
     except Exception:  # noqa: BLE001
         return False
 
 
+def _optional_string(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return value
+
+
+def _inside_vault(cwd: str) -> bool:
+    try:
+        return Path(cwd).resolve().is_relative_to(ROOT)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _text_or_empty(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value
+
+
+def _dict_or_empty(value: object) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    return value
+
+
+def _useful_target(tool_name: str, target: str) -> bool:
+    if tool_name != "Bash":
+        return True
+    return len(target) >= MIN_BASH_CMD_CHARS
+
+
+def _validated_tool_target(hook: dict) -> tuple[str, str] | None:
+    tool_name = _text_or_empty(hook.get("tool_name"))
+    if tool_name not in SIGNIFICANT_TOOLS:
+        return None
+    target = _extract_target(tool_name, _dict_or_empty(hook.get("tool_input")))
+    if not _useful_target(tool_name, target):
+        return None
+    return tool_name, target
+
+
+def _cwd(value: object) -> str:
+    if value:
+        return str(value)
+    return os.getcwd()
+
+
+def _tool_context(hook: dict) -> tuple[str, str, object, object, str] | None:
+    tool = _validated_tool_target(hook)
+    if tool is None:
+        return None
+    tool_name, target = tool
+    source_session = hook.get("session_id")
+    source_cwd = hook.get("cwd")
+    cwd = _cwd(source_cwd)
+    if _inside_vault(cwd):
+        return None
+    return tool_name, target, source_session, source_cwd, cwd
+
+
+def _tool_envelope(
+    hook: dict,
+    tool_name: str,
+    target: str,
+    source_session: object,
+    source_cwd: object,
+    slug: str,
+):
+    return build_event_envelope(
+        event_type="post_tool_use",
+        payload={"tool_name": tool_name, "target": redact_secrets(target)},
+        agent=_optional_string(hook.get("agent")),
+        session=_optional_string(source_session),
+        project=slug if source_cwd else None,
+        worktree=_optional_string(source_cwd),
+        severity=_optional_string(hook.get("severity")),
+        parent_event_id=_optional_string(hook.get("parent_event_id")),
+        source_event_id=_optional_string(hook.get("event_id")),
+    )
+
+
+def _finish_tool_operation(
+    appended: bool, slug: str, tool_name: str, target: str, operation_id: str
+) -> None:
+    if appended:
+        _complete_tool_operation(slug, tool_name, target, operation_id)
+
+
+def _capture_tool(hook: dict) -> None:
+    context = _tool_context(hook)
+    if context is None:
+        return
+    tool_name, target, source_session, source_cwd, cwd = context
+    slug = _compute_slug_from_cwd(cwd)
+    envelope = _tool_envelope(
+        hook, tool_name, target, source_session, source_cwd, slug
+    )
+    operation_id = _claim_tool_operation(
+        slug,
+        tool_name,
+        envelope.payload["target"],
+        source_event_id=envelope.source_event_id,
+    )
+    if operation_id is None:
+        return
+    appended = _append_tool_tag(
+        slug,
+        str(source_session or "unknown"),
+        tool_name,
+        envelope.payload["target"],
+        operation_id=operation_id,
+        agent=envelope.agent or "unknown",
+    )
+    _finish_tool_operation(
+        appended, slug, tool_name, envelope.payload["target"], operation_id
+    )
+
+
 def main() -> int:
     try:
-        hook = _read_hook_input()
-        tool_name = hook.get("tool_name") or ""
-        tool_input = hook.get("tool_input") or {}
-        source_session = hook.get("session_id")
-        source_cwd = hook.get("cwd")
-        session_id = source_session or "unknown"
-        cwd = source_cwd or os.getcwd()
-
-        # Filter to significant tools only.
-        if tool_name not in SIGNIFICANT_TOOLS:
-            return 0
-
-        target = _extract_target(tool_name, tool_input)
-        # For Bash, skip very short commands (cd, pwd, ls noise).
-        if tool_name == "Bash" and len(target) < MIN_BASH_CMD_CHARS:
-            return 0
-
-        # Skip sessions inside the vault itself.
-        try:
-            if Path(cwd).resolve().is_relative_to(ROOT):
-                return 0
-        except Exception:  # noqa: BLE001
-            pass
-
-        slug = _compute_slug_from_cwd(cwd)
-        safe_target = redact_secrets(target) if target else ""
-        envelope = build_event_envelope(
-            event_type="post_tool_use",
-            payload={"tool_name": tool_name, "target": safe_target},
-            agent=hook.get("agent") if isinstance(hook.get("agent"), str) else None,
-            session=str(source_session) if source_session is not None else None,
-            project=slug if source_cwd else None,
-            worktree=str(source_cwd) if source_cwd else None,
-            severity=hook.get("severity") if isinstance(hook.get("severity"), str) else None,
-            parent_event_id=(
-                hook.get("parent_event_id")
-                if isinstance(hook.get("parent_event_id"), str)
-                else None
-            ),
-            source_event_id=(
-                hook.get("event_id") if isinstance(hook.get("event_id"), str) else None
-            ),
-        )
-
-        operation_id = _claim_tool_operation(
-            slug,
-            tool_name,
-            envelope.payload["target"],
-            source_event_id=envelope.source_event_id,
-        )
-        if operation_id is None:
-            return 0
-
-        appended = _append_tool_tag(
-            slug,
-            session_id,
-            tool_name,
-            envelope.payload["target"],
-            operation_id=operation_id,
-        )
-        if appended:
-            _complete_tool_operation(
-                slug, tool_name, envelope.payload["target"], operation_id
-            )
+        _capture_tool(_read_hook_input())
     except Exception:  # noqa: BLE001
         pass
     return 0

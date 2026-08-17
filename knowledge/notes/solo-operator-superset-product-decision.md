@@ -128,6 +128,7 @@ The existing runtime deletion and transaction contracts remain in force.
 
 ## Related
 
+- [[audit-closure-security-recovery-control-plane-decision]]
 - [[read-only-lsp-navigation-engine-decision]]
 - [[persistent-code-intelligence-kernel-decision]]
 - [[derived-evidence-generation-decision]]

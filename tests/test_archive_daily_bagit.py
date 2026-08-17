@@ -500,6 +500,7 @@ def test_bag_info_requires_exact_fields_order_and_no_duplicates(archive_vault) -
     copy = root / "bag-info-copy"
     shutil.copytree(archived.bag_path, copy)
     info = copy / "bag-info.txt"
+    info.chmod(0o600)
     info.write_bytes(info.read_bytes() + b"External-Identifier: daily:2026-01-01\n")
     tags = (
         "archive-manifest.json",
@@ -508,7 +509,9 @@ def test_bag_info_requires_exact_fields_order_and_no_duplicates(archive_vault) -
         "compile-receipt.md",
         "manifest-sha256.txt",
     )
-    (copy / "tagmanifest-sha256.txt").write_bytes(
+    tag_manifest = copy / "tagmanifest-sha256.txt"
+    tag_manifest.chmod(0o600)
+    tag_manifest.write_bytes(
         "".join(
             f"{sha256_bytes((copy / name).read_bytes())}  {name}\n" for name in tags
         ).encode()

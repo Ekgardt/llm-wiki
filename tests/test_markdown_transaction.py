@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import markdown_transaction
 import pytest
 from markdown_transaction import MarkdownChange, MarkdownCoordinator
-from reliable_memory import sha256_bytes
+from reliable_memory import canonical_json_bytes, sha256_bytes
 
 
 @pytest.fixture
@@ -94,6 +94,78 @@ def test_prepare_and_apply_create_replace_delete(vault: Path, state_root: Path):
     assert (vault / "knowledge/index.md").read_bytes() == b"index-v2\n"
     assert (vault / "knowledge/log.md").read_bytes() == b"log-v2\n"
     assert not old.exists()
+
+
+def test_model_output_recheck_quarantines_and_rolls_back_exact_old_bytes(
+    vault: Path, state_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    existing = vault / "knowledge/notes/existing.md"
+    existing.write_bytes(b"legacy-sensitive-value\n")
+    blocked = vault / "knowledge/notes/blocked.md"
+    coordinator = MarkdownCoordinator(vault, state_root)
+    transaction = coordinator.prepare(
+        [
+            MarkdownChange.replace("knowledge/notes/existing.md", b"safe\n"),
+            MarkdownChange.create(
+                "knowledge/notes/blocked.md", b"publication-secret\n"
+            ),
+        ],
+        operation_id="compile:model-output-recheck",
+        content_guard="model_output",
+    )
+    payload = {
+        "version": 1,
+        "literals": ["legacy-sensitive-value", "publication-secret"],
+        "allow_fingerprints": [],
+    }
+    policy = {
+        **payload,
+        "sha256": sha256_bytes(canonical_json_bytes(payload)),
+    }
+    policy_path = tmp_path / "dlp-policy.json"
+    policy_path.write_bytes(canonical_json_bytes(policy))
+    monkeypatch.setenv("LLM_WIKI_DLP_POLICY", str(policy_path))
+
+    with pytest.raises(markdown_transaction.TransactionFailure) as raised:
+        coordinator.apply(transaction.id)
+
+    assert raised.value.code == "dlp_content_blocked"
+    assert existing.read_bytes() == b"legacy-sensitive-value\n"
+    assert not blocked.exists()
+    assert coordinator._record(transaction.id).state == "quarantined"
+
+
+def test_model_output_recheck_quarantines_during_recovery(
+    vault: Path, state_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    coordinator = MarkdownCoordinator(vault, state_root)
+    transaction = coordinator.prepare(
+        [
+            MarkdownChange.create(
+                "knowledge/notes/recovered.md", b"recovery-publication-secret\n"
+            )
+        ],
+        operation_id="compile:model-output-recovery",
+        content_guard="model_output",
+    )
+    payload = {
+        "version": 1,
+        "literals": ["recovery-publication-secret"],
+        "allow_fingerprints": [],
+    }
+    policy = {
+        **payload,
+        "sha256": sha256_bytes(canonical_json_bytes(payload)),
+    }
+    policy_path = tmp_path / "recovery-dlp-policy.json"
+    policy_path.write_bytes(canonical_json_bytes(policy))
+    monkeypatch.setenv("LLM_WIKI_DLP_POLICY", str(policy_path))
+
+    recovered = MarkdownCoordinator(vault, state_root).recover()
+
+    assert [record.id for record in recovered] == [transaction.id]
+    assert recovered[0].state == "quarantined"
+    assert not (vault / "knowledge/notes/recovered.md").exists()
 
 
 @pytest.mark.parametrize(
@@ -245,10 +317,8 @@ def test_prepare_persists_unsigned_64_bit_parent_identity(
         manifest["operations"][0]["parent_inode"],
     ) == parent_identity
 
-    committed = coordinator.apply(transaction.id)
-
-    assert committed.state == "committed"
-    assert target.read_bytes() == b"after"
+    assert transaction.state == "prepared"
+    assert target.read_bytes() == b"before"
 
 
 def test_prepare_requires_keyword_only_operation_id():
@@ -410,6 +480,36 @@ def test_prepare_is_idempotent_by_operation_id(vault: Path, state_root: Path):
             [MarkdownChange.create("knowledge/notes/other.md", b"other\n")],
             operation_id="same",
         )
+
+
+def test_operation_lookup_tolerates_disappearing_preparing_row(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coordinator = MarkdownCoordinator(vault, state_root)
+    with coordinator._connect() as database:
+        database.execute(
+            'INSERT INTO "transaction" '
+            "(id,operation_id,request_hash,state,preconditions_json,plan_hash,"
+            "created_at,updated_at,owner_pid) "
+            "VALUES ('transient','transient-operation','request','preparing',"
+            "'{}','','now','now',?)",
+            (os.getpid(),),
+        )
+        database.commit()
+    original = coordinator._record
+
+    def delete_then_read(transaction_id: str):
+        with coordinator._connect() as database:
+            database.execute(
+                'DELETE FROM "transaction" WHERE id=? AND state=\'preparing\'',
+                (transaction_id,),
+            )
+            database.commit()
+        return original(transaction_id)
+
+    monkeypatch.setattr(coordinator, "_record", delete_then_read)
+
+    assert coordinator._record_for_operation_id("transient-operation") is None
 
 
 @pytest.mark.parametrize(
@@ -1048,6 +1148,14 @@ def test_writer_heartbeat_retries_transient_contention_without_losing_fence(
     assert not lost.is_set()
 
 
+def test_adoption_validation_recognizes_nested_sqlite_contention() -> None:
+    contention = sqlite3.OperationalError("database is locked")
+    wrapped = RuntimeError("reliability_v3_record_invalid")
+    wrapped.__cause__ = contention
+
+    assert markdown_transaction._transient_adoption_contention(wrapped)
+
+
 def test_writer_gate_exit_retries_locked_database_then_releases_owner(
     vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -1180,6 +1288,7 @@ def test_parent_swap_cannot_redirect_replace_outside_vault(
     assert (outside / "page.md").read_bytes() == b"outside"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows directory handles")
 def test_windows_parent_identity_change_fails_closed(
     vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -1265,8 +1374,18 @@ def test_windows_acl_hardening_verifies_owner_only_success(tmp_path: Path, monke
     assert len(calls) == 2
     assert calls[0][0].casefold() == "icacls"
     assert "DOMAIN\\user:(F)" in calls[0]
+    assert "/remove:g" in calls[0]
+    for sid in (
+        "*S-1-3-4",
+        "*S-1-5-18",
+        "*S-1-5-32-544",
+        "*S-1-5-32-545",
+        "*S-1-5-11",
+    ):
+        assert sid in calls[0]
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows ACL identity")
 def test_windows_acl_hardening_failure_is_not_silently_accepted(tmp_path: Path, monkeypatch):
     path = tmp_path / "artifact"
     path.write_bytes(b"artifact")

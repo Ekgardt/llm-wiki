@@ -6,16 +6,21 @@ import subprocess
 import sys
 from pathlib import Path
 
+import markdown_transaction
+import memory_queue
 import pytest
 import repair_installed_memory
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "repair_installed_memory.py"
+ADAPTER = SCRIPT.with_name("integration_adapter.py")
 
 
 def _vault(tmp_path: Path) -> tuple[Path, Path]:
     root = tmp_path / "vault"
     state_root = tmp_path / "state"
     root.mkdir()
+    (root / "scripts").mkdir()
+    (root / "scripts/integration_adapter.py").write_bytes(ADAPTER.read_bytes())
     return root, state_root
 
 
@@ -94,7 +99,7 @@ def test_mutation_flags_require_apply_and_the_complete_offline_gate(
     assert not state_root.exists()
 
 
-def test_complete_adoption_gate_still_fails_closed_until_runtime_activation(
+def test_complete_offline_gate_initializes_fresh_pair(
     tmp_path: Path,
 ) -> None:
     root, state_root = _vault(tmp_path)
@@ -110,11 +115,28 @@ def test_complete_adoption_gate_still_fails_closed_until_runtime_activation(
         "--json",
     )
 
-    assert completed.returncode == 2
-    assert json.loads(completed.stdout)["blockers"] == [
-        {"code": "reliability_v3_runtime_activation_incomplete"}
-    ]
-    assert not state_root.exists()
+    report = json.loads(completed.stdout)
+    assert completed.returncode == 0
+    assert report == {
+        "actions": [{"code": "reliability_v3_adopted"}],
+        "blockers": [],
+        "details": {"adoption_state": "adopted"},
+        "mode": "apply",
+        "overall_status": "ok",
+    }
+    run = state_root / "run"
+    assert not (run / "queue-v2-retired.sqlite3").exists()
+    assert not (run / "markdown-transactions-v2-retired.sqlite3").exists()
+    assert json.loads((run / "queue.sqlite3").read_bytes())["source_state"] == "fresh"
+    assert json.loads((run / "markdown-transactions.sqlite3").read_bytes())[
+        "source_state"
+    ] == "fresh"
+    assert memory_queue.validate_queue_v3_database(
+        run / "queue-v3.sqlite3", state_root=state_root
+    )["integrity_check"] == "ok"
+    assert markdown_transaction.validate_coordinator_v3_database(
+        run / "markdown-transactions-v3.sqlite3", state_root=state_root
+    )["integrity_check"] == "ok"
 
 
 def test_cli_redacts_backend_exceptions(

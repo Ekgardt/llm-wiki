@@ -247,6 +247,8 @@ def _increment_prompt_count(session_id: str, slug: str) -> int:
 
 
 def _spawn_periodic_flush(hook: dict, session_id: str) -> None:
+    from event_envelope import canonical_agent
+
     args = [
         sys.executable,
         str(ROOT / "scripts" / "flush_memory.py"),
@@ -254,6 +256,7 @@ def _spawn_periodic_flush(hook: dict, session_id: str) -> None:
         "--session-id", str(session_id),
         "--transcript", str(hook.get("transcript_path", "")),
         "--trigger", "prompt-count-20",
+        "--agent", canonical_agent(str(hook.get("agent") or "claude")),
     ]
     spawn_detached(args)
 

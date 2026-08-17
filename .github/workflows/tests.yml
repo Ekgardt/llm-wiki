@@ -275,10 +275,8 @@ jobs:
       - run: uv python pin ${{ matrix.python }}
       - run: uv sync --locked
       - name: Explicit Pyright install
-        run: uv run --locked --no-sync python scripts/install_pyright.py --state-root "${{ runner.temp }}/llm-wiki-state"
+        run: uv run --locked --no-sync python scripts/install_pyright.py --state-root "${{ env.LLM_WIKI_STATE_ROOT }}"
       - name: Protocol, process-tree, and security tests
-        env:
-          LLM_WIKI_STATE_ROOT: ${{ runner.temp }}/llm-wiki-state
         run: uv run --locked --no-sync pytest tests/test_lsp_protocol.py tests/test_lsp_process.py tests/test_lsp_process_tree.py tests/test_lsp_security.py tests/test_pyright_session.py tests/test_code_navigation.py tests/test_code_navigation_renderer.py -q
       - name: Correctness benchmark gate
         run: uv run --locked --no-sync python benchmark/run_code_navigation.py --fixture --correctness-only --require-gates

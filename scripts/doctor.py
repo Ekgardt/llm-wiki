@@ -18,7 +18,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -26,6 +26,7 @@ from typing import Any
 
 import reliable_memory
 from bounded_io import read_stable_bytes
+from install_control import InstallControlError, validate_install_state
 from reliable_memory import (
     open_readonly_operational_db,
     read_runtime_bytes,
@@ -187,34 +188,80 @@ def _safe_kind(path: Path, root: Path) -> tuple[str, os.stat_result | None]:
     return "special", info
 
 
-def _runtime_check(state_root: Path) -> dict:
-    details = {}
-    missing = 0
-    unwritable = 0
-    unsafe = 0
+def _runtime_directory_state(state_root: Path) -> tuple[dict[str, object], tuple[int, int, int]]:
+    details: dict[str, object] = {}
+    counts = [0, 0, 0]
     for relative in RUNTIME_DIRECTORIES:
         path = state_root / relative
         kind, _ = _safe_kind(path, state_root)
         exists = kind == "directory"
-        writable = _is_writable_directory(path) if exists else False
+        writable = exists and _is_writable_directory(path)
         details[relative] = {
             "exists": kind != "missing",
             "writable": writable,
             "symlink": kind == "symlink",
             "safe": kind in {"missing", "directory"},
         }
-        missing += not exists
-        unwritable += exists and not writable
-        unsafe += kind not in {"missing", "directory"}
+        counts[0] += not exists
+        counts[1] += exists and not writable
+        counts[2] += kind not in {"missing", "directory"}
+    return details, (counts[0], counts[1], counts[2])
+
+
+def _runtime_directory_result(counts: tuple[int, int, int]) -> tuple[str, str]:
+    missing, unwritable, unsafe = counts
     if unsafe:
-        status, message = "error", "Runtime paths include unsafe entries."
-    elif unwritable:
-        status, message = "error", "Runtime directories are not writable."
-    elif missing:
-        status, message = "degraded", f"{missing} runtime directories are missing."
-    else:
-        status, message = "ok", "Runtime directories exist and are writable."
+        return "error", "Runtime paths include unsafe entries."
+    if unwritable:
+        return "error", "Runtime directories are not writable."
+    if missing:
+        return "degraded", f"{missing} runtime directories are missing."
+    return "ok", "Runtime directories exist and are writable."
+
+
+def _merge_install_health(
+    status: str,
+    message: str,
+    details: dict[str, object],
+    install: dict[str, object],
+) -> tuple[str, str]:
+    details["install"] = {
+        "health": install["health"],
+        "status": install["status"],
+    }
+    details["codes"] = install["codes"]
+    ranks = {"ok": 0, "degraded": 1, "error": 2}
+    install_health = str(install["health"])
+    if ranks[install_health] > ranks[status]:
+        return install_health, f"Install ownership state is {install['status']}."
+    return status, message
+
+
+def _runtime_check(state_root: Path) -> dict:
+    details, counts = _runtime_directory_state(state_root)
+    status, message = _runtime_directory_result(counts)
+    install = validate_install_state(state_root)
+    status, message = _merge_install_health(status, message, details, install)
     return _result("runtime", status, message, details)
+
+
+def _bounded_json_path_problem(
+    path: Path,
+    root: Path,
+    max_bytes: int,
+    deadline: float,
+) -> str | None:
+    if time.monotonic() >= deadline:
+        return "budget"
+    if _safe_kind(path, root)[0] != "regular":
+        return "unsafe"
+    try:
+        oversized = path.lstat().st_size > max_bytes
+    except OSError:
+        return "invalid"
+    if oversized:
+        return "oversized"
+    return None
 
 
 def _read_bounded_json(
@@ -225,12 +272,10 @@ def _read_bounded_json(
     expected_type: type = dict,
     deadline: float = float("inf"),
 ) -> tuple[Any | None, str | None]:
-    if time.monotonic() >= deadline:
-        return None, "budget"
+    problem = _bounded_json_path_problem(path, root, max_bytes, deadline)
+    if problem:
+        return None, problem
     try:
-        metadata = path.lstat()
-        if metadata.st_size > max_bytes:
-            return None, "oversized"
         raw = read_runtime_bytes(path, root, max_bytes=max_bytes)
         if time.monotonic() >= deadline:
             return None, "budget"
@@ -1332,9 +1377,7 @@ def _run_deletion_check(
         require_reliability_v3_adopted(root=root_path, state_root=state_path)
     except ReliabilityV3ValidationError as exc:
         code = (
-            "legacy_protocol_unquiesced"
-            if exc.code == "legacy_protocol_unquiesced"
-            else exc.code
+            "legacy_protocol_unquiesced" if exc.code == "legacy_protocol_unquiesced" else exc.code
         )
         return result([code])
 
@@ -1386,9 +1429,7 @@ def _run_deletion_check(
 LSP_FAILURE_RETENTION = timedelta(days=7)
 MAX_LSP_OWNER_ROWS = 128
 _LSP_OWNER_NONCE = re.compile(r"[0-9a-f]{32}\Z")
-_LSP_TIMESTAMP = re.compile(
-    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{6})?Z\Z"
-)
+_LSP_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{6})?Z\Z")
 _LSP_OWNER_FIELDS = {
     "command_basename",
     "generation_nonce",
@@ -1423,10 +1464,7 @@ def _parse_lsp_timestamp(value: object) -> datetime | None:
         parsed = datetime.fromisoformat(value[:-1] + "+00:00")
     except ValueError:
         return None
-    if (
-        parsed.tzinfo != timezone.utc
-        or parsed.isoformat().replace("+00:00", "Z") != value
-    ):
+    if parsed.tzinfo != timezone.utc or parsed.isoformat().replace("+00:00", "Z") != value:
         return None
     return parsed
 
@@ -1478,10 +1516,7 @@ def _valid_lsp_failure(record: dict[str, Any], owner_nonce: str) -> bool:
         and isinstance(record.get("generation_nonce"), str)
         and _LSP_OWNER_NONCE.fullmatch(record["generation_nonce"]) is not None
         and _parse_lsp_timestamp(record.get("timestamp")) is not None
-        and (
-            "server_pid" not in record
-            or _lsp_positive_pid(record.get("server_pid"))
-        )
+        and ("server_pid" not in record or _lsp_positive_pid(record.get("server_pid")))
     )
 
 
@@ -1657,12 +1692,7 @@ def _decode_lsp_record(payload: bytes) -> dict[str, Any]:
 def _lsp_posix_directory_flags() -> int:
     if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
         raise OSError("POSIX no-follow directory handles are unavailable")
-    return (
-        os.O_RDONLY
-        | os.O_DIRECTORY
-        | os.O_NOFOLLOW
-        | getattr(os, "O_CLOEXEC", 0)
-    )
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
 
 
 def _open_posix_lsp_root(state_root: Path, deadline: float) -> int:
@@ -1797,9 +1827,11 @@ def _read_posix_lsp_record(
         _require_lsp_deadline(deadline)
         after = os.fstat(descriptor)
         _require_lsp_deadline(deadline)
-        if (
-            total != opened.st_size
-            or identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        if total != opened.st_size or identity != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
         ):
             raise PermissionError("LSP runtime record changed during read")
         return _decode_lsp_record(b"".join(chunks))
@@ -1837,9 +1869,7 @@ def _snapshot_posix_lsp(
                 continue
             owner_fd: int | None = None
             present: frozenset[str] = frozenset()
-            records: dict[str, dict[str, Any] | None] = {
-                name: None for name in _LSP_RECORD_NAMES
-            }
+            records: dict[str, dict[str, Any] | None] = {name: None for name in _LSP_RECORD_NAMES}
             try:
                 owner_fd = _open_posix_lsp_directory(lsp_fd, owner_name, deadline)
                 child_names, child_truncated = _list_posix_lsp_names(
@@ -1857,15 +1887,11 @@ def _snapshot_posix_lsp(
                         unreadable = True
                         continue
                     if child_name == "cancellation":
-                        cancellation_fd = _open_posix_lsp_directory(
-                            owner_fd, child_name, deadline
-                        )
+                        cancellation_fd = _open_posix_lsp_directory(owner_fd, child_name, deadline)
                         os.close(cancellation_fd)
                         continue
                     try:
-                        records[child_name] = _read_posix_lsp_record(
-                            owner_fd, child_name, deadline
-                        )
+                        records[child_name] = _read_posix_lsp_record(owner_fd, child_name, deadline)
                     except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
                         unreadable = True
             except TimeoutError:
@@ -1994,9 +2020,7 @@ def _snapshot_windows_lsp(
                 continue
             owner_handle: int | None = None
             present: frozenset[str] = frozenset()
-            records: dict[str, dict[str, Any] | None] = {
-                name: None for name in _LSP_RECORD_NAMES
-            }
+            records: dict[str, dict[str, Any] | None] = {name: None for name in _LSP_RECORD_NAMES}
             try:
                 _require_lsp_deadline(deadline)
                 owner_handle = workspace.open_directory(lsp_handle, owner_entry.name)
@@ -2024,20 +2048,14 @@ def _snapshot_windows_lsp(
                             unreadable = True
                             continue
                         _require_lsp_deadline(deadline)
-                        cancellation = workspace.open_directory(
-                            owner_handle, child_entry.name
-                        )
+                        cancellation = workspace.open_directory(owner_handle, child_entry.name)
                         try:
                             _require_lsp_deadline(deadline)
                             if (
-                                _windows_lsp_identity(
-                                    workspace, cancellation, directory=True
-                                )
+                                _windows_lsp_identity(workspace, cancellation, directory=True)
                                 != child_entry.file_id
                             ):
-                                raise PermissionError(
-                                    "Windows LSP cancellation directory changed"
-                                )
+                                raise PermissionError("Windows LSP cancellation directory changed")
                             _require_lsp_deadline(deadline)
                         finally:
                             workspace.close_handle(cancellation)
@@ -2181,8 +2199,7 @@ def _lsp_runtime_check(
                 and expires_at is not None
                 and expires_at > now
                 and all(
-                    isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
-                    for pid in pids
+                    isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 for pid in pids
                 )
             ):
                 pid_states: list[str] = []
@@ -2241,9 +2258,7 @@ def _lsp_runtime_check(
                 crash_at = _parse_lsp_timestamp(owner.get("started_at"))
             if crash_at is not None:
                 owner_record["failure_evidence"] = True
-                owner_record["failure_age_days"] = (
-                    now - crash_at
-                ).total_seconds() / 86400.0
+                owner_record["failure_age_days"] = (now - crash_at).total_seconds() / 86400.0
             crash_age = owner_record["failure_age_days"]
             if crash_age is None or crash_age < 7:
                 semantic_codes.append("lsp_failure_evidence_retained")
@@ -2258,7 +2273,9 @@ def _lsp_runtime_check(
     return _result(
         "lsp",
         status,
-        "LSP runtime owners are bounded." if status == "ok" else "LSP runtime owners are live or retained.",
+        "LSP runtime owners are bounded."
+        if status == "ok"
+        else "LSP runtime owners are live or retained.",
         {
             "codes": codes,
             "owners": owners,
@@ -2411,9 +2428,7 @@ def _generation_check(
         )
         if isinstance(diagnostic_value, dict):
             diagnostic_manifest = diagnostic_value
-            invalid_details["generation_schema"] = diagnostic_manifest.get(
-                "graph_schema_version"
-            )
+            invalid_details["generation_schema"] = diagnostic_manifest.get("graph_schema_version")
         manifest, seal = generation_catalog._validate_generation(  # noqa: SLF001
             generation_path,
             state_root,
@@ -3123,15 +3138,20 @@ def _codex_wrapper_configured(root: Path, home: Path) -> bool:
     )
 
 
-def _integration_check(root: Path, home: Path, *, deadline: float = float("inf")) -> dict:
-    sources = {
+def _integration_sources(root: Path) -> dict[str, Path]:
+    return {
         "claude": root / "integrations" / "claude-code" / "settings.json",
         "opencode": root / "scripts" / "llm-wiki-memory-opencode.js",
         "codex": root / "integrations" / "codex" / "hooks.json",
-        "cursor": root / "integrations" / "cursor" / "rules" / "llm-wiki.mdc",
-        "antigravity": root / "integrations" / "antigravity" / "AGENTS.md",
+        "cursor": root / "integrations" / "cursor" / "hooks.json",
+        "antigravity": root / "integrations" / "antigravity" / "hooks.json",
     }
-    host_configs = {
+
+
+def _integration_host_configs(
+    home: Path,
+) -> dict[str, tuple[Path, list[tuple[Path, tuple[str, ...]]]]]:
+    return {
         "claude": (
             home / ".claude",
             [(home / ".claude" / "settings.json", ("LLM_WIKI_ROOT", "session_start_context.py"))],
@@ -3154,67 +3174,172 @@ def _integration_check(root: Path, home: Path, *, deadline: float = float("inf")
                 )
             ],
         ),
-        "cursor": (
-            home / ".cursor",
-            [(home / ".cursor" / "rules" / "llm-wiki.mdc", ("LLM-Wiki", "LLM_WIKI_ROOT"))],
-        ),
-        "antigravity": (
-            home / ".gemini" / "antigravity",
-            [(home / ".gemini" / "antigravity" / "AGENTS.md", ("LLM-Wiki", "LLM_WIKI_ROOT"))],
-        ),
     }
-    source_details = {name: path.is_file() for name, path in sources.items()}
-    hosts = {}
-    configured_missing = 0
-    for name, (host_dir, configs) in host_configs.items():
-        if not host_dir.exists():
-            hosts[name] = {"status": "skipped", "message": "Optional host not installed."}
-        elif name == "codex":
-            hooks_active, reason = _codex_runtime_hooks_state(root, home, deadline=deadline)
-            if hooks_active:
-                hosts[name] = {
-                    "status": "ok",
-                    "message": "Official Codex hooks are active and trusted; review changes in /hooks.",
-                    "capture_mode": "official-hooks",
-                    "trust": "review-with-/hooks",
-                }
-            else:
-                configured_missing += 1
-                wrapper = _codex_wrapper_configured(root, home)
-                hosts[name] = {
-                    "status": "degraded",
-                    "message": "Official Codex hooks are not verified; wrapper fallback is heartbeat-only."
-                    if wrapper
-                    else "Official Codex hooks are not verified and no capture fallback is configured.",
-                    "reason": reason,
-                    "capture_mode": "wrapper-fallback-heartbeat-only" if wrapper else "none",
-                }
-                if reason == "runtime_hooks_not_completed":
-                    hosts[name]["not_completed"] = True
-        elif name != "codex" and any(_contains_markers(path, markers) for path, markers in configs):
-            hosts[name] = {"status": "ok", "message": "User integration config detected."}
-        elif name in {"cursor", "antigravity"}:
-            hosts[name] = {
-                "status": "skipped",
-                "message": "Project-scoped integration is optional and was not checked.",
-            }
-        else:
-            configured_missing += 1
-            hosts[name] = {
-                "status": "degraded",
-                "message": "Host detected without LLM-Wiki config.",
-            }
-    required_sources = {"claude", "opencode", "codex"}
-    missing_sources = sum(not source_details[name] for name in required_sources)
+
+
+def _codex_degraded_result(root: Path, home: Path, reason: str) -> dict[str, object]:
+    wrapper = _codex_wrapper_configured(root, home)
+    message = "Official Codex hooks are not verified and no capture fallback is configured."
+    capture_mode = "none"
+    if wrapper:
+        message = "Official Codex hooks are not verified; wrapper fallback is heartbeat-only."
+        capture_mode = "wrapper-fallback-heartbeat-only"
+    result: dict[str, object] = {
+        "status": "degraded",
+        "message": message,
+        "reason": reason,
+        "capture_mode": capture_mode,
+    }
+    if reason == "runtime_hooks_not_completed":
+        result["not_completed"] = True
+    return result
+
+
+def _codex_host_result(root: Path, home: Path, deadline: float) -> dict[str, object]:
+    if not (home / ".codex").exists():
+        return {"status": "skipped", "message": "Optional host not installed."}
+    hooks_active, reason = _codex_runtime_hooks_state(root, home, deadline=deadline)
+    if hooks_active:
+        return {
+            "status": "ok",
+            "message": "Official Codex hooks are active and trusted; review changes in /hooks.",
+            "capture_mode": "official-hooks",
+            "trust": "review-with-/hooks",
+        }
+    return _codex_degraded_result(root, home, reason)
+
+
+def _generic_host_result(
+    host_dir: Path, configs: list[tuple[Path, tuple[str, ...]]]
+) -> dict[str, object]:
+    if not host_dir.exists():
+        return {"status": "skipped", "message": "Optional host not installed."}
+    if any(_contains_markers(path, markers) for path, markers in configs):
+        return {"status": "ok", "message": "User integration config detected."}
+    return {
+        "status": "degraded",
+        "message": "Host detected without LLM-Wiki config.",
+    }
+
+
+def _managed_ide_detected(home: Path, name: str) -> bool:
+    paths = {
+        "cursor": home / ".cursor",
+        "antigravity": home / ".gemini" / "antigravity-ide",
+    }
+    return paths[name].is_dir()
+
+
+def _managed_ide_resource(root: Path, home: Path, name: str):
+    from integration_hook_config import managed_ide_hook_resources
+
+    identifiers = {
+        "cursor": "cursor-user-hooks",
+        "antigravity": "antigravity-user-hooks",
+    }
+    resources = {
+        resource.resource_id: resource for resource in managed_ide_hook_resources(root, home)
+    }
+    return resources[identifiers[name]]
+
+
+def _managed_ide_conflict_result(detected: bool) -> dict[str, object]:
+    return {
+        "status": "degraded",
+        "message": "Managed hook configuration is malformed, unsafe, or conflicting.",
+        "configuration_status": "conflict",
+        "host_detected": detected,
+    }
+
+
+def _managed_ide_active_result(detected: bool) -> dict[str, object]:
+    statuses = {True: "ok", False: "skipped"}
+    return {
+        "status": statuses[detected],
+        "message": "Managed local user hooks are active.",
+        "capture_mode": "official-user-hooks",
+        "configuration_status": "active",
+        "host_detected": detected,
+    }
+
+
+def _managed_ide_absent_result(configured: bool, detected: bool) -> dict[str, object]:
+    if configured or detected:
+        return {
+            "status": "degraded",
+            "message": "Local host is missing its managed LLM-Wiki hooks.",
+            "configuration_status": "absent",
+            "host_detected": detected,
+        }
+    return {
+        "status": "skipped",
+        "message": "Optional local host not detected.",
+        "configuration_status": "absent",
+        "host_detected": False,
+    }
+
+
+def _managed_ide_host_result(root: Path, home: Path, name: str) -> dict[str, object]:
+    detected = _managed_ide_detected(home, name)
+    try:
+        resource = _managed_ide_resource(root, home, name)
+        destination = Path(resource.locator)
+        configured = destination.exists() or destination.is_symlink()
+        active = resource.read_owned() == resource.desired
+    except (InstallControlError, OSError, UnicodeError, ValueError):
+        return _managed_ide_conflict_result(detected)
+    if active:
+        return _managed_ide_active_result(detected)
+    return _managed_ide_absent_result(configured, detected)
+
+
+def _required_host_config(
+    config: tuple[Path, list[tuple[Path, tuple[str, ...]]]] | None,
+) -> tuple[Path, list[tuple[Path, tuple[str, ...]]]]:
+    if config is None:
+        raise ValueError("missing integration host configuration")
+    return config
+
+
+def _integration_host_result(
+    root: Path,
+    home: Path,
+    name: str,
+    config: tuple[Path, list[tuple[Path, tuple[str, ...]]]] | None,
+    deadline: float,
+) -> dict[str, object]:
+    if name == "codex":
+        return _codex_host_result(root, home, deadline)
+    if name in {"cursor", "antigravity"}:
+        return _managed_ide_host_result(root, home, name)
+    return _generic_host_result(*_required_host_config(config))
+
+
+def _integration_hosts(root: Path, home: Path, deadline: float) -> dict[str, dict[str, object]]:
+    configs = _integration_host_configs(home)
+    names = ("claude", "opencode", "codex", "cursor", "antigravity")
+    return {
+        name: _integration_host_result(root, home, name, configs.get(name), deadline)
+        for name in names
+    }
+
+
+def _integration_summary(
+    source_details: Mapping[str, bool], hosts: Mapping[str, Mapping[str, object]]
+) -> tuple[str, str]:
+    missing_sources = sum(not available for available in source_details.values())
     if missing_sources:
-        status, message = "error", f"{missing_sources} integration source adapter(s) are missing."
-    elif configured_missing:
-        status, message = (
-            "degraded",
-            f"{configured_missing} installed host(s) lack integration config.",
-        )
-    else:
-        status, message = "ok", "Integration sources are available; optional hosts were checked."
+        return "error", f"{missing_sources} integration source adapter(s) are missing."
+    configured_missing = sum(host.get("status") == "degraded" for host in hosts.values())
+    if configured_missing:
+        return "degraded", f"{configured_missing} installed host(s) lack integration config."
+    return "ok", "Integration sources are available; optional hosts were checked."
+
+
+def _integration_check(root: Path, home: Path, *, deadline: float = float("inf")) -> dict:
+    source_details = {name: path.is_file() for name, path in _integration_sources(root).items()}
+    hosts = _integration_hosts(root, home, deadline)
+    status, message = _integration_summary(source_details, hosts)
     return _result("integrations", status, message, {"sources": source_details, "hosts": hosts})
 
 
@@ -3932,8 +4057,7 @@ def _partition_code_extraction(
         observation_dependencies = getattr(result, "observation_source_dependencies", {})
         if (
             observation["reason"] in {"missing_dependency", "unresolved_reference"}
-            and str(observation["observation_id"])
-            not in observation_dependencies
+            and str(observation["observation_id"]) not in observation_dependencies
         ):
             workspace_sensitive.add(owner)
 
@@ -3948,11 +4072,7 @@ def _partition_code_extraction(
         owners = (
             (str(owner),)
             if owner is not None
-            else tuple(
-                sorted(
-                    occurrence_sources.get(str(dependency["dependent_node_id"]), ())
-                )
-            )
+            else tuple(sorted(occurrence_sources.get(str(dependency["dependent_node_id"]), ())))
         )
         for source_id in owners:
             grouped[source_id]["dependencies"].append(dependency)
@@ -3995,7 +4115,8 @@ def _generation_source_extractor(snapshot, repository_id: str):
     code_sources = tuple(
         sorted(
             (
-                source for source in snapshot.sources
+                source
+                for source in snapshot.sources
                 if not source.record.relative_path.startswith("knowledge/")
             ),
             key=lambda source: (
@@ -4051,8 +4172,7 @@ def _generation_source_extractor(snapshot, repository_id: str):
 
             if code_partitions is None:
                 if any(
-                    item.content != source_bytes[item.record.logical_id]
-                    for item in code_sources
+                    item.content != source_bytes[item.record.logical_id] for item in code_sources
                 ):
                     raise ValueError("workspace extraction bytes differ from snapshot")
                 workspace_result = extract_code(

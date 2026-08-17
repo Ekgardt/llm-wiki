@@ -7,7 +7,7 @@ This document explains **why** the system is shaped the way it is. For **how to 
 ```
 CODE          scripts/  tests/  docs/  skills/  rules/  integrations/  benchmark/
 KNOWLEDGE     knowledge/{daily,notes,projects,raw,inbox,feedback}
-RUNTIME       cache/  cache/cognee/  logs/  run/   # inside vault, gitignored
+RUNTIME       cache/  logs/  run/   # inside vault, gitignored
               Override root via LLM_WIKI_STATE_ROOT (tests use a temp dir).
 ```
 
@@ -28,6 +28,12 @@ Every knowledge page has YAML frontmatter with at least `type:`. This guarantees
 
 ### 3. LLM-agnostic
 No hard dependency on OpenAI / Anthropic / anyone. The `llm_client.py` abstraction supports 5 backends and auto-detects the first alive one.
+
+Local-first describes the authoritative storage and product runtime, not every model
+transport. OpenCode, Codex, Claude, and OpenAI may process prompts remotely. Ollama is
+local only when explicitly forced to a literal loopback IP and the selected model has
+local metadata. An external Ollama process prevents the client from proving that cloud
+disablement was applied after restart, so that state remains explicitly unverified.
 
 ### 4. Smallest set of high-signal tokens
 Anthropic's context-engineering principle: every byte of context injected into a prompt costs attention budget. SessionStart context is capped at ~2KB.
@@ -65,7 +71,7 @@ The slug system (5-step collision resolution) lets a single vault track unlimite
 │                               │                                      │
 │                               ↓                                      │
 │  LLM BACKEND (CLASSIFY + COMPILE ONLY)                               │
-│  llm_client.py: 5 backends including Ollama, selected locally        │
+│  llm_client.py: 5 backends including Ollama + fail-closed DLP        │
 └──────────────────────────────┬───────────────────────────────────────┘
                                ↓
 ┌──────────────────────────────────────────────────────────────────────┐

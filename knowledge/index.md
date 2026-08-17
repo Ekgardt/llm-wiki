@@ -14,6 +14,11 @@ This index catalogs durable memory distilled from AI agent sessions
 - [[knowledge/notes/provenance-rule-6]] — CLAUDE.md rule 6 — "mark uncertainty explicitly" — is the root constraint that justifies preliminary flagging, editorial notes, and every "inferred from…" caveat in this vault.
 
 ## Decisions
+- [[knowledge/notes/durable-capture-producer-activation-decision]] — SessionEnd and PreCompact capture publish durable Reliability V3 intent evidence before returning; detached work only wakes recovery and deletion requires terminal proof.
+- [[knowledge/notes/managed-ide-hooks-install-update-decision]] — Cursor and Antigravity user hooks use canonical lifecycle adapters and bounded structural fragments owned by one resumable install v2 update, rollback, and uninstall control plane.
+- [[knowledge/notes/install-ownership-control-plane-decision]] — Profile, user environment, and native scheduler mutations use one bounded `run/install` manifest and resumable transaction that fail closed on ambiguous ownership or external drift.
+- [[knowledge/notes/blackboard-fenced-resource-claims-decision]] — Blackboard coordination uses two bounded tables in the existing coordinator-v3 database for atomic resource claims while immutable coordination history remains authoritative Markdown.
+- [[knowledge/notes/audit-closure-security-recovery-control-plane-decision]] — Audit closure retires the unsupported Cognee bridge and adds one fail-closed DLP, recovery, install, scheduling, coordination, and evidence contract without another daemon, database, or MCP tool.
 - [[knowledge/notes/integration-config-backup-retention-decision]] — Claude and Codex configuration merges create verified byte-exact sibling preimages and retain only bounded LLM-Wiki-owned backups.
 - [[knowledge/notes/reliability-v3-runtime-adoption-implementation-decision]] — Reliability V3 runtime database adoption is approved for implementation with explicit offline confirmation and retained v2 evidence.
 - [[knowledge/notes/v4-reliability-contracts-decision]] — Approved V4 reliability target uses path-bound compile receipts, truthful queue serialization, durable capture intents, fenced operational ownership, and bounded execution.

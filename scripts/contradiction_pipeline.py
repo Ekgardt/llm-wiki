@@ -610,7 +610,10 @@ class ContradictionPipeline:
             if path is not None:
                 self.ensure_candidate_parent()
             transaction = self.coordinator.prepare(
-                changes, operation_id=operation_id, preconditions=preconditions
+                changes,
+                operation_id=operation_id,
+                preconditions=preconditions,
+                content_guard="model_output",
             )
             self.coordinator.apply(transaction.id)
         if self.claim_index is not None and decision.mutations:
@@ -1026,6 +1029,7 @@ def run_frozen_benchmark(corpus: Mapping[str, object]) -> BenchmarkMetrics:
                 operation_id="benchmark-publication:"
                 + sha256_bytes(canonical_json_bytes(proposed_paths)),
                 preconditions={item.path: "absent" for item in publication_changes},
+                content_guard="model_output",
             )
             coordinator.apply(transaction.id)
         index.rebuild()

@@ -16,12 +16,12 @@ Usage:
     python scripts/export_vault.py --output ../my.zip   # custom output path
     python scripts/export_vault.py --ref v1.2.0         # archive a tag or older commit
     python scripts/export_vault.py --format tar.gz      # tarball instead of zip
-    python scripts/export_vault.py --verify             # post-build, list the archive and
-                                                        #   fail if any forbidden path slipped in
+    python scripts/export_vault.py --verify             # explicit compatibility flag;
+                                                        #   verification is always mandatory
 
 Exit codes:
-    0 — archive written and (if --verify) passed the forbidden-path check.
-    1 — git archive failed, or verification found a forbidden path.
+    0 — archive passed bounded path/content checks and was published.
+    1 — git archive failed, or mandatory verification failed.
     2 — usage error (missing git, dirty working tree with --strict, etc.).
 
 Why this exists: a colleague audit repeatedly flagged that the zip
@@ -30,15 +30,22 @@ they received contained `.venv/` (~300 MB), `settings.local.json`
 Root cause: operator used `zip -r` on the folder, bypassing
 `.gitignore`. Fix: make `git archive` the default path.
 """
+
 from __future__ import annotations
 
 import argparse
 import io
+import os
+import re
 import shutil
+import stat
 import subprocess
 import sys
+import tarfile
+import tempfile
 import zipfile
 from pathlib import Path
+from typing import BinaryIO
 
 # Force utf-8 on stdout — the description text contains a Unicode arrow.
 if hasattr(sys.stdout, "reconfigure"):
@@ -49,6 +56,23 @@ if hasattr(sys.stdout, "reconfigure"):
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import ROOT  # noqa: E402
+from model_dlp import (  # noqa: E402
+    DLPPolicy,
+    load_policy,
+    require_safe_content,
+)
+
+MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
+MAX_ARCHIVE_MEMBERS = 10_000
+MAX_MEMBER_BYTES = 16 * 1024 * 1024
+MAX_TOTAL_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
+MAX_MEMBER_NAME_BYTES = 4096
+_DRIVE_PATH_RE = re.compile(r"^[A-Za-z]:")
+
+
+class ArchiveVerificationError(ValueError):
+    """The archive could not be completely and safely inspected."""
+
 
 # Paths that MUST NOT appear in an export archive. All gitignored, so
 # `git archive` cannot include them — this list is the verification
@@ -105,12 +129,10 @@ def _is_forbidden(name: str, pattern: str, anchor: str) -> bool:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         type=Path,
-        help=(
-            "Output archive path. Default: "
-            "`<vault>/../llm-wiki-export-<shortsha>.<ext>`."
-        ),
+        help=("Output archive path. Default: `<vault>/../llm-wiki-export-<shortsha>.<ext>`."),
     )
     p.add_argument(
         "--ref",
@@ -127,13 +149,14 @@ def parse_args() -> argparse.Namespace:
         "--verify",
         action="store_true",
         default=True,
-        help=(
-            "After building, list archive contents and fail if any "
-            "forbidden path is present. On by default — pass "
-            "`--no-verify` to skip."
-        ),
+        help=("Compatibility flag. Path and content security verification is always mandatory."),
     )
-    p.add_argument("--no-verify", dest="verify", action="store_false")
+    p.add_argument(
+        "--no-verify",
+        dest="verify",
+        action="store_false",
+        help="Deprecated compatibility flag; security verification still runs.",
+    )
     p.add_argument(
         "--strict",
         action="store_true",
@@ -186,62 +209,233 @@ def _git_archive(ref: str, fmt: str, output: Path) -> None:
     # and `tar.gz` (as of git 2.20+). `--output` takes the destination.
     output.parent.mkdir(parents=True, exist_ok=True)
     _run(
-        "git", "archive",
+        "git",
+        "archive",
         f"--format={fmt}",
-        "--output", str(output),
+        "--output",
+        str(output),
         ref,
     )
 
 
-def _verify_archive(output: Path) -> int:
-    """List archive contents, report size, and fail if any FORBIDDEN
-    path slipped in.
+def _require_supported_format(archive_format: str | None) -> str:
+    if archive_format not in {"zip", "tar", "tar.gz"}:
+        raise ArchiveVerificationError("unsupported archive format")
+    return archive_format
 
-    Supports zip and tar (including .tar.gz). For anything else, prints
-    a warning and skips verification.
-    """
+
+def _archive_format(output: Path, requested: str | None) -> str:
+    if requested is not None:
+        return _require_supported_format(requested)
     suffix = "".join(output.suffixes)
-    names: list[str] = []
-    if suffix == ".zip":
-        with zipfile.ZipFile(output) as zf:
-            names = zf.namelist()
-    elif suffix in (".tar", ".tar.gz"):
-        import tarfile
-        with tarfile.open(output) as tf:
-            names = tf.getnames()
-    else:
-        print(f"export_vault: unknown archive suffix `{suffix}`, skipping verify", file=sys.stderr)
+    inferred = {".zip": "zip", ".tar": "tar", ".tar.gz": "tar.gz"}.get(suffix)
+    return _require_supported_format(inferred)
+
+
+def _member_text(name: str) -> str:
+    if not name:
+        raise ArchiveVerificationError("empty archive member name")
+    if "\x00" in name or len(name.encode("utf-8")) > MAX_MEMBER_NAME_BYTES:
+        raise ArchiveVerificationError("invalid archive member name")
+    return name.replace("\\", "/").rstrip("/")
+
+
+def _member_parts(name: str) -> tuple[str, ...]:
+    if name.startswith("/") or _DRIVE_PATH_RE.match(name):
+        raise ArchiveVerificationError("absolute archive member path")
+    parts = tuple(name.split("/"))
+    if any(part in {"", ".", ".."} for part in parts):
+        raise ArchiveVerificationError("ambiguous archive member path")
+    return parts
+
+
+def _normalized_member_name(name: str) -> str:
+    normalized = "/".join(_member_parts(_member_text(name)))
+    forbidden = next(
+        (
+            pattern
+            for pattern, anchor in FORBIDDEN_PATH_PATTERNS
+            if _is_forbidden(normalized, pattern, anchor)
+        ),
+        None,
+    )
+    if forbidden is not None:
+        raise ArchiveVerificationError("forbidden archive member path")
+    return normalized
+
+
+def _register_member(seen: set[str], name: str) -> str:
+    normalized = _normalized_member_name(name)
+    if normalized in seen:
+        raise ArchiveVerificationError("duplicate archive member path")
+    seen.add(normalized)
+    return normalized
+
+
+def _bounded_total(total: int, size: int) -> int:
+    if size < 0 or size > MAX_MEMBER_BYTES:
+        raise ArchiveVerificationError("archive member exceeds size limit")
+    updated = total + size
+    if updated > MAX_TOTAL_UNCOMPRESSED_BYTES:
+        raise ArchiveVerificationError("archive exceeds uncompressed size limit")
+    return updated
+
+
+def _read_member(stream: BinaryIO) -> bytes:
+    content = stream.read(MAX_MEMBER_BYTES + 1)
+    if len(content) > MAX_MEMBER_BYTES:
+        raise ArchiveVerificationError("archive member exceeds read limit")
+    return content
+
+
+def _scan_metadata(values: tuple[bytes, ...], policy: DLPPolicy) -> None:
+    for value in values:
+        _bounded_total(0, len(value))
+        require_safe_content(value, policy)
+
+
+def _zip_member_type(info: zipfile.ZipInfo) -> None:
+    mode = info.external_attr >> 16
+    member_type = stat.S_IFMT(mode)
+    if member_type not in {0, stat.S_IFDIR, stat.S_IFREG}:
+        raise ArchiveVerificationError("unsupported ZIP member type")
+
+
+def _scan_zip_member(archive: zipfile.ZipFile, info: zipfile.ZipInfo, policy: DLPPolicy) -> int:
+    _scan_metadata((info.filename.encode("utf-8"), info.comment, info.extra), policy)
+    _zip_member_type(info)
+    if info.is_dir():
         return 0
+    if info.flag_bits & 0x1:
+        raise ArchiveVerificationError("encrypted ZIP member")
+    _bounded_total(0, info.file_size)
+    with archive.open(info, "r") as stream:
+        content = _read_member(stream)
+    require_safe_content(content, policy)
+    return len(content)
 
-    size_mb = output.stat().st_size / (1024 * 1024)
-    print()
-    print(f"Archive: {output}")
-    print(f"  Files: {len(names)}")
-    print(f"  Size:  {size_mb:.2f} MB")
 
-    # Find any forbidden matches
-    hits: list[tuple[str, str]] = []  # (pattern, matched_file)
-    for pattern, anchor in FORBIDDEN_PATH_PATTERNS:
-        for name in names:
-            if _is_forbidden(name, pattern, anchor):
-                hits.append((pattern, name))
-                break  # one example per pattern is enough
+def _scan_zip(output: Path, policy: DLPPolicy) -> tuple[int, int]:
+    seen: set[str] = set()
+    total = 0
+    with zipfile.ZipFile(output) as archive:
+        _scan_metadata((archive.comment,), policy)
+        members = archive.infolist()
+        if len(members) > MAX_ARCHIVE_MEMBERS:
+            raise ArchiveVerificationError("archive member count exceeds limit")
+        for info in members:
+            _register_member(seen, info.filename)
+            total = _bounded_total(total, _scan_zip_member(archive, info, policy))
+    return len(seen), total
 
-    if hits:
-        print("")
-        print("export_vault: FORBIDDEN PATHS IN ARCHIVE:", file=sys.stderr)
-        for pattern, example in hits:
-            print(f"  - pattern `{pattern}` matched: {example}", file=sys.stderr)
+
+def _tar_metadata(member: tarfile.TarInfo) -> tuple[bytes, ...]:
+    pax = tuple(
+        f"{key}={value}".encode("utf-8", errors="surrogatepass")
+        for key, value in sorted(member.pax_headers.items())
+    )
+    return (
+        member.name.encode("utf-8", errors="surrogatepass"),
+        member.linkname.encode("utf-8", errors="surrogatepass"),
+        str(member.uname).encode("utf-8", errors="surrogatepass"),
+        str(member.gname).encode("utf-8", errors="surrogatepass"),
+        *pax,
+    )
+
+
+def _scan_regular_tar_member(
+    archive: tarfile.TarFile, member: tarfile.TarInfo, policy: DLPPolicy
+) -> int:
+    if not member.isfile():
+        raise ArchiveVerificationError("unsupported TAR member type")
+    _bounded_total(0, member.size)
+    stream = archive.extractfile(member)
+    if stream is None:
+        raise ArchiveVerificationError("TAR member is unreadable")
+    with stream:
+        content = _read_member(stream)
+    require_safe_content(content, policy)
+    return len(content)
+
+
+def _scan_tar_member(archive: tarfile.TarFile, member: tarfile.TarInfo, policy: DLPPolicy) -> int:
+    _scan_metadata(_tar_metadata(member), policy)
+    if member.isdir():
+        return 0
+    return _scan_regular_tar_member(archive, member, policy)
+
+
+def _scan_tar(output: Path, policy: DLPPolicy) -> tuple[int, int]:
+    seen: set[str] = set()
+    total = 0
+    count = 0
+    with tarfile.open(output, "r:*") as archive:
+        for member in archive:
+            count += 1
+            if count > MAX_ARCHIVE_MEMBERS:
+                raise ArchiveVerificationError("archive member count exceeds limit")
+            _register_member(seen, member.name)
+            total = _bounded_total(total, _scan_tar_member(archive, member, policy))
+    return count, total
+
+
+def _scan_archive(output: Path, archive_format: str, policy: DLPPolicy) -> tuple[int, int]:
+    scanners = {"zip": _scan_zip, "tar": _scan_tar, "tar.gz": _scan_tar}
+    scanner = scanners.get(archive_format)
+    if scanner is None:
+        raise ArchiveVerificationError("unsupported archive format")
+    return scanner(output, policy)
+
+
+def _verify_archive(output: Path, requested_format: str | None = None) -> int:
+    """Fail closed unless every bounded archive member passes path and DLP checks."""
+    try:
+        if output.stat().st_size > MAX_ARCHIVE_BYTES:
+            raise ArchiveVerificationError("archive exceeds compressed size limit")
+        archive_format = _archive_format(output, requested_format)
+        files, total = _scan_archive(output, archive_format, load_policy())
+    except Exception as exc:  # noqa: BLE001 - incomplete verification must fail closed
         print(
-            "\nThis usually means the archive was built with `zip -r` "
-            "instead of `git archive`. Re-run export_vault.py or follow "
-            "docs/EXPORTING.md.",
+            f"export_vault: verification failed ({type(exc).__name__})",
             file=sys.stderr,
         )
         return 1
-
-    print("  Verify: OK (no forbidden paths)")
+    size_mb = output.stat().st_size / (1024 * 1024)
+    print(f"\nArchive: {output}")
+    print(f"  Members: {files}")
+    print(f"  Uncompressed: {total / (1024 * 1024):.2f} MB")
+    print(f"  Size: {size_mb:.2f} MB")
+    print("  Verify: OK (paths and content)")
     return 0
+
+
+def _staging_path(output: Path) -> Path:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, raw_path = tempfile.mkstemp(
+        prefix=f".{output.name}.", suffix=".tmp", dir=output.parent
+    )
+    os.close(descriptor)
+    return Path(raw_path)
+
+
+def _build_verified_archive(args: argparse.Namespace, output: Path) -> int:
+    staging = _staging_path(output)
+    try:
+        _git_archive(args.ref, args.format, staging)
+        if not args.verify:
+            print(
+                "export_vault: --no-verify is deprecated; security checks remain mandatory",
+                file=sys.stderr,
+            )
+        if _verify_archive(staging, args.format) != 0:
+            return 1
+        os.replace(staging, output)
+        return 0
+    except (OSError, subprocess.SubprocessError):
+        print("export_vault: archive build failed", file=sys.stderr)
+        return 1
+    finally:
+        staging.unlink(missing_ok=True)
 
 
 def main() -> int:
@@ -250,20 +444,15 @@ def main() -> int:
 
     if args.strict and _working_tree_dirty():
         print(
-            "export_vault: working tree has uncommitted changes "
-            "(use --no-strict to allow).",
+            "export_vault: working tree has uncommitted changes (use --no-strict to allow).",
             file=sys.stderr,
         )
         return 2
 
     output = args.output or _default_output(args.ref, args.format)
-
-    _git_archive(args.ref, args.format, output)
-
-    if args.verify:
-        rc = _verify_archive(output)
-        if rc != 0:
-            return rc
+    result = _build_verified_archive(args, output)
+    if result != 0:
+        return result
 
     print(f"\nexport_vault: done. → {output}")
     return 0

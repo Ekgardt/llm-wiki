@@ -61,25 +61,41 @@ knowledge/
 
 # RUNTIME (inside the vault, gitignored)
 # Override root via LLM_WIKI_STATE_ROOT (tests use a temp dir).
-cache/     # FTS5 / vector / graph indexes (+ cache/cognee/ for optional graph)
+cache/     # FTS5 / vector / graph indexes; legacy cache/cognee/ is retired
 logs/      # lint reports, compile logs, SessionStart debug dumps
-run/       # state, transactions, queue database/results, locks
+run/       # state, transactions, queue results, locks, install ownership
 ```
 
 **Env contracts:**
 - `$LLM_WIKI_ROOT` → vault root (the repository root). Default: resolved from
   `scripts/` location, worktree-aware.
 - `$LLM_WIKI_STATE_ROOT` → runtime root. **Default: the vault itself** →
-  `cache/` (incl. `cache/cognee/`), `logs/`, `run/` at vault root, all gitignored.
+  `cache/`, `logs/`, `run/` at vault root, all gitignored.
   Override for multi-disk setups or hermetic tests.
 - `$MEMORY_LLM_PROVIDER` → `fake` (tests), or one of
   `opencode|codex|claude|openai|ollama` (runtime, auto-detected).
+- `$LLM_WIKI_DLP_POLICY` → optional absolute external policy path. Invalid or
+  digest-mismatched required policy blocks protected work.
 
 **Agent integration boundary:** MCP is the common interface for reads and
 actions (12 task-shaped tools, uniform response envelope, health/context
 resources). Native hooks, plugins, and wrappers are thin lifecycle adapters
 for events MCP cannot observe. Automatic health context is injected only when
 `doctor` reports degraded/error findings.
+
+**Approved audit-closure contract (2026-08-15):** Cognee is retired from the
+supported product; existing `cache/cognee/` is disposable legacy cache and is not
+deleted automatically. First-party model calls use one fail-closed DLP boundary.
+Verified local-only mode accepts only literal-loopback Ollama and requires
+verifiable Ollama cloud disablement. Coherent encrypted private-vault recovery uses
+Restic with the existing maintenance fence, SQLite online backup, manifests, and
+staged validation. `run/install/` is the only new runtime directory and owns
+resumable install state, exact-release/external-path manifests, verified preimages,
+and non-secret scheduler definitions. Windows uses Task Scheduler, macOS uses a
+user LaunchAgent, Linux uses a user systemd timer, and cron is explicit degraded
+fallback. Blackboard and capture reuse the two Reliability v3 databases. No daemon,
+MCP tool, runtime root, or automatic Git operation is added. See
+`knowledge/notes/audit-closure-security-recovery-control-plane-decision.md`.
 
 **Superset product contract (approved 2026-07-19):** LLM Wiki is the single
 local-first memory, code-intelligence, and agent-control product for one person
@@ -361,8 +377,8 @@ session. Legacy `run/queue/*.json` files are migration input only.
 Override via `MEMORY_LLM_PROVIDER` env var. `fake` returns a canned response
 for tests/e2e.
 
-**Zero-cost path:** no paid API beyond existing agent subscriptions. Cognee
-(optional, 300+ pages) is the only feature that requires Ollama.
+**Zero-cost path:** no paid API beyond existing agent subscriptions. Ollama remains
+an optional local backend; the retired Cognee bridge is not a supported feature.
 
 ---
 

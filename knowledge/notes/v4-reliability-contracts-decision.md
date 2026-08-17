@@ -123,3 +123,7 @@ three-zone and authority model limits migration risk for installed vaults.
 - SQLite transaction control: https://docs.python.org/3.14/library/sqlite3.html
 - uv locking and syncing: https://docs.astral.sh/uv/concepts/projects/sync/
 - XDG Base Directory Specification 0.8: https://specifications.freedesktop.org/basedir-spec/latest/
+
+## Related
+
+- [[audit-closure-security-recovery-control-plane-decision]]

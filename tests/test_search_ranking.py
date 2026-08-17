@@ -226,6 +226,13 @@ def test_needs_rebuild_releases_index_database(tmp_path: Path) -> None:
             "path UNINDEXED, title, summary, body, project UNINDEXED, "
             "timestamp UNINDEXED, slug, tokenize = 'porter unicode61')"
         )
+        connection.execute(
+            "CREATE TABLE index_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO index_metadata (key, value) VALUES ('paths', '[]')"
+        )
+        connection.commit()
     manifest.write_text("[]", encoding="utf-8")
 
     assert not search_memory._needs_rebuild(
@@ -547,6 +554,79 @@ def test_concurrent_index_builds_use_unique_temps_and_leave_valid_index(
         deadline=time.monotonic() + 1,
     )
     assert check["status"] == "ok"
+
+
+def test_stale_legacy_builder_cannot_replace_newer_source_index(
+    tmp_path, monkeypatch
+):
+    import search_memory
+
+    notes = tmp_path / "knowledge/notes"
+    notes.mkdir(parents=True)
+    page = notes / "page.md"
+    page.write_text("# Page\nold generation\n", encoding="utf-8")
+    index_dir = tmp_path / "cache"
+    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
+    monkeypatch.setattr(search_memory, "INDEX_DIR", index_dir)
+    monkeypatch.setattr(search_memory, "INDEX_FILE", index_dir / "index.sqlite")
+    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", index_dir / ".paths-manifest")
+    real_lock = search_memory._index_swap_lock
+    old_ready = threading.Event()
+    release_old = threading.Event()
+
+    @contextmanager
+    def ordered_lock(*args, **kwargs):
+        if threading.current_thread().name.startswith("old-builder"):
+            old_ready.set()
+            assert release_old.wait(10)
+        with real_lock(*args, **kwargs):
+            yield
+
+    monkeypatch.setattr(search_memory, "_index_swap_lock", ordered_lock)
+
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="old-builder") as pool:
+        old = pool.submit(search_memory._build_index, [page])
+        assert old_ready.wait(10)
+        page.write_text("# Page\nnew generation\n", encoding="utf-8")
+        with ThreadPoolExecutor(max_workers=1) as newer_pool:
+            newer_pool.submit(search_memory._build_index, [page]).result(timeout=10)
+        release_old.set()
+        old.result(timeout=10)
+
+    with closing(sqlite3.connect(index_dir / "index.sqlite")) as database:
+        assert "new generation" in database.execute(
+            "SELECT body FROM pages"
+        ).fetchone()[0]
+
+
+def test_freshness_reader_never_observes_mixed_index_manifest_pair(
+    tmp_path, monkeypatch
+):
+    import search_memory
+
+    notes = tmp_path / "knowledge/notes"
+    notes.mkdir(parents=True)
+    page = notes / "page.md"
+    page.write_text("# Page\nbody\n", encoding="utf-8")
+    index_dir = tmp_path / "cache"
+    index = index_dir / "index.sqlite"
+    manifest = index_dir / ".paths-manifest"
+    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
+    monkeypatch.setattr(search_memory, "INDEX_DIR", index_dir)
+    monkeypatch.setattr(search_memory, "INDEX_FILE", index)
+    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", manifest)
+    search_memory._build_index([page])
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with search_memory._index_swap_lock():
+            manifest.unlink()
+            freshness = pool.submit(search_memory._needs_rebuild, [page])
+            time.sleep(0.1)
+            assert not freshness.done()
+            manifest.write_text(
+                json.dumps(["knowledge/notes/page.md"]), encoding="utf-8"
+            )
+        assert freshness.result(timeout=10) is False
 
 
 def test_index_swap_retries_transient_windows_access_denial(tmp_path, monkeypatch):
@@ -1410,6 +1490,40 @@ def test_generation_exact_filename_is_rank_one_without_fts_content_match(tmp_pat
     assert results[0]["path"] == "knowledge/notes/target-contract.md"
     assert results[0]["effective_mode"] == "EXACT"
     assert results[0]["generation"] == "gen-search"
+
+
+def test_generation_exact_filename_uses_canonical_case_and_separator_normalization(
+    tmp_path,
+):
+    import search_memory
+
+    _vault, snapshot = _generation_snapshot(
+        tmp_path,
+        {
+            "knowledge/notes/Target_Contract.md": (
+                "# Unrelated heading\nNo query words occur in this page.\n"
+            ),
+            "knowledge/notes/distractor.md": (
+                "# Target Contract\nTarget contract query words occur here.\n"
+            ),
+        },
+    )
+    catalog = search_memory.GenerationCatalog(tmp_path / "state")
+    generation = catalog.generations_path / "gen-search"
+    generation.mkdir()
+    descriptor = search_memory.build_generation_fts(snapshot, generation)
+    catalog, _manifest = _activate_search_generation(tmp_path, snapshot, [descriptor])
+
+    results = search_memory.search(
+        "target contract",
+        catalog=catalog,
+        graph=False,
+        rerank=False,
+        emit_telemetry=False,
+    )
+
+    assert results[0]["path"] == "knowledge/notes/Target_Contract.md"
+    assert results[0]["effective_mode"] == "EXACT"
 
 
 def test_generation_exact_filename_treats_query_wildcards_literally(tmp_path):

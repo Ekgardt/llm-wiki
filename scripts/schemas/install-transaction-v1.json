@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/install-transaction-v1.json",
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "snapshot": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["state"],
+          "properties": {"state": {"const": "absent"}},
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["state", "sha256", "size"],
+          "properties": {
+            "state": {"const": "present"},
+            "sha256": {"$ref": "#/$defs/digest"},
+            "size": {"type": "integer", "minimum": 0, "maximum": 2097152},
+            "preimage": {"type": "string", "pattern": "^preimages/[0-9a-f]{64}\\.bin$"}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "release": {
+      "type": "object",
+      "required": ["commit_oid", "project_version", "source_mode", "uv_lock_sha256", "worktree_clean"],
+      "properties": {
+        "commit_oid": {"type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"},
+        "project_version": {"type": "string", "minLength": 1, "maxLength": 128},
+        "source_mode": {"enum": ["local_checkout", "pinned_remote"]},
+        "uv_lock_sha256": {"$ref": "#/$defs/digest"},
+        "worktree_clean": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "resource": {
+      "type": "object",
+      "required": ["id", "installed", "kind", "locator", "metadata", "origin", "state"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"},
+        "installed": {"$ref": "#/$defs/snapshot"},
+        "kind": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+        "locator": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "metadata": {"type": "object", "maxProperties": 16, "additionalProperties": {"type": ["boolean", "integer", "string"]}},
+        "origin": {"$ref": "#/$defs/snapshot"},
+        "state": {"enum": ["pending", "mutating", "verified", "reverting", "reverted"]}
+      },
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "required": ["error", "id", "operation", "release", "request_sha256", "resources", "scheduler_backend", "schema", "started_at", "state", "state_root", "target_manifest_sha256", "updated_at", "vault_root"],
+  "properties": {
+    "error": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["code"],
+          "properties": {"code": {"type": "string", "pattern": "^[a-z0-9_]{1,128}$"}},
+          "additionalProperties": false
+        }
+      ]
+    },
+    "id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "operation": {"enum": ["install", "uninstall"]},
+    "release": {"$ref": "#/$defs/release"},
+    "request_sha256": {"$ref": "#/$defs/digest"},
+    "resources": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/resource"}},
+    "scheduler_backend": {"enum": ["cron", "launchd", "systemd_user", "task_scheduler"]},
+    "schema": {"const": "install-transaction/v1"},
+    "started_at": {"type": "string", "minLength": 1, "maxLength": 64},
+    "state": {"enum": ["prepared", "mutating", "publishing", "committed", "reverting", "reverted", "quarantined"]},
+    "state_root": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "target_manifest_sha256": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/digest"}]},
+    "updated_at": {"type": "string", "minLength": 1, "maxLength": 64},
+    "vault_root": {"type": "string", "minLength": 1, "maxLength": 4096}
+  },
+  "additionalProperties": false
+}

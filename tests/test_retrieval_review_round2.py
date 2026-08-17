@@ -804,7 +804,7 @@ def test_exact_filename_stays_rank_one_after_dense_fusion():
 
     exact = _hit(
         "exact",
-        "knowledge/notes/target-contract.md",
+        "knowledge/notes/Target_Contract.md",
         1.0,
         title="Unrelated heading",
     )
@@ -824,7 +824,7 @@ def test_exact_filename_stays_rank_one_after_dense_fusion():
         rerank_enabled=False,
     )
 
-    assert result.candidates[0].relative_path == "knowledge/notes/target-contract.md"
+    assert result.candidates[0].relative_path == "knowledge/notes/Target_Contract.md"
 
 
 def test_exact_filename_stays_rank_one_after_reranking(monkeypatch):
@@ -833,7 +833,7 @@ def test_exact_filename_stays_rank_one_after_reranking(monkeypatch):
 
     exact = _hit(
         "exact",
-        "knowledge/notes/target-contract.md",
+        "knowledge/notes/Target_Contract.md",
         1.0,
         title="Unrelated heading",
     )
@@ -873,7 +873,7 @@ def test_exact_filename_stays_rank_one_after_reranking(monkeypatch):
         rerank_enabled=True,
     )
 
-    assert result.candidates[0].relative_path == "knowledge/notes/target-contract.md"
+    assert result.candidates[0].relative_path == "knowledge/notes/Target_Contract.md"
 
 
 def test_reranker_receives_full_chunk_content(monkeypatch):

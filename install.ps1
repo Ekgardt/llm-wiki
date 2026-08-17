@@ -193,14 +193,16 @@ if ($scriptDirectory -and (Test-Path -LiteralPath (Join-Path $scriptDirectory "p
     if ($head -ne $commit) { Fail "Checked-out commit does not match LLM_WIKI_COMMIT" }
     $origin = (Invoke-NativeCommand git @("-C", $VAULT_ROOT, "remote", "get-url", "origin") -CaptureOutput).Trim()
     if ($origin -ne $repositoryUrl) { Fail "Installed checkout repository identity does not match LLM-Wiki" }
-    foreach ($required in @("pyproject.toml", "uv.lock", "install.sh", "install.ps1", "scripts\installer_config.py")) {
+    foreach ($required in @("pyproject.toml", "uv.lock", "install.sh", "install.ps1", "scripts\installer_config.py", "scripts\install_control.py")) {
         if (-not (Test-Path -LiteralPath (Join-Path $VAULT_ROOT $required) -PathType Leaf)) {
             Fail "Installed checkout is missing $($required.Replace('\', '/'))"
         }
     }
     $env:LLM_WIKI_ROOT = $VAULT_ROOT
     $env:LLM_WIKI_INSTALLER_CREATED_CLONE = "1"
-    $hostExecutable = if ($PSVersionTable.PSEdition -eq "Core") {
+    $hostExecutable = if ($PSVersionTable.PSEdition -eq "Core" -and $PSVersionTable.Platform -eq "Unix") {
+        Join-Path $PSHOME "pwsh"
+    } elseif ($PSVersionTable.PSEdition -eq "Core") {
         Join-Path $PSHOME "pwsh.exe"
     } else {
         Join-Path $PSHOME "powershell.exe"
@@ -230,8 +232,6 @@ New-Item -ItemType Directory -Path $stateInput -Force | Out-Null
 $STATE_ROOT = (Resolve-Path -LiteralPath $stateInput).Path
 $env:LLM_WIKI_ROOT = $VAULT_ROOT
 $env:LLM_WIKI_STATE_ROOT = $STATE_ROOT
-[Environment]::SetEnvironmentVariable("LLM_WIKI_ROOT", $VAULT_ROOT, "User")
-[Environment]::SetEnvironmentVariable("LLM_WIKI_STATE_ROOT", $STATE_ROOT, "User")
 
 Set-Location $VAULT_ROOT
 Info "Vault root: $VAULT_ROOT"
@@ -361,7 +361,6 @@ New-Item -ItemType Directory -Path "$STATE_ROOT\run" -Force | Out-Null
 New-Item -ItemType Directory -Path "$STATE_ROOT\run\queue" -Force | Out-Null
 New-Item -ItemType Directory -Path "$STATE_ROOT\logs" -Force | Out-Null
 New-Item -ItemType Directory -Path "$STATE_ROOT\cache" -Force | Out-Null
-New-Item -ItemType Directory -Path "$STATE_ROOT\cache\cognee" -Force | Out-Null
 Ok "LLM_WIKI_ROOT set (User scope); runtime at $STATE_ROOT\{run,logs,cache} (gitignored)"
 
 # --- 6. Register Task Scheduler -----------------------------------
@@ -369,19 +368,30 @@ Ok "LLM_WIKI_ROOT set (User scope); runtime at $STATE_ROOT\{run,logs,cache} (git
 Info "Registering Windows Task Scheduler..."
 $uvPath = (Get-Command uv).Source
 $schedulerWarning = $false
+$cursorDetected = [bool]((Test-Path "$env:USERPROFILE\.cursor") -or (Get-Command cursor -ErrorAction SilentlyContinue))
+$antigravityDetected = [bool]((Test-Path "$env:USERPROFILE\.gemini\antigravity-ide") -or (Get-Command agy -ErrorAction SilentlyContinue))
 try {
-    & ".\scripts\install-scheduled-tasks.ps1" `
-        -VaultRoot $VAULT_ROOT `
-        -StateRoot $STATE_ROOT `
-        -UvPath $uvPath 2>$null
-    if ($LASTEXITCODE -eq 0) { Ok "Task Scheduler: nightly 03:00 + weekly Sun 04:00" }
-    else {
-        $schedulerWarning = $true
-        Warn "Task Scheduler registration failed - run scripts\install-scheduled-tasks.ps1 manually"
+    $powerShellPath = [System.Diagnostics.Process]::GetCurrentProcess().Path
+    $installControlArgs = @(
+        "run", "--locked", "--no-sync", "--directory", $VAULT_ROOT,
+        "python", (Join-Path $VAULT_ROOT "scripts\install_control.py"),
+        "install", "--root", $VAULT_ROOT, "--state-root", $STATE_ROOT,
+        "--uv-path", $uvPath, "--home", $env:USERPROFILE,
+        "--scheduler", "native",
+        "--powershell-path", $powerShellPath
+    )
+    if ($cursorDetected) { $installControlArgs += "--cursor-hooks" }
+    if ($antigravityDetected) { $installControlArgs += "--antigravity-hooks" }
+    $installControlJson = Invoke-NativeCommand uv $installControlArgs -CaptureOutput
+    $installControl = $installControlJson | ConvertFrom-Json
+    if ($installControl.status -ne "committed" -or
+        $installControl.scheduler_backend -ne "task_scheduler") {
+        throw "Install control returned an invalid result"
     }
+    Ok "Task Scheduler verified: nightly 03:00 + weekly Sun 04:00 (Interactive)"
 } catch {
     $schedulerWarning = $true
-    Warn "Task Scheduler registration failed - run scripts\install-scheduled-tasks.ps1 manually"
+    Warn "Install ownership transaction or Task Scheduler verification failed"
 }
 
 # --- 7. Detect and wire up agents ---------------------------------
@@ -399,27 +409,35 @@ $openCodeResult = Invoke-NativeCommand uv @(
 $openCode = $openCodeResult.Output | ConvertFrom-Json
 switch ($openCode.status) {
     "active" {
-        $agents += "OpenCode(active)"
+        $agents += "OpenCode: active automatic"
         Ok "OpenCode configuration is active"
         $ctxFile = Join-Path $STATE_ROOT "cache\session-context.md"
         & uv run --locked --no-sync --directory $VAULT_ROOT python `
             (Join-Path $VAULT_ROOT "scripts\session_start_context.py") `
             --output-file $ctxFile 2>$null | Out-Null
     }
-    "conflict" { Warn "OpenCode configuration status: conflict" }
-    "configured_unverified" { Warn "OpenCode configuration status: configured_unverified" }
+    "conflict" {
+        $agents += "OpenCode: conflict"
+        Warn "OpenCode configuration status: conflict"
+    }
+    "configured_unverified" {
+        $agents += "OpenCode: configured unverified"
+        Warn "OpenCode configuration status: configured_unverified"
+    }
     "not_detected" { }
     default { Fail "OpenCode configuration helper returned an invalid status" }
 }
 
 # Codex
 if (Get-Command codex -ErrorAction SilentlyContinue) {
-    $agents += "Codex"
+    $codexMcpReady = $false
+    $codexHooksReady = $false
     $codexConfig = Join-Path $env:USERPROFILE ".codex\config.toml"
     $codexDir = Split-Path $codexConfig -Parent
     New-Item -ItemType Directory -Path $codexDir -Force | Out-Null
     $codexMcpExit = Install-CodexMcp -VaultRoot $VAULT_ROOT -Config $codexConfig
     if ($codexMcpExit -eq 0) {
+        $codexMcpReady = $true
         Ok "Codex MCP config verified -> $codexConfig"
     } elseif ($codexMcpExit -eq 2) {
         Warn "Existing Codex MCP entry conflicts with LLM-Wiki; config.toml was not changed. Merge manually."
@@ -429,11 +447,13 @@ if (Get-Command codex -ErrorAction SilentlyContinue) {
     $codexHooks = Join-Path $codexDir "hooks.json"
     $codexHookExit = Install-CodexHooks -VaultRoot $VAULT_ROOT -CodexDir $codexDir
     if ($codexHookExit -eq 0) {
+        $codexHooksReady = $true
         Ok "Codex official hooks merged -> $codexHooks"
         Info "Open /hooks in Codex to review and trust the LLM-Wiki commands."
     } elseif ($codexHookExit -eq 2) {
         Warn "Active inline Codex hooks require manual merge and /hooks trust review; hooks.json was not changed."
     } elseif ($codexHookExit -eq 3) {
+        $codexHooksReady = $true
         Ok "Equivalent LLM-Wiki hooks are already configured inline; hooks.json was not changed."
         Info "Open /hooks in Codex to review and trust the inline LLM-Wiki commands."
     } elseif ($codexHookExit -eq 4) {
@@ -442,20 +462,25 @@ if (Get-Command codex -ErrorAction SilentlyContinue) {
         Warn "Codex hooks were not changed; review the existing hooks configuration manually."
     }
     Info "The heartbeat-only codex-memory-wrapper is not installed automatically; official hooks are primary."
-    Ok "Codex detected"
+    if ($codexMcpReady -and $codexHooksReady) {
+        $agents += "Codex: manual /hooks trust review required"
+    } else {
+        $agents += "Codex: conflict or unverified"
+    }
 }
 
 # Claude Code - merge hooks into user settings if CLI or config dir present
 $claudeConfig = Join-Path $env:USERPROFILE ".claude"
 $claudeUserConfig = Join-Path $env:USERPROFILE ".claude.json"
 if ((Get-Command claude -ErrorAction SilentlyContinue) -or (Test-Path $claudeConfig) -or (Test-Path $claudeUserConfig)) {
-    $agents += "Claude Code"
+    $claudeAutomatic = $false
     Ok "Claude Code detected (or ~/.claude present)"
     Info "Merging LLM-wiki hooks into Claude user settings (backup first)..."
     uv run python (Join-Path $VAULT_ROOT "scripts\merge_claude_settings.py") `
         --vault-root $VAULT_ROOT `
         --state-root $STATE_ROOT 2>&1 | ForEach-Object { Info "$_" }
     if ($LASTEXITCODE -eq 0) {
+        $claudeAutomatic = $true
         Ok "Claude settings merged -> $claudeConfig\settings.json"
     } else {
         Warn "Claude settings merge failed - run manually:"
@@ -481,24 +506,39 @@ if ((Get-Command claude -ErrorAction SilentlyContinue) -or (Test-Path $claudeCon
             Warn "  $claudeMerge"
         }
     }
+    if ($claudeAutomatic) {
+        $agents += "Claude Code: active automatic"
+    } else {
+        $agents += "Claude Code: conflict or unverified"
+    }
 }
 
 # Cursor
-if (Test-Path "$env:USERPROFILE\.cursor") {
-    $agents += "Cursor"
-    Ok "Cursor detected"
+if ($cursorDetected) {
+    if ($schedulerWarning) {
+        $agents += "Cursor: conflict or unverified"
+    } else {
+        $agents += "Cursor: active automatic local hooks"
+        Ok "Cursor local user hooks are active"
+        Info "Cursor cloud agents do not load user-level hooks."
+    }
 }
 
 # Antigravity
-if (Test-Path "$env:USERPROFILE\.antigravity" -ErrorAction SilentlyContinue) {
-    $agents += "Antigravity"
-    Ok "Antigravity detected - copy integrations\antigravity\AGENTS.md to your project root"
+if ($antigravityDetected) {
+    if ($schedulerWarning) {
+        $agents += "Antigravity: conflict or unverified"
+    } else {
+        $agents += "Antigravity: active automatic local hooks"
+        Ok "Antigravity local user hooks are active"
+    }
 }
 
 if ($agents.Count -eq 0) {
     Warn "No agents detected. Install OpenCode, Codex, Claude Code, Cursor, or Antigravity."
 } else {
-    Ok "Agents: $($agents -join ', ')"
+    Ok "Agent integrations:"
+    $agents | ForEach-Object { Info "  - $_" }
 }
 
 # --- 8. Bounded runtime sync --------------------------------------
@@ -526,17 +566,22 @@ Write-Host "==============================================" -ForegroundColor Gre
 Write-Host ""
 Write-Host "Vault:       $VAULT_ROOT"
 Write-Host "State:       $STATE_ROOT (cache/logs/run, gitignored)"
-Write-Host "Agents:      $($agents -join ', ')"
+Write-Host "Agent integrations:"
+if ($agents.Count -eq 0) {
+    Write-Host "  - none detected"
+} else {
+    $agents | ForEach-Object { Write-Host "  - $_" }
+}
 if ($schedulerWarning) {
     Write-Host "Maintenance: not registered" -ForegroundColor Yellow
 } else {
-    Write-Host "Maintenance: Task Scheduler (nightly + weekly)"
+    Write-Host "Maintenance: Task Scheduler (nightly + weekly; logged-on user only)"
 }
 Write-Host ""
 Write-Host "Next steps:"
 Write-Host "  1. Restart terminal"
 Write-Host "  2. Open a project in your agent"
-Write-Host "  3. Work normally - capture is automatic"
+Write-Host "  3. Review the integration states above; automatic capture runs only for active automatic entries"
 Write-Host ""
 Write-Host "MCP baseline: 12 local task-shaped tools (installed)"
 Write-Host "Optional enhancements:"

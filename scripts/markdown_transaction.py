@@ -36,6 +36,7 @@ from claim_tree_manifest import (
     validate_claim_tree_manifest,
     validate_guardrail_source_manifest,
 )
+from model_dlp import DLPContentBlocked, DLPPolicyError, require_safe_publication
 from reliable_memory import (
     DEFAULTS,
     MigrationStatement,
@@ -78,11 +79,14 @@ _SCHEMA = Path(__file__).with_name("schemas") / "markdown-transaction-v1.json"
 _PROJECT_CHECKPOINT_SCHEMA = (
     Path(__file__).with_name("schemas") / "project-checkpoint-v1.json"
 )
-_WRITER_LEASE_SECONDS = 2.0
+_WRITER_LEASE_SECONDS = 30.0
 _WRITER_HEARTBEAT_SECONDS = 0.5
 _WRITER_WAIT_SECONDS = DEFAULTS.markdown_busy_ms / 1_000
 _WRITER_RETRY_BASE_SECONDS = 0.005
 _WRITER_RETRY_CAP_SECONDS = 0.05
+_ADOPTION_VALIDATION_SECONDS = 30.0
+_ADOPTION_VALIDATION_CACHE: set[tuple[object, ...]] = set()
+_ADOPTION_VALIDATION_LOCK = threading.Lock()
 MAX_KNOWLEDGE_TARGET_BYTES = 64 * 1024 * 1024
 MAX_KNOWLEDGE_PATH_BYTES = 512
 MAX_KNOWLEDGE_COMPONENT_BYTES = 128
@@ -98,6 +102,47 @@ _UINT64_MODULUS = 1 << 64
 _COORDINATOR_V3_CONTRACT = OperationalDatabaseContract(application_id=0x4C575433)
 
 _COORDINATOR_V3_TABLE_SQL = (
+    (
+        "blackboard_claim_epochs",
+        """CREATE TABLE blackboard_claim_epochs (
+            project TEXT NOT NULL CHECK (
+                length(CAST(project AS BLOB)) BETWEEN 1 AND 128
+            ),
+            resource TEXT NOT NULL CHECK (
+                length(CAST(resource AS BLOB)) BETWEEN 1 AND 512
+            ),
+            last_epoch INTEGER NOT NULL CHECK (last_epoch >= 0),
+            PRIMARY KEY(project, resource),
+            UNIQUE(project, resource, last_epoch)
+        )""",
+    ),
+    (
+        "blackboard_claims",
+        """CREATE TABLE blackboard_claims (
+            project TEXT NOT NULL CHECK (
+                length(CAST(project AS BLOB)) BETWEEN 1 AND 128
+            ),
+            resource TEXT NOT NULL CHECK (
+                length(CAST(resource AS BLOB)) BETWEEN 1 AND 512
+            ),
+            claim_id TEXT NOT NULL CHECK (
+                length(claim_id) = 64 AND claim_id NOT GLOB '*[^0-9a-f]*'
+            ),
+            agent TEXT NOT NULL CHECK (
+                length(CAST(agent AS BLOB)) BETWEEN 1 AND 128
+            ),
+            lease_token TEXT NOT NULL CHECK (
+                length(lease_token) = 64 AND lease_token NOT GLOB '*[^0-9a-f]*'
+            ),
+            fencing_epoch INTEGER NOT NULL CHECK (fencing_epoch >= 1),
+            heartbeat_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            PRIMARY KEY(project, resource),
+            UNIQUE(project, claim_id, resource),
+            FOREIGN KEY(project, resource, fencing_epoch)
+                REFERENCES blackboard_claim_epochs(project, resource, last_epoch)
+        )""",
+    ),
     (
         "transaction",
         """CREATE TABLE "transaction" (
@@ -925,6 +970,8 @@ def _coordinator_v2_reconciliation_complete(
         "writer_fences": summary["writer_fences"],
     }
     empty = {
+        "blackboard_claim_epochs",
+        "blackboard_claims",
         "capture_binding_projections",
         "intent_fence_epochs",
         "intent_fences",
@@ -948,25 +995,48 @@ def _coordinator_v2_reconciliation_complete(
     populated_new_fields = " OR ".join(
         f'"{field}" IS NOT NULL' for field in new_transaction_fields
     )
-    return (
-        all(statement.completed(database) for statement in statements)
-        and all(
-            database.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
-            == count
-            for table, count in expected.items()
-        )
-        and all(
-            database.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] == 0
-            for table in empty
-        )
-        and database.execute(
-            f'SELECT COUNT(*) FROM "transaction" WHERE {populated_new_fields}'
-        ).fetchone()[0]
-        == 0
+    checks = (
+        _migration_statements_complete(database, statements),
+        _coordinator_counts_match(database, expected),
+        _coordinator_tables_empty(database, empty),
+        _coordinator_transaction_fields_empty(database, populated_new_fields),
+    )
+    return all(checks)
+
+
+def _migration_statements_complete(
+    database: sqlite3.Connection, statements: tuple[MigrationStatement, ...]
+) -> bool:
+    return all(statement.completed(database) for statement in statements)
+
+
+def _coordinator_counts_match(
+    database: sqlite3.Connection, expected: Mapping[str, int]
+) -> bool:
+    return all(
+        database.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] == count
+        for table, count in expected.items()
     )
 
 
-def _coordinator_v3_cross_table_invariant(database: sqlite3.Connection) -> bool:
+def _coordinator_tables_empty(
+    database: sqlite3.Connection, tables: set[str]
+) -> bool:
+    return all(
+        database.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] == 0
+        for table in tables
+    )
+
+
+def _coordinator_transaction_fields_empty(
+    database: sqlite3.Connection, populated_fields: str
+) -> bool:
+    return database.execute(
+        f'SELECT COUNT(*) FROM "transaction" WHERE {populated_fields}'
+    ).fetchone()[0] == 0
+
+
+def _coordinator_v3_base_cross_table_invariant(database: sqlite3.Connection) -> bool:
     owner_projection_violations = database.execute(
         """SELECT COUNT(*) FROM (
                SELECT process_id, process_start_identity, canonical_role,
@@ -1019,6 +1089,230 @@ def _coordinator_v3_cross_table_invariant(database: sqlite3.Connection) -> bool:
             intent_epoch_violations,
         )
     )
+
+
+def _coordinator_v3_blackboard_invariant(database: sqlite3.Connection) -> bool:
+    blackboard_epoch_violations = database.execute(
+        """SELECT COUNT(*) FROM blackboard_claims AS claim
+           LEFT JOIN blackboard_claim_epochs AS epoch
+             ON epoch.project=claim.project AND epoch.resource=claim.resource
+            AND epoch.last_epoch=claim.fencing_epoch
+           WHERE epoch.project IS NULL"""
+    ).fetchone()[0]
+    blackboard_set_violations = database.execute(
+        """SELECT COUNT(*) FROM blackboard_claims AS claim
+           WHERE EXISTS (
+               SELECT 1 FROM blackboard_claims AS sibling
+                WHERE sibling.project=claim.project
+                  AND sibling.claim_id=claim.claim_id
+                  AND (
+                      sibling.agent != claim.agent
+                      OR sibling.lease_token != claim.lease_token
+                      OR sibling.heartbeat_at != claim.heartbeat_at
+                      OR sibling.expires_at != claim.expires_at
+                  )
+           )"""
+    ).fetchone()[0]
+    return not any((blackboard_epoch_violations, blackboard_set_violations))
+
+
+def _coordinator_v3_cross_table_invariant(database: sqlite3.Connection) -> bool:
+    return _coordinator_v3_base_cross_table_invariant(
+        database
+    ) and _coordinator_v3_blackboard_invariant(database)
+
+
+_BLACKBOARD_V3_TABLES = frozenset({"blackboard_claim_epochs", "blackboard_claims"})
+_COORDINATOR_V3_BASE_TABLE_SQL = tuple(
+    item for item in _COORDINATOR_V3_TABLE_SQL if item[0] not in _BLACKBOARD_V3_TABLES
+)
+
+
+def _coordinator_v3_base_schema_complete(database: sqlite3.Connection) -> bool:
+    objects = database.execute(
+        """SELECT type, name FROM sqlite_schema
+           WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"""
+    ).fetchall()
+    expected = {("table", name) for name, _sql in _COORDINATOR_V3_BASE_TABLE_SQL}
+    return {(str(row[0]), str(row[1])) for row in objects} == expected and all(
+        _coordinator_v3_object_matches(database, name, sql)
+        for name, sql in _COORDINATOR_V3_BASE_TABLE_SQL
+    )
+
+
+def _upgrade_object_names_valid(
+    observed: set[tuple[str, str]], expected: set[str]
+) -> bool:
+    for kind, name in observed:
+        if kind != "table":
+            return False
+        if name not in expected:
+            return False
+    return True
+
+
+def _coordinator_schema_upgrade_objects_valid(database: sqlite3.Connection) -> bool:
+    objects = database.execute(
+        """SELECT type, name FROM sqlite_schema
+           WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"""
+    ).fetchall()
+    expected = {name: sql for name, sql in _COORDINATOR_V3_TABLE_SQL}
+    observed = {(str(kind), str(name)) for kind, name in objects}
+    if not _upgrade_object_names_valid(observed, set(expected)):
+        return False
+    return all(
+        _coordinator_v3_object_matches(database, name, expected[name])
+        for _kind, name in observed
+    )
+
+
+def _bounded_table_rows(
+    database: sqlite3.Connection, table: str
+) -> list[tuple[object, ...]]:
+    rows = database.execute(f'SELECT * FROM "{table}" ORDER BY rowid').fetchmany(100_001)
+    if len(rows) > 100_000:
+        raise _coordinator_migration_error(
+            "coordinator_v3_source_conflict",
+            "coordinator v3 schema upgrade exceeded the row bound",
+        )
+    return [tuple(row) for row in rows]
+
+
+def _coordinator_base_rows_match(
+    source: sqlite3.Connection, candidate: sqlite3.Connection
+) -> bool:
+    for table, _sql in _COORDINATOR_V3_BASE_TABLE_SQL:
+        if _bounded_table_rows(source, table) != _bounded_table_rows(candidate, table):
+            return False
+    return True
+
+
+def _coordinator_v3_upgrade_source_healthy(database: sqlite3.Connection) -> bool:
+    integrity = database.execute("PRAGMA integrity_check").fetchall()
+    foreign_keys = database.execute("PRAGMA foreign_key_check").fetchall()
+    integrity_ok = len(integrity) == 1 and integrity[0][0] == "ok"
+    checks = (
+        integrity_ok,
+        not foreign_keys,
+        _coordinator_v3_base_cross_table_invariant(database),
+    )
+    return all(checks)
+
+
+def _validate_coordinator_v3_upgrade_source(database: sqlite3.Connection) -> None:
+    if not _coordinator_v3_base_schema_complete(database):
+        raise _coordinator_migration_error(
+            "coordinator_v3_source_conflict",
+            "coordinator v3 schema upgrade source is not the previous exact schema",
+        )
+    if database.execute("SELECT COUNT(*) FROM maintenance_owners").fetchone()[0]:
+        raise _coordinator_migration_error(
+            "coordinator_v3_source_live",
+            "coordinator v3 schema upgrade source has active owners",
+        )
+    if not _coordinator_v3_upgrade_source_healthy(database):
+        raise _coordinator_migration_error(
+            "coordinator_v3_validation_failed",
+            "coordinator v3 schema upgrade source validation failed",
+        )
+
+
+def _copy_coordinator_v3_source(
+    source: sqlite3.Connection, candidate: Path
+) -> None:
+    if candidate.exists():
+        return
+    with contextlib.closing(
+        open_operational_db(candidate, busy_ms=DEFAULTS.markdown_busy_ms)
+    ) as destination:
+        source.backup(destination)
+
+
+def _require_upgrade_candidate_matches(
+    source: sqlite3.Connection, database: sqlite3.Connection
+) -> None:
+    if not _coordinator_schema_upgrade_objects_valid(database):
+        raise _coordinator_migration_error(
+            "coordinator_v3_source_conflict",
+            "coordinator v3 schema upgrade candidate has unknown objects",
+        )
+    if not _coordinator_base_rows_match(source, database):
+        raise _coordinator_migration_error(
+            "coordinator_v3_source_conflict",
+            "coordinator v3 schema upgrade candidate differs from source",
+        )
+
+
+def _require_empty_blackboard_tables(database: sqlite3.Connection) -> None:
+    for table in _BLACKBOARD_V3_TABLES:
+        if not _coordinator_table_exists(database, table):
+            continue
+        if database.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone():
+            raise _coordinator_migration_error(
+                "coordinator_v3_source_conflict",
+                "coordinator v3 schema upgrade candidate has claim rows",
+            )
+
+
+def _blackboard_schema_statements() -> tuple[MigrationStatement, ...]:
+    return tuple(
+        statement
+        for statement in _coordinator_v3_statements()
+        if statement.name.removeprefix("create_") in _BLACKBOARD_V3_TABLES
+    )
+
+
+def _upgrade_coordinator_candidate_database(
+    source: sqlite3.Connection,
+    candidate: Path,
+    killpoint: Callable[[str], None] | None,
+) -> None:
+    with contextlib.closing(
+        open_operational_db(
+            candidate,
+            busy_ms=DEFAULTS.markdown_busy_ms,
+            contract=_COORDINATOR_V3_CONTRACT,
+        )
+    ) as database:
+        database.row_factory = sqlite3.Row
+        _require_upgrade_candidate_matches(source, database)
+        _require_empty_blackboard_tables(database)
+        run_resumable_migration(
+            database,
+            _blackboard_schema_statements(),
+            final_invariant=_coordinator_v3_schema_complete,
+            killpoint=killpoint,
+        )
+
+
+def upgrade_coordinator_v3_candidate(
+    path: Path,
+    *,
+    source_v3: Path,
+    killpoint: Callable[[str], None] | None = None,
+) -> dict[str, int]:
+    """Copy and resumably extend the previous exact coordinator-v3 schema."""
+    candidate = Path(path)
+    source_path = Path(source_v3)
+    _reject_coordinator_source_alias(candidate, source_path)
+    with contextlib.closing(
+        open_readonly_operational_db(
+            source_path,
+            source_path.parent.parent,
+            max_bytes=1 << 50,
+            owner_only=True,
+            contract=_COORDINATOR_V3_CONTRACT,
+        )
+    ) as source:
+        source.row_factory = sqlite3.Row
+        source.execute("BEGIN")
+        _validate_coordinator_v3_upgrade_source(source)
+        _copy_coordinator_v3_source(source, candidate)
+        _upgrade_coordinator_candidate_database(source, candidate, killpoint)
+    _harden_owner_only(candidate, 0o600)
+    return validate_coordinator_v3_database(
+        candidate, state_root=candidate.parent.parent
+    )["row_counts"]
 
 
 def _reject_coordinator_source_alias(candidate: Path, source: Path) -> None:
@@ -1431,11 +1725,87 @@ def stable_operation_id(kind: str, event_id: str, content: bytes) -> str:
     return f"{kind}:{event_id}:{sha256_bytes(content)}"
 
 
+def _reliability_v3_records_present(state_root: Path) -> bool:
+    run_root = Path(state_root) / "run"
+    records = (
+        run_root / "reliability-v3-migration.json",
+        run_root / "reliability-v3-adopted.json",
+    )
+    return any(path.exists() or path.is_symlink() for path in records)
+
+
+def _adoption_validation_key(vault: Path, state_root: Path) -> tuple[object, ...]:
+    run_root = Path(state_root) / "run"
+    records = tuple(
+        sha256_bytes(
+            read_runtime_bytes(path, state_root, max_bytes=1024 * 1024, owner_only=True)
+        )
+        for path in (
+            run_root / "reliability-v3-migration.json",
+            run_root / "reliability-v3-adopted.json",
+        )
+    )
+    integration = read_stable_bytes(
+        Path(vault) / "scripts" / "integration_adapter.py",
+        16 * 1024 * 1024,
+        label="installed integration adapter",
+    )
+    active = os.lstat(run_root / "markdown-transactions-v3.sqlite3")
+    identity = (active.st_mode, active.st_dev, active.st_ino)
+    return (str(vault), str(state_root), *records, sha256_bytes(integration), *identity)
+
+
+def _transient_adoption_contention(error: BaseException) -> bool:
+    current: BaseException | None = error
+    while current is not None:
+        if _is_transient_writer_contention(current):
+            return True
+        current = current.__cause__
+    return False
+
+
+def _validate_adoption_with_retry(vault: Path, state_root: Path) -> None:
+    from installed_memory_repair import require_reliability_v3_adopted
+
+    deadline = time.monotonic() + _ADOPTION_VALIDATION_SECONDS
+    while True:
+        try:
+            require_reliability_v3_adopted(root=vault, state_root=state_root)
+            break
+        except Exception as exc:
+            if not _transient_adoption_contention(exc) or time.monotonic() >= deadline:
+                raise
+            time.sleep(_WRITER_RETRY_CAP_SECONDS)
+
+
+def _require_adopted_once(vault: Path, state_root: Path) -> None:
+    key = _adoption_validation_key(vault, state_root)
+    with _ADOPTION_VALIDATION_LOCK:
+        if key in _ADOPTION_VALIDATION_CACHE:
+            return
+    _validate_adoption_with_retry(vault, state_root)
+    with _ADOPTION_VALIDATION_LOCK:
+        _ADOPTION_VALIDATION_CACHE.add(key)
+
+
+def active_markdown_coordinator(vault: Path, state_root: Path) -> MarkdownCoordinator:
+    """Open the validated adopted coordinator-v3 database for normal writes."""
+    resolved_vault = Path(vault).resolve(strict=True)
+    state = Path(state_root).absolute()
+    _require_adopted_once(resolved_vault, state)
+    path = state / "run" / "markdown-transactions-v3.sqlite3"
+    coordinator = MarkdownCoordinator._from_v3_candidate(path, state_root=state)
+    coordinator.vault = resolved_vault
+    return coordinator
+
+
 def _default_coordinator() -> MarkdownCoordinator:
     vault = Path(
         os.environ.get("LLM_WIKI_ROOT", str(Path(__file__).resolve().parent.parent))
     ).resolve(strict=True)
     state_root = Path(os.environ.get("LLM_WIKI_STATE_ROOT", str(vault)))
+    if _reliability_v3_records_present(state_root):
+        return active_markdown_coordinator(vault, state_root)
     return MarkdownCoordinator(vault, state_root)
 
 
@@ -1554,22 +1924,75 @@ def _settle_operation(
         record = coordinator._record_for_operation_id(operation_id)
         if record is None:
             return None
-        if record.state in {"prepared", "applying"}:
-            return coordinator.apply(
-                record.id, deadline=deadline, cancelled=cancelled
-            )
-        if record.state != "preparing":
-            return record
-        with coordinator._connect() as database:
-            owner = database.execute(
-                'SELECT owner_pid FROM "transaction" WHERE operation_id = ?',
-                (operation_id,),
-            ).fetchone()
-        if owner is None or owner["owner_pid"] is None or not _pid_alive(owner["owner_pid"]):
-            coordinator.recover(deadline=deadline, cancelled=cancelled)
+        settled = _settle_nonpreparing_record(
+            coordinator, record, deadline=deadline, cancelled=cancelled
+        )
+        if settled is not None:
+            return settled
+        _recover_abandoned_preparation(
+            coordinator, operation_id, deadline=deadline, cancelled=cancelled
+        )
         if time.monotonic() >= deadline:
             raise TimeoutError("timed out waiting for duplicate transaction preparation")
         time.sleep(0.01)
+
+
+def _settle_nonpreparing_record(
+    coordinator: MarkdownCoordinator,
+    record: TransactionRecord,
+    *,
+    deadline: float,
+    cancelled: Callable[[], bool] | None,
+) -> TransactionRecord | None:
+    if record.state == "preparing":
+        return None
+    if record.state in {"prepared", "applying"}:
+        return _apply_or_reread_terminal(
+            coordinator, record, deadline=deadline, cancelled=cancelled
+        )
+    return record
+
+
+def _apply_or_reread_terminal(
+    coordinator: MarkdownCoordinator,
+    record: TransactionRecord,
+    *,
+    deadline: float,
+    cancelled: Callable[[], bool] | None,
+) -> TransactionRecord:
+    try:
+        return coordinator.apply(record.id, deadline=deadline, cancelled=cancelled)
+    except RuntimeError as exc:
+        current = coordinator._record(record.id)
+        message = f"transaction cannot be applied from state {current.state}"
+        if str(exc) != message or current.state in {"prepared", "applying"}:
+            raise
+        return current
+
+
+def _preparer_is_alive(coordinator: MarkdownCoordinator, operation_id: str) -> bool:
+    with coordinator._connect() as database:
+        owner = database.execute(
+            'SELECT owner_pid FROM "transaction" WHERE operation_id = ?',
+            (operation_id,),
+        ).fetchone()
+    if owner is None:
+        return False
+    if owner["owner_pid"] is None:
+        return False
+    return _pid_alive(owner["owner_pid"])
+
+
+def _recover_abandoned_preparation(
+    coordinator: MarkdownCoordinator,
+    operation_id: str,
+    *,
+    deadline: float,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    if _preparer_is_alive(coordinator, operation_id):
+        return
+    coordinator.recover(deadline=deadline, cancelled=cancelled)
 
 
 def _verify_committed_targets(
@@ -1611,51 +2034,61 @@ def _append_request_matches(
     return actual_before == expected_before
 
 
-def append_knowledge(
-    operation_id: str | Path | None = None,
-    path: Path | bytes | None = None,
-    block: bytes | None = None,
-    *,
-    deadline: float = float("inf"),
-    cancelled: Callable[[], bool] | None = None,
-) -> TransactionRecord:
-    """CAS-append Markdown or project JSONL bytes, retrying concurrent winners."""
-    if block is None and isinstance(operation_id, Path) and isinstance(path, bytes):
-        operation_id, path, block = None, operation_id, path
+_AppendAttemptResult = TransactionRecord | Literal["advance", "retry"]
+
+
+def _coerce_legacy_append_arguments(
+    operation_id: str | Path | None,
+    path: Path | bytes | None,
+    block: bytes | None,
+) -> tuple[str | Path | None, Path | bytes | None, bytes | None]:
+    if block is not None:
+        return operation_id, path, block
+    if not isinstance(operation_id, Path):
+        return operation_id, path, block
+    if not isinstance(path, bytes):
+        return operation_id, path, block
+    return None, operation_id, path
+
+
+def _append_operation_id(value: str | Path | None) -> str:
+    if value is None:
+        return f"append:{uuid.uuid4().hex}"
+    if not value:
+        raise ValueError("operation_id must be non-empty")
+    return value  # type: ignore[return-value]
+
+
+def _normalize_append_request(
+    operation_id: str | Path | None,
+    path: Path | bytes | None,
+    block: bytes | None,
+) -> tuple[str, Path, bytes]:
+    operation_id, path, block = _coerce_legacy_append_arguments(
+        operation_id, path, block
+    )
     if not isinstance(path, Path):
         raise TypeError("knowledge append path must be a Path")
-    block = _require_bytes(block)
-    if len(block) > MAX_KNOWLEDGE_TARGET_BYTES:
+    content = _require_bytes(block)
+    if len(content) > MAX_KNOWLEDGE_TARGET_BYTES:
         raise ValueError("knowledge append block size exceeds limit")
-    if operation_id is None:
-        operation_id = f"append:{uuid.uuid4().hex}"
-    elif not operation_id:
-        raise ValueError("operation_id must be non-empty")
-    coordinator = _default_coordinator()
-    relative = _relative_target(coordinator, Path(path))
-    _recover_initial_contention(
-        coordinator, deadline=deadline, cancelled=cancelled
-    )
-    attempt = 0
-    gate_timeouts = 0
-    while attempt < 64:
-        candidate_id = operation_id if attempt == 0 else f"{operation_id}:cas:{attempt}"
-        existing = coordinator._record_for_operation_id(candidate_id)
-        if existing is not None:
-            existing = _settle_operation(
-                coordinator,
-                candidate_id,
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-            if existing is None:
-                continue
-            if not _append_request_matches(coordinator, existing, relative, block):
-                raise ValueError("operation_id is already bound to a different request")
-            if existing.state == "committed":
-                return existing
-            attempt += 1
-            continue
+    return _append_operation_id(operation_id), path, content
+
+
+def _append_candidate_id(operation_id: str, attempt: int) -> str:
+    if attempt == 0:
+        return operation_id
+    return f"{operation_id}:cas:{attempt}"
+
+
+def _capture_append_before(
+    coordinator: MarkdownCoordinator,
+    relative: str,
+    *,
+    deadline: float,
+    cancelled: Callable[[], bool] | None,
+) -> bytes | None:
+    for _attempt in range(64):
         try:
             coordinator._require_operation_active(deadline, cancelled)
             with coordinator.writer_gate(
@@ -1665,76 +2098,342 @@ def append_knowledge(
                 )
             ):
                 coordinator._require_operation_active(deadline, cancelled)
-                before = coordinator._read_bounded_target(
+                return coordinator._read_bounded_target(
                     coordinator._target(relative), MAX_KNOWLEDGE_TARGET_BYTES
                 )
         except TimeoutError:
-            gate_timeouts += 1
-            if gate_timeouts >= 64:
-                raise
             continue
-        if len(before or b"") + len(block) > MAX_KNOWLEDGE_TARGET_BYTES:
-            raise ValueError("prospective knowledge target size exceeds limit")
-        content = (before or b"") + block
-        expected = ABSENT if before is None else sha256_bytes(before)
-        change = (
-            MarkdownChange.create(
-                relative, content, max_before_bytes=MAX_KNOWLEDGE_TARGET_BYTES
-            )
-            if before is None
-            else MarkdownChange.replace(
-                relative, content, max_before_bytes=MAX_KNOWLEDGE_TARGET_BYTES
-            )
+    raise TimeoutError("timed out capturing the knowledge append target")
+
+
+def _append_change(relative: str, before: bytes | None, block: bytes) -> MarkdownChange:
+    content = (before or b"") + block
+    if len(content) > MAX_KNOWLEDGE_TARGET_BYTES:
+        raise ValueError("prospective knowledge target size exceeds limit")
+    if before is None:
+        return MarkdownChange.create(
+            relative, content, max_before_bytes=MAX_KNOWLEDGE_TARGET_BYTES
         )
-        try:
-            coordinator.prepare(
-                [change],
-                operation_id=candidate_id,
-                preconditions={relative: expected},
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-            settled = _settle_operation(
-                coordinator,
-                candidate_id,
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-            if settled is None:
-                continue
-            return settled
-        except (FileExistsError, FileNotFoundError, ValueError) as exc:
-            if isinstance(exc, ValueError) and "operation_id is already bound" in str(exc):
-                winner = _settle_operation(
-                    coordinator,
-                    candidate_id,
-                    deadline=deadline,
-                    cancelled=cancelled,
-                )
-                if winner is None or not _append_request_matches(
-                    coordinator, winner, relative, block
-                ):
-                    raise
-                if winner.state == "committed":
-                    return winner
-                attempt += 1
-                continue
-            if not isinstance(exc, (FileExistsError, FileNotFoundError)) and (
-                "precondition changed" not in str(exc)
-            ):
-                raise
-        except TransactionFailure as exc:
-            if exc.code not in {
-                "before_hash_mismatch", "unknown_target_bytes", "precondition_failed"
-            }:
-                raise
-        except RuntimeError as exc:
-            if "transaction cannot be applied from state" not in str(exc):
-                raise
-        except TimeoutError:
-            pass
-        attempt += 1
+    return MarkdownChange.replace(
+        relative, content, max_before_bytes=MAX_KNOWLEDGE_TARGET_BYTES
+    )
+
+
+def _append_expected_hash(before: bytes | None) -> str:
+    if before is None:
+        return ABSENT
+    return sha256_bytes(before)
+
+
+def _append_preconditions(
+    relative: str,
+    before: bytes | None,
+    extra: Mapping[str, object] | None,
+) -> dict[str, object]:
+    result = dict(extra or {})
+    expected = _append_expected_hash(before)
+    if relative in result and result[relative] != expected:
+        raise ValueError("append target precondition conflicts with captured bytes")
+    result[relative] = expected
+    return result
+
+
+def _classify_settled_append(
+    coordinator: MarkdownCoordinator,
+    record: TransactionRecord | None,
+    relative: str,
+    block: bytes,
+) -> _AppendAttemptResult:
+    if record is None:
+        return "retry"
+    if not _append_request_matches(coordinator, record, relative, block):
+        raise ValueError("operation_id is already bound to a different request")
+    if record.state == "committed":
+        return record
+    return "advance"
+
+
+def _append_transaction_failure(error: TransactionFailure) -> Literal["advance"]:
+    retryable = {"before_hash_mismatch", "unknown_target_bytes", "precondition_failed"}
+    if error.code not in retryable:
+        raise error
+    return "advance"
+
+
+def _append_runtime_failure(error: RuntimeError) -> Literal["advance"]:
+    if "transaction cannot be applied from state" not in str(error):
+        raise error
+    return "advance"
+
+
+def _settle_append_candidate(
+    coordinator: MarkdownCoordinator,
+    candidate_id: str,
+    relative: str,
+    block: bytes,
+    *,
+    deadline: float,
+    cancelled: Callable[[], bool] | None,
+) -> _AppendAttemptResult:
+    try:
+        record = _settle_operation(
+            coordinator, candidate_id, deadline=deadline, cancelled=cancelled
+        )
+    except TransactionFailure as exc:
+        return _append_transaction_failure(exc)
+    except RuntimeError as exc:
+        return _append_runtime_failure(exc)
+    except TimeoutError:
+        return "retry"
+    return _classify_settled_append(coordinator, record, relative, block)
+
+
+def _append_value_failure(
+    error: ValueError,
+    coordinator: MarkdownCoordinator,
+    candidate_id: str,
+    relative: str,
+    block: bytes,
+    *,
+    deadline: float,
+    cancelled: Callable[[], bool] | None,
+) -> _AppendAttemptResult:
+    if "operation_id is already bound" in str(error):
+        return _settle_append_candidate(
+            coordinator,
+            candidate_id,
+            relative,
+            block,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+    if "precondition changed" in str(error):
+        return "retry"
+    raise error
+
+
+def _append_prepare_failure(
+    error: Exception,
+    coordinator: MarkdownCoordinator,
+    candidate_id: str,
+    relative: str,
+    block: bytes,
+    *,
+    deadline: float,
+    cancelled: Callable[[], bool] | None,
+) -> _AppendAttemptResult:
+    if isinstance(error, TransactionFailure):
+        return _append_transaction_failure(error)
+    if isinstance(error, ValueError):
+        return _append_value_failure(
+            error,
+            coordinator,
+            candidate_id,
+            relative,
+            block,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+    if isinstance(error, RuntimeError):
+        return _append_runtime_failure(error)
+    return "retry"
+
+
+def _prepare_append_candidate(
+    coordinator: MarkdownCoordinator,
+    candidate_id: str,
+    relative: str,
+    before: bytes | None,
+    block: bytes,
+    *,
+    extra_preconditions: Mapping[str, object] | None,
+    content_guard: Literal["model_output"] | None,
+    deadline: float,
+    cancelled: Callable[[], bool] | None,
+) -> _AppendAttemptResult:
+    change = _append_change(relative, before, block)
+    try:
+        coordinator.prepare(
+            [change],
+            operation_id=candidate_id,
+            preconditions=_append_preconditions(relative, before, extra_preconditions),
+            content_guard=content_guard,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+    except (
+        FileExistsError,
+        FileNotFoundError,
+        ValueError,
+        TransactionFailure,
+        RuntimeError,
+        TimeoutError,
+    ) as exc:
+        return _append_prepare_failure(
+            exc,
+            coordinator,
+            candidate_id,
+            relative,
+            block,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+    return _settle_append_candidate(
+        coordinator,
+        candidate_id,
+        relative,
+        block,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+
+
+def _run_append_candidate(
+    coordinator: MarkdownCoordinator,
+    candidate_id: str,
+    relative: str,
+    block: bytes,
+    *,
+    extra_preconditions: Mapping[str, object] | None,
+    content_guard: Literal["model_output"] | None,
+    deadline: float,
+    cancelled: Callable[[], bool] | None,
+) -> _AppendAttemptResult:
+    if coordinator._record_for_operation_id(candidate_id) is not None:
+        return _settle_append_candidate(
+            coordinator,
+            candidate_id,
+            relative,
+            block,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+    before = _capture_append_before(
+        coordinator, relative, deadline=deadline, cancelled=cancelled
+    )
+    return _prepare_append_candidate(
+        coordinator,
+        candidate_id,
+        relative,
+        before,
+        block,
+        extra_preconditions=extra_preconditions,
+        content_guard=content_guard,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+
+
+def _append_until_committed(
+    coordinator: MarkdownCoordinator,
+    operation_id: str,
+    relative: str,
+    block: bytes,
+    *,
+    extra_preconditions: Mapping[str, object] | None = None,
+    content_guard: Literal["model_output"] | None = None,
+    deadline: float,
+    cancelled: Callable[[], bool] | None,
+) -> TransactionRecord:
+    attempt = 0
+    while attempt < 64:
+        candidate_id = _append_candidate_id(operation_id, attempt)
+        outcome = _run_append_candidate(
+            coordinator,
+            candidate_id,
+            relative,
+            block,
+            extra_preconditions=extra_preconditions,
+            content_guard=content_guard,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+        if isinstance(outcome, TransactionRecord):
+            return outcome
+        if outcome == "advance":
+            attempt += 1
     raise TimeoutError("knowledge append did not converge after 64 CAS attempts")
+
+
+def append_knowledge(
+    operation_id: str | Path | None = None,
+    path: Path | bytes | None = None,
+    block: bytes | None = None,
+    *,
+    deadline: float = float("inf"),
+    cancelled: Callable[[], bool] | None = None,
+) -> TransactionRecord:
+    """CAS-append Markdown or project JSONL bytes, retrying concurrent winners."""
+    operation_id, append_path, block = _normalize_append_request(
+        operation_id, path, block
+    )
+    coordinator = _default_coordinator()
+    relative = _relative_target(coordinator, append_path)
+    _recover_initial_contention(
+        coordinator, deadline=deadline, cancelled=cancelled
+    )
+    return _append_until_committed(
+        coordinator,
+        operation_id,
+        relative,
+        block,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+
+
+def _capture_append_context_matches(
+    stored: Mapping[str, object], current: Mapping[str, object]
+) -> bool:
+    stored_fence = stored.get("intent_fence")
+    current_fence = current.get("intent_fence")
+    if not isinstance(stored_fence, Mapping) or not isinstance(current_fence, Mapping):
+        return False
+    return stored.get("capture_binding") == current.get("capture_binding") and (
+        stored_fence.get("intent_id"),
+        stored_fence.get("mode"),
+    ) == (
+        current_fence.get("intent_id"),
+        current_fence.get("mode"),
+    )
+
+
+def append_captured_knowledge(
+    coordinator: MarkdownCoordinator,
+    owner: object,
+    operation_id: str,
+    path: Path,
+    block: bytes,
+    *,
+    preconditions: Mapping[str, object],
+    deadline: float = float("inf"),
+    cancelled: Callable[[], bool] | None = None,
+) -> TransactionRecord:
+    """CAS-append one provider decision under live capture preconditions."""
+    operation_id, append_path, content = _normalize_append_request(
+        operation_id, path, block
+    )
+    relative = _relative_target(coordinator, append_path)
+    expected = coordinator._validate_preconditions(preconditions)
+    with coordinator.writer_gate(owner=owner):
+        with coordinator._connect() as database:
+            coordinator._check_capture_preconditions(database, expected)
+        _recover_initial_contention(
+            coordinator, deadline=deadline, cancelled=cancelled
+        )
+        record = _append_until_committed(
+            coordinator,
+            operation_id,
+            relative,
+            content,
+            extra_preconditions=preconditions,
+            content_guard="model_output",
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+    if not _capture_append_context_matches(record.preconditions, expected):
+        raise ValueError("capture append transaction preconditions conflict")
+    return record
 
 
 def _now() -> str:
@@ -1806,29 +2505,80 @@ def _run_acl_command(command: list[str]) -> subprocess.CompletedProcess[bytes]:
     )
 
 
-def _harden_windows_acl(path: Path) -> None:
-    identity = _windows_acl_identity()
-    permission = f"{identity}:(OI)(CI)(F)" if path.is_dir() else f"{identity}:(F)"
+def _acl_permission(path: Path, identity: str) -> str:
+    if path.is_dir():
+        return f"{identity}:(OI)(CI)(F)"
+    return f"{identity}:(F)"
+
+
+def _acl_failure(path: Path, changed: subprocess.CompletedProcess[bytes]) -> None:
+    detail = _acl_output_text(changed.stderr).strip()
+    if not detail:
+        detail = "icacls failed"
+    raise PermissionError(f"could not apply owner-only ACL to {path}: {detail}")
+
+
+def _apply_windows_acl(
+    path: Path, permission: str
+) -> subprocess.CompletedProcess[bytes]:
     try:
         changed = _run_acl_command(
-            ["icacls", str(path), "/inheritance:r", "/grant:r", permission]
+            [
+                "icacls",
+                str(path),
+                "/inheritance:r",
+                "/remove:g",
+                "*S-1-5-18",
+                "*S-1-5-32-544",
+                "*S-1-5-32-545",
+                "*S-1-5-11",
+                "*S-1-3-0",
+                "*S-1-3-4",
+                "/grant:r",
+                permission,
+            ]
         )
-        verified = _run_acl_command(["icacls", str(path)]) if changed.returncode == 0 else None
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise PermissionError(f"could not apply owner-only ACL to {path}: {exc}") from exc
-    if changed.returncode != 0 or verified is None or verified.returncode != 0:
-        detail = _acl_output_text(changed.stderr).strip() or "icacls failed"
-        raise PermissionError(f"could not apply owner-only ACL to {path}: {detail}")
+    if changed.returncode != 0:
+        _acl_failure(path, changed)
+    try:
+        verified = _run_acl_command(["icacls", str(path)])
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise PermissionError(f"could not verify owner-only ACL on {path}: {exc}") from exc
+    if verified.returncode != 0:
+        _acl_failure(path, verified)
+    return verified
+
+
+def _verified_owner_acl_line(
+    path: Path, owner_lines: list[str]
+) -> str:
+    if len(owner_lines) != 1:
+        raise PermissionError(f"owner-only ACL verification failed for {path}")
+    owner = owner_lines[0]
+    if "(F)" not in owner:
+        raise PermissionError(f"owner-only ACL verification failed for {path}")
+    if "(I)" in owner:
+        raise PermissionError(f"owner-only ACL verification failed for {path}")
+    return owner
+
+
+def _verify_no_other_acl(path: Path, acl_lines: list[str], identity: str) -> None:
+    for line in acl_lines:
+        if identity.casefold() not in line.casefold():
+            raise PermissionError(f"owner-only ACL verification failed for {path}")
+
+
+def _harden_windows_acl(path: Path) -> None:
+    identity = _windows_acl_identity()
+    permission = _acl_permission(path, identity)
+    verified = _apply_windows_acl(path, permission)
     output = _acl_output_text(verified.stdout)
     acl_lines = [line.strip() for line in output.splitlines() if ":(" in line]
     owner_lines = [line for line in acl_lines if identity.casefold() in line.casefold()]
-    if (
-        len(owner_lines) != 1
-        or "(F)" not in owner_lines[0]
-        or "(I)" in owner_lines[0]
-        or any(identity.casefold() not in line.casefold() for line in acl_lines)
-    ):
-        raise PermissionError(f"owner-only ACL verification failed for {path}")
+    _verified_owner_acl_line(path, owner_lines)
+    _verify_no_other_acl(path, acl_lines, identity)
 
 
 def _acl_output_text(value: bytes | str | None) -> str:
@@ -2002,6 +2752,15 @@ class MarkdownCoordinator:
         finally:
             database.close()
 
+    def _ownership_registry(self) -> object:
+        from operational_ownership import OwnershipRegistry
+
+        if getattr(self, "_database_contract", None) != _COORDINATOR_V3_CONTRACT:
+            return OwnershipRegistry(self.state_root)
+        return OwnershipRegistry._from_adopted_database(
+            self.state_root, self.database_path
+        )
+
     @staticmethod
     def _validate_intent_fence_owner(
         owner: OwnerLease, mode: Literal["capture", "worker", "operator"]
@@ -2028,9 +2787,7 @@ class MarkdownCoordinator:
         self._validate_intent_fence_owner(owner, mode)
         if re.fullmatch(r"[0-9a-f]{64}", intent_id) is None:
             raise ValueError("intent_id must be lowercase 64-hex")
-        from operational_ownership import OwnershipRegistry
-
-        registry = OwnershipRegistry(self.state_root)
+        registry = self._ownership_registry()
         now = datetime.now(timezone.utc)
         expires_at = min(owner.expires_at, now + timedelta(seconds=30))
         token = uuid.uuid4().hex
@@ -2081,6 +2838,12 @@ class MarkdownCoordinator:
         if not isinstance(fence, IntentFence):
             raise TypeError("fence must be an IntentFence")
         with self._connect() as database, begin_immediate(database):
+            database.execute(
+                """DELETE FROM capture_binding_projections
+                   WHERE intent_id=? AND intent_fence_token=?
+                     AND intent_fence_epoch=?""",
+                (fence.intent_id, fence.token, fence.epoch),
+            )
             deleted = database.execute(
                 """DELETE FROM intent_fences
                    WHERE intent_id=? AND mode=? AND token=? AND fencing_epoch=?
@@ -2604,6 +3367,7 @@ class MarkdownCoordinator:
         operation_id: str,
         preconditions: Mapping[str, object] | None = None,
         validators: Sequence[Validator] = (),
+        content_guard: Literal["model_output"] | None = None,
         project_reservation: ProjectCheckpointReservation | None = None,
         _parent_transaction_id: str | None = None,
         deadline: float = float("inf"),
@@ -2614,6 +3378,8 @@ class MarkdownCoordinator:
             raise ValueError("operation_id must be a non-empty string")
         if not changes:
             raise ValueError("a transaction requires at least one change")
+        if content_guard not in {None, "model_output"}:
+            raise ValueError("content_guard must be 'model_output' or None")
         normalized = tuple(self._validate_change(change) for change in changes)
         paths = [unicodedata.normalize("NFC", change.path).casefold() for change in normalized]
         if len(paths) != len(set(paths)):
@@ -2729,6 +3495,8 @@ class MarkdownCoordinator:
                 "transaction_id": transaction_id,
                 "operations": plan_operations,
             }
+            if content_guard is not None:
+                plan["content_guard"] = content_guard
             validate_schema(plan, _SCHEMA)
             for validator in validators:
                 if not callable(validator):
@@ -2963,6 +3731,18 @@ class MarkdownCoordinator:
             self._local.recovery_cancelled = cancelled
             try:
                 return self._apply_locked(transaction_id)
+            except (DLPContentBlocked, DLPPolicyError) as exc:
+                code = (
+                    "dlp_policy_error"
+                    if isinstance(exc, DLPPolicyError)
+                    else "dlp_content_blocked"
+                )
+                self._rollback_for_quarantine(transaction_id, code)
+                raise TransactionFailure(
+                    "model output publication was blocked",
+                    code,
+                    "quarantined",
+                ) from exc
             except TransactionFailure as exc:
                 if exc.code == "precondition_failed":
                     self._rollback_for_quarantine(transaction_id, exc.code)
@@ -3014,6 +3794,7 @@ class MarkdownCoordinator:
         if record.state not in {"prepared", "applying"}:
             raise RuntimeError(f"transaction cannot be applied from state {record.state}")
         plan = self._load_verified_plan(record)
+        content_guard = self._content_guard(record, plan)
         rows = self._operation_rows(transaction_id)
         operation_states = {
             row["path"]: (row["before_hash"], row["after_hash"]) for row in rows
@@ -3039,7 +3820,9 @@ class MarkdownCoordinator:
             if row["applied"]:
                 self._require_operation_state(row, row["after_hash"], "after state")
                 continue
-            self._mutate_and_mark(transaction_id, row, operation_plan)
+            self._mutate_and_mark(
+                transaction_id, row, operation_plan, content_guard=content_guard
+            )
             self._killpoint("after_each_target", record.parent_transaction_id)
 
         self._check_preconditions(record.preconditions, operation_states)
@@ -3065,6 +3848,7 @@ class MarkdownCoordinator:
         rows: Sequence[sqlite3.Row],
         operation_states: Mapping[str, tuple[str, str]],
     ) -> TransactionRecord:
+        content_guard = self._content_guard(record, plan)
         self._check_preconditions(record.preconditions, operation_states)
         self._reconcile_operation_states(record.id, rows)
         rows = self._operation_rows(record.id)
@@ -3102,7 +3886,12 @@ class MarkdownCoordinator:
                         self._require_operation_state(row, row["after_hash"], "after state")
                         continue
                     assert isinstance(operation_plan, Mapping)
-                    self._mutate_and_mark(record.id, row, operation_plan)
+                    self._mutate_and_mark(
+                        record.id,
+                        row,
+                        operation_plan,
+                        content_guard=content_guard,
+                    )
                     changed.append(row)
                     self._check_preconditions(
                         record.preconditions, operation_states, database=database
@@ -3518,6 +4307,14 @@ class MarkdownCoordinator:
                         record = self._record(transaction_id)
                     try:
                         recovered.append(self._apply_locked(transaction_id))
+                    except (DLPContentBlocked, DLPPolicyError) as exc:
+                        code = (
+                            "dlp_policy_error"
+                            if isinstance(exc, DLPPolicyError)
+                            else "dlp_content_blocked"
+                        )
+                        self._rollback_for_quarantine(transaction_id, code)
+                        recovered.append(self._record(transaction_id))
                     except TransactionFailure as exc:
                         if exc.code == "precondition_failed":
                             self._rollback_for_quarantine(transaction_id, exc.code)
@@ -4316,15 +5113,13 @@ class MarkdownCoordinator:
     def _canonical_writer_gate(
         self, wait_seconds: float | None
     ) -> Iterator[OwnerLease]:
-        from operational_ownership import OwnershipRegistry
-
         if wait_seconds is not None and (
             isinstance(wait_seconds, bool)
             or not isinstance(wait_seconds, (int, float))
             or wait_seconds < 0
         ):
             raise ValueError("writer gate wait_seconds must be non-negative or None")
-        registry = OwnershipRegistry(self.state_root)
+        registry = self._ownership_registry()
         deadline = time.monotonic() + (
             _WRITER_WAIT_SECONDS if wait_seconds is None else wait_seconds
         )
@@ -4453,7 +5248,7 @@ class MarkdownCoordinator:
                 return
 
     def _nested_writer_gate(self, owner: OwnerLease) -> Iterator[OwnerLease]:
-        from operational_ownership import OwnerLease, OwnershipRegistry
+        from operational_ownership import OwnerLease
 
         if not isinstance(owner, OwnerLease):
             raise TypeError("owner must be an OwnerLease")
@@ -4470,7 +5265,7 @@ class MarkdownCoordinator:
                 self._local.gate_depth -= 1
             return
 
-        registry = OwnershipRegistry(self.state_root)
+        registry = self._ownership_registry()
         with self._connect() as database, begin_immediate(database):
             registry.require(database, owner)
             self._insert_writer_projection(database, owner)
@@ -5475,11 +6270,13 @@ class MarkdownCoordinator:
         transaction_id: str,
         row: sqlite3.Row,
         operation_plan: Mapping[str, object],
+        *,
+        content_guard: str | None = None,
     ) -> None:
         active_database = getattr(self._local, "mutation_database", None)
         if active_database is not None:
             self._assert_writer_ownership(active_database)
-            self._apply_operation(row, operation_plan)
+            self._apply_forward_operation(row, operation_plan, content_guard)
             self._require_operation_state(row, row["after_hash"], "after state")
             self._mark_operation_applied(transaction_id, row["position"])
             return
@@ -5489,11 +6286,37 @@ class MarkdownCoordinator:
             self._assert_writer_ownership(database)
             self._local.mutation_database = database
             try:
-                self._apply_operation(row, operation_plan)
+                self._apply_forward_operation(row, operation_plan, content_guard)
                 self._require_operation_state(row, row["after_hash"], "after state")
                 self._mark_operation_applied(transaction_id, row["position"])
             finally:
                 self._local.mutation_database = None
+
+    @staticmethod
+    def _content_guard(
+        record: TransactionRecord, plan: Mapping[str, object]
+    ) -> str | None:
+        configured = plan.get("content_guard")
+        if configured == "model_output":
+            return configured
+        if record.operation_id.startswith(
+            ("compile:", "compile-quarantine:", "contradiction:")
+        ):
+            return "model_output"
+        return None
+
+    def _apply_forward_operation(
+        self,
+        row: sqlite3.Row,
+        operation_plan: Mapping[str, object],
+        content_guard: str | None,
+    ) -> None:
+        previous = getattr(self._local, "content_guard", None)
+        self._local.content_guard = content_guard
+        try:
+            self._apply_operation(row, operation_plan)
+        finally:
+            self._local.content_guard = previous
 
     def _assert_writer_ownership(self, database: sqlite3.Connection) -> None:
         owner_token = getattr(self._local, "gate_token", None)
@@ -5503,9 +6326,7 @@ class MarkdownCoordinator:
             getattr(self, "_database_contract", None) == _COORDINATOR_V3_CONTRACT
             and owner is not None
         ):
-            from operational_ownership import OwnershipRegistry
-
-            registry = OwnershipRegistry(self.state_root)
+            registry = self._ownership_registry()
             registry.require(database, owner)
             cursor = database.execute(
                 """UPDATE writer_owners
@@ -5582,6 +6403,8 @@ class MarkdownCoordinator:
             content = artifact.read_bytes()
             if sha256_bytes(content) != row["after_hash"]:
                 raise RuntimeError(f"transaction after-image is corrupt for {row['path']}")
+            if getattr(self._local, "content_guard", None) == "model_output":
+                require_safe_publication(content)
             temporary_name = f".{target.name}.{uuid.uuid4().hex}.tmp"
             try:
                 self._write_new_file_at(parent_descriptor, temporary_name, content)
@@ -5641,6 +6464,8 @@ class MarkdownCoordinator:
         content = artifact.read_bytes()
         if sha256_bytes(content) != row["after_hash"]:
             raise RuntimeError(f"transaction after-image is corrupt for {row['path']}")
+        if getattr(self._local, "content_guard", None) == "model_output":
+            require_safe_publication(content)
         temporary = target.parent / f".{target.name}.{uuid.uuid4().hex}.tmp"
         self._write_new_file(temporary, content, owner_only=False)
         self._before_target_mutation(target)
@@ -5754,9 +6579,17 @@ class MarkdownCoordinator:
     def _record_for_operation_id(self, operation_id: str) -> TransactionRecord | None:
         with self._connect() as database:
             row = database.execute(
-                'SELECT id FROM "transaction" WHERE operation_id = ?', (operation_id,)
+                'SELECT id, state FROM "transaction" WHERE operation_id = ?',
+                (operation_id,),
             ).fetchone()
-        return None if row is None else self._record(row["id"])
+        if row is None:
+            return None
+        try:
+            return self._record(row["id"])
+        except KeyError:
+            if row["state"] == "preparing":
+                return None
+            raise
 
     def _request_hash_for_operation_id(self, operation_id: str) -> str | None:
         with self._connect() as database:

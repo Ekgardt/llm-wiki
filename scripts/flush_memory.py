@@ -33,9 +33,11 @@ doesn't track runtime churn.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
 
@@ -53,6 +55,29 @@ from secret_redact import redact_secrets  # noqa: E402
 DAILY_DIR = ROOT / "knowledge" / "daily"
 DEDUPE_WINDOW_SECONDS = 60
 MAX_TRANSCRIPT_CHARS = 60_000
+MAX_CAPTURE_INTENT_BYTES = 1024 * 1024
+MAX_CAPTURE_DECISION_BYTES = 1024 * 1024
+MAX_CAPTURE_TERMINAL_BYTES = 64 * 1024
+
+_CAPTURE_SOURCE_FIELDS = (
+    "source_occurrence_id",
+    "source_event_id",
+    "occurred_at",
+    "host",
+    "event",
+    "session",
+    "project_slug",
+    "worktree",
+    "trigger",
+    "checkpoint_reason",
+    "chunk_index",
+    "chunk_count",
+    "evidence",
+)
+_CAPTURE_SYSTEM_PROMPT = (
+    "Classify durable session evidence. Emit exactly FLUSH_OK, or FLUSH_MAJOR "
+    "followed by a nonempty body, or FLUSH_MINOR followed by a nonempty body."
+)
 
 # Tier sentinels — replace the legacy single FLUSH_OK. The classifier
 # is asked to emit exactly one of these as the FIRST line of its
@@ -118,6 +143,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--trigger", default="")
     p.add_argument("--source-event-id", default="")
     p.add_argument("--checkpoint-reason", default="")
+    p.add_argument(
+        "--agent",
+        choices=("opencode", "codex", "claude", "cursor", "antigravity", "unknown"),
+        default="unknown",
+    )
     p.add_argument("--ephemeral-transcript", action="store_true")
     return p.parse_args()
 
@@ -387,90 +417,905 @@ def maybe_trigger_compile(state: dict, daily_path: Path, tier: str) -> None:
     state["compile_triggers"] = state["compile_triggers"][-20:]
 
 
-def _run_flush(args: argparse.Namespace) -> int:
-    # Read-only peek for the dedupe short-circuit; the real write happens
-    # inside update_state() below so we don't race with compile_memory.
-    if should_skip(load_state(), args.session_id, args.event):
-        return 0
+def _flush_summary(args: argparse.Namespace) -> str | None:
+    if not args.transcript:
+        return ""
+    transcript = read_transcript_tail(Path(args.transcript))
+    if not transcript:
+        return ""
+    return summarize_with_llm(transcript, args.event, args.session_id)
 
-    transcript = read_transcript_tail(Path(args.transcript)) if args.transcript else ""
-    raw_summary = summarize_with_llm(transcript, args.event, args.session_id) if transcript else ""
-    if raw_summary is None:
-        return 0
 
-    # 3-tier classification (Phase 0.5). Replaces binary FLUSH_OK check.
-    tier, body = _classify_response(raw_summary)
+def _capture_binding_intent_id(binding: object) -> str:
+    intent_id = getattr(binding, "intent_id", None)
+    if not isinstance(intent_id, str):
+        raise RuntimeError("capture intent is unresolved")
+    return intent_id
 
-    # 3b. Feedback capture — scan for correction/preference patterns.
-    # If the user corrected the agent during this session, save as a
-    # feedback candidate for later promotion. Non-blocking.
-    if tier in ("major", "minor") and body:
-        try:
-            sys.path.insert(0, str(Path(__file__).resolve().parent))
-            from feedback_capture import capture_from_text
-            capture_from_text(
-                body,
-                session_id=args.session_id,
-                slug="unknown",
-                trigger=args.event,
-            )
-        except Exception:
-            pass
 
-    # FLUSH_OK: nothing worth persisting. Still record dedupe so retries
-    # don't hammer the SDK. Still consider auto-compile in case the day's
-    # log already has prior MAJOR content worth compiling.
+def _capture_intent_reference(
+    lease: object, active: object
+) -> tuple[str, str, str]:
+    payload = getattr(lease, "payload", None)
+    intent_id = getattr(active, "intent_id", None)
+    intent_sha256 = getattr(active, "intent_sha256", None)
+    if not isinstance(payload, Mapping):
+        raise RuntimeError("capture task payload is invalid")
+    if not isinstance(intent_id, str) or not isinstance(intent_sha256, str):
+        raise RuntimeError("capture task binding is invalid")
+    intent_path = f"run/capture-intents/ready/{intent_id[:2]}/{intent_id}.json"
+    actual = (
+        set(payload),
+        payload.get("intent_id"),
+        payload.get("intent_sha256"),
+        isinstance(payload.get("intent_path"), str),
+        getattr(active, "task_id", None),
+    )
+    expected = (
+        {"intent_id", "intent_path", "intent_sha256"},
+        intent_id,
+        intent_sha256,
+        True,
+        getattr(lease, "id", None),
+    )
+    if actual != expected:
+        raise RuntimeError("capture task payload conflicts with its binding")
+    return intent_id, intent_path, intent_sha256
+
+
+def _decode_capture_intent(data: bytes) -> dict[str, object]:
+    from reliable_memory import canonical_json_bytes, validate_schema
+
+    try:
+        record = json.loads(data.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("capture intent JSON is invalid") from exc
+    if not isinstance(record, dict):
+        raise RuntimeError("capture intent must be a JSON object")
+    validate_schema(record, Path(__file__).with_name("schemas") / "capture-intent-v1.json")
+    if canonical_json_bytes(record) != data:
+        raise RuntimeError("capture intent is not canonical JSON")
+    return record
+
+
+def _require_capture_intent_identity(record: Mapping[str, object]) -> None:
+    from reliable_memory import canonical_json_bytes, sha256_bytes
+
+    source = {field: record[field] for field in _CAPTURE_SOURCE_FIELDS}
+    chunk_sha256 = sha256_bytes(canonical_json_bytes(record["evidence"]))
+    complete_sha256 = sha256_bytes(canonical_json_bytes(source))
+    identity = {
+        "schema_version": "capture-intent/v1",
+        "source_occurrence_id": record["source_occurrence_id"],
+        "source_event_id": record["source_event_id"],
+        "occurred_at": record["occurred_at"],
+        "checkpoint_reason": record["checkpoint_reason"],
+        "chunk_index": record["chunk_index"],
+        "chunk_sha256": chunk_sha256,
+    }
+    actual = (
+        record["chunk_sha256"],
+        record["complete_input_sha256"],
+        record["intent_id"],
+    )
+    expected = (
+        chunk_sha256,
+        complete_sha256,
+        sha256_bytes(canonical_json_bytes(identity)),
+    )
+    if actual != expected:
+        raise RuntimeError("capture intent identity is invalid")
+
+
+def _read_capture_intent(
+    queue: object, lease: object, active: object
+) -> dict[str, object]:
+    from reliable_memory import read_runtime_bytes, sha256_bytes
+
+    intent_id, intent_path, intent_sha256 = _capture_intent_reference(lease, active)
+    data = read_runtime_bytes(
+        queue.state_root / intent_path,
+        queue.state_root,
+        max_bytes=MAX_CAPTURE_INTENT_BYTES,
+        owner_only=True,
+    )
+    if sha256_bytes(data) != intent_sha256:
+        raise RuntimeError("capture intent digest changed")
+    record = _decode_capture_intent(data)
+    if record["intent_id"] != intent_id:
+        raise RuntimeError("capture intent ID conflicts with its binding")
+    _require_capture_intent_identity(record)
+    return record
+
+
+def _capture_prompt(record: Mapping[str, object]) -> str:
+    from reliable_memory import canonical_json_bytes
+
+    evidence = canonical_json_bytes(record["evidence"]).decode("utf-8")
+    return (
+        "Classify this role-preserved session evidence using the closed flush grammar.\n"
+        f"Event: {record['event']}\n"
+        f"Evidence: {evidence}"
+    )
+
+
+def _capture_wire_body(raw: str, token: str) -> str | None:
+    prefix = f"{token}\n"
+    if not raw.startswith(prefix):
+        return None
+    body = raw[len(prefix) :]
+    if not body:
+        raise RuntimeError("capture provider returned an empty flush body")
+    if body != body.strip():
+        raise RuntimeError("capture provider returned noncanonical flush output")
+    return body
+
+
+def _parse_capture_wire_output(raw: object) -> tuple[str, str]:
+    if not isinstance(raw, str):
+        raise RuntimeError("capture provider returned no flush output")
+    if raw == "FLUSH_OK":
+        return "ok", ""
+    major = _capture_wire_body(raw, "FLUSH_MAJOR")
+    if major is not None:
+        return "major", major
+    minor = _capture_wire_body(raw, "FLUSH_MINOR")
+    if minor is not None:
+        return "minor", minor
+    raise RuntimeError("capture provider returned invalid flush output")
+
+
+def _call_capture_classifier(
+    record: Mapping[str, object],
+    llm_call: Callable[[str, str, int], object] | None,
+) -> tuple[object, str, str]:
+    from llm_client import LLMResult, call_llm_result
+
+    caller = llm_call
+    if caller is None:
+        caller = call_llm_result
+    result = caller(_capture_prompt(record), _CAPTURE_SYSTEM_PROMPT, 1500)
+    if not isinstance(result, LLMResult):
+        raise RuntimeError("capture provider did not return a provider result")
+    if (result.available, result.failure_class) != (True, None):
+        raise RuntimeError("capture provider call did not succeed")
+    tier, body = _parse_capture_wire_output(result.text)
+    return result, tier, body
+
+
+def _capture_tier_outcome(tier: str) -> str:
+    outcomes = {
+        "ok": "semantic_ok",
+        "major": "major_written",
+        "minor": "minor_written",
+    }
+    try:
+        return outcomes[tier]
+    except KeyError as exc:
+        raise ValueError("capture tier is invalid") from exc
+
+
+def _capture_now() -> datetime:
+    return datetime.now().astimezone()
+
+
+def _require_capture_time(value: object) -> datetime:
+    if not isinstance(value, datetime):
+        raise TypeError("capture decision time must be a datetime")
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("capture decision time must be timezone-aware")
+    return value
+
+
+def _capture_text(value: object, fallback: str) -> str:
+    if isinstance(value, str) and value:
+        return value
+    return fallback
+
+
+def _capture_daily_block(
+    record: Mapping[str, object], tier: str, body: str, chosen_at: datetime
+) -> str:
+    event = _capture_text(record["event"], "session_end").replace("_", "-")
+    session = _capture_text(record["session"], "unknown")
+    trigger = _capture_text(record["trigger"], event)
+    header = f"\n## [{chosen_at.strftime('%H:%M:%S')}] {event} | {session}\n"
+    metadata = (
+        f"- Trigger: `{trigger}`\n"
+        f"- Agent: `{record['host']}`\n"
+        f"- Capture intent: `{record['intent_id']}`\n"
+        f"- Tier: `{tier}`\n\n"
+    )
+    return redact_secrets(f"{header}{metadata}{body}\n")
+
+
+def _capture_operation_plan(
+    record: Mapping[str, object],
+    tier: str,
+    body: str,
+    chosen_at: datetime | None,
+) -> list[dict[str, object]]:
+    from reliable_memory import sha256_bytes
+
     if tier == "ok":
-        def _mutate_noop(state: dict) -> None:
-            record_flush(state, args.session_id, args.event)
-            state.setdefault("flush_empty_count", 0)
-            state["flush_empty_count"] = int(state.get("flush_empty_count", 0)) + 1
-            state["last_flush_empty_at"] = datetime.now().isoformat(timespec="seconds")
-            # Track tier distribution for observability.
-            state.setdefault("flush_tier_counts", {})
-            state["flush_tier_counts"]["ok"] = int(state["flush_tier_counts"].get("ok", 0)) + 1
+        return []
+    if chosen_at is None:
+        raise ValueError("durable capture decision requires a chosen time")
+    chosen = _require_capture_time(chosen_at)
+    block = _capture_daily_block(record, tier, body, chosen)
+    path = f"knowledge/daily/{chosen.strftime('%Y-%m-%d')}.md"
+    return [
+        {
+            "kind": "append",
+            "path": path,
+            "block": block,
+            "block_sha256": sha256_bytes(block.encode("utf-8")),
+            "operation_id": f"capture-markdown:{record['intent_id']}",
+            "chosen_at": chosen.isoformat().replace("+00:00", "Z"),
+        }
+    ]
 
-        update_state(_mutate_noop)
-        return 0
 
-    # FLUSH_MAJOR or FLUSH_MINOR: append the structured body to today's
-    # daily log with a Tier: marker so the compile pipeline and human
-    # readers can see what kind of content this is.
-    now = datetime.now()
-    day = now.strftime("%Y-%m-%d")
+def _capture_decision_time(decision: Mapping[str, object]) -> datetime | None:
+    plan = decision["operation_plan"]
+    if not plan:
+        return None
+    try:
+        value = datetime.fromisoformat(str(plan[0]["chosen_at"]).replace("Z", "+00:00"))
+    except (IndexError, KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("capture decision time is invalid") from exc
+    return _require_capture_time(value)
+
+
+def _require_capture_decision_semantics(
+    decision: Mapping[str, object], intent: Mapping[str, object]
+) -> None:
+    tier, body = _parse_capture_wire_output(decision["wire_output"])
+    actual = (decision["tier"], decision["outcome"])
+    expected = (tier, _capture_tier_outcome(tier))
+    if actual != expected:
+        raise RuntimeError("capture decision outcome is invalid")
+    plan = _capture_operation_plan(
+        intent, tier, body, _capture_decision_time(decision)
+    )
+    if decision["operation_plan"] != plan:
+        raise RuntimeError("capture decision operation plan is invalid")
+
+
+def _capture_decision_bytes(
+    record: Mapping[str, object],
+    active: object,
+    result: object,
+    tier: str,
+    body: str,
+    chosen_at: datetime | None,
+) -> bytes:
+    from llm_client import LLMResult
+    from reliable_memory import canonical_json_bytes, validate_schema
+
+    if not isinstance(result, LLMResult):
+        raise TypeError("capture decision requires an LLM result")
+    descriptor = result.descriptor
+    decision = {
+        "schema_version": "capture-decision/v1",
+        "intent_id": record["intent_id"],
+        "intent_sha256": getattr(active, "intent_sha256"),
+        "complete_input_sha256": record["complete_input_sha256"],
+        "chunk_sha256": record["chunk_sha256"],
+        "stage": "flush",
+        "provider": {
+            "provider": descriptor.provider,
+            "model": descriptor.model,
+            "candidate_index": descriptor.candidate_index,
+            "fallback_from": list(descriptor.fallback_from),
+            "structured_output": result.structured_output,
+        },
+        "wire_output": result.text,
+        "tier": tier,
+        "outcome": _capture_tier_outcome(tier),
+        "operation_plan": _capture_operation_plan(record, tier, body, chosen_at),
+        "processing_binding": {
+            "kind": "task",
+            "task_id": getattr(active, "task_id"),
+            "active_link_digest": getattr(active, "active_digest"),
+        },
+    }
+    schema = Path(__file__).with_name("schemas") / "capture-decision-v1.json"
+    validate_schema(decision, schema)
+    _require_capture_decision_semantics(decision, record)
+    encoded = canonical_json_bytes(decision)
+    if len(encoded) > MAX_CAPTURE_DECISION_BYTES:
+        raise RuntimeError("capture decision exceeds its byte limit")
+    return encoded
+
+
+def _ensure_capture_results_directory(queue: object) -> None:
+    from reliable_memory import fsync_directory
+
+    path = Path(queue.results_dir)
+    try:
+        path.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    else:
+        fsync_directory(path.parent)
+    if path.is_symlink() or not path.is_dir():
+        raise PermissionError("capture results directory is unsafe")
+    path.resolve(strict=True).relative_to(Path(queue.state_root).resolve(strict=True))
+
+
+def _capture_decision_relative_path(intent_id: str) -> str:
+    from reliable_memory import canonical_json_bytes, sha256_bytes
+
+    key = sha256_bytes(
+        canonical_json_bytes({"intent_id": intent_id, "stage": "flush"})
+    )
+    return f"run/queue-results/capture-decision-{key}.json"
+
+
+def _index_capture_decision(
+    queue: object,
+    coordinator: object,
+    lease: object,
+    active: object,
+    task_fence: object,
+    intent_fence: object,
+    owner: object,
+    encoded: bytes,
+) -> object:
+    from reliable_memory import publish_runtime_file, sha256_bytes
+
+    relative = _capture_decision_relative_path(active.intent_id)
+    publish_runtime_file(
+        queue.state_root / relative,
+        encoded,
+        state_root=queue.state_root,
+        create_only=True,
+    )
+    return queue.publish_semantic_decision(
+        coordinator,
+        task_id=lease.id,
+        intent_id=active.intent_id,
+        stage="flush",
+        decision_path=relative,
+        decision_sha256=sha256_bytes(encoded),
+        active_link_digest=active.active_digest,
+        task_fence=task_fence,
+        intent_fence=intent_fence,
+        owner=owner,
+    )
+
+
+def _decode_capture_decision(data: bytes) -> dict[str, object]:
+    from reliable_memory import canonical_json_bytes, validate_schema
+
+    try:
+        decision = json.loads(data.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("capture decision JSON is invalid") from exc
+    if not isinstance(decision, dict):
+        raise RuntimeError("capture decision must be a JSON object")
+    schema = Path(__file__).with_name("schemas") / "capture-decision-v1.json"
+    validate_schema(decision, schema)
+    if canonical_json_bytes(decision) != data:
+        raise RuntimeError("capture decision is not canonical JSON")
+    return decision
+
+
+def _require_capture_decision_identity(
+    decision: Mapping[str, object],
+    intent: Mapping[str, object],
+    active: object,
+) -> None:
+    actual = (
+        decision["intent_id"],
+        decision["intent_sha256"],
+        decision["complete_input_sha256"],
+        decision["chunk_sha256"],
+        decision["processing_binding"],
+    )
+    expected = (
+        active.intent_id,
+        active.intent_sha256,
+        intent["complete_input_sha256"],
+        intent["chunk_sha256"],
+        {
+            "kind": "task",
+            "task_id": active.task_id,
+            "active_link_digest": active.active_digest,
+        },
+    )
+    if actual != expected:
+        raise RuntimeError("capture decision conflicts with its binding")
+    _require_capture_decision_semantics(decision, intent)
+
+
+def _existing_capture_decision(
+    queue: object,
+    coordinator: object,
+    lease: object,
+    active: object,
+    task_fence: object,
+    intent_fence: object,
+    owner: object,
+    intent: Mapping[str, object],
+) -> tuple[object, dict[str, object]] | None:
+    indexed = queue.indexed_capture_decision(
+        task_id=lease.id,
+        intent_id=active.intent_id,
+        stage="flush",
+        active_link_digest=active.active_digest,
+    )
+    relative = _capture_decision_relative_path(active.intent_id)
+    candidate = queue.state_root / relative
+    try:
+        candidate.lstat()
+    except FileNotFoundError:
+        return None
+    from reliable_memory import read_runtime_bytes
+
+    encoded = read_runtime_bytes(
+        candidate,
+        queue.state_root,
+        max_bytes=MAX_CAPTURE_DECISION_BYTES,
+        owner_only=True,
+    )
+    decision = _decode_capture_decision(encoded)
+    _require_capture_decision_identity(decision, intent, active)
+    if indexed is None:
+        indexed = _index_capture_decision(
+            queue,
+            coordinator,
+            lease,
+            active,
+            task_fence,
+            intent_fence,
+            owner,
+            encoded,
+        )
+    return indexed, decision
+
+
+def _publish_capture_decision(
+    queue: object,
+    coordinator: object,
+    lease: object,
+    active: object,
+    task_fence: object,
+    intent_fence: object,
+    owner: object,
+    record: Mapping[str, object],
+    result: object,
+    tier: str,
+    body: str,
+    chosen_at: datetime | None,
+) -> tuple[object, dict[str, object]]:
+    encoded = _capture_decision_bytes(
+        record, active, result, tier, body, chosen_at
+    )
+    indexed = _index_capture_decision(
+        queue,
+        coordinator,
+        lease,
+        active,
+        task_fence,
+        intent_fence,
+        owner,
+        encoded,
+    )
+    return indexed, _decode_capture_decision(encoded)
+
+
+def _capture_terminal_bytes(
+    active: object, decision: object, disposition: Mapping[str, object]
+) -> bytes:
+    from reliable_memory import canonical_json_bytes
+
+    terminal = {
+        "schema_version": "capture-terminal/v1",
+        "intent_id": active.intent_id,
+        "intent_sha256": active.intent_sha256,
+        "semantic_decisions": [
+            {
+                "stage": decision.stage,
+                "decision_path": decision.decision_path,
+                "decision_sha256": decision.decision_sha256,
+            }
+        ],
+        "processing_binding": {
+            "kind": "task",
+            "task_id": active.task_id,
+            "active_link_digest": active.active_digest,
+        },
+        "disposition": dict(disposition),
+    }
+    encoded = canonical_json_bytes(terminal)
+    if len(encoded) > MAX_CAPTURE_TERMINAL_BYTES:
+        raise RuntimeError("capture terminal exceeds its byte limit")
+    return encoded
+
+
+def _publish_capture_terminal(
+    queue: object,
+    lease: object,
+    active: object,
+    task_fence: object,
+    intent_fence: object,
+    owner: object,
+    decision: object,
+    disposition: Mapping[str, object],
+) -> object:
+    from reliable_memory import publish_runtime_file, sha256_bytes
+
+    encoded = _capture_terminal_bytes(active, decision, disposition)
+    relative = f"run/queue-results/capture-{active.intent_id}.json"
+    publish_runtime_file(
+        queue.state_root / relative,
+        encoded,
+        state_root=queue.state_root,
+        create_only=True,
+    )
+    return queue.complete_capture_terminal(
+        lease,
+        intent_id=active.intent_id,
+        terminal_path=relative,
+        terminal_sha256=sha256_bytes(encoded),
+        active_link_digest=active.active_digest,
+        task_fence=task_fence,
+        intent_fence=intent_fence,
+        owner=owner,
+    )
+
+
+def _publish_no_content_terminal(
+    queue: object,
+    lease: object,
+    active: object,
+    task_fence: object,
+    intent_fence: object,
+    owner: object,
+    decision: object,
+) -> object:
+    disposition = {
+        "kind": "no_durable_content",
+        "decision_sha256": decision.decision_sha256,
+    }
+    return _publish_capture_terminal(
+        queue,
+        lease,
+        active,
+        task_fence,
+        intent_fence,
+        owner,
+        decision,
+        disposition,
+    )
+
+
+def _capture_transaction_preconditions(active: object, intent_fence: object) -> dict:
+    return {
+        "intent_fence": {
+            "intent_id": intent_fence.intent_id,
+            "mode": intent_fence.mode,
+            "token": intent_fence.token,
+            "fencing_epoch": intent_fence.epoch,
+            "expires_at": intent_fence.expires_at.isoformat().replace("+00:00", "Z"),
+        },
+        "capture_binding": {
+            "intent_id": active.intent_id,
+            "task_id": active.task_id,
+            "active_link_digest": active.active_digest,
+            "seal_digest": active.seal_digest,
+        },
+    }
+
+
+def _commit_capture_markdown(
+    queue: object,
+    coordinator: object,
+    lease: object,
+    active: object,
+    intent_fence: object,
+    owner: object,
+    decision: object,
+    decision_record: Mapping[str, object],
+) -> tuple[object, object]:
+    from markdown_transaction import append_captured_knowledge
+
+    sealed = queue.active_capture_binding(None, lease.id)
+    if sealed.seal_digest is None or sealed.active_digest != active.active_digest:
+        raise RuntimeError("capture decision did not seal the active binding")
+    coordinator.project_capture_binding(sealed, intent_fence=intent_fence)
+    plan = decision_record["operation_plan"][0]
+    transaction = append_captured_knowledge(
+        coordinator,
+        owner,
+        plan["operation_id"],
+        coordinator.vault / plan["path"],
+        plan["block"].encode("utf-8"),
+        preconditions=_capture_transaction_preconditions(sealed, intent_fence),
+    )
+    if transaction.state != "committed":
+        raise RuntimeError("capture Markdown transaction did not commit")
+    return sealed, transaction
+
+
+def _capture_markdown_disposition(transaction: object, decision: object) -> dict:
+    outputs = [
+        {"path": operation.path, "sha256": operation.after_hash}
+        for operation in transaction.operations
+    ]
+    return {
+        "kind": "markdown_committed",
+        "transaction_id": transaction.id,
+        "operation_id": transaction.operation_id,
+        "decision_sha256": decision.decision_sha256,
+        "outputs": outputs,
+    }
+
+
+def _complete_capture_decision(
+    queue: object,
+    coordinator: object,
+    lease: object,
+    active: object,
+    task_fence: object,
+    intent_fence: object,
+    owner: object,
+    decision: object,
+    decision_record: Mapping[str, object],
+) -> object:
+    if decision_record["outcome"] == "semantic_ok":
+        return _publish_no_content_terminal(
+            queue,
+            lease,
+            active,
+            task_fence,
+            intent_fence,
+            owner,
+            decision,
+        )
+    sealed, transaction = _commit_capture_markdown(
+        queue,
+        coordinator,
+        lease,
+        active,
+        intent_fence,
+        owner,
+        decision,
+        decision_record,
+    )
+    disposition = _capture_markdown_disposition(transaction, decision)
+    return _publish_capture_terminal(
+        queue,
+        lease,
+        sealed,
+        task_fence,
+        intent_fence,
+        owner,
+        decision,
+        disposition,
+    )
+
+
+def process_new_capture(
+    queue: object,
+    coordinator: object,
+    lease: object,
+    active: object,
+    task_fence: object,
+    intent_fence: object,
+    owner: object,
+    *,
+    llm_call: Callable[[str, str, int], object] | None = None,
+    now: Callable[[], datetime] = _capture_now,
+) -> object:
+    record = _read_capture_intent(queue, lease, active)
+    _ensure_capture_results_directory(queue)
+    resolved = _existing_capture_decision(
+        queue, coordinator, lease, active, task_fence, intent_fence, owner, record
+    )
+    if resolved is None:
+        result, tier, body = _call_capture_classifier(record, llm_call)
+        chosen_at = None
+        if tier != "ok":
+            chosen_at = _require_capture_time(now())
+        resolved = _publish_capture_decision(
+            queue,
+            coordinator,
+            lease,
+            active,
+            task_fence,
+            intent_fence,
+            owner,
+            record,
+            result,
+            tier,
+            body,
+            chosen_at,
+        )
+    decision, decision_record = resolved
+    return _complete_capture_decision(
+        queue,
+        coordinator,
+        lease,
+        active,
+        task_fence,
+        intent_fence,
+        owner,
+        decision,
+        decision_record,
+    )
+
+
+def process_capture_lease(
+    queue: object,
+    coordinator: object,
+    lease: object,
+    *,
+    owner: object,
+    process_missing: Callable[[object, object, object, object, object], object],
+) -> object:
+    from memory_queue import capture_task_fences
+
+    binding = queue.active_capture_binding(None, lease.id)
+    intent_id = _capture_binding_intent_id(binding)
+    with capture_task_fences(
+        queue,
+        coordinator,
+        lease.id,
+        intent_id=intent_id,
+        mode="worker",
+        owner=owner,
+    ) as (task_fence, intent_fence):
+        if intent_fence is None:
+            raise RuntimeError("capture intent fence is unavailable")
+        terminal = queue.complete_existing_capture_terminal(
+            lease,
+            intent_id=intent_id,
+            active_link_digest=binding.active_digest,
+            task_fence=task_fence,
+            intent_fence=intent_fence,
+            owner=owner,
+        )
+        if terminal is not None:
+            return terminal
+        return process_missing(lease, binding, task_fence, intent_fence, owner)
+
+
+def run_capture_worker_once(
+    queue: object,
+    coordinator: object,
+    *,
+    process_missing: Callable[[object, object, object, object, object], object],
+) -> object | None:
+    registry = queue.ownership_registry()
+    scope = "worker:capture-recovery"
+    owner = registry.acquire("queue-worker", scope=scope)
+    try:
+        with queue.queue_owner(role="queue-worker", scope=scope, parent=owner):
+            lease = queue.claim_capture("capture-worker")
+            if lease is None:
+                return None
+            return process_capture_lease(
+                queue,
+                coordinator,
+                lease,
+                owner=owner,
+                process_missing=process_missing,
+            )
+    finally:
+        registry.release(owner)
+
+
+def _capture_feedback(tier: str, body: str, args: argparse.Namespace) -> None:
+    if tier not in {"major", "minor"}:
+        return
+    if not body:
+        return
+    try:
+        from feedback_capture import capture_from_text
+
+        capture_from_text(
+            body,
+            session_id=args.session_id,
+            slug="unknown",
+            trigger=args.event,
+        )
+    except Exception:
+        pass
+
+
+def _record_empty_state(state: dict, args: argparse.Namespace) -> None:
+    record_flush(state, args.session_id, args.event)
+    state["flush_empty_count"] = int(state.get("flush_empty_count", 0)) + 1
+    state["last_flush_empty_at"] = datetime.now().isoformat(timespec="seconds")
+    counts = state.setdefault("flush_tier_counts", {})
+    counts["ok"] = int(counts.get("ok", 0)) + 1
+
+
+def _record_empty_flush(args: argparse.Namespace) -> None:
+    update_state(lambda state: _record_empty_state(state, args))
+
+
+def _flush_body(body: str) -> str:
+    if body:
+        return body + "\n"
+    return "(tier flagged but no structured body - manual review needed)\n"
+
+
+def _flush_block(
+    args: argparse.Namespace, tier: str, body: str, now: datetime
+) -> str:
     header = f"\n## [{now.strftime('%H:%M:%S')}] {args.event} | {args.session_id}\n"
     meta = (
         f"- Trigger: `{args.trigger}`\n"
+        f"- Agent: `{getattr(args, 'agent', 'unknown')}`\n"
         f"- Transcript: `{args.transcript}`\n"
         f"- Tier: `{tier}`\n"
     )
-    body_block = body + "\n" if body else "(tier flagged but no structured body — manual review needed)\n"
-    block = header + meta + "\n" + body_block
-    # Mandatory redaction boundary: strip secrets before the block lands
-    # in the durable daily log (mirrors post_tool_capture.py:66-72).
-    block = redact_secrets(block)
+    return redact_secrets(header + meta + "\n" + _flush_body(body))
 
-    deferred_compiles: list[tuple[Path, str]] = []
 
-    def _mutate(state: dict) -> None:
-        if should_skip(state, args.session_id, args.event):
-            return
-        operation_id = (
-            f"flush:{args.source_event_id}" if args.source_event_id else None
+def _flush_operation_id(args: argparse.Namespace) -> str | None:
+    source_event_id = getattr(args, "source_event_id", "")
+    if not source_event_id:
+        return None
+    return f"flush:{source_event_id}"
+
+
+def _append_flush_state(
+    state: dict,
+    args: argparse.Namespace,
+    day: str,
+    block: str,
+    tier: str,
+    deferred: list[tuple[Path, str]],
+) -> None:
+    if should_skip(state, args.session_id, args.event):
+        return
+    daily_path = append_daily(day, block, operation_id=_flush_operation_id(args))
+    record_flush(state, args.session_id, args.event)
+    counts = state.setdefault("flush_tier_counts", {})
+    counts[tier] = int(counts.get(tier, 0)) + 1
+    if tier == "major":
+        deferred.append((daily_path, tier))
+
+
+def _persist_flush(
+    args: argparse.Namespace, tier: str, block: str, day: str
+) -> list[tuple[Path, str]]:
+    deferred: list[tuple[Path, str]] = []
+    update_state(
+        lambda state: _append_flush_state(state, args, day, block, tier, deferred)
+    )
+    return deferred
+
+
+def _trigger_deferred_compiles(deferred: list[tuple[Path, str]]) -> None:
+    for daily_path, tier in deferred:
+        update_state(
+            lambda state, path=daily_path, flush_tier=tier: maybe_trigger_compile(
+                state, path, flush_tier
+            )
         )
-        daily_path = append_daily(day, block, operation_id=operation_id)
-        record_flush(state, args.session_id, args.event)
-        state.setdefault("flush_tier_counts", {})
-        state["flush_tier_counts"][tier] = int(state["flush_tier_counts"].get(tier, 0)) + 1
-        if tier == "major":
-            deferred_compiles.append((daily_path, tier))
 
-    update_state(_mutate)
 
-    for daily_path, flush_tier in deferred_compiles:
-        def _trigger_and_persist(state: dict, _dp=daily_path, _ft=flush_tier) -> None:
-            maybe_trigger_compile(state, _dp, _ft)
-        update_state(_trigger_and_persist)
+def _run_flush(args: argparse.Namespace) -> int:
+    if should_skip(load_state(), args.session_id, args.event):
+        return 0
+    raw_summary = _flush_summary(args)
+    if raw_summary is None:
+        return 0
+    tier, body = _classify_response(raw_summary)
+    _capture_feedback(tier, body, args)
+    if tier == "ok":
+        _record_empty_flush(args)
+        return 0
+    now = datetime.now()
+    block = _flush_block(args, tier, body, now)
+    deferred = _persist_flush(args, tier, block, now.strftime("%Y-%m-%d"))
+    _trigger_deferred_compiles(deferred)
     return 0
 
 

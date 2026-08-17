@@ -1147,7 +1147,7 @@ class DailyArchiver:
         try:
             bag.replace(destination)
         except OSError as exc:
-            if exc.errno != errno.EXDEV:
+            if exc.errno not in {errno.EACCES, errno.EPERM, errno.EXDEV}:
                 raise
             self._copy_bag_cross_volume(bag, destination)
         fsync_directory(bag.parent)

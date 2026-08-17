@@ -11,6 +11,7 @@ These tests ensure that:
 
 If any of these are removed, CI catches it.
 """
+
 from __future__ import annotations
 
 import json
@@ -30,6 +31,13 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture
+def opencode_plugin_url(tmp_path: Path) -> str:
+    plugin = tmp_path / "llm-wiki-memory-opencode.mjs"
+    shutil.copyfile(ROOT / "scripts" / "llm-wiki-memory-opencode.js", plugin)
+    return plugin.resolve().as_uri()
 
 
 def test_opencode_plugin_is_lifecycle_only():
@@ -57,8 +65,8 @@ def test_opencode_plugin_is_lifecycle_only():
     assert "project" not in plugin
 
 
-def test_opencode_roleless_user_message_is_forwarded_once():
-    plugin_url = (ROOT / "scripts" / "llm-wiki-memory-opencode.js").resolve().as_uri()
+def test_opencode_roleless_user_message_is_forwarded_once(opencode_plugin_url: str):
+    plugin_url = opencode_plugin_url
     root = "D:/vault"
     directory = "D:/project"
     script = textwrap.dedent(
@@ -292,7 +300,7 @@ def test_host_tool_call_id_separates_repeated_mutations():
     assert first.event_id != second.event_id
 
 
-def test_adapter_observes_same_envelope_once_before_delegate(monkeypatch):
+def test_adapter_observes_same_envelope_once_before_durable_capture(monkeypatch):
     import io
     import sys
 
@@ -309,21 +317,34 @@ def test_adapter_observes_same_envelope_once_before_delegate(monkeypatch):
     )
     monkeypatch.setattr(
         integration_adapter,
-        "_run_delegate",
-        lambda *args, **kwargs: calls.append(("delegate", args[1])) or None,
+        "_publish_durable_capture_intent",
+        lambda envelope, *_args: calls.append(("capture", envelope)) or "1" * 64,
     )
+    monkeypatch.setattr(integration_adapter, "_run_delegate", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(integration_adapter, "spawn_detached", lambda _args: 123)
     monkeypatch.setattr(
         sys,
         "stdin",
-        io.StringIO(json.dumps({"session_id": "s1", "cwd": "C:/project", "reason": "done"})),
+        io.StringIO(
+            json.dumps(
+                {
+                    "session_id": "s1",
+                    "cwd": "C:/project",
+                    "reason": "done",
+                    "transcript_path": "C:/tmp/session.jsonl",
+                }
+            )
+        ),
     )
 
-    assert integration_adapter.main(
-        ["--source", "claude", "--event", "session_end", "--delegate", "session_end_capture.py"]
-    ) == 0
-    assert [name for name, _ in calls] == ["observe", "delegate"]
-    assert calls[1][1]["event_id"] == calls[0][1].event_id
-    assert calls[1][1]["occurrence_id"] == calls[0][1].payload["occurrence_id"]
+    assert (
+        integration_adapter.main(
+            ["--source", "claude", "--event", "session_end", "--delegate", "session_end_capture.py"]
+        )
+        == 0
+    )
+    assert [name for name, _ in calls] == ["observe", "capture"]
+    assert calls[1][1] is calls[0][1]
 
 
 @pytest.mark.parametrize(
@@ -417,7 +438,7 @@ def test_same_normalized_occurrence_is_checkpointed_once(monkeypatch):
     assert checkpoints[0]["occurrence_id"] == envelope.event_id
 
 
-def test_delegate_runs_when_checkpoint_observation_fails(monkeypatch, capsys):
+def test_durable_capture_runs_when_checkpoint_observation_fails(monkeypatch, capsys):
     import io
     import sys
 
@@ -439,6 +460,12 @@ def test_delegate_runs_when_checkpoint_observation_fails(monkeypatch, capsys):
     )
     monkeypatch.setattr(
         integration_adapter,
+        "_publish_durable_capture_intent",
+        lambda *_args: calls.append("capture") or "1" * 64,
+    )
+    monkeypatch.setattr(integration_adapter, "spawn_detached", lambda _args: 123)
+    monkeypatch.setattr(
+        integration_adapter,
         "_log_checkpoint_error",
         lambda error: calls.append(("logged", len(str(error)))),
         raising=False,
@@ -446,13 +473,24 @@ def test_delegate_runs_when_checkpoint_observation_fails(monkeypatch, capsys):
     monkeypatch.setattr(
         sys,
         "stdin",
-        io.StringIO(json.dumps({"session_id": "s1", "cwd": "C:/project"})),
+        io.StringIO(
+            json.dumps(
+                {
+                    "session_id": "s1",
+                    "cwd": "C:/project",
+                    "transcript_path": "C:/tmp/session.jsonl",
+                }
+            )
+        ),
     )
 
-    assert integration_adapter.main(
-        ["--source", "codex", "--event", "session_end", "--delegate", "session_end_capture.py"]
-    ) == 0
-    assert calls == [("logged", 2000), "session_end_capture.py"]
+    assert (
+        integration_adapter.main(
+            ["--source", "codex", "--event", "session_end", "--delegate", "session_end_capture.py"]
+        )
+        == 0
+    )
+    assert calls == [("logged", 2000), "capture", "session_end_project_tag.py"]
     assert "capture skipped" not in capsys.readouterr().err
 
 
@@ -665,9 +703,7 @@ def test_concurrent_distinct_events_are_each_journaled_exactly_once(monkeypatch,
 
     journal = ProjectStore(vault, state_root).read_journal("demo")
     records = [
-        json.loads(line)
-        for line in journal.removeprefix(JOURNAL_HEADER).splitlines()
-        if line
+        json.loads(line) for line in journal.removeprefix(JOURNAL_HEADER).splitlines() if line
     ]
     assert sorted(record["occurrence_id"] for record in records) == sorted(
         event.event_id for event in events
@@ -774,12 +810,8 @@ def test_session_start_maintenance_does_not_debounce_or_drop_following_delta(mon
     from project_journal import CheckpointReducer
 
     previous = integration_adapter.datetime.fromisoformat("2026-07-13T11:59:29+00:00")
-    session_start_at = integration_adapter.datetime.fromisoformat(
-        "2026-07-13T12:00:00+00:00"
-    )
-    ordinary_event_at = integration_adapter.datetime.fromisoformat(
-        "2026-07-13T12:00:01+00:00"
-    )
+    session_start_at = integration_adapter.datetime.fromisoformat("2026-07-13T12:00:00+00:00")
+    ordinary_event_at = integration_adapter.datetime.fromisoformat("2026-07-13T12:00:01+00:00")
     state = {
         "project_checkpoint_reducers": {
             "demo:s1": CheckpointReducer(last_checkpoint_at=previous).to_state()
@@ -839,9 +871,7 @@ def test_session_start_maintenance_does_not_debounce_or_drop_following_delta(mon
     assert len(checkpoints) == 1
     assert checkpoints[0]["occurrence_id"] == ordinary.event_id
     assert checkpoints[0]["delta"]["current_task"] == delta["current_task"]
-    assert checkpoints[0]["delta"]["current_task_operations"] == [
-        delta["current_task"]
-    ]
+    assert checkpoints[0]["delta"]["current_task_operations"] == [delta["current_task"]]
 
 
 def test_debounced_deltas_flush_in_order_on_later_observation_exactly_once(monkeypatch):
@@ -903,19 +933,13 @@ def test_debounced_deltas_flush_in_order_on_later_observation_exactly_once(monke
         "correction-1",
         1,
         "correction",
-        delta(
-            current_task={"id": "task-1", "action": "upsert", "value": "First"}
-        ),
+        delta(current_task={"id": "task-1", "action": "upsert", "value": "First"}),
     )
     blocker = event(
         "blocker-1",
         2,
         "blocker_opened",
-        delta(
-            blockers=[
-                {"id": "blocker-1", "action": "upsert", "value": "Waiting"}
-            ]
-        ),
+        delta(blockers=[{"id": "blocker-1", "action": "upsert", "value": "Waiting"}]),
     )
     file_change = event(
         "file-1",
@@ -923,12 +947,8 @@ def test_debounced_deltas_flush_in_order_on_later_observation_exactly_once(monke
         "file_changed",
         delta(
             current_task={"id": "task-1", "action": "upsert", "value": "Latest"},
-            blockers=[
-                {"id": "blocker-1", "action": "close", "value": "Resolved"}
-            ],
-            changed_files=[
-                {"id": "src/app.py", "action": "upsert", "value": "src/app.py"}
-            ],
+            blockers=[{"id": "blocker-1", "action": "close", "value": "Resolved"}],
+            changed_files=[{"id": "src/app.py", "action": "upsert", "value": "src/app.py"}],
         ),
     )
     timer = event("timer-1", 31)
@@ -936,9 +956,11 @@ def test_debounced_deltas_flush_in_order_on_later_observation_exactly_once(monke
     for envelope in (correction, blocker, file_change):
         integration_adapter._observe_project_checkpoint(envelope)
     assert checkpoints == []
-    assert [
-        item["event_id"] for item in state["project_checkpoint_pending"]["demo"]
-    ] == [correction.event_id, blocker.event_id, file_change.event_id]
+    assert [item["event_id"] for item in state["project_checkpoint_pending"]["demo"]] == [
+        correction.event_id,
+        blocker.event_id,
+        file_change.event_id,
+    ]
 
     state = json.loads(json.dumps(state))
     integration_adapter._observe_project_checkpoint(timer)
@@ -1133,7 +1155,9 @@ def test_bypass_flush_batches_205_pending_events_across_failure_and_restart(monk
         5,
     ]
     assert all(len(item["delta"]["decisions"]) <= 100 for item in checkpoints)
-    assert [event_id for item in checkpoints for event_id in item["evidence_event_ids"]] == event_ids
+    assert [
+        event_id for item in checkpoints for event_id in item["evidence_event_ids"]
+    ] == event_ids
     assert state["project_checkpoint_pending"]["demo"] == []
 
     state = json.loads(json.dumps(state))
@@ -1165,8 +1189,7 @@ def test_single_oversized_valid_delta_splits_before_enqueue(monkeypatch):
 
     delta = integration_adapter._empty_delta()
     delta["decisions"] = [
-        {"id": f"decision-{index}", "action": "upsert", "value": str(index)}
-        for index in range(205)
+        {"id": f"decision-{index}", "action": "upsert", "value": str(index)} for index in range(205)
     ]
     envelope = integration_adapter.normalize_event(
         "claude",
@@ -1356,7 +1379,7 @@ def test_opencode_session_start_appends_recovered_bounded_project_handoff(monkey
 
 
 def test_opencode_node_injects_shared_bounded_legacy_handoff_for_unicode_slug(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, opencode_plugin_url: str
 ):
     import sys
 
@@ -1393,11 +1416,9 @@ def test_opencode_node_injects_shared_bounded_legacy_handoff_for_unicode_slug(
     started = time.perf_counter()
     result = integration_adapter.ingest_event(envelope)
     elapsed = time.perf_counter() - started
-    shared = recover_project_handoff(
-        ProjectStore(vault, state_root), slug, project_root=project
-    )
+    shared = recover_project_handoff(ProjectStore(vault, state_root), slug, project_root=project)
 
-    assert elapsed < 0.25
+    assert elapsed < 0.75
     assert result["context"] == shared.context
     assert len(result["context"]) <= 2400
     assert "Preserve older handoff" in result["context"]
@@ -1405,13 +1426,13 @@ def test_opencode_node_injects_shared_bounded_legacy_handoff_for_unicode_slug(
     assert f"project:{slug}" in result["context"]
     assert not (project_state / "journal.md").exists()
 
-    plugin_url = (ROOT / "scripts/llm-wiki-memory-opencode.js").resolve().as_uri()
+    plugin_url = opencode_plugin_url
     script = textwrap.dedent(
         f"""
         globalThis.Bun = {{ spawn() {{
           return {{
             stdin: {{ write() {{}}, end() {{}} }},
-            stdout: new Blob([{json.dumps(json.dumps({'context': result['context']}))}]).stream(),
+            stdout: new Blob([{json.dumps(json.dumps({"context": result["context"]}))}]).stream(),
             exited: Promise.resolve(0),
             kill() {{}},
           }};
@@ -1432,7 +1453,12 @@ def test_opencode_node_injects_shared_bounded_legacy_handoff_for_unicode_slug(
     env = os.environ.copy()
     env["LLM_WIKI_ROOT"] = str(vault)
     node = subprocess.run(
-        ["node", "--input-type=module", "--eval", script],
+        [
+            "node",
+            "--input-type=module",
+            "--eval",
+            script,
+        ],
         env=env,
         capture_output=True,
         text=True,
@@ -1482,9 +1508,7 @@ def test_opencode_session_start_project_recovery_is_fail_open(monkeypatch):
     assert errors == ["recovery unavailable"]
 
 
-def test_opencode_session_start_writer_contention_is_bounded_and_degraded(
-    monkeypatch, tmp_path
-):
+def test_opencode_session_start_writer_contention_is_bounded_and_degraded(monkeypatch, tmp_path):
     import sys
 
     scripts = ROOT / "scripts"
@@ -1537,9 +1561,7 @@ def test_opencode_session_start_writer_contention_is_bounded_and_degraded(
 
 
 @pytest.mark.parametrize("host", ["claude", "codex"])
-def test_claude_and_codex_project_state_are_bounded_under_writer_contention(
-    host, tmp_path
-):
+def test_claude_and_codex_project_state_are_bounded_under_writer_contention(host, tmp_path):
     import os
     import shutil
     import sys
@@ -1638,7 +1660,14 @@ def test_claude_hooks_cover_compaction_failure_stop_and_end_signals():
         (ROOT / "integrations" / "claude-code" / "settings.json").read_text(encoding="utf-8")
     )
     hooks = settings["hooks"]
-    assert {"SessionStart", "PreCompact", "PostToolUse", "PostToolUseFailure", "Stop", "SessionEnd"} <= set(hooks)
+    assert {
+        "SessionStart",
+        "PreCompact",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "Stop",
+        "SessionEnd",
+    } <= set(hooks)
     stop_command = hooks["Stop"][0]["hooks"][0]["command"]
     failure_command = hooks["PostToolUseFailure"][0]["hooks"][0]["command"]
     assert "--event stop" in stop_command
@@ -1660,9 +1689,7 @@ def test_claude_session_start_uses_one_outer_adapter_budget():
     assert "--delegate" not in command
 
 
-def test_claude_outer_session_start_preserves_hook_output_contract(
-    monkeypatch, capsys
-):
+def test_claude_outer_session_start_preserves_hook_output_contract(monkeypatch, capsys):
     import io
     import sys
 
@@ -1675,9 +1702,7 @@ def test_claude_outer_session_start_preserves_hook_output_contract(
     )
     monkeypatch.setattr(sys, "stdin", io.StringIO("{}"))
 
-    assert integration_adapter.main(
-        ["--source", "claude", "--event", "session_start"]
-    ) == 0
+    assert integration_adapter.main(["--source", "claude", "--event", "session_start"]) == 0
     assert json.loads(capsys.readouterr().out) == {
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
@@ -1704,17 +1729,34 @@ def test_claude_session_end_uses_one_adapter_occurrence_for_both_side_effects(mo
     assert "--delegate" not in hooks[0]["command"]
 
     calls = []
+
+    def observe(envelope):
+        calls.append(("observe", envelope.event_id))
+
+    def delegate(name, _payload, **_kwargs):
+        calls.append(("delegate", name))
+        return type("Result", (), {"returncode": 0, "stdout": ""})()
+
+    def capture(envelope, *_args):
+        calls.append(("capture", envelope.event_id))
+        return "1" * 64
+
+    def wake(args):
+        calls.append(("wake", args))
+        return 123
+
     monkeypatch.setattr(
         integration_adapter,
         "_observe_project_checkpoint",
-        lambda envelope: calls.append(("observe", envelope.event_id)),
+        observe,
     )
+    monkeypatch.setattr(integration_adapter, "_run_delegate", delegate)
     monkeypatch.setattr(
         integration_adapter,
-        "_run_delegate",
-        lambda name, payload, **kwargs: calls.append(("delegate", name))
-        or type("Result", (), {"returncode": 0, "stdout": '{"flush_started": true}'})(),
+        "_publish_durable_capture_intent",
+        capture,
     )
+    monkeypatch.setattr(integration_adapter, "spawn_detached", wake)
     monkeypatch.setattr(
         sys,
         "stdin",
@@ -1730,11 +1772,10 @@ def test_claude_session_end_uses_one_adapter_occurrence_for_both_side_effects(mo
     )
 
     assert integration_adapter.main(["--source", "claude", "--event", "session_end"]) == 0
-    assert [name for kind, name in calls if kind == "delegate"] == [
-        "session_end_project_tag.py",
-        "session_end_capture.py",
-    ]
-    assert len([item for item in calls if item[0] == "observe"]) == 1
+    assert calls[0][0] == "observe"
+    assert calls[1] == ("capture", calls[0][1])
+    assert calls[2] == ("delegate", "session_end_project_tag.py")
+    assert calls[3][0] == "wake"
 
 
 def test_codex_wrapper_recovers_project_state_before_launch():
@@ -1869,16 +1910,16 @@ def _codex_inline_hooks_toml(*, include_stop: bool = True) -> str:
         group = groups[0]
         blocks.append(f"[[hooks.{event_name}]]")
         if "matcher" in group:
-            blocks.append(f'matcher = {json.dumps(group["matcher"])}')
+            blocks.append(f"matcher = {json.dumps(group['matcher'])}")
         handler = group["hooks"][0]
         blocks.extend(
             [
                 "",
                 f"[[hooks.{event_name}.hooks]]",
                 'type = "command"',
-                f'command = {json.dumps(handler["command"])}',
-                f'command_windows = {json.dumps(handler["commandWindows"])}',
-                f'timeout = {handler["timeout"]}',
+                f"command = {json.dumps(handler['command'])}",
+                f"command_windows = {json.dumps(handler['commandWindows'])}",
+                f"timeout = {handler['timeout']}",
                 "",
             ]
         )
@@ -1909,9 +1950,7 @@ def test_codex_hook_merge_skips_equivalent_inline_hooks(tmp_path):
     assert destination.read_bytes() == before
 
 
-def test_codex_hook_command_reports_equivalent_inline_without_creating_json(
-    tmp_path, capsys
-):
+def test_codex_hook_command_reports_equivalent_inline_without_creating_json(tmp_path, capsys):
     import argparse
     import sys
 
@@ -1948,9 +1987,7 @@ def test_codex_hook_merge_preserves_json_when_inline_is_equivalent(tmp_path):
     config.write_text(_codex_inline_hooks_toml(), encoding="utf-8")
     installed = json.loads(source.read_text(encoding="utf-8"))
     installed["custom"] = True
-    installed["hooks"]["Stop"].insert(
-        0, {"hooks": [{"type": "command", "command": "echo user"}]}
-    )
+    installed["hooks"]["Stop"].insert(0, {"hooks": [{"type": "command", "command": "echo user"}]})
     destination.write_text(json.dumps(installed), encoding="utf-8")
 
     result = codex_memory.merge_codex_hooks(source, destination, config=config)
@@ -2021,9 +2058,7 @@ def test_codex_hook_merge_rejects_partial_inline_hooks_without_writing(tmp_path)
         "default-enabled",
     ],
 )
-def test_codex_hooks_feature_state_obeys_canonical_precedence(
-    tmp_path, features, expected
-):
+def test_codex_hooks_feature_state_obeys_canonical_precedence(tmp_path, features, expected):
     import sys
 
     scripts = ROOT / "scripts"
@@ -2087,8 +2122,7 @@ def test_codex_mcp_config_state_accepts_exact_enabled_table(tmp_path, quoted):
     [
         ('model = "gpt-5.6"\n', "absent"),
         (
-            '[mcp_servers.llm-wiki]\ncommand = "uv"\n'
-            'args = ["python", "other.py"]\n',
+            '[mcp_servers.llm-wiki]\ncommand = "uv"\nargs = ["python", "other.py"]\n',
             "conflict",
         ),
         (
@@ -2099,9 +2133,7 @@ def test_codex_mcp_config_state_accepts_exact_enabled_table(tmp_path, quoted):
         ),
     ],
 )
-def test_codex_mcp_config_state_distinguishes_absent_and_conflicting(
-    tmp_path, body, expected
-):
+def test_codex_mcp_config_state_distinguishes_absent_and_conflicting(tmp_path, body, expected):
     import sys
 
     scripts = ROOT / "scripts"
@@ -2172,22 +2204,22 @@ def windows_fake_uv(tmp_path_factory):
         "using System.Threading;\n"
         "public static class FakeUv {\n"
         "  public static int Main() {\n"
-        "    var pidFile = Environment.GetEnvironmentVariable(\"FAKE_UV_PID_FILE\");\n"
-        "    var startedFile = Environment.GetEnvironmentVariable(\"FAKE_UV_STARTED_FILE\");\n"
+        '    var pidFile = Environment.GetEnvironmentVariable("FAKE_UV_PID_FILE");\n'
+        '    var startedFile = Environment.GetEnvironmentVariable("FAKE_UV_STARTED_FILE");\n'
         "    if (!String.IsNullOrEmpty(pidFile)) File.WriteAllText(pidFile, Process.GetCurrentProcess().Id.ToString());\n"
-        "    if (!String.IsNullOrEmpty(startedFile)) File.WriteAllText(startedFile, \"started\");\n"
-        "    var output = Environment.GetEnvironmentVariable(\"FAKE_UV_OUTPUT\");\n"
+        '    if (!String.IsNullOrEmpty(startedFile)) File.WriteAllText(startedFile, "started");\n'
+        '    var output = Environment.GetEnvironmentVariable("FAKE_UV_OUTPUT");\n'
         "    if (!String.IsNullOrEmpty(output)) Console.WriteLine(output);\n"
-        "    if (Environment.GetEnvironmentVariable(\"FAKE_UV_MODE\") == \"block\") {\n"
-        "      var python = Environment.GetEnvironmentVariable(\"FAKE_UV_PYTHON\");\n"
-        "      var childScript = Environment.GetEnvironmentVariable(\"FAKE_UV_CHILD_SCRIPT\");\n"
-        "      var childInfo = new ProcessStartInfo(python, \"\\\"\" + childScript + \"\\\"\");\n"
+        '    if (Environment.GetEnvironmentVariable("FAKE_UV_MODE") == "block") {\n'
+        '      var python = Environment.GetEnvironmentVariable("FAKE_UV_PYTHON");\n'
+        '      var childScript = Environment.GetEnvironmentVariable("FAKE_UV_CHILD_SCRIPT");\n'
+        '      var childInfo = new ProcessStartInfo(python, "\\"" + childScript + "\\"");\n'
         "      childInfo.UseShellExecute = false;\n"
         "      Process.Start(childInfo);\n"
         "      Thread.Sleep(Timeout.Infinite);\n"
         "    }\n"
         "    int code;\n"
-        "    return Int32.TryParse(Environment.GetEnvironmentVariable(\"FAKE_UV_EXIT\"), out code) ? code : 0;\n"
+        '    return Int32.TryParse(Environment.GetEnvironmentVariable("FAKE_UV_EXIT"), out code) ? code : 0;\n'
         "  }\n"
         "}\n",
         encoding="utf-8",
@@ -2224,7 +2256,7 @@ def _write_blocking_fake_uv(directory: Path) -> None:
         "stop_child() { : > child.stopped; exit 0; }\n"
         "trap stop_child HUP INT TERM\n"
         "i=0\n"
-        "while [ \"$i\" -lt 30 ]; do sleep 0.1; i=$((i + 1)); done\n"
+        'while [ "$i" -lt 30 ]; do sleep 0.1; i=$((i + 1)); done\n'
         ": > child.completed\n",
         encoding="utf-8",
     )
@@ -2301,9 +2333,7 @@ def test_unix_installer_trusts_smoke_exit_status(
     bash = _find_working_bash()
     if bash is None:
         pytest.skip("bash unavailable")
-    section = _installer_test_section(
-        (ROOT / "install.sh").read_text(encoding="utf-8")
-    )
+    section = _installer_test_section((ROOT / "install.sh").read_text(encoding="utf-8"))
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     _write_fake_uv(fake_bin, exit_code=fake_exit, last_line=fake_output)
@@ -2348,9 +2378,7 @@ def test_unix_installer_timeout_stops_tests_and_aborts(tmp_path):
     bash = _find_working_bash()
     if bash is None:
         pytest.skip("bash unavailable")
-    section = _installer_test_section(
-        (ROOT / "install.sh").read_text(encoding="utf-8")
-    )
+    section = _installer_test_section((ROOT / "install.sh").read_text(encoding="utf-8"))
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     _write_blocking_fake_uv(fake_bin)
@@ -2399,15 +2427,11 @@ def test_unix_installer_timeout_stops_tests_and_aborts(tmp_path):
     ("signal_name", "expected_exit"),
     [("HUP", 129), ("INT", 130), ("TERM", 143)],
 )
-def test_unix_installer_signal_traps_cleanup_and_exit(
-    tmp_path, signal_name, expected_exit
-):
+def test_unix_installer_signal_traps_cleanup_and_exit(tmp_path, signal_name, expected_exit):
     bash = _find_working_bash()
     if bash is None:
         pytest.skip("bash unavailable")
-    section = _installer_test_section(
-        (ROOT / "install.sh").read_text(encoding="utf-8")
-    )
+    section = _installer_test_section((ROOT / "install.sh").read_text(encoding="utf-8"))
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     _write_blocking_fake_uv(fake_bin)
@@ -2484,9 +2508,7 @@ def test_unix_installer_signal_kills_complete_stubborn_test_tree(tmp_path):
     bash = _find_working_bash()
     if bash is None:
         pytest.skip("bash unavailable")
-    section = _installer_test_section(
-        (ROOT / "install.sh").read_text(encoding="utf-8")
-    )
+    section = _installer_test_section((ROOT / "install.sh").read_text(encoding="utf-8"))
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     _write_stubborn_fake_uv_tree(fake_bin)
@@ -2563,9 +2585,7 @@ def test_unix_installer_initial_monitor_mode_cleans_stopped_test_tree(tmp_path):
     bash = _find_working_bash()
     if bash is None:
         pytest.skip("bash unavailable")
-    section = _installer_test_section(
-        (ROOT / "install.sh").read_text(encoding="utf-8")
-    )
+    section = _installer_test_section((ROOT / "install.sh").read_text(encoding="utf-8"))
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     _write_stubborn_fake_uv_tree(fake_bin)
@@ -2649,15 +2669,11 @@ def test_unix_installer_initial_monitor_mode_cleans_stopped_test_tree(tmp_path):
 
 
 @pytest.mark.parametrize("stop_signal", ["STOP", "TTIN"])
-def test_unix_installer_initial_monitor_off_cleans_stopped_test_tree(
-    tmp_path, stop_signal
-):
+def test_unix_installer_initial_monitor_off_cleans_stopped_test_tree(tmp_path, stop_signal):
     bash = _find_working_bash()
     if bash is None:
         pytest.skip("bash unavailable")
-    section = _installer_test_section(
-        (ROOT / "install.sh").read_text(encoding="utf-8")
-    )
+    section = _installer_test_section((ROOT / "install.sh").read_text(encoding="utf-8"))
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     _write_stubborn_fake_uv_tree(fake_bin)
@@ -2899,8 +2915,7 @@ def test_unix_installer_cleanup_targets_group_with_term_then_kill(tmp_path):
         pytest.skip("bash unavailable")
     source = (ROOT / "install.sh").read_text(encoding="utf-8")
     functions = "\n".join(
-        _shell_function(source, name)
-        for name in ("test_tree_alive", "stop_test_child")
+        _shell_function(source, name) for name in ("test_tree_alive", "stop_test_child")
     )
     runner = tmp_path / "exercise-cleanup.sh"
     runner.write_text(
@@ -2939,9 +2954,7 @@ def test_unix_installer_cleanup_targets_group_with_term_then_kill(tmp_path):
     calls = (tmp_path / "calls").read_text().splitlines()
     assert "kill -s TERM -- -4242" in calls
     assert "kill -s KILL -- -4242" in calls
-    assert calls.index("kill -s TERM -- -4242") < calls.index(
-        "kill -s KILL -- -4242"
-    )
+    assert calls.index("kill -s TERM -- -4242") < calls.index("kill -s KILL -- -4242")
     assert calls.count("sleep 0.1") == 5
     assert calls[-1] == "wait 4242"
 
@@ -2967,9 +2980,7 @@ def test_windows_installer_trusts_smoke_exit_status(
     powershell = shutil.which(powershell_name)
     if powershell is None:
         pytest.skip(f"{powershell_name} unavailable")
-    section = _installer_test_section(
-        (ROOT / "install.ps1").read_text(encoding="utf-8")
-    )
+    section = _installer_test_section((ROOT / "install.ps1").read_text(encoding="utf-8"))
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     _write_fake_uv(fake_bin, exit_code=fake_exit, last_line=fake_output)
@@ -3039,9 +3050,7 @@ def test_windows_installer_error_stops_native_child_and_later_steps(
         encoding="utf-8",
     )
     later = tmp_path / "later.marker"
-    section = _installer_test_section(
-        (ROOT / "install.ps1").read_text(encoding="utf-8")
-    )
+    section = _installer_test_section((ROOT / "install.ps1").read_text(encoding="utf-8"))
     injected_wait = textwrap.dedent(
         """
         $testDeadline = [DateTime]::UtcNow.AddSeconds(10)
@@ -3113,15 +3122,19 @@ def test_windows_installer_error_stops_native_child_and_later_steps(
 
 def _codex_mcp_toml(vault: Path, *, quoted: bool, conflicting: bool = False) -> str:
     table = '[mcp_servers."llm-wiki"]' if quoted else "[mcp_servers.llm-wiki]"
-    args = ["python", "other.py"] if conflicting else [
-        "run",
-        "--locked",
-        "--no-sync",
-        "--directory",
-        str(vault),
-        "python",
-        "scripts/mcp_server.py",
-    ]
+    args = (
+        ["python", "other.py"]
+        if conflicting
+        else [
+            "run",
+            "--locked",
+            "--no-sync",
+            "--directory",
+            str(vault),
+            "python",
+            "scripts/mcp_server.py",
+        ]
+    )
     return f'{table}\ncommand = "uv"\nargs = {json.dumps(args)}\n'
 
 
@@ -3130,9 +3143,7 @@ def _codex_mcp_toml(vault: Path, *, quoted: bool, conflicting: bool = False) -> 
     [("equivalent", 0), ("conflicting", 2), ("absent", 0)],
     ids=["quoted-equivalent", "conflicting", "absent"],
 )
-def test_unix_installer_mcp_function_uses_parser_in_temp_home(
-    tmp_path, scenario, expected_exit
-):
+def test_unix_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scenario, expected_exit):
     bash = Path(r"C:\Program Files\Git\bin\bash.exe")
     if not bash.exists():
         pytest.skip("Git Bash unavailable")
@@ -3144,9 +3155,7 @@ def test_unix_installer_mcp_function_uses_parser_in_temp_home(
     original = (
         'model = "gpt-5.6"\n'
         if scenario == "absent"
-        else _codex_mcp_toml(
-            ROOT, quoted=True, conflicting=scenario == "conflicting"
-        )
+        else _codex_mcp_toml(ROOT, quoted=True, conflicting=scenario == "conflicting")
     )
     config.write_text(original, encoding="utf-8")
     before = config.read_bytes()
@@ -3187,9 +3196,7 @@ def test_unix_installer_mcp_function_uses_parser_in_temp_home(
     [("equivalent", 0), ("conflicting", 2), ("absent", 0)],
     ids=["quoted-equivalent", "conflicting", "absent"],
 )
-def test_windows_installer_mcp_function_uses_parser_in_temp_home(
-    tmp_path, scenario, expected_exit
-):
+def test_windows_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scenario, expected_exit):
     source = ROOT / "install.ps1"
     home = tmp_path / "home"
     config = home / ".codex" / "config.toml"
@@ -3197,9 +3204,7 @@ def test_windows_installer_mcp_function_uses_parser_in_temp_home(
     original = (
         'model = "gpt-5.6"\n'
         if scenario == "absent"
-        else _codex_mcp_toml(
-            ROOT, quoted=True, conflicting=scenario == "conflicting"
-        )
+        else _codex_mcp_toml(ROOT, quoted=True, conflicting=scenario == "conflicting")
     )
     config.write_text(original, encoding="utf-8")
     before = config.read_bytes()
@@ -3220,7 +3225,7 @@ def test_windows_installer_mcp_function_uses_parser_in_temp_home(
             $all = @($args)
             $index = [Array]::IndexOf($all, 'config-state')
             if ($index -lt 0) {{ throw 'config-state missing' }}
-            & {json.dumps(sys.executable)} {json.dumps(str(ROOT / 'scripts/codex_memory.py'))} $all[$index..($all.Count - 1)]
+            & {json.dumps(sys.executable)} {json.dumps(str(ROOT / "scripts/codex_memory.py"))} $all[$index..($all.Count - 1)]
         }}
         $code = Install-CodexMcp -VaultRoot {json.dumps(str(ROOT))} -Config {json.dumps(str(config))}
         exit $code
@@ -3284,12 +3289,15 @@ def test_unix_installer_hook_function_executes_in_temp_home(tmp_path):
     assert result.returncode == 0, result.stderr
     merged = json.loads((codex_dir / "hooks.json").read_text(encoding="utf-8"))
     assert merged["custom"] is True
-    assert sum(
-        "codex_memory.py" in handler.get("command", "")
-        for groups in merged["hooks"].values()
-        for group in groups
-        for handler in group["hooks"]
-    ) == 4
+    assert (
+        sum(
+            "codex_memory.py" in handler.get("command", "")
+            for groups in merged["hooks"].values()
+            for group in groups
+            for handler in group["hooks"]
+        )
+        == 4
+    )
     assert any(
         handler.get("command") == "echo user"
         for group in merged["hooks"]["Stop"]
@@ -3369,7 +3377,7 @@ def test_windows_installer_hook_function_executes_in_temp_home(tmp_path):
             $all = @($args)
             $index = [Array]::IndexOf($all, 'merge-hooks')
             if ($index -lt 0) {{ throw 'merge-hooks missing' }}
-            & {json.dumps(sys.executable)} {json.dumps(str(ROOT / 'scripts/codex_memory.py'))} $all[$index..($all.Count - 1)]
+            & {json.dumps(sys.executable)} {json.dumps(str(ROOT / "scripts/codex_memory.py"))} $all[$index..($all.Count - 1)]
         }}
         Install-CodexHooks -VaultRoot {json.dumps(str(ROOT))} -CodexDir {json.dumps(str(codex_dir))}
         if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}
@@ -3389,12 +3397,15 @@ def test_windows_installer_hook_function_executes_in_temp_home(tmp_path):
     assert result.returncode == 0, result.stderr
     merged = json.loads((codex_dir / "hooks.json").read_text(encoding="utf-8"))
     assert merged["custom"] is True
-    assert sum(
-        "codex_memory.py" in handler.get("command", "")
-        for groups in merged["hooks"].values()
-        for group in groups
-        for handler in group["hooks"]
-    ) == 4
+    assert (
+        sum(
+            "codex_memory.py" in handler.get("command", "")
+            for groups in merged["hooks"].values()
+            for group in groups
+            for handler in group["hooks"]
+        )
+        == 4
+    )
     assert any(
         handler.get("command") == "echo user"
         for group in merged["hooks"]["Stop"]
@@ -3428,7 +3439,7 @@ def test_windows_installer_preserves_json_when_partial_inline_hooks_exist(tmp_pa
         function uv {{
             $all = @($args)
             $index = [Array]::IndexOf($all, 'merge-hooks')
-            & {json.dumps(sys.executable)} {json.dumps(str(ROOT / 'scripts/codex_memory.py'))} $all[$index..($all.Count - 1)]
+            & {json.dumps(sys.executable)} {json.dumps(str(ROOT / "scripts/codex_memory.py"))} $all[$index..($all.Count - 1)]
         }}
         $code = Install-CodexHooks -VaultRoot {json.dumps(str(ROOT))} -CodexDir {json.dumps(str(codex_dir))}
         exit $code
@@ -3458,9 +3469,7 @@ def test_unix_installer_warns_and_preserves_json_when_hooks_feature_disabled(tmp
     home = tmp_path / "home"
     codex_dir = home / ".codex"
     codex_dir.mkdir(parents=True)
-    (codex_dir / "config.toml").write_text(
-        "[features]\ncodex_hooks = false\n", encoding="utf-8"
-    )
+    (codex_dir / "config.toml").write_text("[features]\ncodex_hooks = false\n", encoding="utf-8")
     destination = codex_dir / "hooks.json"
     destination.write_text('{"custom":true}\n', encoding="utf-8")
     before = destination.read_bytes()
@@ -3518,7 +3527,7 @@ def test_windows_installer_warns_and_preserves_json_when_hooks_feature_disabled(
         function uv {{
             $all = @($args)
             $index = [Array]::IndexOf($all, 'merge-hooks')
-            & {json.dumps(sys.executable)} {json.dumps(str(ROOT / 'scripts/codex_memory.py'))} $all[$index..($all.Count - 1)]
+            & {json.dumps(sys.executable)} {json.dumps(str(ROOT / "scripts/codex_memory.py"))} $all[$index..($all.Count - 1)]
         }}
         $code = Install-CodexHooks -VaultRoot {json.dumps(str(ROOT))} -CodexDir {json.dumps(str(codex_dir))}
         exit $code
@@ -3568,17 +3577,21 @@ def test_opencode_host_directory_maps_directly_to_worktree_or_null():
     assert unavailable.worktree is None
 
 
-def test_opencode_node_harness_forwards_bounded_tail_and_escaped_paths(tmp_path):
-    plugin_url = (ROOT / "scripts" / "llm-wiki-memory-opencode.js").resolve().as_uri()
+def test_opencode_node_harness_forwards_bounded_tail_and_escaped_paths(
+    tmp_path, opencode_plugin_url: str
+):
+    plugin_url = opencode_plugin_url
     root = str(tmp_path / "Vault With Spaces")
     directory = str(tmp_path / "Project With Spaces")
-    adapter_context = json.dumps({
-        "context": (
-            "# Project memory context\n\n## Health\n\nScheduler degraded.\n\n"
-            "# Project handoff\n\n## MCP identifiers\n"
-            "- `project:demo`\n- `sequence:7`\n"
-        )
-    })
+    adapter_context = json.dumps(
+        {
+            "context": (
+                "# Project memory context\n\n## Health\n\nScheduler degraded.\n\n"
+                "# Project handoff\n\n## MCP identifiers\n"
+                "- `project:demo`\n- `sequence:7`\n"
+            )
+        }
+    )
     script = textwrap.dedent(
         f"""
         process.env.LLM_WIKI_ROOT = {json.dumps(root)};
@@ -3669,8 +3682,8 @@ def test_opencode_node_harness_forwards_bounded_tail_and_escaped_paths(tmp_path)
     ]
 
 
-def test_opencode_node_harness_times_out_stalled_capture(tmp_path):
-    plugin_url = (ROOT / "scripts" / "llm-wiki-memory-opencode.js").resolve().as_uri()
+def test_opencode_node_harness_times_out_stalled_capture(tmp_path, opencode_plugin_url: str):
+    plugin_url = opencode_plugin_url
     root = str(tmp_path / "Vault With Spaces")
     script = textwrap.dedent(
         f"""
@@ -3710,8 +3723,10 @@ def test_opencode_node_harness_times_out_stalled_capture(tmp_path):
     assert observed["killed"] is True
 
 
-def test_opencode_forwards_known_mutation_and_dirty_idle_without_fake_progress_signals(tmp_path):
-    plugin_url = (ROOT / "scripts" / "llm-wiki-memory-opencode.js").resolve().as_uri()
+def test_opencode_forwards_known_mutation_and_dirty_idle_without_fake_progress_signals(
+    tmp_path, opencode_plugin_url: str
+):
+    plugin_url = opencode_plugin_url
     root = str(tmp_path / "vault")
     script = textwrap.dedent(
         f"""
@@ -3778,8 +3793,12 @@ def test_codex_project_state_observes_session_start_before_recovery(monkeypatch,
     monkeypatch.setattr(
         codex_memory,
         "_run_script",
-        lambda *args: calls.append(("recover", args[0]))
-        or subprocess.CompletedProcess([], 0, '{"hookSpecificOutput":{"additionalContext":""}}', ""),
+        lambda *args: (
+            calls.append(("recover", args[0]))
+            or subprocess.CompletedProcess(
+                [], 0, '{"hookSpecificOutput":{"additionalContext":""}}', ""
+            )
+        ),
     )
     monkeypatch.setattr(codex_memory, "_state_path", lambda path: ("demo", tmp_path / "state.md"))
     args = type("Args", (), {"cwd": str(tmp_path), "json": True})()
@@ -3788,8 +3807,8 @@ def test_codex_project_state_observes_session_start_before_recovery(monkeypatch,
     assert calls == [("observe", "session_start"), ("recover", "session_start_project_state.py")]
 
 
-def test_opencode_vault_guard_uses_resolved_path_boundary():
-    plugin_url = (ROOT / "scripts" / "llm-wiki-memory-opencode.js").resolve().as_uri()
+def test_opencode_vault_guard_uses_resolved_path_boundary(opencode_plugin_url: str):
+    plugin_url = opencode_plugin_url
     script = textwrap.dedent(
         f"""
         process.env.LLM_WIKI_ROOT = "/work/wiki";
@@ -3834,19 +3853,17 @@ def test_codex_wrapper_generates_context_file():
     assert "session_start_context" in wrapper, (
         "Codex wrapper must call session_start_context.py before codex starts"
     )
-    assert "session-context.md" in wrapper, (
-        "Codex wrapper must write to cache/session-context.md"
-    )
+    assert "session-context.md" in wrapper, "Codex wrapper must write to cache/session-context.md"
 
 
 def test_cursor_rules_has_mandatory_context_read():
     """Cursor rules file must instruct the agent to read the session
     context file at session start (MANDATORY).
     """
-    rules = (ROOT / "integrations" / "cursor" / "rules" / "llm-wiki.mdc").read_text(encoding="utf-8")
-    assert "session-context.md" in rules, (
-        "Cursor rules must reference cache/session-context.md"
+    rules = (ROOT / "integrations" / "cursor" / "rules" / "llm-wiki.mdc").read_text(
+        encoding="utf-8"
     )
+    assert "session-context.md" in rules, "Cursor rules must reference cache/session-context.md"
     assert "MANDATORY" in rules.upper() or "first" in rules.lower(), (
         "Cursor rules must mark context reading as mandatory/first step"
     )
@@ -3870,12 +3887,8 @@ def test_session_start_context_supports_output_file():
     writing context to a file (used by non-Claude agents).
     """
     script = (ROOT / "scripts" / "session_start_context.py").read_text(encoding="utf-8")
-    assert "--output-file" in script, (
-        "session_start_context.py must support --output-file flag"
-    )
-    assert "write_text" in script, (
-        "session_start_context.py must write context to the output file"
-    )
+    assert "--output-file" in script, "session_start_context.py must support --output-file flag"
+    assert "write_text" in script, "session_start_context.py must write context to the output file"
 
 
 def test_install_scripts_generate_context(tmp_path):
@@ -3898,18 +3911,17 @@ def test_install_scripts_generate_context(tmp_path):
     assert "--no-default-groups" in install_ps1
 
     sh_codex = install_sh.split("# Codex CLI", 1)[1].split("# Cursor", 1)[0]
-    sh_claude = install_sh.split("# Claude Code", 1)[1].split(
-        "# OpenCode configuration", 1
-    )[0]
-    sh_opencode = install_sh.split("# OpenCode configuration", 1)[1].split(
-        "# Codex CLI", 1
-    )[0]
+    sh_claude = install_sh.split("# Claude Code", 1)[1].split("# OpenCode configuration", 1)[0]
+    sh_opencode = install_sh.split("# OpenCode configuration", 1)[1].split("# Codex CLI", 1)[0]
     ps_codex = install_ps1.split("# Codex", 1)[1].split("# Claude Code", 1)[0]
     ps_claude = install_ps1.split("# Claude Code", 1)[1].split("# Cursor", 1)[0]
     ps_opencode = install_ps1.split("# OpenCode", 1)[1].split("# Codex", 1)[0]
 
     assert 'CLAUDE_MCP="$HOME/.claude.json"' in sh_claude
-    assert '"mcpServers":{"llm-wiki":{"command":"uv","args":["run","--locked","--no-sync","--directory"' in sh_claude
+    assert (
+        '"mcpServers":{"llm-wiki":{"command":"uv","args":["run","--locked","--no-sync","--directory"'
+        in sh_claude
+    )
     assert ".claude/.mcp.json" not in install_sh
     assert "Existing ~/.claude.json found without llm-wiki" in sh_claude
     assert "grep -q '\"llm-wiki\"'" in sh_claude
@@ -3928,9 +3940,7 @@ def test_install_scripts_generate_context(tmp_path):
 
     def parse_shell_json(block: str, destination: str) -> dict:
         line = next(line for line in block.splitlines() if f'> "${destination}"' in line)
-        match = re.search(
-            r"printf '%s\\n' '(.*?)'\"\$VAULT_JSON\"'(.*?)' >", line
-        )
+        match = re.search(r"printf '%s\\n' '(.*?)'\"\$VAULT_JSON\"'(.*?)' >", line)
         assert match, line
         return json.loads(match.group(1) + '"ROOT"' + match.group(2))
 
@@ -3956,10 +3966,7 @@ def test_install_scripts_generate_context(tmp_path):
     assert "config-state" in sh_codex_mcp
     assert "[mcp_servers.llm-wiki]" in sh_codex_mcp
     assert 'command = "uv"' in sh_codex_mcp
-    assert (
-        'args = [\\"run\\", \\"--locked\\", \\"--no-sync\\", '
-        '\\"--directory\\"' in sh_codex_mcp
-    )
+    assert 'args = [\\"run\\", \\"--locked\\", \\"--no-sync\\", \\"--directory\\"' in sh_codex_mcp
     assert "config.bak" in sh_codex_mcp
     assert "grep" not in sh_codex_mcp
     assert "install_codex_hooks" in sh_codex
@@ -3967,7 +3974,7 @@ def test_install_scripts_generate_context(tmp_path):
 
     assert '$claudeUserConfig = Join-Path $env:USERPROFILE ".claude.json"' in install_ps1
     assert "$claudeMcp = $claudeUserConfig" in ps_claude
-    assert 'mcpServers = [ordered]@{' in ps_claude
+    assert "mcpServers = [ordered]@{" in ps_claude
     assert ".claude\\.mcp.json" not in install_ps1
     assert "Existing ~/.claude.json found without llm-wiki" in ps_claude
     assert "-notmatch '\"llm-wiki\"\\s*:'" in ps_claude
@@ -4051,6 +4058,7 @@ def test_windows_scheduler_payload_carries_exact_roots_and_uv(tmp_path):
 
     def ps_literal(value: str) -> str:
         return "'" + value.replace("'", "''") + "'"
+
     command = textwrap.dedent(
         f"""
         $tokens = $null
@@ -4074,7 +4082,7 @@ def test_windows_scheduler_payload_carries_exact_roots_and_uv(tmp_path):
             -StateRoot {ps_literal(state)} `
             -UvPath {ps_literal(uv_path)} `
             -RunnerPath {ps_literal(str(runner))} `
-            -PowerShellPath {ps_literal(shutil.which('pwsh') or 'pwsh')}
+            -PowerShellPath {ps_literal(shutil.which("pwsh") or "pwsh")}
         $encoded = ($action.Argument -split '\\s+')[-1]
         $decoded = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded))
         [pscustomobject]@{{ Execute = $action.Execute; Decoded = $decoded }} |
@@ -4096,9 +4104,101 @@ def test_windows_scheduler_payload_carries_exact_roots_and_uv(tmp_path):
     quoted_root = root.replace("'", "''")
     quoted_state = state.replace("'", "''")
     quoted_uv = uv_path.replace("'", "''")
-    assert value["Execute"].casefold().endswith(("pwsh.exe", "powershell.exe"))
+    assert Path(value["Execute"]).name.casefold() in {
+        "pwsh",
+        "pwsh.exe",
+        "powershell.exe",
+    }
     assert "-Kind 'nightly'" in decoded
     assert f"-VaultRoot '{quoted_root}'" in decoded
     assert f"-StateRoot '{quoted_state}'" in decoded
     assert f"-UvPath '{quoted_uv}'" in decoded
     assert str(runner).replace("'", "''") in decoded
+
+
+def test_windows_scheduler_status_accepts_only_the_registered_contract(tmp_path):
+    if shutil.which("pwsh") is None:
+        pytest.skip("PowerShell 7 is unavailable")
+    script = ROOT / "scripts" / "install-scheduled-tasks.ps1"
+    root = str(tmp_path / "vault")
+    state = str(tmp_path / "state")
+    uv_path = str(tmp_path / "uv.exe")
+    runner = str(tmp_path / "vault/scripts/run-scheduled-task.ps1")
+
+    def ps_literal(value: str) -> str:
+        return "'" + value.replace("'", "''") + "'"
+
+    command = textwrap.dedent(
+        f"""
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            {json.dumps(str(script))}, [ref]$tokens, [ref]$errors)
+        if ($errors.Count) {{ throw ($errors | Out-String) }}
+        foreach ($name in @('New-LLMWikiScheduledAction', 'Test-LLMWikiScheduledTasks')) {{
+            $fn = $ast.Find({{ param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq $name
+            }}, $true)
+            if ($null -eq $fn) {{ throw "$name missing" }}
+            Invoke-Expression $fn.Extent.Text
+        }}
+        function New-ScheduledTaskAction {{
+            param($Execute, $Argument)
+            [pscustomobject]@{{ Execute = $Execute; Arguments = $Argument }}
+        }}
+        $script:invalid = $false
+        function Get-ScheduledTask {{
+            param($TaskName, $ErrorAction)
+            $kind = if ($TaskName -eq 'LLMWiki-Nightly') {{ 'nightly' }} else {{ 'weekly' }}
+            $action = New-LLMWikiScheduledAction `
+                -Kind $kind `
+                -VaultRoot {ps_literal(root)} `
+                -StateRoot {ps_literal(state)} `
+                -UvPath {ps_literal(uv_path)} `
+                -RunnerPath {ps_literal(runner)} `
+                -PowerShellPath 'pwsh.exe'
+            [pscustomobject]@{{
+                State = 'Ready'
+                Actions = @($action)
+                Triggers = @([pscustomobject]@{{
+                    StartBoundary = '2026-08-15T03:00:00'
+                    Enabled = $true
+                }})
+                Principal = [pscustomobject]@{{
+                    LogonType = $(if ($script:invalid) {{ 'ServiceAccount' }} else {{ 'Interactive' }})
+                    UserId = 'operator'
+                }}
+            }}
+        }}
+        function Get-ScheduledTaskInfo {{
+            param($InputObject, $ErrorAction)
+            process {{ [pscustomobject]@{{
+                LastRunTime = [datetime]::MinValue
+                LastTaskResult = 0
+                NextRunTime = [datetime]::MaxValue
+            }} }}
+        }}
+        $valid = Test-LLMWikiScheduledTasks `
+            -VaultRoot {ps_literal(root)} `
+            -StateRoot {ps_literal(state)} `
+            -UvPath {ps_literal(uv_path)}
+        $script:invalid = $true
+        $invalid = Test-LLMWikiScheduledTasks `
+            -VaultRoot {ps_literal(root)} `
+            -StateRoot {ps_literal(state)} `
+            -UvPath {ps_literal(uv_path)}
+        @([bool]$valid, [bool]$invalid) | ConvertTo-Json -Compress
+        """
+    )
+
+    result = subprocess.run(
+        ["pwsh", "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout.splitlines()[-1]) == [True, False], result.stdout

@@ -4,11 +4,30 @@ import hashlib
 import json
 import math
 from dataclasses import replace
+from pathlib import Path
 
 import llm_client
 import pytest
 from context_budget import TokenCount, TokenUsage
 from reliable_memory import canonical_json_bytes
+
+
+def _write_dlp_policy(
+    path: Path,
+    *,
+    literals: tuple[str, ...] = (),
+    allow_fingerprints: tuple[str, ...] = (),
+) -> None:
+    payload = {
+        "version": 1,
+        "literals": list(literals),
+        "allow_fingerprints": list(allow_fingerprints),
+    }
+    policy = {
+        **payload,
+        "sha256": hashlib.sha256(canonical_json_bytes(payload)).hexdigest(),
+    }
+    path.write_text(json.dumps(policy), encoding="utf-8")
 
 
 def test_candidate_zero_has_known_identity_and_no_fallback(monkeypatch):
@@ -97,6 +116,126 @@ def test_call_candidate_returns_actual_identity_and_native_structured_mode(monke
     assert result.text == '{"ok":true}'
     assert result.failure_class is None
     assert result.structured_output == "native"
+
+
+def test_call_llm_result_preserves_selected_provider_descriptor(monkeypatch):
+    monkeypatch.setenv("MEMORY_LLM_PROVIDER", "fake")
+    monkeypatch.setitem(llm_client._PROBES, "fake", lambda descriptor: True)
+    monkeypatch.setitem(llm_client._BACKENDS, "fake", lambda *args: "answer")
+
+    result = llm_client.call_llm_result("prompt", "system", max_tokens=10)
+
+    assert result is not None
+    assert result.text == "answer"
+    assert result.descriptor.provider == "fake"
+    assert result.descriptor.model == "fake-v1"
+
+
+def test_call_candidate_redacts_builtins_and_policy_literals_before_transport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    policy_path = tmp_path / "dlp-policy.json"
+    _write_dlp_policy(policy_path, literals=("internal-codename",))
+    monkeypatch.setenv("LLM_WIKI_DLP_POLICY", str(policy_path))
+    descriptor = llm_client.provider_candidates("fake", max_tokens=10)[0]
+    captured = []
+
+    def backend(descriptor, prompt, system_prompt, schema):
+        captured.append((prompt, system_prompt, schema))
+        return "answer"
+
+    monkeypatch.setitem(llm_client._BACKENDS, "fake", backend)
+
+    result = llm_client.call_candidate(
+        descriptor,
+        "Authorization: Bearer transport-secret internal-codename",
+        "system password=system-secret",
+        max_tokens=10,
+        available=True,
+    )
+
+    assert result.text == "answer"
+    transported = json.dumps(captured)
+    assert "transport-secret" not in transported
+    assert "system-secret" not in transported
+    assert "internal-codename" not in transported
+    assert "[REDACTED" in transported
+
+
+def test_call_candidate_fails_closed_before_transport_for_invalid_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    policy_path = tmp_path / "dlp-policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "literals": ["protected"],
+                "allow_fingerprints": [],
+                "sha256": "0" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LLM_WIKI_DLP_POLICY", str(policy_path))
+    descriptor = llm_client.provider_candidates("fake", max_tokens=10)[0]
+    calls = []
+
+    def backend(*args):
+        calls.append(args)
+        return "answer"
+
+    monkeypatch.setitem(llm_client._BACKENDS, "fake", backend)
+
+    result = llm_client.call_candidate(
+        descriptor, "prompt", "system", max_tokens=10, available=True
+    )
+
+    assert result.text is None
+    assert result.failure_class == "dlp_policy_error"
+    assert calls == []
+
+
+def test_call_candidate_blocks_sensitive_provider_output(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("LLM_WIKI_DLP_POLICY", raising=False)
+    descriptor = llm_client.provider_candidates("fake", max_tokens=10)[0]
+    monkeypatch.setitem(
+        llm_client._BACKENDS,
+        "fake",
+        lambda *args: "Authorization: Bearer provider-output-secret",
+    )
+
+    result = llm_client.call_candidate(
+        descriptor, "prompt", "system", max_tokens=10, available=True
+    )
+
+    assert result.text is None
+    assert result.failure_class == "dlp_output_blocked"
+
+
+def test_call_candidate_allows_only_exact_fingerprinted_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    response = "Authorization: Bearer known-false-positive"
+    fingerprint = hashlib.sha256(response.encode("utf-8")).hexdigest()
+    policy_path = tmp_path / "dlp-policy.json"
+    _write_dlp_policy(policy_path, allow_fingerprints=(fingerprint,))
+    monkeypatch.setenv("LLM_WIKI_DLP_POLICY", str(policy_path))
+    descriptor = llm_client.provider_candidates("fake", max_tokens=10)[0]
+    monkeypatch.setitem(llm_client._BACKENDS, "fake", lambda *args: response)
+
+    allowed = llm_client.call_candidate(
+        descriptor, "prompt", "system", max_tokens=10, available=True
+    )
+    monkeypatch.setitem(llm_client._BACKENDS, "fake", lambda *args: response + " changed")
+    blocked = llm_client.call_candidate(
+        descriptor, "prompt", "system", max_tokens=10, available=True
+    )
+
+    assert allowed.text == response
+    assert allowed.failure_class is None
+    assert blocked.text is None
+    assert blocked.failure_class == "dlp_output_blocked"
 
 
 def test_prompt_structured_mode_passes_schema_instruction_to_legacy_backend(monkeypatch):
@@ -352,6 +491,108 @@ def test_ollama_probe_uses_captured_remote_endpoint_after_env_drift(monkeypatch)
     assert llm_client.probe_candidate(descriptor) is True
     assert requests[0][0].full_url == "http://remote.example:22123/api/tags"
     assert requests[0][1] == 1.0
+
+
+def test_forced_ollama_local_only_rejects_nonliteral_loopback(monkeypatch):
+    monkeypatch.setenv("OLLAMA_NO_CLOUD", "1")
+    monkeypatch.setenv("MEMORY_LLM_BASE_URL", "http://remote.example:11434/v1")
+
+    descriptor = llm_client.provider_candidates("ollama", max_tokens=321)[0]
+
+    assert descriptor.resolution_failure == "invalid_configuration"
+
+
+def test_forced_ollama_local_only_accepts_only_local_model_metadata(monkeypatch):
+    monkeypatch.setenv("OLLAMA_NO_CLOUD", "1")
+    monkeypatch.setenv("MEMORY_LLM_BASE_URL", "http://127.0.0.1:11434/v1")
+    monkeypatch.setenv("MEMORY_LLM_MODEL", "qwen3:0.6b")
+    descriptor = llm_client.provider_candidates("ollama", max_tokens=321)[0]
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, limit):
+            assert limit == 1024 * 1024 + 1
+            return json.dumps(
+                {
+                    "models": [
+                        {
+                            "name": "qwen3:0.6b",
+                            "model": "qwen3:0.6b",
+                            "modified_at": "2026-08-15T00:00:00Z",
+                            "size": 523_000_000,
+                            "digest": "a" * 64,
+                            "details": {
+                                "format": "gguf",
+                                "family": "qwen3",
+                                "families": ["qwen3"],
+                                "parameter_size": "0.6B",
+                                "quantization_level": "Q4_K_M",
+                            },
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+
+    monkeypatch.setattr(llm_client.urllib.request, "urlopen", lambda *args, **kwargs: Response())
+
+    assert descriptor.capabilities["local_only_status"] == "external_runtime_unverified"
+    assert llm_client.probe_candidate(descriptor) is True
+
+
+def test_call_candidate_cannot_bypass_local_only_remote_model_check(monkeypatch):
+    monkeypatch.setenv("OLLAMA_NO_CLOUD", "1")
+    monkeypatch.setenv("MEMORY_LLM_BASE_URL", "http://127.0.0.1:11434/v1")
+    monkeypatch.setenv("MEMORY_LLM_MODEL", "qwen3:0.6b")
+    descriptor = llm_client.provider_candidates("ollama", max_tokens=321)[0]
+    backend_calls = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, limit):
+            return json.dumps(
+                {
+                    "models": [
+                        {
+                            "name": "qwen3:0.6b",
+                            "model": "qwen3:0.6b",
+                            "remote_model": "qwen3:0.6b-cloud",
+                            "remote_host": "https://ollama.com",
+                            "size": 0,
+                            "digest": "",
+                            "details": {},
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+
+    monkeypatch.setattr(llm_client.urllib.request, "urlopen", lambda *args, **kwargs: Response())
+    monkeypatch.setitem(
+        llm_client._BACKENDS,
+        "ollama",
+        lambda *args: backend_calls.append(args) or "answer",
+    )
+
+    result = llm_client.call_candidate(
+        descriptor, "prompt", "system", max_tokens=321, available=True
+    )
+
+    assert result.text is None
+    assert result.failure_class == "unavailable"
+    assert backend_calls == []
 
 
 def test_call_candidate_rejects_max_tokens_different_from_descriptor(monkeypatch):

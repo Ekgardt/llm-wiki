@@ -17,7 +17,6 @@ retrieval-benchmark = [
 ]
 semantic = ["sentence-transformers>=2.7,<6"]
 hybrid = ["numpy>=2.2.6,<3", "lancedb>=0.20", "sentence-transformers>=2.7,<6"]
-cognee = ["cognee>=0.1,<2"]
 # v4.0: tree-sitter code graph (12 languages; grammars remain optional as a group).
 code-graph = [
     "jedi>=0.19,<1",

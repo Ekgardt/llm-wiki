@@ -58,11 +58,7 @@ def _junction_or_skip(link: Path, target: Path) -> None:
 
 
 def _linux_memfd_available() -> bool:
-    return (
-        sys.platform.startswith("linux")
-        and hasattr(os, "memfd_create")
-        and Path("/proc/self/fd").is_dir()
-    )
+    return workspace_revision._private_index_platform_supported()
 
 
 def _run_git(root: Path, *arguments: str, input_bytes: bytes | None = None) -> bytes:

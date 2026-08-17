@@ -1047,17 +1047,12 @@ def test_powershell_installer_scheduler_failure_is_partial_and_nonzero(tmp_path)
     summary = source.split(
         "# --- 9. Summary ---------------------------------------------------", 1
     )[1]
-    scripts = tmp_path / "scripts"
-    scripts.mkdir()
-    (scripts / "install-scheduled-tasks.ps1").write_text(
-        "param($VaultRoot, $StateRoot, $UvPath)\nexit 7\n",
-        encoding="utf-8",
-    )
     harness = f"""
 function Info([string]$Message) {{ Write-Output "INFO:$Message" }}
 function Warn([string]$Message) {{ Write-Output "WARN:$Message" }}
 function Ok([string]$Message) {{ Write-Output "OK:$Message" }}
 function uv {{ }}
+function Invoke-NativeCommand {{ throw 'injected install-control failure' }}
 $VAULT_ROOT = 'C:\\vault'
 $STATE_ROOT = 'C:\\state'
 $agents = @()
@@ -1081,6 +1076,47 @@ $syncWarning = $false
     assert "Maintenance: not registered" in completed.stdout
     assert "LLM-Wiki installed successfully" not in completed.stdout
     assert "Maintenance: Task Scheduler (nightly + weekly)" not in completed.stdout
+
+
+def test_powershell_installer_verifies_registered_scheduler_state(tmp_path):
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("PowerShell 7 is unavailable")
+    source = (ROOT / "install.ps1").read_text(encoding="utf-8")
+    scheduler = source.split(
+        "# --- 6. Register Task Scheduler -----------------------------------", 1
+    )[1].split("# --- 7. Detect and wire up agents ---------------------------------", 1)[0]
+    summary = source.split(
+        "# --- 9. Summary ---------------------------------------------------", 1
+    )[1]
+    harness = f"""
+function Info([string]$Message) {{ Write-Output "INFO:$Message" }}
+function Warn([string]$Message) {{ Write-Output "WARN:$Message" }}
+function Ok([string]$Message) {{ Write-Output "OK:$Message" }}
+function uv {{ }}
+function Invoke-NativeCommand {{ '{{"status":"committed","scheduler_backend":"invalid"}}' }}
+$VAULT_ROOT = 'C:\\vault'
+$STATE_ROOT = 'C:\\state'
+$agents = @()
+$syncWarning = $false
+{scheduler}
+{summary}
+"""
+
+    completed = subprocess.run(
+        [pwsh, "-NoProfile", "-NonInteractive", "-Command", harness],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=10,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert "Install ownership transaction or Task Scheduler verification failed" in completed.stdout
+    assert "Maintenance: not registered" in completed.stdout
+    assert "LLM-Wiki installed successfully" not in completed.stdout
 
 
 def test_sync_reports_legacy_change_separately_when_generation_is_deferred(

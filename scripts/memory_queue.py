@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
+    from markdown_transaction import IntentFence
     from operational_ownership import OwnerLease
 
 from reliable_memory import (
@@ -43,6 +44,7 @@ from reliable_memory import (
     open_operational_db,
     open_readonly_operational_db,
     read_runtime_bytes,
+    restricted_relative_path,
     run_resumable_migration,
     sha256_bytes,
     validate_schema,
@@ -78,6 +80,16 @@ _SECRET_KEYS = {
     "secret",
     "set_cookie",
     "token",
+}
+_CAPTURE_TERMINAL_DISPOSITION_FIELDS = {
+    "markdown_committed": {
+        "kind",
+        "transaction_id",
+        "operation_id",
+        "decision_sha256",
+        "outputs",
+    },
+    "no_durable_content": {"kind", "decision_sha256"},
 }
 
 _QUEUE_V3_TABLE_SQL = (
@@ -722,10 +734,28 @@ _QUEUE_V3_TRIGGER_SQL = (
         BEGIN SELECT RAISE(ABORT, 'semantic decisions are immutable'); END""",
     ),
     (
-        "semantic_decisions_immutable_delete",
-        """CREATE TRIGGER semantic_decisions_immutable_delete
+        "semantic_decisions_authorized_delete",
+        """CREATE TRIGGER semantic_decisions_authorized_delete
         BEFORE DELETE ON semantic_decisions
-        BEGIN SELECT RAISE(ABORT, 'semantic decisions are immutable'); END""",
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM capture_task_links AS link
+            JOIN task_purge_authorizations AS authorization
+              ON authorization.task_id=link.task_id
+            WHERE authorization.mode='ordinary' AND (
+                (
+                    link.intent_id=OLD.intent_id
+                    AND link.link_digest=OLD.active_link_digest
+                )
+                OR EXISTS (
+                    SELECT 1 FROM capture_task_link_resolutions AS resolution
+                    WHERE resolution.task_id=link.task_id
+                      AND resolution.selected_intent_id=OLD.intent_id
+                      AND resolution.resolution_digest=OLD.active_link_digest
+                )
+            )
+        )
+        BEGIN SELECT RAISE(ABORT, 'semantic decision delete is unauthorized'); END""",
     ),
     (
         "queue_lineage_guard_insert",
@@ -1022,6 +1052,72 @@ def _migration_error(code: str, message: str) -> OperationalDatabaseContractErro
     error = OperationalDatabaseContractError(message)
     error.code = code
     return error
+
+
+def _ordinary_purge_operation_id(manifest_sha256: str) -> str:
+    return f"ordinary-purge:{manifest_sha256}"
+
+
+def _capture_purge_archive_path(task_id: str, source_path: str) -> str:
+    key = sha256_bytes(
+        canonical_json_bytes({"source_path": source_path, "task_id": task_id})
+    )
+    return f"capture-artifacts/{key}.artifact"
+
+
+def _ordinary_purge_result_archive_path(task_id: str) -> str:
+    value = f"results/{task_id}.result"
+    try:
+        restricted_relative_path(value, ("results",))
+    except ValueError as exc:
+        raise QueueOperationError("export_verification_failed") from exc
+    return value
+
+
+def _ordinary_purge_authorization_digest(
+    task_id: str, operation_id: str, manifest_sha256: str
+) -> str:
+    return sha256_bytes(
+        canonical_json_bytes(
+            {
+                "manifest_sha256": manifest_sha256,
+                "operation_id": operation_id,
+                "task_id": task_id,
+            }
+        )
+    )
+
+
+def _ordinary_purge_manifest_digest(operation_id: object) -> str | None:
+    prefix = "ordinary-purge:"
+    if not isinstance(operation_id, str) or not operation_id.startswith(prefix):
+        return None
+    digest = operation_id.removeprefix(prefix)
+    if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        return None
+    return digest
+
+
+def _queue_v3_purge_authorization_valid(row: sqlite3.Row) -> bool:
+    manifest_sha256 = _ordinary_purge_manifest_digest(row["operation_id"])
+    if row["mode"] != "ordinary" or row["task_present"]:
+        return False
+    if manifest_sha256 is None:
+        return False
+    expected = _ordinary_purge_authorization_digest(
+        str(row["task_id"]), str(row["operation_id"]), manifest_sha256
+    )
+    return row["authorization_digest"] == expected
+
+
+def _queue_v3_purge_authorizations_valid(database: sqlite3.Connection) -> bool:
+    rows = database.execute(
+        """SELECT authorization.*,
+                  EXISTS(SELECT 1 FROM tasks WHERE id=authorization.task_id)
+                    AS task_present
+           FROM task_purge_authorizations AS authorization"""
+    ).fetchall()
+    return all(_queue_v3_purge_authorization_valid(row) for row in rows)
 
 
 def _repair_partial_queue_v3_schema(
@@ -1730,15 +1826,12 @@ def validate_queue_v3_database(
                   OR attempts NOT BETWEEN 0 AND 100""",
             (_MAX_QUEUE_PAYLOAD_BYTES,),
         ).fetchone()[0]
-        purge_authorizations = database.execute(
-            "SELECT COUNT(*) FROM task_purge_authorizations"
-        ).fetchone()[0]
         if (
             len(integrity) != 1
             or integrity[0][0] != "ok"
             or foreign_keys
             or payload_violations
-            or purge_authorizations
+            or not _queue_v3_purge_authorizations_valid(database)
             or not _queue_v3_payloads_valid(database)
         ):
             raise _migration_error(
@@ -2001,6 +2094,182 @@ class CaptureTaskBinding:
     seal_digest: str | None
 
 
+def _require_capture_intent_path(value: str, state: Literal["pending", "ready"]) -> None:
+    restricted_relative_path(value, ("run/capture-intents",))
+    if len(value.encode("utf-8")) > 4096:
+        raise ValueError(f"{state} capture intent path is invalid")
+    pattern = rf"run/capture-intents/{state}/[0-9a-f]{{2}}/[0-9a-f]{{64}}\.json"
+    if re.fullmatch(pattern, value) is None:
+        raise ValueError(f"{state} capture intent path is invalid")
+
+
+def _require_lower_sha256(value: str, label: str) -> None:
+    if re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise ValueError(f"{label} must be lowercase 64-hex")
+
+
+def _require_capture_intent_size(value: int) -> None:
+    if type(value) is not int:
+        raise ValueError("capture intent byte size is invalid")
+    if not 1 <= value <= _MAX_QUEUE_PAYLOAD_BYTES:
+        raise ValueError("capture intent byte size is invalid")
+
+
+def _require_capture_intent_descriptor(
+    intent_id: str,
+    pending_path: str,
+    intent_sha256: str,
+    byte_size: int,
+) -> None:
+    _require_lower_sha256(intent_id, "intent_id")
+    _require_lower_sha256(intent_sha256, "intent_sha256")
+    _require_capture_intent_size(byte_size)
+    _require_capture_intent_path(pending_path, "pending")
+    expected = f"run/capture-intents/pending/{intent_id[:2]}/{intent_id}.json"
+    if pending_path != expected:
+        raise ValueError("capture intent descriptor is invalid")
+
+
+def _require_capture_decision_path(value: str, intent_id: str, stage: str) -> None:
+    restricted_relative_path(value, ("run/queue-results",))
+    expected = _capture_decision_relative_path(intent_id, stage)
+    if value != expected:
+        raise ValueError("decision path is invalid")
+
+
+def _capture_decision_relative_path(intent_id: str, stage: str) -> str:
+    key = sha256_bytes(canonical_json_bytes({"intent_id": intent_id, "stage": stage}))
+    return f"run/queue-results/capture-decision-{key}.json"
+
+
+def _capture_semantic_seal_digest(
+    task_id: str, intent_id: str, stage: str, active_link_digest: str
+) -> str:
+    return sha256_bytes(
+        canonical_json_bytes(
+            {
+                "active_digest": active_link_digest,
+                "consumer_id": f"{intent_id}:{stage}",
+                "consumer_kind": "semantic-decision",
+                "task_id": task_id,
+            }
+        )
+    )
+
+
+def _require_indexed_capture_decision(
+    row: sqlite3.Row,
+    active: CaptureTaskBinding,
+    *,
+    intent_id: str,
+    stage: str,
+    active_link_digest: str,
+) -> None:
+    decision_path = _capture_decision_relative_path(intent_id, stage)
+    seal_digest = _capture_semantic_seal_digest(
+        active.task_id, intent_id, stage, active_link_digest
+    )
+    actual = (
+        active.intent_id,
+        active.active_digest,
+        active.seal_digest,
+        row["decision_path"],
+        row["active_link_digest"],
+        row["publication_state"],
+    )
+    expected = (
+        intent_id,
+        active_link_digest,
+        seal_digest,
+        decision_path,
+        active_link_digest,
+        "published",
+    )
+    if actual != expected:
+        raise QueueOperationError("semantic_decision_conflict")
+
+
+def _indexed_capture_decision_published_at(row: sqlite3.Row) -> datetime:
+    published_at = _parse_timestamp(str(row["published_at"]))
+    if published_at is None:
+        raise QueueOperationError("semantic_decision_conflict")
+    return published_at
+
+
+def _read_indexed_capture_decision(
+    state_root: Path, row: sqlite3.Row
+) -> tuple[str, str]:
+    decision_path = str(row["decision_path"])
+    decision_sha256 = str(row["decision_sha256"])
+    _require_lower_sha256(decision_sha256, "decision_sha256")
+    data = read_runtime_bytes(
+        state_root / decision_path,
+        state_root,
+        max_bytes=1024 * 1024,
+        owner_only=True,
+    )
+    if sha256_bytes(data) != decision_sha256:
+        raise QueueOperationError("semantic_decision_conflict")
+    return decision_path, decision_sha256
+
+
+def _require_capture_terminal_path(value: str, intent_id: str) -> None:
+    restricted_relative_path(value, ("run/queue-results",))
+    expected = f"run/queue-results/capture-{intent_id}.json"
+    if value != expected:
+        raise ValueError("capture terminal path is invalid")
+
+
+def _capture_terminal_disposition_fields(kind: object) -> set[str] | None:
+    if not isinstance(kind, str):
+        return None
+    return _CAPTURE_TERMINAL_DISPOSITION_FIELDS.get(kind)
+
+
+def _existing_capture_publication_state(
+    row: sqlite3.Row | None,
+    *,
+    pending_path: str,
+    ready_path: str,
+    intent_sha256: str,
+    byte_size: int,
+) -> str:
+    if row is None:
+        raise QueueOperationError("capture_intent_conflict")
+    state = str(row["publication_state"])
+    expected_paths = {"pending": pending_path, "ready": ready_path}
+    matches = (
+        expected_paths.get(state) == row["relative_path"]
+        and row["intent_sha256"] == intent_sha256
+        and row["byte_size"] == byte_size
+    )
+    if not matches:
+        raise QueueOperationError("capture_intent_conflict")
+    return state
+
+
+def _require_capture_replay_task(
+    row: sqlite3.Row,
+    kind: str,
+    handler_version: int,
+    payload_bytes: bytes,
+    dedupe_key: str,
+) -> None:
+    stored = bytes(row["payload_blob"])
+    validation = validate_payload_blob(stored, str(row["input_hash"]), parse=True)
+    actual = (
+        validation.code,
+        row["kind"],
+        row["handler_version"],
+        row["input_hash"],
+        row["dedupe_key"],
+        stored,
+    )
+    expected = (None, kind, handler_version, sha256_bytes(payload_bytes), dedupe_key, payload_bytes)
+    if actual != expected:
+        raise QueueOperationError("capture_replay_conflict")
+
+
 @dataclass(frozen=True)
 class TaskFence:
     task_id: str
@@ -2070,6 +2339,33 @@ class WorkerSummary:
 class PurgeReceipt:
     purged: int
     task_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _CapturePurgeArtifact:
+    source_path: str
+    archive_path: str
+    sha256: str
+
+
+@dataclass(frozen=True)
+class _CapturePurgeEvidence:
+    task_id: str
+    intent_id: str
+    intent: _CapturePurgeArtifact
+    decisions: tuple[_CapturePurgeArtifact, ...]
+    terminal_path: str
+
+
+@dataclass(frozen=True)
+class _OrdinaryPurgePlan:
+    cutoff: str
+    export: Path
+    task_ids: tuple[str, ...]
+    records: tuple[dict[str, object], ...]
+    records_bytes: bytes
+    capture_evidence: tuple[_CapturePurgeEvidence, ...]
+    manifest_bytes: bytes | None
 
 
 def _utc_now() -> datetime:
@@ -3792,10 +4088,20 @@ class MemoryQueue:
 class _QueueV3CandidateReader:
     """Minimal claim seam for tests against an unpublished v3 candidate."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, coordinator_path: Path | None = None) -> None:
         self.db_path = Path(path)
         self.state_root = self.db_path.parent.parent
         self.results_dir = self.state_root / "run" / "queue-results"
+        self.coordinator_path = coordinator_path
+
+    def ownership_registry(self):
+        from operational_ownership import OwnershipRegistry
+
+        if self.coordinator_path is None:
+            return OwnershipRegistry(self.state_root)
+        return OwnershipRegistry._from_adopted_database(
+            self.state_root, self.coordinator_path
+        )
 
     def _connect(self) -> sqlite3.Connection:
         return open_operational_db(
@@ -4016,6 +4322,140 @@ class _QueueV3CandidateReader:
             if inserted != 1:
                 raise QueueOperationError("capture_intent_insert_failed")
 
+    def index_capture_intent_pending(
+        self,
+        *,
+        intent_id: str,
+        pending_path: str,
+        ready_path: str,
+        intent_sha256: str,
+        byte_size: int,
+    ) -> str:
+        _require_capture_intent_descriptor(
+            intent_id, pending_path, intent_sha256, byte_size
+        )
+        _require_capture_intent_path(ready_path, "ready")
+        now = _timestamp(_utc_now())
+        with closing(self._connect()) as database, begin_immediate(database):
+            existing = database.execute(
+                "SELECT * FROM capture_intents WHERE intent_id=?", (intent_id,)
+            ).fetchone()
+            if existing is not None:
+                return _existing_capture_publication_state(
+                    existing,
+                    pending_path=pending_path,
+                    ready_path=ready_path,
+                    intent_sha256=intent_sha256,
+                    byte_size=byte_size,
+                )
+            inserted = database.execute(
+                """INSERT INTO capture_intents(
+                       intent_id,relative_path,intent_sha256,byte_size,
+                       publication_state,updated_at
+                   ) VALUES (?,?,?,?,'pending',?)""",
+                (intent_id, pending_path, intent_sha256, byte_size, now),
+            ).rowcount
+            if inserted != 1:
+                raise QueueOperationError("capture_intent_insert_failed")
+        return "pending"
+
+    def mark_capture_intent_ready(
+        self,
+        *,
+        intent_id: str,
+        pending_path: str,
+        ready_path: str,
+        intent_sha256: str,
+        byte_size: int,
+    ) -> None:
+        _require_capture_intent_descriptor(
+            intent_id, pending_path, intent_sha256, byte_size
+        )
+        _require_capture_intent_path(ready_path, "ready")
+        with closing(self._connect()) as database, begin_immediate(database):
+            row = database.execute(
+                "SELECT * FROM capture_intents WHERE intent_id=?", (intent_id,)
+            ).fetchone()
+            state = _existing_capture_publication_state(
+                row,
+                pending_path=pending_path,
+                ready_path=ready_path,
+                intent_sha256=intent_sha256,
+                byte_size=byte_size,
+            )
+            if state == "ready":
+                return
+            updated = database.execute(
+                """UPDATE capture_intents
+                   SET relative_path=?,publication_state='ready',updated_at=?
+                   WHERE intent_id=? AND relative_path=?
+                     AND publication_state='pending'""",
+                (ready_path, _timestamp(_utc_now()), intent_id, pending_path),
+            ).rowcount
+            if updated != 1:
+                raise QueueOperationError("capture_intent_conflict")
+
+    def enqueue_capture_task_replay_safe(
+        self,
+        kind: str,
+        handler_version: int,
+        payload: Mapping[str, object],
+        *,
+        intent_id: str,
+        intent_path: str,
+        intent_sha256: str,
+        capture_fence: object,
+        owner: OwnerLease,
+    ) -> CaptureTaskBinding:
+        payload_bytes = canonical_json_bytes(_redact_payload(dict(payload)))
+        dedupe_key = f"capture:{intent_id}:{handler_version}"
+        existing = self._capture_replay_binding(
+            intent_id=intent_id,
+            kind=kind,
+            handler_version=handler_version,
+            payload_bytes=payload_bytes,
+            dedupe_key=dedupe_key,
+        )
+        if existing is not None:
+            return existing
+        return self.enqueue_capture_task(
+            kind,
+            handler_version,
+            payload,
+            intent_id=intent_id,
+            intent_path=intent_path,
+            intent_sha256=intent_sha256,
+            capture_fence=capture_fence,
+            owner=owner,
+            dedupe_key=dedupe_key,
+        )
+
+    def _capture_replay_binding(
+        self,
+        *,
+        intent_id: str,
+        kind: str,
+        handler_version: int,
+        payload_bytes: bytes,
+        dedupe_key: str,
+    ) -> CaptureTaskBinding | None:
+        with closing(self._connect()) as database:
+            rows = database.execute(
+                """SELECT task.*,link.intent_sha256
+                   FROM capture_task_links AS link
+                   JOIN tasks AS task ON task.id=link.task_id
+                   WHERE link.intent_id=?""",
+                (intent_id,),
+            ).fetchall()
+            if not rows:
+                return None
+            if len(rows) != 1:
+                raise QueueOperationError("capture_link_conflicted")
+            _require_capture_replay_task(
+                rows[0], kind, handler_version, payload_bytes, dedupe_key
+            )
+            return self.active_capture_binding(database, str(rows[0]["id"]))
+
     @staticmethod
     def _insert_capture_link(
         database: sqlite3.Connection,
@@ -4066,7 +4506,7 @@ class _QueueV3CandidateReader:
         if not isinstance(intent_path, str) or len(intent_path.encode("utf-8")) > 4096:
             raise ValueError("intent_path is invalid")
         from markdown_transaction import IntentFence
-        from operational_ownership import OwnerLease, OwnershipRegistry
+        from operational_ownership import OwnerLease
 
         if not isinstance(owner, OwnerLease) or owner.role != "capture":
             raise ValueError("capture enqueue requires a capture owner")
@@ -4077,7 +4517,7 @@ class _QueueV3CandidateReader:
             or capture_fence.owner != owner
         ):
             raise ValueError("capture fence does not match the intent and owner")
-        registry = OwnershipRegistry(self.state_root)
+        registry = self.ownership_registry()
         with closing(registry._connect()) as coordinator_database:
             try:
                 registry.require(coordinator_database, owner)
@@ -4213,9 +4653,7 @@ class _QueueV3CandidateReader:
         self._validate_task_fence_owner(owner, mode)
         if not isinstance(task_id, str) or not task_id:
             raise ValueError("task_id must be non-empty")
-        from operational_ownership import OwnershipRegistry
-
-        registry = OwnershipRegistry(self.state_root)
+        registry = self.ownership_registry()
         with closing(registry._connect()) as coordinator_database:
             registry.require(coordinator_database, owner)
         now = _utc_now()
@@ -4433,7 +4871,7 @@ class _QueueV3CandidateReader:
         owner: OwnerLease,
         reason: str,
     ) -> CaptureTaskBinding:
-        from operational_ownership import OwnerLease, OwnershipRegistry, current_actor_identity
+        from operational_ownership import OwnerLease, current_actor_identity
 
         if not isinstance(owner, OwnerLease) or owner.role != "repair":
             raise ValueError("capture link resolution requires a repair owner")
@@ -4458,7 +4896,7 @@ class _QueueV3CandidateReader:
         )
         resolution_digest = sha256_bytes(canonical_json_bytes(record))
         observed_json = canonical_json_bytes(record["observed"])
-        registry = OwnershipRegistry(self.state_root)
+        registry = self.ownership_registry()
         with closing(registry._connect()) as coordinator_database:
             registry.require(coordinator_database, owner)
         with closing(self._connect()) as database, begin_immediate(database):
@@ -4606,6 +5044,47 @@ class _QueueV3CandidateReader:
         if inserted != 1:
             raise QueueOperationError("semantic_decision_insert_failed")
 
+    def indexed_capture_decision(
+        self,
+        *,
+        task_id: str,
+        intent_id: str,
+        stage: Literal["flush", "feedback", "feedback-verify"],
+        active_link_digest: str,
+    ) -> SemanticDecision | None:
+        _require_capture_decision_path(
+            _capture_decision_relative_path(intent_id, stage), intent_id, stage
+        )
+        with closing(self._connect()) as database:
+            row = database.execute(
+                "SELECT * FROM semantic_decisions WHERE intent_id=? AND stage=?",
+                (intent_id, stage),
+            ).fetchone()
+            if row is None:
+                return None
+            active = self.active_capture_binding(database, task_id)
+            _require_indexed_capture_decision(
+                row,
+                active,
+                intent_id=intent_id,
+                stage=stage,
+                active_link_digest=active_link_digest,
+            )
+            published_at = _indexed_capture_decision_published_at(row)
+        decision_path, decision_sha256 = _read_indexed_capture_decision(
+            self.state_root, row
+        )
+        return SemanticDecision(
+            task_id=task_id,
+            intent_id=intent_id,
+            stage=stage,
+            decision_path=decision_path,
+            decision_sha256=decision_sha256,
+            active_link_digest=active_link_digest,
+            seal_digest=active.seal_digest or "",
+            published_at=published_at,
+        )
+
     def publish_semantic_decision(
         self,
         coordinator: object,
@@ -4621,7 +5100,7 @@ class _QueueV3CandidateReader:
         owner: OwnerLease,
     ) -> SemanticDecision:
         from markdown_transaction import IntentFence
-        from operational_ownership import OwnerLease, OwnershipRegistry
+        from operational_ownership import OwnerLease
 
         if stage not in {"flush", "feedback", "feedback-verify"}:
             raise ValueError("semantic decision stage is invalid")
@@ -4641,13 +5120,7 @@ class _QueueV3CandidateReader:
             or intent_fence.owner != owner
         ):
             raise ValueError("semantic decision owner does not match fences")
-        if (
-            not isinstance(decision_path, str)
-            or not decision_path.startswith("run/capture-decisions/")
-            or "\\" in decision_path
-            or len(decision_path.encode("utf-8")) > 4096
-        ):
-            raise ValueError("decision path is invalid")
+        _require_capture_decision_path(decision_path, intent_id, stage)
         candidate = self.state_root / decision_path
         data = read_runtime_bytes(
             candidate,
@@ -4657,7 +5130,7 @@ class _QueueV3CandidateReader:
         )
         if sha256_bytes(data) != decision_sha256:
             raise QueueOperationError("semantic_decision_conflict")
-        registry = OwnershipRegistry(self.state_root)
+        registry = self.ownership_registry()
         now = _utc_now()
         with closing(registry._connect()) as coordinator_database:
             registry.require(coordinator_database, owner)
@@ -4778,6 +5251,299 @@ class _QueueV3CandidateReader:
             published_at=published_at,
         )
 
+    def _read_capture_terminal(
+        self, terminal_path: str, terminal_sha256: str
+    ) -> tuple[dict[str, object], bytes]:
+        data = read_runtime_bytes(
+            self.state_root / terminal_path,
+            self.state_root,
+            max_bytes=64 * 1024,
+            owner_only=True,
+        )
+        if sha256_bytes(data) != terminal_sha256:
+            raise QueueOperationError("capture_terminal_conflict")
+        value = json.loads(data.decode("utf-8", errors="strict"))
+        if not isinstance(value, dict):
+            raise QueueOperationError("capture_terminal_invalid")
+        return value, data
+
+    def _capture_terminal_decisions(
+        self, database: sqlite3.Connection, intent_id: str
+    ) -> list[dict[str, str]]:
+        rows = database.execute(
+            """SELECT stage,decision_path,decision_sha256 FROM semantic_decisions
+               WHERE intent_id=? ORDER BY stage""",
+            (intent_id,),
+        ).fetchall()
+        result = []
+        for row in rows:
+            data = read_runtime_bytes(
+                self.state_root / str(row["decision_path"]),
+                self.state_root,
+                max_bytes=1024 * 1024,
+                owner_only=True,
+            )
+            if sha256_bytes(data) != row["decision_sha256"]:
+                raise QueueOperationError("semantic_decision_conflict")
+            result.append(
+                {
+                    "stage": str(row["stage"]),
+                    "decision_path": str(row["decision_path"]),
+                    "decision_sha256": str(row["decision_sha256"]),
+                }
+            )
+        return result
+
+    @staticmethod
+    def _require_capture_terminal_disposition(
+        record: Mapping[str, object], decisions: list[dict[str, str]]
+    ) -> None:
+        disposition = record.get("disposition")
+        if not isinstance(disposition, dict):
+            raise QueueOperationError("capture_terminal_invalid")
+        required = _capture_terminal_disposition_fields(disposition.get("kind"))
+        decision_digests = {item["decision_sha256"] for item in decisions}
+        actual = (set(disposition), disposition.get("decision_sha256") in decision_digests)
+        expected = (required, True)
+        if actual != expected:
+            raise QueueOperationError("capture_terminal_invalid")
+
+    def _require_capture_terminal_record(
+        self,
+        record: Mapping[str, object],
+        *,
+        binding: CaptureTaskBinding,
+        decisions: list[dict[str, str]],
+    ) -> None:
+        expected_keys = {
+            "schema_version",
+            "intent_id",
+            "intent_sha256",
+            "semantic_decisions",
+            "processing_binding",
+            "disposition",
+        }
+        processing = record.get("processing_binding")
+        identity = (
+            set(record),
+            record.get("schema_version"),
+            record.get("intent_id"),
+            record.get("intent_sha256"),
+            record.get("semantic_decisions"),
+        )
+        expected_identity = (
+            expected_keys,
+            "capture-terminal/v1",
+            binding.intent_id,
+            binding.intent_sha256,
+            decisions,
+        )
+        if identity != expected_identity or not isinstance(processing, dict):
+            raise QueueOperationError("capture_terminal_invalid")
+        expected_processing = {
+            "kind": "task",
+            "task_id": binding.task_id,
+            "active_link_digest": binding.active_digest,
+        }
+        if processing != expected_processing:
+            raise QueueOperationError("capture_terminal_invalid")
+        self._require_capture_terminal_disposition(record, decisions)
+
+    def _require_capture_terminal_owner(
+        self,
+        *,
+        lease: QueueLease,
+        intent_id: str,
+        task_fence: TaskFence,
+        intent_fence: object,
+        owner: OwnerLease,
+    ) -> None:
+        from markdown_transaction import IntentFence
+        from operational_ownership import OwnerLease
+
+        actual = (
+            isinstance(owner, OwnerLease),
+            task_fence.task_id,
+            task_fence.mode,
+            task_fence.owner,
+            isinstance(intent_fence, IntentFence),
+            getattr(intent_fence, "intent_id", None),
+            getattr(intent_fence, "mode", None),
+            getattr(intent_fence, "owner", None),
+        )
+        expected = (True, lease.id, "worker", owner, True, intent_id, "worker", owner)
+        if actual != expected:
+            raise ValueError("capture terminal fences do not match")
+
+    @staticmethod
+    def _require_capture_terminal_task_fence(
+        database: sqlite3.Connection,
+        task_fence: TaskFence,
+        owner: OwnerLease,
+        now: datetime,
+    ) -> None:
+        row = database.execute(
+            """SELECT 1 FROM task_fences WHERE task_id=? AND mode='worker'
+               AND token=? AND fencing_epoch=? AND canonical_owner_token=?
+               AND canonical_fencing_epoch=? AND expires_at>?""",
+            (
+                task_fence.task_id,
+                task_fence.token,
+                task_fence.epoch,
+                owner.token,
+                owner.epoch,
+                _timestamp(now),
+            ),
+        ).fetchone()
+        if row is None:
+            raise QueueOperationError("task_fence_lost")
+
+    @staticmethod
+    def _require_capture_terminal_intent_fence(
+        database: sqlite3.Connection,
+        intent_fence: IntentFence,
+        owner: OwnerLease,
+        now: datetime,
+    ) -> None:
+        row = database.execute(
+            """SELECT 1 FROM intent_fences WHERE intent_id=? AND mode='worker'
+               AND token=? AND fencing_epoch=? AND canonical_owner_token=?
+               AND canonical_fencing_epoch=? AND expires_at>?""",
+            (
+                intent_fence.intent_id,
+                intent_fence.token,
+                intent_fence.epoch,
+                owner.token,
+                owner.epoch,
+                _timestamp(now),
+            ),
+        ).fetchone()
+        if row is None:
+            raise QueueOperationError("intent_fence_lost")
+
+    @staticmethod
+    def _commit_capture_terminal_row(
+        database: sqlite3.Connection,
+        row: sqlite3.Row,
+        lease: QueueLease,
+        *,
+        terminal_path: str,
+        terminal_sha256: str,
+        intent_id: str,
+        now: datetime,
+    ) -> None:
+        database.execute(
+            """INSERT INTO attempt_history(
+                   task_id,attempt,started_at,finished_at,outcome,error_code
+               ) VALUES (?,?,?,?, 'succeeded',NULL)""",
+            (
+                lease.id,
+                row["attempts"],
+                row["attempt_started_at"] or _timestamp(now),
+                _timestamp(now),
+            ),
+        )
+        changed = database.execute(
+            """UPDATE tasks SET state='succeeded',result_reference=?,result_sha256=?,
+                   result_operation_id=?,error_code=NULL,updated_at=?,last_attempt_at=?,
+                   lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,
+                   lease_heartbeat_at=NULL,attempt_started_at=NULL
+               WHERE id=? AND lease_token=? AND state='leased'""",
+            (
+                terminal_path,
+                terminal_sha256,
+                f"capture-terminal:{intent_id}",
+                _timestamp(now),
+                _timestamp(now),
+                lease.id,
+                lease.token,
+            ),
+        ).rowcount
+        if changed != 1:
+            raise LeaseFenceError(f"lease is stale or not owned: {lease.id}")
+
+    def complete_existing_capture_terminal(
+        self,
+        lease: QueueLease,
+        *,
+        intent_id: str,
+        active_link_digest: str,
+        task_fence: TaskFence,
+        intent_fence: object,
+        owner: OwnerLease,
+    ) -> str | None:
+        relative = f"run/queue-results/capture-{intent_id}.json"
+        candidate = self.state_root / relative
+        try:
+            candidate.lstat()
+        except FileNotFoundError:
+            return None
+        data = read_runtime_bytes(
+            candidate,
+            self.state_root,
+            max_bytes=64 * 1024,
+            owner_only=True,
+        )
+        return self.complete_capture_terminal(
+            lease,
+            intent_id=intent_id,
+            terminal_path=relative,
+            terminal_sha256=sha256_bytes(data),
+            active_link_digest=active_link_digest,
+            task_fence=task_fence,
+            intent_fence=intent_fence,
+            owner=owner,
+        )
+
+    def complete_capture_terminal(
+        self,
+        lease: QueueLease,
+        *,
+        intent_id: str,
+        terminal_path: str,
+        terminal_sha256: str,
+        active_link_digest: str,
+        task_fence: TaskFence,
+        intent_fence: object,
+        owner: OwnerLease,
+    ) -> str:
+        _require_lower_sha256(intent_id, "intent_id")
+        _require_lower_sha256(terminal_sha256, "terminal_sha256")
+        _require_capture_terminal_path(terminal_path, intent_id)
+        self._require_capture_terminal_owner(
+            lease=lease,
+            intent_id=intent_id,
+            task_fence=task_fence,
+            intent_fence=intent_fence,
+            owner=owner,
+        )
+        record, _data = self._read_capture_terminal(terminal_path, terminal_sha256)
+        registry = self.ownership_registry()
+        now = _utc_now()
+        with closing(registry._connect()) as coordinator_database:
+            registry.require(coordinator_database, owner)
+            self._require_capture_terminal_intent_fence(
+                coordinator_database, intent_fence, owner, now
+            )
+        with closing(self._connect()) as database, begin_immediate(database):
+            row = self._require_lease_row(database, lease, now)
+            self._require_capture_terminal_task_fence(database, task_fence, owner, now)
+            binding = self.active_capture_binding(database, lease.id)
+            if binding.active_digest != active_link_digest or binding.intent_id != intent_id:
+                raise QueueOperationError("capture_link_conflicted")
+            decisions = self._capture_terminal_decisions(database, intent_id)
+            self._require_capture_terminal_record(record, binding=binding, decisions=decisions)
+            self._commit_capture_terminal_row(
+                database,
+                row,
+                lease,
+                terminal_path=terminal_path,
+                terminal_sha256=terminal_sha256,
+                intent_id=intent_id,
+                now=now,
+            )
+        return terminal_path
+
     @staticmethod
     def _publish_corrupt_fixed_files(
         package: Path,
@@ -4837,7 +5603,7 @@ class _QueueV3CandidateReader:
         deadline: float = float("inf"),
         cancelled: Callable[[], bool] | None = None,
     ) -> CorruptExportProgress:
-        from operational_ownership import OwnerLease, OwnershipRegistry, current_actor_identity
+        from operational_ownership import OwnerLease, current_actor_identity
 
         _require_active(deadline, cancelled)
         if not isinstance(owner, OwnerLease) or owner.role != "repair":
@@ -4846,7 +5612,7 @@ class _QueueV3CandidateReader:
             raise ValueError("task ID is invalid")
         if not isinstance(reason, str) or not 1 <= len(reason.encode("utf-8")) <= 4096:
             raise ValueError("quarantine reason is invalid")
-        registry = OwnershipRegistry(self.state_root)
+        registry = self.ownership_registry()
         actor = current_actor_identity()
         with closing(registry._connect()) as coordinator_database:
             registry.require(coordinator_database, owner)
@@ -5655,65 +6421,242 @@ class _QueueV3CandidateReader:
             elif task is not None:
                 raise QueueOperationError("task_fence_lost")
 
+    def _capture_terminal_file(
+        self, intent_id: str
+    ) -> tuple[dict[str, object], bytes]:
+        path = self.results_dir / f"capture-{intent_id}.json"
+        try:
+            raw = _read_stable_owner_file(path, 64 * 1024)
+            value = json.loads(raw.decode("utf-8", errors="strict"))
+        except (OSError, PermissionError, ValueError, json.JSONDecodeError) as exc:
+            raise QueueOperationError("capture_intent_unresolved") from exc
+        if not isinstance(value, dict):
+            raise QueueOperationError("capture_terminal_invalid")
+        return value, raw
+
+    @staticmethod
+    def _require_capture_terminal_identity(
+        record: Mapping[str, object], task_id: str, binding: CaptureTaskBinding
+    ) -> None:
+        processing = record.get("processing_binding")
+        disposition = record.get("disposition")
+        actual = (
+            set(record),
+            record.get("schema_version"),
+            record.get("intent_id"),
+            record.get("intent_sha256"),
+            isinstance(record.get("semantic_decisions"), list),
+        )
+        expected = (
+            {
+                "schema_version",
+                "intent_id",
+                "intent_sha256",
+                "semantic_decisions",
+                "processing_binding",
+                "disposition",
+            },
+            "capture-terminal/v1",
+            binding.intent_id,
+            binding.intent_sha256,
+            True,
+        )
+        if actual != expected:
+            raise QueueOperationError("capture_terminal_invalid")
+        expected_processing = {
+            "kind": "task",
+            "task_id": task_id,
+            "active_link_digest": binding.active_digest,
+        }
+        if processing != expected_processing:
+            raise QueueOperationError("capture_terminal_invalid")
+        if not isinstance(disposition, dict):
+            raise QueueOperationError("capture_terminal_invalid")
+        allowed = {"markdown_committed", "no_durable_content", "operator_discard"}
+        if disposition.get("kind") not in allowed:
+            raise QueueOperationError("capture_terminal_invalid")
+
+    @staticmethod
+    def _require_capture_terminal_database_binding(
+        database: sqlite3.Connection,
+        task_id: str,
+        binding: CaptureTaskBinding,
+        raw: bytes,
+    ) -> None:
+        intent = database.execute(
+            "SELECT intent_sha256 FROM capture_intents WHERE intent_id=?",
+            (binding.intent_id,),
+        ).fetchone()
+        if intent is None or intent["intent_sha256"] != binding.intent_sha256:
+            raise QueueOperationError("capture_terminal_invalid")
+        task = database.execute(
+            """SELECT result_reference,result_sha256,result_operation_id
+               FROM tasks WHERE id=?""",
+            (task_id,),
+        ).fetchone()
+        expected = (
+            f"run/queue-results/capture-{binding.intent_id}.json",
+            sha256_bytes(raw),
+            f"capture-terminal:{binding.intent_id}",
+        )
+        if task is None or tuple(task) != expected:
+            raise QueueOperationError("capture_terminal_unbound")
+
+    def _require_capture_terminal_proof(
+        self,
+        database: sqlite3.Connection,
+        task_id: str,
+        binding: CaptureTaskBinding,
+    ) -> dict[str, object]:
+        if binding.intent_id is None or binding.intent_sha256 is None:
+            raise QueueOperationError("capture_intent_unresolved")
+        record, raw = self._capture_terminal_file(binding.intent_id)
+        self._require_capture_terminal_identity(record, task_id, binding)
+        self._require_capture_terminal_database_binding(
+            database, task_id, binding, raw
+        )
+        return record
+
     def _capture_terminal_blocker(
         self,
         database: sqlite3.Connection,
         task_id: str,
         binding: CaptureTaskBinding,
     ) -> str | None:
-        if binding.intent_id is None or binding.intent_sha256 is None:
-            return "capture_intent_unresolved"
-        path = self.results_dir / f"capture-{binding.intent_id}.json"
         try:
-            raw = _read_stable_owner_file(path, 64 * 1024)
-            record = json.loads(raw.decode("utf-8", errors="strict"))
-        except (OSError, PermissionError, ValueError, json.JSONDecodeError):
-            return "capture_intent_unresolved"
-        if not isinstance(record, dict) or set(record) != {
-            "schema_version",
-            "intent_id",
-            "intent_sha256",
-            "semantic_decisions",
-            "processing_binding",
-            "disposition",
-        }:
-            return "capture_terminal_invalid"
-        processing = record.get("processing_binding")
-        disposition = record.get("disposition")
-        if (
-            record.get("schema_version") != "capture-terminal/v1"
-            or record.get("intent_id") != binding.intent_id
-            or record.get("intent_sha256") != binding.intent_sha256
-            or not isinstance(record.get("semantic_decisions"), list)
-            or not isinstance(processing, dict)
-            or processing.get("kind") != "task"
-            or processing.get("task_id") != task_id
-            or processing.get("active_link_digest") != binding.active_digest
-            or not isinstance(disposition, dict)
-            or disposition.get("kind")
-            not in {"markdown_committed", "no_durable_content", "operator_discard"}
-        ):
-            return "capture_terminal_invalid"
-        intent = database.execute(
+            self._require_capture_terminal_proof(database, task_id, binding)
+        except QueueOperationError as exc:
+            return exc.code
+        return None
+
+    @staticmethod
+    def _require_capture_purge_unshared(
+        database: sqlite3.Connection, task_id: str, intent_id: str
+    ) -> None:
+        other = database.execute(
+            """SELECT task_id FROM capture_task_links
+               WHERE intent_id=? AND task_id<>?
+               UNION ALL
+               SELECT task_id FROM capture_task_link_resolutions
+               WHERE selected_intent_id=? AND task_id<>?
+               LIMIT 1""",
+            (intent_id, task_id, intent_id, task_id),
+        ).fetchone()
+        if other is not None:
+            raise QueueOperationError("capture_link_conflicted")
+
+    def _capture_purge_artifact(
+        self,
+        task_id: str,
+        source_path: str,
+        expected_sha256: str,
+        *,
+        max_bytes: int,
+        error_code: str,
+    ) -> _CapturePurgeArtifact:
+        try:
+            data = read_runtime_bytes(
+                self.state_root / source_path,
+                self.state_root,
+                max_bytes=max_bytes,
+                owner_only=True,
+            )
+        except (OSError, PermissionError, ValueError) as exc:
+            raise QueueOperationError(error_code) from exc
+        if sha256_bytes(data) != expected_sha256:
+            raise QueueOperationError(error_code)
+        archive_path = _capture_purge_archive_path(task_id, source_path)
+        return _CapturePurgeArtifact(source_path, archive_path, expected_sha256)
+
+    def _capture_purge_intent_path(
+        self, database: sqlite3.Connection, binding: CaptureTaskBinding
+    ) -> _CapturePurgeArtifact:
+        row = database.execute(
             "SELECT * FROM capture_intents WHERE intent_id=?", (binding.intent_id,)
         ).fetchone()
-        if intent is None or intent["intent_sha256"] != binding.intent_sha256:
-            return "capture_terminal_invalid"
-        task = database.execute(
-            """SELECT result_reference,result_sha256,result_operation_id
-               FROM tasks WHERE id=?""",
-            (task_id,),
-        ).fetchone()
-        if (
-            task is None
-            or task["result_reference"]
-            != f"run/queue-results/capture-{binding.intent_id}.json"
-            or task["result_sha256"] != sha256_bytes(raw)
-            or task["result_operation_id"]
-            != f"capture-terminal:{binding.intent_id}"
-        ):
-            return "capture_terminal_unbound"
-        return None
+        if row is None:
+            raise QueueOperationError("capture_intent_conflict")
+        relative = str(row["relative_path"])
+        artifact = self._capture_purge_artifact(
+            binding.task_id,
+            relative,
+            str(binding.intent_sha256),
+            max_bytes=_MAX_QUEUE_PAYLOAD_BYTES,
+            error_code="capture_intent_conflict",
+        )
+        size = (self.state_root / relative).stat().st_size
+        if (size, row["publication_state"]) != (row["byte_size"], "ready"):
+            raise QueueOperationError("capture_intent_conflict")
+        return artifact
+
+    def _require_capture_purge_decision_file(
+        self, task_id: str, row: sqlite3.Row
+    ) -> _CapturePurgeArtifact:
+        return self._capture_purge_artifact(
+            task_id,
+            str(row["decision_path"]),
+            str(row["decision_sha256"]),
+            max_bytes=1024 * 1024,
+            error_code="semantic_decision_conflict",
+        )
+
+    @staticmethod
+    def _capture_purge_decisions_match(
+        rows: list[sqlite3.Row],
+        binding: CaptureTaskBinding,
+        record: Mapping[str, object],
+    ) -> bool:
+        indexed = [
+            {
+                "stage": str(row["stage"]),
+                "decision_path": str(row["decision_path"]),
+                "decision_sha256": str(row["decision_sha256"]),
+            }
+            for row in rows
+        ]
+        digests_match = all(
+            row["active_link_digest"] == binding.active_digest for row in rows
+        )
+        return indexed == record.get("semantic_decisions") and digests_match
+
+    def _capture_purge_decision_paths(
+        self,
+        database: sqlite3.Connection,
+        binding: CaptureTaskBinding,
+        record: Mapping[str, object],
+    ) -> tuple[_CapturePurgeArtifact, ...]:
+        rows = database.execute(
+            """SELECT stage,decision_path,decision_sha256,active_link_digest
+               FROM semantic_decisions WHERE intent_id=? ORDER BY stage""",
+            (binding.intent_id,),
+        ).fetchall()
+        if not self._capture_purge_decisions_match(rows, binding, record):
+            raise QueueOperationError("capture_terminal_invalid")
+        return tuple(
+            self._require_capture_purge_decision_file(binding.task_id, row)
+            for row in rows
+        )
+
+    def _capture_purge_evidence(
+        self,
+        database: sqlite3.Connection,
+        task_id: str,
+        binding: CaptureTaskBinding,
+    ) -> _CapturePurgeEvidence:
+        record = self._require_capture_terminal_proof(database, task_id, binding)
+        intent_id = str(binding.intent_id)
+        self._require_capture_purge_unshared(database, task_id, intent_id)
+        intent = self._capture_purge_intent_path(database, binding)
+        decisions = self._capture_purge_decision_paths(
+            database, binding, record
+        )
+        return _CapturePurgeEvidence(
+            task_id,
+            intent_id,
+            intent,
+            decisions,
+            f"run/queue-results/capture-{intent_id}.json",
+        )
 
     @staticmethod
     def _require_corrupt_task_fence(
@@ -5955,14 +6898,14 @@ class _QueueV3CandidateReader:
         deadline: float = float("inf"),
         cancelled: Callable[[], bool] | None = None,
     ) -> CorruptPurgeProgress:
-        from operational_ownership import OwnerLease, OwnershipRegistry
+        from operational_ownership import OwnerLease
 
         _require_active(deadline, cancelled)
         if not isinstance(owner, OwnerLease) or owner.role != "repair":
             raise ValueError("corrupt purge requires a repair owner")
         if not isinstance(task_id, str) or not 1 <= len(task_id.encode("utf-8")) <= 256:
             raise ValueError("task ID is invalid")
-        registry = OwnershipRegistry(self.state_root)
+        registry = self.ownership_registry()
         with closing(registry._connect()) as coordinator_database:
             registry.require(coordinator_database, owner)
         completed = self._completed_corrupt_purge_progress(task_id)
@@ -6276,7 +7219,7 @@ class _QueueV3CandidateReader:
         scope: str,
         parent: OwnerLease | None = None,
     ) -> Iterator[OwnerLease]:
-        from operational_ownership import OwnerLease, OwnershipRegistry
+        from operational_ownership import OwnerLease
 
         allowed = {
             "queue-worker": {"queue-worker", "compile", "doctor", "nightly", "weekly"},
@@ -6284,7 +7227,7 @@ class _QueueV3CandidateReader:
         }
         if role not in allowed:
             raise ValueError("queue owner role must be queue-worker or queue-operator")
-        registry = OwnershipRegistry(self.state_root)
+        registry = self.ownership_registry()
         nested = parent is not None
         if nested:
             if not isinstance(parent, OwnerLease):
@@ -6350,9 +7293,7 @@ class _QueueV3CandidateReader:
             )
 
     def heartbeat_queue_owner(self, lease: OwnerLease) -> None:
-        from operational_ownership import OwnershipRegistry
-
-        registry = OwnershipRegistry(self.state_root)
+        registry = self.ownership_registry()
         current = registry.heartbeat(lease)
         with closing(
             open_operational_db(
@@ -6492,6 +7433,105 @@ class _QueueV3CandidateReader:
             last_attempt_at=_parse_timestamp(row["last_attempt_at"]),
             prior_attempts=int(row["attempts"]),
         )
+
+    @staticmethod
+    def _validate_capture_claim(
+        owner: str, lease_seconds: int, max_attempts: int
+    ) -> None:
+        if not owner:
+            raise ValueError("owner must be non-empty")
+        if lease_seconds <= 0:
+            raise ValueError("lease must be positive")
+        _validate_retry_policy(
+            max_attempts, DEFAULTS.retry_base_seconds, DEFAULTS.retry_cap_seconds
+        )
+
+    @staticmethod
+    def _capture_claim_row(
+        database: sqlite3.Connection, max_attempts: int, now: datetime
+    ) -> sqlite3.Row | None:
+        return database.execute(
+            """SELECT task.* FROM tasks AS task
+               JOIN capture_task_links AS link ON link.task_id=task.id
+               WHERE task.state='ready' AND task.kind='flush'
+                 AND task.handler_version=1 AND task.attempts<?
+                 AND task.available_at<=?
+                 AND (SELECT COUNT(*) FROM attempt_history AS history
+                      WHERE history.task_id=task.id)<?
+               ORDER BY task.priority DESC,task.available_at,task.created_at,task.id
+               LIMIT 1""",
+            (max_attempts, _timestamp(now), _MAX_RUNTIME_ATTEMPTS),
+        ).fetchone()
+
+    def _lease_capture_row(
+        self,
+        database: sqlite3.Connection,
+        row: sqlite3.Row,
+        *,
+        owner: str,
+        lease_seconds: int,
+        max_attempts: int,
+        now: datetime,
+    ) -> QueueLease | None:
+        validation = self._require_valid_task_payload(database, row, now=now, parse=True)
+        if validation is None:
+            return None
+        token = sha256_bytes(os.urandom(32))
+        expires_at = now + timedelta(seconds=lease_seconds)
+        changed = database.execute(
+            """UPDATE tasks SET state='leased',attempts=attempts+1,
+                   lease_owner=?,lease_token=?,lease_expires_at=?,
+                   lease_heartbeat_at=?,attempt_started_at=?,updated_at=?
+               WHERE id=? AND state='ready' AND attempts<?""",
+            (
+                owner,
+                token,
+                _timestamp(expires_at),
+                _timestamp(now),
+                _timestamp(now),
+                _timestamp(now),
+                row["id"],
+                max_attempts,
+            ),
+        ).rowcount
+        if changed != 1:
+            return None
+        return QueueLease(
+            id=str(row["id"]),
+            kind=str(row["kind"]),
+            handler_version=int(row["handler_version"]),
+            payload=validation.payload or {},
+            input_hash=str(row["input_hash"]),
+            owner=owner,
+            token=token,
+            expires_at=expires_at,
+            attempt=int(row["attempts"]) + 1,
+            created_at=_parse_timestamp(row["created_at"]),  # type: ignore[arg-type]
+            last_attempt_at=_parse_timestamp(row["last_attempt_at"]),
+            prior_attempts=int(row["attempts"]),
+        )
+
+    def claim_capture(
+        self,
+        owner: str,
+        *,
+        lease_seconds: int = DEFAULTS.queue_lease_seconds,
+        max_attempts: int = DEFAULTS.queue_max_attempts,
+    ) -> QueueLease | None:
+        self._validate_capture_claim(owner, lease_seconds, max_attempts)
+        now = _utc_now()
+        with closing(self._connect()) as database, begin_immediate(database):
+            row = self._capture_claim_row(database, max_attempts, now)
+            if row is None:
+                return None
+            return self._lease_capture_row(
+                database,
+                row,
+                owner=owner,
+                lease_seconds=lease_seconds,
+                max_attempts=max_attempts,
+                now=now,
+            )
 
     def heartbeat(
         self,
@@ -7002,169 +8042,975 @@ class _QueueV3CandidateReader:
         cancelled: Callable[[], bool] | None = None,
     ) -> PurgeReceipt:
         _require_active(deadline, cancelled)
-        cutoff = _timestamp(_as_utc(terminal_before))
+        plan = self._ordinary_purge_plan(terminal_before, export_path)
+        manifest_bytes = self._publish_ordinary_purge_export(
+            plan, deadline=deadline, cancelled=cancelled
+        )
+        capture_evidence = self._commit_ordinary_purge(
+            plan,
+            manifest_bytes,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+        self._cleanup_ordinary_purge_artifacts(plan, capture_evidence)
+        self._publish_ordinary_purge_receipt(plan, manifest_bytes)
+        self._clear_ordinary_purge_authorizations(plan, manifest_bytes)
+        return PurgeReceipt(len(plan.task_ids), plan.task_ids)
+
+    def _ordinary_purge_plan(
+        self, terminal_before: datetime, export_path: Path
+    ) -> _OrdinaryPurgePlan:
+        retention_cutoff = _utc_now() - timedelta(
+            days=DEFAULTS.queue_result_retention_days
+        )
+        cutoff = _timestamp(min(_as_utc(terminal_before), retention_cutoff))
         export = Path(export_path).absolute()
-        if export.exists() or export.is_symlink():
-            raise QueueOperationError("export_exists")
+        if export.is_symlink():
+            raise QueueOperationError("export_verification_failed")
+        if export.exists():
+            return self._load_ordinary_purge_plan(cutoff, export)
+        return self._new_ordinary_purge_plan(cutoff, export)
+
+    def _new_ordinary_purge_plan(
+        self, cutoff: str, export: Path
+    ) -> _OrdinaryPurgePlan:
         with closing(self._connect()) as database:
-            task_ids = tuple(
-                str(row["id"])
-                for row in database.execute(
-                    """SELECT id FROM tasks
-                       WHERE state IN ('succeeded','cancelled') AND updated_at<?
-                       ORDER BY created_at,id""",
-                    (cutoff,),
-                )
+            database.execute("BEGIN")
+            rows = database.execute(
+                """SELECT * FROM tasks
+                   WHERE state IN ('succeeded','cancelled') AND updated_at<?
+                   ORDER BY created_at,id""",
+                (cutoff,),
+            ).fetchall()
+            records = tuple(
+                self._export_task_in_transaction(database, row) for row in rows
             )
-        records = [self.export_task(task_id) for task_id in task_ids]
-        records_bytes = canonical_json_bytes(records)
+            capture_evidence = self._ordinary_capture_evidence_for_rows(
+                database, rows
+            )
+        task_ids = tuple(str(row["id"]) for row in rows)
+        records_bytes = canonical_json_bytes(list(records))
         if len(records_bytes) > _MAX_EXPORT_METADATA_BYTES:
             raise QueueOperationError("export_metadata_too_large")
-        parent = export.parent
+        return _OrdinaryPurgePlan(
+            cutoff,
+            export,
+            task_ids,
+            records,
+            records_bytes,
+            capture_evidence,
+            None,
+        )
+
+    def _ordinary_capture_evidence_for_rows(
+        self, database: sqlite3.Connection, rows: list[sqlite3.Row]
+    ) -> tuple[_CapturePurgeEvidence, ...]:
+        evidence: list[_CapturePurgeEvidence] = []
+        for row in rows:
+            evidence.extend(
+                self._ordinary_capture_purge_evidence(database, str(row["id"]))
+            )
+        return tuple(evidence)
+
+    def _load_ordinary_purge_plan(
+        self, cutoff: str, export: Path
+    ) -> _OrdinaryPurgePlan:
+        self._require_ordinary_purge_export_directory(export)
+        try:
+            records_bytes = _read_stable_owner_file(
+                export / "records.json", _MAX_EXPORT_METADATA_BYTES
+            )
+            manifest_bytes = _read_stable_owner_file(
+                export / "manifest.json", _MAX_EXPORT_METADATA_BYTES
+            )
+            records, manifest = self._decode_ordinary_purge_export(
+                records_bytes, manifest_bytes
+            )
+        except QueueOperationError:
+            raise
+        except (OSError, PermissionError, UnicodeError, ValueError) as exc:
+            raise QueueOperationError("export_verification_failed") from exc
+        task_ids = tuple(str(record["task_id"]) for record in records)
+        self._require_ordinary_purge_manifest(
+            manifest,
+            cutoff=cutoff,
+            task_ids=task_ids,
+            records_bytes=records_bytes,
+        )
+        capture_evidence = self._capture_purge_evidence_from_manifest(
+            manifest["capture_artifacts"], records
+        )
+        plan = _OrdinaryPurgePlan(
+            cutoff,
+            export,
+            task_ids,
+            records,
+            records_bytes,
+            capture_evidence,
+            manifest_bytes,
+        )
+        self._require_existing_ordinary_purge_files(plan, manifest)
+        return plan
+
+    @staticmethod
+    def _require_ordinary_purge_export_directory(export: Path) -> None:
+        metadata = export.lstat()
+        reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        actual = (
+            stat.S_ISDIR(metadata.st_mode),
+            stat.S_ISLNK(metadata.st_mode),
+            bool(getattr(metadata, "st_file_attributes", 0) & reparse),
+            _is_owner_only(export),
+        )
+        if actual != (True, False, False, True):
+            raise QueueOperationError("export_verification_failed")
+
+    @staticmethod
+    def _decode_ordinary_purge_export(
+        records_bytes: bytes, manifest_bytes: bytes
+    ) -> tuple[tuple[dict[str, object], ...], dict[str, object]]:
+        records_value, manifest = (
+            _QueueV3CandidateReader._decode_ordinary_purge_json(
+                records_bytes, manifest_bytes
+            )
+        )
+        records = _QueueV3CandidateReader._ordinary_purge_records(
+            records_value, records_bytes
+        )
+        return records, manifest
+
+    @staticmethod
+    def _decode_ordinary_purge_json(
+        records_bytes: bytes, manifest_bytes: bytes
+    ) -> tuple[list[object], dict[str, object]]:
+        try:
+            records_value = json.loads(records_bytes.decode("utf-8", errors="strict"))
+            manifest = json.loads(manifest_bytes.decode("utf-8", errors="strict"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise QueueOperationError("export_verification_failed") from exc
+        if (isinstance(records_value, list), isinstance(manifest, dict)) != (True, True):
+            raise QueueOperationError("export_verification_failed")
+        return records_value, manifest
+
+    @staticmethod
+    def _ordinary_purge_records(
+        records_value: list[object], records_bytes: bytes
+    ) -> tuple[dict[str, object], ...]:
+        if not all(isinstance(record, dict) for record in records_value):
+            raise QueueOperationError("export_verification_failed")
+        records = tuple(records_value)
+        if canonical_json_bytes(list(records)) != records_bytes:
+            raise QueueOperationError("export_verification_failed")
+        for record in records:
+            validate_schema(
+                record, Path(__file__).with_name("schemas") / "queue-task-v3.json"
+            )
+        return records
+
+    @staticmethod
+    def _require_ordinary_purge_manifest(
+        manifest: Mapping[str, object],
+        *,
+        cutoff: str,
+        task_ids: tuple[str, ...],
+        records_bytes: bytes,
+    ) -> None:
+        identity = (
+            set(manifest),
+            manifest.get("cutoff"),
+            manifest.get("records_sha256"),
+            manifest.get("task_ids"),
+        )
+        expected = (
+            {"capture_artifacts", "cutoff", "records_sha256", "results", "task_ids"},
+            cutoff,
+            sha256_bytes(records_bytes),
+            list(task_ids),
+        )
+        if identity != expected:
+            raise QueueOperationError("export_verification_failed")
+        if len(set(task_ids)) != len(task_ids):
+            raise QueueOperationError("export_verification_failed")
+        if not isinstance(manifest.get("results"), list):
+            raise QueueOperationError("export_verification_failed")
+        if not isinstance(manifest.get("capture_artifacts"), list):
+            raise QueueOperationError("export_verification_failed")
+
+    @staticmethod
+    def _capture_purge_manifest_identity(
+        value: object,
+    ) -> tuple[str, str, str, str, str, str, str]:
+        record = _QueueV3CandidateReader._capture_purge_manifest_mapping(value)
+        _QueueV3CandidateReader._require_capture_purge_manifest_hashes(record)
+        return (
+            str(record["task_id"]),
+            str(record["intent_id"]),
+            str(record["terminal_path"]),
+            str(record["kind"]),
+            str(record["source_path"]),
+            str(record["archive_path"]),
+            str(record["sha256"]),
+        )
+
+    @staticmethod
+    def _capture_purge_manifest_mapping(value: object) -> dict[str, object]:
+        fields = {
+            "archive_path",
+            "intent_id",
+            "kind",
+            "sha256",
+            "source_path",
+            "task_id",
+            "terminal_path",
+        }
+        if not isinstance(value, dict):
+            raise QueueOperationError("export_verification_failed")
+        actual = (set(value), {type(item) for item in value.values()})
+        if actual != (fields, {str}):
+            raise QueueOperationError("export_verification_failed")
+        return value
+
+    @staticmethod
+    def _require_capture_purge_manifest_hashes(
+        value: Mapping[str, object],
+    ) -> None:
+        if value["kind"] not in {"intent", "decision"}:
+            raise QueueOperationError("export_verification_failed")
+        try:
+            _require_lower_sha256(str(value["intent_id"]), "intent_id")
+            _require_lower_sha256(str(value["sha256"]), "sha256")
+        except ValueError as exc:
+            raise QueueOperationError("export_verification_failed") from exc
+
+    @staticmethod
+    def _capture_purge_manifest_artifact(
+        task_id: str,
+        source_path: str,
+        archive_path: str,
+        digest: str,
+    ) -> _CapturePurgeArtifact:
+        try:
+            restricted_relative_path(
+                source_path, ("run/capture-intents", "run/queue-results")
+            )
+            restricted_relative_path(archive_path, ("capture-artifacts",))
+        except ValueError as exc:
+            raise QueueOperationError("export_verification_failed") from exc
+        if archive_path != _capture_purge_archive_path(task_id, source_path):
+            raise QueueOperationError("export_verification_failed")
+        return _CapturePurgeArtifact(source_path, archive_path, digest)
+
+    def _capture_purge_evidence_from_manifest(
+        self,
+        value: object,
+        records: tuple[dict[str, object], ...],
+    ) -> tuple[_CapturePurgeEvidence, ...]:
+        if not isinstance(value, list):
+            raise QueueOperationError("export_verification_failed")
+        grouped: dict[
+            tuple[str, str, str], list[tuple[str, _CapturePurgeArtifact]]
+        ] = {}
+        for item in value:
+            task_id, intent_id, terminal, kind, source, archive, digest = (
+                self._capture_purge_manifest_identity(item)
+            )
+            artifact = self._capture_purge_manifest_artifact(
+                task_id, source, archive, digest
+            )
+            grouped.setdefault((task_id, intent_id, terminal), []).append(
+                (kind, artifact)
+            )
+        evidence = tuple(
+            self._capture_purge_evidence_group(key, grouped[key])
+            for key in sorted(grouped)
+        )
+        self._require_capture_purge_evidence_records(evidence, records)
+        return evidence
+
+    @staticmethod
+    def _capture_purge_evidence_group(
+        key: tuple[str, str, str],
+        items: list[tuple[str, _CapturePurgeArtifact]],
+    ) -> _CapturePurgeEvidence:
+        intents, decisions = _QueueV3CandidateReader._partition_capture_purge_artifacts(
+            items
+        )
+        _QueueV3CandidateReader._require_unique_capture_purge_paths(items, intents)
+        task_id, intent_id, terminal_path = key
+        return _CapturePurgeEvidence(
+            task_id, intent_id, intents[0], decisions, terminal_path
+        )
+
+    @staticmethod
+    def _partition_capture_purge_artifacts(
+        items: list[tuple[str, _CapturePurgeArtifact]],
+    ) -> tuple[tuple[_CapturePurgeArtifact, ...], tuple[_CapturePurgeArtifact, ...]]:
+        intents: list[_CapturePurgeArtifact] = []
+        decisions: list[_CapturePurgeArtifact] = []
+        for kind, artifact in items:
+            if kind == "intent":
+                intents.append(artifact)
+                continue
+            decisions.append(artifact)
+        return tuple(intents), tuple(decisions)
+
+    @staticmethod
+    def _require_unique_capture_purge_paths(
+        items: list[tuple[str, _CapturePurgeArtifact]],
+        intents: tuple[_CapturePurgeArtifact, ...],
+    ) -> None:
+        paths = {artifact.source_path for _kind, artifact in items}
+        if (len(intents), len(paths)) != (1, len(items)):
+            raise QueueOperationError("export_verification_failed")
+
+    @staticmethod
+    def _ordinary_purge_record_capture_identity(
+        record: Mapping[str, object],
+    ) -> tuple[str, str, str, str] | None:
+        binding = record.get("capture_binding")
+        if binding is None:
+            return None
+        result = record.get("result")
+        if (isinstance(binding, dict), isinstance(result, dict)) != (True, True):
+            raise QueueOperationError("export_verification_failed")
+        return _QueueV3CandidateReader._ordinary_capture_record_values(
+            record, binding, result
+        )
+
+    @staticmethod
+    def _ordinary_capture_record_values(
+        record: Mapping[str, object],
+        binding: Mapping[str, object],
+        result: Mapping[str, object],
+    ) -> tuple[str, str, str, str]:
+        task_id = record.get("task_id")
+        intent_id = binding.get("intent_id")
+        intent_sha256 = binding.get("intent_sha256")
+        terminal_path = result.get("reference")
+        values = (task_id, intent_id, intent_sha256, terminal_path)
+        if tuple(isinstance(item, str) for item in values) != (True,) * len(values):
+            raise QueueOperationError("export_verification_failed")
+        if terminal_path != f"run/queue-results/capture-{intent_id}.json":
+            raise QueueOperationError("export_verification_failed")
+        return str(task_id), str(intent_id), str(intent_sha256), str(terminal_path)
+
+    def _require_capture_purge_evidence_records(
+        self,
+        evidence: tuple[_CapturePurgeEvidence, ...],
+        records: tuple[dict[str, object], ...],
+    ) -> None:
+        expected = self._ordinary_purge_expected_capture_records(records)
+        observed = {
+            item.task_id: (
+                item.intent_id,
+                item.intent.sha256,
+                item.terminal_path,
+            )
+            for item in evidence
+        }
+        if (len(observed), observed) != (len(evidence), expected):
+            raise QueueOperationError("export_verification_failed")
+
+    def _ordinary_purge_expected_capture_records(
+        self, records: tuple[dict[str, object], ...]
+    ) -> dict[str, tuple[str, str, str]]:
+        expected: dict[str, tuple[str, str, str]] = {}
+        for record in records:
+            identity = self._ordinary_purge_record_capture_identity(record)
+            if identity is not None:
+                task_id, intent_id, intent_sha256, terminal = identity
+                expected[task_id] = (intent_id, intent_sha256, terminal)
+        return expected
+
+    @staticmethod
+    def _ordinary_purge_expected_results(
+        records: tuple[dict[str, object], ...],
+    ) -> list[dict[str, str]]:
+        return [
+            {"id": str(record["task_id"]), "sha256": str(record["result"]["sha256"])}
+            for record in records
+            if isinstance(record.get("result"), dict)
+        ]
+
+    @staticmethod
+    def _capture_purge_artifacts(
+        evidence: tuple[_CapturePurgeEvidence, ...],
+    ) -> tuple[_CapturePurgeArtifact, ...]:
+        return tuple(
+            artifact
+            for item in evidence
+            for artifact in (item.intent, *item.decisions)
+        )
+
+    def _require_existing_ordinary_purge_files(
+        self, plan: _OrdinaryPurgePlan, manifest: Mapping[str, object]
+    ) -> None:
+        expected_results = self._ordinary_purge_expected_results(plan.records)
+        if manifest["results"] != expected_results:
+            raise QueueOperationError("export_verification_failed")
+        self._require_existing_ordinary_result_files(plan.export, expected_results)
+        self._require_existing_capture_purge_files(plan)
+
+    @staticmethod
+    def _require_existing_ordinary_result_files(
+        export: Path, expected_results: list[dict[str, str]]
+    ) -> None:
+        for item in expected_results:
+            relative = _ordinary_purge_result_archive_path(item["id"])
+            data = _read_stable_owner_file(export / relative, _MAX_RESULT_BYTES)
+            if sha256_bytes(data) != item["sha256"]:
+                raise QueueOperationError("export_verification_failed")
+
+    def _require_existing_capture_purge_files(
+        self, plan: _OrdinaryPurgePlan
+    ) -> None:
+        for artifact in self._capture_purge_artifacts(plan.capture_evidence):
+            data = _read_stable_owner_file(
+                plan.export / artifact.archive_path, _MAX_QUEUE_PAYLOAD_BYTES
+            )
+            if sha256_bytes(data) != artifact.sha256:
+                raise QueueOperationError("export_verification_failed")
+
+    def _publish_ordinary_purge_export(
+        self,
+        plan: _OrdinaryPurgePlan,
+        *,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> bytes:
+        if plan.manifest_bytes is not None:
+            return self._existing_ordinary_purge_manifest(plan)
+        return self._publish_new_ordinary_purge_export(
+            plan, deadline=deadline, cancelled=cancelled
+        )
+
+    @staticmethod
+    def _existing_ordinary_purge_manifest(plan: _OrdinaryPurgePlan) -> bytes:
+        current = _read_stable_owner_file(
+            plan.export / "manifest.json", _MAX_EXPORT_METADATA_BYTES
+        )
+        if current != plan.manifest_bytes:
+            raise QueueOperationError("export_verification_failed")
+        return current
+
+    def _publish_new_ordinary_purge_export(
+        self,
+        plan: _OrdinaryPurgePlan,
+        *,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> bytes:
+        parent = plan.export.parent
         parent.mkdir(parents=True, exist_ok=True)
         _harden_owner_only(parent, 0o700)
-        if parent.is_symlink() or not parent.is_dir() or not _is_owner_only(parent):
+        actual = (parent.is_symlink(), parent.is_dir(), _is_owner_only(parent))
+        if actual != (False, True, True):
             raise QueueOperationError("export_parent_permissions_invalid")
-        staging = parent / f".{export.name}.staging-{uuid.uuid4().hex}"
+        _cleanup_export_staging(parent, plan.export.name)
+        staging = parent / f".{plan.export.name}.staging-{uuid.uuid4().hex}"
         staging.mkdir()
         _harden_owner_only(staging, 0o700)
-        results_export = staging / "results"
-        results_export.mkdir()
-        _harden_owner_only(results_export, 0o700)
-        result_manifest: list[dict[str, str]] = []
         try:
-            for record in records:
-                _require_active(deadline, cancelled)
-                result = record["result"]
-                if not isinstance(result, dict):
-                    continue
-                reference = str(result["reference"])
-                digest = str(result["sha256"])
-                data = _read_stable_owner_file(
-                    self.state_root / reference, _MAX_RESULT_BYTES
-                )
-                if sha256_bytes(data) != digest:
-                    raise QueueOperationError("result_verification_failed")
-                target = results_export / f"{record['task_id']}.result"
-                _write_durable_file(target, data)
-                result_manifest.append(
-                    {"id": str(record["task_id"]), "sha256": digest}
-                )
-            records_path = staging / "records.json"
-            _write_durable_file(records_path, records_bytes)
-            manifest = {
-                "records_sha256": sha256_bytes(records_bytes),
-                "results": result_manifest,
-                "task_ids": list(task_ids),
-            }
-            manifest_bytes = canonical_json_bytes(manifest)
-            manifest_path = staging / "manifest.json"
-            _write_durable_file(manifest_path, manifest_bytes)
-            if (
-                _read_stable_owner_file(records_path, _MAX_EXPORT_METADATA_BYTES)
-                != records_bytes
-                or _read_stable_owner_file(manifest_path, _MAX_EXPORT_METADATA_BYTES)
-                != manifest_bytes
-            ):
-                raise QueueOperationError("export_verification_failed")
-            fsync_directory(results_export)
-            fsync_directory(staging)
+            manifest_bytes = self._write_ordinary_purge_export(
+                plan, staging, deadline=deadline, cancelled=cancelled
+            )
             _require_active(deadline, cancelled)
-            staging.replace(export)
+            staging.replace(plan.export)
             fsync_directory(parent)
+            return manifest_bytes
         except BaseException:
             _remove_export_staging(staging)
             raise
-        manifest_sha256 = sha256_bytes(manifest_bytes)
-        operation_id = f"ordinary-purge:{manifest_sha256}"
-        try:
-            if task_ids:
-                with closing(self._connect()) as database, begin_immediate(
-                    database,
-                    before_commit=lambda: _require_active(deadline, cancelled),
-                ):
-                    for task_id in task_ids:
-                        row = database.execute(
-                            "SELECT * FROM tasks WHERE id=?", (task_id,)
-                        ).fetchone()
-                        if (
-                            row is None
-                            or row["state"] not in {"succeeded", "cancelled"}
-                            or row["updated_at"] >= cutoff
-                        ):
-                            raise QueueOperationError("purge_selection_changed")
-                        validation = validate_payload_blob(
-                            bytes(row["payload_blob"]), row["input_hash"], parse=True
-                        )
-                        if validation.code is not None:
-                            self._demote_payload_mismatch(database, row, now=_utc_now())
-                            raise QueueOperationError("payload_hash_mismatch")
-                        current_record = self._export_task_in_transaction(
-                            database, row
-                        )
-                        expected_record = records[task_ids.index(task_id)]
-                        if canonical_json_bytes(current_record) != canonical_json_bytes(
-                            expected_record
-                        ):
-                            raise QueueOperationError("purge_selection_changed")
-                        authorization_digest = sha256_bytes(
-                            canonical_json_bytes(
-                                {
-                                    "manifest_sha256": manifest_sha256,
-                                    "operation_id": operation_id,
-                                    "task_id": task_id,
-                                }
-                            )
-                        )
-                        inserted = database.execute(
-                            """INSERT INTO task_purge_authorizations(
-                                   task_id,mode,operation_id,authorization_digest,created_at
-                               ) VALUES (?,'ordinary',?,?,?)""",
-                            (
-                                task_id,
-                                operation_id,
-                                authorization_digest,
-                                _timestamp(_utc_now()),
-                            ),
-                        ).rowcount
-                        if inserted != 1:
-                            raise QueueOperationError("purge_authorization_failed")
-                        for table in (
-                            "capture_task_link_seals",
-                            "capture_task_link_resolutions",
-                            "capture_task_links",
-                            "attempt_history",
-                            "task_source_links",
-                        ):
-                            database.execute(
-                                f'DELETE FROM "{table}" WHERE task_id=?', (task_id,)
-                            )
-                        deleted = database.execute(
-                            "DELETE FROM tasks WHERE id=?", (task_id,)
-                        ).rowcount
-                        if deleted != 1:
-                            raise QueueOperationError("purge_delete_failed")
-                        cleared = database.execute(
-                            "DELETE FROM task_purge_authorizations WHERE task_id=?",
-                            (task_id,),
-                        ).rowcount
-                        if cleared != 1:
-                            raise QueueOperationError("purge_authorization_failed")
-        except BaseException:
-            _remove_export_staging(export)
-            raise
+
+    def _write_ordinary_purge_export(
+        self,
+        plan: _OrdinaryPurgePlan,
+        staging: Path,
+        *,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> bytes:
+        results_export = staging / "results"
+        results_export.mkdir()
+        _harden_owner_only(results_export, 0o700)
+        results = self._ordinary_purge_result_manifest(
+            plan.records,
+            results_export,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+        capture_artifacts = self._ordinary_purge_capture_manifest(
+            plan,
+            staging,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+        manifest_bytes = canonical_json_bytes(
+            {
+                "capture_artifacts": capture_artifacts,
+                "cutoff": plan.cutoff,
+                "records_sha256": sha256_bytes(plan.records_bytes),
+                "results": results,
+                "task_ids": list(plan.task_ids),
+            }
+        )
+        records_path = staging / "records.json"
+        manifest_path = staging / "manifest.json"
+        _write_durable_file(records_path, plan.records_bytes)
+        _write_durable_file(manifest_path, manifest_bytes)
+        self._require_ordinary_purge_export(
+            records_path, plan.records_bytes, manifest_path, manifest_bytes
+        )
+        fsync_directory(results_export)
+        fsync_directory(staging)
+        return manifest_bytes
+
+    def _ordinary_purge_capture_manifest(
+        self,
+        plan: _OrdinaryPurgePlan,
+        staging: Path,
+        *,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> list[dict[str, str]]:
+        manifest: list[dict[str, str]] = []
+        for evidence in plan.capture_evidence:
+            _require_active(deadline, cancelled)
+            manifest.append(
+                self._publish_capture_purge_artifact(
+                    staging, evidence, evidence.intent, kind="intent"
+                )
+            )
+            for decision in evidence.decisions:
+                manifest.append(
+                    self._publish_capture_purge_artifact(
+                        staging, evidence, decision, kind="decision"
+                    )
+                )
+        capture_dir = staging / "capture-artifacts"
+        if capture_dir.exists():
+            fsync_directory(capture_dir)
+        return manifest
+
+    def _publish_capture_purge_artifact(
+        self,
+        staging: Path,
+        evidence: _CapturePurgeEvidence,
+        artifact: _CapturePurgeArtifact,
+        *,
+        kind: Literal["intent", "decision"],
+    ) -> dict[str, str]:
+        data = read_runtime_bytes(
+            self.state_root / artifact.source_path,
+            self.state_root,
+            max_bytes=_MAX_QUEUE_PAYLOAD_BYTES,
+            owner_only=True,
+        )
+        if sha256_bytes(data) != artifact.sha256:
+            raise QueueOperationError("capture_purge_changed")
+        target = staging / artifact.archive_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _harden_owner_only(target.parent, 0o700)
+        _write_durable_file(target, data)
+        return {
+            "archive_path": artifact.archive_path,
+            "intent_id": evidence.intent_id,
+            "kind": kind,
+            "sha256": artifact.sha256,
+            "source_path": artifact.source_path,
+            "task_id": evidence.task_id,
+            "terminal_path": evidence.terminal_path,
+        }
+
+    def _ordinary_purge_result_manifest(
+        self,
+        records: tuple[dict[str, object], ...],
+        results_export: Path,
+        *,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> list[dict[str, str]]:
+        result_manifest: list[dict[str, str]] = []
         for record in records:
+            _require_active(deadline, cancelled)
             result = record["result"]
             if not isinstance(result, dict):
                 continue
             reference = str(result["reference"])
-            with closing(self._connect()) as database:
-                retained = database.execute(
-                    "SELECT 1 FROM tasks WHERE result_reference=? LIMIT 1", (reference,)
-                ).fetchone()
-            if retained is None:
-                (self.state_root / reference).unlink(missing_ok=True)
-        return PurgeReceipt(len(task_ids), task_ids)
+            digest = str(result["sha256"])
+            data = _read_stable_owner_file(
+                self.state_root / reference, _MAX_RESULT_BYTES
+            )
+            if sha256_bytes(data) != digest:
+                raise QueueOperationError("result_verification_failed")
+            archive = _ordinary_purge_result_archive_path(str(record["task_id"]))
+            _write_durable_file(results_export.parent / archive, data)
+            result_manifest.append({"id": str(record["task_id"]), "sha256": digest})
+        return result_manifest
+
+    @staticmethod
+    def _require_ordinary_purge_export(
+        records_path: Path,
+        records_bytes: bytes,
+        manifest_path: Path,
+        manifest_bytes: bytes,
+    ) -> None:
+        actual = (
+            _read_stable_owner_file(records_path, _MAX_EXPORT_METADATA_BYTES),
+            _read_stable_owner_file(manifest_path, _MAX_EXPORT_METADATA_BYTES),
+        )
+        if actual != (records_bytes, manifest_bytes):
+            raise QueueOperationError("export_verification_failed")
+
+    def _commit_ordinary_purge(
+        self,
+        plan: _OrdinaryPurgePlan,
+        manifest_bytes: bytes,
+        *,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> tuple[_CapturePurgeEvidence, ...]:
+        if not plan.task_ids:
+            return ()
+        manifest_sha256 = sha256_bytes(manifest_bytes)
+        operation_id = _ordinary_purge_operation_id(manifest_sha256)
+        receipt_published = self._ordinary_purge_receipt_matches(
+            plan, manifest_bytes
+        )
+        expected = {item.task_id: item for item in plan.capture_evidence}
+        with closing(self._connect()) as database, begin_immediate(
+            database,
+            before_commit=lambda: _require_active(deadline, cancelled),
+        ):
+            state = self._ordinary_purge_commit_state(
+                database,
+                plan,
+                operation_id=operation_id,
+                manifest_sha256=manifest_sha256,
+                receipt_published=receipt_published,
+            )
+            if state == "pending":
+                for task_id, expected_record in zip(plan.task_ids, plan.records):
+                    _require_active(deadline, cancelled)
+                    self._purge_ordinary_task(
+                        database,
+                        task_id,
+                        expected_record,
+                        expected_capture=expected.get(task_id),
+                        cutoff=plan.cutoff,
+                        operation_id=operation_id,
+                        manifest_sha256=manifest_sha256,
+                    )
+        return plan.capture_evidence
+
+    def _ordinary_purge_commit_state(
+        self,
+        database: sqlite3.Connection,
+        plan: _OrdinaryPurgePlan,
+        *,
+        operation_id: str,
+        manifest_sha256: str,
+        receipt_published: bool,
+    ) -> str:
+        placeholders = ",".join("?" for _ in plan.task_ids)
+        present = database.execute(
+            f"SELECT id FROM tasks WHERE id IN ({placeholders})",  # noqa: S608
+            plan.task_ids,
+        ).fetchall()
+        authorizations = database.execute(
+            f"""SELECT * FROM task_purge_authorizations
+                WHERE task_id IN ({placeholders}) ORDER BY task_id""",  # noqa: S608
+            plan.task_ids,
+        ).fetchall()
+        counts = (len(present), len(authorizations))
+        if counts == (len(plan.task_ids), 0):
+            return "pending"
+        if counts == (0, len(plan.task_ids)):
+            self._require_ordinary_purge_authorizations(
+                authorizations, plan.task_ids, operation_id, manifest_sha256
+            )
+            return "cleanup"
+        if (counts, receipt_published) == ((0, 0), True):
+            return "complete"
+        raise QueueOperationError("purge_resume_conflict")
+
+    @staticmethod
+    def _require_ordinary_purge_authorizations(
+        rows: list[sqlite3.Row],
+        task_ids: tuple[str, ...],
+        operation_id: str,
+        manifest_sha256: str,
+    ) -> None:
+        expected = sorted(
+            (
+                task_id,
+                "ordinary",
+                operation_id,
+                _ordinary_purge_authorization_digest(
+                    task_id, operation_id, manifest_sha256
+                ),
+            )
+            for task_id in task_ids
+        )
+        actual = sorted(
+            (
+                str(row["task_id"]),
+                str(row["mode"]),
+                str(row["operation_id"]),
+                str(row["authorization_digest"]),
+            )
+            for row in rows
+        )
+        if actual != expected:
+            raise QueueOperationError("purge_authorization_failed")
+
+    def _purge_ordinary_task(
+        self,
+        database: sqlite3.Connection,
+        task_id: str,
+        expected_record: Mapping[str, object],
+        *,
+        expected_capture: _CapturePurgeEvidence | None,
+        cutoff: str,
+        operation_id: str,
+        manifest_sha256: str,
+    ) -> None:
+        row = database.execute(
+            "SELECT * FROM tasks WHERE id=?", (task_id,)
+        ).fetchone()
+        self._require_ordinary_purge_task(row, cutoff)
+        self._require_ordinary_purge_payload(database, row)
+        self._require_ordinary_purge_record(database, row, expected_record)
+        evidence = self._ordinary_capture_purge_evidence(database, task_id)
+        expected_evidence = () if expected_capture is None else (expected_capture,)
+        if evidence != expected_evidence:
+            raise QueueOperationError("capture_purge_changed")
+        self._insert_ordinary_purge_authorization(
+            database, task_id, operation_id, manifest_sha256
+        )
+        self._delete_capture_purge_rows_before_task(database, evidence)
+        self._delete_task_owned_evidence(database, task_id)
+        self._delete_ordinary_task(database, task_id)
+        self._delete_capture_purge_rows_after_task(database, evidence)
+
+    @staticmethod
+    def _require_ordinary_purge_task(row: sqlite3.Row | None, cutoff: str) -> None:
+        if (
+            row is None
+            or row["state"] not in {"succeeded", "cancelled"}
+            or row["updated_at"] >= cutoff
+        ):
+            raise QueueOperationError("purge_selection_changed")
+
+    def _require_ordinary_purge_payload(
+        self, database: sqlite3.Connection, row: sqlite3.Row
+    ) -> None:
+        validation = validate_payload_blob(
+            bytes(row["payload_blob"]), row["input_hash"], parse=True
+        )
+        if validation.code is not None:
+            self._demote_payload_mismatch(database, row, now=_utc_now())
+            raise QueueOperationError("payload_hash_mismatch")
+
+    def _require_ordinary_purge_record(
+        self,
+        database: sqlite3.Connection,
+        row: sqlite3.Row,
+        expected_record: Mapping[str, object],
+    ) -> None:
+        current = self._export_task_in_transaction(database, row)
+        if canonical_json_bytes(current) != canonical_json_bytes(expected_record):
+            raise QueueOperationError("purge_selection_changed")
+
+    def _ordinary_capture_purge_evidence(
+        self, database: sqlite3.Connection, task_id: str
+    ) -> tuple[_CapturePurgeEvidence, ...]:
+        link = database.execute(
+            "SELECT 1 FROM capture_task_links WHERE task_id=?", (task_id,)
+        ).fetchone()
+        if link is None:
+            return ()
+        binding = self.active_capture_binding(database, task_id)
+        return (self._capture_purge_evidence(database, task_id, binding),)
+
+    @staticmethod
+    def _insert_ordinary_purge_authorization(
+        database: sqlite3.Connection,
+        task_id: str,
+        operation_id: str,
+        manifest_sha256: str,
+    ) -> None:
+        authorization_digest = _ordinary_purge_authorization_digest(
+            task_id, operation_id, manifest_sha256
+        )
+        inserted = database.execute(
+            """INSERT INTO task_purge_authorizations(
+                   task_id,mode,operation_id,authorization_digest,created_at
+               ) VALUES (?,'ordinary',?,?,?)""",
+            (task_id, operation_id, authorization_digest, _timestamp(_utc_now())),
+        ).rowcount
+        if inserted != 1:
+            raise QueueOperationError("purge_authorization_failed")
+
+    @staticmethod
+    def _delete_capture_purge_rows_before_task(
+        database: sqlite3.Connection,
+        evidence: tuple[_CapturePurgeEvidence, ...],
+    ) -> None:
+        for item in evidence:
+            deleted = database.execute(
+                "DELETE FROM semantic_decisions WHERE intent_id=?", (item.intent_id,)
+            ).rowcount
+            if deleted != len(item.decisions):
+                raise QueueOperationError("capture_purge_changed")
+
+    @staticmethod
+    def _delete_ordinary_task(
+        database: sqlite3.Connection, task_id: str
+    ) -> None:
+        deleted = database.execute(
+            "DELETE FROM tasks WHERE id=?", (task_id,)
+        ).rowcount
+        if deleted != 1:
+            raise QueueOperationError("purge_delete_failed")
+
+    @staticmethod
+    def _delete_capture_purge_rows_after_task(
+        database: sqlite3.Connection,
+        evidence: tuple[_CapturePurgeEvidence, ...],
+    ) -> None:
+        for item in evidence:
+            deleted = database.execute(
+                "DELETE FROM capture_intents WHERE intent_id=?", (item.intent_id,)
+            ).rowcount
+            if deleted != 1:
+                raise QueueOperationError("capture_purge_changed")
+
+    def _cleanup_ordinary_purge_artifacts(
+        self,
+        plan: _OrdinaryPurgePlan,
+        evidence: tuple[_CapturePurgeEvidence, ...],
+    ) -> None:
+        retained_terminals = {item.terminal_path for item in evidence}
+        for item in evidence:
+            self._unlink_capture_purge_artifacts(plan.export, item)
+        for record in plan.records:
+            self._cleanup_ordinary_result(record, retained_terminals)
+
+    def _cleanup_ordinary_result(
+        self, record: Mapping[str, object], retained_terminals: set[str]
+    ) -> None:
+        result = record["result"]
+        if not isinstance(result, dict):
+            return
+        reference = str(result["reference"])
+        if reference in retained_terminals:
+            return
+        with closing(self._connect()) as database:
+            retained = database.execute(
+                "SELECT 1 FROM tasks WHERE result_reference=? LIMIT 1", (reference,)
+            ).fetchone()
+        if retained is None:
+            (self.state_root / reference).unlink(missing_ok=True)
+
+    def _unlink_capture_purge_artifacts(
+        self, export: Path, evidence: _CapturePurgeEvidence
+    ) -> None:
+        for artifact in (evidence.intent, *evidence.decisions):
+            self._unlink_capture_purge_artifact(export, evidence.task_id, artifact)
+
+    def _unlink_capture_purge_artifact(
+        self,
+        export: Path,
+        task_id: str,
+        artifact: _CapturePurgeArtifact,
+    ) -> None:
+        self._capture_purge_manifest_artifact(
+            task_id, artifact.source_path, artifact.archive_path, artifact.sha256
+        )
+        archived = _read_stable_owner_file(
+            export / artifact.archive_path, _MAX_QUEUE_PAYLOAD_BYTES
+        )
+        if sha256_bytes(archived) != artifact.sha256:
+            raise QueueOperationError("export_verification_failed")
+        source = self.state_root / artifact.source_path
+        try:
+            before = source.lstat()
+        except FileNotFoundError:
+            return
+        current = read_runtime_bytes(
+            source,
+            self.state_root,
+            max_bytes=_MAX_QUEUE_PAYLOAD_BYTES,
+            owner_only=True,
+        )
+        if sha256_bytes(current) != artifact.sha256:
+            raise QueueOperationError("capture_purge_changed")
+        if not os.path.samestat(before, source.lstat()):
+            raise QueueOperationError("capture_purge_changed")
+        source.unlink()
+        fsync_directory(source.parent)
+
+    @staticmethod
+    def _ordinary_purge_receipt_bytes(
+        plan: _OrdinaryPurgePlan, manifest_bytes: bytes
+    ) -> bytes:
+        manifest_sha256 = sha256_bytes(manifest_bytes)
+        return canonical_json_bytes(
+            {
+                "schema_version": "ordinary-purge-receipt/v1",
+                "operation_id": _ordinary_purge_operation_id(manifest_sha256),
+                "manifest_sha256": manifest_sha256,
+                "task_ids": list(plan.task_ids),
+            }
+        )
+
+    def _ordinary_purge_receipt_matches(
+        self, plan: _OrdinaryPurgePlan, manifest_bytes: bytes
+    ) -> bool:
+        path = plan.export / "purge-receipt.json"
+        try:
+            current = _read_stable_owner_file(path, 64 * 1024)
+        except FileNotFoundError:
+            return False
+        if current != self._ordinary_purge_receipt_bytes(plan, manifest_bytes):
+            raise QueueOperationError("purge_receipt_invalid")
+        return True
+
+    def _publish_ordinary_purge_receipt(
+        self, plan: _OrdinaryPurgePlan, manifest_bytes: bytes
+    ) -> None:
+        receipt_bytes = self._ordinary_purge_receipt_bytes(plan, manifest_bytes)
+        _write_durable_file(plan.export / "purge-receipt.json", receipt_bytes)
+        if not self._ordinary_purge_receipt_matches(plan, manifest_bytes):
+            raise QueueOperationError("purge_receipt_invalid")
+
+    def _clear_ordinary_purge_authorizations(
+        self, plan: _OrdinaryPurgePlan, manifest_bytes: bytes
+    ) -> None:
+        if not plan.task_ids:
+            return
+        manifest_sha256 = sha256_bytes(manifest_bytes)
+        operation_id = _ordinary_purge_operation_id(manifest_sha256)
+        placeholders = ",".join("?" for _ in plan.task_ids)
+        with closing(self._connect()) as database, begin_immediate(database):
+            rows = database.execute(
+                f"""SELECT * FROM task_purge_authorizations
+                    WHERE task_id IN ({placeholders}) ORDER BY task_id""",  # noqa: S608
+                plan.task_ids,
+            ).fetchall()
+            if not rows:
+                return
+            self._require_ordinary_purge_authorizations(
+                rows, plan.task_ids, operation_id, manifest_sha256
+            )
+            deleted = database.execute(
+                f"""DELETE FROM task_purge_authorizations
+                    WHERE task_id IN ({placeholders})""",  # noqa: S608
+                plan.task_ids,
+            ).rowcount
+            if deleted != len(plan.task_ids):
+                raise QueueOperationError("purge_authorization_failed")
 
     def _export_task_in_transaction(
         self, database: sqlite3.Connection, row: sqlite3.Row
@@ -7984,6 +9830,21 @@ def _v3_queue_for_cli() -> _QueueV3CandidateReader:
     )
 
 
+def active_memory_queue(vault: Path, state_root: Path) -> _QueueV3CandidateReader:
+    """Open the queue side of one completely validated adopted V3 pair."""
+    from installed_memory_repair import require_reliability_v3_adopted
+
+    resolved_vault = Path(vault).resolve(strict=True)
+    state = Path(state_root).absolute()
+    require_reliability_v3_adopted(root=resolved_vault, state_root=state)
+    queue_path = state / "run" / "queue-v3.sqlite3"
+    coordinator_path = state / "run" / "markdown-transactions-v3.sqlite3"
+    validate_queue_v3_database(queue_path, state_root=state)
+    return _QueueV3CandidateReader(
+        queue_path, coordinator_path=coordinator_path
+    )
+
+
 @contextmanager
 def _repair_owner_for_cli() -> Iterator[OwnerLease]:
     from operational_ownership import OwnershipRegistry
@@ -8479,6 +10340,8 @@ def _terminate_processor_child(
         try:
             _kill_process_group(process.pid, signal.SIGTERM)
             tree_verified = True
+        except ProcessLookupError:
+            tree_verified = os.name != "nt" and descendants == set()
         except OSError:
             tree_verified = False
     process.join(0.2)

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from install_control import ManagedResource, install_resources
 
 from tests.test_reliability_v3_adoption import (
     _vault,
@@ -467,6 +468,84 @@ def test_expired_committed_undo_artifact_does_not_block_quiescent_observation(
 
     assert result["quiescent"] is True
     assert result["blockers"] == []
+    assert result["permit"] is False
+
+
+def test_active_install_manifest_blocks_adopted_runtime_deletion(tmp_path: Path) -> None:
+    import doctor
+
+    root, state_root = _vault(tmp_path)
+    build_adopted_reliability_v3(root, state_root)
+    value: bytes | None = None
+
+    def read_owned() -> bytes | None:
+        return value
+
+    def write_owned(updated: bytes | None) -> None:
+        nonlocal value
+        value = updated
+
+    install_resources(
+        state_root=state_root,
+        vault_root=root,
+        release={
+            "commit_oid": "a" * 40,
+            "project_version": "4.0.0",
+            "source_mode": "pinned_remote",
+            "uv_lock_sha256": "b" * 64,
+            "worktree_clean": True,
+        },
+        scheduler_backend="cron",
+        resources=[
+            ManagedResource(
+                resource_id="deletion-value",
+                kind="test_value",
+                locator="test://deletion-value",
+                desired=b"installed",
+                read_owned=read_owned,
+                write_owned=write_owned,
+                recognizes=lambda current: current == b"installed",
+            )
+        ],
+    )
+
+    result = doctor._run_deletion_check(
+        state_root, datetime.now(timezone.utc), root=root
+    )
+
+    assert result["quiescent"] is False
+    assert result["blockers"] == [{"code": "install_manifest_retained"}]
+    assert result["permit"] is False
+
+
+def test_live_blackboard_claim_blocks_adopted_runtime_deletion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import blackboard
+    import doctor
+
+    root, state_root = _vault(tmp_path)
+    build_adopted_reliability_v3(root, state_root)
+    now = datetime(2026, 8, 16, 12, tzinfo=timezone.utc)
+    projects = root / "knowledge/projects"
+    (projects / "demo/.blackboard").mkdir(parents=True)
+    monkeypatch.setattr(blackboard, "PROJECTS_DIR", projects)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
+    blackboard.claim_task(
+        "demo",
+        "own shared resource",
+        "opencode",
+        resources=["src/shared.py"],
+        ttl_seconds=300,
+        now=now,
+    )
+
+    result = doctor._run_deletion_check(state_root, now, root=root)
+    codes = {item["code"] for item in result["blockers"]}
+
+    assert result["quiescent"] is False
+    assert "blackboard_claim_retained" in codes
     assert result["permit"] is False
 
 

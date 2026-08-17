@@ -64,7 +64,7 @@ The principles below summarize the non-negotiable invariants.
 6. **Verify before write.** The compile pipeline's VERIFY-BEFORE-WRITE rule is non-negotiable. If the LLM claims a citation, Python verifies the literal substring exists in the source. Hallucinated evidence gets dropped.
 
 7. **Three-zone layout.** CODE + KNOWLEDGE tracked in git; RUNTIME
-   (`cache/logs/run/`, incl. `cache/cognee/`) inside the vault but gitignored. Never put
+   (`cache/logs/run/`) inside the vault but gitignored. Never put
    runtime outside the vault. Enforced by `tests/test_structure.py`.
 
 8. **Reliable local mutation.** Markdown remains authoritative. Operational SQLite

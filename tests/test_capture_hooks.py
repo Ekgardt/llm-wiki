@@ -177,11 +177,13 @@ def test_capture_wrappers_forward_checkpoint_event_identity(monkeypatch, capsys)
                 "transcript_path": "session.jsonl",
                 "event_id": "event-1",
                 "checkpoint_reason": "session_end",
+                "agent": "codex",
             },
         ) == 0
         assert "--source-event-id" in spawned[0]
         assert spawned[0][spawned[0].index("--source-event-id") + 1] == "event-1"
         assert "--checkpoint-reason" in spawned[0]
+        assert spawned[0][spawned[0].index("--agent") + 1] == "codex"
         capsys.readouterr()
 
 
@@ -615,6 +617,7 @@ def test_twentieth_prompt_spawns_nonblocking_flush(monkeypatch, tmp_path):
         "user_prompt_capture",
         {
             "prompt": "twentieth meaningful prompt",
+            "agent": "opencode",
             "session_id": "session-20",
             "cwd": str(project),
             "transcript_path": str(tmp_path / "session.jsonl"),
@@ -629,6 +632,7 @@ def test_twentieth_prompt_spawns_nonblocking_flush(monkeypatch, tmp_path):
         "--event", "pre-compact", "--session-id", "session-20",
         "--transcript", str(tmp_path / "session.jsonl"),
         "--trigger", "prompt-count-20",
+        "--agent", "opencode",
     ]
 
 
@@ -729,6 +733,7 @@ def test_tool_capture_logs_significant_tools(monkeypatch, tmp_path):
         {
             "tool_name": "Edit",
             "tool_input": {"filePath": "src/auth.py"},
+            "agent": "opencode",
             "session_id": "abc123def456",
             "cwd": str(project_cwd),
         },
@@ -741,6 +746,7 @@ def test_tool_capture_logs_significant_tools(monkeypatch, tmp_path):
     assert "Edit" in content
     assert "src/auth.py" in content
     assert "test-slug" in content
+    assert "tool | opencode | abc123de | test-slug | Edit" in content
 
 
 def test_tool_capture_redacts_and_builds_envelope_before_append(monkeypatch, tmp_path):
@@ -758,9 +764,10 @@ def test_tool_capture_redacts_and_builds_envelope_before_append(monkeypatch, tmp
         calls.append(("build", kwargs))
         return build_event_envelope(**kwargs)
 
-    def observed_append(slug, session_id, tool, target, operation_id=None):
+    def observed_append(slug, session_id, tool, target, operation_id=None, agent=None):
         calls.append(("append", {"slug": slug, "session": session_id, "tool": tool,
-                                 "target": target, "operation_id": operation_id}))
+                                 "target": target, "operation_id": operation_id,
+                                 "agent": agent}))
 
     monkeypatch.setattr(post_tool_capture, "ROOT", fake_root)
     monkeypatch.setattr(post_tool_capture, "_compute_slug_from_cwd", lambda cwd: "test-slug")
@@ -774,6 +781,7 @@ def test_tool_capture_redacts_and_builds_envelope_before_append(monkeypatch, tmp
         {
             "tool_name": "Bash",
             "tool_input": {"command": f"curl -H 'Authorization: Bearer {secret}' example.com"},
+            "agent": "opencode",
             "session_id": "session-1",
             "cwd": str(project_cwd),
         },
@@ -784,6 +792,7 @@ def test_tool_capture_redacts_and_builds_envelope_before_append(monkeypatch, tmp
     assert calls[0][1]["event_type"] == "post_tool_use"
     assert secret not in calls[0][1]["payload"]["target"]
     assert secret not in calls[1][1]["target"]
+    assert calls[1][1]["agent"] == "opencode"
     assert calls[1][1]["operation_id"].startswith("post-tool:")
 
 
@@ -981,6 +990,177 @@ def test_capture_operation_replays_same_host_event_but_rate_limits_another(
 
     current[0] += timedelta(seconds=window + 1)
     assert claim("host-event-2") not in {None, first}
+
+
+@pytest.mark.parametrize("module_name", ["user_prompt_capture", "post_tool_capture"])
+def test_pending_capture_never_aliases_a_different_host_occurrence(
+    monkeypatch, module_name
+):
+    module = __import__(module_name)
+    state = {}
+    current = [datetime(2026, 8, 14, 12, 0, 0)]
+
+    class FrozenDateTime:
+        @classmethod
+        def now(cls):
+            return current[0]
+
+        @classmethod
+        def fromisoformat(cls, value):
+            return datetime.fromisoformat(value)
+
+    def update(mutator, **_kwargs):
+        mutator(state)
+        return state
+
+    monkeypatch.setattr(module, "datetime", FrozenDateTime)
+    monkeypatch.setattr(module, "update_state", update)
+    if module_name == "user_prompt_capture":
+        claim = lambda source: module._claim_prompt_operation(  # noqa: E731
+            "slug", "prompt-hash", source_event_id=source
+        )
+    else:
+        claim = lambda source: module._claim_tool_operation(  # noqa: E731
+            "slug", "Edit", "src/app.py", source_event_id=source
+        )
+
+    first = claim("host-event-1")
+    assert first is not None
+    assert claim("host-event-2") is None
+    current[0] += timedelta(seconds=module.RATE_LIMIT_SECONDS + 1)
+    assert claim("host-event-2") not in {None, first}
+
+
+@pytest.mark.parametrize("module_name", ["user_prompt_capture", "post_tool_capture"])
+def test_anonymous_pending_capture_expires_after_rate_window(monkeypatch, module_name):
+    module = __import__(module_name)
+    state = {}
+    current = [datetime(2026, 8, 14, 12, 0, 0)]
+
+    class FrozenDateTime:
+        @classmethod
+        def now(cls):
+            return current[0]
+
+        @classmethod
+        def fromisoformat(cls, value):
+            return datetime.fromisoformat(value)
+
+    def update(mutator, **_kwargs):
+        mutator(state)
+        return state
+
+    monkeypatch.setattr(module, "datetime", FrozenDateTime)
+    monkeypatch.setattr(module, "update_state", update)
+    if module_name == "user_prompt_capture":
+        claim = lambda: module._claim_prompt_operation("slug", "prompt-hash")  # noqa: E731
+    else:
+        claim = lambda: module._claim_tool_operation(  # noqa: E731
+            "slug", "Edit", "src/app.py"
+        )
+
+    first = claim()
+    assert first is not None
+    current[0] += timedelta(seconds=module.RATE_LIMIT_SECONDS + 1)
+    assert claim() not in {None, first}
+
+
+def test_anonymous_fallback_operations_do_not_share_a_permanent_identity():
+    from capture_operation import claim_operation
+
+    def unavailable(_mutator):
+        raise OSError("state unavailable")
+
+    options = {
+        "namespace": "capture",
+        "key": "same-content",
+        "prefix": "capture",
+        "source_event_id": None,
+        "rate_limit_seconds": 60,
+        "max_entries": 10,
+        "now": datetime(2026, 8, 14, 12, 0, 0),
+    }
+
+    first = claim_operation(unavailable, **options)
+    second = claim_operation(unavailable, **options)
+
+    assert first is not None
+    assert second is not None
+    assert first != second
+
+
+@pytest.mark.parametrize(
+    ("module_name", "payload", "completion_name", "needle"),
+    [
+        (
+            "user_prompt_capture",
+            {
+                "prompt": "Crash after this committed prompt",
+                "session_id": "session-1",
+                "event_id": "prompt-crash-event",
+            },
+            "_complete_prompt_operation",
+            "Crash after this committed prompt",
+        ),
+        (
+            "post_tool_capture",
+            {
+                "tool_name": "Edit",
+                "tool_input": {"filePath": "src/crash-boundary.py"},
+                "session_id": "session-1",
+                "event_id": "tool-crash-event",
+            },
+            "_complete_tool_operation",
+            "src/crash-boundary.py",
+        ),
+    ],
+)
+def test_capture_replays_after_crash_between_append_and_completion(
+    monkeypatch,
+    tmp_path,
+    isolated_capture_state,
+    module_name,
+    payload,
+    completion_name,
+    needle,
+):
+    import daily_log_append
+
+    module = __import__(module_name)
+    fake_root = tmp_path / "vault"
+    fake_root.mkdir()
+    project_cwd = tmp_path / "project"
+    project_cwd.mkdir()
+    state = {}
+
+    def update(mutator, **_kwargs):
+        mutator(state)
+        return state
+
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(fake_root))
+    monkeypatch.setattr(daily_log_append, "STATE_ROOT", isolated_capture_state)
+    monkeypatch.setattr(module, "ROOT", fake_root)
+    monkeypatch.setattr(module, "update_state", update)
+    monkeypatch.setattr(module, "_compute_slug_from_cwd", lambda _cwd: "test-slug")
+    if module_name == "user_prompt_capture":
+        monkeypatch.setattr(module, "_increment_prompt_count", lambda *_args: 1)
+    payload = {**payload, "cwd": str(project_cwd)}
+    complete = getattr(module, completion_name)
+    monkeypatch.setattr(
+        module,
+        completion_name,
+        lambda *_args: (_ for _ in ()).throw(SystemExit(86)),
+    )
+
+    with pytest.raises(SystemExit, match="86"):
+        _run_capture_with_stdin(module_name, payload)
+
+    monkeypatch.setattr(module, completion_name, complete)
+    assert _run_capture_with_stdin(module_name, payload) == 0
+    daily = next((fake_root / "knowledge/daily").glob("*.md"))
+    content = daily.read_text(encoding="utf-8")
+    assert content.count(needle) == 1
+    assert content.count("llm-wiki-operation:") == 1
 
 
 def test_tool_capture_bash_filters_short_commands(monkeypatch, tmp_path):

@@ -20,6 +20,6 @@ Indexes, PID locks, queues, lint reports:
 $LLM_WIKI_STATE_ROOT/{run,logs,cache}
 ```
 
-Default: the vault itself → `cache/` (incl. `cache/cognee/`), `logs/`, `run/`
+Default: the vault itself → `cache/`, `logs/`, `run/`
 at vault root, all gitignored. Override via `LLM_WIKI_STATE_ROOT` (tests use
 a temp dir).

@@ -22,6 +22,8 @@ QUEUE_CONTRACT = OperationalDatabaseContract(application_id=0x4C575133)
 COORDINATOR_APPLICATION_ID = 0x4C575433
 
 COORDINATOR_V3_TABLES = {
+    "blackboard_claim_epochs",
+    "blackboard_claims",
     "capture_binding_projections",
     "intent_fence_epochs",
     "intent_fences",
@@ -86,6 +88,81 @@ def _row_exists(database: sqlite3.Connection, name: str) -> bool:
     ).fetchone() is not None
 
 
+def _object_names(objects: list[tuple], kind: str) -> set[str]:
+    return {str(row[1]) for row in objects if row[0] == kind}
+
+
+def _task_columns(database: sqlite3.Connection) -> dict[str, str]:
+    return {
+        row[1]: row[2].upper()
+        for row in database.execute("PRAGMA table_info(tasks)")
+    }
+
+
+def _selected_table_sql(
+    database: sqlite3.Connection, names: tuple[str, ...]
+) -> dict[str, str]:
+    return {
+        name: database.execute(
+            "SELECT sql FROM sqlite_schema WHERE type='table' AND name=?", (name,)
+        ).fetchone()[0]
+        for name in names
+    }
+
+
+def _queue_schema(path: Path) -> tuple[set[str], set[str], set[str], str, dict[str, str]]:
+    with contextlib.closing(sqlite3.connect(path)) as database:
+        objects = database.execute(
+            "SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+        tables = _object_names(objects, "table")
+        indexes = _object_names(objects, "index")
+        triggers = _object_names(objects, "trigger")
+        task_sql = database.execute(
+            "SELECT sql FROM sqlite_schema WHERE type='table' AND name='tasks'"
+        ).fetchone()[0]
+        columns = _task_columns(database)
+    return tables, indexes, triggers, task_sql, columns
+
+
+def _assert_queue_states(task_sql: str) -> None:
+    states = (
+        "ready",
+        "leased",
+        "blocked",
+        "succeeded",
+        "dead",
+        "cancelled",
+        "quarantine_pending",
+        "quarantined",
+        "purge_pending",
+    )
+    for state in states:
+        assert f"'{state}'" in task_sql
+
+
+def _coordinator_schema(path: Path) -> tuple[set[str], set[str], dict[str, str]]:
+    with contextlib.closing(sqlite3.connect(path)) as database:
+        objects = database.execute(
+            "SELECT type, name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+        tables = _object_names(objects, "table")
+        triggers = _object_names(objects, "trigger")
+        names = ("transaction", "project_leases", "writer_owners", "blackboard_claims")
+        sql = _selected_table_sql(database, names)
+    return tables, triggers, sql
+
+
+def _assert_owner_projection_sql(values: tuple[str, str]) -> None:
+    for sql in values:
+        assert "length(CAST(canonical_role AS BLOB)) BETWEEN 1 AND 64" in sql
+        assert "length(CAST(canonical_scope AS BLOB)) BETWEEN 1 AND 512" in sql
+        assert "length(CAST(actor_id AS BLOB)) BETWEEN 1 AND 256" in sql
+        assert "process_id > 0" in sql
+        assert "length(CAST(process_start_identity AS BLOB)) BETWEEN 1 AND 512" in sql
+        assert "REFERENCES maintenance_owners" in sql
+
+
 def test_queue_v3_fresh_schema_has_complete_invariant(tmp_path: Path) -> None:
     path = tmp_path / "run" / "queue-v3.candidate.sqlite3"
 
@@ -103,19 +180,7 @@ def test_queue_v3_fresh_schema_has_complete_invariant(tmp_path: Path) -> None:
     assert validated["application_id"] == 0x4C575133
     assert validated["user_version"] == 3
     assert validated["integrity_check"] == "ok"
-    with contextlib.closing(sqlite3.connect(path)) as database:
-        objects = database.execute(
-            "SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'"
-        ).fetchall()
-        tables = {name for kind, name, _sql in objects if kind == "table"}
-        indexes = {name for kind, name, _sql in objects if kind == "index"}
-        triggers = {name for kind, name, _sql in objects if kind == "trigger"}
-        task_sql = database.execute(
-            "SELECT sql FROM sqlite_schema WHERE type='table' AND name='tasks'"
-        ).fetchone()[0]
-        task_columns = {
-            row[1]: row[2].upper() for row in database.execute("PRAGMA table_info(tasks)")
-        }
+    tables, indexes, triggers, task_sql, task_columns = _queue_schema(path)
 
     assert tables == QUEUE_V3_TABLES
     assert QUEUE_V3_INDEXES <= indexes
@@ -123,11 +188,11 @@ def test_queue_v3_fresh_schema_has_complete_invariant(tmp_path: Path) -> None:
         "attempt_history_immutable_update",
         "attempt_history_authorized_delete",
         "capture_task_links_immutable_update",
-        "capture_task_link_resolutions_immutable_update",
-        "capture_task_link_seals_immutable_update",
-        "semantic_decisions_immutable_update",
-        "semantic_decisions_immutable_delete",
-        "queue_lineage_insert",
+            "capture_task_link_resolutions_immutable_update",
+            "capture_task_link_seals_immutable_update",
+            "semantic_decisions_immutable_update",
+            "semantic_decisions_authorized_delete",
+            "queue_lineage_insert",
         "queue_lineage_update_old",
         "queue_lineage_update_new",
         "queue_lineage_delete",
@@ -135,18 +200,7 @@ def test_queue_v3_fresh_schema_has_complete_invariant(tmp_path: Path) -> None:
     assert task_columns["payload_blob"] == "BLOB"
     assert "length(payload_blob) <= 1048576" in task_sql
     assert "attempts BETWEEN 0 AND 100" in task_sql
-    for state in (
-        "ready",
-        "leased",
-        "blocked",
-        "succeeded",
-        "dead",
-        "cancelled",
-        "quarantine_pending",
-        "quarantined",
-        "purge_pending",
-    ):
-        assert f"'{state}'" in task_sql
+    _assert_queue_states(task_sql)
 
 
 def test_coordinator_v3_fresh_schema_has_complete_invariant(tmp_path: Path) -> None:
@@ -173,32 +227,48 @@ def test_coordinator_v3_fresh_schema_has_complete_invariant(tmp_path: Path) -> N
     assert validated["journal_mode"] == "delete"
     assert validated["synchronous"] == 2
     assert validated["trusted_schema"] == 0
-    with contextlib.closing(sqlite3.connect(path)) as database:
-        objects = database.execute(
-            "SELECT type, name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'"
-        ).fetchall()
-        tables = {name for kind, name in objects if kind == "table"}
-        triggers = {name for kind, name in objects if kind == "trigger"}
-        transaction_sql = database.execute(
-            "SELECT sql FROM sqlite_schema WHERE type='table' AND name='transaction'"
-        ).fetchone()[0]
-        project_sql = database.execute(
-            "SELECT sql FROM sqlite_schema WHERE type='table' AND name='project_leases'"
-        ).fetchone()[0]
-        writer_sql = database.execute(
-            "SELECT sql FROM sqlite_schema WHERE type='table' AND name='writer_owners'"
-        ).fetchone()[0]
+    tables, triggers, sql = _coordinator_schema(path)
 
     assert tables == COORDINATOR_V3_TABLES
     assert triggers == set()
-    assert "'aborting'" in transaction_sql and "'aborted'" in transaction_sql
-    for sql in (project_sql, writer_sql):
-        assert "length(CAST(canonical_role AS BLOB)) BETWEEN 1 AND 64" in sql
-        assert "length(CAST(canonical_scope AS BLOB)) BETWEEN 1 AND 512" in sql
-        assert "length(CAST(actor_id AS BLOB)) BETWEEN 1 AND 256" in sql
-        assert "process_id > 0" in sql
-        assert "length(CAST(process_start_identity AS BLOB)) BETWEEN 1 AND 512" in sql
-        assert "REFERENCES maintenance_owners" in sql
+    assert "'aborting'" in sql["transaction"]
+    assert "'aborted'" in sql["transaction"]
+    _assert_owner_projection_sql((sql["project_leases"], sql["writer_owners"]))
+    claim_sql = sql["blackboard_claims"]
+    assert "PRIMARY KEY(project, resource)" in claim_sql
+    assert "REFERENCES blackboard_claim_epochs" in claim_sql
+    assert "fencing_epoch >= 1" in claim_sql
+
+
+def test_coordinator_v3_schema_upgrade_copies_old_rows_and_adds_empty_blackboard(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "run/markdown-transactions-v3.sqlite3"
+    candidate = tmp_path / "run/markdown-transactions-v3.candidate.sqlite3"
+    markdown_transaction.initialize_coordinator_v3_candidate(source, source_v2=None)
+    with contextlib.closing(sqlite3.connect(source)) as database:
+        database.execute("DROP TABLE blackboard_claims")
+        database.execute("DROP TABLE blackboard_claim_epochs")
+        database.execute(
+            "INSERT INTO writer_fences(gate_name,last_epoch) VALUES ('global',7)"
+        )
+        database.commit()
+
+    result = markdown_transaction.upgrade_coordinator_v3_candidate(
+        candidate,
+        source_v3=source,
+    )
+
+    assert result["writer_fences"] == 1
+    validated = markdown_transaction.validate_coordinator_v3_database(
+        candidate, state_root=tmp_path
+    )
+    assert validated["row_counts"]["blackboard_claims"] == 0
+    assert validated["row_counts"]["blackboard_claim_epochs"] == 0
+    with contextlib.closing(sqlite3.connect(candidate)) as database:
+        assert database.execute(
+            "SELECT last_epoch FROM writer_fences WHERE gate_name='global'"
+        ).fetchone() == (7,)
 
 
 def test_coordinator_candidate_header_is_unpublished_until_schema_is_complete(

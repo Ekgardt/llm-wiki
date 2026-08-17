@@ -30,6 +30,8 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── lsp_security.py               contained repository/config/source reads
 │   ├── pyright_profile.py            pinned identity discovery and qualification
 │   ├── install_pyright.py            explicit managed-package installer
+│   ├── install_control.py            resumable install/update/rollback ownership
+│   ├── integration_hook_config.py    bounded Cursor/Antigravity hook projections
 │   ├── pyright_session.py            Pyright readiness, sync, and semantic provider
 │   ├── workspace_revision.py         bounded pre/post freshness proofs
 │   ├── code_navigation.py            normalized precise-navigation facade
@@ -56,6 +58,8 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 ├── skills/                        CODE — 9 agent skills (SKILL.md)
 ├── rules/                         CODE — file-handling policies
 ├── integrations/                  CODE — IDE/agent integrations
+│   ├── cursor/hooks.json             official local user-hook template
+│   └── antigravity/hooks.json        official local user-hook template
 ├── benchmark/                     CODE — benchmark suite + report
 │
 ├── knowledge/                     KNOWLEDGE — content (gitignored: personal)
@@ -93,21 +97,21 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   └── index.sqlite                 FTS5 search index
 ├── logs/                         RUNTIME — gitignored (lint/compile/hook logs)
 ├── run/                          RUNTIME — gitignored operational state
-│   ├── markdown-transactions.sqlite3 current DB; proposed legacy tombstone
-│   ├── markdown-transactions-v3.sqlite3 proposed active transaction/owner DB
-│   ├── markdown-transactions-v2-retired.sqlite3 proposed upgrade evidence
+│   ├── markdown-transactions.sqlite3 current DB; approved legacy tombstone target
+│   ├── markdown-transactions-v3.sqlite3 approved active transaction/owner DB
+│   ├── markdown-transactions-v2-retired.sqlite3 approved upgrade evidence
 │   ├── transactions/<id>/           before/after images, plans, proposed abort receipt
-│   ├── queue.sqlite3                 current DB; proposed legacy tombstone
-│   ├── queue-v3.sqlite3              proposed active queue + owner DB
-│   ├── queue-v2-retired.sqlite3      proposed upgrade evidence
-│   ├── queue-results/                fenced results + proposed decisions/dispositions
+│   ├── queue.sqlite3                 current DB; approved legacy tombstone target
+│   ├── queue-v3.sqlite3              approved active queue + owner DB
+│   ├── queue-v2-retired.sqlite3      approved upgrade evidence
+│   ├── queue-results/                fenced results + approved decisions/dispositions
 │   ├── queue-quarantine/             malformed legacy/current queue evidence
 │   │   └── capture-<sha256>/         proposed resumable raw + intent + manifest
-│   ├── capture-intents/              proposed target: unprocessed capture intents
+│   ├── capture-intents/              approved target: unprocessed capture intents
 │   │   ├── pending/<00-ff>/<id>.json file-first/index reconciliation boundary
 │   │   └── ready/<00-ff>/<id>.json   indexed intents awaiting terminal outcome
-│   ├── reliability-v3-migration.json proposed resumable cutover manifest
-│   ├── reliability-v3-adopted.json   proposed complete cutover evidence
+│   ├── reliability-v3-migration.json approved resumable cutover manifest
+│   ├── reliability-v3-adopted.json   approved complete cutover evidence
 │   ├── queue/                        legacy migration input only
 │   ├── queue-migrated-v2             migration completion marker
 │   ├── state.json                    automation + compile receipts
@@ -115,6 +119,12 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   │   ├── owner.json                 immutable create-only owner evidence
 │   │   ├── failure.json               optional immutable terminal evidence
 │   │   └── lease.json                 bounded mutable live lease
+│   ├── install/                       approved install/recovery ownership state
+│   │   ├── manifest.json               owned paths + exact installed release
+│   │   ├── transaction.json            resumable install/upgrade/rollback state
+│   │   ├── install.lock                process-lifetime advisory writer lock
+│   │   ├── preimages/                  verified owned-fragment/value preimages
+│   │   └── scheduler/                  non-secret native scheduler definitions
 │   └── state.json.lock
 │
 ├── AGENTS.md                     ROOT — agent contract (byte-identical to CLAUDE.md)
@@ -143,14 +153,16 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 | `$LLM_WIKI_ROOT` | Resolved from `scripts/` location (worktree-aware via `git rev-parse --git-common-dir`) | Vault root — code + knowledge + runtime |
 | `$LLM_WIKI_STATE_ROOT` | **The vault root itself** | Runtime root → `cache/`, `logs/`, `run/` at vault root. Override for multi-disk or hermetic tests. |
 | `$MEMORY_LLM_PROVIDER` | Auto-detected (`opencode` → `codex` → `claude` → `openai` → `ollama`) | LLM backend for compile/flush/query. `fake` for tests. |
+| `$LLM_WIKI_DLP_POLICY` | Unset | Optional absolute path to an external bounded-literal/fingerprint policy. Invalid or digest-mismatched required policy fails closed. |
 
 ## External integration configuration preimages
 
-Claude and Codex configuration merges may create byte-exact sibling preimages outside
-the vault zones. Claude uses
+Claude, Codex, Cursor, and Antigravity configuration merges may create byte-exact
+sibling preimages outside the vault zones. Claude uses
 `settings.json.bak-llm-wiki-<YYYYMMDD-HHMMSS-ffffff>` beside `settings.json`; Codex
-uses `hooks.json.bak-llm-wiki-<YYYYMMDD-HHMMSS-ffffff>` beside `hooks.json`. A no-op
-merge creates no backup.
+uses `hooks.json.bak-llm-wiki-<YYYYMMDD-HHMMSS-ffffff>` beside `hooks.json`. Cursor
+and Antigravity use the same exact `hooks.json` sibling prefix at their official user
+configuration paths. A no-op merge creates no backup.
 
 Only files with the destination's exact `.bak-llm-wiki-` prefix are owned by this
 retention contract. After changed configuration is published and verified, each
@@ -161,12 +173,98 @@ bytes only, not owner, ACL, alternate streams, or complete filesystem metadata. 
 are not runtime state and do not replace private-vault backup/restore. See
 `knowledge/notes/integration-config-backup-retention-decision.md`.
 
+## Approved audit-closure boundary
+
+The user approved the security, recovery, install, scheduling, coordination, and
+evidence contract on 2026-08-15. The only new runtime directory is `run/install/`.
+It owns resumable install state, exact-release and external-path manifests, verified
+preimages, and non-secret scheduler definitions. It does not contain backup passwords
+or provider credentials. Restic receives credentials through its standard external
+password command or protected password file.
+
+Cognee is retired from the supported product. The optional package extra, sync script,
+and setup path are removed during implementation. Existing `cache/cognee/` content is
+a disposable legacy cache: no supported reader depends on it, and no installer,
+repair, or migration deletes it automatically.
+
+First-party model calls share one fail-closed DLP boundary. Optional custom literals
+and fingerprint allowlists are loaded only from the absolute external path named by
+`LLM_WIKI_DLP_POLICY`; the policy is not a fourth root zone. Verified local-only mode
+accepts only literal-loopback Ollama and requires verifiable Ollama cloud disablement.
+The implemented strict path uses the existing `MEMORY_LLM_PROVIDER=ollama` override,
+the official `OLLAMA_NO_CLOUD=1` server setting, and an explicit `127.0.0.1` or `::1`
+endpoint. It disables provider fallback and rejects remote model metadata, but reports
+`external_runtime_unverified` because LLM Wiki does not own or inspect the running
+Ollama process and therefore cannot prove that it restarted with cloud disabled.
+
+Private-vault backup is a coherent application snapshot, not a direct copy of live
+SQLite files. The existing maintenance admission fence blocks cooperating writers;
+SQLite online backup, source membership/hash recapture, and a manifest-bound staged
+projection create the Restic input. Unknown or ambiguous owners, source races,
+integrity failures, and schema mismatches block backup. Restore validates into an
+empty staging target before publication and never guesses historical ownership.
+The implemented CLI in `scripts/private_vault_backup.py` requires exact Restic
+`0.19.1`, an external repository-file containing only the repository location, and
+pre-existing empty staging/restore directories. Credentials remain in Restic's
+external environment, password file, or password command. Backup returns an exact
+snapshot ID plus manifest digest; restore requires both, runs `restic check`, and
+keeps a validated `vault/` + `state/` image only on success. It does not publish over
+an installed vault. Restic repositories must be outside the vault and staging tree.
+
+Windows Task Scheduler remains the native Windows scheduler. macOS uses a per-user
+LaunchAgent and Linux uses a per-user systemd timer; cron is explicit degraded
+fallback only. Blackboard tables reuse `markdown-transactions-v3.sqlite3`, capture
+reuses Queue v3 intents/terminal proof, and the active operational database count
+remains two. No daemon, MCP tool, runtime root, or automatic Git operation is added.
+Blackboard adds only `blackboard_claim_epochs` and `blackboard_claims` to the exact
+coordinator-v3 schema. They provide bounded all-or-none resource claims, renewable
+logical leases, expiry/reclaim, and monotonic fencing; authoritative task, conflict,
+and resolution events remain append-only Markdown. Installed databases require the
+existing explicit offline re-adoption path before clients accept the changed schema
+digest. See `knowledge/notes/audit-closure-security-recovery-control-plane-decision.md`
+and `knowledge/notes/blackboard-fenced-resource-claims-decision.md`.
+
+### Install ownership state
+
+The first install-control slice is defined by
+`knowledge/notes/install-ownership-control-plane-decision.md`. The approved managed
+IDE-hook extension is defined by
+`knowledge/notes/managed-ide-hooks-install-update-decision.md`. Version 1 records
+remain readable; validated installs adopt canonical `install-manifest/v2` and
+`install-transaction/v2` for resumable resource-set updates and one retained committed
+update rollback. No `complete.json`, install database, daemon, MCP tool, or
+force-adoption path exists.
+
+The manifest owns recognized LLM-Wiki profile fragments, Windows user root variables,
+native scheduler resources, an explicitly selected cron block, and bounded structural
+fragments in the official Cursor and Antigravity user hook files. It records exact
+source identity and digests but does not claim that a dirty local checkout is an
+immutable release. Other agent configuration, Git push protection, code upgrade, full
+release inventory, and restored-vault publication remain separate follow-up scopes.
+
+Transactions move through `prepared`, `mutating`, `publishing`, and `committed`.
+Failure recovery uses `reverting` and `reverted`; malformed state, ambiguous ownership,
+or external drift uses `quarantined`. A durable prepared transaction and all required
+owned-fragment preimages precede external mutation. Update leaves the prior manifest
+active until target verification and publishes generation +1. The original projection
+is retained for uninstall; the prior installed projection supports only the latest
+committed-update rollback. Restoration requires the exact expected installed value and
+never overwrites a concurrent user edit.
+
+`manifest.json`, `transaction.json`, preimages, and scheduler definitions are bounded,
+digest-verified, and durably published on the supported local-filesystem boundary.
+Whole profiles, whole crontabs, whole user hook files, unrelated task definitions,
+provider credentials, and backup passwords are never copied into `run/install/`. An active manifest,
+nonterminal transaction, quarantine, or unreadable install state blocks the offline
+`run/` deletion snapshot.
+
 ## Approved Reliability v3 implementation scope
 
 The user approved the repair direction and delegated the exact architecture decisions
-on 2026-08-05, then explicitly approved implementation of the operational database
-pair and offline adoption backend on 2026-08-12. This scope keeps the three root zones
-and existing runtime environment variables.
+on 2026-08-05, explicitly approved implementation of the operational database pair
+and offline adoption backend on 2026-08-12, and approved durable capture producer
+activation on 2026-08-16. This scope keeps the three root zones and existing runtime
+environment variables.
 Remote installer bootstrap adds mandatory full-OID input `LLM_WIKI_COMMIT`. The only
 new runtime directory is `run/capture-intents/`. New create-only
 `capture-intent/v1` records remain there until an immutable terminal record under
@@ -176,6 +274,16 @@ Provider-derived `capture-decision/v1` records are published in `queue-results/`
 before side effects and reused after crashes.
 Legacy `cache/transient-transcripts/` files are recovery input only; new capture work
 is not written to disposable cache.
+
+For supported SessionEnd and PreCompact evidence, `integration_adapter.py` is the one
+synchronous producer boundary. It must publish bounded canonical redacted intent
+evidence before returning. Detached execution may wake processing only: spawn success,
+a process ID, or queue insertion is not ownership transfer and never authorizes source
+deletion. Events without transcript evidence make no successful capture claim and do
+not fabricate no-durable-content terminal outcomes. Recovery checks terminal record,
+decision record, and deterministic transaction adoption before any provider retry.
+Exact replay uses stable source event identity plus complete redacted-input digest;
+an identity collision with different bytes fails closed.
 
 Compile authority is `compile-receipt/v3`. V3 receipt filenames are
 `knowledge/daily/receipts/v3-<source-identity-sha256>.md`; source identity hashes
@@ -209,9 +317,11 @@ Operational migrations execute individual statements under explicit transactions
 verify their complete invariant on every startup, and remain restartable after any
 statement. Operational databases remain rollback-journal, `synchronous=FULL`, local
 filesystem only, and no WAL. The listed v3 paths remain unavailable to normal runtime
-mutation until implementation and verification pass. See
+mutation until offline adoption, producer, replay, terminal, recovery, purge, and
+complexity verification pass. See
 `knowledge/notes/v4-reliability-contracts-decision.md` and
 `knowledge/notes/reliability-v3-runtime-adoption-implementation-decision.md` and
+`knowledge/notes/durable-capture-producer-activation-decision.md` and
 `docs/superpowers/specs/2026-08-05-v4-reliability-repair-design.md`.
 
 ## Implemented corpus-generation checkpoint
@@ -505,8 +615,10 @@ graph-dependent code tools use bounded live extraction and label it incomplete.
   owning LSP lifecycle. Its `lease.json` is a bounded mutable live
   lease with a 10 seconds heartbeat and 30 seconds expiry, separate from immutable
   `owner.json` and `failure.json`. Existing `run/queue/*.json` is one-time
-  migration input only.
-- `cache/cognee/` — optional semantic graph data (only if Cognee installed).
+  migration input only. The approved audit-closure target adds `run/install/` for
+  manifest-owned install, rollback, scheduler, and external-preimage state.
+- `cache/cognee/` — retired disposable legacy cache. It has no supported reader and
+  is never removed automatically.
 
 **Runtime deletion contract.** `cache/` and `logs/` are regenerated on demand.
 The current `run/` contains recoverable but operationally significant transactions

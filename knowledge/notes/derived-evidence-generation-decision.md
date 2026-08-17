@@ -81,6 +81,7 @@ undo artifacts retain their existing protections.
 
 ## Related
 
+- [[audit-closure-security-recovery-control-plane-decision]]
 - [[read-only-lsp-navigation-engine-decision]]
 - [[persistent-code-intelligence-kernel-decision]]
 - [[solo-operator-superset-product-decision]]

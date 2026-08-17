@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/capture-decision-v1.json",
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "type": "object",
+  "required": [
+    "schema_version",
+    "intent_id",
+    "intent_sha256",
+    "complete_input_sha256",
+    "chunk_sha256",
+    "stage",
+    "provider",
+    "wire_output",
+    "tier",
+    "outcome",
+    "operation_plan",
+    "processing_binding"
+  ],
+  "properties": {
+    "schema_version": {"const": "capture-decision/v1"},
+    "intent_id": {"$ref": "#/$defs/digest"},
+    "intent_sha256": {"$ref": "#/$defs/digest"},
+    "complete_input_sha256": {"$ref": "#/$defs/digest"},
+    "chunk_sha256": {"$ref": "#/$defs/digest"},
+    "stage": {"const": "flush"},
+    "provider": {
+      "type": "object",
+      "required": [
+        "provider",
+        "model",
+        "candidate_index",
+        "fallback_from",
+        "structured_output"
+      ],
+      "properties": {
+        "provider": {"type": "string", "minLength": 1, "maxLength": 64},
+        "model": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string", "minLength": 1, "maxLength": 256}
+          ]
+        },
+        "candidate_index": {"type": "integer", "minimum": 0, "maximum": 7},
+        "fallback_from": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {"type": "string", "minLength": 1, "maxLength": 512}
+        },
+        "structured_output": {"enum": ["native", "prompt"]}
+      },
+      "additionalProperties": false
+    },
+    "wire_output": {"type": "string", "minLength": 8, "maxLength": 524288},
+    "tier": {"enum": ["ok", "major", "minor"]},
+    "outcome": {"enum": ["semantic_ok", "major_written", "minor_written"]},
+    "operation_plan": {
+      "type": "array",
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "kind",
+          "path",
+          "block",
+          "block_sha256",
+          "operation_id",
+          "chosen_at"
+        ],
+        "properties": {
+          "kind": {"const": "append"},
+          "path": {
+            "type": "string",
+            "pattern": "^knowledge/daily/[0-9]{4}-[0-9]{2}-[0-9]{2}\\.md$",
+            "maxLength": 64
+          },
+          "block": {"type": "string", "minLength": 1, "maxLength": 524288},
+          "block_sha256": {"$ref": "#/$defs/digest"},
+          "operation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+          "chosen_at": {"type": "string", "minLength": 1, "maxLength": 64}
+        },
+        "additionalProperties": false
+      }
+    },
+    "processing_binding": {
+      "type": "object",
+      "required": ["kind", "task_id", "active_link_digest"],
+      "properties": {
+        "kind": {"const": "task"},
+        "task_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "active_link_digest": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

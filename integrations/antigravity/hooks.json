@@ -1,0 +1,30 @@
+{
+  "llm-wiki": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "uv run --locked --no-sync --directory \"__LLM_WIKI_ROOT__\" python \"__LLM_WIKI_ROOT__/scripts/integration_adapter.py\" --source antigravity --event session_start",
+        "timeout": 15
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "write_to_file|replace_file_content|multi_replace_file_content|run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --locked --no-sync --directory \"__LLM_WIKI_ROOT__\" python \"__LLM_WIKI_ROOT__/scripts/integration_adapter.py\" --source antigravity --event post_tool_use",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "uv run --locked --no-sync --directory \"__LLM_WIKI_ROOT__\" python \"__LLM_WIKI_ROOT__/scripts/integration_adapter.py\" --source antigravity --event stop",
+        "timeout": 10
+      }
+    ]
+  }
+}

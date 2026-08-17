@@ -54,7 +54,6 @@ def test_no_qmd_refs_in_skills():
         "docs/STRUCTURE.md",
         "docs/USER-GUIDE.md",
         "docs/EXPORTING.md",
-        "docs/SETUP-COGNEE.md",
         "integrations/README.md",
         "tests/README.md",
         "AGENTS.md",
@@ -525,24 +524,40 @@ def test_lint_check_count_matches_code():
             )
 
 
-# ─── 10. No standalone root cognee/ in docs ─────────────────────────
+# ─── 10. Retired Cognee bridge stays retired ────────────────────────
 
-def test_no_standalone_cognee_in_docs():
-    """Docs must use cache/cognee/ not standalone root cognee/."""
-    structure = (ROOT / "docs" / "STRUCTURE.md").read_text(encoding="utf-8")
-    # Extract canonical runtime dirs from STRUCTURE.md
-    assert "cache/cognee" in structure, "STRUCTURE.md must document cache/cognee/"
+def test_cognee_bridge_is_retired_without_deleting_legacy_cache():
+    """Cognee has no supported entry point, but its old cache is preserved."""
+    assert not (ROOT / "scripts" / "cognee_sync.py").exists()
+    assert not (ROOT / "docs" / "SETUP-COGNEE.md").exists()
 
-    for doc_name in ("README.md", "README.ru.md", "README.zh-CN.md",
-                      "docs/USER-GUIDE.md", "CONTRIBUTING.md"):
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    lockfile = (ROOT / "uv.lock").read_text(encoding="utf-8")
+    assert 'cognee = [' not in pyproject
+    assert 'name = "cognee"' not in lockfile
+
+    for installer in ("install.sh", "install.ps1"):
+        source = (ROOT / installer).read_text(encoding="utf-8")
+        assert "cache/cognee" not in source.replace("\\", "/")
+
+    current_docs = (
+        "README.md",
+        "README.ru.md",
+        "README.zh-CN.md",
+        "docs/ARCHITECTURE.md",
+        "docs/USER-GUIDE.md",
+        "CONTRIBUTING.md",
+        "knowledge/README.md",
+    )
+    forbidden = ("--extra cognee", "scripts/cognee_sync.py", "Optional: Cognee")
+    for doc_name in current_docs:
         doc = (ROOT / doc_name).read_text(encoding="utf-8")
-        # Find standalone cognee/ not preceded by cache/
-        for m in re.finditer(r"(?<!cache/)(?<!cache\\)\bcognee/", doc):
-            line = doc[:m.start()].count("\n") + 1
-            pytest.fail(
-                f"{doc_name}:{line}: standalone 'cognee/' found — "
-                f"should be 'cache/cognee/' per STRUCTURE.md"
-            )
+        for text in forbidden:
+            assert text not in doc, f"{doc_name} still advertises retired Cognee: {text}"
+
+    structure = (ROOT / "docs" / "STRUCTURE.md").read_text(encoding="utf-8")
+    assert "`cache/cognee/` — retired disposable legacy cache" in structure
+    assert "never removed automatically" in structure
 
 
 # ─── 11. Installer version comments match pyproject.toml ────────────

@@ -22,6 +22,7 @@ Daily entry format (one append per session end):
 
     ## [HH:MM:SS] session-end | <session_id>
     - Trigger: `<reason>`
+    - Agent: `<canonical agent>`
     - Project slug: `<slug>`
     - Project root: `<absolute path>`
     - Transcript: `<transcript path>`
@@ -50,6 +51,7 @@ if hasattr(sys.stdout, "reconfigure"):
 SLUG_UNSAFE_RE = re.compile(r"[\s_/\\:*?\"<>|]+")
 
 from daily_log_append import locked_append  # noqa: E402
+from event_envelope import canonical_agent  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
 # Match the Source line that session_start_project_state.py writes into
@@ -200,63 +202,81 @@ def _append_entry(
     locked_append(daily_path, entry, operation_id=operation_id)
 
 
+def _vault_paths() -> tuple[Path, Path] | None:
+    vault_root = os.environ.get("LLM_WIKI_ROOT")
+    if not vault_root:
+        return None
+    vault = Path(vault_root).resolve()
+    daily_dir = vault / "knowledge" / "daily"
+    if daily_dir.parent.is_dir():
+        return vault, daily_dir
+    _safe_write_error(f"knowledge/ dir missing under {vault}")
+    return None
+
+
+def _eligible_project(vault: Path) -> Path | None:
+    project_dir = _resolve_project_dir()
+    if _is_inside_vault(project_dir, vault):
+        return None
+    if _is_user_home(project_dir):
+        return None
+    return project_dir
+
+
+def _transcript_line(transcript: str) -> str:
+    if not transcript:
+        return ""
+    return f"- Transcript: `{transcript}`\n"
+
+
+def _session_entry(payload: dict, slug: str, project_dir: Path, now: datetime) -> str:
+    session_id = str(payload.get("session_id", "unknown"))
+    reason = str(payload.get("reason", "other"))
+    transcript = str(payload.get("transcript_path", ""))
+    agent = canonical_agent(str(payload.get("agent") or "claude"))
+    entry = (
+        f"## [{now.strftime('%H:%M:%S')}] session-end | {session_id}\n"
+        f"- Trigger: `{reason}`\n"
+        f"- Agent: `{agent}`\n"
+        f"- Project slug: `{slug}`\n"
+        f"- Project root: `{project_dir}`\n"
+        f"{_transcript_line(transcript)}\n"
+    )
+    return redact_secrets(entry)
+
+
+def _session_operation_id(payload: dict) -> str | None:
+    source_event_id = payload.get("event_id") or payload.get("source_event_id")
+    if not isinstance(source_event_id, str) or not source_event_id:
+        return None
+    return f"session-end:{source_event_id}"
+
+
+def _tag_session() -> None:
+    paths = _vault_paths()
+    if paths is None:
+        return
+    vault, daily_dir = paths
+    project_dir = _eligible_project(vault)
+    if project_dir is None:
+        return
+    payload = _read_payload()
+    now = datetime.now()
+    slug = _compute_slug(project_dir, vault / "knowledge" / "projects")
+    today_file = daily_dir / f"{now.strftime('%Y-%m-%d')}.md"
+    _append_entry(
+        today_file,
+        _session_entry(payload, slug, project_dir, now),
+        operation_id=_session_operation_id(payload),
+    )
+
+
 def main() -> int:
     try:
-        vault_root = os.environ.get("LLM_WIKI_ROOT")
-        if not vault_root:
-            return 0
-        vault = Path(vault_root).resolve()
-        daily_dir = vault / "knowledge" / "daily"
-        if not daily_dir.parent.is_dir():
-            _safe_write_error(f"knowledge/ dir missing under {vault}")
-            return 0
-
-        project_dir = _resolve_project_dir()
-
-        # Skip if inside the vault — the project-level SessionEnd hook
-        # (`session_end_capture.py`) handles that case with richer content
-        # via flush_memory.py.
-        if _is_inside_vault(project_dir, vault):
-            return 0
-
-        # Skip if cwd is $HOME — matches the SessionStart HOME guard.
-        # Prevents `user` slug noise in daily log when Claude Code is
-        # launched from the home directory.
-        if _is_user_home(project_dir):
-            return 0
-
-        projects_dir = vault / "knowledge" / "projects"
-        slug = _compute_slug(project_dir, projects_dir)
-        payload = _read_payload()
-        now = datetime.now()
-        session_id = str(payload.get("session_id", "unknown"))
-        reason = str(payload.get("reason", "other"))
-        transcript = str(payload.get("transcript_path", ""))
-
-        today_file = daily_dir / f"{now.strftime('%Y-%m-%d')}.md"
-        entry = (
-            f"## [{now.strftime('%H:%M:%S')}] session-end | {session_id}\n"
-            f"- Trigger: `{reason}`\n"
-            f"- Project slug: `{slug}`\n"
-            f"- Project root: `{project_dir}`\n"
-            + (f"- Transcript: `{transcript}`\n" if transcript else "")
-            + "\n"
-        )
-        # Mandatory redaction boundary: strip secrets before the entry lands
-        # in the durable daily log (mirrors post_tool_capture.py:66-72).
-        entry = redact_secrets(entry)
-        source_event_id = payload.get("event_id") or payload.get("source_event_id")
-        operation_id = (
-            f"session-end:{source_event_id}"
-            if isinstance(source_event_id, str) and source_event_id
-            else None
-        )
-        _append_entry(today_file, entry, operation_id=operation_id)
-        return 0
-
+        _tag_session()
     except Exception:  # noqa: BLE001
         _safe_write_error("unhandled:\n" + traceback.format_exc())
-        return 0
+    return 0
 
 
 if __name__ == "__main__":

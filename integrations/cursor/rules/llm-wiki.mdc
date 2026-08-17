@@ -42,11 +42,8 @@ uv run python "$LLM_WIKI_ROOT/scripts/search_memory.py" "<query>" --semantic --l
 
 ## When a decision is made or a lesson is learned
 
-Record it to the daily log:
-```bash
-TS=$(date +%H:%M:%S)
-echo '{"slug":"<project-slug>","sessionId":"cursor-session","block":"## ['"$TS"'] cursor-session | decision\n- Decision: <what was decided>\n- Reason: <why>"}' | uv run python "$LLM_WIKI_ROOT/scripts/daily_log_append.py"
-```
+Record explicit decisions with the LLM-Wiki MCP `log_decision` tool. Include a
+concise summary and the rationale when it matters.
 
 ## When you need project-specific context
 
@@ -58,6 +55,6 @@ uv run python "$LLM_WIKI_ROOT/scripts/build_context.py" "<project-slug>"
 ## Important rules
 
 1. **ALWAYS search the vault before making architecture decisions** — a past session may have already solved this
-2. **Record every non-trivial decision** — future you (or another agent) will thank you
+2. **Record every non-trivial decision** — use the MCP `log_decision` tool
 3. **Never edit `knowledge/notes/` pages directly for compile output** — use the scripts. The compile pipeline will handle it.
 4. **Read guard rails at start** — `uv run python "$LLM_WIKI_ROOT/scripts/build_guardrails.py"` shows learned rules from past corrections
