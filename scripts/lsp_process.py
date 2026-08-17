@@ -4528,8 +4528,7 @@ def _current_identity(path: Path) -> _ObjectIdentity | None:
         return None
 
 
-def _secure_windows_owner_root(path: Path, deadline: float) -> None:
-    identity = _windows_acl_identity()
+def _apply_owner_only_acl(path: Path, identity: str, deadline: float) -> None:
     changed = _run_windows_owner_acl(
         [
             "icacls",
@@ -4542,17 +4541,33 @@ def _secure_windows_owner_root(path: Path, deadline: float) -> None:
     )
     if changed.returncode != 0:
         raise PermissionError("could not apply owner-only LSP ACL")
+
+
+def _read_owner_acl_entries(path: Path, deadline: float) -> list[str]:
     verified = _run_windows_owner_acl(["icacls", str(path)], deadline)
     if verified.returncode != 0:
         raise PermissionError("could not verify owner-only LSP ACL")
-    acl_lines = [
+    return [
         line.strip()
         for line in _acl_output_text(verified.stdout).splitlines()
         if ":(" in line
     ]
-    if len(acl_lines) != 1:
-        raise PermissionError("owner-only LSP ACL verification was ambiguous")
-    owner_ace = acl_lines[0]
+
+
+def _require_single_owner_ace(path: Path, entries: Sequence[str]) -> str:
+    if len(entries) == 1:
+        return entries[0]
+    # Name the principals that were actually present. Without them an operator
+    # cannot tell an extra inherited entry from a missing one, and the platform
+    # that produced the entries is usually not the one reading the failure.
+    principals = ", ".join(sorted({_acl_principal(path, entry) for entry in entries})[:8])
+    raise PermissionError(
+        "owner-only LSP ACL verification was ambiguous: expected 1 access control "
+        f"entry, found {len(entries)} for {principals}"
+    )
+
+
+def _require_owner_only_ace(path: Path, owner_ace: str, identity: str) -> None:
     markers = re.findall(r"\([^)]+\)", owner_ace)
     if (
         _acl_principal(path, owner_ace).casefold() != identity.casefold()
@@ -4560,6 +4575,14 @@ def _secure_windows_owner_root(path: Path, deadline: float) -> None:
         or set(markers) != {"(OI)", "(CI)", "(F)"}
     ):
         raise PermissionError("owner-only LSP ACL verification failed")
+
+
+def _secure_windows_owner_root(path: Path, deadline: float) -> None:
+    identity = _windows_acl_identity()
+    _apply_owner_only_acl(path, identity, deadline)
+    entries = _read_owner_acl_entries(path, deadline)
+    owner_ace = _require_single_owner_ace(path, entries)
+    _require_owner_only_ace(path, owner_ace, identity)
 
 
 def _run_windows_owner_acl(

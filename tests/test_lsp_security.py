@@ -2855,3 +2855,30 @@ def test_security_boundary_documents_trusted_repository_not_sandbox() -> None:
     assert "trusted" in text.casefold()
     assert "not a sandbox" in text.casefold()
     assert "navigation evidence" in text.casefold()
+
+
+def test_ambiguous_owner_acl_failure_names_the_principals_it_saw() -> None:
+    import lsp_process
+
+    path = PureWindowsPath("C:/state/run/lsp/owner")
+    entries = [
+        f"{path} RUNNER\\runneradmin:(OI)(CI)(F)",
+        "BUILTIN\\Administrators:(OI)(CI)(F)",
+    ]
+
+    with pytest.raises(PermissionError) as failure:
+        lsp_process._require_single_owner_ace(path, entries)
+
+    message = str(failure.value)
+    assert "found 2" in message
+    assert "RUNNER\\runneradmin" in message
+    assert "BUILTIN\\Administrators" in message
+
+
+def test_single_owner_acl_entry_is_returned_unchanged() -> None:
+    import lsp_process
+
+    path = PureWindowsPath("C:/state/run/lsp/owner")
+    entry = f"{path} RUNNER\\runneradmin:(OI)(CI)(F)"
+
+    assert lsp_process._require_single_owner_ace(path, [entry]) == entry
