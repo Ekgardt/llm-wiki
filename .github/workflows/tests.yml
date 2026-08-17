@@ -274,6 +274,16 @@ jobs:
       - run: uv python install ${{ matrix.python }}
       - run: uv python pin ${{ matrix.python }}
       - run: uv sync --locked
+      # `${{ github.workspace }}/../llm-wiki-state` keeps runtime state out of the
+      # checkout, but leaves a `..` component. `install_pyright.py` rejects that by
+      # design, so normalize the path once and reuse it for the whole job.
+      - name: Normalize the external state root
+        shell: bash
+        run: >
+          uv run --locked --no-sync python -c
+          "import os, pathlib;
+          print('LLM_WIKI_STATE_ROOT=' + str(pathlib.Path(os.environ['LLM_WIKI_STATE_ROOT']).resolve()))"
+          >> "$GITHUB_ENV"
       - name: Explicit Pyright install
         run: uv run --locked --no-sync python scripts/install_pyright.py --state-root "${{ env.LLM_WIKI_STATE_ROOT }}"
       - name: Protocol, process-tree, and security tests
