@@ -372,64 +372,95 @@ def open_operational_db(
     initialize_contract: bool = False,
 ) -> sqlite3.Connection:
     """Open an owner-restricted rollback-journal operational database."""
-    if busy_ms < 0:
-        raise ValueError("busy_ms must be non-negative")
-    if initialize_contract and contract is None:
-        raise ValueError("initialize_contract requires an operational database contract")
+    _require_operational_open_arguments(busy_ms, contract, initialize_contract)
     path = Path(path)
     validate_state_root(path.parent)
-    expected: os.stat_result | None = None
-    try:
-        descriptor = os.open(
-            path,
-            os.O_WRONLY
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_BINARY", 0)
-            | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
-        )
-    except FileExistsError:
-        expected = validate_runtime_file(
-            path,
-            path.parent,
-            max_bytes=1 << 50,
-        )
-    else:
-        os.close(descriptor)
-        expected = path.stat(follow_symlinks=False)
+    expected = _operational_db_identity(path)
     connection = sqlite3.connect(
         path,
         timeout=busy_ms / 1_000,
         isolation_level=None,
     )
     try:
-        current = path.stat(follow_symlinks=False)
-        if expected is None or not os.path.samestat(expected, current):
-            raise PermissionError("operational database identity changed while opening")
-        connection.row_factory = sqlite3.Row
-        connection.execute(f"PRAGMA busy_timeout={busy_ms:d}")
-        mode = connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
-        if str(mode).casefold() != "delete":
-            raise sqlite3.OperationalError(f"SQLite refused journal_mode=DELETE: {mode}")
-        connection.execute("PRAGMA synchronous=FULL")
-        connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("PRAGMA trusted_schema=OFF")
-        _require_pragma(connection, "synchronous", 2)
-        _require_pragma(connection, "foreign_keys", 1)
-        _require_pragma(connection, "trusted_schema", 0)
-        _require_pragma(connection, "busy_timeout", busy_ms)
-        if contract is not None:
-            _validate_or_initialize_operational_contract(
-                connection,
-                contract,
-                initialize=initialize_contract,
-            )
-        _set_owner_only(path, 0o600)
+        _configure_operational_connection(
+            connection,
+            path,
+            expected,
+            busy_ms=busy_ms,
+            contract=contract,
+            initialize_contract=initialize_contract,
+        )
         return connection
     except Exception:
         connection.close()
         raise
+
+
+def _require_operational_open_arguments(
+    busy_ms: int,
+    contract: OperationalDatabaseContract | None,
+    initialize_contract: bool,
+) -> None:
+    if busy_ms < 0:
+        raise ValueError("busy_ms must be non-negative")
+    if initialize_contract and contract is None:
+        raise ValueError("initialize_contract requires an operational database contract")
+
+
+def _operational_db_identity(path: Path) -> os.stat_result:
+    """Create the database file, or validate an existing one without a probe."""
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError:
+        return validate_operational_db_file(path, path.parent, max_bytes=1 << 50)
+    # O_EXCL proves this inode was just created here, so no connection in this
+    # process can hold locks on it and closing the descriptor strips nothing.
+    os.close(descriptor)
+    return path.stat(follow_symlinks=False)
+
+
+def _apply_operational_pragmas(connection: sqlite3.Connection, busy_ms: int) -> None:
+    connection.row_factory = sqlite3.Row
+    connection.execute(f"PRAGMA busy_timeout={busy_ms:d}")
+    mode = connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
+    if str(mode).casefold() != "delete":
+        raise sqlite3.OperationalError(f"SQLite refused journal_mode=DELETE: {mode}")
+    connection.execute("PRAGMA synchronous=FULL")
+    connection.execute("PRAGMA foreign_keys=ON")
+    connection.execute("PRAGMA trusted_schema=OFF")
+    _require_pragma(connection, "synchronous", 2)
+    _require_pragma(connection, "foreign_keys", 1)
+    _require_pragma(connection, "trusted_schema", 0)
+    _require_pragma(connection, "busy_timeout", busy_ms)
+
+
+def _configure_operational_connection(
+    connection: sqlite3.Connection,
+    path: Path,
+    expected: os.stat_result,
+    *,
+    busy_ms: int,
+    contract: OperationalDatabaseContract | None,
+    initialize_contract: bool,
+) -> None:
+    current = path.stat(follow_symlinks=False)
+    if not os.path.samestat(expected, current):
+        raise PermissionError("operational database identity changed while opening")
+    _apply_operational_pragmas(connection, busy_ms)
+    if contract is not None:
+        _validate_or_initialize_operational_contract(
+            connection,
+            contract,
+            initialize=initialize_contract,
+        )
+    _set_owner_only(path, 0o600)
 
 
 def _pragma_integer(connection: sqlite3.Connection, name: str) -> int:
@@ -518,23 +549,18 @@ def run_resumable_migration(
         raise error
 
 
-def validate_runtime_file(
-    path: Path,
-    state_root: Path,
-    *,
-    max_bytes: int,
-    owner_only: bool = False,
-) -> os.stat_result:
-    """Validate one bounded regular runtime file without following links."""
-    if max_bytes < 0:
-        raise ValueError("max_bytes must be non-negative")
-    path = Path(path)
+def _contained_runtime_metadata(path: Path, state_root: Path) -> os.stat_result:
     root = Path(state_root).resolve(strict=True)
     try:
         path.parent.resolve(strict=True).relative_to(root)
-        metadata = path.lstat()
+        return path.lstat()
     except (OSError, ValueError) as exc:
         raise PermissionError("runtime file is outside the configured state root") from exc
+
+
+def _require_bounded_regular_file(
+    path: Path, metadata: os.stat_result, max_bytes: int
+) -> None:
     if (
         stat.S_ISLNK(metadata.st_mode)
         or _windows_reparse_point(path)
@@ -542,16 +568,45 @@ def validate_runtime_file(
         or metadata.st_size > max_bytes
     ):
         raise PermissionError("runtime file must be a bounded regular file")
-    if owner_only:
-        if os.name == "nt":
-            from memory_queue import _is_owner_only
 
-            if not _is_owner_only(path):
-                raise PermissionError("runtime file must be owner-only")
-        else:
-            mode = stat.S_IMODE(metadata.st_mode)
-            if mode & 0o077 or mode & 0o600 != 0o600:
-                raise PermissionError("runtime file must be owner-only")
+
+def _require_owner_only_file(path: Path, metadata: os.stat_result) -> None:
+    if os.name == "nt":
+        from memory_queue import _is_owner_only
+
+        if not _is_owner_only(path):
+            raise PermissionError("runtime file must be owner-only")
+        return
+    mode = stat.S_IMODE(metadata.st_mode)
+    if mode & 0o077 or mode & 0o600 != 0o600:
+        raise PermissionError("runtime file must be owner-only")
+
+
+def _validated_runtime_metadata(
+    path: Path,
+    state_root: Path,
+    *,
+    max_bytes: int,
+    owner_only: bool,
+) -> os.stat_result:
+    """Validate a bounded regular runtime file from metadata alone."""
+    if max_bytes < 0:
+        raise ValueError("max_bytes must be non-negative")
+    metadata = _contained_runtime_metadata(path, state_root)
+    _require_bounded_regular_file(path, metadata, max_bytes)
+    if owner_only:
+        _require_owner_only_file(path, metadata)
+    return metadata
+
+
+def _confirm_runtime_identity(path: Path, metadata: os.stat_result) -> None:
+    """Prove the validated metadata still describes the file behind the path.
+
+    Never call this for a file that may already have an open SQLite connection
+    in this process. Closing any descriptor releases every POSIX advisory lock
+    the process holds on that inode, whichever descriptor took them, so this
+    probe would silently strip the locks a live connection depends on.
+    """
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
     try:
@@ -560,7 +615,44 @@ def validate_runtime_file(
             raise PermissionError("runtime file identity changed during validation")
     finally:
         os.close(descriptor)
+
+
+def validate_runtime_file(
+    path: Path,
+    state_root: Path,
+    *,
+    max_bytes: int,
+    owner_only: bool = False,
+) -> os.stat_result:
+    """Validate one bounded regular runtime file without following links."""
+    path = Path(path)
+    metadata = _validated_runtime_metadata(
+        path, state_root, max_bytes=max_bytes, owner_only=owner_only
+    )
+    _confirm_runtime_identity(path, metadata)
     return metadata
+
+
+def validate_operational_db_file(
+    path: Path,
+    state_root: Path,
+    *,
+    max_bytes: int,
+    owner_only: bool = False,
+) -> os.stat_result:
+    """Validate an operational database without opening a second descriptor.
+
+    `validate_runtime_file` proves identity by opening and closing its own
+    descriptor. On POSIX that close drops every advisory lock this process holds
+    on the inode, including the locks an already-open SQLite connection relies
+    on, so concurrent writers stop excluding each other and one of them deletes
+    the rollback journal underneath a live transaction. The database openers
+    bracket `sqlite3.connect` with `lstat` and `samestat` instead, which proves
+    the same identity across the connect without touching a descriptor.
+    """
+    return _validated_runtime_metadata(
+        Path(path), state_root, max_bytes=max_bytes, owner_only=owner_only
+    )
 
 
 def open_readonly_operational_db(
@@ -575,7 +667,9 @@ def open_readonly_operational_db(
     """Open a validated runtime SQLite database read-only and fail on path races."""
     if busy_ms < 0:
         raise ValueError("busy_ms must be non-negative")
-    expected = validate_runtime_file(path, state_root, max_bytes=max_bytes, owner_only=owner_only)
+    expected = validate_operational_db_file(
+        path, state_root, max_bytes=max_bytes, owner_only=owner_only
+    )
     database = sqlite3.connect(
         f"{Path(path).resolve(strict=True).as_uri()}?mode=ro",
         uri=True,
@@ -586,20 +680,7 @@ def open_readonly_operational_db(
         current = Path(path).stat(follow_symlinks=False)
         if not os.path.samestat(expected, current):
             raise PermissionError("runtime database identity changed while opening")
-        database.row_factory = sqlite3.Row
-        database.execute(f"PRAGMA busy_timeout={busy_ms:d}")
-        database.execute("PRAGMA foreign_keys=ON")
-        database.execute("PRAGMA trusted_schema=OFF")
-        database.execute("PRAGMA query_only=ON")
-        mode = database.execute("PRAGMA journal_mode").fetchone()[0]
-        if str(mode).casefold() != "delete":
-            raise OperationalDatabaseContractError(
-                f"operational database journal_mode mismatch: expected delete, got {mode}"
-            )
-        _require_pragma(database, "synchronous", 2)
-        _require_pragma(database, "foreign_keys", 1)
-        _require_pragma(database, "trusted_schema", 0)
-        _require_pragma(database, "busy_timeout", busy_ms)
+        _apply_readonly_operational_pragmas(database, busy_ms)
         if contract is not None:
             _validate_or_initialize_operational_contract(
                 database, contract, initialize=False
@@ -608,6 +689,25 @@ def open_readonly_operational_db(
     except Exception:
         database.close()
         raise
+
+
+def _apply_readonly_operational_pragmas(
+    database: sqlite3.Connection, busy_ms: int
+) -> None:
+    database.row_factory = sqlite3.Row
+    database.execute(f"PRAGMA busy_timeout={busy_ms:d}")
+    database.execute("PRAGMA foreign_keys=ON")
+    database.execute("PRAGMA trusted_schema=OFF")
+    database.execute("PRAGMA query_only=ON")
+    mode = database.execute("PRAGMA journal_mode").fetchone()[0]
+    if str(mode).casefold() != "delete":
+        raise OperationalDatabaseContractError(
+            f"operational database journal_mode mismatch: expected delete, got {mode}"
+        )
+    _require_pragma(database, "synchronous", 2)
+    _require_pragma(database, "foreign_keys", 1)
+    _require_pragma(database, "trusted_schema", 0)
+    _require_pragma(database, "busy_timeout", busy_ms)
 
 
 def read_runtime_bytes(

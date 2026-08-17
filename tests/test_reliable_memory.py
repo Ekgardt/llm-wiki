@@ -700,3 +700,44 @@ def test_concurrent_state_root_validation_uses_unique_probe_databases(tmp_path, 
     probes = {path for path in connected_paths if path.name.startswith(".llm-wiki-lock-probe-")}
     assert len(probes) == 64
     assert not list(root.glob(".llm-wiki-lock-probe-*"))
+
+
+def _posix_locks_on_inode(inode: int) -> int:
+    """Count kernel advisory locks recorded against one inode."""
+    total = 0
+    with open("/proc/locks", encoding="ascii") as records:
+        for line in records:
+            fields = line.split()
+            if len(fields) >= 6 and fields[5].split(":")[-1] == str(inode):
+                total += 1
+    return total
+
+
+@pytest.mark.skipif(
+    not Path("/proc/locks").exists(), reason="kernel lock table is unavailable"
+)
+def test_reopening_an_operational_database_keeps_existing_locks(tmp_path: Path) -> None:
+    """A second open must not strip the locks a live transaction depends on.
+
+    `close()` releases every POSIX advisory lock the process holds on an inode,
+    whichever descriptor took them, so any descriptor probe against a database
+    file silently disarms SQLite's cross-process exclusion.
+    """
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    database = state_root / "operational.sqlite3"
+    holder = open_operational_db(database, busy_ms=1_000)
+    try:
+        holder.execute("CREATE TABLE t(v TEXT)")
+        with begin_immediate(holder):
+            holder.execute("INSERT INTO t(v) VALUES ('holder')")
+            inode = database.stat().st_ino
+            before = _posix_locks_on_inode(inode)
+            second = open_operational_db(database, busy_ms=1_000)
+            second.close()
+            after = _posix_locks_on_inode(inode)
+    finally:
+        holder.close()
+
+    assert before > 0
+    assert after == before
