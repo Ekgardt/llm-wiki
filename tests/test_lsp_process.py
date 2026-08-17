@@ -6641,6 +6641,7 @@ def test_windows_owner_acl_uses_one_bounded_change_and_one_verification(
     with pytest.raises(OSError, match="popen failed"):
         LspProcess.start(_command(), cwd=tmp_path, owner_root=owner)
 
+    broad = list(lsp_process._BROAD_ACL_SIDS)
     assert [command for command, _kwargs in commands] == [
         [
             "icacls",
@@ -6649,6 +6650,8 @@ def test_windows_owner_acl_uses_one_bounded_change_and_one_verification(
             "/grant:r",
             f"{identity}:(OI)(CI)(F)",
         ],
+        ["icacls", str(owner), "/remove:g", *broad],
+        ["icacls", str(owner), "/remove:d", *broad],
         ["icacls", str(owner)],
     ]
     for _command_args, kwargs in commands:

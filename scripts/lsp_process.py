@@ -4528,19 +4528,37 @@ def _current_identity(path: Path) -> _ObjectIdentity | None:
         return None
 
 
-def _apply_owner_only_acl(path: Path, identity: str, deadline: float) -> None:
-    changed = _run_windows_owner_acl(
-        [
-            "icacls",
-            str(path),
-            "/inheritance:r",
-            "/grant:r",
-            f"{identity}:(OI)(CI)(F)",
-        ],
-        deadline,
+# Explicit access control entries survive `/inheritance:r`, which only drops
+# inherited ones. Windows images commonly place explicit entries for SYSTEM,
+# Administrators and OWNER RIGHTS on the temporary tree, so the owner-only
+# guarantee needs the same removal passes `_harden_cache_windows_acl` already
+# uses for the cache root.
+_BROAD_ACL_SIDS = (
+    "*S-1-1-0",  # Everyone
+    "*S-1-3-0",  # Creator Owner
+    "*S-1-3-4",  # Owner Rights
+    "*S-1-5-18",  # Local System
+    "*S-1-5-32-544",  # Administrators
+    "*S-1-5-32-545",  # Users
+    "*S-1-15-2-1",  # All application packages
+    "*S-1-15-2-2",  # All restricted application packages
+)
+
+
+def _owner_only_acl_commands(path: Path, identity: str) -> tuple[list[str], ...]:
+    target = str(path)
+    return (
+        ["icacls", target, "/inheritance:r", "/grant:r", f"{identity}:(OI)(CI)(F)"],
+        ["icacls", target, "/remove:g", *_BROAD_ACL_SIDS],
+        ["icacls", target, "/remove:d", *_BROAD_ACL_SIDS],
     )
-    if changed.returncode != 0:
-        raise PermissionError("could not apply owner-only LSP ACL")
+
+
+def _apply_owner_only_acl(path: Path, identity: str, deadline: float) -> None:
+    for command in _owner_only_acl_commands(path, identity):
+        applied = _run_windows_owner_acl(command, deadline)
+        if applied.returncode != 0:
+            raise PermissionError("could not apply owner-only LSP ACL")
 
 
 def _read_owner_acl_entries(path: Path, deadline: float) -> list[str]:
