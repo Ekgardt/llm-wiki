@@ -9556,10 +9556,16 @@ def test_persistent_autonomous_cleanup_fault_retries_with_fresh_bounded_budgets(
             coordinator, generation, "injected persistent restart failure"
         )
         assert first_cleanup.wait(1)
-        threading.Event().wait(0.24)
-
-        assert 2 <= len(terminal_attempts) <= 6
-        assert _all_deadlines_ahead(terminal_attempts)
+        # Retries are spaced by the recovery interval, so a fixed wait counts
+        # how fast the machine is rather than how the retry behaves. Wait for
+        # the second attempt instead, and bound the count by the time actually
+        # spent waiting, which still catches a runaway loop.
+        waiting_since = time.monotonic()
+        assert _poll_until(lambda: len(terminal_attempts) >= 2, 5)
+        elapsed = time.monotonic() - waiting_since
+        attempts = list(terminal_attempts)
+        assert len(attempts) <= int(elapsed / lsp_process._RECOVERY_RETRY_SECONDS) + 3
+        assert _all_deadlines_ahead(attempts)
         assert recovery.is_alive()
         assert heartbeat.is_alive()
         assert coordinator.recovery_thread is recovery
