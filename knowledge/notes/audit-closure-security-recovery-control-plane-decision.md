@@ -139,3 +139,8 @@ actually been exercised.
 - [[reliability-v3-runtime-adoption-implementation-decision]]
 - [[derived-evidence-generation-decision]]
 - [[integration-config-backup-retention-decision]]
+- [[knowledge/notes/blackboard-fenced-resource-claims-decision]]
+- [[knowledge/notes/install-ownership-control-plane-decision]]
+- [[knowledge/notes/managed-ide-hooks-install-update-decision]]
+- [[knowledge/notes/baseline-environment-binding-decision]]
+- [[knowledge/notes/observable-capture-and-bounded-maintenance-decision]]

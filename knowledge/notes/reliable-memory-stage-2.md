@@ -44,3 +44,7 @@ Routine low-risk recovery remains automatic and agent-readable.
 - [[knowledge/notes/agent-native-mcp-foundation]]
 - [[knowledge/notes/centralized-memory-subsystem]]
 - [[solo-operator-superset-product-decision]]
+- [[knowledge/notes/durable-capture-producer-activation-decision]]
+- [[knowledge/notes/integration-config-backup-retention-decision]]
+- [[knowledge/notes/reliability-v3-runtime-adoption-implementation-decision]]
+- [[knowledge/notes/observable-capture-and-bounded-maintenance-decision]]

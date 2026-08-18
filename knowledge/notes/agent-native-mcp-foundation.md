@@ -45,3 +45,6 @@ capture on hosts with different lifecycle APIs.
 - [[knowledge/notes/centralized-memory-subsystem]]
 - [[knowledge/notes/mirror-existing-pipelines]]
 - [[solo-operator-superset-product-decision]]
+- [[knowledge/notes/durable-capture-producer-activation-decision]]
+- [[knowledge/notes/integration-config-backup-retention-decision]]
+- [[knowledge/notes/managed-ide-hooks-install-update-decision]]

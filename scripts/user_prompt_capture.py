@@ -67,6 +67,13 @@ except Exception:  # noqa: BLE001
         return None
 
 from capture_operation import claim_operation, complete_operation  # noqa: E402
+
+try:
+    from capture_diagnostics import record_capture_failure  # noqa: E402
+except Exception:  # noqa: BLE001
+    def record_capture_failure(kind, reason, **fields):  # type: ignore[misc]
+        """No-op stub — diagnostics must never break the capture hook."""
+
 from event_envelope import build_event_envelope  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
@@ -84,16 +91,21 @@ MIN_PROMPT_CHARS = 5
 # stack traces) shouldn't blow up the daily log.
 MAX_PROMPT_PREVIEW = 140
 FLUSH_MESSAGE_INTERVAL = 20
+ADVISORY_REFRESH_INTERVAL = 10
 HOOK_STATE_LOCK_TIMEOUT = 0.1
+
+
+def _read_stdin() -> str:
+    try:
+        return sys.stdin.read()
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _read_hook_input() -> dict:
     """Parse Claude Code hook JSON from stdin. Tolerant of empty stdin."""
-    try:
-        raw = sys.stdin.read()
-    except Exception:  # noqa: BLE001
-        return {}
-    if not raw or not raw.strip():
+    raw = _read_stdin()
+    if not raw.strip():
         return {}
     try:
         result = json.loads(raw)
@@ -223,16 +235,18 @@ def _claim_prompt_dedupe(slug: str, prompt_hash: str) -> bool:
     return claimed
 
 
+def _prompt_counter_key(session_id: str, slug: str) -> str:
+    """Count per session; fall back to the project when the id is unknown."""
+    normalized = str(session_id or "").strip()
+    if normalized and normalized != "unknown":
+        return normalized
+    return f"project:{slug or 'unknown'}"
+
+
 def _increment_prompt_count(session_id: str, slug: str) -> int:
     """Increment this session's prompt count, falling back to the project."""
     count = 0
-    normalized_session = str(session_id or "").strip()
-    key = (
-        normalized_session
-        if normalized_session and normalized_session != "unknown"
-        else f"project:{slug or 'unknown'}"
-    )
-
+    key = _prompt_counter_key(session_id, slug)
     def _mutate(state: dict) -> None:
         nonlocal count
         counters = state.setdefault("user_prompt_counts", {})
@@ -296,79 +310,105 @@ def _append_prompt_tag(
         )
         append_daily(slug, session_id, block, operation_id=operation_id)
         return True
+    except Exception as error:  # noqa: BLE001
+        record_capture_failure(
+            "user_prompt_append",
+            f"{type(error).__name__}: {error}",
+            slug=slug,
+            session_id=session_id,
+        )
+        return False
+
+
+def _optional_string(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _hook_cwd(hook: dict) -> str:
+    return str(hook.get("cwd") or os.getcwd())
+
+
+def _hook_session(hook: dict) -> str:
+    return str(hook.get("session_id") or "unknown")
+
+
+def _inside_vault(cwd: str) -> bool:
+    """Sessions run inside the vault are maintenance loops, not user work."""
+    try:
+        return Path(cwd).resolve().is_relative_to(ROOT)
     except Exception:  # noqa: BLE001
         return False
+
+
+def _should_skip(prompt: str, cwd: str) -> bool:
+    return len(prompt) < MIN_PROMPT_CHARS or _inside_vault(cwd)
+
+
+def _prompt_envelope(hook: dict, safe_prompt: str, slug: str):
+    """Build the canonical event envelope for one captured prompt."""
+    source_cwd = hook.get("cwd")
+    source_session = hook.get("session_id")
+    return build_event_envelope(
+        event_type="user_prompt",
+        payload={"prompt": safe_prompt},
+        agent=_optional_string(hook.get("agent")),
+        session=str(source_session) if source_session is not None else None,
+        project=slug if source_cwd else None,
+        worktree=str(source_cwd) if source_cwd else None,
+        severity=_optional_string(hook.get("severity")),
+        parent_event_id=_optional_string(hook.get("parent_event_id")),
+        source_event_id=_optional_string(hook.get("event_id")),
+    )
+
+
+def _maybe_periodic_work(hook: dict, session_id: str, prompt_count: int) -> None:
+    """Advisory refresh and periodic flush ride on the prompt counter."""
+    if not prompt_count:
+        return
+    if prompt_count % ADVISORY_REFRESH_INTERVAL == 0:
+        _write_advisory_output(_build_advisory_refresh())
+    if prompt_count % FLUSH_MESSAGE_INTERVAL == 0:
+        _spawn_periodic_flush(hook, session_id)
+
+
+def _record_prompt(hook: dict, prompt: str) -> None:
+    """Claim, append, and complete one prompt capture."""
+    session_id = _hook_session(hook)
+    slug = _compute_slug_from_cwd(_hook_cwd(hook))
+    envelope = _prompt_envelope(hook, redact_secrets(prompt), slug)
+    _maybe_periodic_work(hook, session_id, _increment_prompt_count(session_id, slug))
+
+    # Rate-limit by the redacted payload hash so capture state cannot
+    # become a side channel for source secrets.
+    prompt_hash = envelope.content_hash[:12]
+    operation_id = _claim_prompt_operation(
+        slug,
+        prompt_hash,
+        source_event_id=envelope.source_event_id,
+    )
+    if operation_id is None:
+        return
+    appended = _append_prompt_tag(
+        slug,
+        session_id,
+        envelope.payload["prompt"],
+        operation_id=operation_id,
+    )
+    if appended:
+        _complete_prompt_operation(slug, prompt_hash, operation_id)
 
 
 def main() -> int:
     try:
         hook = _read_hook_input()
-        prompt = (hook.get("prompt") or "").strip()
-        source_session = hook.get("session_id")
-        source_cwd = hook.get("cwd")
-        session_id = source_session or "unknown"
-        cwd = source_cwd or os.getcwd()
-
-        # Skip prompts that are too short to be meaningful.
-        if len(prompt) < MIN_PROMPT_CHARS:
+        prompt = str(hook.get("prompt") or "").strip()
+        if _should_skip(prompt, _hook_cwd(hook)):
             return 0
-
-        # Skip sessions inside the vault itself (maintenance loops).
-        try:
-            cwd_resolved = Path(cwd).resolve()
-            if cwd_resolved.is_relative_to(ROOT):
-                return 0
-        except Exception:  # noqa: BLE001
-            pass
-
-        slug = _compute_slug_from_cwd(cwd)
-        safe_prompt = redact_secrets(prompt)
-        envelope = build_event_envelope(
-            event_type="user_prompt",
-            payload={"prompt": safe_prompt},
-            agent=hook.get("agent") if isinstance(hook.get("agent"), str) else None,
-            session=str(source_session) if source_session is not None else None,
-            project=slug if source_cwd else None,
-            worktree=str(source_cwd) if source_cwd else None,
-            severity=hook.get("severity") if isinstance(hook.get("severity"), str) else None,
-            parent_event_id=(
-                hook.get("parent_event_id")
-                if isinstance(hook.get("parent_event_id"), str)
-                else None
-            ),
-            source_event_id=(
-                hook.get("event_id") if isinstance(hook.get("event_id"), str) else None
-            ),
-        )
-
-        prompt_count = _increment_prompt_count(str(session_id), slug)
-        if prompt_count and prompt_count % 10 == 0:
-            _write_advisory_output(_build_advisory_refresh())
-        if prompt_count and prompt_count % FLUSH_MESSAGE_INTERVAL == 0:
-            _spawn_periodic_flush(hook, session_id)
-
-        # Rate-limit by the redacted payload hash so capture state cannot
-        # become a side channel for source secrets.
-        prompt_hash = envelope.content_hash[:12]
-        operation_id = _claim_prompt_operation(
-            slug,
-            prompt_hash,
-            source_event_id=envelope.source_event_id,
-        )
-        if operation_id is None:
-            return 0
-
-        appended = _append_prompt_tag(
-            slug,
-            session_id,
-            envelope.payload["prompt"],
-            operation_id=operation_id,
-        )
-        if appended:
-            _complete_prompt_operation(slug, prompt_hash, operation_id)
-    except Exception:  # noqa: BLE001
-        # Last-resort: never break the user's session over a logging hook.
-        pass
+        _record_prompt(hook, prompt)
+    except Exception as error:  # noqa: BLE001
+        # Last-resort: never break the user's session over a logging hook,
+        # but never lose the capture silently either.
+        record_capture_failure("user_prompt_hook", f"{type(error).__name__}: {error}")
     return 0
 
 

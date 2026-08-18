@@ -899,3 +899,72 @@ def test_session_start_health_latency_is_bounded_with_large_unsafe_queue(
     assert elapsed < 0.5
     assert block.startswith("## Health")
     assert "secret" not in block
+
+
+def _fake_section(monkeypatch, module, *, log_entry: str) -> None:
+    """Silence every SessionStart section except the log tail."""
+    monkeypatch.setattr(module, "guardrails_block", lambda: "")
+    monkeypatch.setattr(module, "metacognitive_block", lambda: "")
+    monkeypatch.setattr(module, "advisory_block", lambda: "")
+    monkeypatch.setattr(module, "_impact_block", lambda: "")
+    monkeypatch.setattr(module, "health_block", lambda: "")
+    monkeypatch.setattr(module, "trim_index", lambda *_: "")
+    monkeypatch.setattr(module, "latest_daily", lambda: None)
+    monkeypatch.setattr(module, "last_log_entries", lambda *_: log_entry)
+
+
+def test_session_context_stays_under_the_char_ceiling(monkeypatch):
+    """An oversized low-priority section is dropped whole, not sliced."""
+    import session_start_context
+
+    _fake_section(monkeypatch, session_start_context, log_entry="L" * 9000)
+
+    context = session_start_context.build_context()
+
+    assert len(context) <= session_start_context.SESSION_CONTEXT_MAX_CHARS
+    assert "# Project memory context" in context
+    assert "LLLL" not in context
+
+
+def test_session_context_keeps_sections_that_fit(monkeypatch):
+    """Nothing is dropped while the payload stays under the ceiling."""
+    import session_start_context
+
+    _fake_section(monkeypatch, session_start_context, log_entry="- kept entry")
+
+    context = session_start_context.build_context()
+
+    assert "- kept entry" in context
+    assert len(context) <= session_start_context.SESSION_CONTEXT_MAX_CHARS
+
+
+def test_char_ceiling_never_drops_mandatory_sections():
+    """Guard rails are mandatory: the ceiling may not evict them."""
+    import session_start_context
+    from context_budget import ContextItem
+
+    def item(item_id: str, priority: int, size: int, mandatory: bool) -> ContextItem:
+        return ContextItem(
+            item_id=item_id,
+            text="x" * size,
+            source=f"test:{item_id}",
+            priority=priority,
+            relevance=1.0,
+            confidence="high",
+            freshness="fresh",
+            token_cost=size,
+            mandatory=mandatory,
+            representation="l1",
+            parent_id="session-start",
+            priority_class="safety" if mandatory else "history",
+        )
+
+    items = [item("safety", 1, 500, True), item("history", 7, 5000, False)]
+
+    rendered = session_start_context.fit_to_char_ceiling(
+        items,
+        lambda kept: "".join(entry.text for entry in kept),
+        max_chars=1000,
+    )
+
+    assert len(rendered) == 500

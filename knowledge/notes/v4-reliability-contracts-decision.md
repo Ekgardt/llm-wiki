@@ -127,3 +127,7 @@ three-zone and authority model limits migration risk for installed vaults.
 ## Related
 
 - [[audit-closure-security-recovery-control-plane-decision]]
+- [[knowledge/notes/blackboard-fenced-resource-claims-decision]]
+- [[knowledge/notes/durable-capture-producer-activation-decision]]
+- [[knowledge/notes/reliability-v3-runtime-adoption-implementation-decision]]
+- [[knowledge/notes/observable-capture-and-bounded-maintenance-decision]]

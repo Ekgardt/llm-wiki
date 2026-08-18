@@ -76,3 +76,4 @@ restates only what those records state; no new decision is introduced here.
 - [[knowledge/notes/reliability-v3-runtime-adoption-implementation-decision]]
 - [[knowledge/notes/agent-native-mcp-foundation]]
 - [[knowledge/notes/reliable-memory-stage-2]]
+- [[knowledge/notes/observable-capture-and-bounded-maintenance-decision]]

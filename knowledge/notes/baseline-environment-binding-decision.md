@@ -63,3 +63,16 @@ to notice. That is the accepted cost.
 Requested and granted by the machine owner on 2026-08-17, in response to the
 three options above. Research recorded in
 `docs/research/2026-08-17-cross-platform-identity-and-publish-semantics.md`.
+
+## Source / Evidence
+
+- `benchmark/run_retrieval_v2.py` — baseline environment binding and the five
+  packages the benchmark actually loads.
+- `benchmark/baseline-2026-07-16.md` — the frozen measurement this contract protects.
+- Commit `350eec8` — the lock regeneration that broke the previous byte-digest binding.
+- `docs/research/2026-08-17-cross-platform-identity-and-publish-semantics.md`.
+
+## Related
+
+- [[knowledge/notes/audit-closure-security-recovery-control-plane-decision]]
+- [[knowledge/notes/derived-evidence-generation-decision]]

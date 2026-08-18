@@ -111,3 +111,4 @@ the installed definition and loaded/enabled state are both verified.
 - [[knowledge/notes/audit-closure-security-recovery-control-plane-decision]]
 - [[knowledge/notes/integration-config-backup-retention-decision]]
 - [[knowledge/notes/reliability-v3-runtime-adoption-implementation-decision]]
+- [[knowledge/notes/managed-ide-hooks-install-update-decision]]

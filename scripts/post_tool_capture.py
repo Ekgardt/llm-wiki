@@ -55,6 +55,13 @@ except Exception:  # noqa: BLE001
         """No-op stub — safe skip when memory_state is unavailable."""
 
 from capture_operation import claim_operation, complete_operation  # noqa: E402
+
+try:
+    from capture_diagnostics import record_capture_failure  # noqa: E402
+except Exception:  # noqa: BLE001
+    def record_capture_failure(kind, reason, **fields):  # type: ignore[misc]
+        """No-op stub — diagnostics must never break the capture hook."""
+
 from event_envelope import build_event_envelope, canonical_agent  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
@@ -238,7 +245,13 @@ def _append_tool_tag(
         )
         append_daily(slug, session_id, block, operation_id=operation_id)
         return True
-    except Exception:  # noqa: BLE001
+    except Exception as error:  # noqa: BLE001
+        record_capture_failure(
+            "post_tool_append",
+            f"{type(error).__name__}: {error}",
+            slug=slug,
+            session_id=session_id,
+        )
         return False
 
 
@@ -363,8 +376,8 @@ def _capture_tool(hook: dict) -> None:
 def main() -> int:
     try:
         _capture_tool(_read_hook_input())
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as error:  # noqa: BLE001
+        record_capture_failure("post_tool_hook", f"{type(error).__name__}: {error}")
     return 0
 
 
