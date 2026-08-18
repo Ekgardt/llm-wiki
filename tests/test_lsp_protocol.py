@@ -1604,7 +1604,7 @@ def test_constructor_rechecks_budget_before_each_owner_thread_start(
         except BaseException as error:
             raised_error = error
 
-    assert raised_error is not None
+    assert raised_error is not None, starts
     pending: list[BaseException] = [raised_error]
     errors = _reachable_errors(pending[0])
     retained = _first_retained_cleanup(errors)

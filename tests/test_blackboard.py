@@ -17,6 +17,15 @@ from tests.test_reliability_v3_adoption import (
 )
 
 
+def _is_contention(error: BaseException) -> bool:
+    """Losing the writer gate, its lease, or the SQLite lock is contention."""
+    if isinstance(error, TimeoutError):
+        return True
+    if isinstance(error, sqlite3.OperationalError):
+        return "database is locked" in str(error)
+    return isinstance(error, RuntimeError) and "gate ownership was lost" in str(error)
+
+
 def _under_contention(call, *arguments, attempts: int = 12, **keywords):
     """Retry a blackboard call whose global writer gate timed out.
 
@@ -29,8 +38,8 @@ def _under_contention(call, *arguments, attempts: int = 12, **keywords):
     for attempt in range(attempts):
         try:
             return call(*arguments, **keywords)
-        except TimeoutError:
-            if attempt == attempts - 1:
+        except BaseException as error:
+            if attempt == attempts - 1 or not _is_contention(error):
                 raise
             time.sleep(0.05 * (attempt + 1))
     raise AssertionError("unreachable")
