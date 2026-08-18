@@ -31,6 +31,8 @@ _HIGH_ENTROPY_RE = re.compile(
 )
 _PURE_HEX_RE = re.compile(r"^[0-9a-f]+$")
 _ENTROPY_THRESHOLD = 4.0
+_MIN_BASE64_SEGMENT = 3
+_MIN_BASE64_RUN = 16
 
 
 def _shannon_entropy(data: str) -> float:
@@ -50,8 +52,37 @@ def _redact_patterns(text: str) -> str:
     return out
 
 
+def _looks_like_path(token: str) -> bool:
+    """Slash runs with a very short segment are filesystem paths, not blobs.
+
+    macOS temporary directories look exactly like base64 to an entropy test:
+    `5/zjnzxgh147qcg3bb5cg2wvqw0000gn/T/pytest` is 41 characters of
+    `[A-Za-z0-9/]` at entropy 4.46. Redacting it corrupts every stored path and
+    every log line that mentions one. A real blob does not contain one- or
+    two-character slash-separated pieces, and it carries at least one long
+    dense run between separators.
+    """
+    if "/" not in token:
+        return False
+    return _segment_shape_is_path(_token_segments(token))
+
+
+def _token_segments(token: str) -> list[str]:
+    return [segment for segment in token.split("/") if segment]
+
+
+def _segment_shape_is_path(segments: list[str]) -> bool:
+    if not segments:
+        return True
+    if min(len(segment) for segment in segments) < _MIN_BASE64_SEGMENT:
+        return True
+    return max(len(segment) for segment in segments) < _MIN_BASE64_RUN
+
+
 def _is_high_entropy(token: str) -> bool:
     if _PURE_HEX_RE.match(token):
+        return False
+    if _looks_like_path(token):
         return False
     return _shannon_entropy(token) >= _ENTROPY_THRESHOLD
 

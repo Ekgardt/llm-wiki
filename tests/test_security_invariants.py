@@ -292,6 +292,25 @@ class TestRedactionBeforePersistence:
         text = "branch fix/linux-installer-and-transient-cleanup is ready"
         assert redact_secrets(text) == text
 
+    def test_redact_keeps_macos_temporary_paths(self):
+        """A macOS temp path is 41 characters of `[A-Za-z0-9/]` at entropy 4.46."""
+        from secret_redact import redact_secrets
+
+        path = (
+            "/private/var/folders/_5/zjnzxgh147qcg3bb5cg2wvqw0000gn/T/"
+            "pytest-of-runner/pytest-0/test_case0/Project With Spaces"
+        )
+        assert redact_secrets(path) == path
+
+    def test_redact_still_catches_base64_with_slashes(self):
+        """A real blob keeps long dense runs between its separators."""
+        from secret_redact import redact_secrets
+
+        blob = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldY/YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4"
+        out = redact_secrets(f"payload {blob}")
+        assert blob not in out
+        assert "[REDACTED_TOKEN]" in out
+
     def test_redact_does_not_redact_sha256(self):
         """Git SHA hashes (pure hex) must NOT be redacted."""
         from secret_redact import redact_secrets
