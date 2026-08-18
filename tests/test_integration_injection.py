@@ -2657,7 +2657,7 @@ def test_unix_installer_initial_monitor_mode_cleans_stopped_test_tree(tmp_path):
             f"""
             set -euo pipefail
             set -m
-            export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS=30
+            export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS=3
             PATH="$(dirname "$0")/bin:$PATH"
             export PATH
             info() {{ :; }}
@@ -2745,7 +2745,7 @@ def test_unix_installer_initial_monitor_off_cleans_stopped_test_tree(tmp_path, s
             f"""
             set -euo pipefail
             set +m
-            export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS=30
+            export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS=3
             PATH="$(dirname "$0")/bin:$PATH"
             export PATH
             info() {{ :; }}
@@ -2786,7 +2786,10 @@ def test_unix_installer_initial_monitor_off_cleans_stopped_test_tree(tmp_path, s
             if [ "$started" -ne 1 ]; then exit 90; fi
             kill -s {stop_signal} "$(cat uv.pid)"
             finished=0
-            for ((attempt = 0; attempt < 300; attempt++)); do
+            # Bash reports a stopped job to `wait` only where job control does
+            # it; elsewhere the installer's own smoke timer ends the wait, so
+            # the poll has to outlast that timer.
+            for ((attempt = 0; attempt < 1000; attempt++)); do
               if ! kill -0 "$installerPid" 2>/dev/null; then finished=1; break; fi
               sleep 0.01
             done

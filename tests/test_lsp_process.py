@@ -9548,8 +9548,11 @@ def test_persistent_autonomous_cleanup_fault_retries_with_fresh_bounded_budgets(
     finally:
         release.set()
         holder.join(1)
-        if lsp_process._coordinator_has_ownership(coordinator):
-            process.close(time.monotonic() + 5)
+        # The injected fault and the 0.02 s cleanup budget are the subject of
+        # the test, not of its teardown: with both still installed the closing
+        # cleanup fails on a slow machine and buries the real result.
+        monkeypatch.undo()
+        _close_if_owned(process, coordinator)
 
 
 def test_second_explicit_restart_failure_with_held_transition_lock_is_sticky(
