@@ -5895,7 +5895,10 @@ def test_immediate_parent_symlink_is_rejected_before_mutation(tmp_path: Path) ->
     except OSError:
         pytest.skip("directory symlinks unavailable")
     owner = linked_parent / OWNER_NONCE
-    with pytest.raises(ValueError, match="parent"):
+    # POSIX refuses the linked parent by name; the Windows workspace refuses the
+    # reparse point first. Both are the refusal this test exists for, and
+    # neither may leave the owner directory behind.
+    with pytest.raises((ValueError, PermissionError), match="parent|reparse point"):
         LspProcess.start(_command(), cwd=tmp_path, owner_root=owner)
     assert not owner.exists()
 
