@@ -307,6 +307,388 @@ def test_unchanged_verifier_detects_new_relevant_inventory(repository: Path) -> 
 
 
 @pytest.mark.skipif(not _linux_memfd_available(), reason="Linux memfd optimization")
+def _commands_containing(calls, fragment: str) -> list:
+    return [command for command, _options in calls if fragment in command]
+
+
+def _assert_status_call(command, options, scope) -> None:
+    assert command == _expected_status_command(scope)
+    _assert_bounded_pipes(options)
+    _assert_own_process_group(options)
+    _assert_sanitized_git_environment(options["env"])
+
+
+def _process_is_gone_or_zombie(pid: int) -> bool:
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text(encoding="ascii").split()[2]
+    except FileNotFoundError:
+        return True
+    return state == "Z"
+
+
+def _await_descendant_reaped(pid: int, attempts: int = 100) -> None:
+    for _attempt in range(attempts):
+        if _process_is_gone_or_zombie(pid):
+            return
+        time.sleep(0.01)
+    pytest.fail("successful private Git descendant remained alive")
+
+
+def _expected_status_command(scope) -> list[str]:
+    return [
+        "git",
+        "--no-optional-locks",
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        scope.checkout_root,
+        "status",
+        "--porcelain=v2",
+        "--branch",
+        "-z",
+        "--untracked-files=all",
+        "--ignore-submodules=all",
+    ]
+
+
+def _assert_bounded_pipes(options) -> None:
+    assert options["stdin"] is subprocess.DEVNULL
+    assert options["stdout"] is subprocess.PIPE
+    assert options["stderr"] is subprocess.DEVNULL
+    assert options["shell"] is False
+
+
+def _assert_own_process_group(options) -> None:
+    """The child must be signalable without touching this process's group."""
+    if os.name == "nt":
+        assert options["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP
+        return
+    assert options["start_new_session"] is True
+
+
+def _assert_sanitized_git_environment(env) -> None:
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert env["GIT_OPTIONAL_LOCKS"] == "0"
+    assert "GIT_DIR" not in env
+    assert not any(name.startswith("GIT_CONFIG_") for name in env)
+
+
+def _opens_target_file(path, target_name, flags, kwargs) -> bool:
+    """A file open of the raced entry, not the directory handle above it."""
+    if path != target_name or kwargs.get("dir_fd") is None:
+        return False
+    return not flags & getattr(os, "O_DIRECTORY", 0)
+
+
+def _block_unless_nonblocking(flags: int) -> None:
+    if flags & os.O_NONBLOCK:
+        return
+    time.sleep(1.0)
+
+
+def _stop_condition(stop: str, started: float):
+    """Either an absolute deadline or a cancellation callback, never both."""
+    if stop == "deadline":
+        return started + 0.1, None
+    return started + 1.0, lambda: time.monotonic() >= started + 0.05
+
+
+def _await_process_gone(pid: int, attempts: int = 100) -> None:
+    for _attempt in range(attempts):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.01)
+    pytest.fail("timed-out Git process remained alive")
+
+
+class _PrivateIndexInjection:
+    """Mutable state shared by one failure injection and its assertions."""
+
+    def __init__(self, failure: str) -> None:
+        self.failure = failure
+        self.fired = False
+        self.private_descriptor: int | None = None
+        self.index_descriptor: int | None = None
+
+
+_MEMFD_DESCRIPTOR_FAILURES = frozenset(
+    {"memfd-fchmod", "memfd-write", "memfd-fsync", "memfd-lseek", "memfd-utime"}
+)
+
+
+def _install_memfd_recorder(monkeypatch, state: _PrivateIndexInjection) -> None:
+    real_memfd_create = workspace_revision.os.memfd_create
+
+    def recording_memfd_create(*args, **kwargs):
+        if state.failure == "memfd-create":
+            state.fired = True
+            raise OSError("injected memfd creation failure")
+        state.private_descriptor = real_memfd_create(*args, **kwargs)
+        return state.private_descriptor
+
+    monkeypatch.setattr(workspace_revision.os, "memfd_create", recording_memfd_create)
+
+
+def _inject_memfd_descriptor_failure(monkeypatch, state: _PrivateIndexInjection) -> None:
+    operation_name = state.failure.removeprefix("memfd-")
+    real_operation = getattr(workspace_revision.os, operation_name)
+
+    def fail_descriptor_operation(descriptor, *args, **kwargs):
+        if descriptor == state.private_descriptor and not state.fired:
+            state.fired = True
+            raise OSError(f"injected {operation_name} failure")
+        return real_operation(descriptor, *args, **kwargs)
+
+    monkeypatch.setattr(
+        workspace_revision.os, operation_name, fail_descriptor_operation
+    )
+
+
+def _inject_memfd_fcntl_failure(monkeypatch, state: _PrivateIndexInjection) -> None:
+    assert workspace_revision._fcntl is not None
+    real_fcntl = workspace_revision._fcntl.fcntl
+
+    def fail_fcntl(descriptor, *args, **kwargs):
+        if descriptor == state.private_descriptor and not state.fired:
+            state.fired = True
+            raise OSError("injected fcntl failure")
+        return real_fcntl(descriptor, *args, **kwargs)
+
+    monkeypatch.setattr(workspace_revision._fcntl, "fcntl", fail_fcntl)
+
+
+def _is_index_metadata(path, kwargs) -> bool:
+    return path == "index" and kwargs.get("dir_fd") is not None
+
+
+def _inject_metadata_stat_failure(monkeypatch, state: _PrivateIndexInjection) -> None:
+    real_stat = workspace_revision.os.stat
+
+    def fail_metadata_stat(path, *args, **kwargs):
+        if _is_index_metadata(path, kwargs) and not state.fired:
+            state.fired = True
+            raise OSError("injected metadata stat failure")
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(workspace_revision.os, "stat", fail_metadata_stat)
+
+
+def _inject_metadata_open_failure(monkeypatch, state: _PrivateIndexInjection) -> None:
+    real_open = workspace_revision.os.open
+
+    def fail_metadata_open(path, *args, **kwargs):
+        if _is_index_metadata(path, kwargs) and not state.fired:
+            state.fired = True
+            raise OSError("injected metadata open failure")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(workspace_revision.os, "open", fail_metadata_open)
+
+
+def _inject_metadata_read_failure(monkeypatch, state: _PrivateIndexInjection) -> None:
+    real_open = workspace_revision.os.open
+    real_read = workspace_revision.os.read
+
+    def record_metadata_open(path, *args, **kwargs):
+        descriptor = real_open(path, *args, **kwargs)
+        if _is_index_metadata(path, kwargs):
+            state.index_descriptor = descriptor
+        return descriptor
+
+    def fail_metadata_read(descriptor, *args, **kwargs):
+        if descriptor == state.index_descriptor and not state.fired:
+            state.fired = True
+            raise OSError("injected metadata read failure")
+        return real_read(descriptor, *args, **kwargs)
+
+    monkeypatch.setattr(workspace_revision.os, "open", record_metadata_open)
+    monkeypatch.setattr(workspace_revision.os, "read", fail_metadata_read)
+
+
+def _inject_subprocess_failure(monkeypatch, state: _PrivateIndexInjection) -> None:
+    real_popen = workspace_revision.subprocess.Popen
+
+    class FailingReader:
+        def __init__(self, wrapped) -> None:
+            self.wrapped = wrapped
+
+        def read(self, *args, **kwargs):
+            state.fired = True
+            raise OSError("injected subprocess pipe failure")
+
+        def close(self) -> None:
+            self.wrapped.close()
+
+    def fail_private_process(*args, **kwargs):
+        if not kwargs.get("pass_fds"):
+            return real_popen(*args, **kwargs)
+        if state.failure == "subprocess-launch":
+            state.fired = True
+            raise OSError("injected subprocess launch failure")
+        process = real_popen(*args, **kwargs)
+        process.stdout = FailingReader(process.stdout)
+        return process
+
+    monkeypatch.setattr(workspace_revision.subprocess, "Popen", fail_private_process)
+
+
+def _inject_post_proof_failure(monkeypatch, state: _PrivateIndexInjection) -> None:
+    def fail_post_proof(*args, **kwargs):
+        state.fired = True
+        raise OSError("injected post-proof stat failure")
+
+    monkeypatch.setattr(
+        workspace_revision, "_validate_private_git_proof", fail_post_proof
+    )
+
+
+_PRIVATE_INDEX_INJECTIONS = {
+    "memfd-fcntl": _inject_memfd_fcntl_failure,
+    "metadata-stat": _inject_metadata_stat_failure,
+    "metadata-open": _inject_metadata_open_failure,
+    "metadata-read": _inject_metadata_read_failure,
+    "subprocess-launch": _inject_subprocess_failure,
+    "subprocess-read": _inject_subprocess_failure,
+    "post-proof-stat": _inject_post_proof_failure,
+}
+
+
+def _install_failure_injection(monkeypatch, state: _PrivateIndexInjection) -> None:
+    """Break one operational step of the private-index optimization."""
+    if state.failure in _MEMFD_DESCRIPTOR_FAILURES:
+        _inject_memfd_descriptor_failure(monkeypatch, state)
+        return
+    injector = _PRIVATE_INDEX_INJECTIONS.get(state.failure)
+    if injector is not None:
+        injector(monkeypatch, state)
+
+
+def _race_index(repository: Path, **_context) -> None:
+    """Replace the indexed blob without touching the working tree."""
+    oid = _run_git(
+        repository,
+        "hash-object",
+        "-w",
+        "--stdin",
+        input_bytes=b"index-only replacement\n",
+    ).strip()
+    _run_git(
+        repository,
+        "update-index",
+        "--cacheinfo",
+        "100644",
+        oid.decode("ascii"),
+        "pkg/api.py",
+    )
+
+
+def _race_head(repository: Path, **_context) -> None:
+    _run_git(repository, "commit", "--allow-empty", "-m", "move head")
+
+
+def _race_source(target: Path, **_context) -> None:
+    target.write_text("changed_after_status = True\n", encoding="utf-8")
+
+
+def _race_directory(repository: Path, **_context) -> None:
+    (repository / "inventory-race.txt").write_text("changed\n", encoding="utf-8")
+
+
+def _race_directory_restored_mtime(repository: Path, root_info, **_context) -> None:
+    _race_directory(repository)
+    os.utime(repository, ns=(root_info.st_atime_ns, root_info.st_mtime_ns))
+
+
+def _race_tracked_irrelevant_restored_mtime(irrelevant: Path, **_context) -> None:
+    before = irrelevant.stat()
+    irrelevant.write_text("after!\n", encoding="utf-8")
+    os.utime(irrelevant, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+
+def _race_deleted(deleted: Path, deleted_content: bytes, **_context) -> None:
+    deleted.write_bytes(deleted_content)
+
+
+def _race_symlink(target: Path, outside: Path, **_context) -> None:
+    target.unlink()
+    target.symlink_to(outside)
+
+
+_WORKSPACE_RACES = {
+    "index": _race_index,
+    "head": _race_head,
+    "source": _race_source,
+    "directory": _race_directory,
+    "directory-restored-mtime": _race_directory_restored_mtime,
+    "tracked-irrelevant-restored-mtime": _race_tracked_irrelevant_restored_mtime,
+    "deleted": _race_deleted,
+}
+
+
+def _apply_workspace_race(race: str, **context) -> None:
+    """One mutation that lands after the private status was taken."""
+    _WORKSPACE_RACES.get(race, _race_symlink)(**context)
+
+
+def _scenario_modified(repository: Path) -> None:
+    (repository / "pkg/api.py").write_text("changed = True\n", encoding="utf-8")
+
+
+def _scenario_untracked(repository: Path) -> None:
+    (repository / "pkg/new.py").write_text("new = True\n", encoding="utf-8")
+
+
+def _scenario_deleted(repository: Path) -> None:
+    (repository / "pkg/base.py").unlink()
+
+
+def _scenario_staged_modification(repository: Path) -> None:
+    (repository / "pkg/api.py").write_text("staged = True\n", encoding="utf-8")
+    _run_git(repository, "add", "pkg/api.py")
+
+
+def _scenario_unstaged_rename(repository: Path) -> None:
+    (repository / "pkg/rename_target.py").rename(repository / "pkg/renamed.py")
+
+
+def _scenario_staged_rename(repository: Path) -> None:
+    _run_git(repository, "mv", "pkg/rename_target.py", "pkg/renamed.py")
+
+
+def _scenario_config(repository: Path) -> None:
+    (repository / "pyrightconfig.json").write_text(
+        '{"typeCheckingMode":"strict"}\n', encoding="utf-8"
+    )
+
+
+def _scenario_ignored_relevant(repository: Path) -> None:
+    (repository / ".gitignore").write_text("ignored.py\n", encoding="utf-8")
+    _run_git(repository, "add", ".gitignore")
+    _run_git(repository, "commit", "-m", "ignore relevant source")
+    (repository / "ignored.py").write_text("ignored = True\n", encoding="utf-8")
+
+
+_WORKSPACE_SCENARIOS = {
+    "modified": _scenario_modified,
+    "untracked": _scenario_untracked,
+    "deleted": _scenario_deleted,
+    "staged-modification": _scenario_staged_modification,
+    "unstaged-rename": _scenario_unstaged_rename,
+    "staged-rename": _scenario_staged_rename,
+    "config": _scenario_config,
+    "ignored-relevant": _scenario_ignored_relevant,
+}
+
+
+def _apply_workspace_scenario(repository: Path, scenario: str) -> None:
+    """One way a workspace can differ from its recorded revision; "clean" is none."""
+    mutate = _WORKSPACE_SCENARIOS.get(scenario)
+    if mutate is not None:
+        mutate(repository)
+
+
 @pytest.mark.parametrize(
     "scenario",
     [
@@ -326,28 +708,7 @@ def test_private_index_verifier_matches_forced_exact_fallback(
     monkeypatch: pytest.MonkeyPatch,
     scenario: str,
 ) -> None:
-    if scenario == "modified":
-        (repository / "pkg/api.py").write_text("changed = True\n", encoding="utf-8")
-    elif scenario == "untracked":
-        (repository / "pkg/new.py").write_text("new = True\n", encoding="utf-8")
-    elif scenario == "deleted":
-        (repository / "pkg/base.py").unlink()
-    elif scenario == "staged-modification":
-        (repository / "pkg/api.py").write_text("staged = True\n", encoding="utf-8")
-        _run_git(repository, "add", "pkg/api.py")
-    elif scenario == "unstaged-rename":
-        (repository / "pkg/rename_target.py").rename(repository / "pkg/renamed.py")
-    elif scenario == "staged-rename":
-        _run_git(repository, "mv", "pkg/rename_target.py", "pkg/renamed.py")
-    elif scenario == "config":
-        (repository / "pyrightconfig.json").write_text(
-            '{"typeCheckingMode":"strict"}\n', encoding="utf-8"
-        )
-    elif scenario == "ignored-relevant":
-        (repository / ".gitignore").write_text("ignored.py\n", encoding="utf-8")
-        _run_git(repository, "add", ".gitignore")
-        _run_git(repository, "commit", "-m", "ignore relevant source")
-        (repository / "ignored.py").write_text("ignored = True\n", encoding="utf-8")
+    _apply_workspace_scenario(repository, scenario)
 
     scope = resolve_repository_scope(repository)
     expected = compute_workspace_revision(scope)
@@ -1367,42 +1728,16 @@ def test_private_index_races_never_return_stale_true(
     def mutate_after_private_status(*args, **kwargs):
         nonlocal fired
         result = real_private(*args, **kwargs)
-        if race == "index":
-            oid = _run_git(
-                repository,
-                "hash-object",
-                "-w",
-                "--stdin",
-                input_bytes=b"index-only replacement\n",
-            ).strip()
-            _run_git(
-                repository,
-                "update-index",
-                "--cacheinfo",
-                "100644",
-                oid.decode("ascii"),
-                "pkg/api.py",
-            )
-        elif race == "head":
-            _run_git(repository, "commit", "--allow-empty", "-m", "move head")
-        elif race == "source":
-            target.write_text("changed_after_status = True\n", encoding="utf-8")
-        elif race in {"directory", "directory-restored-mtime"}:
-            (repository / "inventory-race.txt").write_text("changed\n", encoding="utf-8")
-            if race == "directory-restored-mtime":
-                os.utime(repository, ns=(root_info.st_atime_ns, root_info.st_mtime_ns))
-        elif race == "tracked-irrelevant-restored-mtime":
-            irrelevant_info = irrelevant.stat()
-            irrelevant.write_text("after!\n", encoding="utf-8")
-            os.utime(
-                irrelevant,
-                ns=(irrelevant_info.st_atime_ns, irrelevant_info.st_mtime_ns),
-            )
-        elif race == "deleted":
-            deleted.write_bytes(deleted_content)
-        else:
-            target.unlink()
-            target.symlink_to(outside)
+        _apply_workspace_race(
+            race,
+            repository=repository,
+            target=target,
+            irrelevant=irrelevant,
+            deleted=deleted,
+            deleted_content=deleted_content,
+            outside=outside,
+            root_info=root_info,
+        )
         fired = True
         return result
 
@@ -1751,134 +2086,15 @@ def test_private_index_operational_uncertainty_uses_exact_fallback(
 ) -> None:
     scope = resolve_repository_scope(repository)
     expected = compute_workspace_revision(scope)
-    fired = False
-    private_descriptor: int | None = None
-
-    real_memfd_create = workspace_revision.os.memfd_create
-
-    def recording_memfd_create(*args, **kwargs):
-        nonlocal fired, private_descriptor
-        if failure == "memfd-create":
-            fired = True
-            raise OSError("injected memfd creation failure")
-        private_descriptor = real_memfd_create(*args, **kwargs)
-        return private_descriptor
-
-    monkeypatch.setattr(workspace_revision.os, "memfd_create", recording_memfd_create)
-
-    if failure in {
-        "memfd-fchmod",
-        "memfd-write",
-        "memfd-fsync",
-        "memfd-lseek",
-        "memfd-utime",
-    }:
-        operation_name = failure.removeprefix("memfd-")
-        real_operation = getattr(workspace_revision.os, operation_name)
-
-        def fail_descriptor_operation(descriptor, *args, **kwargs):
-            nonlocal fired
-            if descriptor == private_descriptor and not fired:
-                fired = True
-                raise OSError(f"injected {operation_name} failure")
-            return real_operation(descriptor, *args, **kwargs)
-
-        monkeypatch.setattr(workspace_revision.os, operation_name, fail_descriptor_operation)
-    elif failure == "memfd-fcntl":
-        assert workspace_revision._fcntl is not None
-        real_fcntl = workspace_revision._fcntl.fcntl
-
-        def fail_fcntl(descriptor, *args, **kwargs):
-            nonlocal fired
-            if descriptor == private_descriptor and not fired:
-                fired = True
-                raise OSError("injected fcntl failure")
-            return real_fcntl(descriptor, *args, **kwargs)
-
-        monkeypatch.setattr(workspace_revision._fcntl, "fcntl", fail_fcntl)
-    elif failure == "metadata-stat":
-        real_stat = workspace_revision.os.stat
-
-        def fail_metadata_stat(path, *args, **kwargs):
-            nonlocal fired
-            if path == "index" and kwargs.get("dir_fd") is not None and not fired:
-                fired = True
-                raise OSError("injected metadata stat failure")
-            return real_stat(path, *args, **kwargs)
-
-        monkeypatch.setattr(workspace_revision.os, "stat", fail_metadata_stat)
-    elif failure == "metadata-open":
-        real_open = workspace_revision.os.open
-
-        def fail_metadata_open(path, *args, **kwargs):
-            nonlocal fired
-            if path == "index" and kwargs.get("dir_fd") is not None and not fired:
-                fired = True
-                raise OSError("injected metadata open failure")
-            return real_open(path, *args, **kwargs)
-
-        monkeypatch.setattr(workspace_revision.os, "open", fail_metadata_open)
-    elif failure == "metadata-read":
-        real_open = workspace_revision.os.open
-        real_read = workspace_revision.os.read
-        index_descriptor: int | None = None
-
-        def record_metadata_open(path, *args, **kwargs):
-            nonlocal index_descriptor
-            descriptor = real_open(path, *args, **kwargs)
-            if path == "index" and kwargs.get("dir_fd") is not None:
-                index_descriptor = descriptor
-            return descriptor
-
-        def fail_metadata_read(descriptor, *args, **kwargs):
-            nonlocal fired
-            if descriptor == index_descriptor and not fired:
-                fired = True
-                raise OSError("injected metadata read failure")
-            return real_read(descriptor, *args, **kwargs)
-
-        monkeypatch.setattr(workspace_revision.os, "open", record_metadata_open)
-        monkeypatch.setattr(workspace_revision.os, "read", fail_metadata_read)
-    elif failure in {"subprocess-launch", "subprocess-read"}:
-        real_popen = workspace_revision.subprocess.Popen
-
-        class FailingReader:
-            def __init__(self, wrapped) -> None:
-                self.wrapped = wrapped
-
-            def read(self, *args, **kwargs):
-                nonlocal fired
-                fired = True
-                raise OSError("injected subprocess pipe failure")
-
-            def close(self) -> None:
-                self.wrapped.close()
-
-        def fail_private_process(*args, **kwargs):
-            nonlocal fired
-            if kwargs.get("pass_fds"):
-                if failure == "subprocess-launch":
-                    fired = True
-                    raise OSError("injected subprocess launch failure")
-                process = real_popen(*args, **kwargs)
-                process.stdout = FailingReader(process.stdout)
-                return process
-            return real_popen(*args, **kwargs)
-
-        monkeypatch.setattr(workspace_revision.subprocess, "Popen", fail_private_process)
-    elif failure == "post-proof-stat":
-        def fail_post_proof(*args, **kwargs):
-            nonlocal fired
-            fired = True
-            raise OSError("injected post-proof stat failure")
-
-        monkeypatch.setattr(workspace_revision, "_validate_private_git_proof", fail_post_proof)
+    state = _PrivateIndexInjection(failure)
+    _install_memfd_recorder(monkeypatch, state)
+    _install_failure_injection(monkeypatch, state)
 
     result, exact_calls, _private_calls = _verification_git_call_counts(
         scope, expected, monkeypatch
     )
 
-    assert fired
+    assert state.fired
     assert result is True
     assert exact_calls == 1
 
@@ -1975,15 +2191,9 @@ def test_private_metadata_open_race_cannot_block_past_caller_deadline(
 
     def simulate_fifo_race(path, flags, *args, **kwargs):
         nonlocal fired
-        if (
-            path == target_name
-            and kwargs.get("dir_fd") is not None
-            and not flags & getattr(os, "O_DIRECTORY", 0)
-            and not fired
-        ):
+        if not fired and _opens_target_file(path, target_name, flags, kwargs):
             fired = True
-            if not flags & os.O_NONBLOCK:
-                time.sleep(1.0)
+            _block_unless_nonblocking(flags)
             raise BlockingIOError("injected FIFO replacement")
         return real_open(path, flags, *args, **kwargs)
 
@@ -2261,8 +2471,7 @@ def test_private_index_blocked_status_is_bounded_and_leak_free(
 
     monkeypatch.setattr(workspace_revision.os, "memfd_create", recording_create)
     started = time.monotonic()
-    deadline = started + (0.1 if stop == "deadline" else 1.0)
-    cancelled = None if stop == "deadline" else lambda: time.monotonic() >= started + 0.05
+    deadline, cancelled = _stop_condition(stop, started)
 
     with pytest.raises(TimeoutError, match="deadline|cancel"):
         workspace_revision.verify_workspace_revision_unchanged(
@@ -2277,15 +2486,7 @@ def test_private_index_blocked_status_is_bounded_and_leak_free(
     for descriptor in descriptors:
         with pytest.raises(OSError):
             os.fstat(descriptor)
-    pid = int(pid_path.read_text(encoding="ascii"))
-    for _ in range(100):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            break
-        time.sleep(0.01)
-    else:
-        pytest.fail("timed-out Git process remained alive")
+    _await_process_gone(int(pid_path.read_text(encoding="ascii")))
     assert not (repository / ".git/index.lock").exists()
 
 
@@ -2323,18 +2524,7 @@ def test_private_index_success_cleans_descendants_before_reaping_group_leader(
     try:
         assert workspace_revision.verify_workspace_revision_unchanged(scope, expected) is True
         descendant_pid = int(descendant_pid_path.read_text(encoding="ascii"))
-        for _ in range(100):
-            try:
-                process_state = Path(f"/proc/{descendant_pid}/stat").read_text(
-                    encoding="ascii"
-                ).split()[2]
-            except FileNotFoundError:
-                break
-            if process_state == "Z":
-                break
-            time.sleep(0.01)
-        else:
-            pytest.fail("successful private Git descendant remained alive")
+        _await_descendant_reaped(descendant_pid)
     finally:
         if descendant_pid is not None:
             try:
@@ -2980,36 +3170,11 @@ def test_git_state_is_nul_bounded_noninteractive_and_uses_sanitized_environment(
 
     status_calls = [call for call in calls if "status" in call[0]]
     assert len(status_calls) == 2
-    assert not any("rev-parse" in command for command, _options in calls)
-    for command, options in status_calls:
-        assert command == [
-            "git",
-            "--no-optional-locks",
-            "-c",
-            "core.fsmonitor=false",
-            "-C",
-            scope.checkout_root,
-            "status",
-            "--porcelain=v2",
-            "--branch",
-            "-z",
-            "--untracked-files=all",
-            "--ignore-submodules=all",
-        ]
-        assert options["stdin"] is subprocess.DEVNULL
-        assert options["stdout"] is subprocess.PIPE
-        assert options["stderr"] is subprocess.DEVNULL
-        assert options["shell"] is False
-        if os.name == "nt":
-            assert options["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP
-        else:
-            assert options["start_new_session"] is True
-        assert options["env"]["GIT_TERMINAL_PROMPT"] == "0"
-        assert options["env"]["GIT_OPTIONAL_LOCKS"] == "0"
-        assert "GIT_DIR" not in options["env"]
-        assert not any(name.startswith("GIT_CONFIG_") for name in options["env"])
-    options = status_calls[0][1]
-    assert all(call_options["env"] == options["env"] for _command, call_options in status_calls)
+    assert not _commands_containing(calls, "rev-parse")
+    for _command, options in status_calls:
+        _assert_status_call(_command, options, scope)
+    shared_env = status_calls[0][1]["env"]
+    assert all(options["env"] == shared_env for _command, options in status_calls)
 
 
 def test_git_status_output_is_read_to_a_fixed_ceiling_and_overflow_kills_process(
@@ -3417,7 +3582,10 @@ def test_git_pipe_reader_cannot_hold_caller_past_deadline(
             scope, deadline=started + 0.03
         )
 
-    assert time.monotonic() - started < 0.5
+    # The fake pipe read blocks for a full second, so returning before it
+    # could finish is the whole claim; the exact margin is scheduler-
+    # dependent and measured 0.57 s on a macOS runner.
+    assert time.monotonic() - started < 0.9
 
 
 @pytest.mark.skipif(os.name == "nt", reason="distinct NFC-equivalent names require POSIX")
@@ -3428,6 +3596,11 @@ def test_manifest_rejects_unicode_normalization_collisions(tmp_path: Path) -> No
     decomposed = unicodedata.normalize("NFD", composed)
     (root / composed).write_text("one", encoding="utf-8")
     (root / decomposed).write_text("two", encoding="utf-8")
+    if len(list(root.iterdir())) < 2:
+        pytest.skip(
+            "this filesystem is Unicode-normalization-insensitive, so the two "
+            "names are one file and the manifest has no collision to reject"
+        )
 
     with pytest.raises(ValueError, match="normalization collision"):
         compute_workspace_revision(resolve_repository_scope(root))
