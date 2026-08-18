@@ -1799,9 +1799,20 @@ class DailyArchiver:
         return any(marker in acl for marker in ("(F)", "(M)", "(W)"))
 
     @staticmethod
+    def _acl_failure(reason: str, detail: str) -> PermissionError:
+        """Name what the ACL check saw; the seal fails either way."""
+        return PermissionError(
+            f"archive read-only ACL verification failed ({reason}): {detail[:400]}"
+        )
+
+    @staticmethod
     def _require_acl_commands_succeeded(changed: object, verified: object) -> None:
         if changed.returncode != 0 or verified.returncode != 0:
-            raise PermissionError("archive read-only ACL verification failed")
+            raise DailyArchiver._acl_failure(
+                "icacls exit",
+                f"grant={changed.returncode} read={verified.returncode} "
+                f"{_acl_output_text(getattr(changed, 'stdout', b''))}",
+            )
 
     @staticmethod
     def _require_read_only_acl(identity: str, changed: object, verified: object) -> None:
@@ -1809,11 +1820,15 @@ class DailyArchiver:
         acl = _acl_output_text(verified.stdout)
         acl_lines = DailyArchiver._acl_lines(acl)
         if not acl_lines:
-            raise PermissionError("archive read-only ACL verification failed")
+            raise DailyArchiver._acl_failure("no ACL entries", acl)
         if not DailyArchiver._acl_grants_only_identity(identity, acl_lines):
-            raise PermissionError("archive read-only ACL verification failed")
+            raise DailyArchiver._acl_failure(
+                f"principal other than {identity}", " | ".join(acl_lines)
+            )
         if DailyArchiver._acl_has_write_marker(acl):
-            raise PermissionError("archive read-only ACL verification failed")
+            raise DailyArchiver._acl_failure(
+                "write access granted", " | ".join(acl_lines)
+            )
 
     @staticmethod
     def _posix_read_only_mode(path: Path) -> None:

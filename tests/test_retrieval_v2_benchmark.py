@@ -51,21 +51,37 @@ def test_required_v2_artifacts_exist():
     assert RUNNER.is_file()
 
 
+def _assert_closed_object(rule: dict) -> None:
+    if rule.get("type") != "object":
+        return
+    assert rule.get("additionalProperties") is False
+    assert set(rule.get("required", ())) == set(rule.get("properties", ()))
+
+
+def _visit_schema(rule: object) -> None:
+    """Every object level of the schema must be closed and fully required."""
+    if isinstance(rule, dict):
+        _assert_closed_object(rule)
+        for value in rule.values():
+            _visit_schema(value)
+        return
+    if isinstance(rule, list):
+        for value in rule:
+            _visit_schema(value)
+
+
+def _assert_both_answerabilities(queries, language: str) -> None:
+    language_queries = [query for query in queries if query["language"] == language]
+    assert {query["answerability"] for query in language_queries} == {
+        "answerable",
+        "unanswerable",
+    }
+
+
 def test_schema_is_closed_at_every_object_level():
     schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
 
-    def visit(rule: object) -> None:
-        if isinstance(rule, dict):
-            if rule.get("type") == "object":
-                assert rule.get("additionalProperties") is False
-                assert set(rule.get("required", ())) == set(rule.get("properties", ()))
-            for value in rule.values():
-                visit(value)
-        elif isinstance(rule, list):
-            for value in rule:
-                visit(value)
-
-    visit(schema)
+    _visit_schema(schema)
     assert "$ref" not in SCHEMA.read_text(encoding="utf-8")
 
 
@@ -82,15 +98,7 @@ def test_corpus_is_canonical_closed_and_semantically_valid():
 def test_corpus_has_balanced_public_synthetic_coverage():
     corpus = json.loads(CORPUS.read_text(encoding="utf-8"))
     queries = corpus["queries"]
-    languages = Counter(query["language"] for query in queries)
-    assert all(languages[language] >= 6 for language in ("EN", "RU", "ZH"))
-    assert sum(query["cross_language"] for query in queries) >= 3
-    for language in ("EN", "RU", "ZH"):
-        language_queries = [query for query in queries if query["language"] == language]
-        assert {query["answerability"] for query in language_queries} == {
-            "answerable",
-            "unanswerable",
-        }
+    _assert_language_coverage(queries)
     required_types = {
         "exact-name",
         "relative-path",
@@ -107,10 +115,7 @@ def test_corpus_has_balanced_public_synthetic_coverage():
     }
     assert required_types <= {query["query_type"] for query in queries}
     assert corpus["description"].lower().startswith("public synthetic")
-    assert all(
-        document["relative_path"].startswith("synthetic/")
-        for document in corpus["documents"]
-    )
+    assert _all_synthetic(corpus["documents"])
 
 
 def test_loader_verifies_offsets_hashes_references_and_privacy(tmp_path):
@@ -432,6 +437,229 @@ def test_report_has_every_metric_slice_gate_and_trace(tmp_path):
     ).stat().st_size
 
 
+def _lexical_sweep_runs_first(calls) -> bool:
+    """The five lexical configurations are measured before any model call."""
+    if any("--model-id" in argv for argv, _deadline in calls[:5]):
+        return False
+    return "--model-id" in calls[5][0]
+
+
+def _every_model_call_uses(calls, winner: str) -> bool:
+    model_calls = [argv for argv, _deadline in calls if "--model-id" in argv]
+    return all(_argv_option(argv, "--lexical-config") == winner for argv in model_calls)
+
+
+def _lexical_configurations(evidence_items) -> set[str]:
+    return {item["lexical_configuration"] for item in evidence_items}
+
+
+def _requested_spec_index(specs, argv) -> int:
+    identity = (
+        _argv_option(argv, "--model-id"),
+        _argv_option(argv, "--variant-id"),
+        _argv_option(argv, "--reranker-id"),
+    )
+    return next(
+        index for index, spec in enumerate(specs) if _spec_identity(spec) == identity
+    )
+
+
+def _returned_spec(specs, attack: str, requested_index: int):
+    """A hostile worker answers with the wrong candidate; an honest one does not."""
+    if attack == "wrong-candidate":
+        return specs[1]
+    return specs[requested_index]
+
+
+def _lexical_worker_report(runner, tmp_path: Path, lexical_config: str):
+    return runner.run_benchmark(
+        runner.load_corpus(CORPUS, SCHEMA),
+        corpus_path=CORPUS,
+        matrix_path=BENCHMARK / "model-matrix-v1.json",
+        cache_root=tmp_path / f"lexical-{lexical_config}",
+        lexical_config=lexical_config,
+        test_segmenter=_PinnedJieba(),
+    )
+
+
+def _argv_option(argv, name: str) -> str | None:
+    if name not in argv:
+        return None
+    return argv[argv.index(name) + 1]
+
+
+def _spec_for_argv(runner, selection, argv):
+    """The candidate spec the worker command line names."""
+    identity = (
+        _argv_option(argv, "--model-id"),
+        _argv_option(argv, "--variant-id"),
+        _argv_option(argv, "--reranker-id"),
+    )
+    return next(
+        item
+        for item in runner.required_candidate_specs(selection.matrix)
+        if _spec_identity(item) == identity
+    )
+
+
+def _no_quality_claim(repo: Path, evidence_items) -> bool:
+    return all(
+        json.loads((repo / item["retained_path"]).read_bytes())["quality_claim"] is False
+        for item in evidence_items
+    )
+
+
+def _write_candidate_reports(runner, selection, specs, directory: Path) -> list[Path]:
+    directory.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for offset, spec in enumerate(specs):
+        path = directory / f"candidate-{offset}.json"
+        path.write_bytes(_candidate_report(runner, selection, spec, offset=offset))
+        paths.append(path)
+    return paths
+
+
+def _assert_retained_report(repo: Path, retained: Path, evidence) -> None:
+    """Each retained report is content-addressed and stays canonical."""
+    path = repo / Path(evidence["retained_path"])
+    assert path.parent == retained
+    assert path.name == f"{evidence['raw_report_sha256']}.json"
+    raw = path.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == evidence["raw_report_sha256"]
+    parsed = json.loads(raw)
+    assert raw == (
+        json.dumps(parsed, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        + "\n"
+    ).encode()
+
+
+def _embedding_variants(matrix) -> set[tuple[str, str]]:
+    return {
+        (candidate["id"], variant["variant_id"])
+        for candidate in matrix["embeddings"]
+        for variant in candidate["variants"]
+    }
+
+
+def _sparse_weights(text: str) -> dict[str, float]:
+    if "second" in text or text == "find it":
+        return {"42": 1.0}
+    return {"7": 1.0}
+
+
+def _scored(runner, candidates, scores):
+    return [
+        runner.ScoredCandidate(candidate, score)
+        for candidate, score in zip(candidates, scores)
+    ]
+
+
+def _rescaled(runner, items, factor: float):
+    return [runner.ScoredCandidate(item.candidate, item.score * factor) for item in items]
+
+
+def _ranking_identity(items):
+    return [(item.evidence_id, item.score) for item in items]
+
+
+def _assert_depth_kept_frozen_tail(adapter, frozen_ids, depth: int, ranked) -> None:
+    """Below its depth every list is the frozen order, unchanged."""
+    assert [item.evidence_id for item in ranked[depth:]] == frozen_ids[depth:]
+    assert adapter.last_trace["depths"][str(depth)]["candidate_ids"] == frozen_ids[:depth]
+
+
+def _expected_matrix(embedding_variants, rerankers) -> set:
+    return {
+        (model_id, variant_id, reranker_id)
+        for model_id, variant_id in embedding_variants
+        for reranker_id in {None, *rerankers}
+    }
+
+
+def _trace_scores(report) -> list[float]:
+    return [
+        item["score"] for trace in report["traces"] for item in trace["ranked_evidence"]
+    ]
+
+
+def _all_normalized(scores) -> bool:
+    return all(0.0 <= score <= 1.0 for score in scores)
+
+
+def _answerable_traces(report, corpus) -> list[dict]:
+    unanswerable = {
+        query["query_id"]
+        for query in corpus["queries"]
+        if query["answerability"] == "unanswerable"
+    }
+    return [trace for trace in report["traces"] if trace["query_id"] not in unanswerable]
+
+
+def _spec_identity(spec) -> tuple[str, str, str | None]:
+    reranker = spec["reranker"]
+    reranker_id = reranker["id"] if reranker else None
+    return (spec["embedding"]["id"], spec["embedding"]["variant_id"], reranker_id)
+
+
+def _assert_language_coverage(queries) -> None:
+    """Each language carries enough queries, and cross-language ones exist."""
+    languages = Counter(query["language"] for query in queries)
+    for language in ("EN", "RU", "ZH"):
+        assert languages[language] >= 6
+        _assert_both_answerabilities(queries, language)
+    assert sum(query["cross_language"] for query in queries) >= 3
+
+
+def _all_synthetic(documents) -> bool:
+    return all(
+        document["relative_path"].startswith("synthetic/") for document in documents
+    )
+
+
+def _assert_gold_retrieved(runner, adapter, candidates, query) -> None:
+    ranked = adapter.rank(
+        query["text"],
+        runner._query_scope(query),
+        candidates,
+        limit=runner.MAX_CANDIDATES,
+        language=query["language"],
+    )
+    assert set(query["required_evidence_spans"]) <= {item.evidence_id for item in ranked}
+
+
+def _all_have(candidates, attribute: str, expected) -> bool:
+    return all(getattr(candidate, attribute) == expected for candidate in candidates)
+
+
+def _assert_negatives_survive_filters(runner, candidates, query) -> None:
+    """Hard filters must keep the negatives the query is scored against."""
+    scoped = runner.filter_candidates(candidates, runner._query_scope(query))
+    assert set(query["negative_candidates"]) & {
+        candidate.evidence_id for candidate in scoped
+    }
+
+
+def _evidence_languages(corpus) -> dict[str, str]:
+    return {
+        span["evidence_id"]: document["language"]
+        for document in corpus["documents"]
+        for span in document["evidence_spans"]
+    }
+
+
+def _assert_requires_language_transfer(query, evidence_languages) -> None:
+    """A cross-language query answers in another language and names no files."""
+    for evidence_id in query["required_evidence_spans"]:
+        assert evidence_languages[evidence_id] != query["language"]
+    assert not re.search(r"\b[\w-]+\.(?:py|sqlite3|md)\b", query["text"])
+
+
+def _cache_listing(cache: Path) -> list[str] | None:
+    if not cache.exists():
+        return None
+    return sorted(path.relative_to(cache).as_posix() for path in cache.rglob("*"))
+
+
 def test_filters_apply_before_scoring_and_keep_eligible_negatives():
     runner = _runner_module()
     corpus = runner.load_corpus(CORPUS, SCHEMA)
@@ -445,14 +673,11 @@ def test_filters_apply_before_scoring_and_keep_eligible_negatives():
         runner.QueryScope(projects=("aurora",), temporal_mode="as_of", as_of="2025-03-01"),
     )
     assert current
-    assert all(candidate.project == "aurora" for candidate in current)
-    assert all(candidate.status == "active" for candidate in current)
+    assert _all_have(current, "project", "aurora")
+    assert _all_have(current, "status", "active")
     assert any(candidate.status == "superseded" for candidate in historical)
     for query in corpus["queries"]:
-        scoped = runner.filter_candidates(candidates, runner._query_scope(query))
-        assert set(query["negative_candidates"]) & {
-            candidate.evidence_id for candidate in scoped
-        }
+        _assert_negatives_survive_filters(runner, candidates, query)
 
 
 def test_adapters_never_score_candidates_excluded_by_hard_filters(monkeypatch):
@@ -489,31 +714,19 @@ def test_adapters_never_score_candidates_excluded_by_hard_filters(monkeypatch):
 def test_cross_language_queries_require_language_transfer_not_filename_overlap():
     runner = _runner_module()
     corpus = runner.load_corpus(CORPUS, SCHEMA)
-    evidence_languages = {
-        span["evidence_id"]: document["language"]
-        for document in corpus["documents"]
-        for span in document["evidence_spans"]
-    }
+    evidence_languages = _evidence_languages(corpus)
     cross_language = [query for query in corpus["queries"] if query["cross_language"]]
 
     assert len(cross_language) >= 3
-    assert all(
-        evidence_languages[evidence_id] != query["language"]
-        for query in cross_language
-        for evidence_id in query["required_evidence_spans"]
-    )
-    assert all(not re.search(r"\b[\w-]+\.(?:py|sqlite3|md)\b", query["text"]) for query in cross_language)
+    for query in cross_language:
+        _assert_requires_language_transfer(query, evidence_languages)
 
 
 def test_cache_is_isolated_and_no_network_or_model_access(tmp_path, monkeypatch):
     runner = _runner_module()
     corpus = runner.load_corpus(CORPUS, SCHEMA)
     source_cache = ROOT / "cache"
-    source_cache_before = (
-        sorted(path.relative_to(source_cache).as_posix() for path in source_cache.rglob("*"))
-        if source_cache.exists()
-        else None
-    )
+    source_cache_before = _cache_listing(source_cache)
     vault = tmp_path / "vault"
     vault.mkdir()
     monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
@@ -526,11 +739,7 @@ def test_cache_is_isolated_and_no_network_or_model_access(tmp_path, monkeypatch)
     isolated = tmp_path / "isolated"
     runner.run_benchmark(corpus, cache_root=isolated)
     assert (isolated / "fake-index.json").is_file()
-    source_cache_after = (
-        sorted(path.relative_to(source_cache).as_posix() for path in source_cache.rglob("*"))
-        if source_cache.exists()
-        else None
-    )
+    source_cache_after = _cache_listing(source_cache)
     assert source_cache_after == source_cache_before
     with pytest.raises(ValueError):
         runner.run_benchmark(corpus, cache_root=ROOT / "cache")
@@ -1042,17 +1251,10 @@ def test_all_lexical_configs_retrieve_cross_language_gold(tmp_path, lexical_conf
         test_segmenter=_PinnedJieba(),
     )
     try:
-        for query in (item for item in corpus["queries"] if item["cross_language"]):
-            ranked = adapter.rank(
-                query["text"],
-                runner._query_scope(query),
-                candidates,
-                limit=runner.MAX_CANDIDATES,
-                language=query["language"],
-            )
-            assert set(query["required_evidence_spans"]) <= {
-                item.evidence_id for item in ranked
-            }
+        for query in corpus["queries"]:
+            if not query["cross_language"]:
+                continue
+            _assert_gold_retrieved(runner, adapter, candidates, query)
     finally:
         adapter.close()
 
@@ -1248,11 +1450,9 @@ def test_fused_scores_preserve_downstream_abstention_contract(tmp_path, lexical_
         test_segmenter=_PinnedJieba(),
     )
 
-    scores = [item["score"] for trace in report["traces"] for item in trace["ranked_evidence"]]
-    answerable = [trace for trace in report["traces"] if trace["query_id"] not in {
-        query["query_id"] for query in corpus["queries"] if query["answerability"] == "unanswerable"
-    }]
-    assert scores and all(0.0 <= score <= 1.0 for score in scores)
+    scores = _trace_scores(report)
+    answerable = _answerable_traces(report, corpus)
+    assert scores and _all_normalized(scores)
     assert any(not trace["abstained"] for trace in answerable)
     assert report["overall"]["no_answer_false_answer_rate"] == pytest.approx(1 / 3)
     assert report["gates"]["qa_contract_passed"] is False
@@ -1369,10 +1569,10 @@ def test_query_deadline_removes_index_and_allows_retry(tmp_path):
     runner = _runner_module()
     candidates = [_lexical_candidate(runner, "one", "catalog")]
     scope = runner.QueryScope(projects=("alpha",), temporal_mode="current", as_of=None)
-    adapter = runner.SQLiteLexicalAdapter(
-        candidates, tmp_path, "L0", deadline_seconds=0.05
-    )
-    runner.time.sleep(0.06)
+    # Build under a generous deadline — a loaded runner can spend longer than
+    # any short budget on the index itself — then expire it for the query.
+    adapter = runner.SQLiteLexicalAdapter(candidates, tmp_path, "L0")
+    adapter._deadline = runner.time.perf_counter() - 0.01
 
     with pytest.raises(TimeoutError, match="deadline"):
         adapter.rank("catalog", scope, candidates, limit=10, language="EN")
@@ -1689,28 +1889,13 @@ def test_required_candidate_specs_cover_the_closed_canonical_matrix():
     matrix = json.loads((BENCHMARK / "model-matrix-v1.json").read_bytes())
 
     specs = runner.required_candidate_specs(matrix)
-    embedding_variants = {
-        (candidate["id"], variant["variant_id"])
-        for candidate in matrix["embeddings"]
-        for variant in candidate["variants"]
-    }
+    embedding_variants = _embedding_variants(matrix)
     rerankers = {candidate["id"] for candidate in matrix["rerankers"]}
-    observed = {
-        (
-            spec["embedding"]["id"],
-            spec["embedding"]["variant_id"],
-            spec["reranker"]["id"] if spec["reranker"] else None,
-        )
-        for spec in specs
-    }
+    observed = {_spec_identity(spec) for spec in specs}
 
     assert len(embedding_variants) == 9
     assert rerankers == {"BAAI/bge-reranker-v2-m3", "Qwen/Qwen3-Reranker-0.6B"}
-    assert observed == {
-        (model_id, variant_id, reranker_id)
-        for model_id, variant_id in embedding_variants
-        for reranker_id in {None, *rerankers}
-    }
+    assert observed == _expected_matrix(embedding_variants, rerankers)
     assert len(specs) == len(observed) == 27
     assert any(
         spec["embedding"]["id"] == "google/embeddinggemma-300m" for spec in specs
@@ -1805,9 +1990,7 @@ def test_bge_m3_adapter_fuses_learned_sparse_as_a_separate_signal():
         del options
         dense = np.zeros((len(texts), 1024), dtype=np.float32)
         dense[:, 0] = 1.0
-        sparse = []
-        for text in texts:
-            sparse.append({"42": 1.0} if "second" in text or text == "find it" else {"7": 1.0})
+        sparse = [_sparse_weights(text) for text in texts]
         return {"dense_vecs": dense, "lexical_weights": sparse}
 
     candidates = [
@@ -2381,8 +2564,7 @@ def test_reranker_runs_all_depths_from_one_frozen_candidate_list():
     ).hexdigest()
     assert set(adapter.last_trace["depths"]) == {"10", "20", "50"}
     for depth, ranked in ranked_by_depth.items():
-        assert [item.evidence_id for item in ranked[depth:]] == frozen_ids[depth:]
-        assert adapter.last_trace["depths"][str(depth)]["candidate_ids"] == frozen_ids[:depth]
+        _assert_depth_kept_frozen_tail(adapter, frozen_ids, depth, ranked)
 
 
 def test_qwen_longest_first_preserves_fixed_prefix_suffix_and_balances_pair():
@@ -2894,22 +3076,17 @@ def test_rrf_confidence_is_scale_invariant_and_normalized():
         runner.Candidate(str(index), str(index), f"synthetic/{index}", "EN", "p", "active", "2025-01-01", None, (), str(index))
         for index in range(3)
     ]
-    first = [runner.ScoredCandidate(candidate, score) for candidate, score in zip(candidates, (9, 6, 3))]
-    second = [runner.ScoredCandidate(candidate, score) for candidate, score in zip(reversed(candidates), (900, 600, 300))]
+    first = _scored(runner, candidates, (9, 6, 3))
+    second = _scored(runner, list(reversed(candidates)), (900, 600, 300))
     fused = runner._fuse_rankings((first, second), candidates, limit=3)
     scaled = runner._fuse_rankings(
-        (
-            [runner.ScoredCandidate(item.candidate, item.score * 1000) for item in first],
-            [runner.ScoredCandidate(item.candidate, item.score / 1000) for item in second],
-        ),
+        (_rescaled(runner, first, 1000), _rescaled(runner, second, 0.001)),
         candidates,
         limit=3,
     )
 
-    assert all(0.0 <= item.score <= 1.0 for item in fused)
-    assert [(item.evidence_id, item.score) for item in fused] == [
-        (item.evidence_id, item.score) for item in scaled
-    ]
+    assert _all_normalized([item.score for item in fused])
+    assert _ranking_identity(fused) == _ranking_identity(scaled)
 
 
 def test_bounded_worker_timeout_kills_and_cleans_report(tmp_path):
@@ -3269,67 +3446,135 @@ def test_reranker_scoring_failure_degrades_whole_run_to_lexical(tmp_path):
     assert report["gates"]["degraded"] is True
 
 
+def _query_ranking(runner, candidates, query):
+    """Deterministic ranking: required evidence first, then evidence id."""
+    eligible = runner.filter_candidates(candidates, runner._query_scope(query))
+    required = set(query["required_evidence_spans"])
+    ordered = sorted(
+        eligible, key=lambda item: (item.evidence_id not in required, item.evidence_id)
+    )
+    top_confidence = 1.0 if query["answerability"] == "answerable" else 0.5
+    return [
+        runner.ScoredCandidate(item, top_confidence - index / 1000)
+        for index, item in enumerate(ordered)
+    ]
+
+
+def _query_answer(query) -> dict[str, object]:
+    if query["answerability"] != "unanswerable":
+        return {"abstained": False, "reason": None}
+    return {"abstained": True, "reason": query["allowed_abstention_reason"]}
+
+
+def _ranked_evidence(ranked) -> list[dict[str, object]]:
+    return [{"evidence_id": item.evidence_id, "score": item.score} for item in ranked]
+
+
+def _reranker_depths(ranked, answer) -> dict[str, object]:
+    return {
+        "depths": {
+            str(depth): {
+                "ranked_evidence": _ranked_evidence(ranked),
+                "duration_ms": float(depth),
+                "query_latency_ms": 10.0 + depth,
+                "abstained": answer["abstained"],
+                "abstention_reason": answer["reason"],
+            }
+            for depth in (10, 20, 50)
+        }
+    }
+
+
+def _query_trace(runner, query, ranked, answer, row, reranker) -> dict[str, object]:
+    pre_rerank = [item.evidence_id for item in ranked] if reranker else None
+    trace = {
+        "query_id": query["query_id"],
+        "ranked_evidence": _ranked_evidence(ranked),
+        "ranked_parents": runner._expand_parents(ranked),
+        "abstained": answer["abstained"],
+        "abstention_reason": answer["reason"],
+        "abstention_contract_valid": row["abstention_contract_valid"],
+        "latency_ms": 10.0,
+        "pre_rerank_candidate_ids": pre_rerank,
+        "reranker": None,
+    }
+    if reranker is not None:
+        trace["reranker"] = _reranker_depths(ranked, answer)
+    return trace
+
+
+def _candidate_rows_and_traces(runner, corpus, candidates, reranker):
+    rows = []
+    traces = []
+    for query in corpus["queries"]:
+        ranked = _query_ranking(runner, candidates, query)
+        answer = _query_answer(query)
+        row = runner._evaluation_row(query, ranked, answer)
+        rows.append(row)
+        traces.append(_query_trace(runner, query, ranked, answer, row, reranker))
+    return rows, traces
+
+
+def _confidence_method(reranker) -> str | None:
+    if reranker is None:
+        return None
+    if reranker["id"] == "BAAI/bge-reranker-v2-m3":
+        return "sigmoid_probability_from_sequence_classification_logit"
+    return "softmax_probability_of_yes_over_no"
+
+
+def _reranker_block(reranker, overall_metrics, slice_metrics, traces):
+    if reranker is None:
+        return None
+    return {
+        "model_id": reranker["id"],
+        "revision": reranker["revision"],
+        "variant_id": reranker["variant_id"],
+        "depths": [10, 20, 50],
+        "depth_metrics": {
+            str(depth): {
+                "overall": overall_metrics,
+                "slices": slice_metrics,
+                "duration_ms": depth * len(traces),
+                "inference_latencies_ms": [float(depth)] * len(traces),
+                "warm_latency_p95_ms": 10.0 + depth,
+                "shared_resources": [
+                    "peak_rss_bytes",
+                    "index_size_bytes",
+                    "vector_bytes",
+                ],
+            }
+            for depth in (10, 20, 50)
+        },
+        "formatting": {},
+    }
+
+
+def _language_rows(rows, language: str) -> list:
+    return [row for row in rows if row["language"] == language]
+
+
+def _cross_language_rows(rows) -> list:
+    return [row for row in rows if row["cross_language"]]
+
+
+def _slice_metrics(runner, rows) -> dict[str, object]:
+    metrics = {
+        language: runner._aggregate(_language_rows(rows, language))
+        for language in ("EN", "RU", "ZH")
+    }
+    metrics["cross-language"] = runner._aggregate(_cross_language_rows(rows))
+    return metrics
+
+
 def _candidate_report(runner, selection, spec, *, offset):
     embedding = spec["embedding"]
     reranker = spec["reranker"]
     corpus = runner.load_corpus(CORPUS, SCHEMA)
     candidates = runner.build_candidates(corpus)
-    traces = []
-    rows = []
-    for query in corpus["queries"]:
-        eligible = runner.filter_candidates(candidates, runner._query_scope(query))
-        required = set(query["required_evidence_spans"])
-        ordered = sorted(eligible, key=lambda item: (item.evidence_id not in required, item.evidence_id))
-        top_confidence = 1.0 if query["answerability"] == "answerable" else 0.5
-        ranked = [
-            runner.ScoredCandidate(item, top_confidence - index / 1000)
-            for index, item in enumerate(ordered)
-        ]
-        answer = {
-            "abstained": query["answerability"] == "unanswerable",
-            "reason": query["allowed_abstention_reason"] if query["answerability"] == "unanswerable" else None,
-        }
-        row = runner._evaluation_row(query, ranked, answer)
-        rows.append(row)
-        traces.append(
-            {
-                "query_id": query["query_id"],
-                "ranked_evidence": [
-                    {"evidence_id": item.evidence_id, "score": item.score} for item in ranked
-                ],
-                "ranked_parents": runner._expand_parents(ranked),
-                "abstained": answer["abstained"],
-                "abstention_reason": answer["reason"],
-                "abstention_contract_valid": row["abstention_contract_valid"],
-                "latency_ms": 10.0,
-                "pre_rerank_candidate_ids": [item.evidence_id for item in ranked] if reranker else None,
-                "reranker": None,
-            }
-        )
-        if reranker is not None:
-            traces[-1]["reranker"] = {
-                "depths": {
-                    str(depth): {
-                        "ranked_evidence": [
-                            {"evidence_id": item.evidence_id, "score": item.score}
-                            for item in ranked
-                        ],
-                        "duration_ms": float(depth),
-                        "query_latency_ms": 10.0 + depth,
-                        "abstained": answer["abstained"],
-                        "abstention_reason": answer["reason"],
-                    }
-                    for depth in (10, 20, 50)
-                }
-            }
+    rows, traces = _candidate_rows_and_traces(runner, corpus, candidates, reranker)
     overall_metrics = runner._aggregate(rows)
-    slice_metrics = {
-        language: runner._aggregate([row for row in rows if row["language"] == language])
-        for language in ("EN", "RU", "ZH")
-    }
-    slice_metrics["cross-language"] = runner._aggregate(
-        [row for row in rows if row["cross_language"]]
-    )
+    slice_metrics = _slice_metrics(runner, rows)
     report = {
         "schema_version": "retrieval-report/v2",
         "corpus_id": "public-synthetic-retrieval-v2",
@@ -3352,13 +3597,7 @@ def _candidate_report(runner, selection, spec, *, offset):
             "confidence": {
                 "fusion": "RRF divided by its theoretical maximum; bounded to [0,1]",
                 "qa_threshold": 0.54,
-                "reranker": (
-                    "sigmoid_probability_from_sequence_classification_logit"
-                    if reranker is not None and reranker["id"] == "BAAI/bge-reranker-v2-m3"
-                    else "softmax_probability_of_yes_over_no"
-                    if reranker is not None
-                    else None
-                ),
+                "reranker": _confidence_method(reranker),
             },
         },
         "macro_average": {
@@ -3377,32 +3616,7 @@ def _candidate_report(runner, selection, spec, *, offset):
             "peak_rss_bytes": 1_000_000_000 + offset,
             "index_size_bytes": 100_000 + offset,
         },
-        "reranker": (
-            {
-                "model_id": reranker["id"],
-                "revision": reranker["revision"],
-                "variant_id": reranker["variant_id"],
-                "depths": [10, 20, 50],
-                "depth_metrics": {
-                    str(depth): {
-                        "overall": overall_metrics,
-                        "slices": slice_metrics,
-                        "duration_ms": depth * len(traces),
-                        "inference_latencies_ms": [float(depth)] * len(traces),
-                        "warm_latency_p95_ms": 10.0 + depth,
-                        "shared_resources": [
-                            "peak_rss_bytes",
-                            "index_size_bytes",
-                            "vector_bytes",
-                        ],
-                    }
-                    for depth in (10, 20, 50)
-                },
-                "formatting": {},
-            }
-            if reranker is not None
-            else None
-        ),
+        "reranker": _reranker_block(reranker, overall_metrics, slice_metrics, traces),
     }
     return (
         json.dumps(report, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
@@ -3480,12 +3694,7 @@ def test_aggregation_requires_complete_reports_and_writes_canonical_selection(tm
         variant_id="float32-384d",
     )
     specs = runner.required_candidate_specs(selection.matrix)
-    raw_paths = []
-    for offset, spec in enumerate(specs):
-        path = tmp_path / "raw" / f"candidate-{offset}.json"
-        path.parent.mkdir(exist_ok=True)
-        path.write_bytes(_candidate_report(runner, selection, spec, offset=offset))
-        raw_paths.append(path)
+    raw_paths = _write_candidate_reports(runner, selection, specs, tmp_path / "raw")
     repo = tmp_path / "repo"
     baseline = repo / selection.matrix["selection"]["baseline"]["raw_report_path"]
     baseline.parent.mkdir(parents=True)
@@ -3545,15 +3754,7 @@ def test_aggregation_requires_complete_reports_and_writes_canonical_selection(tm
     assert retained.is_dir()
     assert len(list(retained.glob("*.json"))) == len(specs)
     for evidence in artifact["candidate_reports"]:
-        path = repo / Path(evidence["retained_path"])
-        assert path.parent == retained
-        assert path.name == f"{evidence['raw_report_sha256']}.json"
-        assert hashlib.sha256(path.read_bytes()).hexdigest() == evidence["raw_report_sha256"]
-        parsed = json.loads(path.read_bytes())
-        assert path.read_bytes() == (
-            json.dumps(parsed, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-            + "\n"
-        ).encode()
+        _assert_retained_report(repo, retained, evidence)
     with pytest.raises(ValueError, match="already exists"):
         runner.aggregate_selection(
             raw_paths,
@@ -3652,30 +3853,14 @@ def test_mocked_orchestration_is_plumbing_only_and_uses_retained_lexical_winner(
         assert (worker_cache / sentinel.name).read_bytes() == b"prefetched"
         lexical_config = argv[argv.index("--lexical-config") + 1]
         if "--model-id" not in argv:
-            report = runner.run_benchmark(
-                runner.load_corpus(CORPUS, SCHEMA),
-                corpus_path=CORPUS,
-                matrix_path=BENCHMARK / "model-matrix-v1.json",
-                cache_root=tmp_path / f"lexical-{lexical_config}",
-                lexical_config=lexical_config,
-                test_segmenter=_PinnedJieba(),
-            )
+            report = _lexical_worker_report(runner, tmp_path, lexical_config)
             lexical_reports.append(report)
             return runner._WorkerPayload(report, runner._canonical_report_bytes(report))
         workspace = runner._create_run_workspace(worker_cache)
         workspace_paths.append(workspace.path)
         model_cache_identities.append(workspace.model_cache_identity)
         runner._cleanup_run_workspace(workspace)
-        model_id = argv[argv.index("--model-id") + 1]
-        variant_id = argv[argv.index("--variant-id") + 1]
-        reranker_id = argv[argv.index("--reranker-id") + 1] if "--reranker-id" in argv else None
-        spec = next(
-            item
-            for item in runner.required_candidate_specs(selection.matrix)
-            if item["embedding"]["id"] == model_id
-            and item["embedding"]["variant_id"] == variant_id
-            and (item["reranker"]["id"] if item["reranker"] else None) == reranker_id
-        )
+        spec = _spec_for_argv(runner, selection, argv)
         report = json.loads(
             _candidate_report(runner, selection, spec, offset=len(calls) - 1)
         )
@@ -3707,26 +3892,21 @@ def test_mocked_orchestration_is_plumbing_only_and_uses_retained_lexical_winner(
     )
 
     assert len(calls) == len(runner.required_candidate_specs(selection.matrix)) + 5
-    assert all("--model-id" not in argv for argv, _deadline in calls[:5])
-    assert "--model-id" in calls[5][0]
+    assert _lexical_sweep_runs_first(calls)
     winner = runner._select_lexical_winner(lexical_reports)["id"]
-    model_calls = [argv for argv, _deadline in calls if "--model-id" in argv]
-    assert all(argv[argv.index("--lexical-config") + 1] == winner for argv in model_calls)
+    assert _every_model_call_uses(calls, winner)
     assert len(set(workspace_paths)) == len(workspace_paths)
     assert len(set(model_cache_identities)) == 1
     assert not list((shared_cache / "runs").iterdir())
     assert artifact["schema_version"] == "retrieval-comparison/v1"
     assert artifact["quality_claim"] is False
     assert artifact["release_evidence"] is False
-    lexical_evidence = [item for item in artifact["candidate_reports"] if "lexical_configuration" in item]
-    assert {item["lexical_configuration"] for item in lexical_evidence} == set(
-        runner.LEXICAL_CONFIGURATIONS
-    )
+    lexical_evidence = [
+        item for item in artifact["candidate_reports"] if "lexical_configuration" in item
+    ]
+    assert _lexical_configurations(lexical_evidence) == set(runner.LEXICAL_CONFIGURATIONS)
     model_evidence = [item for item in artifact["candidate_reports"] if "candidate" in item]
-    assert all(
-        json.loads((repo / item["retained_path"]).read_bytes())["quality_claim"] is False
-        for item in model_evidence
-    )
+    assert _no_quality_claim(repo, model_evidence)
 
 
 def test_authoritative_degraded_error_names_requested_candidate_and_fallback(
@@ -3909,31 +4089,12 @@ def test_replaced_worker_wrong_binding_or_replay_cannot_publish(
         nonlocal first_payload
         lexical = argv[argv.index("--lexical-config") + 1]
         if "--model-id" not in argv:
-            report = runner.run_benchmark(
-                runner.load_corpus(CORPUS, SCHEMA),
-                corpus_path=CORPUS,
-                matrix_path=BENCHMARK / "model-matrix-v1.json",
-                cache_root=tmp_path / f"lexical-{lexical}",
-                lexical_config=lexical,
-                test_segmenter=_PinnedJieba(),
-            )
+            report = _lexical_worker_report(runner, tmp_path, lexical)
             return runner._WorkerPayload(report, runner._canonical_report_bytes(report))
-        requested_id = argv[argv.index("--model-id") + 1]
-        requested_variant = argv[argv.index("--variant-id") + 1]
-        requested_reranker = (
-            argv[argv.index("--reranker-id") + 1] if "--reranker-id" in argv else None
-        )
-        requested_index = next(
-            index
-            for index, spec in enumerate(specs)
-            if spec["embedding"]["id"] == requested_id
-            and spec["embedding"]["variant_id"] == requested_variant
-            and (spec["reranker"]["id"] if spec["reranker"] else None)
-            == requested_reranker
-        )
+        requested_index = _requested_spec_index(specs, argv)
         if attack == "replay" and requested_index == 1:
             return first_payload
-        returned_spec = specs[1] if attack == "wrong-candidate" else specs[requested_index]
+        returned_spec = _returned_spec(specs, attack, requested_index)
         report = json.loads(
             _candidate_report(runner, selection, returned_spec, offset=requested_index)
         )
