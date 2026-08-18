@@ -2521,6 +2521,13 @@ def test_unix_installer_signal_traps_cleanup_and_exit(tmp_path, signal_name, exp
         textwrap.dedent(
             f"""
             set -euo pipefail
+            # A shell without job control starts an asynchronous job with
+            # SIGINT ignored, and an ignored signal cannot be trapped. bash 5
+            # installs the trap here anyway, bash 3.2 on macOS does not, so
+            # the installer never saw the INT it traps. Job control gives the
+            # job its own process group with the default disposition, which is
+            # how a terminal delivers Ctrl-C to a real installation.
+            set -m
             ./installer-under-test.sh &
             installerPid=$!
             started=0
