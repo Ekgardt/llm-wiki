@@ -214,47 +214,33 @@ class ProcessTree:
         deadline = _deadline(deadline)
         if time.monotonic() >= deadline:
             raise TimeoutError("LSP process-tree spawn deadline expired")
-        if isinstance(pass_fds, (str, bytes)) or not isinstance(pass_fds, Sequence):
-            raise TypeError("pass_fds must be a sequence of file descriptors")
-        inherited_descriptors = tuple(pass_fds)
-        if any(
-            isinstance(descriptor, bool)
-            or not isinstance(descriptor, int)
-            or descriptor < 0
-            for descriptor in inherited_descriptors
-        ):
-            raise ValueError("pass_fds must contain nonnegative integers")
-        if len(set(inherited_descriptors)) != len(inherited_descriptors):
-            raise ValueError("pass_fds must not contain duplicates")
-        if len(inherited_descriptors) > _MAX_PASS_FDS:
-            raise ValueError(f"pass_fds must contain at most {_MAX_PASS_FDS} descriptors")
-        if inherited_descriptors and os.name != "posix":
-            raise ValueError("pass_fds are supported only on POSIX")
+        inherited_descriptors = _validated_pass_fds(pass_fds)
+        options = _spawn_options(cwd, env)
         if os.name == "posix":
-            for descriptor in inherited_descriptors:
-                try:
-                    flags = fcntl.fcntl(descriptor, fcntl.F_GETFL)
-                except OSError as error:
-                    raise ValueError("pass_fds must contain open descriptors") from error
-                if flags & os.O_ACCMODE != os.O_RDONLY:
-                    raise ValueError("pass_fds must contain read-only descriptors")
-        options: dict[str, object] = {
-            "cwd": cwd,
-            "env": env,
-            "shell": False,
-            "stdin": subprocess.PIPE,
-            "stdout": subprocess.PIPE,
-            "stderr": subprocess.PIPE,
-            "close_fds": True,
-        }
-        if os.name == "posix":
-            if inherited_descriptors:
-                options["pass_fds"] = inherited_descriptors
-            process = subprocess.Popen(list(command), start_new_session=True, **options)
-            return cls(process, None, process.pid)
+            return cls._spawn_posix(command, options, inherited_descriptors)
         if os.name != "nt":
             raise RuntimeError("LSP process trees are unsupported on this platform")
+        return cls._spawn_windows(command, options, deadline)
 
+    @classmethod
+    def _spawn_posix(
+        cls,
+        command: Sequence[str],
+        options: dict[str, object],
+        inherited_descriptors: tuple[int, ...],
+    ) -> ProcessTree:
+        if inherited_descriptors:
+            options["pass_fds"] = inherited_descriptors
+        process = subprocess.Popen(list(command), start_new_session=True, **options)
+        return cls(process, None, process.pid)
+
+    @classmethod
+    def _spawn_windows(
+        cls,
+        command: Sequence[str],
+        options: dict[str, object],
+        deadline: float,
+    ) -> ProcessTree:
         job = _create_windows_job()
         process: subprocess.Popen[bytes] | None = None
         try:
@@ -267,54 +253,67 @@ class ProcessTree:
             return tree
         except BaseException as setup_error:
             if process is None:
-                cleanup_errors: list[BaseException] = []
-                try:
-                    _close_windows_handle(job)
-                except BaseException as cleanup_error:
-                    cleanup_errors.append(cleanup_error)
-                if cleanup_errors:
-                    raise _ProcessTreeSpawnError(
-                        None,
-                        tuple(cleanup_errors),
-                        windows_job=job,
-                    ) from setup_error
-                raise
+                cls._raise_unstarted_windows_failure(job, setup_error)
+            cls._raise_started_windows_failure(process, job, deadline, setup_error)
 
-            tree = cls(process, job, None)
-            cleanup_errors: list[BaseException] = []
-            try:
-                tree.terminate(deadline=deadline)
-            except BaseException as cleanup_error:
-                cleanup_errors.append(cleanup_error)
-            try:
-                tree.close()
-            except BaseException as cleanup_error:
-                cleanup_errors.append(cleanup_error)
-            try:
-                child_reaped = process.poll() is not None
-            except BaseException as cleanup_error:
-                cleanup_errors.append(cleanup_error)
-                child_reaped = False
-            if tree.windows_job is not None or not child_reaped:
-                raise _ProcessTreeSpawnError(tree, tuple(cleanup_errors)) from setup_error
-            raise
+    @staticmethod
+    def _raise_unstarted_windows_failure(job: int, setup_error: BaseException) -> None:
+        """No child exists yet; only the job object may need closing."""
+        cleanup_errors: list[BaseException] = []
+        try:
+            _close_windows_handle(job)
+        except BaseException as cleanup_error:
+            cleanup_errors.append(cleanup_error)
+        if cleanup_errors:
+            raise _ProcessTreeSpawnError(
+                None,
+                tuple(cleanup_errors),
+                windows_job=job,
+            ) from setup_error
+        raise setup_error
+
+    @classmethod
+    def _raise_started_windows_failure(
+        cls,
+        process: subprocess.Popen[bytes],
+        job: int,
+        deadline: float,
+        setup_error: BaseException,
+    ) -> None:
+        """A child exists: tear the tree down before re-raising the setup error."""
+        tree = cls(process, job, None)
+        cleanup_errors: list[BaseException] = []
+        _collect_cleanup_error(cleanup_errors, lambda: tree.terminate(deadline=deadline))
+        _collect_cleanup_error(cleanup_errors, tree.close)
+        child_reaped = _reaped_or_recorded(process, cleanup_errors)
+        if tree.windows_job is not None or not child_reaped:
+            raise _ProcessTreeSpawnError(tree, tuple(cleanup_errors)) from setup_error
+        raise setup_error
 
     def has_live_descendants(self) -> bool:
         """Observe descendants after the direct process has been reaped."""
         if self.process.poll() is None:
             raise RuntimeError("direct LSP process is still live")
         if os.name == "nt":
-            job = self.windows_job
-            if job is None:
-                raise RuntimeError("Windows LSP process tree ownership was released")
-            return _bounded_job_active_processes(job) != 0
-        group = self.process_group
-        if group is None:
-            raise RuntimeError("POSIX LSP process group ownership was released")
-        direct_reaped, group_absent = _observe_posix_tree(self.process, group)
+            return _bounded_job_active_processes(self._owned_job()) != 0
+        direct_reaped, group_absent = _observe_posix_tree(
+            self.process, self._owned_group()
+        )
         if not direct_reaped:
             raise RuntimeError("direct LSP process was not reaped")
         return not group_absent
+
+    def _owned_job(self) -> int:
+        job = self.windows_job
+        if job is None:
+            raise RuntimeError("Windows LSP process tree ownership was released")
+        return job
+
+    def _owned_group(self) -> int:
+        group = self.process_group
+        if group is None:
+            raise RuntimeError("POSIX LSP process group ownership was released")
+        return group
 
     def terminate(self, *, deadline: float) -> None:
         deadline = _deadline(deadline)
@@ -324,83 +323,31 @@ class ProcessTree:
         self._terminate_posix(deadline)
 
     def _terminate_posix(self, deadline: float) -> None:
-        group = self.process_group
-        if group is None:
-            raise RuntimeError("POSIX LSP process group ownership was released")
+        group = self._owned_group()
         errors: list[BaseException] = []
         started = time.monotonic()
         graceful_deadline = min(
             deadline,
             started + min(0.5, max(0.0, (deadline - started) / 2)),
         )
-        try:
-            os.killpg(group, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        except BaseException as error:
-            errors.append(error)
-
+        _signal_group(group, signal.SIGTERM, errors)
         complete = _wait_posix_tree(self.process, group, graceful_deadline)
         if not complete:
-            try:
-                os.killpg(group, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            except BaseException as error:
-                errors.append(error)
+            _signal_group(group, signal.SIGKILL, errors)
             complete = _wait_posix_tree(self.process, group, deadline)
-
         if errors:
             raise errors[0]
         if not complete:
             raise TimeoutError("LSP process group did not exit before deadline")
 
     def _terminate_windows(self, deadline: float) -> None:
-        job = self.windows_job
-        if job is None:
-            raise RuntimeError("Windows LSP process tree ownership was released")
+        job = self._owned_job()
         errors: list[BaseException] = []
         snapshot_errors: list[BaseException] = []
-        tracked_pids: tuple[int, ...] = ()
-        try:
-            tracked_pids = _job_process_ids(job)
-        except BaseException as error:
-            snapshot_errors.append(error)
-        try:
-            if not _KERNEL32.TerminateJobObject(job, 1):
-                errors.append(ctypes.WinError(ctypes.get_last_error()))
-        except BaseException as error:
-            errors.append(error)
-
-        try:
-            direct_reaped = self.process.poll() is not None
-        except BaseException as error:
-            errors.append(error)
-            direct_reaped = False
-        if not direct_reaped:
-            try:
-                self.process.kill()
-            except BaseException as error:
-                errors.append(error)
-        try:
-            self.process.wait(timeout=max(0.0, deadline - time.monotonic()))
-        except subprocess.TimeoutExpired:
-            pass
-        except BaseException as error:
-            errors.append(error)
-
-        try:
-            complete, observe_errors = _wait_windows_tree(
-                self.process,
-                job,
-                deadline,
-                tracked_pids=tracked_pids,
-            )
-        except BaseException as error:
-            complete = False
-            errors.append(error)
-        else:
-            errors.extend(observe_errors)
+        tracked_pids = _tracked_job_pids(job, snapshot_errors)
+        _terminate_windows_job(job, errors)
+        self._kill_direct_windows_process(deadline, errors)
+        complete = self._await_windows_tree(job, deadline, tracked_pids, errors)
         if not complete:
             errors[:0] = snapshot_errors
         if errors:
@@ -408,32 +355,59 @@ class ProcessTree:
         if not complete:
             raise TimeoutError("LSP Windows process tree did not exit before deadline")
 
+    def _kill_direct_windows_process(
+        self, deadline: float, errors: list[BaseException]
+    ) -> None:
+        if not _reaped_or_recorded(self.process, errors):
+            _collect_cleanup_error(errors, self.process.kill)
+        try:
+            self.process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            return
+        except BaseException as error:  # noqa: BLE001 - reported by the caller
+            errors.append(error)
+
+    def _await_windows_tree(
+        self,
+        job: int,
+        deadline: float,
+        tracked_pids: tuple[int, ...],
+        errors: list[BaseException],
+    ) -> bool:
+        try:
+            complete, observe_errors = _wait_windows_tree(
+                self.process,
+                job,
+                deadline,
+                tracked_pids=tracked_pids,
+            )
+        except BaseException as error:  # noqa: BLE001 - reported by the caller
+            errors.append(error)
+            return False
+        errors.extend(observe_errors)
+        return complete
+
     def close(self) -> None:
         if os.name == "nt":
-            job = self.windows_job
-            errors: list[BaseException] = []
-            try:
-                direct_reaped = self.process.poll() is not None
-            except BaseException as error:
-                errors.append(error)
-                direct_reaped = False
-            active: int | None = 0
-            if job is not None:
-                try:
-                    active = _bounded_job_active_processes(job)
-                except BaseException as error:
-                    errors.append(error)
-                    active = None
-            if errors:
-                raise errors[0]
-            if not direct_reaped or active != 0:
-                raise RuntimeError("Windows LSP process tree is still live")
-            _close_windows_process_handle(self.process)
-            if job is not None:
-                _close_windows_handle(job)
-                self.windows_job = None
+            self._close_windows()
             return
+        self._close_posix()
 
+    def _close_windows(self) -> None:
+        job = self.windows_job
+        errors: list[BaseException] = []
+        direct_reaped = _reaped_or_recorded(self.process, errors)
+        active = _job_active_or_recorded(job, errors)
+        if errors:
+            raise errors[0]
+        if not direct_reaped or active != 0:
+            raise RuntimeError("Windows LSP process tree is still live")
+        _close_windows_process_handle(self.process)
+        if job is not None:
+            _close_windows_handle(job)
+            self.windows_job = None
+
+    def _close_posix(self) -> None:
         group = self.process_group
         if group is None:
             return
@@ -441,6 +415,137 @@ class ProcessTree:
         if not direct_reaped or not group_absent:
             raise RuntimeError("POSIX LSP process group is still live")
         self.process_group = None
+
+
+def _tracked_job_pids(job: int, errors: list[BaseException]) -> tuple[int, ...]:
+    try:
+        return _job_process_ids(job)
+    except BaseException as error:  # noqa: BLE001 - reported by the caller
+        errors.append(error)
+        return ()
+
+
+def _terminate_windows_job(job: int, errors: list[BaseException]) -> None:
+    try:
+        if not _KERNEL32.TerminateJobObject(job, 1):
+            errors.append(ctypes.WinError(ctypes.get_last_error()))
+    except BaseException as error:  # noqa: BLE001 - reported by the caller
+        errors.append(error)
+
+
+def _job_active_or_recorded(job: int | None, errors: list[BaseException]) -> int | None:
+    """Active process count, or None when the job could not be queried."""
+    if job is None:
+        return 0
+    try:
+        return _bounded_job_active_processes(job)
+    except BaseException as error:  # noqa: BLE001 - reported by the caller
+        errors.append(error)
+        return None
+
+
+@dataclass
+class _WindowsWaitState:
+    """Mutable observation state for one Windows tree wait."""
+
+    remaining_pids: set[int]
+    wait_error: BaseException | None = None
+    query_failed: bool = False
+    empty_observations: int = 0
+    empty_since: float | None = None
+
+    def reset_empty(self) -> None:
+        self.empty_observations = 0
+        self.empty_since = None
+
+    def observe_empty(self, now: float) -> None:
+        if self.empty_since is None:
+            self.empty_since = now
+        self.empty_observations += 1
+
+
+def _signal_group(group: int, number: int, errors: list[BaseException]) -> None:
+    """Signal the whole group; an already-gone group is not a failure."""
+    try:
+        os.killpg(group, number)
+    except ProcessLookupError:
+        return
+    except BaseException as error:  # noqa: BLE001 - reported by the caller
+        errors.append(error)
+
+
+def _pass_fds_sequence(pass_fds: Sequence[int]) -> tuple[int, ...]:
+    if isinstance(pass_fds, (str, bytes)) or not isinstance(pass_fds, Sequence):
+        raise TypeError("pass_fds must be a sequence of file descriptors")
+    return tuple(pass_fds)
+
+
+def _require_bounded_descriptor_set(descriptors: tuple[int, ...]) -> None:
+    if any(not _is_descriptor(descriptor) for descriptor in descriptors):
+        raise ValueError("pass_fds must contain nonnegative integers")
+    if len(set(descriptors)) != len(descriptors):
+        raise ValueError("pass_fds must not contain duplicates")
+    if len(descriptors) > _MAX_PASS_FDS:
+        raise ValueError(f"pass_fds must contain at most {_MAX_PASS_FDS} descriptors")
+
+
+def _validated_pass_fds(pass_fds: Sequence[int]) -> tuple[int, ...]:
+    """Read-only, unique, open descriptors — POSIX only, and bounded."""
+    descriptors = _pass_fds_sequence(pass_fds)
+    _require_bounded_descriptor_set(descriptors)
+    if descriptors and os.name != "posix":
+        raise ValueError("pass_fds are supported only on POSIX")
+    _require_read_only_descriptors(descriptors)
+    return descriptors
+
+
+def _is_descriptor(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _require_read_only_descriptors(descriptors: tuple[int, ...]) -> None:
+    if os.name != "posix":
+        return
+    for descriptor in descriptors:
+        _require_read_only_descriptor(descriptor)
+
+
+def _require_read_only_descriptor(descriptor: int) -> None:
+    try:
+        flags = fcntl.fcntl(descriptor, fcntl.F_GETFL)
+    except OSError as error:
+        raise ValueError("pass_fds must contain open descriptors") from error
+    if flags & os.O_ACCMODE != os.O_RDONLY:
+        raise ValueError("pass_fds must contain read-only descriptors")
+
+
+def _spawn_options(cwd: Path, env: Mapping[str, str]) -> dict[str, object]:
+    return {
+        "cwd": cwd,
+        "env": env,
+        "shell": False,
+        "stdin": subprocess.PIPE,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "close_fds": True,
+    }
+
+
+def _collect_cleanup_error(errors: list[BaseException], action) -> None:
+    try:
+        action()
+    except BaseException as cleanup_error:  # noqa: BLE001 - cleanup is best effort
+        errors.append(cleanup_error)
+
+
+def _reaped_or_recorded(
+    process: subprocess.Popen[bytes], errors: list[BaseException]
+) -> bool:
+    try:
+        return process.poll() is not None
+    except BaseException as cleanup_error:  # noqa: BLE001 - cleanup is best effort
+        errors.append(cleanup_error)
+        return False
 
 
 def _deadline(value: float) -> float:
@@ -451,45 +556,89 @@ def _deadline(value: float) -> float:
     return float(value)
 
 
-def _linux_group_is_inert(proc_root: Path, group: int) -> bool | None:
+def _proc_stat_payload(entry_path: str) -> bytes | None:
+    """Bounded `/proc/<pid>/stat` bytes; None when it cannot be trusted."""
+    try:
+        with open(Path(entry_path) / "stat", "rb") as stat_file:
+            payload = stat_file.read(_LINUX_PROC_STAT_LIMIT + 1)
+    except FileNotFoundError:
+        return b""
+    except OSError:
+        return None
+    if len(payload) > _LINUX_PROC_STAT_LIMIT:
+        return None
+    return payload
+
+
+def _proc_stat_fields(payload: bytes) -> list[bytes] | None:
+    closing = payload.rfind(b") ")
+    if closing < 0:
+        return None
+    fields = payload[closing + 2 :].split()
+    if len(fields) < 4:
+        return None
+    return fields
+
+
+def _stat_belongs_to_live_group(fields: list[bytes], group: int) -> bool | None:
+    """True when this entry keeps the group alive; None when unreadable."""
+    try:
+        process_group = int(fields[2])
+        session = int(fields[3])
+    except ValueError:
+        return None
+    if process_group != group and session != group:
+        return False
+    return fields[0] not in _LINUX_DEAD_STATES
+
+
+def _proc_entry_keeps_group(entry_path: str, group: int) -> bool | None:
+    payload = _proc_stat_payload(entry_path)
+    if payload is None:
+        return None
+    if not payload:
+        return False
+    fields = _proc_stat_fields(payload)
+    if fields is None:
+        return None
+    return _stat_belongs_to_live_group(fields, group)
+
+
+def _scan_proc_entries(entries, group: int) -> bool | None:
+    """True when nothing in /proc keeps the group alive; None when unreadable."""
     scanned = 0
+    for entry in entries:
+        if not entry.name.isdecimal():
+            continue
+        scanned += 1
+        if scanned > _LINUX_PROC_SCAN_LIMIT:
+            return None
+        verdict = _proc_entry_verdict(entry.path, group)
+        if verdict is not None:
+            return verdict
+    return True
+
+
+def _proc_entry_verdict(entry_path: str, group: int) -> bool | None:
+    """None to keep scanning; False when live; None-unreadable maps to None."""
+    keeps = _proc_entry_keeps_group(entry_path, group)
+    if keeps is None:
+        return None
+    if keeps:
+        return False
+    return None
+
+
+def _linux_group_is_inert(proc_root: Path, group: int) -> bool | None:
     try:
         entries = os.scandir(proc_root)
     except OSError:
         return None
     with entries:
         try:
-            for entry in entries:
-                if not entry.name.isdecimal():
-                    continue
-                scanned += 1
-                if scanned > _LINUX_PROC_SCAN_LIMIT:
-                    return None
-                try:
-                    with open(Path(entry.path) / "stat", "rb") as stat_file:
-                        payload = stat_file.read(_LINUX_PROC_STAT_LIMIT + 1)
-                except FileNotFoundError:
-                    continue
-                except OSError:
-                    return None
-                if len(payload) > _LINUX_PROC_STAT_LIMIT:
-                    return None
-                closing = payload.rfind(b") ")
-                fields = payload[closing + 2 :].split() if closing >= 0 else ()
-                if len(fields) < 4:
-                    return None
-                try:
-                    process_group = int(fields[2])
-                    session = int(fields[3])
-                except ValueError:
-                    return None
-                if (process_group == group or session == group) and (
-                    fields[0] not in _LINUX_DEAD_STATES
-                ):
-                    return False
+            return _scan_proc_entries(entries, group)
         except OSError:
             return None
-    return True
 
 
 def _observe_posix_tree(
@@ -499,12 +648,15 @@ def _observe_posix_tree(
     try:
         os.killpg(group, 0)
     except ProcessLookupError:
-        group_absent = True
-    else:
-        group_absent = False
-        if direct_reaped and sys.platform.startswith("linux"):
-            group_absent = _linux_group_is_inert(Path("/proc"), group) is True
-    return direct_reaped, group_absent
+        return direct_reaped, True
+    except PermissionError:
+        # macOS answers EPERM when the group still holds a process this caller
+        # may not signal — a zombie awaiting its parent, typically. The group
+        # exists either way, which is the only thing this probe asks.
+        return direct_reaped, False
+    if direct_reaped and sys.platform.startswith("linux"):
+        return direct_reaped, _linux_group_is_inert(Path("/proc"), group) is True
+    return direct_reaped, False
 
 
 def _wait_posix_tree(
@@ -520,228 +672,303 @@ def _wait_posix_tree(
         time.sleep(min(0.01, remaining))
 
 
-if os.name == "nt":
-    def _assign_windows_process(job: int, process: subprocess.Popen[bytes]) -> None:
-        if not _KERNEL32.AssignProcessToJobObject(job, int(process._handle)):
-            raise ctypes.WinError(ctypes.get_last_error())
+# Windows helpers are defined unconditionally and called only from the
+# `os.name == "nt"` branches above. Keeping them at module level avoids an
+# artificial nesting level; the ctypes bindings they use stay inside the
+# platform guard and are resolved when a Windows caller runs them.
+def _assign_windows_process(job: int, process: subprocess.Popen[bytes]) -> None:
+    if not _KERNEL32.AssignProcessToJobObject(job, int(process._handle)):
+        raise ctypes.WinError(ctypes.get_last_error())
 
 
-    def _job_active_processes(job: int) -> int:
-        information = _BasicAccountingInformation()
-        returned = wintypes.DWORD()
-        if not _KERNEL32.QueryInformationJobObject(
+def _job_active_processes(job: int) -> int:
+    information = _BasicAccountingInformation()
+    returned = wintypes.DWORD()
+    if not _KERNEL32.QueryInformationJobObject(
+        job,
+        _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+        ctypes.byref(information),
+        ctypes.sizeof(information),
+        ctypes.byref(returned),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return int(information.active_processes)
+
+
+def _bounded_job_active_processes(job: int) -> int:
+    active = _job_active_processes(job)
+    if active > _MAX_JOB_PROCESS_IDS:
+        raise RuntimeError("LSP Windows Job active process bound was exceeded")
+    return active
+
+
+def _job_process_ids(job: int) -> tuple[int, ...]:
+    _bounded_job_active_processes(job)
+    offset = _BasicProcessIdList.process_id_list.offset
+    buffer_size = offset + _MAX_JOB_PROCESS_IDS * ctypes.sizeof(ctypes.c_size_t)
+    buffer = ctypes.create_string_buffer(buffer_size)
+    information = _BasicProcessIdList.from_buffer(buffer)
+    returned = wintypes.DWORD()
+    queried = _KERNEL32.QueryInformationJobObject(
+        job,
+        _JOB_OBJECT_BASIC_PROCESS_ID_LIST,
+        ctypes.byref(buffer),
+        buffer_size,
+        ctypes.byref(returned),
+    )
+    captured = int(information.number_of_process_ids_in_list) if queried else 0
+    if captured <= _MAX_JOB_PROCESS_IDS:
+        values = (ctypes.c_size_t * captured).from_buffer(buffer, offset)
+        process_ids = tuple(int(process_id) for process_id in values)
+    else:
+        process_ids = ()
+    _bounded_job_active_processes(job)
+    return process_ids
+
+
+def _windows_wait_result_alive(result: int) -> bool:
+    if result == _WAIT_OBJECT_0:
+        return False
+    if result == _WAIT_TIMEOUT:
+        return True
+    if result == _WAIT_FAILED:
+        raise ctypes.WinError(ctypes.get_last_error())
+    raise OSError(f"unexpected Windows process wait result: {result}")
+
+
+def _windows_pid_alive(pid: int) -> bool:
+    handle = _KERNEL32.OpenProcess(_SYNCHRONIZE, False, pid)
+    if not handle:
+        error = ctypes.get_last_error()
+        if error == 87:  # ERROR_INVALID_PARAMETER: process no longer exists.
+            return False
+        raise ctypes.WinError(error)
+    try:
+        return _windows_wait_result_alive(
+            int(_KERNEL32.WaitForSingleObject(handle, 0))
+        )
+    finally:
+        _close_windows_handle(int(handle))
+
+
+def _wait_windows_tree(
+    process: subprocess.Popen[bytes],
+    job: int,
+    deadline: float,
+    *,
+    tracked_pids: Sequence[int] = (),
+) -> tuple[bool, list[BaseException]]:
+    errors: list[BaseException] = []
+    state = _WindowsWaitState(remaining_pids=set(tracked_pids))
+    while True:
+        direct_reaped = _observe_direct_process(process, state)
+        active, state.query_failed = _job_active_once(job, errors, state.query_failed)
+        _prune_dead_pids(state.remaining_pids)
+        if _tree_settled(direct_reaped, active, state):
+            return True, _final_errors(errors, state.wait_error)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False, _final_errors(errors, state.wait_error)
+        _wait_one_step(process, direct_reaped, deadline, remaining, state)
+
+
+def _observe_direct_process(
+    process: subprocess.Popen[bytes], state: _WindowsWaitState
+) -> bool:
+    direct_reaped = process.poll() is not None
+    if direct_reaped:
+        state.wait_error = None
+    return direct_reaped
+
+
+def _job_active_once(
+    job: int, errors: list[BaseException], query_failed: bool
+) -> tuple[int | None, bool]:
+    """Active count, or None once the query has failed for this tree."""
+    if query_failed:
+        return None, True
+    try:
+        return _bounded_job_active_processes(job), False
+    except BaseException as error:  # noqa: BLE001 - reported by the caller
+        errors.append(error)
+        return None, True
+
+
+def _prune_dead_pids(remaining_pids: set[int]) -> None:
+    for pid in tuple(remaining_pids):
+        if not _pid_still_alive(pid):
+            remaining_pids.discard(pid)
+
+
+def _pid_still_alive(pid: int) -> bool:
+    try:
+        return _windows_pid_alive(pid)
+    except BaseException:  # noqa: BLE001 - an unreadable pid stops tracking
+        return False
+
+
+def _pid_settled(state: _WindowsWaitState, now: float) -> bool:
+    if not state.remaining_pids:
+        return True
+    return now - state.empty_since >= _WINDOWS_PID_SETTLE_SECONDS
+
+
+def _tree_settled(
+    direct_reaped: bool, active: int | None, state: _WindowsWaitState
+) -> bool:
+    """Two consecutive empty observations, with tracked pids settled."""
+    if not direct_reaped or active != 0:
+        state.reset_empty()
+        return False
+    now = time.monotonic()
+    state.observe_empty(now)
+    return state.empty_observations >= 2 and _pid_settled(state, now)
+
+
+def _final_errors(
+    errors: list[BaseException], wait_error: BaseException | None
+) -> list[BaseException]:
+    if wait_error is None:
+        return errors
+    return errors + [wait_error]
+
+
+def _wait_one_step(
+    process: subprocess.Popen[bytes],
+    direct_reaped: bool,
+    deadline: float,
+    remaining: float,
+    state: _WindowsWaitState,
+) -> None:
+    if direct_reaped:
+        time.sleep(min(0.01, remaining))
+        return
+    state.wait_error = _wait_direct_process(process, deadline, remaining, state.wait_error)
+
+
+def _wait_direct_process(
+    process: subprocess.Popen[bytes],
+    deadline: float,
+    remaining: float,
+    wait_error: BaseException | None,
+) -> BaseException | None:
+    try:
+        process.wait(timeout=min(0.01, remaining))
+    except subprocess.TimeoutExpired:
+        return wait_error
+    except BaseException as error:  # noqa: BLE001 - retried until the deadline
+        left = deadline - time.monotonic()
+        if left > 0:
+            time.sleep(min(0.01, left))
+        return error
+    return None
+
+
+def _create_windows_job() -> int:
+    handle = _KERNEL32.CreateJobObjectW(None, None)
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    job = int(handle)
+    limits = _ExtendedLimitInformation()
+    limits.basic_limit_information.limit_flags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    try:
+        if not _KERNEL32.SetInformationJobObject(
             job,
-            _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
-            ctypes.byref(information),
-            ctypes.sizeof(information),
-            ctypes.byref(returned),
+            _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            ctypes.byref(limits),
+            ctypes.sizeof(limits),
         ):
             raise ctypes.WinError(ctypes.get_last_error())
-        return int(information.active_processes)
-
-
-    def _bounded_job_active_processes(job: int) -> int:
-        active = _job_active_processes(job)
-        if active > _MAX_JOB_PROCESS_IDS:
-            raise RuntimeError("LSP Windows Job active process bound was exceeded")
-        return active
-
-
-    def _job_process_ids(job: int) -> tuple[int, ...]:
-        _bounded_job_active_processes(job)
-        offset = _BasicProcessIdList.process_id_list.offset
-        buffer_size = offset + _MAX_JOB_PROCESS_IDS * ctypes.sizeof(ctypes.c_size_t)
-        buffer = ctypes.create_string_buffer(buffer_size)
-        information = _BasicProcessIdList.from_buffer(buffer)
-        returned = wintypes.DWORD()
-        queried = _KERNEL32.QueryInformationJobObject(
-            job,
-            _JOB_OBJECT_BASIC_PROCESS_ID_LIST,
-            ctypes.byref(buffer),
-            buffer_size,
-            ctypes.byref(returned),
-        )
-        captured = int(information.number_of_process_ids_in_list) if queried else 0
-        if captured <= _MAX_JOB_PROCESS_IDS:
-            values = (ctypes.c_size_t * captured).from_buffer(buffer, offset)
-            process_ids = tuple(int(process_id) for process_id in values)
-        else:
-            process_ids = ()
-        _bounded_job_active_processes(job)
-        return process_ids
-
-
-    def _windows_pid_alive(pid: int) -> bool:
-        handle = _KERNEL32.OpenProcess(_SYNCHRONIZE, False, pid)
-        if not handle:
-            error = ctypes.get_last_error()
-            if error == 87:  # ERROR_INVALID_PARAMETER: process no longer exists.
-                return False
-            raise ctypes.WinError(error)
+    except BaseException as configuration_error:
         try:
-            result = int(_KERNEL32.WaitForSingleObject(handle, 0))
-            if result == _WAIT_OBJECT_0:
-                return False
-            if result == _WAIT_TIMEOUT:
-                return True
-            if result == _WAIT_FAILED:
-                raise ctypes.WinError(ctypes.get_last_error())
-            raise OSError(f"unexpected Windows process wait result: {result}")
-        finally:
-            _close_windows_handle(int(handle))
+            _close_windows_handle(job)
+        except BaseException as cleanup_error:
+            raise _ProcessTreeSpawnError(
+                None,
+                (configuration_error, cleanup_error),
+                windows_job=job,
+            ) from configuration_error
+        raise
+    return job
 
 
-    def _wait_windows_tree(
-        process: subprocess.Popen[bytes],
-        job: int,
-        deadline: float,
-        *,
-        tracked_pids: Sequence[int] = (),
-    ) -> tuple[bool, list[BaseException]]:
-        errors: list[BaseException] = []
-        wait_error: BaseException | None = None
-        query_failed = False
-        empty_observations = 0
-        empty_since: float | None = None
-        remaining_pids = set(tracked_pids)
-        while True:
-            direct_reaped = process.poll() is not None
-            if direct_reaped:
-                wait_error = None
-            active: int | None = None
-            if not query_failed:
-                try:
-                    active = _bounded_job_active_processes(job)
-                except BaseException as error:
-                    errors.append(error)
-                    query_failed = True
-            for pid in tuple(remaining_pids):
-                try:
-                    alive = _windows_pid_alive(pid)
-                except BaseException:
-                    remaining_pids.remove(pid)
-                    continue
-                if not alive:
-                    remaining_pids.remove(pid)
-            if direct_reaped and active == 0:
-                now = time.monotonic()
-                if empty_since is None:
-                    empty_since = now
-                empty_observations += 1
-                pid_settled = not remaining_pids or (
-                    now - empty_since >= _WINDOWS_PID_SETTLE_SECONDS
-                )
-                if empty_observations >= 2 and pid_settled:
-                    return True, errors + ([wait_error] if wait_error is not None else [])
-            else:
-                empty_observations = 0
-                empty_since = None
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return False, errors + ([wait_error] if wait_error is not None else [])
-            if not direct_reaped:
-                try:
-                    process.wait(timeout=min(0.01, remaining))
-                except subprocess.TimeoutExpired:
-                    pass
-                except BaseException as error:
-                    wait_error = error
-                    remaining = deadline - time.monotonic()
-                    if remaining > 0:
-                        time.sleep(min(0.01, remaining))
-                else:
-                    wait_error = None
-            else:
-                time.sleep(min(0.01, remaining))
-
-
-    def _create_windows_job() -> int:
-        handle = _KERNEL32.CreateJobObjectW(None, None)
-        if not handle:
+def _resume_one_thread(thread_id: int) -> None:
+    """Resume exactly one suspended thread of the freshly created process."""
+    thread = _KERNEL32.OpenThread(_THREAD_SUSPEND_RESUME, False, thread_id)
+    if not thread:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        previous_count = int(_KERNEL32.ResumeThread(thread))
+        if previous_count == 0xFFFFFFFF:
             raise ctypes.WinError(ctypes.get_last_error())
-        job = int(handle)
-        limits = _ExtendedLimitInformation()
-        limits.basic_limit_information.limit_flags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        try:
-            if not _KERNEL32.SetInformationJobObject(
-                job,
-                _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
-                ctypes.byref(limits),
-                ctypes.sizeof(limits),
-            ):
-                raise ctypes.WinError(ctypes.get_last_error())
-        except BaseException as configuration_error:
-            try:
-                _close_windows_handle(job)
-            except BaseException as cleanup_error:
-                raise _ProcessTreeSpawnError(
-                    None,
-                    (configuration_error, cleanup_error),
-                    windows_job=job,
-                ) from configuration_error
-            raise
-        return job
+        if previous_count != 1:
+            raise RuntimeError(
+                "suspended LSP primary thread had an invalid suspend count"
+            )
+    finally:
+        _close_windows_handle(int(thread))
 
 
-    def _resume_windows_process(pid: int) -> None:
-        snapshot = _KERNEL32.CreateToolhelp32Snapshot(_TH32CS_SNAPTHREAD, 0)
-        if snapshot == _INVALID_HANDLE_VALUE:
-            raise ctypes.WinError(ctypes.get_last_error())
-        resumed = 0
-        entry = _ThreadEntry32()
-        entry.size = ctypes.sizeof(entry)
-        try:
-            available = bool(_KERNEL32.Thread32First(snapshot, ctypes.byref(entry)))
-            while available:
-                if int(entry.owner_process_id) == pid:
-                    thread = _KERNEL32.OpenThread(
-                        _THREAD_SUSPEND_RESUME, False, entry.thread_id
-                    )
-                    if not thread:
-                        raise ctypes.WinError(ctypes.get_last_error())
-                    try:
-                        previous_count = int(_KERNEL32.ResumeThread(thread))
-                        if previous_count == 0xFFFFFFFF:
-                            raise ctypes.WinError(ctypes.get_last_error())
-                        if previous_count != 1:
-                            raise RuntimeError(
-                                "suspended LSP primary thread had an invalid suspend count"
-                            )
-                        resumed += 1
-                    finally:
-                        _close_windows_handle(int(thread))
-                available = bool(_KERNEL32.Thread32Next(snapshot, ctypes.byref(entry)))
-                if not available:
-                    error = ctypes.get_last_error()
-                    if error != _ERROR_NO_MORE_FILES:
-                        raise ctypes.WinError(error)
-        finally:
-            _close_windows_handle(int(snapshot))
-        if resumed != 1:
-            raise RuntimeError("suspended LSP process did not have one primary thread")
+def _advance_thread_snapshot(snapshot: int, entry: _ThreadEntry32) -> bool:
+    if bool(_KERNEL32.Thread32Next(snapshot, ctypes.byref(entry))):
+        return True
+    error = ctypes.get_last_error()
+    if error != _ERROR_NO_MORE_FILES:
+        raise ctypes.WinError(error)
+    return False
 
 
-    def _close_windows_handle(handle: int) -> None:
-        if not _KERNEL32.CloseHandle(handle):
-            raise ctypes.WinError(ctypes.get_last_error())
+def _resume_threads_of(snapshot: int, entry: _ThreadEntry32, pid: int) -> int:
+    resumed = 0
+    available = bool(_KERNEL32.Thread32First(snapshot, ctypes.byref(entry)))
+    while available:
+        if int(entry.owner_process_id) == pid:
+            _resume_one_thread(entry.thread_id)
+            resumed += 1
+        available = _advance_thread_snapshot(snapshot, entry)
+    return resumed
 
 
-    def _close_windows_process_handle(process: subprocess.Popen[bytes]) -> None:
-        handle = getattr(process, "_handle", None)
-        close = getattr(handle, "Close", None)
-        if not callable(close):
-            return
-        was_closed = getattr(handle, "closed", None)
-        try:
-            close()
-        except BaseException:
-            # CPython marks Handle.closed before calling CloseHandle.
-            if was_closed is False and getattr(handle, "closed", None) is True:
-                try:
-                    handle.closed = False
-                except (AttributeError, TypeError):
-                    pass
-            raise
+def _resume_windows_process(pid: int) -> None:
+    snapshot = _KERNEL32.CreateToolhelp32Snapshot(_TH32CS_SNAPTHREAD, 0)
+    if snapshot == _INVALID_HANDLE_VALUE:
+        raise ctypes.WinError(ctypes.get_last_error())
+    entry = _ThreadEntry32()
+    entry.size = ctypes.sizeof(entry)
+    try:
+        resumed = _resume_threads_of(snapshot, entry, pid)
+    finally:
+        _close_windows_handle(int(snapshot))
+    if resumed != 1:
+        raise RuntimeError("suspended LSP process did not have one primary thread")
+
+
+def _close_windows_handle(handle: int) -> None:
+    if not _KERNEL32.CloseHandle(handle):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+def _restore_handle_closed_flag(handle: object, was_closed: object) -> None:
+    """CPython marks `Handle.closed` before calling CloseHandle."""
+    if was_closed is not False or getattr(handle, "closed", None) is not True:
+        return
+    try:
+        handle.closed = False
+    except (AttributeError, TypeError):
+        pass
+
+
+def _close_windows_process_handle(process: subprocess.Popen[bytes]) -> None:
+    handle = getattr(process, "_handle", None)
+    close = getattr(handle, "Close", None)
+    if not callable(close):
+        return
+    was_closed = getattr(handle, "closed", None)
+    try:
+        close()
+    except BaseException:
+        _restore_handle_closed_flag(handle, was_closed)
+        raise
 
 
 __all__ = ["ProcessTree"]
