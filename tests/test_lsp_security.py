@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import os
 import re
@@ -343,6 +344,27 @@ def test_fifo_is_rejected_without_blocking(repository: Path, scope: RepositorySc
         resolve_repository_source(scope, "pkg/events")
 
 
+@contextlib.contextmanager
+def _bound_unix_socket(path: Path):
+    """Bind by short relative name — macOS caps `sun_path` at 104 bytes.
+
+    The pytest temporary directory alone exceeds that on macOS runners, so
+    binding the absolute path fails with `AF_UNIX path too long` before the
+    containment rule under test is ever reached.
+    """
+    listener = socket.socket(socket.AF_UNIX)
+    previous = Path.cwd()
+    try:
+        os.chdir(path.parent)
+        try:
+            listener.bind(path.name)
+        finally:
+            os.chdir(previous)
+        yield listener
+    finally:
+        listener.close()
+
+
 @pytest.mark.skipif(
     os.name != "posix" or not hasattr(socket, "AF_UNIX"), reason="POSIX local socket"
 )
@@ -350,13 +372,9 @@ def test_socket_device_like_entry_is_rejected(
     repository: Path, scope: RepositoryScope
 ) -> None:
     target = repository / "pkg" / "service.sock"
-    listener = socket.socket(socket.AF_UNIX)
-    try:
-        listener.bind(str(target))
+    with _bound_unix_socket(target):
         with pytest.raises(PathContainmentError):
             resolve_repository_source(scope, "pkg/service.sock")
-    finally:
-        listener.close()
 
 
 def _symlink_or_skip(link: Path, target: Path, *, directory: bool) -> None:
