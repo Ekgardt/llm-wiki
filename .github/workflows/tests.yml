@@ -262,16 +262,21 @@ jobs:
             platform: linux
             python: "3.10"
             node: "22.23.1"
+            timeout: 15
+          # The hosted Windows image runs this suite roughly three times slower
+          # than Linux, and the correctness gate follows it inside the same job.
           - os: windows-2025
             platform: windows
             python: "3.10"
             node: "22.23.1"
+            timeout: 40
           - os: macos-15
             platform: macos
             python: "3.10"
             node: "22.23.1"
+            timeout: 25
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: ${{ matrix.timeout }}
     env:
       UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/../llm-wiki-pyright-${{ matrix.platform }}
       LLM_WIKI_ROOT: ${{ github.workspace }}
