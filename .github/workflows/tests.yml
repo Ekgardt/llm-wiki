@@ -110,6 +110,16 @@ jobs:
       - run: uv python install ${{ matrix.python }}
       - run: uv python pin ${{ matrix.python }}
       - run: uv sync --locked
+      # `${{ github.workspace }}/../…` keeps runtime state out of the checkout but
+      # leaves a `..` component. The Windows handle-relative walker refuses to
+      # traverse one by design, so normalize the path once for the whole job.
+      - name: Normalize the external state root
+        shell: bash
+        run: >
+          uv run --locked --no-sync python -c
+          "import os, pathlib;
+          print('LLM_WIKI_STATE_ROOT=' + str(pathlib.Path(os.environ['LLM_WIKI_STATE_ROOT']).resolve()))"
+          >> "$GITHUB_ENV"
       - run: uv run --locked --no-sync pytest -q --durations=0 --junitxml="${{ runner.temp }}/pytest-timings/junit.xml"
       - if: matrix.class == 'linux_full' && matrix.python == '3.14'
         run: uv run --locked --no-sync python benchmark/run_benchmark.py --legacy-only
