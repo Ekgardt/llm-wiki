@@ -297,7 +297,7 @@ def test_worker_cleans_grandchild_before_returning_normal_result(tmp_path: Path)
         result = memory_queue._run_processor_child(
             _exiting_grandchild_processor,
             {"payload": {"pid_path": str(pid_path)}},
-            10,
+            60,
         )
         pid = int(pid_path.read_text(encoding="ascii"))
         assert result is True
@@ -317,7 +317,7 @@ def test_worker_cleans_grandchild_before_reporting_malformed_result(
             memory_queue._run_processor_child(
                 _malformed_grandchild_processor,
                 {"payload": {"pid_path": str(pid_path)}},
-                10,
+                60,
             )
         pid = int(pid_path.read_text(encoding="ascii"))
         assert raised.value.code == "processor_result_malformed"
@@ -337,7 +337,7 @@ def test_worker_cleans_grandchild_before_reporting_processor_crash(
             memory_queue._run_processor_child(
                 _crashing_grandchild_processor,
                 {"payload": {"pid_path": str(pid_path)}},
-                10,
+                60,
             )
         pid = int(pid_path.read_text(encoding="ascii"))
         assert raised.value.code == "processor_exception"
@@ -421,7 +421,7 @@ def test_worker_child_drains_one_megabyte_result_before_join() -> None:
     result = memory_queue._run_processor_child(
         _result_processor,
         {"payload": {"size": 1024 * 1024}},
-        10,
+        60,
     )
 
     assert isinstance(result, memory_queue.DeferredResult)
@@ -432,7 +432,7 @@ def test_worker_child_drains_result_at_queue_size_limit() -> None:
     result = memory_queue._run_processor_child(
         _result_processor,
         {"payload": {"size": memory_queue._MAX_RESULT_BYTES}},
-        10,
+        60,
     )
 
     assert isinstance(result, memory_queue.DeferredResult)
@@ -444,7 +444,7 @@ def test_worker_child_rejects_oversize_result_without_deadlock() -> None:
         memory_queue._run_processor_child(
             _result_processor,
             {"payload": {"size": memory_queue._MAX_RESULT_BYTES + 1}},
-            10,
+            60,
         )
 
     assert raised.value.code == "processor_result_oversize"

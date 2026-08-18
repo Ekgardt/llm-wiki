@@ -6653,7 +6653,9 @@ def test_windows_200_crash_restarts_with_children_have_no_false_failure_or_leaks
     kernel32.CloseHandle.restype = wintypes.BOOL
 
     def wait_for_pid_line(index: int) -> int:
-        deadline = time.monotonic() + 2
+        # 200 restart cycles on a hosted Windows image; the child needs longer
+        # than two seconds to record its pid when the runner is loaded.
+        deadline = time.monotonic() + 30
         while True:
             lines = (
                 pid_log.read_text(encoding="ascii").splitlines()
