@@ -283,6 +283,44 @@ def test_membership_hash_changes_for_every_file_contract_field(tmp_path: Path) -
             validate_code_capture(damaged)
 
 
+def _orphan_directory(damaged: dict) -> None:
+    damaged["directories"].append(
+        {
+            "relative_path": "src/orphan/deep",
+            "entry_count": 0,
+            "entries_sha256": "0" * 64,
+        }
+    )
+    damaged["directories"].sort(key=lambda item: item["relative_path"])
+
+
+def _drop_parent_directory(damaged: dict) -> None:
+    damaged["directories"] = [
+        item for item in damaged["directories"] if item["relative_path"] != "src/pkg"
+    ]
+
+
+def _over_depth(damaged: dict) -> None:
+    damaged["limits"]["max_depth"] = 1
+
+
+def _empty_directories(damaged: dict) -> None:
+    damaged["directories"] = []
+
+
+_TOPOLOGY_DAMAGE = {
+    "empty-directories": _empty_directories,
+    "orphan": _orphan_directory,
+    "missing-parent": _drop_parent_directory,
+    "over-depth": _over_depth,
+}
+
+
+def _damage_capture(damaged: dict, damage: str) -> None:
+    """Apply one impossible-topology mutation to a captured manifest."""
+    _TOPOLOGY_DAMAGE[damage](damaged)
+
+
 @pytest.mark.parametrize(
     "damage", ("empty-directories", "orphan", "missing-parent", "over-depth")
 )
@@ -301,25 +339,7 @@ def test_validate_code_capture_rejects_impossible_topology(
         ).code_capture
     )
     damaged = copy.deepcopy(capture)
-    if damage == "empty-directories":
-        damaged["directories"] = []
-    elif damage == "orphan":
-        damaged["directories"].append(
-            {
-                "relative_path": "src/orphan/deep",
-                "entry_count": 0,
-                "entries_sha256": "0" * 64,
-            }
-        )
-        damaged["directories"].sort(key=lambda item: item["relative_path"])
-    elif damage == "missing-parent":
-        damaged["directories"] = [
-            item
-            for item in damaged["directories"]
-            if item["relative_path"] != "src/pkg"
-        ]
-    else:
-        damaged["limits"]["max_depth"] = 1
+    _damage_capture(damaged, damage)
     damaged["membership_sha256"] = hashlib.sha256(
         canonical_json_bytes(
             {"files": damaged["files"], "directories": damaged["directories"]}
@@ -366,6 +386,18 @@ def test_capture_globs_match_complete_posix_path_segments(tmp_path: Path) -> Non
     ]
 
 
+def _policy_accepts(policy_type, pattern: str, field: str) -> bool:
+    """Whether the runtime policy accepts this glob in this field."""
+    include = (pattern,) if field == "include_globs" else ("**",)
+    ignore = (pattern,) if field == "ignore_globs" else ()
+    try:
+        policy_type(("src",), include, ignore, (".py",))
+    except ValueError:
+        return False
+    return True
+
+
+@pytest.mark.parametrize("field", ("include_globs", "ignore_globs"))
 @pytest.mark.parametrize(
     ("pattern", "accepted"),
     (
@@ -382,7 +414,6 @@ def test_capture_globs_match_complete_posix_path_segments(tmp_path: Path) -> Non
         ("src//*.py", False),
     ),
 )
-@pytest.mark.parametrize("field", ("include_globs", "ignore_globs"))
 def test_repository_policy_glob_runtime_and_manifest_schema_agree(
     pattern: str, accepted: bool, field: str
 ) -> None:
@@ -402,17 +433,7 @@ def test_repository_policy_glob_runtime_and_manifest_schema_agree(
         "suffixes": [".py"],
     }
     schema_accepted = not list(jsonschema.Draft202012Validator(schema).iter_errors(policy))
-    try:
-        RepositoryCodePolicy(
-            ("src",),
-            (pattern,) if field == "include_globs" else ("**",),
-            (pattern,) if field == "ignore_globs" else (),
-            (".py",),
-        )
-    except ValueError:
-        runtime_accepted = False
-    else:
-        runtime_accepted = True
+    runtime_accepted = _policy_accepts(RepositoryCodePolicy, pattern, field)
 
     assert schema_accepted is accepted
     assert runtime_accepted is schema_accepted
@@ -526,6 +547,13 @@ def test_capture_rejects_nfc_collisions(tmp_path: Path) -> None:
     root = tmp_path / "repository"
     _write(root / "src/caf\u00e9.py", b"one = 1\n")
     _write(root / "src/cafe\u0301.py", b"two = 2\n")
+    if len(list((root / "src").iterdir())) < 2:
+        pytest.skip(
+            "this filesystem is Unicode-normalization-insensitive, so the two "
+            "names are one file and capture has no collision to reject; the "
+            "rule itself is covered by "
+            "test_contract_rejects_casefold_collision_on_every_platform"
+        )
     with pytest.raises(ValueError, match="collision"):
         _capture(root)
 
@@ -1276,6 +1304,24 @@ def test_posix_workspace_verification_returns_exact_true(tmp_path: Path) -> None
     assert code_workspace.verify_workspace_seal(workspace, snapshot) is True
 
 
+def _forged_snapshot(snapshot, mutation: str):
+    """One snapshot mutation that every workspace boundary must reject."""
+    source = snapshot.sources[0]
+    record = source.record
+    if mutation == "content":
+        damaged_source = dataclasses.replace(source, content=b"answer = 43\n")
+        return dataclasses.replace(snapshot, sources=(damaged_source,))
+    if mutation == "size":
+        damaged_record = dataclasses.replace(record, size=record.size + 1)
+    elif mutation == "hash":
+        damaged_record = dataclasses.replace(record, sha256="f" * 64)
+    else:
+        return dataclasses.replace(snapshot, corpus_sha256="f" * 64)
+    return dataclasses.replace(
+        snapshot, sources=(dataclasses.replace(source, record=damaged_record),)
+    )
+
+
 @pytest.mark.parametrize("operation", ("seal", "verify"))
 @pytest.mark.parametrize("mutation", ("content", "size", "hash", "manifest"))
 def test_workspace_boundaries_reject_forged_snapshot_before_filesystem_access(
@@ -1286,23 +1332,7 @@ def test_workspace_boundaries_reject_forged_snapshot_before_filesystem_access(
     repository = tmp_path / "repository"
     _write(repository / "src/app.py", b"answer = 42\n")
     snapshot = _capture(repository)
-    source = snapshot.sources[0]
-    record = source.record
-    if mutation == "content":
-        damaged_source = dataclasses.replace(source, content=b"answer = 43\n")
-        damaged = dataclasses.replace(snapshot, sources=(damaged_source,))
-    elif mutation == "size":
-        damaged_record = dataclasses.replace(record, size=record.size + 1)
-        damaged = dataclasses.replace(
-            snapshot, sources=(dataclasses.replace(source, record=damaged_record),)
-        )
-    elif mutation == "hash":
-        damaged_record = dataclasses.replace(record, sha256="f" * 64)
-        damaged = dataclasses.replace(
-            snapshot, sources=(dataclasses.replace(source, record=damaged_record),)
-        )
-    else:
-        damaged = dataclasses.replace(snapshot, corpus_sha256="f" * 64)
+    damaged = _forged_snapshot(snapshot, mutation)
 
     destination = tmp_path / f"sealed-{operation}-{mutation}"
     entries = tuple(
@@ -1932,6 +1962,51 @@ def test_sealing_rejects_over_depth_before_child_creation(
     assert not (tmp_path / "sealed").exists()
 
 
+def _drop_deep_parent(code_workspace, contract, directories: list):
+    return [item for item in directories if item.relative_path != "src/pkg/deep"]
+
+
+def _zero_direct_count(code_workspace, contract, directories: list):
+    return [_zeroed_pkg_entry(item) for item in directories]
+
+
+def _zeroed_pkg_entry(item):
+    if item.relative_path != "src/pkg":
+        return item
+    return dataclasses.replace(item, entry_count=0)
+
+
+def _directory_over_file(code_workspace, contract, directories: list):
+    directories.append(
+        code_workspace.DirectoryMembership(contract.files[0].relative_path, 0, "0" * 64)
+    )
+    directories.sort(key=lambda item: item.relative_path)
+    return directories
+
+
+_TOPOLOGY_FORGERY = {
+    "missing-parent": _drop_deep_parent,
+    "direct-count": _zero_direct_count,
+    "file-directory-collision": _directory_over_file,
+}
+
+
+def _forged_topology(code_workspace, contract, damage: str):
+    """One forged capture topology that sealing must reject before any mkdir."""
+    limits = contract.limits
+    directories = list(contract.directories)
+    if damage == "depth":
+        limits = dataclasses.replace(limits, max_depth=1)
+    else:
+        directories = _TOPOLOGY_FORGERY[damage](code_workspace, contract, directories)
+    return dataclasses.replace(
+        contract,
+        limits=limits,
+        directories=tuple(directories),
+        membership_sha256="0" * 64,
+    )
+
+
 @pytest.mark.parametrize(
     "damage", ("missing-parent", "direct-count", "depth", "file-directory-collision")
 )
@@ -1945,35 +2020,7 @@ def test_sealing_rejects_forged_topology_before_creating_root(
     snapshot = _capture(
         repository, limits=code_workspace.RepositoryCodeLimits(max_depth=8)
     )
-    contract = snapshot.code_capture
-    directories = list(contract.directories)
-    limits = contract.limits
-    if damage == "missing-parent":
-        directories = [item for item in directories if item.relative_path != "src/pkg/deep"]
-    elif damage == "direct-count":
-        directories = [
-            dataclasses.replace(item, entry_count=0)
-            if item.relative_path == "src/pkg"
-            else item
-            for item in directories
-        ]
-    elif damage == "depth":
-        limits = dataclasses.replace(limits, max_depth=1)
-    else:
-        directories.append(
-            code_workspace.DirectoryMembership(
-                contract.files[0].relative_path,
-                0,
-                "0" * 64,
-            )
-        )
-        directories.sort(key=lambda item: item.relative_path)
-    forged = dataclasses.replace(
-        contract,
-        limits=limits,
-        directories=tuple(directories),
-        membership_sha256="0" * 64,
-    )
+    forged = _forged_topology(code_workspace, snapshot.code_capture, damage)
     payload = code_workspace.code_capture_as_dict(forged)
     membership = hashlib.sha256(
         canonical_json_bytes(
@@ -2116,6 +2163,18 @@ def test_windows_workspace_capability_fails_closed_with_precise_reason(
         windows_workspace.require_capability()
 
 
+def _reject_unsafe_components(windows_workspace, parent) -> None:
+    for unsafe in ("..", "file:stream", "CON", "trailing."):
+        with pytest.raises(ValueError, match="path component"):
+            windows_workspace.create_directory(parent, unsafe)
+
+
+def _close_all(windows_workspace, handles) -> None:
+    for handle in handles:
+        if handle is not None:
+            windows_workspace.close_handle(handle)
+
+
 @pytest.mark.skipif(os.name != "nt", reason="real Windows handle boundary required")
 def test_windows_workspace_native_operations_are_relative_exclusive_and_bound(
     tmp_path: Path,
@@ -2125,9 +2184,7 @@ def test_windows_workspace_native_operations_are_relative_exclusive_and_bound(
     parent = windows_workspace.open_directory_path(tmp_path)
     root = directory = file_handle = reopened = None
     try:
-        for unsafe in ("..", "file:stream", "CON", "trailing."):
-            with pytest.raises(ValueError, match="path component"):
-                windows_workspace.create_directory(parent, unsafe)
+        _reject_unsafe_components(windows_workspace, parent)
         root = windows_workspace.create_directory(parent, "sealed")
         with pytest.raises(FileExistsError):
             windows_workspace.create_directory(parent, "sealed")
@@ -2151,9 +2208,7 @@ def test_windows_workspace_native_operations_are_relative_exclusive_and_bound(
             windows_workspace.read_chunks(reopened, chunk_bytes=4096, max_bytes=4096)
         ) == b"answer = 42\n"
     finally:
-        for handle in (reopened, file_handle, directory, root):
-            if handle is not None:
-                windows_workspace.close_handle(handle)
+        _close_all(windows_workspace, (reopened, file_handle, directory, root))
         windows_workspace.close_handle(parent)
 
 
