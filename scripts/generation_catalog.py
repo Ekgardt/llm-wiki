@@ -567,6 +567,44 @@ def _windows_stat_matches_identity(
     return values[:2] == values[2:]
 
 
+def _windows_file_id_identity(handle: int) -> tuple[int, int]:
+    """The identity `os.stat` reports on Python 3.12 and later.
+
+    Python 3.12 widened Windows `st_dev` to 64 bits and `st_ino` to 128 bits by
+    reading `FILE_ID_INFO` (gh-99726). `GetFileInformationByHandle` still
+    reports the 32-bit volume serial of `BY_HANDLE_FILE_INFORMATION`, so
+    comparing one against the other rejected a directory that had not changed,
+    and repository capture failed with "changed during enumeration" on every
+    Windows runner from 3.12 onward.
+    """
+    _, volume, file_id = _windows_handle_file_identity(handle)
+    return volume, int.from_bytes(file_id, "little")
+
+
+def _windows_handle_identity_candidates(handle: int) -> tuple[tuple[int, int], ...]:
+    """Both identities the kernel reports for one open handle.
+
+    Which of them `os.stat` returns depends on the running interpreter, not on
+    the file, so a caller proving "the entry I enumerated is the object I
+    opened" has to accept either. Both are read from the same handle, so this
+    stays an exact identity match rather than a weaker one.
+    """
+    candidates = [_windows_handle_stat_identity(handle)]
+    try:
+        candidates.append(_windows_file_id_identity(handle))
+    except OSError:
+        return tuple(candidates)
+    return tuple(candidates)
+
+
+def _windows_stat_matches_any_identity(
+    metadata: os.stat_result, candidates: tuple[tuple[int, int], ...]
+) -> bool:
+    return any(
+        _windows_stat_matches_identity(metadata, candidate) for candidate in candidates
+    )
+
+
 def _windows_handle_stat_identity(handle: int) -> tuple[int, int]:
     if os.name != "nt":
         raise OSError("Windows handle stat identity is unavailable")

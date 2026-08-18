@@ -938,9 +938,17 @@ def test_windows_stat_identity_comparison_fails_closed() -> None:
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows handle file IDs only")
 def test_windows_handle_stat_identity_matches_path_stat(tmp_path: Path) -> None:
+    """`os.stat` must match one of the identities the handle can report.
+
+    Which one it matches is decided by the interpreter, not by the file:
+    Python 3.12 widened Windows `st_dev` to 64 bits and `st_ino` to 128 bits by
+    reading `FILE_ID_INFO`, while `GetFileInformationByHandle` still reports a
+    32-bit volume serial. Asserting only the older pair made every unchanged
+    directory look swapped on 3.12 and later.
+    """
     from generation_catalog import (
-        _windows_handle_stat_identity,
-        _windows_stat_matches_identity,
+        _windows_handle_identity_candidates,
+        _windows_stat_matches_any_identity,
     )
     from markdown_transaction import _close_windows_handle, _open_windows_directory
 
@@ -948,11 +956,14 @@ def test_windows_handle_stat_identity_matches_path_stat(tmp_path: Path) -> None:
     target.mkdir()
     handle = _open_windows_directory(target)
     try:
-        identity = _windows_handle_stat_identity(handle)
+        candidates = _windows_handle_identity_candidates(handle)
     finally:
         _close_windows_handle(handle)
 
-    assert _windows_stat_matches_identity(target.stat(follow_symlinks=False), identity)
+    assert candidates
+    assert _windows_stat_matches_any_identity(
+        target.stat(follow_symlinks=False), candidates
+    )
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows directory handle identity only")

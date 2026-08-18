@@ -54,6 +54,7 @@ knowledge/notes/*
 !knowledge/notes/case-sensitive-grep-injected-context.md
 !knowledge/notes/centralized-memory-subsystem.md
 !knowledge/notes/agent-native-mcp-foundation.md
+!knowledge/notes/baseline-environment-binding-decision.md
 !knowledge/notes/audit-closure-security-recovery-control-plane-decision.md
 !knowledge/notes/derived-evidence-generation-decision.md
 !knowledge/notes/lsp-live-lease-decision.md
@@ -62,6 +63,7 @@ knowledge/notes/*
 !knowledge/notes/read-only-lsp-navigation-engine-decision.md
 !knowledge/notes/reliability-v3-runtime-adoption-implementation-decision.md
 !knowledge/notes/durable-capture-producer-activation-decision.md
+!knowledge/notes/observable-capture-and-bounded-maintenance-decision.md
 !knowledge/notes/integration-config-backup-retention-decision.md
 !knowledge/notes/install-ownership-control-plane-decision.md
 !knowledge/notes/solo-operator-superset-product-decision.md

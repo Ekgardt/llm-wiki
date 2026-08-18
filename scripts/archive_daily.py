@@ -366,7 +366,7 @@ class DailyArchiver:
                             self.killpoint("before_publish_rename")
                             self._prepare_build_for_publish(publish_build)
                             heartbeat.refresh()
-                            publish_build.replace(final_bag)
+                            self._publish_build(publish_build, final_bag)
                             published = True
                             fsync_directory(final_bag.parent)
                             self.killpoint("after_publish_rename")
@@ -684,17 +684,48 @@ class DailyArchiver:
             vault=self.vault,
             allow_build_intent=True,
         )
+        self._unseal_root(build)
         if os.name == "nt":
-            _harden_owner_only(build, 0o700)
             _harden_owner_only(build / "build-intent.json", 0o600)
         else:
-            build.chmod(0o700)
             (build / "build-intent.json").chmod(0o600)
         (build / "build-intent.json").unlink()
         fsync_directory(build)
         self._set_archive_read_only(build)
         validate_bag(build, coordinator=self.coordinator, vault=self.vault)
         return intent
+
+    @staticmethod
+    def _unseal_root(build: Path) -> None:
+        """Make only the package root writable; every member stays read-only."""
+        if os.name == "nt":
+            _harden_owner_only(build, 0o700)
+            return
+        build.chmod(0o700)
+
+    def _publish_build(self, build: Path, final: Path) -> None:
+        """Rename a sealed build into place, then seal it under its final name.
+
+        `rename(2)` returns EACCES when "oldpath is a directory and does not
+        allow write permission (needed to update the `..` entry)". POSIX makes
+        that a *may*, so it is implementation-defined: macOS enforces it, Linux
+        does not when the parent is unchanged. The build root is sealed at
+        0o500, so publication failed on macOS only - and in recovery that
+        failure is caught as OSError, which deletes the interrupted build
+        instead of finishing it. The archive is immutable evidence; losing one
+        to a permission bit is worse than the test failures that exposed it.
+
+        The root is writable for exactly one rename and is sealed again
+        immediately, or restored if the rename fails so a later recovery pass
+        still finds a valid package.
+        """
+        self._unseal_root(build)
+        try:
+            build.replace(final)
+        except BaseException:
+            self._set_archive_read_only(build)
+            raise
+        self._set_archive_read_only(final)
 
     @staticmethod
     def _recovery_stopped(
@@ -739,7 +770,7 @@ class DailyArchiver:
                 self._require_recovery_active(deadline, cancelled)
                 self._prepare_build_for_publish(build)
                 self._require_recovery_active(deadline, cancelled)
-                build.replace(final)
+                self._publish_build(build, final)
                 fsync_directory(final.parent)
             except (OSError, TypeError, ValueError, EvidenceResolutionError):
                 self._require_recovery_active(deadline, cancelled)

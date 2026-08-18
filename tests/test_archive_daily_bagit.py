@@ -1405,10 +1405,19 @@ def test_cli_exposes_hot_and_transaction_retention_flags() -> None:
 
 
 def test_only_archiver_uses_daily_archive_directory_rename_exception() -> None:
+    """Publishing a bag by directory rename stays inside the archiver.
+
+    The marker follows `_publish_build`, which now owns the rename: the build
+    root has to be writable for the call, because macOS denies renaming a
+    directory that lacks write permission (`rename(2)` EACCES, "needed to
+    update the `..` entry"). Keeping that window in one place is the point of
+    the check, so the marker tracks the helper rather than the raw call it
+    replaced.
+    """
     scripts = Path(__file__).resolve().parents[1] / "scripts"
     offenders = set()
     for path in scripts.glob("*.py"):
         text = path.read_text(encoding="utf-8")
-        if "publish_build.replace(final_bag)" in text:
+        if "def _publish_build(" in text:
             offenders.add(path.name)
     assert offenders == {"archive_daily.py"}
