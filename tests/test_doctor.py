@@ -1537,7 +1537,7 @@ def test_repair_does_not_touch_knowledge_config_network_or_subprocess(tmp_path, 
 
     report = doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
 
-    assert report["overall_status"] in {"ok", "degraded"}
+    assert report["overall_status"] in {"ok", "degraded"}, report
     assert _snapshot(root) == before_root
     assert _snapshot(home) == before_home
 
@@ -1750,7 +1750,7 @@ def test_existing_index_rebuild_lock_defers_without_touching_live_index(tmp_path
     assert index.read_bytes() == before
     check = _check(report, "index")
     assert check["status"] == "degraded"
-    assert check["details"]["repair_deferred"] is True
+    assert check["details"].get("repair_deferred") is True, check
     assert "deferred" in check["message"].lower()
 
 
@@ -1897,7 +1897,7 @@ def test_queue_recovery_lock_is_owner_aware(tmp_path, monkeypatch, active):
 
     if active:
         assert lease.exists()
-        assert check["details"]["repair_deferred"] is True
+        assert check["details"].get("repair_deferred") is True, check
         assert "deferred" in check["message"].lower()
     else:
         assert not lease.exists()

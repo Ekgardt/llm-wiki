@@ -9,6 +9,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -75,6 +76,25 @@ def _vault(tmp_path: Path) -> tuple[Path, Path]:
     return vault, state
 
 
+def _under_contention(call, *arguments, attempts: int = 6, **keywords):
+    """Retry a write whose global writer gate timed out.
+
+    The gate budget is ten seconds and a caller cannot extend it; the documented
+    answer to losing it is to try again. Six processes appending on a hosted
+    Windows runner, where every append also hardens files through `icacls`,
+    reach that budget. The operation id makes the retry converge on the same
+    committed append.
+    """
+    for attempt in range(attempts):
+        try:
+            return call(*arguments, **keywords)
+        except TimeoutError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+    raise AssertionError("unreachable")
+
+
 def _same_operation_worker(
     api: str,
     target: str,
@@ -89,8 +109,12 @@ def _same_operation_worker(
 
     path = Path(target)
     if api == "append":
-        return markdown_transaction.append_knowledge(operation_id, path, content).state
-    return markdown_transaction.mutate_knowledge(operation_id, {path: content}).state
+        return _under_contention(
+            markdown_transaction.append_knowledge, operation_id, path, content
+        ).state
+    return _under_contention(
+        markdown_transaction.mutate_knowledge, operation_id, {path: content}
+    ).state
 
 
 def _distinct_append_worker(target: str, index: int, vault: str, state: str) -> str:
@@ -98,8 +122,11 @@ def _distinct_append_worker(target: str, index: int, vault: str, state: str) -> 
     os.environ["LLM_WIKI_STATE_ROOT"] = state
     import markdown_transaction
 
-    return markdown_transaction.append_knowledge(
-        f"stress:{index}", Path(target), f"event-{index}\n".encode()
+    return _under_contention(
+        markdown_transaction.append_knowledge,
+        f"stress:{index}",
+        Path(target),
+        f"event-{index}\n".encode(),
     ).state
 
 

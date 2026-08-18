@@ -17,19 +17,39 @@ from tests.test_reliability_v3_adoption import (
 )
 
 
+def _under_contention(call, *arguments, attempts: int = 6, **keywords):
+    """Retry a blackboard call whose global writer gate timed out.
+
+    Every blackboard operation, reads included, appends through the one global
+    Markdown writer gate, and each append hardens files with `icacls` on
+    Windows. With six processes on a hosted runner a caller can lose that gate
+    for longer than its ten-second budget. That is contention, not incoherence,
+    and a real caller retries it.
+    """
+    for attempt in range(attempts):
+        try:
+            return call(*arguments, **keywords)
+        except TimeoutError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+    raise AssertionError("unreachable")
+
+
 def _write_blackboard_batch(vault: str, state_root: str, worker: int, count: int) -> int:
     os.environ["LLM_WIKI_ROOT"] = vault
     os.environ["LLM_WIKI_STATE_ROOT"] = state_root
     blackboard.PROJECTS_DIR = Path(vault) / "knowledge/projects"
     completed = 0
     for index in range(count):
-        claim = blackboard.claim_task(
+        claim = _under_contention(
+            blackboard.claim_task,
             "demo",
             f"worker {worker} task {index}",
             f"agent-{worker}",
             resources=[f"worker/{worker}/task/{index}"],
         )
-        if blackboard.complete_task("demo", claim):
+        if _under_contention(blackboard.complete_task, "demo", claim):
             completed += 1
     return completed
 
@@ -40,7 +60,7 @@ def _read_blackboard_status(vault: str, state_root: str, count: int) -> int:
     blackboard.PROJECTS_DIR = Path(vault) / "knowledge/projects"
     largest = 0
     for _ in range(count):
-        status = blackboard.get_status("demo")
+        status = _under_contention(blackboard.get_status, "demo")
         largest = max(largest, status["active_tasks"] + status["completed_tasks"])
         assert status["active_tasks"] >= 0
         assert status["completed_tasks"] >= 0
@@ -171,10 +191,10 @@ def test_multiprocess_status_reads_remain_coherent_during_claim_and_complete(
             )
             for worker in range(writers)
         ]
-        assert [future.result(timeout=120) for future in writes] == [
+        assert [future.result(timeout=300) for future in writes] == [
             tasks_per_writer
         ] * writers
-        assert all(future.result(timeout=120) >= 0 for future in readers)
+        assert all(future.result(timeout=300) >= 0 for future in readers)
 
     status = blackboard.get_status("demo")
     assert status["active_tasks"] == 0
@@ -198,7 +218,7 @@ def test_multiprocess_same_resource_claim_has_one_fenced_winner(
             )
             for agent in ("opencode", "codex")
         ]
-        results = [future.result(timeout=120) for future in futures]
+        results = [future.result(timeout=300) for future in futures]
 
     assert sorted(status for status, _identity in results) == ["claimed", "conflict"]
     with sqlite3.connect(
