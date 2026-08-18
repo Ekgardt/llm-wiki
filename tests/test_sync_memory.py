@@ -430,7 +430,10 @@ def test_dependency_commands_share_one_deadline(tmp_path):
     timeouts = []
     def run_uv(command, **kwargs):
         timeouts.append(kwargs["timeout"])
-        time.sleep(0.03)
+        # Longer than the 20 ms the assertions require the budget to shrink by,
+        # and longer than the ~15.6 ms Windows timer tick, which let a 30 ms
+        # sleep return after 16 ms and made the shrink look absent.
+        time.sleep(0.15)
         stdout = (
             json.dumps({"sync": {"changes": [{"package": "mcp"}]}})
             if "--dry-run" in command
@@ -438,9 +441,9 @@ def test_dependency_commands_share_one_deadline(tmp_path):
         )
         return subprocess.CompletedProcess(command, 0, stdout, "")
 
-    # The budget only has to outlast three 0.03 s commands plus process
-    # overhead; 0.2 s left no room on a loaded macOS runner and the action
-    # reported "error" for a machine-speed reason, not a contract one.
+    # The budget only has to outlast three commands plus process overhead;
+    # 0.2 s left no room on a loaded macOS runner and the action reported
+    # "error" for a machine-speed reason, not a contract one.
     result = sync_memory._dependency_action(
         root=tmp_path,
         apply=True,
