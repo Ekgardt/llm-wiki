@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import inspect
 import io
-import contextlib
 import json
 import math
 import os
