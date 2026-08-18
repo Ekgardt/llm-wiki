@@ -13,6 +13,13 @@ permissions:
 env:
   UV_VERSION: "0.12.3"
 
+# One run per ref: a new push supersedes the previous matrix instead of queuing
+# behind it. Without this, consecutive pushes each hold a full Windows matrix
+# (about an hour per job) and later runs wait for capacity they cannot get.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   gitleaks:
     name: timing::focused::gitleaks
