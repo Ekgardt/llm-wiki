@@ -306,7 +306,6 @@ def test_unchanged_verifier_detects_new_relevant_inventory(repository: Path) -> 
     assert workspace_revision.verify_workspace_revision_unchanged(scope, expected) is False
 
 
-@pytest.mark.skipif(not _linux_memfd_available(), reason="Linux memfd optimization")
 def _commands_containing(calls, fragment: str) -> list:
     return [command for command, _options in calls if fragment in command]
 
@@ -689,6 +688,7 @@ def _apply_workspace_scenario(repository: Path, scenario: str) -> None:
         mutate(repository)
 
 
+@pytest.mark.skipif(not _linux_memfd_available(), reason="Linux memfd optimization")
 @pytest.mark.parametrize(
     "scenario",
     [

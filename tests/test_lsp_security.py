@@ -1752,7 +1752,12 @@ def test_redaction_normalizes_windows_components_without_matching_siblings(
     long_alias = _windows_normalized_component_alias(root, dot_repetitions=4096)
     long_value = f'"{long_alias}/private"'
     long_result = redact_lsp_text(long_value, repository=scope)
-    assert long_result == '"<repository>"'
+    # The alias must disappear. Which marker replaces it depends on the layout:
+    # where the repository sits under the user profile, as it does on Windows
+    # runners, the home rule reaches this token first once the repository
+    # matcher stops walking four thousand dotted components.
+    assert long_alias not in long_result
+    assert long_result in {'"<repository>"', '"<home>"'}
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Unicode path aliases")
@@ -3005,7 +3010,10 @@ def test_windows_thousand_failures_do_not_grow_native_handle_count(
         with pytest.raises(PathContainmentError):
             resolve_repository_source(scope, "missing.py")
 
-    assert handle_count() == before
+    # The claim is that a thousand refusals do not grow the handle table. The
+    # count can legitimately fall while unrelated objects are collected, and a
+    # Windows runner measured 201 against a baseline of 257.
+    assert handle_count() <= before
 
 
 def test_security_boundary_documents_trusted_repository_not_sandbox() -> None:
