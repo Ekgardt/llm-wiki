@@ -43,6 +43,135 @@ def _collect_test_count() -> int:
 
 # ─── 1. No QMD references on active product surfaces ────────────────
 
+def _assert_docs_clean(relative_paths, check) -> None:
+    for relative_path in relative_paths:
+        check(relative_path)
+
+
+def _powershell_variables(content: str) -> set[str]:
+    return set(re.findall(r"\$([A-Za-z_]\w*)", content))
+
+
+def _powershell_parameter_names(content: str) -> set[str]:
+    """Variables bound by a function signature or a param() block."""
+    names: set[str] = set()
+    for match in re.finditer(r"function\s+[\w-]+\s*\(([^)]*)\)", content):
+        names |= _powershell_variables(match.group(1))
+    for block in re.finditer(r"param\((.*?)\)\s*(?:\{|\r?\n)", content, re.DOTALL):
+        names |= _powershell_variables(block.group(1))
+    return names
+
+
+def _powershell_assigned_variables(content: str) -> set[str]:
+    assigned = set(re.findall(r"\$([A-Za-z_]\w*)\s*=", content))
+    assigned |= _powershell_parameter_names(content)
+    assigned |= set(re.findall(r"foreach\s*\(\s*\$([A-Za-z_]\w*)\s+in\b", content))
+    return assigned
+
+
+_STDLIB_AND_EXTERNAL = frozenset(
+    {
+        "os", "sys", "re", "json", "time", "datetime", "pathlib",
+        "hashlib", "subprocess", "argparse", "contextlib",
+        "io", "math", "secrets", "threading", "typing",
+        "collections", "functools", "itertools", "enum",
+        "dataclasses", "abc", "copy", "tempfile", "shutil",
+        "importlib", "traceback", "textwrap", "string",
+        "unittest", "pytest", "__future__", "warnings",
+    }
+)
+
+
+def _is_tracked_script(py: Path, tracked: set[str]) -> bool:
+    return f"scripts/{py.name}" in tracked or py.name in tracked
+
+
+def _local_import_names(source: str) -> list[str]:
+    """Imported names that resolve to a module file in scripts/."""
+    names = []
+    for match in re.finditer(r"^\s*(?:from|import)\s+(\w+)", source, re.MULTILINE):
+        name = match.group(1)
+        if name in _STDLIB_AND_EXTERNAL:
+            continue
+        if (ROOT / "scripts" / f"{name}.py").exists():
+            names.append(name)
+    return names
+
+
+def _assert_local_imports_tracked(py: Path, tracked: set[str]) -> None:
+    for name in _local_import_names(py.read_text(encoding="utf-8")):
+        assert f"scripts/{name}.py" in tracked or f"{name}.py" in tracked, (
+            f"scripts/{py.name}: imports '{name}' which exists as "
+            f"scripts/{name}.py but is NOT tracked by Git. "
+            f"Run: git add scripts/{name}.py"
+        )
+
+
+def _untracked_module_names(status_output: str) -> list[str]:
+    names = []
+    for line in status_output.strip().splitlines():
+        if line.startswith("??") and line.endswith(".py"):
+            names.append(line.split("/")[-1].strip().replace(".py", ""))
+    return names
+
+
+def _assert_no_untracked_import(py: Path, untracked: list[str]) -> None:
+    source = py.read_text(encoding="utf-8")
+    for module in untracked:
+        assert re.search(rf"(?:from|import)\s+{module}\b", source) is None, (
+            f"scripts/{py.name}: imports '{module}' which is UNTRACKED. "
+            f"Run: git add scripts/{module}.py — clean clone will break."
+        )
+
+
+def _assert_referenced_scripts_exist(skill_md: Path, bash_call: str) -> None:
+    """Allowed-tools may name runtime commands, but never a missing script."""
+    if bash_call.strip().startswith("uv run"):
+        return
+    for script_rel in re.findall(r"(scripts/\S+\.py)", bash_call):
+        assert (ROOT / script_rel).is_file(), (
+            f"{skill_md.relative_to(ROOT)}: allowed-tools references "
+            f"{script_rel} which does not exist"
+        )
+
+
+def _assert_matching_version(installer: str, src: str, match, current_version: str) -> None:
+    tag_version = match.group(1)
+    line = src[: match.start()].count("\n") + 1
+    assert tag_version == current_version, (
+        f"{installer}:{line}: references v{tag_version} but "
+        f"pyproject.toml is {current_version}. Update installer comment."
+    )
+
+
+def _assert_no_qmd_claim(relative_path: str) -> None:
+    text = (ROOT / relative_path).read_text(encoding="utf-8")
+    assert not re.search(r"\bqmd\b", text, re.IGNORECASE), (
+        f"{relative_path}: stale QMD claim"
+    )
+
+
+def _assert_no_web_clipper_claim(relative_path: str) -> None:
+    text = (ROOT / relative_path).read_text(encoding="utf-8")
+    assert "web clipper" not in text.casefold(), (
+        f"{relative_path}: stale Web Clipper claim"
+    )
+
+
+def _assert_tool_count_documented(relative_path: str, expected: int) -> None:
+    """Every public document states the same MCP tool count as the server."""
+    text = (ROOT / relative_path).read_text(encoding="utf-8")
+    counts = re.findall(
+        r"\b(\d+)\s+(?:\S+\s+)?task-shaped\s+(?:MCP\s+)?(?:tools|инструмент\w*|工具)",
+        text,
+        re.IGNORECASE,
+    )
+    assert counts, f"{relative_path}: missing numeric task-shaped MCP tool count"
+    assert set(counts) == {str(expected)}, (
+        f"{relative_path}: stale task-shaped MCP tool counts: {counts}"
+    )
+
+
 def test_no_qmd_refs_in_skills():
     skill = ROOT / "skills" / "knowledge-lookup" / "SKILL.md"
     assert not re.search(r"\bqmd\b", skill.read_text(encoding="utf-8"), re.IGNORECASE)
@@ -61,11 +190,7 @@ def test_no_qmd_refs_in_skills():
         "knowledge/notes/Retrieval Workflow.md",
         "knowledge/notes/Ingestion Workflow.md",
     )
-    for relative_path in active_docs:
-        text = (ROOT / relative_path).read_text(encoding="utf-8")
-        assert not re.search(r"\bqmd\b", text, re.IGNORECASE), (
-            f"{relative_path}: stale QMD claim"
-        )
+    _assert_docs_clean(active_docs, _assert_no_qmd_claim)
 
     integration_docs = (
         "docs/ARCHITECTURE.md",
@@ -74,11 +199,7 @@ def test_no_qmd_refs_in_skills():
         "integrations/README.md",
         "knowledge/notes/Ingestion Workflow.md",
     )
-    for relative_path in integration_docs:
-        text = (ROOT / relative_path).read_text(encoding="utf-8")
-        assert "web clipper" not in text.casefold(), (
-            f"{relative_path}: stale Web Clipper claim"
-        )
+    _assert_docs_clean(integration_docs, _assert_no_web_clipper_claim)
     obsidian_integration = ROOT / "integrations" / "obsidian"
     bundled = [path for path in obsidian_integration.rglob("*") if path.is_file()]
     assert not bundled, f"bundled Obsidian integration files found: {bundled}"
@@ -110,16 +231,7 @@ def test_no_qmd_refs_in_skills():
         "tests/README.md",
     )
     for relative_path in active_public_docs:
-        text = (ROOT / relative_path).read_text(encoding="utf-8")
-        counts = re.findall(
-            r"\b(\d+)\s+(?:\S+\s+)?task-shaped\s+(?:MCP\s+)?(?:tools|инструмент\w*|工具)",
-            text,
-            re.IGNORECASE,
-        )
-        assert counts, f"{relative_path}: missing numeric task-shaped MCP tool count"
-        assert set(counts) == {str(len(TOOL_INPUT_SCHEMAS))}, (
-            f"{relative_path}: stale task-shaped MCP tool counts: {counts}"
-        )
+        _assert_tool_count_documented(relative_path, len(TOOL_INPUT_SCHEMAS))
 
 
 def test_ci_uses_current_gitleaks_action():
@@ -142,26 +254,8 @@ def test_install_ps1_no_undefined_vars():
     }
 
     # Collect all $varName references.
-    refs: set[str] = set()
-    for m in re.finditer(r"\$([A-Za-z_]\w*)", content):
-        var = m.group(1)
-        if var in skip:
-            continue
-        refs.add(var)
-
-    # Collect assignments: $var = ...
-    assigned: set[str] = set()
-    for m in re.finditer(r"\$([A-Za-z_]\w*)\s*=", content):
-        assigned.add(m.group(1))
-
-    # Collect function parameters: function Name($a, $b)
-    for fm in re.finditer(r"function\s+[\w-]+\s*\(([^)]*)\)", content):
-        for pm in re.finditer(r"\$([A-Za-z_]\w*)", fm.group(1)):
-            assigned.add(pm.group(1))
-    for block in re.finditer(r"param\((.*?)\)\s*(?:\{|\r?\n)", content, re.DOTALL):
-        for pm in re.finditer(r"\$([A-Za-z_]\w*)", block.group(1)):
-            assigned.add(pm.group(1))
-    assigned.update(re.findall(r"foreach\s*\(\s*\$([A-Za-z_]\w*)\s+in\b", content))
+    refs = _powershell_variables(content) - skip
+    assigned = _powershell_assigned_variables(content)
 
     undefined = sorted(refs - assigned - skip)
     assert not undefined, f"Undefined PowerShell vars in install.ps1: {undefined}"
@@ -462,14 +556,7 @@ def test_skills_allowed_tools_reference_existing_scripts():
     for skill_md in sorted(skills_dir.glob("*/SKILL.md")):
         text = skill_md.read_text(encoding="utf-8")
         for bash_call in re.findall(r"Bash\(([^)]*)\)", text):
-            # Ignore runtime commands ("uv run ...").
-            if bash_call.strip().startswith("uv run"):
-                continue
-            for script_rel in re.findall(r"(scripts/\S+\.py)", bash_call):
-                assert (ROOT / script_rel).is_file(), (
-                    f"{skill_md.relative_to(ROOT)}: allowed-tools references "
-                    f"{script_rel} which does not exist"
-                )
+            _assert_referenced_scripts_exist(skill_md, bash_call)
 
 
 # ─── 8. README must not invent agentmemory Recall@10 ────────────────
@@ -573,13 +660,7 @@ def test_installer_version_matches_pyproject():
         src = (ROOT / installer).read_text(encoding="utf-8")
         # Find version-tag references like v3.3.3
         for m in re.finditer(r"v(\d+\.\d+\.\d+)", src):
-            tag_version = m.group(1)
-            if tag_version != current_version:
-                line = src[:m.start()].count("\n") + 1
-                pytest.fail(
-                    f"{installer}:{line}: references v{tag_version} but "
-                    f"pyproject.toml is {current_version}. Update installer comment."
-                )
+            _assert_matching_version(installer, src, m, current_version)
 
 
 def test_remote_bootstrap_is_immutable_and_fail_closed():
@@ -625,25 +706,37 @@ def test_unix_installer_is_executable_in_git():
 
 # ─── 12. All daily-log writers use shared lock ──────────────────────
 
+# Writes that reach a daily log: an open() on a daily path, a write through
+# DAILY_DIR, or a call into the shared appender. `append.*daily` used to be one
+# of these patterns and matched any line where an unrelated `.append(` happened
+# to sit beside a `daily_id` argument.
+_DAILY_WRITE_PATTERN = re.compile(
+    r"daily[\w.]*\.open\s*\(|DAILY_DIR.*\.write|append_daily\s*\("
+)
+_DAILY_LOCK_MARKERS = ("_daily_lock", "append_daily", "locked_append")
+_DAILY_INFRASTRUCTURE = ("daily_log_append.py", "memory_state.py")
+
+
+def _writes_daily_log(source: str) -> bool:
+    return _DAILY_WRITE_PATTERN.search(source) is not None
+
+
+def _uses_daily_lock(source: str) -> bool:
+    return any(marker in source for marker in _DAILY_LOCK_MARKERS)
+
+
 def test_all_daily_writers_use_lock():
     """Scripts that write to daily logs must use _daily_lock or append_daily."""
-    daily_writers = []
-    for py in (ROOT / "scripts").glob("*.py"):
-        src = py.read_text(encoding="utf-8")
-        # Check if the script writes to a daily log file
-        if re.search(r'(daily.*\.open\s*\(|append.*daily|DAILY_DIR.*\.write)', src):
-            if py.name in ("daily_log_append.py", "memory_state.py"):
-                continue  # These define the lock/append infrastructure
-            daily_writers.append(py)
-
-    for py in daily_writers:
-        src = py.read_text(encoding="utf-8")
-        has_lock = "_daily_lock" in src or "append_daily" in src or "locked_append" in src
-        if not has_lock:
-            pytest.fail(
-                f"{py.name}: writes to daily log without using _daily_lock() "
-                f"or append_daily(). All daily-log writes must be lock-protected."
-            )
+    for py in sorted((ROOT / "scripts").glob("*.py")):
+        if py.name in _DAILY_INFRASTRUCTURE:
+            continue  # These define the lock/append infrastructure.
+        source = py.read_text(encoding="utf-8")
+        if not _writes_daily_log(source):
+            continue
+        assert _uses_daily_lock(source), (
+            f"{py.name}: writes to daily log without using _daily_lock() "
+            f"or append_daily(). All daily-log writes must be lock-protected."
+        )
 
 
 # ─── 13. Clean-clone: all imports in tracked scripts resolve to tracked files ─
@@ -669,33 +762,9 @@ def test_all_script_imports_resolve_in_git():
 
     # Scan all tracked scripts for local imports
     for py in sorted((ROOT / "scripts").glob("*.py")):
-        rel = f"scripts/{py.name}"
-        if rel not in tracked and py.name not in tracked:
+        if not _is_tracked_script(py, tracked):
             continue  # untracked script — skip (will be caught by git status)
-        src = py.read_text(encoding="utf-8")
-        # Find local imports (not stdlib, not pip packages)
-        for m in re.finditer(r"^\s*(?:from|import)\s+(\w+)", src, re.MULTILINE):
-            mod_name = m.group(1)
-            # Skip stdlib and known external packages
-            if mod_name in ("os", "sys", "re", "json", "time", "datetime", "pathlib",
-                            "hashlib", "subprocess", "argparse", "contextlib",
-                            "io", "math", "secrets", "threading", "typing",
-                            "collections", "functools", "itertools", "enum",
-                            "dataclasses", "abc", "copy", "tempfile", "shutil",
-                            "importlib", "traceback", "textwrap", "string",
-                            "unittest", "pytest", "__future__",
-                            "datetime", "warnings"):
-                continue
-            # Check if this is a local module (a .py file in scripts/)
-            potential_file = ROOT / "scripts" / f"{mod_name}.py"
-            if potential_file.exists():
-                # It's a local import — must be tracked
-                if f"scripts/{mod_name}.py" not in tracked and mod_name + ".py" not in tracked:
-                    pytest.fail(
-                        f"scripts/{py.name}: imports '{mod_name}' which exists as "
-                        f"scripts/{mod_name}.py but is NOT tracked by Git. "
-                        f"Run: git add scripts/{mod_name}.py"
-                    )
+        _assert_local_imports_tracked(py, tracked)
 
 
 # ─── 14. No untracked .py files that are imported by tracked code ──────────
@@ -714,21 +783,10 @@ def test_no_untracked_imported_modules():
         ["git", "status", "--short", "--porcelain", "scripts/"],
         cwd=ROOT, capture_output=True, text=True,
     )
-    untracked = []
-    for line in r.stdout.strip().splitlines():
-        if line.startswith("??") and line.endswith(".py"):
-            name = line.split("/")[-1].strip()
-            untracked.append(name.replace(".py", ""))
-
+    untracked = _untracked_module_names(r.stdout)
     if not untracked:
         return  # No untracked .py files — clean
 
     # Check if any tracked script imports these untracked modules
     for py in sorted((ROOT / "scripts").glob("*.py")):
-        src = py.read_text(encoding="utf-8")
-        for mod in untracked:
-            if re.search(rf"(?:from|import)\s+{mod}\b", src):
-                pytest.fail(
-                    f"scripts/{py.name}: imports '{mod}' which is UNTRACKED. "
-                    f"Run: git add scripts/{mod}.py — clean clone will break."
-                )
+        _assert_no_untracked_import(py, untracked)
