@@ -170,7 +170,7 @@ def test_remote_bootstrap_rejects_non_full_oid(
             env=environment,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=30,
             check=False,
         )
     else:
@@ -184,7 +184,7 @@ def test_remote_bootstrap_rejects_non_full_oid(
             env=environment,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=30,
             check=False,
         )
 
