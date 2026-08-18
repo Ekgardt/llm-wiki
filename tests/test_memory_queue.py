@@ -902,6 +902,42 @@ def test_publish_existing_mismatch_is_bounded_conflict_without_overwrite(
     assert queue.get(task_id).state == "leased"
 
 
+def _corrupt_as_symlink(monkeypatch, _memory_queue, _queue, result_path) -> None:
+    real_is_symlink = Path.is_symlink
+    monkeypatch.setattr(
+        Path,
+        "is_symlink",
+        lambda path: path == result_path or real_is_symlink(path),
+    )
+
+
+def _corrupt_as_oversize(monkeypatch, memory_queue, _queue, _result_path) -> None:
+    monkeypatch.setattr(memory_queue, "_MAX_RESULT_BYTES", 1)
+
+
+def _corrupt_as_changed(monkeypatch, _memory_queue, queue, _result_path) -> None:
+    monkeypatch.setattr(queue, "_validated_result_digest", lambda reference: None)
+
+
+def _corrupt_as_shared(monkeypatch, memory_queue, _queue, _result_path) -> None:
+    monkeypatch.setattr(memory_queue, "_is_owner_only", lambda path: False)
+
+
+_RESULT_CORRUPTIONS = {
+    "symlink": _corrupt_as_symlink,
+    "oversize": _corrupt_as_oversize,
+    "changed": _corrupt_as_changed,
+}
+
+
+def _corrupt_published_result(
+    monkeypatch, memory_queue, queue, result_path, invalid: str
+) -> None:
+    """One way an already-published result can stop being trustworthy."""
+    corrupt = _RESULT_CORRUPTIONS.get(invalid, _corrupt_as_shared)
+    corrupt(monkeypatch, memory_queue, queue, result_path)
+
+
 @pytest.mark.parametrize("invalid", ["symlink", "oversize", "changed", "owner"])
 def test_publish_existing_invalid_metadata_dead_letters_without_overwrite(
     queue: MemoryQueue,
@@ -915,20 +951,7 @@ def test_publish_existing_invalid_metadata_dead_letters_without_overwrite(
     assert lease is not None
     reference = queue.publish_result(lease, operation_id=task_id, result=b"original")
     result_path = queue.state_root / reference
-    if invalid == "symlink":
-        real_is_symlink = Path.is_symlink
-        monkeypatch.setattr(
-            Path,
-            "is_symlink",
-            lambda path: path == result_path or real_is_symlink(path),
-        )
-    elif invalid == "oversize":
-        monkeypatch.setattr(memory_queue, "_MAX_RESULT_BYTES", 1)
-    elif invalid == "changed":
-        monkeypatch.setattr(queue, "_validated_result_digest", lambda reference: None)
-    else:
-        monkeypatch.setattr(memory_queue, "_is_owner_only", lambda path: False)
-
+    _corrupt_published_result(monkeypatch, memory_queue, queue, result_path, invalid)
     incoming = b"x" if invalid == "oversize" else b"original"
     with pytest.raises(ResultConflictError, match="result_corrupt"):
         queue.publish_result(lease, operation_id=task_id, result=incoming)
@@ -1886,4 +1909,11 @@ def test_deferred_compile_failure_retries_then_dies(
     assert second.failed == 1
     assert dead.state == "dead"
     assert dead.error_code == "processor_failed"
-    assert len(calls) == 2
+    # macOS probes the filesystem with `/sbin/mount` for cloud-sync detection,
+    # so the raw call list carries unrelated commands; count the compiles.
+    compile_calls = [
+        command
+        for command in calls
+        if any("compile_memory.py" in str(part) for part in command)
+    ]
+    assert len(compile_calls) == 2
