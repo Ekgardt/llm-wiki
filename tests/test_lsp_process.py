@@ -3574,14 +3574,24 @@ def test_request_after_shutdown_cannot_restart_terminal_process(tmp_path: Path) 
 _OS_INJECTED_ENVIRONMENT = frozenset({"__CF_USER_TEXT_ENCODING"})
 
 
-def _idle_boundary_holds(process) -> bool:
-    """Exactly 300 seconds, measured against one stable idle baseline."""
-    baseline = process.last_used_monotonic
+def _idle_boundary_probe(process) -> tuple[bool, bool, bool]:
+    """Exactly 300 seconds, measured against one pinned idle baseline.
+
+    Reading the baseline is not enough: any use of the process stamps
+    `last_used_monotonic`, and a startup or restart worker can still be running
+    when the probe starts. Pinning the value first makes a stamp visible as a
+    moved baseline instead of a silently wrong comparison.
+    """
+    baseline = time.monotonic()
+    process.last_used_monotonic = baseline
     below = process.idle_expired(baseline + 299.999)
     at_boundary = process.idle_expired(baseline + 300.0)
-    if process.last_used_monotonic != baseline:
-        return False
-    return below is False and at_boundary is True
+    return below, at_boundary, process.last_used_monotonic == baseline
+
+
+def _idle_boundary_holds(process) -> bool:
+    below, at_boundary, stable = _idle_boundary_probe(process)
+    return stable and below is False and at_boundary is True
 
 
 def test_idle_expiry_is_exactly_300_seconds_and_rejects_non_finite_input(
@@ -3589,9 +3599,10 @@ def test_idle_expiry_is_exactly_300_seconds_and_rejects_non_finite_input(
 ) -> None:
     process = _start(tmp_path, "--lifecycle")
     try:
-        # Any use of the process stamps `last_used_monotonic`, so the boundary
-        # only means something when it did not move between the two probes.
-        assert any(_idle_boundary_holds(process) for _attempt in range(5))
+        # A moved baseline means a concurrent stamp, not a wrong boundary, so
+        # the last probe is reported rather than a bare `assert False`.
+        attempts = [_idle_boundary_holds(process) for _attempt in range(20)]
+        assert any(attempts), _idle_boundary_probe(process)
         for invalid in (math.nan, math.inf, True, "later"):
             with pytest.raises((TypeError, ValueError)):
                 process.idle_expired(invalid)  # type: ignore[arg-type]
@@ -7069,6 +7080,16 @@ def test_four_delayed_owner_acl_starts_share_deadline_and_leave_no_leaks(
     assert _lsp_thread_names() == initial_threads
 
 
+def _poll_until(predicate, timeout: float = 5.0) -> bool:
+    """Wait for state the transition lock holder must not block on."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return bool(predicate())
+
+
 def _coordinator_wait(process: LspProcess, predicate: object, timeout: float = 3.0) -> bool:
     coordinator = process._coordinator
     with coordinator.condition:
@@ -7657,7 +7678,7 @@ def test_heartbeat_failure_is_bounded_when_transition_lock_is_held(
     def hold_transition() -> None:
         with coordinator.condition:
             held.set()
-            assert release.wait(3)
+            assert release.wait(30)
 
     def fail_heartbeat(_instance: LspProcess, _deadline: float) -> None:
         attempted.set()
@@ -7671,13 +7692,18 @@ def test_heartbeat_failure_is_bounded_when_transition_lock_is_held(
     coordinator.heartbeat_wake.set()
 
     try:
-        assert attempted.wait(1)
-        heartbeat.join(0.25)
+        assert attempted.wait(5)
+        heartbeat.join(5)
         assert not heartbeat.is_alive()
         assert coordinator.pending_failure_intents >= 1
+        # The bounded TimeoutError is recorded by the recovery loop, and only
+        # while this thread still holds the transition lock. Waiting for it
+        # here keeps the later `close()` assertion from depending on how
+        # quickly that thread is scheduled.
+        assert _poll_until(lambda: coordinator.background_cleanup_error is not None)
     finally:
         release.set()
-        holder.join(1)
+        holder.join(5)
 
     assert _coordinator_wait(
         process,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -87,6 +88,10 @@ def test_user_owned_symlink_ancestor_is_still_rejected(tmp_path: Path) -> None:
         bounded_io.read_stable_bytes(link / "page.md", 1024, label="linked target")
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="Windows has no root-owned system symlink; reparse points stay refused",
+)
 def test_system_owned_symlink_ancestor_is_accepted(tmp_path, monkeypatch) -> None:
     """macOS reaches every temporary file through root's `/var` symlink."""
     import bounded_io
@@ -105,6 +110,30 @@ def test_system_owned_symlink_ancestor_is_accepted(tmp_path, monkeypatch) -> Non
     assert bounded_io.read_stable_bytes(
         link / "page.md", 1024, label="linked target"
     ) == b"inside"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows reparse points")
+def test_windows_reparse_point_ancestor_is_refused(tmp_path, monkeypatch) -> None:
+    """The exception is root ownership, which Windows cannot express here.
+
+    `_system_symlink` returns False on Windows by construction, and the reparse
+    attribute is refused before the symlink question is even asked.
+    """
+    import bounded_io
+
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "page.md").write_bytes(b"inside")
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(real, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    monkeypatch.setattr(bounded_io, "_system_symlink", lambda candidate: True)
+
+    with pytest.raises(PermissionError, match="parent must be a regular directory"):
+        bounded_io.read_stable_bytes(link / "page.md", 1024, label="linked target")
 
 
 def test_system_symlink_requires_root_owner_and_root_owned_parent(
