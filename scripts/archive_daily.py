@@ -57,6 +57,21 @@ MAX_POLICY_BYTES = 1024 * 1024
 MAX_ARCHIVE_ENTRIES = 10_000
 MAX_ARCHIVE_MONTHS = 1_200
 ARCHIVE_WRITER_WAIT_SECONDS = 0.25
+# Explicit access control entries survive `/inheritance:r`, which only drops
+# inherited ones. Windows images place explicit SYSTEM, Administrators and
+# OWNER RIGHTS entries on the temporary tree, so a sealed package needs the
+# same removal passes the cache root and the LSP owner directory already use.
+BROAD_ACL_SIDS = (
+    "*S-1-1-0",  # Everyone
+    "*S-1-3-0",  # Creator Owner
+    "*S-1-3-4",  # Owner Rights
+    "*S-1-5-11",  # Authenticated Users
+    "*S-1-5-18",  # Local System
+    "*S-1-5-32-544",  # Administrators
+    "*S-1-5-32-545",  # Users
+    "*S-1-15-2-1",  # All application packages
+    "*S-1-15-2-2",  # All restricted application packages
+)
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
@@ -1771,20 +1786,24 @@ class DailyArchiver:
         raise PermissionError("archive package contains a special file")
 
     @staticmethod
+    def _read_only_acl_commands(path: Path, identity: str) -> tuple[list[str], ...]:
+        access = "(OI)(CI)(RX)" if path.is_dir() else "(R)"
+        target = str(path)
+        return (
+            ["icacls", target, "/inheritance:r", "/grant:r", f"{identity}:{access}"],
+            ["icacls", target, "/remove:g", *BROAD_ACL_SIDS],
+            ["icacls", target, "/remove:d", *BROAD_ACL_SIDS],
+        )
+
+    @staticmethod
     def _windows_read_only_acl(path: Path) -> None:
         identity = _windows_acl_identity()
-        access = "(OI)(CI)(RX)" if path.is_dir() else "(R)"
-        changed = _run_acl_command(
-            [
-                "icacls",
-                str(path),
-                "/inheritance:r",
-                "/grant:r",
-                f"{identity}:{access}",
-            ]
-        )
+        applied = [
+            _run_acl_command(command)
+            for command in DailyArchiver._read_only_acl_commands(path, identity)
+        ]
         verified = _run_acl_command(["icacls", str(path)])
-        DailyArchiver._require_read_only_acl(identity, changed, verified)
+        DailyArchiver._require_read_only_acl(identity, applied, verified)
 
     @staticmethod
     def _acl_lines(acl: str) -> list[str]:
@@ -1806,17 +1825,19 @@ class DailyArchiver:
         )
 
     @staticmethod
-    def _require_acl_commands_succeeded(changed: object, verified: object) -> None:
-        if changed.returncode != 0 or verified.returncode != 0:
+    def _require_acl_commands_succeeded(applied: list, verified: object) -> None:
+        codes = [command.returncode for command in applied]
+        if any(code != 0 for code in codes) or verified.returncode != 0:
+            first = applied[0]
             raise DailyArchiver._acl_failure(
                 "icacls exit",
-                f"grant={changed.returncode} read={verified.returncode} "
-                f"{_acl_output_text(getattr(changed, 'stdout', b''))}",
+                f"apply={codes} read={verified.returncode} "
+                f"{_acl_output_text(getattr(first, 'stdout', b''))}",
             )
 
     @staticmethod
-    def _require_read_only_acl(identity: str, changed: object, verified: object) -> None:
-        DailyArchiver._require_acl_commands_succeeded(changed, verified)
+    def _require_read_only_acl(identity: str, applied: list, verified: object) -> None:
+        DailyArchiver._require_acl_commands_succeeded(applied, verified)
         acl = _acl_output_text(verified.stdout)
         acl_lines = DailyArchiver._acl_lines(acl)
         if not acl_lines:

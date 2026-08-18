@@ -167,6 +167,48 @@ def test_archive_queries_release_transaction_database(archive_vault) -> None:
     os.replace(replacement, database)
 
 
+def _block_with_manual_pin(root: Path, state_root: Path, daily: Path, digest: str) -> None:
+    (state_root / "run" / "archive-pins.json").write_text(
+        json.dumps({"daily_ids": [daily.stem], "source_hashes": []}), encoding="utf-8"
+    )
+
+
+def _block_with_decision(root: Path, state_root: Path, daily: Path, digest: str) -> None:
+    (root / "knowledge/notes/decision.md").write_text(
+        f"---\ntype: decision\n---\n\nEvidence: daily:{daily.stem} sha256:{digest}\n",
+        encoding="utf-8",
+    )
+
+
+def _block_with_queue_task(root: Path, state_root: Path, daily: Path, digest: str) -> None:
+    from memory_queue import MemoryQueue
+
+    MemoryQueue(state_root).enqueue("compile", 1, {"daily_id": daily.stem, "hash": digest})
+
+
+def _block_with_legacy_queue(root: Path, state_root: Path, daily: Path, digest: str) -> None:
+    legacy = state_root / "run" / "queue"
+    legacy.mkdir()
+    (legacy / "task.json").write_text(json.dumps({"daily_id": daily.stem}), encoding="utf-8")
+
+
+def _block_with_transaction(root: Path, state_root: Path, daily: Path, digest: str) -> None:
+    MarkdownCoordinator(root, state_root).prepare(
+        [MarkdownChange.delete(f"knowledge/daily/{daily.name}", max_before_bytes=1024)],
+        operation_id="pending-daily-delete",
+        preconditions={f"knowledge/daily/{daily.name}": digest},
+    )
+
+
+_BLOCKERS = {
+    "manual_pin": _block_with_manual_pin,
+    "decision": _block_with_decision,
+    "queue": _block_with_queue_task,
+    "legacy_queue": _block_with_legacy_queue,
+    "transaction": _block_with_transaction,
+}
+
+
 @pytest.mark.parametrize(
     ("blocker", "reason"),
     [
@@ -182,31 +224,9 @@ def test_eligibility_rejects_every_live_or_pinned_reference(
 ) -> None:
     root, state_root, daily = archive_vault
     digest = sha256_bytes(daily.read_bytes())
-    coordinator = MarkdownCoordinator(root, state_root)
 
-    if blocker == "manual_pin":
-        (state_root / "run" / "archive-pins.json").write_text(
-            json.dumps({"daily_ids": [daily.stem], "source_hashes": []}), encoding="utf-8"
-        )
-    elif blocker == "decision":
-        (root / "knowledge/notes/decision.md").write_text(
-            f"---\ntype: decision\n---\n\nEvidence: daily:{daily.stem} sha256:{digest}\n",
-            encoding="utf-8",
-        )
-    elif blocker == "queue":
-        from memory_queue import MemoryQueue
+    _BLOCKERS[blocker](root, state_root, daily, digest)
 
-        MemoryQueue(state_root).enqueue("compile", 1, {"daily_id": daily.stem, "hash": digest})
-    elif blocker == "legacy_queue":
-        legacy = state_root / "run" / "queue"
-        legacy.mkdir()
-        (legacy / "task.json").write_text(json.dumps({"daily_id": daily.stem}), encoding="utf-8")
-    elif blocker == "transaction":
-        coordinator.prepare(
-            [MarkdownChange.delete(f"knowledge/daily/{daily.name}", max_before_bytes=1024)],
-            operation_id="pending-daily-delete",
-            preconditions={f"knowledge/daily/{daily.name}": digest},
-        )
     result = _archiver(root, state_root).eligible(daily, hot_days=90)
     assert not result.eligible
     assert reason in result.reasons
@@ -1393,6 +1413,64 @@ def test_windows_read_only_acl_is_verified_and_fail_closed(tmp_path, monkeypatch
         lambda command: SimpleNamespace(returncode=1, stdout=b"", stderr=b"denied"),
     )
     with pytest.raises(PermissionError, match="ACL"):
+        archive_daily.DailyArchiver._set_archive_read_only(path)
+
+
+def _acl_removal_commands(calls: list) -> list:
+    return [command for command in calls if "/remove:g" in command or "/remove:d" in command]
+
+
+def test_windows_seal_removes_the_broad_principals(tmp_path, monkeypatch) -> None:
+    """Granting read-only access is not enough on a hosted Windows image.
+
+    `/inheritance:r` drops inherited entries only. The temporary tree carries
+    explicit SYSTEM, Administrators and OWNER RIGHTS entries, which survived the
+    grant and then failed the seal's own verification.
+    """
+    import archive_daily
+
+    path = tmp_path / "bag"
+    path.mkdir()
+    monkeypatch.setattr(archive_daily.os, "name", "nt")
+    monkeypatch.setattr(archive_daily, "_windows_acl_identity", lambda: "DOMAIN\\owner")
+    calls = []
+
+    def acl(command):
+        calls.append(command)
+        return SimpleNamespace(
+            returncode=0,
+            stdout=b"bag DOMAIN\\owner:(OI)(CI)(RX)\r\n",
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(archive_daily, "_run_acl_command", acl)
+    archive_daily.DailyArchiver._set_archive_read_only(path)
+
+    removals = _acl_removal_commands(calls)
+    assert [command[2] for command in removals] == ["/remove:g", "/remove:d"]
+    assert len(removals) == 2
+    for sid in ("*S-1-3-4", "*S-1-5-18", "*S-1-5-32-544"):
+        assert all(sid in command for command in removals)
+
+
+def test_windows_seal_fails_when_another_principal_survives(tmp_path, monkeypatch) -> None:
+    """The verification pass stays fail-closed once the removals have run."""
+    import archive_daily
+
+    path = tmp_path / "bag"
+    path.mkdir()
+    monkeypatch.setattr(archive_daily.os, "name", "nt")
+    monkeypatch.setattr(archive_daily, "_windows_acl_identity", lambda: "DOMAIN\\owner")
+    survivor = (
+        b"bag DOMAIN\\owner:(OI)(CI)(RX)\r\n"
+        b"    NT AUTHORITY\\SYSTEM:(F)\r\n"
+    )
+    monkeypatch.setattr(
+        archive_daily,
+        "_run_acl_command",
+        lambda command: SimpleNamespace(returncode=0, stdout=survivor, stderr=b""),
+    )
+    with pytest.raises(PermissionError, match="principal other than"):
         archive_daily.DailyArchiver._set_archive_read_only(path)
 
 
