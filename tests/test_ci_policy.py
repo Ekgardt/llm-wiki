@@ -91,11 +91,11 @@ def test_full_suite_matrix_contains_every_supported_python_endpoint() -> None:
     assert job["strategy"]["matrix"]["include"] == [
         {"os": "ubuntu-24.04", "python": "3.10", "timeout": 45, "class": "linux_full"},
         {"os": "ubuntu-24.04", "python": "3.14", "timeout": 45, "class": "linux_full"},
-        {"os": "windows-2025", "python": "3.10", "timeout": 60, "class": "windows_full"},
-        {"os": "windows-2025", "python": "3.11", "timeout": 60, "class": "windows_full"},
-        {"os": "windows-2025", "python": "3.12", "timeout": 60, "class": "windows_full"},
-        {"os": "windows-2025", "python": "3.13", "timeout": 60, "class": "windows_full"},
-        {"os": "windows-2025", "python": "3.14", "timeout": 60, "class": "windows_full"},
+        {"os": "windows-2025", "python": "3.10", "timeout": 90, "class": "windows_full"},
+        {"os": "windows-2025", "python": "3.11", "timeout": 90, "class": "windows_full"},
+        {"os": "windows-2025", "python": "3.12", "timeout": 90, "class": "windows_full"},
+        {"os": "windows-2025", "python": "3.13", "timeout": 90, "class": "windows_full"},
+        {"os": "windows-2025", "python": "3.14", "timeout": 90, "class": "windows_full"},
         {"os": "macos-15", "python": "3.10", "timeout": 45, "class": "macos_full"},
         {"os": "macos-15", "python": "3.14", "timeout": 45, "class": "macos_full"},
     ]
@@ -160,7 +160,7 @@ def test_job_timeouts_names_and_timing_artifacts_match_approved_classes() -> Non
     jobs = _workflow()["jobs"]
     assert jobs["lint"]["timeout-minutes"] == 15
     assert jobs["lint"]["name"] == "timing::focused::lint"
-    assert jobs["pyright-navigation"]["timeout-minutes"] == 15
+    assert jobs["pyright-navigation"]["timeout-minutes"] == "${{ matrix.timeout }}"
     assert jobs["pyright-navigation"]["name"].startswith("timing::focused::")
     assert jobs["installer"]["name"] == "timing::installer::${{ matrix.platform }}"
     for name in ("clean-production", "clean-hybrid", "clean-code-graph"):

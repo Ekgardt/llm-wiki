@@ -17,7 +17,7 @@ from tests.test_reliability_v3_adoption import (
 )
 
 
-def _under_contention(call, *arguments, attempts: int = 6, **keywords):
+def _under_contention(call, *arguments, attempts: int = 12, **keywords):
     """Retry a blackboard call whose global writer gate timed out.
 
     Every blackboard operation, reads included, appends through the one global

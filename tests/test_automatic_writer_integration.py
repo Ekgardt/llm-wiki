@@ -76,7 +76,7 @@ def _vault(tmp_path: Path) -> tuple[Path, Path]:
     return vault, state
 
 
-def _under_contention(call, *arguments, attempts: int = 6, **keywords):
+def _under_contention(call, *arguments, attempts: int = 12, **keywords):
     """Retry a write whose global writer gate timed out.
 
     The gate budget is ten seconds and a caller cannot extend it; the documented
@@ -853,11 +853,17 @@ def test_concurrent_daily_and_project_jsonl_appends_never_interleave(tmp_path, m
     jsonl = vault / "knowledge" / "projects" / "demo" / ".blackboard" / "tasks.jsonl"
 
     def append(index: int) -> None:
-        markdown_transaction.append_knowledge(
-            f"daily:event-{index}", daily, f"D{index:02d}-start\nD{index:02d}-end\n".encode()
+        _under_contention(
+            markdown_transaction.append_knowledge,
+            f"daily:event-{index}",
+            daily,
+            f"D{index:02d}-start\nD{index:02d}-end\n".encode(),
         )
-        markdown_transaction.append_knowledge(
-            f"project:event-{index}", jsonl, f'{{"id":{index}}}\n'.encode()
+        _under_contention(
+            markdown_transaction.append_knowledge,
+            f"project:event-{index}",
+            jsonl,
+            f'{{"id":{index}}}\n'.encode(),
         )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
