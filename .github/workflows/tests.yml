@@ -70,25 +70,28 @@ jobs:
             python: "3.14"
             timeout: 45
             class: linux_full
+          # The hosted Windows image runs the full suite in 47 to 59 minutes,
+          # and a slow one was cancelled at the sixty-minute mark with a third
+          # of the suite unrun. Ninety minutes keeps a slow image legible.
           - os: windows-2025
             python: "3.10"
-            timeout: 60
+            timeout: 90
             class: windows_full
           - os: windows-2025
             python: "3.11"
-            timeout: 60
+            timeout: 90
             class: windows_full
           - os: windows-2025
             python: "3.12"
-            timeout: 60
+            timeout: 90
             class: windows_full
           - os: windows-2025
             python: "3.13"
-            timeout: 60
+            timeout: 90
             class: windows_full
           - os: windows-2025
             python: "3.14"
-            timeout: 60
+            timeout: 90
             class: windows_full
           - os: macos-15
             python: "3.10"
