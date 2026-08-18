@@ -35,10 +35,14 @@ def injected_context() -> str:
     # so this subprocess is safe even without env vars — but tests that
     # DO rely on env stay consistent.
     import os
+    # The hook reconfigures its stdout to UTF-8, so the reader has to say so
+    # too: on Windows `text=True` alone decodes with the ANSI code page and
+    # fails on the first non-ASCII character in the injected context.
     out = subprocess.check_output(
         [sys.executable, str(SCRIPT)],
         env=os.environ.copy(),
         text=True,
+        encoding="utf-8",
     )
     d = json.loads(out)
     return d["hookSpecificOutput"]["additionalContext"]

@@ -294,6 +294,33 @@ def test_runtime_file_identity_round_trips_through_create_only_publication(
     assert destination.read_bytes() == b'{"value":1}'
 
 
+def test_runtime_identity_capture_allows_a_live_writer(tmp_path: Path) -> None:
+    """Operational databases stay open while their identity is captured.
+
+    Windows honours the share mode of the handle. Capturing identity through a
+    handle that denied writers failed with `ERROR_SHARING_VIOLATION` as soon as
+    the same process held the database open, which is the normal case for a
+    second capture in one session.
+    """
+    state_root = tmp_path / "state"
+    (state_root / "run").mkdir(parents=True)
+    database = state_root / "run" / "queue.sqlite3"
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("CREATE TABLE example (value INTEGER)")
+        connection.commit()
+        first = reliable_memory.capture_runtime_file_identity(
+            database, state_root=state_root
+        )
+        second = reliable_memory.capture_runtime_file_identity(
+            database, state_root=state_root
+        )
+    finally:
+        connection.close()
+    assert first == second
+    assert first.platform in {"posix", "windows"}
+
+
 def test_runtime_file_publication_is_create_only_and_compare_and_replace_fenced(
     tmp_path: Path,
 ) -> None:

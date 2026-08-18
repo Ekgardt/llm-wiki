@@ -738,6 +738,26 @@ def read_runtime_bytes(
         os.close(descriptor)
 
 
+def _windows_runtime_identity_names(target: Path) -> tuple[str, str]:
+    """Volume and file id for one open runtime file, writers still allowed."""
+    import windows_workspace
+
+    handle = windows_workspace.open_shared_readonly_runtime_file(target)
+    try:
+        volume, file_id, is_directory = windows_workspace.identity(
+            handle, directory=False
+        )
+    finally:
+        windows_workspace.close_handle(handle)
+    if is_directory:
+        raise PermissionError("runtime artifact must be a regular file")
+    return f"volume:{volume}", f"file-id:{file_id.hex()}"
+
+
+def _posix_runtime_identity_names(current: os.stat_result) -> tuple[str, str]:
+    return f"dev:{current.st_dev}", f"ino:{current.st_ino}"
+
+
 def capture_runtime_file_identity(
     path: Path, *, state_root: Path
 ) -> RuntimeFileIdentity:
@@ -745,33 +765,16 @@ def capture_runtime_file_identity(
     target = Path(path)
     root = Path(state_root).resolve(strict=True)
     metadata = validate_runtime_file(target, root, max_bytes=1 << 50)
-    if os.name == "nt":
-        import windows_workspace
-
-        handle = windows_workspace.open_exclusive_readonly_source_file(target)
-        try:
-            volume, file_id, is_directory = windows_workspace.identity(
-                handle, directory=False
-            )
-            if is_directory:
-                raise PermissionError("runtime artifact must be a regular file")
-        finally:
-            windows_workspace.close_handle(handle)
-        current = target.stat(follow_symlinks=False)
-        if not os.path.samestat(metadata, current):
-            raise PermissionError("runtime file identity changed during capture")
-        platform_name = "windows"
-        volume_name = f"volume:{volume}"
-        file_name = f"file-id:{file_id.hex()}"
-    else:
-        current = target.stat(follow_symlinks=False)
-        if not os.path.samestat(metadata, current):
-            raise PermissionError("runtime file identity changed during capture")
-        platform_name = "posix"
-        volume_name = f"dev:{current.st_dev}"
-        file_name = f"ino:{current.st_ino}"
+    on_windows = os.name == "nt"
+    names = _windows_runtime_identity_names(target) if on_windows else None
+    current = target.stat(follow_symlinks=False)
+    if not os.path.samestat(metadata, current):
+        raise PermissionError("runtime file identity changed during capture")
+    if names is None:
+        names = _posix_runtime_identity_names(current)
+    volume_name, file_name = names
     return RuntimeFileIdentity(
-        platform=platform_name,
+        platform="windows" if on_windows else "posix",
         volume=volume_name,
         file_id=file_name,
         size=current.st_size,
