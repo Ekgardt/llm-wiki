@@ -6598,11 +6598,17 @@ def test_windows_500_start_close_cycles_keep_process_handle_count_bounded(
     )
 
     def start_untracked() -> LspProcess:
-        return lsp_process._start_lsp_process(
+        # Five hundred spawns on a hosted Windows image; the two-second default
+        # startup budget is not what this test measures, and one cycle that
+        # loses the race reports a thread-start timeout instead of a handle
+        # leak. The path is otherwise the plain one.
+        return lsp_process._start_lsp_process_impl(
             LspProcess,
             _command("--lifecycle"),
             cwd=tmp_path,
             owner_root=tmp_path / OWNER_NONCE,
+            configured_deadline=time.monotonic() + 30,
+            generation_configuration=lsp_process._unconfigured_generation(),
         )
 
     retained_handles: list[object] = []

@@ -884,7 +884,10 @@ def test_recovery_passes_deadline_and_cancellation_to_source_removal(
 
     monkeypatch.setattr(archiver.coordinator, "prepare", prepare)
     monkeypatch.setattr(archiver.coordinator, "apply", apply)
-    deadline = time.monotonic() + 5
+    # Recovery rebuilds the archive index on the way through. What is under
+    # test is that the deadline and the cancellation callback reach source
+    # removal, not how long the rebuild takes on the host.
+    deadline = time.monotonic() + 60
 
     def cancelled() -> bool:
         return False
