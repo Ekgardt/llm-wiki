@@ -465,10 +465,17 @@ class _WindowsWaitState:
 
 
 def _signal_group(group: int, number: int, errors: list[BaseException]) -> None:
-    """Signal the whole group; an already-gone group is not a failure."""
+    """Signal the whole group.
+
+    An already-gone group is not a failure, and neither is EPERM: macOS answers
+    it when the group still holds a process this caller may not signal — a
+    zombie awaiting its parent, typically — while the processes we do own were
+    signalled. Whether the group actually goes away is decided afterwards by
+    `_wait_posix_tree`, which still reports a timeout when it does not.
+    """
     try:
         os.killpg(group, number)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         return
     except BaseException as error:  # noqa: BLE001 - reported by the caller
         errors.append(error)
