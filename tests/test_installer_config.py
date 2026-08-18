@@ -358,6 +358,24 @@ def _process_exists(pid: int) -> bool:
     return True
 
 
+def _read_text_quietly(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _await_probe_pid(pid_file: Path, timeout: float = 2.0) -> int:
+    """The child records its PID before sleeping; the write can lag the kill."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        text = _read_text_quietly(pid_file)
+        if text:
+            return int(text)
+        time.sleep(0.01)
+    pytest.fail(f"probe child never recorded its PID in {pid_file}")
+
+
 @pytest.mark.parametrize("mode", ["hung", "oversized"])
 def test_hung_or_oversized_debug_probe_is_bounded_and_cleans_child(
     tmp_path: Path, mode: str
@@ -384,7 +402,7 @@ def test_hung_or_oversized_debug_probe_is_bounded_and_cleans_child(
 
     assert status == "configured_unverified"
     assert time.monotonic() - started < 3
-    pid = int(pid_file.read_text(encoding="utf-8"))
+    pid = _await_probe_pid(pid_file)
     for _ in range(100):
         if not _process_exists(pid):
             break
