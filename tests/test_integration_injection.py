@@ -3889,7 +3889,9 @@ def test_opencode_vault_guard_uses_resolved_path_boundary(opencode_plugin_url: s
         }} }};
         await sibling.event(created);
         await vault.event(created);
-        console.log(commands.length);
+        // A number goes through `util.inspect`, which colours it when
+        // FORCE_COLOR is set in the developer's shell; a string never does.
+        console.log(String(commands.length));
         """
     )
 
