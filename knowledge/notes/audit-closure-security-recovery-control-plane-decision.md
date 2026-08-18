@@ -144,3 +144,4 @@ actually been exercised.
 - [[knowledge/notes/managed-ide-hooks-install-update-decision]]
 - [[knowledge/notes/baseline-environment-binding-decision]]
 - [[knowledge/notes/observable-capture-and-bounded-maintenance-decision]]
+- [[knowledge/notes/system-symlink-ancestor-decision]]

@@ -109,3 +109,4 @@ redacted error reach the trail.
 - [[knowledge/notes/audit-closure-security-recovery-control-plane-decision]]
 - [[knowledge/notes/v4-reliability-contracts-decision]]
 - [[knowledge/notes/reliable-memory-stage-2]]
+- [[knowledge/notes/system-symlink-ancestor-decision]]
