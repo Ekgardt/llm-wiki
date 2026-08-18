@@ -48,6 +48,11 @@ def _write_blackboard_batch(vault: str, state_root: str, worker: int, count: int
             f"worker {worker} task {index}",
             f"agent-{worker}",
             resources=[f"worker/{worker}/task/{index}"],
+            # The default lease is thirty seconds. Six processes queueing for
+            # one writer gate on a hosted Windows image can spend longer than
+            # that between claim and completion, and the expiry then fails the
+            # run for contention rather than for incoherence.
+            ttl_seconds=600,
         )
         if _under_contention(blackboard.complete_task, "demo", claim):
             completed += 1

@@ -6685,7 +6685,10 @@ def test_windows_200_crash_restarts_with_children_have_no_false_failure_or_leaks
         before = (
             pid_log.read_text(encoding="ascii").splitlines() if pid_log.exists() else []
         )
-        process = lsp_process._start_lsp_process(
+        # The two-second default startup budget is not what two hundred crash
+        # and restart cycles measure, and one cycle that loses it reports a
+        # startup timeout instead of a leaked handle or a false failure.
+        process = lsp_process._start_lsp_process_impl(
             LspProcess,
             _command(
                 "--lifecycle",
@@ -6697,6 +6700,8 @@ def test_windows_200_crash_restarts_with_children_have_no_false_failure_or_leaks
             ),
             cwd=tmp_path,
             owner_root=tmp_path / OWNER_NONCE,
+            configured_deadline=time.monotonic() + 30,
+            generation_configuration=lsp_process._unconfigured_generation(),
         )
         handles: list[int] = []
         exit_results: list[int] = []

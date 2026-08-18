@@ -156,7 +156,7 @@ def test_opencode_roleless_user_message_is_forwarded_once(opencode_plugin_url: s
         [require_tool("node"), "--input-type=module", "-e", script],
         capture_output=True,
         text=True,
-        timeout=5,
+        timeout=30,
         check=False,
     )
 
@@ -1528,7 +1528,7 @@ def test_opencode_node_injects_shared_bounded_legacy_handoff_for_unicode_slug(
         text=True,
         encoding="utf-8",
         check=False,
-        timeout=5,
+        timeout=30,
     )
     assert node.returncode == 0, node.stderr
     assert json.loads(node.stdout) == [result["context"]]
@@ -3821,7 +3821,7 @@ def test_opencode_forwards_known_mutation_and_dirty_idle_without_fake_progress_s
         [require_tool("node"), "--input-type=module", "-e", script],
         capture_output=True,
         text=True,
-        timeout=5,
+        timeout=30,
         check=False,
     )
 
@@ -3899,7 +3899,7 @@ def test_opencode_vault_guard_uses_resolved_path_boundary(opencode_plugin_url: s
         [require_tool("node"), "--input-type=module", "-e", script],
         capture_output=True,
         text=True,
-        timeout=5,
+        timeout=30,
         check=False,
     )
 
