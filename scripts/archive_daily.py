@@ -61,7 +61,7 @@ ARCHIVE_WRITER_WAIT_SECONDS = 0.25
 # inherited ones. Windows images place explicit SYSTEM, Administrators and
 # OWNER RIGHTS entries on the temporary tree, so a sealed package needs the
 # same removal passes the cache root and the LSP owner directory already use.
-BROAD_ACL_SIDS = (
+_BROAD_ACL_SIDS = (
     "*S-1-1-0",  # Everyone
     "*S-1-3-0",  # Creator Owner
     "*S-1-3-4",  # Owner Rights
@@ -1791,8 +1791,8 @@ class DailyArchiver:
         target = str(path)
         return (
             ["icacls", target, "/inheritance:r", "/grant:r", f"{identity}:{access}"],
-            ["icacls", target, "/remove:g", *BROAD_ACL_SIDS],
-            ["icacls", target, "/remove:d", *BROAD_ACL_SIDS],
+            ["icacls", target, "/remove:g", *_BROAD_ACL_SIDS],
+            ["icacls", target, "/remove:d", *_BROAD_ACL_SIDS],
         )
 
     @staticmethod
