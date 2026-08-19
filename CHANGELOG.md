@@ -56,6 +56,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `memory_queue.py restore --export <path>` brings the work in one verified purge
+  export back as new ready tasks, refusing the whole export if the manifest, the
+  records digest, any result digest, or the id list fails to verify.
+- `memory_queue.py purge --include-dead` retires attempts-exhausted tasks through
+  that same export-first path. Without the flag they are retained, because a dead
+  task records work the system promised and never did.
+
 - Read-only Python code navigation through pinned Pyright 1.1.411: bounded stdlib
   LSP protocol, generation-aware process lifecycle ownership, workspace-revision
   freshness retry, normalized navigation facade, deterministic renderer, precise
