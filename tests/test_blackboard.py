@@ -402,3 +402,32 @@ def test_a_reconciled_activation_does_not_break_the_claimer(blackboard_vault):
         f"blackboard-active:{claim.claim_id}",
     )
     assert blackboard.get_status("demo")["active_tasks"] == 1
+
+
+def test_a_claim_whose_record_fails_releases_its_resources(
+    blackboard_vault: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller that never learns it holds a claim must not be blocked by it."""
+    real_append = blackboard._append_jsonl
+    failures: list[str] = []
+
+    def failing_append(path, record, operation_id):
+        if operation_id.startswith("blackboard-active:"):
+            failures.append(operation_id)
+            raise TimeoutError("Markdown writer gate deadline expired")
+        return real_append(path, record, operation_id)
+
+    monkeypatch.setattr(blackboard, "_append_jsonl", failing_append)
+    with pytest.raises(TimeoutError):
+        blackboard.claim_task(
+            "demo", "task", "agent-a", resources=["shared/resource"]
+        )
+    assert len(failures) == 1
+
+    monkeypatch.setattr(blackboard, "_append_jsonl", real_append)
+    claim = blackboard.claim_task(
+        "demo", "task", "agent-a", resources=["shared/resource"]
+    )
+    assert claim.resources == ("shared/resource",)
+    assert blackboard.complete_task("demo", claim) is True

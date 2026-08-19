@@ -33,6 +33,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -486,8 +487,29 @@ def claim_task(
         acquired = _acquire_claim(_coordinator(), claim)
     except _ResourceBusy as busy:
         _raise_conflict(slug, claim, busy)
-    _append_jsonl(tasks_file, _claim_active_record(acquired), f"blackboard-active:{claim.claim_id}")
+    _publish_active_claim(tasks_file, acquired)
     return acquired
+
+
+def _publish_active_claim(tasks_file: Path, acquired: BlackboardClaim) -> None:
+    """Record the acquired claim, releasing it if the record cannot be written.
+
+    The resource rows are inserted before the claim is announced. When the
+    announcement fails, the caller never learns that it holds the resources,
+    and its retry would meet its own rows as a conflict. Releasing here keeps
+    the operation atomic from the caller's side: either the claim is held and
+    recorded, or it is not held at all.
+    """
+    try:
+        _append_jsonl(
+            tasks_file,
+            _claim_active_record(acquired),
+            f"blackboard-active:{acquired.claim_id}",
+        )
+    except BaseException:
+        with contextlib.suppress(Exception):
+            _delete_exact_claim(_coordinator(), acquired)
+        raise
 
 
 def _row_epochs(rows: Sequence[sqlite3.Row]) -> tuple[tuple[str, int], ...]:
