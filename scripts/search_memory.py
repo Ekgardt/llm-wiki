@@ -1941,6 +1941,53 @@ def _generation_consumption_unchanged(
         return False
 
 
+def _read_only_connect_options(deadline: float | None) -> dict[str, object]:
+    options: dict[str, object] = {"uri": True}
+    if deadline is not None:
+        options["timeout"] = max(0.0, min(5.0, deadline - time.monotonic()))
+    return options
+
+
+def _close_quietly(connection: sqlite3.Connection) -> None:
+    try:
+        connection.close()
+    except sqlite3.Error:
+        pass
+
+
+def _connectable_generation(
+    manifest: dict[str, object], generations_path: object, generation_id: object
+) -> bool:
+    if not isinstance(generation_id, str) or generations_path is None:
+        return False
+    return bool(_generation_artifact(manifest, GENERATION_FTS_ARTIFACT))
+
+
+def _validated_generation_connection(
+    artifact: Path,
+    manifest: dict[str, object],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> sqlite3.Connection | None:
+    """Open the artifact read-only and hand it back only once it validates."""
+    _check_generation_stop(deadline, cancelled)
+    connection = sqlite3.connect(
+        f"{artifact.resolve().as_uri()}?mode=ro",
+        **_read_only_connect_options(deadline),
+    )
+    try:
+        _check_generation_stop(deadline, cancelled)
+        if not _valid_generation_fts(
+            connection, manifest, deadline=deadline, cancelled=cancelled
+        ):
+            connection.close()
+            return None
+        return connection
+    except BaseException:
+        _close_quietly(connection)
+        raise
+
+
 def _generation_connection(
     catalog: object,
     manifest: dict[str, object],
@@ -1949,41 +1996,18 @@ def _generation_connection(
     cancelled: Callable[[], bool] | None = None,
 ) -> sqlite3.Connection | None:
     _check_generation_stop(deadline, cancelled)
-    generation_id = manifest.get("generation_id")
     generations_path = getattr(catalog, "generations_path", None)
-    if not isinstance(generation_id, str) or generations_path is None:
-        return None
-    if not _generation_artifact(manifest, GENERATION_FTS_ARTIFACT):
+    generation_id = manifest.get("generation_id")
+    if not _connectable_generation(manifest, generations_path, generation_id):
         return None
     artifact = Path(generations_path) / generation_id / GENERATION_FTS_ARTIFACT
     try:
-        connect_options = {"uri": True}
-        if deadline is not None:
-            connect_options["timeout"] = max(
-                0.0, min(5.0, deadline - time.monotonic())
-            )
-        _check_generation_stop(deadline, cancelled)
-        connection = sqlite3.connect(
-            f"{artifact.resolve().as_uri()}?mode=ro", **connect_options
+        return _validated_generation_connection(
+            artifact, manifest, deadline, cancelled
         )
-        _check_generation_stop(deadline, cancelled)
-        if not _valid_generation_fts(
-            connection, manifest, deadline=deadline, cancelled=cancelled
-        ):
-            connection.close()
-            return None
-        return connection
     except TimeoutError:
-        try:
-            connection.close()
-        except (UnboundLocalError, sqlite3.Error):
-            pass
         raise
     except (OSError, PermissionError, sqlite3.Error, TypeError, ValueError):
-        try:
-            connection.close()
-        except (UnboundLocalError, sqlite3.Error):
-            pass
         return None
 
 
@@ -4626,6 +4650,59 @@ def _legacy_vector_source_membership(
     return list(zip(live["source_paths"], live["source_sha256"], strict=True))
 
 
+def _expected_vector_metadata(live: dict, vectors, finite: bool) -> dict:
+    """What the sidecar must say for the cached artifact to still be usable."""
+    return {
+        "schema_version": "legacy-vectors/v1",
+        "model_id": EMBEDDING_MODEL,
+        "model_revision": EMBEDDING_MODEL_REVISION,
+        "dimensions": EMBEDDING_DIM,
+        "source_paths": live["source_paths"],
+        "source_sha256": live["source_sha256"],
+        "titles": live["titles"],
+        "summaries": live["summaries"],
+        "projects": live["projects"],
+        "timestamps": live["timestamps"],
+        "dtype": str(vectors.dtype),
+        "shape": list(vectors.shape),
+        "finite": finite,
+        "artifact_sha256": _artifact_descriptor(VECTOR_NPY, "vectors.npy")["sha256"],
+    }
+
+
+def _matching_vector_block(vectors, count: int, finite: bool) -> bool:
+    import numpy as np
+
+    return (
+        vectors.ndim == 2
+        and vectors.shape == (count, EMBEDDING_DIM)
+        and vectors.dtype == np.dtype(np.float32)
+        and finite
+    )
+
+
+def _cached_vectors(
+    pages: list[Path], deadline: float | None, cancelled: Callable[[], bool] | None
+) -> dict | None:
+    """Accept the cached artifact only when it still describes the live sources."""
+    try:
+        import numpy as np
+
+        cache_meta = json.loads(VECTOR_META.read_text(encoding="utf-8"))
+        vectors = np.load(str(VECTOR_NPY), mmap_mode="r", allow_pickle=False)
+        live = _legacy_vector_documents(pages, deadline=deadline, cancelled=cancelled)
+        finite = bool(np.isfinite(vectors).all())
+        expected = _expected_vector_metadata(live, vectors, finite)
+        count = len(live["source_paths"])
+        if cache_meta != expected or not _matching_vector_block(vectors, count, finite):
+            return None
+        return {**live, **cache_meta, "paths": live["source_paths"], "vectors": vectors}
+    except TimeoutError:
+        raise
+    except Exception:
+        return None
+
+
 def _load_or_build_vectors(
     pages: list[Path],
     *,
@@ -4638,50 +4715,10 @@ def _load_or_build_vectors(
     small .json for metadata. Existing artifacts are accepted only when every
     metadata value still matches the configured model and live source bytes.
     """
-    # Try .npy format (fast, memory-mapped). Never convert mmap → Python list.
+    # Try .npy format (fast, memory-mapped). Never convert mmap to a Python list.
     _check_legacy_stop(deadline, cancelled)
     if VECTOR_NPY.exists() and VECTOR_META.exists():
-        try:
-            import numpy as np
-
-            cache_meta = json.loads(VECTOR_META.read_text(encoding="utf-8"))
-            vectors = np.load(str(VECTOR_NPY), mmap_mode="r", allow_pickle=False)
-            live = _legacy_vector_documents(
-                pages, deadline=deadline, cancelled=cancelled
-            )
-            finite = bool(np.isfinite(vectors).all())
-            expected = {
-                "schema_version": "legacy-vectors/v1",
-                "model_id": EMBEDDING_MODEL,
-                "model_revision": EMBEDDING_MODEL_REVISION,
-                "dimensions": EMBEDDING_DIM,
-                "source_paths": live["source_paths"],
-                "source_sha256": live["source_sha256"],
-                "titles": live["titles"],
-                "summaries": live["summaries"],
-                "projects": live["projects"],
-                "timestamps": live["timestamps"],
-                "dtype": str(vectors.dtype),
-                "shape": list(vectors.shape),
-                "finite": finite,
-                "artifact_sha256": _artifact_descriptor(VECTOR_NPY, "vectors.npy")[
-                    "sha256"
-                ],
-            }
-            if (
-                cache_meta != expected
-                or vectors.ndim != 2
-                or vectors.shape != (len(live["source_paths"]), EMBEDDING_DIM)
-                or vectors.dtype != np.dtype(np.float32)
-                or not finite
-            ):
-                return None
-            return {**live, **cache_meta, "paths": live["source_paths"], "vectors": vectors}
-        except TimeoutError:
-            raise
-        except Exception:
-            return None
-
+        return _cached_vectors(pages, deadline, cancelled)
     return _build_vectors(pages, deadline=deadline, cancelled=cancelled)
 
 
