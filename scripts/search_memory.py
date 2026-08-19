@@ -3115,6 +3115,167 @@ def _search_backends(
     )
 
 
+def _legacy_bm25_rows(
+    conn: sqlite3.Connection, query: str, limit: int
+) -> list[tuple[object, ...]]:
+    """Adaptive fetch: short queries match more pages, so ask for more."""
+    words = [word for word in query.split() if word]
+    fts_query = " ".join(f'"{word.replace(chr(34), chr(34) * 2)}"' for word in words)
+    multiplier = 5 if len(words) <= 3 else 3
+    return conn.execute(
+        """
+        SELECT path, title, summary, project, timestamp, bm25(pages) as rank
+        FROM pages
+        WHERE pages MATCH ?
+        ORDER BY rank
+        LIMIT ?
+        """,
+        (fts_query, limit * multiplier),
+    ).fetchall()
+
+
+def _legacy_row_excluded(path: str, timestamp: str, since: str | None, as_of: str | None) -> bool:
+    if since and timestamp and timestamp[:10] < since:
+        return True
+    if not as_of:
+        return False
+    if timestamp and timestamp[:10] > as_of[:10]:
+        return True
+    return not _valid_as_of(path, as_of)
+
+
+def _legacy_scored_rows(
+    rows: list[tuple[object, ...]],
+    *,
+    query_lower: str,
+    query_words: set[str],
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+) -> list[dict]:
+    scored = [
+        _legacy_scored_row(
+            row,
+            query_lower=query_lower,
+            query_words=query_words,
+            project=project,
+        )
+        for row in rows
+        if not _legacy_row_excluded(str(row[0]), str(row[4] or ""), since, as_of)
+    ]
+    # FTS5 returns bm25() order; the boosts above change it.
+    scored.sort(key=lambda row: row["score"], reverse=True)
+    return scored
+
+
+def _legacy_scored_row(
+    row: tuple[object, ...],
+    *,
+    query_lower: str,
+    query_words: set[str],
+    project: str | None,
+) -> dict:
+    path, title, summary, proj, timestamp, rank = row
+    score = _boosted_lexical_score(
+        rank,
+        path=path,
+        title=title,
+        row_project=proj or "",
+        query_lower=query_lower,
+        query_words=query_words,
+        project=project,
+    )
+    return {
+        "path": path,
+        "title": title,
+        "summary": summary[:120] if summary else "",
+        "score": round(score, 2),
+        "project": proj or "",
+        "timestamp": timestamp or "",
+    }
+
+
+def _exact_filename_answer(rows: list[dict], query: str, limit: int) -> list[dict] | None:
+    """A page whose filename is the query wins outright, before any fusion.
+
+    Otherwise a graph neighbour can promote a linked-but-wrong page above it.
+    Duplicates prefer the canonical notes tree.
+    """
+    normalized = query.lower().strip().replace(" ", "-")
+    matches = [row for row in rows[:10] if Path(row["path"]).stem.lower() == normalized]
+    if not matches:
+        return None
+    matches.sort(key=lambda row: (0 if "knowledge/notes/" in row["path"] else 1, -row["score"]))
+    best = matches[0]
+    rest = [row for row in rows if row["path"] != best["path"]][: limit - 1]
+    return [best, *rest]
+
+
+def _legacy_vector_results(
+    query: str,
+    pages: list[Path],
+    limit: int,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+) -> list[dict] | None:
+    """LanceDB when it is there, brute-force NumPy otherwise, None on failure."""
+    results = _lance_vector_results(query, limit, project, since, as_of)
+    if results is not None:
+        return results
+    try:
+        return _vector_search(query, pages, limit * 3, project, since, as_of)
+    except Exception as error:  # noqa: BLE001 - a failed optional signal is reported
+        print(f"  (vector search failed: {error})", file=sys.stderr)
+        return None
+
+
+def _lance_vector_results(
+    query: str,
+    limit: int,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+) -> list[dict] | None:
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from lance_store import have_lancedb
+        from lance_store import vector_search as _lance_search
+
+        if not have_lancedb():
+            return None
+        vectors = _embed_texts([query], is_query=True)
+        if not vectors:
+            return None
+        return _lance_search(vectors[0], limit * 3, project, since=since, as_of=as_of) or None
+    except Exception:  # noqa: BLE001 - optional backend
+        return None
+
+
+def _legacy_graph_boosts(
+    graph: bool, bm25_results: list[dict], vector_results: list[dict] | None
+) -> list[dict] | None:
+    if not graph:
+        return None
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from graph_neighbors import boost_graph_neighbors
+
+        return boost_graph_neighbors(bm25_results, vector_results)
+    except Exception:  # noqa: BLE001 - optional signal
+        return None
+
+
+def _project_boosted_fusion(fused: list[dict], project: str | None) -> list[dict]:
+    if not project:
+        return fused
+    for row in fused:
+        if row.get("project", "").lower() == project.lower():
+            row["fused_score"] = round(row["fused_score"] * 1.5, 4)
+    fused.sort(key=lambda row: row.get("fused_score", 0), reverse=True)
+    return fused
+
+
 def _legacy_search(
     query: str,
     scope: str = "all",
@@ -3130,198 +3291,67 @@ def _legacy_search(
     source_tool: str = "search_memory",
     emit_telemetry: bool = True,
 ) -> list[dict]:
-    """Run a hybrid BM25 + optional vector search.
+    """Run a hybrid BM25 + optional vector search over the legacy index.
 
-    Optional filters:
-    - project: boost results tagged with `project: <slug>` (x2 score boost)
-    - since: only results with timestamp >= YYYY-MM-DD
-    - as_of: only results valid on YYYY-MM-DD (timestamp <= as_of and
-      valid_to empty or >= as_of); also applies source_authority weights
-    - semantic: if sentence-transformers is installed, also run vector
-      search and fuse results via RRF. Finds semantically related pages
-      even when keywords don't match.
+    `project` boosts pages tagged with that slug, `since` and `as_of` filter by
+    time, and `semantic` adds vector search fused with BM25 through RRF so
+    related pages surface when the keywords do not match.
     """
     if not query or not query.strip():
         return []
-
     pages = page_paths if page_paths is not None else _collect_pages(scope)
     if not pages:
         return []
-
     if force_rebuild or _needs_rebuild(pages):
         _build_index(pages)
 
-    conn = sqlite3.connect(str(INDEX_FILE))
-
-    # BM25 search (always runs)
-    # Escape FTS5 special tokens: wrap each word in double quotes to
-    # prevent FTS5 from interpreting common words (in, not, and, or,
-    # near) as operators or column names. This preserves AND semantics
-    # between terms while avoiding syntax errors.
-    fts_terms = []
-    for w in query.split():
-        if not w:
-            continue
-        safe = w.replace('"', '""')
-        fts_terms.append(f'"{safe}"')
-    fts_query = " ".join(fts_terms)
-    # Adaptive fetch limit: short queries (≤3 words) match more pages,
-    # so fetch more candidates to give filename/title boosts a chance.
-    query_word_count = len([w for w in query.split() if w])
-    fetch_multiplier = 5 if query_word_count <= 3 else 3
-    bm25_raw = conn.execute(
-        """
-        SELECT path, title, summary, project, timestamp, bm25(pages) as rank
-        FROM pages
-        WHERE pages MATCH ?
-        ORDER BY rank
-        LIMIT ?
-        """,
-        (fts_query, limit * fetch_multiplier),
-    ).fetchall()
-    conn.close()
-
-    # TITLE BOOST: if a page's title matches the query, boost its score.
-    # This fixes Recall@1 regressions where a duplicate page (promoted
-    # wiki copy) outscores the original knowledge page.
     query_lower = query.lower().strip()
-    query_words = set(query_lower.split())
+    conn = sqlite3.connect(str(INDEX_FILE))
+    try:
+        raw_rows = _legacy_bm25_rows(conn, query, limit)
+    finally:
+        conn.close()
+    bm25_results = _legacy_scored_rows(
+        raw_rows,
+        query_lower=query_lower,
+        query_words=set(query_lower.split()),
+        project=project,
+        since=since,
+        as_of=as_of,
+    )
 
-    bm25_results = []
-    for row in bm25_raw:
-        path, title, summary, proj, ts, rank = row
-        if since and ts:
-            try:
-                if ts[:10] < since:
-                    continue
-            except (IndexError, TypeError):
-                pass
-        if as_of and ts:
-            try:
-                if ts[:10] > as_of[:10]:
-                    continue
-            except (IndexError, TypeError):
-                pass
-        if as_of and not _valid_as_of(path, as_of):
-            continue
-        score = _boosted_lexical_score(
-            rank,
-            path=path,
-            title=title,
-            row_project=proj or "",
-            query_lower=query_lower,
-            query_words=query_words,
-            project=project,
-        )
-
-        bm25_results.append({
-            "path": path,
-            "title": title,
-            "summary": summary[:120] if summary else "",
-            "score": round(score, 2),
-            "project": proj or "",
-            "timestamp": ts or "",
-        })
-
-    # RE-SORT after boosts! FTS5 returns results in bm25() order, but
-    # title/filename boosts change the effective score. Without this
-    # re-sort, a page boosted to score=300 stays at its original FTS5
-    # position (e.g. rank 2) even though it should be rank 1.
-    bm25_results.sort(key=lambda x: x["score"], reverse=True)
-
-    # SHORT-CIRCUIT: if any page has exact filename match with the query,
-    # return it at rank 1 immediately. This prevents graph-neighbor RRF
-    # from pushing a filename-matched page down by promoting a linked
-    # but incorrect page (e.g. wiki copy beating the knowledge original).
-    # When multiple pages match (duplicates), prefer knowledge/notes/.
-    query_normalized = query.lower().strip().replace(" ", "-")
-    filename_matches = [
-        r for r in bm25_results[:10]
-        if Path(r["path"]).stem.lower() == query_normalized
-    ]
-    if filename_matches:
-        # Sort matches: knowledge/notes/ first (primary source),
-        # then by score (highest first)
-        filename_matches.sort(
-            key=lambda r: (
-                0 if "knowledge/notes/" in r["path"] else 1,
-                -r["score"],
-            )
-        )
-        best = filename_matches[0]
-        rest = [x for x in bm25_results if x["path"] != best["path"]][:limit-1]
+    exact = _exact_filename_answer(bm25_results, query, limit)
+    if exact is not None:
         return _finalize_results(
             query,
-            [best] + rest,
+            exact,
             limit,
             retrieval_mode="exact",
             source_tool=source_tool,
             emit_telemetry=emit_telemetry,
         )
 
-    # Optional: vector search for semantic matching
     vector_results = None
     if semantic and _have_sentence_transformers():
-        # Try LanceDB (HNSW index) first, fall back to numpy brute-force.
-        try:
-            sys.path.insert(0, str(Path(__file__).resolve().parent))
-            from lance_store import have_lancedb
-            from lance_store import vector_search as _lance_search
+        vector_results = _legacy_vector_results(query, pages, limit, project, since, as_of)
+    graph_boosts = _legacy_graph_boosts(graph, bm25_results, vector_results)
 
-            if have_lancedb():
-                qvecs = _embed_texts([query], is_query=True)
-                if qvecs:
-                    lance_results = _lance_search(
-                        qvecs[0], limit * 3, project, since=since, as_of=as_of
-                    )
-                    if lance_results:
-                        vector_results = lance_results
-        except Exception:
-            pass
-
-        # Fall back to numpy brute-force if LanceDB unavailable or empty.
-        if vector_results is None:
-            try:
-                vector_results = _vector_search(query, pages, limit * 3, project, since, as_of)
-            except Exception as e:
-                print(f"  (vector search failed: {e})", file=sys.stderr)
-                vector_results = None
-
-    # Optional: graph-neighbor boost (3rd retrieval signal)
-    graph_boosts = None
-    if graph:
-        try:
-            sys.path.insert(0, str(Path(__file__).resolve().parent))
-            from graph_neighbors import boost_graph_neighbors
-            graph_boosts = boost_graph_neighbors(bm25_results, vector_results)
-        except Exception:
-            pass
-
-    # Fuse results: BM25 + Vector + Graph-neighbor via RRF
     if vector_results or graph_boosts:
-        fused = _rrf_fuse_triple(bm25_results, vector_results, graph_boosts)
-        # Apply project boost on fused results
-        if project:
-            for r in fused:
-                if r.get("project", "").lower() == project.lower():
-                    r["fused_score"] = round(r["fused_score"] * 1.5, 4)
-            fused.sort(key=lambda x: x.get("fused_score", 0), reverse=True)
-        final = _maybe_rerank(query, fused, limit) if rerank else fused[:limit]
+        fused = _project_boosted_fusion(
+            _rrf_fuse_triple(bm25_results, vector_results, graph_boosts), project
+        )
         return _finalize_results(
             query,
-            final,
+            _maybe_rerank(query, fused, limit) if rerank else fused[:limit],
             limit,
             retrieval_mode="hybrid",
             source_tool=source_tool,
             emit_telemetry=emit_telemetry,
         )
 
-    # BM25 only (fallback)
-    bm25_results.sort(key=lambda x: x["score"], reverse=True)
-    final = _maybe_rerank(query, bm25_results, limit) if rerank else bm25_results[:limit]
     return _finalize_results(
         query,
-        final,
+        _maybe_rerank(query, bm25_results, limit) if rerank else bm25_results[:limit],
         limit,
         retrieval_mode="bm25",
         source_tool=source_tool,
