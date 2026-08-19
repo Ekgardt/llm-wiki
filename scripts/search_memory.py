@@ -33,7 +33,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import closing, contextmanager, nullcontext
+from contextlib import AbstractContextManager, closing, contextmanager, nullcontext
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -573,6 +573,143 @@ def _publish_validated_generation(
     )
 
 
+def _require_finite_deadline(deadline: float | None) -> None:
+    if deadline is None:
+        return
+    if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
+        raise ValueError("deadline must be a finite monotonic timestamp")
+    if not math.isfinite(deadline):
+        raise ValueError("deadline must be a finite monotonic timestamp")
+
+
+def _publication_gate(
+    coordinator: object | None, wait_seconds: float | None
+) -> AbstractContextManager[object]:
+    """The Markdown writer gate, or nothing when no coordinator was supplied."""
+    if coordinator is None:
+        return nullcontext()
+    if wait_seconds is None:
+        return coordinator.writer_gate()
+    return coordinator.writer_gate(wait_seconds=wait_seconds)
+
+
+def _require_matching_repository(
+    vault: Path,
+    expected_repository_scope: object | None,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    if expected_repository_scope is None:
+        return
+    from repository_scope import RepositoryScope, resolve_repository_scope
+
+    if not isinstance(expected_repository_scope, RepositoryScope):
+        raise TypeError("expected_repository_scope must be a RepositoryScope")
+    live_scope = resolve_repository_scope(vault, deadline=deadline, cancelled=cancelled)
+    if live_scope != expected_repository_scope:
+        raise ValueError("publication root does not match generation repository scope")
+
+
+def _discard_unactivated(
+    catalog: GenerationCatalog, generation_id: str, catalog_options: Mapping[str, object]
+) -> None:
+    discard = getattr(catalog, "discard_unactivated", None)
+    if callable(discard):
+        discard(generation_id, **catalog_options)
+
+
+def _register_generation(
+    catalog: GenerationCatalog,
+    generation_id: str,
+    candidate: object | None,
+    catalog_options: Mapping[str, object],
+) -> None:
+    if candidate is None:
+        catalog.register(generation_id, **catalog_options)
+        return
+    catalog._register_validated(candidate, **catalog_options)  # noqa: SLF001
+
+
+def _activate_generation(
+    catalog: GenerationCatalog,
+    generation_id: str,
+    candidate: object | None,
+    *,
+    expected_active: str | None,
+    catalog_options: Mapping[str, object],
+) -> bool:
+    if candidate is None:
+        return bool(
+            catalog.activate(
+                generation_id, expected_active=expected_active, **catalog_options
+            )
+        )
+    return bool(
+        catalog._activate_validated(  # noqa: SLF001
+            candidate, expected_active=expected_active, **catalog_options
+        )
+    )
+
+
+def _stop_options(
+    deadline: float | None, cancelled: Callable[[], bool] | None
+) -> dict[str, object]:
+    options: dict[str, object] = {}
+    if deadline is not None:
+        options["deadline"] = float(deadline)
+    if cancelled is not None:
+        options["cancelled"] = cancelled
+    return options
+
+
+def _publish_under_gate(
+    snapshot: CorpusSnapshot,
+    vault: Path,
+    catalog: GenerationCatalog,
+    generation_id: str,
+    *,
+    candidate: object | None,
+    expected_repository_scope: object | None,
+    expected_active: str | None,
+    remaining: Callable[[], float | None],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    """Validate, register, activate — and discard anything left unactivated."""
+    catalog_options = _stop_options(deadline, cancelled)
+    registered = False
+    try:
+        _check_generation_stop(deadline, cancelled)
+        _require_matching_repository(
+            vault, expected_repository_scope, deadline=deadline, cancelled=cancelled
+        )
+        validation_options: dict[str, object] = {"coordinator": None}
+        if cancelled is not None:
+            validation_options["cancelled"] = cancelled
+        if deadline is not None:
+            validation_options["deadline_seconds"] = remaining()
+        validate_live_snapshot(snapshot, vault, **validation_options)
+        remaining()
+        _register_generation(catalog, generation_id, candidate, catalog_options)
+        registered = True
+        remaining()
+        activated = _activate_generation(
+            catalog,
+            generation_id,
+            candidate,
+            expected_active=expected_active,
+            catalog_options=catalog_options,
+        )
+        if not activated:
+            _discard_unactivated(catalog, generation_id, catalog_options)
+        return activated
+    except BaseException:
+        if registered:
+            _discard_unactivated(catalog, generation_id, catalog_options)
+        raise
+
+
 def _publish_generation(
     snapshot: CorpusSnapshot,
     vault: Path,
@@ -586,12 +723,7 @@ def _publish_generation(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> bool:
-    if deadline is not None and (
-        isinstance(deadline, bool)
-        or not isinstance(deadline, (int, float))
-        or not math.isfinite(deadline)
-    ):
-        raise ValueError("deadline must be a finite monotonic timestamp")
+    _require_finite_deadline(deadline)
 
     def remaining() -> float | None:
         _check_generation_stop(deadline, cancelled)
@@ -602,68 +734,19 @@ def _publish_generation(
             raise TimeoutError("generation publication deadline reached")
         return value
 
-    wait_seconds = remaining()
-    if coordinator is None:
-        gate = nullcontext()
-    elif wait_seconds is None:
-        gate = coordinator.writer_gate()
-    else:
-        gate = coordinator.writer_gate(wait_seconds=wait_seconds)
-    with gate:
-        registered = False
-        try:
-            _check_generation_stop(deadline, cancelled)
-            if expected_repository_scope is not None:
-                from repository_scope import RepositoryScope, resolve_repository_scope
-
-                if not isinstance(expected_repository_scope, RepositoryScope):
-                    raise TypeError("expected_repository_scope must be a RepositoryScope")
-                live_scope = resolve_repository_scope(
-                    vault, deadline=deadline, cancelled=cancelled
-                )
-                if live_scope != expected_repository_scope:
-                    raise ValueError("publication root does not match generation repository scope")
-            validation_options = {"coordinator": None}
-            if cancelled is not None:
-                validation_options["cancelled"] = cancelled
-            if deadline is not None:
-                validation_options["deadline_seconds"] = remaining()
-            validate_live_snapshot(snapshot, vault, **validation_options)
-            remaining()
-            catalog_options = {}
-            if deadline is not None:
-                catalog_options["deadline"] = float(deadline)
-            if cancelled is not None:
-                catalog_options["cancelled"] = cancelled
-            if candidate is None:
-                catalog.register(generation_id, **catalog_options)
-            else:
-                catalog._register_validated(candidate, **catalog_options)  # noqa: SLF001
-            registered = True
-            remaining()
-            if candidate is None:
-                activated = catalog.activate(
-                    generation_id,
-                    expected_active=expected_active,
-                    **catalog_options,
-                )
-            else:
-                activated = catalog._activate_validated(  # noqa: SLF001
-                    candidate,
-                    expected_active=expected_active,
-                    **catalog_options,
-                )
-            if not activated:
-                discard = getattr(catalog, "discard_unactivated", None)
-                if callable(discard):
-                    discard(generation_id, **catalog_options)
-            return activated
-        except BaseException:
-            if registered:
-                discard = getattr(catalog, "discard_unactivated", None)
-                if callable(discard):
-                    discard(generation_id, **catalog_options)
-            raise
+    with _publication_gate(coordinator, remaining()):
+        return _publish_under_gate(
+            snapshot,
+            vault,
+            catalog,
+            generation_id,
+            candidate=candidate,
+            expected_repository_scope=expected_repository_scope,
+            expected_active=expected_active,
+            remaining=remaining,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
 
 
 def _check_legacy_stop(
