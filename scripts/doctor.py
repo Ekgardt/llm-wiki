@@ -462,7 +462,7 @@ def _read_busy_ms(deadline: float | None) -> int:
     Spending the whole remaining budget on the wait would turn every busy
     database into an indistinguishable "budget exhausted" verdict.
     """
-    if deadline is None:
+    if deadline is None or not math.isfinite(deadline):
         return READ_BUSY_MS
     remaining_ms = (deadline - time.monotonic()) * 1000
     return max(0, min(READ_BUSY_MS, int(remaining_ms / 2)))

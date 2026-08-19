@@ -2089,6 +2089,16 @@ def test_locked_index_returns_immediately_as_degraded(tmp_path):
     assert check["details"]["database_busy"] is True
 
 
+def test_the_read_wait_survives_a_budgetless_deadline():
+    """Most checks default to an infinite deadline; arithmetic must survive it."""
+    import doctor
+
+    assert doctor._read_busy_ms(float("inf")) == doctor.READ_BUSY_MS
+    assert doctor._read_busy_ms(None) == doctor.READ_BUSY_MS
+    assert doctor._read_busy_ms(time.monotonic() - 1) == 0
+    assert 0 < doctor._read_busy_ms(time.monotonic() + 0.1) <= doctor.READ_BUSY_MS
+
+
 def test_a_brief_commit_lock_does_not_make_a_healthy_index_look_busy(tmp_path):
     """A millisecond commit is normal; only a stuck database is worth reporting."""
     import doctor
