@@ -929,6 +929,45 @@ def _next_documents(
     return next_documents
 
 
+_STARTUP_DEGRADING_ERRORS = (
+    JsonRpcResponseError,
+    OSError,
+    ProtocolViolation,
+    RuntimeError,
+    TimeoutError,
+)
+
+_PROGRESS_METHODS = (
+    "$/progress",
+    "pyright/beginProgress",
+    "pyright/endProgress",
+    "pyright/reportProgress",
+)
+
+
+@dataclass
+class _StartupAttempt:
+    """The owner nonce one startup attempt published, if it got that far."""
+
+    owner_nonce: str | None = None
+
+
+def _reraise_startup_interruption(
+    error: BaseException, interruption: BaseException
+) -> None:
+    """An interruption always propagates; a wrapped one keeps its context."""
+    if interruption is error:
+        raise error
+    _raise_collected_errors([], prior_error=error)
+
+
+def _progress_handler(
+    session: "PyrightSession", method: str
+) -> Callable[[object], None]:
+    """One notification handler bound to the progress method it reports."""
+    return lambda params: session._progress(method, params)
+
+
 class _LaunchServerGuard:
     def __init__(
         self,
@@ -1958,294 +1997,407 @@ class PyrightSession:
         )
         return node, server
 
+    def _reset_readiness_locked(self) -> None:
+        """Forget what a running server told us about itself."""
+        self._readiness = "not_ready"
+        self._readiness_evidence = ()
+        self._position_encoding = None
+        self._capabilities = {}
+
+    def _degrade_locked(self, code: str) -> None:
+        """Record a startup degradation and drop what it invalidates."""
+        self._reset_readiness_locked()
+        self._degradation_codes = tuple(sorted({*self._degradation_codes, code}))
+
+    def _forget_generation_locked(self) -> None:
+        """Forget everything tied to a generation that never became ours."""
+        self._generation_nonce = None
+        self._ready_uri_generations.clear()
+        self._workspace_revision = None
+        self._diagnostics.clear()
+        self._diagnostic_bytes = 0
+        self._clear_wire_state()
+
+    def _await_startup_locked(self, startup_deadline: float) -> None:
+        """Wait out another caller's startup; the caller holds the lock."""
+        while self._starting:
+            remaining = startup_deadline - time.monotonic()
+            if remaining <= 0 or not self._condition.wait(remaining):
+                raise TimeoutError("Pyright startup did not finish before deadline")
+
+    def _startup_needed_locked(self) -> bool:
+        """A start is warranted only for a qualified, idle session."""
+        if self._process is not None or self._readiness != "not_ready":
+            return False
+        return self._identity.qualified
+
+    def _claim_startup_locked(
+        self,
+    ) -> tuple[StartupCleanupError | None, LspProcess | None] | None:
+        """The retained owners to clear first, or None when not to start at all."""
+        self._reconcile_process_state_locked()
+        if not self._startup_needed_locked():
+            return None
+        retained_cleanup = self._startup_cleanup_error
+        retained_process = self._startup_process
+        nothing_retained = retained_cleanup is None and retained_process is None
+        if self._startup_attempted and nothing_retained:
+            return None
+        self._starting = True
+        if nothing_retained:
+            self._startup_attempted = True
+        return retained_cleanup, retained_process
+
+    def _admit_startup(
+        self, startup_deadline: float, bootstrap_timeout_seconds: float
+    ) -> tuple[StartupCleanupError | None, LspProcess | None] | None:
+        """Claim the right to start, or None when this call must not start one."""
+        with self._lock:
+            if self._closed or self._closing:
+                raise RuntimeError("Pyright session is closed")
+            if self._capacity_locked:
+                self._degrade_locked("pyright_capacity_exhausted")
+                return None
+            if bootstrap_timeout_seconds <= 0:
+                self._degrade_locked("pyright_startup_timeout")
+                return None
+            self._await_startup_locked(startup_deadline)
+            return self._claim_startup_locked()
+
+    def _startup_retry_ok(self, action: Callable[[], None]) -> bool:
+        """Retry a retained owner; False when it failed in an expected way."""
+        try:
+            action()
+        except BaseException as error:
+            interruption = _startup_interruption(error)
+            if interruption is not None:
+                _reraise_startup_interruption(error, interruption)
+            if isinstance(error, (OSError, RuntimeError, TimeoutError)):
+                return False
+            raise
+        return True
+
+    def _clear_retained_cleanup(self, retained: StartupCleanupError) -> None:
+        with self._lock:
+            if self._startup_cleanup_error is retained:
+                self._startup_cleanup_error = None
+                self._sync_startup_atexit_locked()
+
+    def _clear_retained_process(self, retained: LspProcess) -> None:
+        with self._lock:
+            if self._startup_process is retained:
+                self._startup_process = None
+                self._sync_startup_atexit_locked()
+
+    def _clear_retained_owners(
+        self,
+        retained_cleanup: StartupCleanupError | None,
+        retained_process: LspProcess | None,
+        startup_deadline: float,
+    ) -> bool:
+        """Clear what a previous attempt left; False when one refused again."""
+        if retained_cleanup is not None:
+            if not self._startup_retry_ok(
+                lambda: retained_cleanup.retry_cleanup(startup_deadline)
+            ):
+                return False
+            self._clear_retained_cleanup(retained_cleanup)
+        if retained_process is not None:
+            if not self._startup_retry_ok(
+                lambda: retained_process.close(startup_deadline)
+            ):
+                return False
+            self._clear_retained_process(retained_process)
+        return True
+
+    def _clear_bootstrap_nonce_locked(self, attempt: _StartupAttempt) -> None:
+        if self._bootstrap_owner_nonce == attempt.owner_nonce:
+            self._bootstrap_owner_nonce = None
+
+    def _clear_bootstrap_nonce(self, attempt: _StartupAttempt) -> None:
+        with self._lock:
+            self._clear_bootstrap_nonce_locked(attempt)
+
+    def _server_request_handlers(self) -> dict[str, object]:
+        return {
+            "client/registerCapability": self._benign_server_request,
+            "client/unregisterCapability": self._benign_server_request,
+            "window/workDoneProgress/create": self._benign_server_request,
+            "workspace/configuration": self._configuration,
+        }
+
+    def _server_notification_handlers(self) -> dict[str, object]:
+        handlers: dict[str, object] = {
+            method: _progress_handler(self, method) for method in _PROGRESS_METHODS
+        }
+        handlers["textDocument/publishDiagnostics"] = self._publish_diagnostics
+        return handlers
+
+    def _prepare_owner(
+        self, attempt: _StartupAttempt, *, startup_deadline: float
+    ) -> tuple[Path, Path, Path]:
+        """The node and server paths, and a fresh owner root for this attempt."""
+        node, server = self._validated_qualified_paths(deadline=startup_deadline)
+        _ensure_lsp_parent(self._state_root, deadline=startup_deadline)
+        owner = lsp_owner_root(self._state_root, secrets.token_hex(16))
+        attempt.owner_nonce = owner.name
+        with self._lock:
+            self._bootstrap_owner_nonce = owner.name
+        return node, server, owner
+
+    def _start_configured_process(
+        self,
+        node: Path,
+        server: Path,
+        owner: Path,
+        *,
+        bootstrap_timeout_seconds: float,
+        startup_deadline: float,
+    ) -> LspProcess:
+        """Start Pyright under its owner root, with our handlers and guards."""
+        command = (
+            str(node),
+            str(server),
+            "--stdio",
+            f"--cancellationReceive=file:{owner / 'cancellation'}",
+        )
+        return LspProcess.start_configured(
+            command,
+            cwd=Path(self._repository.checkout_root),
+            owner_root=owner,
+            deadline=startup_deadline,
+            server_request_handlers=self._server_request_handlers(),
+            server_notification_handlers=self._server_notification_handlers(),
+            generation_bootstrap=(
+                lambda protocol,
+                process_id,
+                generation_nonce,
+                generation_deadline: self._bootstrap_owned_generation(
+                    owner.name,
+                    protocol,
+                    process_id,
+                    generation_nonce,
+                    generation_deadline,
+                )
+            ),
+            bootstrap_timeout_seconds=bootstrap_timeout_seconds,
+            generation_guard=(
+                lambda _generation_nonce, generation_deadline: _LaunchServerGuard(
+                    server,
+                    self._identity.executable_sha256,
+                    command=command,
+                    owner_root=owner,
+                    deadline=generation_deadline,
+                )
+            ),
+        )
+
+    def _retry_startup_cleanup(
+        self, error: BaseException, startup_deadline: float
+    ) -> StartupCleanupError | None:
+        """Retry an owner cleanup the launch left behind; what still needs keeping."""
+        if not isinstance(error, StartupCleanupError):
+            return None
+        try:
+            error.retry_cleanup(
+                min(startup_deadline, time.monotonic() + _OWNER_CLEANUP_SECONDS)
+            )
+        except (KeyboardInterrupt, SystemExit):
+            with self._lock:
+                self._retain_startup_cleanup_locked(error)
+            raise
+        except BaseException:
+            return error
+        return None
+
+    def _record_retained_cleanup_locked(
+        self, retained_error: StartupCleanupError | None
+    ) -> None:
+        if retained_error is not None:
+            self._retain_startup_cleanup_locked(retained_error)
+            return
+        self._startup_cleanup_error = None
+        self._sync_startup_atexit_locked()
+
+    def _record_retained_cleanup(
+        self, retained_error: StartupCleanupError | None
+    ) -> None:
+        with self._lock:
+            self._record_retained_cleanup_locked(retained_error)
+
+    def _allow_startup_retry(self) -> None:
+        with self._lock:
+            self._startup_attempted = False
+
+    def _record_startup_degradation(
+        self, error: BaseException, retained_error: StartupCleanupError | None
+    ) -> None:
+        """A launch that failed in a known way leaves the session degraded."""
+        code = _startup_code(error)
+        with self._lock:
+            self._process = None
+            self._record_retained_cleanup_locked(retained_error)
+            self._degrade_locked(code)
+
+    def _handle_launch_failure(
+        self,
+        error: BaseException,
+        attempt: _StartupAttempt,
+        *,
+        startup_deadline: float,
+    ) -> None:
+        """Record a failed launch; returns only when it counts as degradation."""
+        self._clear_bootstrap_nonce(attempt)
+        interruption = _startup_interruption(error)
+        retained_error = self._retry_startup_cleanup(error, startup_deadline)
+        if interruption is not None:
+            self._record_retained_cleanup(retained_error)
+            _reraise_startup_interruption(error, interruption)
+        if isinstance(error, (TypeError, ValueError)):
+            self._allow_startup_retry()
+            raise error
+        if not isinstance(error, _STARTUP_DEGRADING_ERRORS):
+            raise error
+        self._record_startup_degradation(error, retained_error)
+
+    def _launch_server(
+        self,
+        attempt: _StartupAttempt,
+        *,
+        bootstrap_timeout_seconds: float,
+        startup_deadline: float,
+    ) -> LspProcess | None:
+        """The started process, or None when the failure was recorded as degraded."""
+        try:
+            node, server, owner = self._prepare_owner(
+                attempt, startup_deadline=startup_deadline
+            )
+            return self._start_configured_process(
+                node,
+                server,
+                owner,
+                bootstrap_timeout_seconds=bootstrap_timeout_seconds,
+                startup_deadline=startup_deadline,
+            )
+        except BaseException as error:
+            self._handle_launch_failure(
+                error, attempt, startup_deadline=startup_deadline
+            )
+            return None
+
+    def _reset_after_failed_start(
+        self,
+        process: LspProcess,
+        retained_owner: LspProcess | None,
+        attempt: _StartupAttempt,
+    ) -> None:
+        """Forget everything the failed attempt might have published."""
+        with self._lock:
+            if self._process is process:
+                self._process = None
+            self._clear_bootstrap_nonce_locked(attempt)
+            self._startup_process = retained_owner
+            self._sync_startup_atexit_locked()
+            self._reset_readiness_locked()
+            self._forget_generation_locked()
+
+    def _close_failed_process(
+        self,
+        process: LspProcess | None,
+        attempt: _StartupAttempt,
+        *,
+        startup_deadline: float,
+    ) -> BaseException | None:
+        """Close a process that never became ours; the close error, if any."""
+        if process is None:
+            return None
+        cleanup_deadline = min(
+            startup_deadline, time.monotonic() + _OWNER_CLEANUP_SECONDS
+        )
+        retained_owner: LspProcess | None = None
+        cleanup_error: BaseException | None = None
+        try:
+            process.close(cleanup_deadline)
+        except BaseException as close_error:
+            retained_owner = process
+            cleanup_error = close_error
+        self._reset_after_failed_start(process, retained_owner, attempt)
+        return cleanup_error
+
+    def _abandon_startup(
+        self,
+        error: BaseException,
+        process: LspProcess | None,
+        attempt: _StartupAttempt,
+        *,
+        startup_deadline: float,
+    ) -> None:
+        """Undo a startup that raised, then propagate what stopped it."""
+        cleanup_error = self._close_failed_process(
+            process, attempt, startup_deadline=startup_deadline
+        )
+        cleanup_interruption = None
+        if cleanup_error is not None:
+            cleanup_interruption = _startup_interruption(cleanup_error)
+        interruption = _startup_interruption(error) or cleanup_interruption
+        if interruption is None:
+            raise error
+        self._allow_startup_retry()
+        if cleanup_error is not None:
+            _raise_collected_errors([cleanup_error], prior_error=error)
+        _reraise_startup_interruption(error, interruption)
+
+    def _start_owned(
+        self,
+        retained: tuple[StartupCleanupError | None, LspProcess | None],
+        *,
+        bootstrap_timeout_seconds: float,
+        startup_deadline: float,
+    ) -> None:
+        """Start a server while this caller holds the starting flag."""
+        retained_cleanup, retained_process = retained
+        attempt = _StartupAttempt()
+        process: LspProcess | None = None
+        try:
+            if not self._clear_retained_owners(
+                retained_cleanup, retained_process, startup_deadline
+            ):
+                return
+            with self._lock:
+                self._startup_attempted = True
+            process = self._launch_server(
+                attempt,
+                bootstrap_timeout_seconds=bootstrap_timeout_seconds,
+                startup_deadline=startup_deadline,
+            )
+            if process is None:
+                return
+            with self._lock:
+                self._process = process
+                self._startup_process = None
+                self._sync_startup_atexit_locked()
+        except BaseException as error:
+            self._abandon_startup(
+                error, process, attempt, startup_deadline=startup_deadline
+            )
+
     def start(self, *, deadline: float) -> None:
         caller_deadline = _validated_deadline(deadline)
         startup_started = time.monotonic()
-        startup_deadline = min(
-            caller_deadline,
-            startup_started + STARTUP_SECONDS,
-        )
+        startup_deadline = min(caller_deadline, startup_started + STARTUP_SECONDS)
         bootstrap_timeout_seconds = startup_deadline - startup_started
         with self._operation():
-            retained_cleanup: StartupCleanupError | None = None
-            retained_process: LspProcess | None = None
-            with self._lock:
-                if self._closed or self._closing:
-                    raise RuntimeError("Pyright session is closed")
-                if self._capacity_locked:
-                    self._readiness = "not_ready"
-                    self._readiness_evidence = ()
-                    self._position_encoding = None
-                    self._capabilities = {}
-                    self._degradation_codes = tuple(
-                        sorted(
-                            {
-                                *self._degradation_codes,
-                                "pyright_capacity_exhausted",
-                            }
-                        )
-                    )
-                    return
-                if bootstrap_timeout_seconds <= 0:
-                    self._readiness = "not_ready"
-                    self._readiness_evidence = ()
-                    self._position_encoding = None
-                    self._capabilities = {}
-                    self._degradation_codes = tuple(
-                        sorted(
-                            {
-                                *self._degradation_codes,
-                                "pyright_startup_timeout",
-                            }
-                        )
-                    )
-                    return
-                while self._starting:
-                    remaining = startup_deadline - time.monotonic()
-                    if remaining <= 0 or not self._condition.wait(remaining):
-                        raise TimeoutError("Pyright startup did not finish before deadline")
-                self._reconcile_process_state_locked()
-                if self._process is not None or self._readiness != "not_ready":
-                    return
-                if not self._identity.qualified:
-                    return
-                retained_cleanup = self._startup_cleanup_error
-                retained_process = self._startup_process
-                if (
-                    self._startup_attempted
-                    and retained_cleanup is None
-                    and retained_process is None
-                ):
-                    return
-                self._starting = True
-                if retained_cleanup is None and retained_process is None:
-                    self._startup_attempted = True
-
-            process: LspProcess | None = None
-            bootstrap_owner_nonce: str | None = None
+            retained = self._admit_startup(
+                startup_deadline, bootstrap_timeout_seconds
+            )
+            if retained is None:
+                return
             try:
-                if retained_cleanup is not None:
-                    try:
-                        retained_cleanup.retry_cleanup(startup_deadline)
-                    except BaseException as error:
-                        interruption = _startup_interruption(error)
-                        if interruption is not None:
-                            if interruption is error:
-                                raise
-                            _raise_collected_errors([], prior_error=error)
-                        if isinstance(error, (OSError, RuntimeError, TimeoutError)):
-                            return
-                        raise
-                    with self._lock:
-                        if self._startup_cleanup_error is retained_cleanup:
-                            self._startup_cleanup_error = None
-                            self._sync_startup_atexit_locked()
-
-                if retained_process is not None:
-                    try:
-                        retained_process.close(startup_deadline)
-                    except BaseException as error:
-                        interruption = _startup_interruption(error)
-                        if interruption is not None:
-                            if interruption is error:
-                                raise
-                            _raise_collected_errors([], prior_error=error)
-                        if isinstance(error, (OSError, RuntimeError, TimeoutError)):
-                            return
-                        raise
-                    with self._lock:
-                        if self._startup_process is retained_process:
-                            self._startup_process = None
-                            self._sync_startup_atexit_locked()
-
-                with self._lock:
-                    self._startup_attempted = True
-
-                try:
-                    node, server = self._validated_qualified_paths(
-                        deadline=startup_deadline
-                    )
-                    _ensure_lsp_parent(self._state_root, deadline=startup_deadline)
-                    owner = lsp_owner_root(self._state_root, secrets.token_hex(16))
-                    bootstrap_owner_nonce = owner.name
-                    with self._lock:
-                        self._bootstrap_owner_nonce = bootstrap_owner_nonce
-                    process = LspProcess.start_configured(
-                        (
-                            str(node),
-                            str(server),
-                            "--stdio",
-                            f"--cancellationReceive=file:{owner / 'cancellation'}",
-                        ),
-                        cwd=Path(self._repository.checkout_root),
-                        owner_root=owner,
-                        deadline=startup_deadline,
-                        server_request_handlers={
-                            "client/registerCapability": self._benign_server_request,
-                            "client/unregisterCapability": self._benign_server_request,
-                            "window/workDoneProgress/create": self._benign_server_request,
-                            "workspace/configuration": self._configuration,
-                        },
-                        server_notification_handlers={
-                            "$/progress": lambda params: self._progress(
-                                "$/progress", params
-                            ),
-                            "pyright/beginProgress": lambda params: self._progress(
-                                "pyright/beginProgress", params
-                            ),
-                            "pyright/endProgress": lambda params: self._progress(
-                                "pyright/endProgress", params
-                            ),
-                            "pyright/reportProgress": lambda params: self._progress(
-                                "pyright/reportProgress", params
-                            ),
-                            "textDocument/publishDiagnostics": self._publish_diagnostics,
-                        },
-                        generation_bootstrap=(
-                            lambda protocol,
-                            process_id,
-                            generation_nonce,
-                            generation_deadline: self._bootstrap_owned_generation(
-                                owner.name,
-                                protocol,
-                                process_id,
-                                generation_nonce,
-                                generation_deadline,
-                            )
-                        ),
-                        bootstrap_timeout_seconds=bootstrap_timeout_seconds,
-                        generation_guard=(
-                            lambda _generation_nonce, generation_deadline: (
-                                _LaunchServerGuard(
-                                    server,
-                                    self._identity.executable_sha256,
-                                    command=(
-                                        str(node),
-                                        str(server),
-                                        "--stdio",
-                                        f"--cancellationReceive=file:{owner / 'cancellation'}",
-                                    ),
-                                    owner_root=owner,
-                                    deadline=generation_deadline,
-                                )
-                            )
-                        ),
-                    )
-                except BaseException as error:
-                    with self._lock:
-                        if self._bootstrap_owner_nonce == bootstrap_owner_nonce:
-                            self._bootstrap_owner_nonce = None
-                    interruption = _startup_interruption(error)
-                    retained_error: StartupCleanupError | None = None
-                    if isinstance(error, StartupCleanupError):
-                        try:
-                            error.retry_cleanup(
-                                min(
-                                    startup_deadline,
-                                    time.monotonic() + _OWNER_CLEANUP_SECONDS,
-                                )
-                            )
-                        except (KeyboardInterrupt, SystemExit):
-                            with self._lock:
-                                self._retain_startup_cleanup_locked(error)
-                            raise
-                        except BaseException:
-                            retained_error = error
-                    if interruption is not None:
-                        with self._lock:
-                            if retained_error is not None:
-                                self._retain_startup_cleanup_locked(retained_error)
-                            else:
-                                self._startup_cleanup_error = None
-                                self._sync_startup_atexit_locked()
-                        if interruption is error:
-                            raise
-                        _raise_collected_errors([], prior_error=error)
-                    if isinstance(error, (TypeError, ValueError)):
-                        with self._lock:
-                            self._startup_attempted = False
-                        raise
-                    if not isinstance(
-                        error,
-                        (
-                            JsonRpcResponseError,
-                            OSError,
-                            ProtocolViolation,
-                            RuntimeError,
-                            TimeoutError,
-                        ),
-                    ):
-                        raise
-                    code = _startup_code(error)
-                    with self._lock:
-                        self._process = None
-                        if retained_error is not None:
-                            self._retain_startup_cleanup_locked(retained_error)
-                        else:
-                            self._startup_cleanup_error = None
-                            self._sync_startup_atexit_locked()
-                        self._readiness = "not_ready"
-                        self._readiness_evidence = ()
-                        self._position_encoding = None
-                        self._capabilities = {}
-                        self._degradation_codes = tuple(
-                            sorted({*self._degradation_codes, code})
-                        )
-                    return
-
-                with self._lock:
-                    self._process = process
-                    self._startup_process = None
-                    self._sync_startup_atexit_locked()
-            except BaseException as error:
-                cleanup_error: BaseException | None = None
-                if process is not None:
-                    cleanup_deadline = min(
-                        startup_deadline,
-                        time.monotonic() + _OWNER_CLEANUP_SECONDS,
-                    )
-                    retained_process_owner: LspProcess | None = None
-                    try:
-                        process.close(cleanup_deadline)
-                    except BaseException as close_error:
-                        retained_process_owner = process
-                        cleanup_error = close_error
-                    with self._lock:
-                        if self._process is process:
-                            self._process = None
-                        if self._bootstrap_owner_nonce == bootstrap_owner_nonce:
-                            self._bootstrap_owner_nonce = None
-                        self._startup_process = retained_process_owner
-                        self._sync_startup_atexit_locked()
-                        self._readiness = "not_ready"
-                        self._readiness_evidence = ()
-                        self._position_encoding = None
-                        self._capabilities = {}
-                        self._generation_nonce = None
-                        self._ready_uri_generations.clear()
-                        self._workspace_revision = None
-                        self._diagnostics.clear()
-                        self._diagnostic_bytes = 0
-                        self._clear_wire_state()
-                original_interruption = _startup_interruption(error)
-                cleanup_interruption = (
-                    _startup_interruption(cleanup_error)
-                    if cleanup_error is not None
-                    else None
+                self._start_owned(
+                    retained,
+                    bootstrap_timeout_seconds=bootstrap_timeout_seconds,
+                    startup_deadline=startup_deadline,
                 )
-                interruption = original_interruption or cleanup_interruption
-                if interruption is not None:
-                    with self._lock:
-                        self._startup_attempted = False
-                    if cleanup_error is not None:
-                        _raise_collected_errors(
-                            [cleanup_error],
-                            prior_error=error,
-                        )
-                    if interruption is error:
-                        raise
-                    _raise_collected_errors([], prior_error=error)
-                raise
             finally:
                 with self._lock:
                     self._starting = False
