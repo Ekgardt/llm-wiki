@@ -4005,6 +4005,33 @@ def _lance_dense_hits(
     cancelled: Callable[[], bool] | None,
 ) -> list[dict] | None:
     """LanceDB results bound to this model and this source membership."""
+    results = _lance_results(
+        query,
+        pages,
+        limit=limit,
+        project=project,
+        since=since,
+        as_of=as_of,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    if not results:
+        return None
+    return [_as_legacy_dense_row(item, "score") for item in results]
+
+
+def _lance_results(
+    query: str,
+    pages: list[Path],
+    *,
+    limit: int,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list | None:
+    """None when the optional backend is absent or cannot answer in time."""
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         from lance_store import have_lancedb
@@ -4032,9 +4059,7 @@ def _lance_dense_hits(
         raise
     except Exception:  # noqa: BLE001 - an optional backend that cannot answer
         return None
-    if not results:
-        return None
-    return [_as_legacy_dense_row(item, "score") for item in results]
+    return results
 
 
 def _numpy_dense_hits(
@@ -4912,6 +4937,30 @@ def _vector_hit(
     }
 
 
+def _vector_hits(
+    similarities: list[float],
+    vectors_data: dict,
+    *,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[dict]:
+    results = []
+    for index, similarity in enumerate(similarities):
+        _check_legacy_stop(deadline, cancelled)
+        excluded = _legacy_vector_excluded(
+            vectors_data["paths"][index],
+            str(vectors_data["timestamps"][index] or ""),
+            since=since,
+            as_of=as_of,
+        )
+        if not excluded:
+            results.append(_vector_hit(index, similarity, vectors_data, project))
+    return results
+
+
 def _vector_search(
     query: str,
     pages: list[Path],
@@ -4936,20 +4985,34 @@ def _vector_search(
     )
     if query_vector is None:
         return None
-    similarities = _cosine_similarity(query_vector, matrix)
-    results = []
-    for index, similarity in enumerate(similarities):
-        _check_legacy_stop(deadline, cancelled)
-        if _legacy_vector_excluded(
-            vectors_data["paths"][index],
-            str(vectors_data["timestamps"][index] or ""),
-            since=since,
-            as_of=as_of,
-        ):
-            continue
-        results.append(_vector_hit(index, similarity, vectors_data, project))
+    results = _vector_hits(
+        _cosine_similarity(query_vector, matrix),
+        vectors_data,
+        project=project,
+        since=since,
+        as_of=as_of,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
     results.sort(key=lambda hit: (-hit["score"], hit["path"]))
     return results[:limit]
+
+
+def _append_vector_document(documents: dict[str, list[str]], page: Path) -> None:
+    """One page's contribution to the parallel columns the vector cache stores."""
+    raw = read_stable_bytes(page, MAX_PAGE_BYTES, label="legacy vector source")
+    content = raw.decode("utf-8", errors="ignore")
+    title, summary = _extract_title_and_summary(content, page.stem)
+    body = _strip_frontmatter(content)[:500]
+    project = _extract_frontmatter_field(content, PROJECT_FIELD_RE) or ""
+    timestamp = _extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or ""
+    documents["source_paths"].append(page.relative_to(ROOT).as_posix())
+    documents["source_sha256"].append(hashlib.sha256(raw).hexdigest())
+    documents["titles"].append(title)
+    documents["summaries"].append(summary)
+    documents["projects"].append(project.lower())
+    documents["timestamps"].append(timestamp[:10])
+    documents["texts"].append(f"{title}. {summary}. {body[:300]}")
 
 
 def _legacy_vector_documents(
@@ -4973,19 +5036,7 @@ def _legacy_vector_documents(
     )
     for page in ordered:
         _check_legacy_stop(deadline, cancelled)
-        raw = read_stable_bytes(page, MAX_PAGE_BYTES, label="legacy vector source")
-        content = raw.decode("utf-8", errors="ignore")
-        title, summary = _extract_title_and_summary(content, page.stem)
-        body = _strip_frontmatter(content)[:500]
-        project = _extract_frontmatter_field(content, PROJECT_FIELD_RE) or ""
-        timestamp = _extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or ""
-        documents["source_paths"].append(page.relative_to(ROOT).as_posix())
-        documents["source_sha256"].append(hashlib.sha256(raw).hexdigest())
-        documents["titles"].append(title)
-        documents["summaries"].append(summary)
-        documents["projects"].append(project.lower())
-        documents["timestamps"].append(timestamp[:10] if timestamp else "")
-        documents["texts"].append(f"{title}. {summary}. {body[:300]}")
+        _append_vector_document(documents, page)
     return documents
 
 
