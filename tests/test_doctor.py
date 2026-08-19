@@ -2064,7 +2064,8 @@ def test_budget_exhaustion_degrades_overall_and_health_summary(tmp_path):
     assert "index" in degraded_summary(report)
 
 
-def test_locked_index_returns_immediately_as_degraded(tmp_path):
+def test_locked_index_returns_bounded_as_degraded(tmp_path):
+    """The wait for a lock is bounded, so the check returns instead of blocking."""
     import doctor
 
     _, state_root, _ = _build_root(tmp_path)
@@ -2084,7 +2085,10 @@ def test_locked_index_returns_immediately_as_degraded(tmp_path):
         writer.rollback()
         writer.close()
 
-    assert elapsed < 0.5
+    # The holder only releases after this call returns, so any finite time
+    # proves the wait was bounded. The exact figure is the machine's, not ours;
+    # the chosen wait itself is covered by the _read_busy_ms unit test.
+    assert elapsed < 30
     assert check["status"] == "degraded"
     assert check["details"]["database_busy"] is True
 

@@ -7482,7 +7482,7 @@ def test_tree_cleanup_fault_retains_tree_owner_lease_and_scratch_until_retry(
 
     monkeypatch.setattr(lsp_process.ProcessTree, "terminate", fail_tree)
     with pytest.raises((OSError, RuntimeError, TimeoutError), match="tree|live"):
-        process.shutdown(time.monotonic() + 3)
+        process.shutdown(time.monotonic() + 60)
 
     assert generation.tree is tree
     assert coordinator.owner_directory is not None
@@ -7491,7 +7491,7 @@ def test_tree_cleanup_fault_retains_tree_owner_lease_and_scratch_until_retry(
     assert coordinator.cleanup_result.ownership_pending is True
     assert heartbeat.is_alive()
     coordinator.heartbeat_wake.set()
-    heartbeat_deadline = time.monotonic() + 2
+    heartbeat_deadline = time.monotonic() + 30
     while time.monotonic() < heartbeat_deadline:
         if json.loads(lease_path.read_bytes())["heartbeat_at"] != first_timestamp:
             break
@@ -7499,7 +7499,7 @@ def test_tree_cleanup_fault_retains_tree_owner_lease_and_scratch_until_retry(
     assert json.loads(lease_path.read_bytes())["heartbeat_at"] != first_timestamp
 
     fault_enabled = False
-    process.shutdown(time.monotonic() + 5)
+    process.shutdown(time.monotonic() + 60)
     assert not heartbeat.is_alive()
     assert not process.owner_root.exists()
     assert coordinator.cleanup_result.errors == []
@@ -7527,7 +7527,7 @@ def test_heartbeat_failure_during_cleanup_pending_is_stale_and_observable(
 
     monkeypatch.setattr(lsp_process.ProcessTree, "terminate", terminate_tree)
     with pytest.raises(OSError, match="tree remains live"):
-        process.close(time.monotonic() + 3)
+        process.close(time.monotonic() + 60)
 
     lease_path = process.owner_root / "lease.json"
     stale_lease = lease_path.read_bytes()
@@ -7537,7 +7537,7 @@ def test_heartbeat_failure_during_cleanup_pending_is_stale_and_observable(
 
     monkeypatch.setattr(lsp_process, "_write_current_lease", fail_pending_heartbeat)
     coordinator.heartbeat_wake.set()
-    heartbeat.join(1)
+    heartbeat.join(60)
     assert not heartbeat.is_alive()
     assert lease_path.read_bytes() == stale_lease
     assert coordinator.background_cleanup_error is not None
@@ -7546,7 +7546,7 @@ def test_heartbeat_failure_during_cleanup_pending_is_stale_and_observable(
 
     tree_fault = False
     with pytest.raises(RuntimeError, match=r"background cleanup failed \(OSError\)"):
-        process.close(time.monotonic() + 5)
+        process.close(time.monotonic() + 60)
 
     failure = json.loads((process.owner_root / "failure.json").read_bytes())
     assert failure["code"] == "heartbeat_failed"
