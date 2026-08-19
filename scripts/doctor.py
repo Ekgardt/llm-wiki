@@ -3082,6 +3082,361 @@ def _maintenance_extractor_identity() -> str:
     return f"maintenance-extractors/v3:{digest}"
 
 
+class _GenerationFacts(NamedTuple):
+    delta: int
+    unresolved: int
+    scope_state: str
+    corpus_extraction_state: str
+    graph_extraction_state: str
+
+
+def _require_catalog_integrity(database: sqlite3.Connection, deadline: float) -> None:
+    integrity = database.execute("PRAGMA integrity_check(1)").fetchone()
+    tables = _tables(database, deadline)
+    required = {"generations", "catalog_state", "activation_history"}
+    if integrity is None or integrity[0] != "ok" or not required.issubset(tables):
+        raise sqlite3.DatabaseError("catalog integrity or schema failed")
+
+
+def _require_catalog_durability(database: sqlite3.Connection) -> None:
+    journal = str(database.execute("PRAGMA journal_mode").fetchone()[0]).casefold()
+    synchronous = database.execute("PRAGMA synchronous").fetchone()[0]
+    if journal != "delete" or synchronous != 2:
+        raise sqlite3.DatabaseError("catalog durability contract failed")
+
+
+def _active_pointer(database: sqlite3.Connection) -> object:
+    row = database.execute(
+        "SELECT active_generation_id FROM catalog_state WHERE singleton=1"
+    ).fetchone()
+    if row is None:
+        return None
+    return row[0]
+
+
+def _catalog_active_generation(
+    catalog_path: Path, state_root: Path, deadline: float, state: dict
+) -> tuple[dict | None, str | None]:
+    """The active generation id, or the result to return when there is none."""
+    with _readonly_database(catalog_path, state_root, deadline=deadline) as database:
+        database.set_progress_handler(lambda: int(_deadline_reached(deadline)), 1000)
+        _require_catalog_integrity(database, deadline)
+        _require_catalog_durability(database)
+        active = _active_pointer(database)
+        if not isinstance(active, str) or not active:
+            return (
+                _generation_result(
+                    "ok",
+                    "Evidence generation has not been activated; legacy retrieval remains available.",
+                    catalog="valid",
+                    catalog_schema="valid",
+                    freshness="missing",
+                    repairable=True,
+                    recommended_action="rebuild_generation",
+                ),
+                None,
+            )
+        registered = database.execute(
+            "SELECT 1 FROM generations WHERE generation_id=?",
+            (active,),
+        ).fetchone()
+        if registered is None:
+            raise sqlite3.DatabaseError("active generation is not registered")
+        state["invalid_details"].update(
+            catalog="valid",
+            active_generation=active,
+            catalog_schema="valid",
+        )
+    return None, active
+
+
+def _validated_generation_manifest(
+    generation_path: Path, state_root: Path, deadline: float, state: dict
+) -> tuple[dict, tuple]:
+    import generation_catalog
+
+    diagnostic_value = json.loads(
+        read_runtime_bytes(
+            generation_path / "manifest.json",
+            state_root,
+            max_bytes=MAX_MANIFEST_BYTES,
+        )
+    )
+    if isinstance(diagnostic_value, dict):
+        state["diagnostic_manifest"] = diagnostic_value
+        state["invalid_details"]["generation_schema"] = diagnostic_value.get(
+            "graph_schema_version"
+        )
+    return generation_catalog._validate_generation(  # noqa: SLF001
+        generation_path,
+        state_root,
+        deadline=deadline,
+    )
+
+
+def _scope_state(manifest: dict, repository_scope: object) -> str:
+    if manifest.get("repository_scope") == repository_scope.as_dict():
+        return "current"
+    if "repository_scope" not in manifest:
+        return "missing"
+    return "mismatched"
+
+
+def _corpus_extraction_state(
+    manifest: dict, collector_version: str, extractor_version: str
+) -> str:
+    if manifest.get("collector_version") != collector_version:
+        return "stale"
+    if manifest.get("extractor_version") != extractor_version:
+        return "stale"
+    return "current"
+
+
+def _graph_extraction_state(manifest: dict) -> str:
+    if manifest.get("graph_extractor_version") == _maintenance_extractor_identity():
+        return "current"
+    return "stale"
+
+
+def _source_delta(source_manifest: dict, snapshot: object) -> int:
+    indexed = {
+        item["relative_path"]: item["sha256"] for item in source_manifest["sources"]
+    }
+    current = {
+        source.record.relative_path: source.record.sha256
+        for source in snapshot.sources
+    }
+    return sum(
+        indexed.get(path) != current.get(path)
+        for path in indexed.keys() | current.keys()
+    )
+
+
+def _unresolved_observations(
+    generation_path: Path, state_root: Path, deadline: float
+) -> int:
+    graph = generation_path / "evidence.sqlite3"
+    with _readonly_database(
+        graph, state_root, max_bytes=16 * 1024 * 1024 * 1024, deadline=deadline
+    ) as database:
+        database.set_progress_handler(lambda: int(_deadline_reached(deadline)), 1000)
+        return database.execute(
+            "SELECT COUNT(*) FROM (SELECT 1 FROM observation LIMIT ?)",
+            (MAX_OPERATIONAL_ROWS + 1,),
+        ).fetchone()[0]
+
+
+def _generation_facts(
+    root: Path,
+    state_root: Path,
+    generation_path: Path,
+    manifest: dict,
+    max_sources: int,
+    deadline: float,
+    cancelled,
+) -> _GenerationFacts:
+    """What the live sources and the stored generation currently say."""
+    source_manifest = json.loads(
+        read_runtime_bytes(
+            generation_path / "source-manifest.json",
+            state_root,
+            max_bytes=MAX_MANIFEST_BYTES * 1024,
+        )
+    )
+    policy = source_manifest["policy"]
+
+    from corpus_snapshot import COLLECTOR_VERSION, EXTRACTOR_VERSION, collect_corpus
+    from repository_scope import resolve_repository_scope
+
+    repository_scope = resolve_repository_scope(
+        root, deadline=deadline, cancelled=cancelled
+    )
+    snapshot = collect_corpus(
+        root,
+        daily_paths=policy["daily_paths"],
+        code_roots=policy["code_roots"],
+        include_historical=policy["include_historical"],
+        as_of=policy["as_of"],
+        max_files=max_sources,
+        deadline=deadline,
+    )
+    return _GenerationFacts(
+        delta=_source_delta(source_manifest, snapshot),
+        unresolved=_unresolved_observations(generation_path, state_root, deadline),
+        scope_state=_scope_state(manifest, repository_scope),
+        corpus_extraction_state=_corpus_extraction_state(
+            manifest, COLLECTOR_VERSION, EXTRACTOR_VERSION
+        ),
+        graph_extraction_state=_graph_extraction_state(manifest),
+    )
+
+
+def _generation_age_source(seal: tuple, catalog_info) -> tuple[int, str]:
+    manifest_seal = next(
+        (entry for entry in seal if entry.path == "manifest.json"), None
+    )
+    if manifest_seal is not None:
+        return manifest_seal.mtime_ns, "manifest_mtime"
+    if catalog_info is not None:
+        return catalog_info.st_mtime_ns, "catalog_mtime"
+    raise OSError("generation age timestamp is unavailable")
+
+
+def _generation_age(seal: tuple, catalog_info, now: datetime) -> tuple[int, str]:
+    timestamp_ns, age_source = _generation_age_source(seal, catalog_info)
+    now_ns = int(_as_utc(now).timestamp() * 1_000_000_000)
+    return max(0, (now_ns - timestamp_ns) // 1_000_000_000), age_source
+
+
+def _identity_stale(facts: _GenerationFacts, complete_v2: bool) -> bool:
+    if facts.scope_state != "current" or facts.corpus_extraction_state != "current":
+        return True
+    return facts.graph_extraction_state != "current" or not complete_v2
+
+
+def _generation_search_fields(complete_v2: bool) -> dict:
+    if not complete_v2:
+        return {
+            "search_index": "missing",
+            "search_schema": None,
+            "search_integrity": "missing",
+        }
+    return {
+        "search_index": "valid",
+        "search_schema": "corpus-search/v1",
+        "search_integrity": "valid",
+    }
+
+
+def _generation_health_result(
+    active: str,
+    manifest: dict,
+    seal: tuple,
+    catalog_info,
+    now: datetime,
+    facts: _GenerationFacts,
+) -> dict:
+    age, age_source = _generation_age(seal, catalog_info, now)
+    vector_state = str(manifest["vector_state"])
+    complete_v2 = manifest.get("schema_version") == "corpus-generation/v2"
+    stale = bool(
+        facts.delta
+        or age > GENERATION_FRESH_SECONDS
+        or _identity_stale(facts, complete_v2)
+    )
+    degraded = stale or vector_state == "stale" or bool(facts.unresolved)
+    message = "Evidence generation is healthy."
+    if degraded:
+        message = "Evidence generation requires refresh."
+    return _generation_result(
+        "degraded" if degraded else "ok",
+        message,
+        catalog="valid",
+        active_generation=active,
+        catalog_schema="valid",
+        generation_schema=manifest["graph_schema_version"],
+        source_manifest="valid",
+        evidence_integrity="valid",
+        vector_state=vector_state,
+        vector_model=manifest["embedding_model_id"],
+        vector_dimensions=manifest["vector_dimensions"],
+        freshness="stale" if stale else "fresh",
+        repository_scope=facts.scope_state,
+        extraction_identity=facts.graph_extraction_state,
+        corpus_extraction_identity=facts.corpus_extraction_state,
+        unindexed_delta=facts.delta,
+        unresolved_observations=facts.unresolved,
+        age_seconds=age,
+        age_source=age_source,
+        repairable=degraded,
+        **_generation_search_fields(complete_v2),
+    )
+
+
+def _validated_search_artifact(
+    generation_path: Path, diagnostic: dict, state_root: Path, deadline: float
+) -> dict:
+    try:
+        from search_memory import validate_generation_fts_artifact
+
+        validate_generation_fts_artifact(
+            generation_path,
+            diagnostic,
+            state_root=state_root,
+            deadline=deadline,
+        )
+    except (OSError, PermissionError, TypeError, ValueError, sqlite3.Error):
+        return {"search_index": "corrupt", "search_integrity": "invalid"}
+    return {"search_index": "valid", "search_integrity": "valid"}
+
+
+def _diagnostic_search_state(
+    generation_path: Path, diagnostic: dict, state_root: Path, deadline: float
+) -> dict:
+    search_kind = _safe_kind(generation_path / "search.sqlite3", state_root)[0]
+    if search_kind == "missing":
+        return {"search_index": "missing", "search_integrity": "missing"}
+    if search_kind != "regular":
+        return {"search_index": "corrupt", "search_integrity": "invalid"}
+    return _validated_search_artifact(
+        generation_path, diagnostic, state_root, deadline
+    )
+
+
+def _diagnose_invalid_generation(
+    state: dict, state_root: Path, deadline: float
+) -> None:
+    """Say what the search artifact looks like when the generation is invalid."""
+    generation_path = state["generation_path"]
+    diagnostic = state["diagnostic_manifest"]
+    if generation_path is None or not isinstance(diagnostic, dict):
+        return
+    if diagnostic.get("schema_version") != "corpus-generation/v2":
+        return
+    state["invalid_details"]["search_schema"] = "corpus-search/v1"
+    state["invalid_details"].update(
+        _diagnostic_search_state(generation_path, diagnostic, state_root, deadline)
+    )
+
+
+def _checked_generation(
+    root: Path,
+    state_root: Path,
+    now: datetime,
+    deadline: float,
+    catalog_path: Path,
+    catalog_info,
+    max_sources: int,
+    cancelled,
+    state: dict,
+) -> dict:
+    early, active = _catalog_active_generation(
+        catalog_path, state_root, deadline, state
+    )
+    if early is not None:
+        return early
+    if _deadline_reached(deadline):
+        raise TimeoutError("generation check deadline")
+    generation_path = state_root / "cache" / "evidence-graph" / "generations" / active
+    state["generation_path"] = generation_path
+    manifest, seal = _validated_generation_manifest(
+        generation_path, state_root, deadline, state
+    )
+    facts = _generation_facts(
+        root, state_root, generation_path, manifest, max_sources, deadline, cancelled
+    )
+    return _generation_health_result(active, manifest, seal, catalog_info, now, facts)
+
+
+def _require_positive_source_limit(max_sources: object) -> None:
+    if (
+        isinstance(max_sources, bool)
+        or not isinstance(max_sources, int)
+        or max_sources < 1
+    ):
+        raise ValueError("max_sources must be a positive integer")
+
+
 def _generation_check(
     root: Path,
     state_root: Path,
@@ -3092,12 +3447,8 @@ def _generation_check(
     cancelled=None,
 ) -> dict:
     """Validate the catalog-selected immutable generation without writing."""
-    if isinstance(max_sources, bool) or not isinstance(max_sources, int) or max_sources < 1:
-        raise ValueError("max_sources must be a positive integer")
+    _require_positive_source_limit(max_sources)
     catalog_path = state_root / "cache" / "evidence-graph" / "catalog.sqlite3"
-    invalid_details: dict[str, object] = {"catalog": "invalid", "repairable": True}
-    diagnostic_manifest: dict[str, object] | None = None
-    generation_path: Path | None = None
     kind, catalog_info = _safe_kind(catalog_path, state_root)
     if kind == "missing":
         return _generation_result(
@@ -3115,173 +3466,22 @@ def _generation_check(
             catalog="invalid",
             repairable=False,
         )
+    state: dict[str, Any] = {
+        "invalid_details": {"catalog": "invalid", "repairable": True},
+        "diagnostic_manifest": None,
+        "generation_path": None,
+    }
     try:
-        with _readonly_database(catalog_path, state_root, deadline=deadline) as database:
-            database.set_progress_handler(lambda: int(_deadline_reached(deadline)), 1000)
-            integrity = database.execute("PRAGMA integrity_check(1)").fetchone()
-            tables = _tables(database, deadline)
-            required = {"generations", "catalog_state", "activation_history"}
-            if integrity is None or integrity[0] != "ok" or not required.issubset(tables):
-                raise sqlite3.DatabaseError("catalog integrity or schema failed")
-            journal = str(database.execute("PRAGMA journal_mode").fetchone()[0]).casefold()
-            synchronous = database.execute("PRAGMA synchronous").fetchone()[0]
-            if journal != "delete" or synchronous != 2:
-                raise sqlite3.DatabaseError("catalog durability contract failed")
-            state = database.execute(
-                "SELECT active_generation_id FROM catalog_state WHERE singleton=1"
-            ).fetchone()
-            active = None if state is None else state[0]
-            if not isinstance(active, str) or not active:
-                return _generation_result(
-                    "ok",
-                    "Evidence generation has not been activated; legacy retrieval remains available.",
-                    catalog="valid",
-                    catalog_schema="valid",
-                    freshness="missing",
-                    repairable=True,
-                    recommended_action="rebuild_generation",
-                )
-            registered = database.execute(
-                "SELECT 1 FROM generations WHERE generation_id=?",
-                (active,),
-            ).fetchone()
-            if registered is None:
-                raise sqlite3.DatabaseError("active generation is not registered")
-            invalid_details.update(
-                catalog="valid",
-                active_generation=active,
-                catalog_schema="valid",
-            )
-        if _deadline_reached(deadline):
-            raise TimeoutError("generation check deadline")
-
-        import generation_catalog
-
-        generation_path = state_root / "cache" / "evidence-graph" / "generations" / active
-        diagnostic_value = json.loads(
-            read_runtime_bytes(
-                generation_path / "manifest.json",
-                state_root,
-                max_bytes=MAX_MANIFEST_BYTES,
-            )
-        )
-        if isinstance(diagnostic_value, dict):
-            diagnostic_manifest = diagnostic_value
-            invalid_details["generation_schema"] = diagnostic_manifest.get("graph_schema_version")
-        manifest, seal = generation_catalog._validate_generation(  # noqa: SLF001
-            generation_path,
-            state_root,
-            deadline=deadline,
-        )
-        source_manifest_raw = read_runtime_bytes(
-            generation_path / "source-manifest.json",
-            state_root,
-            max_bytes=MAX_MANIFEST_BYTES * 1024,
-        )
-        source_manifest = json.loads(source_manifest_raw)
-        policy = source_manifest["policy"]
-
-        from corpus_snapshot import COLLECTOR_VERSION, EXTRACTOR_VERSION, collect_corpus
-        from repository_scope import resolve_repository_scope
-
-        repository_scope = resolve_repository_scope(
+        return _checked_generation(
             root,
-            deadline=deadline,
-            cancelled=cancelled,
-        )
-        scope_state = (
-            "current"
-            if manifest.get("repository_scope") == repository_scope.as_dict()
-            else "missing"
-            if "repository_scope" not in manifest
-            else "mismatched"
-        )
-        corpus_extraction_state = (
-            "current"
-            if manifest.get("collector_version") == COLLECTOR_VERSION
-            and manifest.get("extractor_version") == EXTRACTOR_VERSION
-            else "stale"
-        )
-        graph_extraction_state = (
-            "current"
-            if manifest.get("graph_extractor_version") == _maintenance_extractor_identity()
-            else "stale"
-        )
-
-        snapshot = collect_corpus(
-            root,
-            daily_paths=policy["daily_paths"],
-            code_roots=policy["code_roots"],
-            include_historical=policy["include_historical"],
-            as_of=policy["as_of"],
-            max_files=max_sources,
-            deadline=deadline,
-        )
-        indexed = {item["relative_path"]: item["sha256"] for item in source_manifest["sources"]}
-        current = {source.record.relative_path: source.record.sha256 for source in snapshot.sources}
-        delta = sum(
-            indexed.get(path) != current.get(path) for path in indexed.keys() | current.keys()
-        )
-        graph = generation_path / "evidence.sqlite3"
-        with _readonly_database(
-            graph, state_root, max_bytes=16 * 1024 * 1024 * 1024, deadline=deadline
-        ) as database:
-            database.set_progress_handler(lambda: int(_deadline_reached(deadline)), 1000)
-            unresolved = database.execute(
-                "SELECT COUNT(*) FROM (SELECT 1 FROM observation LIMIT ?)",
-                (MAX_OPERATIONAL_ROWS + 1,),
-            ).fetchone()[0]
-        manifest_seal = next((entry for entry in seal if entry.path == "manifest.json"), None)
-        if manifest_seal is not None:
-            age_timestamp_ns = manifest_seal.mtime_ns
-            age_source = "manifest_mtime"
-        elif catalog_info is not None:
-            age_timestamp_ns = catalog_info.st_mtime_ns
-            age_source = "catalog_mtime"
-        else:
-            raise OSError("generation age timestamp is unavailable")
-        now_ns = int(_as_utc(now).timestamp() * 1_000_000_000)
-        age = max(0, (now_ns - age_timestamp_ns) // 1_000_000_000)
-        stale_age = age > GENERATION_FRESH_SECONDS
-        vector_state = str(manifest["vector_state"])
-        complete_v2 = manifest.get("schema_version") == "corpus-generation/v2"
-        identity_stale = (
-            scope_state != "current"
-            or corpus_extraction_state != "current"
-            or graph_extraction_state != "current"
-            or not complete_v2
-        )
-        status = (
-            "degraded"
-            if delta or stale_age or identity_stale or vector_state == "stale" or unresolved
-            else "ok"
-        )
-        return _generation_result(
-            status,
-            "Evidence generation requires refresh."
-            if status != "ok"
-            else "Evidence generation is healthy.",
-            catalog="valid",
-            active_generation=active,
-            catalog_schema="valid",
-            generation_schema=manifest["graph_schema_version"],
-            source_manifest="valid",
-            evidence_integrity="valid",
-            search_index="valid" if complete_v2 else "missing",
-            search_schema="corpus-search/v1" if complete_v2 else None,
-            search_integrity="valid" if complete_v2 else "missing",
-            vector_state=vector_state,
-            vector_model=manifest["embedding_model_id"],
-            vector_dimensions=manifest["vector_dimensions"],
-            freshness="stale" if delta or stale_age or identity_stale else "fresh",
-            repository_scope=scope_state,
-            extraction_identity=graph_extraction_state,
-            corpus_extraction_identity=corpus_extraction_state,
-            unindexed_delta=delta,
-            unresolved_observations=unresolved,
-            age_seconds=age,
-            age_source=age_source,
-            repairable=status == "degraded",
+            state_root,
+            now,
+            deadline,
+            catalog_path,
+            catalog_info,
+            max_sources,
+            cancelled,
+            state,
         )
     except TimeoutError:
         return _generation_result(
@@ -3301,35 +3501,11 @@ def _generation_check(
         json.JSONDecodeError,
         sqlite3.Error,
     ):
-        if (
-            generation_path is not None
-            and diagnostic_manifest is not None
-            and diagnostic_manifest.get("schema_version") == "corpus-generation/v2"
-        ):
-            invalid_details["search_schema"] = "corpus-search/v1"
-            search_kind = _safe_kind(generation_path / "search.sqlite3", state_root)[0]
-            if search_kind == "missing":
-                invalid_details.update(search_index="missing", search_integrity="missing")
-            elif search_kind == "regular":
-                try:
-                    from search_memory import validate_generation_fts_artifact
-
-                    validate_generation_fts_artifact(
-                        generation_path,
-                        diagnostic_manifest,
-                        state_root=state_root,
-                        deadline=deadline,
-                    )
-                except (OSError, PermissionError, TypeError, ValueError, sqlite3.Error):
-                    invalid_details.update(search_index="corrupt", search_integrity="invalid")
-                else:
-                    invalid_details.update(search_index="valid", search_integrity="valid")
-            else:
-                invalid_details.update(search_index="corrupt", search_integrity="invalid")
+        _diagnose_invalid_generation(state, state_root, deadline)
         return _generation_result(
             "error",
             "Evidence generation catalog or active artifacts are invalid.",
-            **invalid_details,
+            **state["invalid_details"],
         )
 
 
