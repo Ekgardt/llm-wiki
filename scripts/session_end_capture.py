@@ -17,6 +17,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from event_envelope import canonical_agent  # noqa: E402
 from memory_state import ROOT, STATE_ROOT, spawn_detached  # noqa: E402
 
+try:
+    from capture_diagnostics import record_capture_failure  # noqa: E402
+except Exception:  # noqa: BLE001
+    def record_capture_failure(kind, reason, **fields):  # type: ignore[misc]
+        """No-op stub — diagnostics must never break the capture hook."""
+
 
 def _cleanup_ephemeral(path: str) -> None:
     try:
@@ -80,6 +86,15 @@ def _capture(payload: dict) -> None:
         args.append("--ephemeral-transcript")
     spawned = _spawn_flush(args)
     _cleanup_failed_ephemeral(payload, spawned)
+    if spawned is None:
+        # Called directly rather than through the integration adapter there is
+        # no durable intent behind this hook, so a failed spawn would lose the
+        # session without a trace. Leave one.
+        record_capture_failure(
+            "session_end",
+            "flush_spawn_failed",
+            session_id=str(payload.get("session_id", "")),
+        )
     print(json.dumps({"flush_started": spawned is not None}))
 
 

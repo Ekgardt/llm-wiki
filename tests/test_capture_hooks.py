@@ -1270,3 +1270,27 @@ def tmp_path_state(tmp_path: Path, monkeypatch, module):
     state_dir.mkdir()
     monkeypatch.setattr(module, "STATE_ROOT", tmp_path)
     return state_dir / "state.json"
+
+
+def test_a_failed_direct_spawn_leaves_a_capture_failure_trace(monkeypatch, capsys):
+    """Called outside the adapter there is no durable intent, so record the loss."""
+    import precompact_capture
+    import session_end_capture
+
+    recorded = []
+    for module, event in ((session_end_capture, "session_end"), (precompact_capture, "pre_compact")):
+        monkeypatch.setattr(module, "spawn_detached", lambda args: None)
+        monkeypatch.setattr(
+            module,
+            "record_capture_failure",
+            lambda kind, reason, **fields: recorded.append((kind, reason, fields)),
+        )
+        assert _run_capture_with_stdin(
+            module.__name__, {"session_id": "session-7", "transcript_path": "session.jsonl"}
+        ) == 0
+        assert json.loads(capsys.readouterr().out) == {"flush_started": False}
+        del event
+
+    assert [item[0] for item in recorded] == ["session_end", "pre_compact"]
+    assert {item[1] for item in recorded} == {"flush_spawn_failed"}
+    assert {item[2]["session_id"] for item in recorded} == {"session-7"}
