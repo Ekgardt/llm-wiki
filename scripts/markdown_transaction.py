@@ -24,7 +24,7 @@ from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 if TYPE_CHECKING:
     from operational_ownership import OwnerLease
@@ -1772,6 +1772,107 @@ def _require_hash_or_absent(expected: object) -> None:
         return
     if not _is_sha256_hex(expected):
         raise ValueError("precondition values must be 'absent' or SHA-256 hashes")
+
+
+_RECOVERY_MANIFEST_FIELDS = {
+    "schema_version",
+    "transaction_id",
+    "request_hash",
+    "plan_hash",
+    "operations",
+}
+_PERSISTED_OPERATION_FIELDS = {
+    "position",
+    "before_hash",
+    "after_hash",
+    "parent_device",
+    "parent_inode",
+}
+# Which side of a recorded operation must be absent, per kind.
+_OPERATION_ABSENCE = {
+    "create": (True, False),
+    "replace": (False, False),
+    "delete": (False, True),
+}
+
+
+class _BuiltOperation(NamedTuple):
+    row: tuple
+    change: dict
+    parent_mismatch: bool
+
+
+class _PromotionPlan(NamedTuple):
+    manifest: dict
+    operations: list
+    parent_mismatch: bool
+
+
+def _manifest_identity_matches(
+    manifest: Mapping[str, object], transaction_id: str, plan_bytes: bytes
+) -> bool:
+    if manifest["schema_version"] != "markdown-transaction-recovery/v1":
+        return False
+    if manifest["transaction_id"] != transaction_id:
+        return False
+    return manifest["plan_hash"] == sha256_bytes(plan_bytes)
+
+
+def _comparable_operation_lists(plan_operations: object, manifest_operations: object) -> bool:
+    if not isinstance(plan_operations, list) or not isinstance(manifest_operations, list):
+        return False
+    return len(plan_operations) == len(manifest_operations)
+
+
+def _persisted_integers(persisted: Mapping[str, object]) -> bool:
+    if type(persisted["position"]) is not int:
+        return False
+    if type(persisted["parent_device"]) is not int:
+        return False
+    return type(persisted["parent_inode"]) is int
+
+
+def _persisted_shape_matches(persisted: object, position: int) -> bool:
+    if not isinstance(persisted, dict):
+        return False
+    if set(persisted) != _PERSISTED_OPERATION_FIELDS:
+        return False
+    if persisted["position"] != position:
+        return False
+    return _persisted_integers(persisted)
+
+
+def _validated_persisted_operation(
+    persisted: object, position: int, operation: object
+) -> tuple | None:
+    """The encoded parent identity, or None when the pair does not line up."""
+    if not isinstance(operation, dict):
+        return None
+    if not _persisted_shape_matches(persisted, position):
+        return None
+    try:
+        return _encode_parent_identity(
+            (persisted["parent_device"], persisted["parent_inode"])
+        )
+    except ValueError:
+        return None
+
+
+def _kind_transition_valid(kind: object, before_hash: str, after_hash: str) -> bool:
+    expected = _OPERATION_ABSENCE.get(kind)
+    if expected is None:
+        return True
+    return (before_hash == ABSENT, after_hash == ABSENT) == expected
+
+
+def _operation_hashes_consistent(
+    persisted: Mapping[str, object], kind: object, before_hash: str, after_hash: str
+) -> bool:
+    if persisted["before_hash"] != before_hash:
+        return False
+    if persisted["after_hash"] != after_hash:
+        return False
+    return _kind_transition_valid(kind, before_hash, after_hash)
 
 
 def _is_target_boundary_error(error: BaseException) -> bool:
@@ -4599,165 +4700,229 @@ class MarkdownCoordinator:
     ) -> bool:
         return time.monotonic() >= deadline or bool(cancelled and cancelled())
 
-    def _promote_preparing(self, record: TransactionRecord) -> str:
-        artifact_root = self.transaction_root / record.id
-        try:
-            plan_bytes = (artifact_root / "plan.json").read_bytes()
-            plan = json.loads(plan_bytes)
-            validate_schema(plan, _SCHEMA)
-            if (
-                plan_bytes != canonical_json_bytes(plan)
-                or plan["transaction_id"] != record.id
-            ):
-                return "invalid"
-            self._verify_plan_artifacts(plan, artifact_root)
-            manifest_bytes = (artifact_root / "manifest.json").read_bytes()
-            manifest = json.loads(manifest_bytes)
-            if manifest_bytes != canonical_json_bytes(manifest):
-                return "invalid"
-            if set(manifest) != {
-                "schema_version",
-                "transaction_id",
-                "request_hash",
-                "plan_hash",
-                "operations",
-            }:
-                return "invalid"
-            if (
-                manifest["schema_version"] != "markdown-transaction-recovery/v1"
-                or manifest["transaction_id"] != record.id
-                or manifest["plan_hash"] != sha256_bytes(plan_bytes)
-            ):
-                return "invalid"
-            with self._connect() as database:
-                row = database.execute(
-                    'SELECT request_hash FROM "transaction" WHERE id = ?',
-                    (record.id,),
-                ).fetchone()
-            if row is None or manifest["request_hash"] != row["request_hash"]:
-                return "invalid"
-            plan_operations = plan["operations"]
-            manifest_operations = manifest["operations"]
-            if (
-                not isinstance(plan_operations, list)
-                or not isinstance(manifest_operations, list)
-                or len(plan_operations) != len(manifest_operations)
-            ):
-                return "invalid"
+    def _quarantine_parent_identity(self, record: TransactionRecord) -> str:
+        self._set_transaction_state(
+            record.id, "quarantined", error_code="parent_identity_changed"
+        )
+        return "quarantined"
 
-            operations: list[tuple[object, ...]] = []
-            request_changes: list[dict[str, object]] = []
-            seen_paths: set[str] = set()
-            parent_mismatch = False
-            for position, (operation, persisted) in enumerate(
-                zip(plan_operations, manifest_operations, strict=True)
-            ):
-                if not isinstance(operation, dict) or not isinstance(persisted, dict):
-                    return "invalid"
-                if set(persisted) != {
-                    "position",
-                    "before_hash",
-                    "after_hash",
-                    "parent_device",
-                    "parent_inode",
-                } or persisted["position"] != position:
-                    return "invalid"
-                if (
-                    type(persisted["position"]) is not int
-                    or type(persisted["parent_device"]) is not int
-                    or type(persisted["parent_inode"]) is not int
-                ):
-                    return "invalid"
-                try:
-                    encoded_parent_identity = _encode_parent_identity(
-                        (persisted["parent_device"], persisted["parent_inode"])
-                    )
-                except ValueError:
-                    return "invalid"
-                path = str(operation["path"])
-                try:
-                    self._target(path)
-                except (FileNotFoundError, ValueError) as exc:
-                    raise TargetBoundaryFailure from exc
-                normalized = unicodedata.normalize("NFC", path).casefold()
-                if normalized in seen_paths:
-                    return "invalid"
-                seen_paths.add(normalized)
-                before_hash = self._state_description_hash(operation["before"])
-                after_hash = self._state_description_hash(operation["after"])
-                kind = operation["kind"]
-                if (
-                    persisted["before_hash"] != before_hash
-                    or persisted["after_hash"] != after_hash
-                    or kind == "create"
-                    and (before_hash != ABSENT or after_hash == ABSENT)
-                    or kind == "replace"
-                    and (before_hash == ABSENT or after_hash == ABSENT)
-                    or kind == "delete"
-                    and (before_hash == ABSENT or after_hash != ABSENT)
-                ):
-                    return "invalid"
-                try:
-                    current_parent = self._parent_identity(self._target(path).parent)
-                except (FileNotFoundError, RuntimeError, ValueError) as exc:
-                    raise TargetBoundaryFailure from exc
-                parent_identity = (
-                    persisted["parent_device"],
-                    persisted["parent_inode"],
-                )
-                parent_mismatch = parent_mismatch or current_parent != parent_identity
-                operations.append(
-                    (
-                        record.id,
-                        position,
-                        kind,
-                        path,
-                        before_hash,
-                        after_hash,
-                        *encoded_parent_identity,
-                        0,
-                    )
-                )
-                request_changes.append(
-                    {
-                        "kind": kind,
-                        "path": path,
-                        "content_hash": after_hash,
-                    }
-                )
-            request = {
-                "changes": request_changes,
-                "preconditions": dict(record.preconditions),
-            }
-            if sha256_bytes(canonical_json_bytes(request)) != manifest["request_hash"]:
-                return "invalid"
-        except TargetBoundaryFailure:
-            self._set_transaction_state(
-                record.id, "quarantined", error_code="parent_identity_changed"
+    def _require_target_within_boundary(self, path: str) -> None:
+        try:
+            self._target(path)
+        except (FileNotFoundError, ValueError) as exc:
+            raise TargetBoundaryFailure from exc
+
+    def _current_parent_identity(self, path: str) -> tuple[int, int]:
+        try:
+            return self._parent_identity(self._target(path).parent)
+        except (FileNotFoundError, RuntimeError, ValueError) as exc:
+            raise TargetBoundaryFailure from exc
+
+    def _validated_plan_document(
+        self, record: TransactionRecord, artifact_root: Path
+    ) -> tuple[dict | None, bytes]:
+        plan_bytes = (artifact_root / "plan.json").read_bytes()
+        plan = json.loads(plan_bytes)
+        validate_schema(plan, _SCHEMA)
+        if plan_bytes != canonical_json_bytes(plan):
+            return None, plan_bytes
+        if plan["transaction_id"] != record.id:
+            return None, plan_bytes
+        return plan, plan_bytes
+
+    def _validated_manifest_document(
+        self, record: TransactionRecord, artifact_root: Path, plan_bytes: bytes
+    ) -> dict | None:
+        manifest_bytes = (artifact_root / "manifest.json").read_bytes()
+        manifest = json.loads(manifest_bytes)
+        if manifest_bytes != canonical_json_bytes(manifest):
+            return None
+        if set(manifest) != _RECOVERY_MANIFEST_FIELDS:
+            return None
+        if not _manifest_identity_matches(manifest, record.id, plan_bytes):
+            return None
+        return manifest
+
+    def _manifest_matches_request(
+        self, record: TransactionRecord, manifest: Mapping[str, object]
+    ) -> bool:
+        with self._connect() as database:
+            row = database.execute(
+                'SELECT request_hash FROM "transaction" WHERE id = ?',
+                (record.id,),
+            ).fetchone()
+        if row is None:
+            return False
+        return manifest["request_hash"] == row["request_hash"]
+
+    def _built_operation(
+        self,
+        record: TransactionRecord,
+        position: int,
+        operation: object,
+        persisted: object,
+        seen_paths: set[str],
+    ) -> _BuiltOperation | None:
+        encoded_parent_identity = _validated_persisted_operation(
+            persisted, position, operation
+        )
+        if encoded_parent_identity is None:
+            return None
+        path = str(operation["path"])
+        self._require_target_within_boundary(path)
+        normalized = unicodedata.normalize("NFC", path).casefold()
+        if normalized in seen_paths:
+            return None
+        seen_paths.add(normalized)
+        before_hash = self._state_description_hash(operation["before"])
+        after_hash = self._state_description_hash(operation["after"])
+        kind = operation["kind"]
+        if not _operation_hashes_consistent(persisted, kind, before_hash, after_hash):
+            return None
+        current_parent = self._current_parent_identity(path)
+        parent_identity = (persisted["parent_device"], persisted["parent_inode"])
+        return _BuiltOperation(
+            (
+                record.id,
+                position,
+                kind,
+                path,
+                before_hash,
+                after_hash,
+                *encoded_parent_identity,
+                0,
+            ),
+            {"kind": kind, "path": path, "content_hash": after_hash},
+            current_parent != parent_identity,
+        )
+
+    def _request_hash_matches(
+        self,
+        record: TransactionRecord,
+        request_changes: list[dict[str, object]],
+        manifest: Mapping[str, object],
+    ) -> bool:
+        request = {
+            "changes": request_changes,
+            "preconditions": dict(record.preconditions),
+        }
+        return sha256_bytes(canonical_json_bytes(request)) == manifest["request_hash"]
+
+    def _built_operations(
+        self,
+        record: TransactionRecord,
+        plan: Mapping[str, object],
+        manifest: Mapping[str, object],
+    ) -> _PromotionPlan | None:
+        plan_operations = plan["operations"]
+        manifest_operations = manifest["operations"]
+        if not _comparable_operation_lists(plan_operations, manifest_operations):
+            return None
+        built = self._all_built_operations(record, plan_operations, manifest_operations)
+        if built is None:
+            return None
+        operations = [item.row for item in built]
+        if not self._request_hash_matches(
+            record, [item.change for item in built], manifest
+        ):
+            return None
+        parent_mismatch = any(item.parent_mismatch for item in built)
+        return _PromotionPlan(dict(manifest), operations, parent_mismatch)
+
+    def _all_built_operations(
+        self,
+        record: TransactionRecord,
+        plan_operations: list,
+        manifest_operations: list,
+    ) -> list[_BuiltOperation] | None:
+        seen_paths: set[str] = set()
+        built: list[_BuiltOperation] = []
+        for position, (operation, persisted) in enumerate(
+            zip(plan_operations, manifest_operations, strict=True)
+        ):
+            item = self._built_operation(
+                record, position, operation, persisted, seen_paths
             )
-            return "quarantined"
+            if item is None:
+                return None
+            built.append(item)
+        return built
+
+    def _validated_promotion_plan(
+        self, record: TransactionRecord
+    ) -> _PromotionPlan | None:
+        """Everything the artifacts must agree on before a transaction promotes."""
+        artifact_root = self.transaction_root / record.id
+        plan, plan_bytes = self._validated_plan_document(record, artifact_root)
+        if plan is None:
+            return None
+        self._verify_plan_artifacts(plan, artifact_root)
+        manifest = self._validated_manifest_document(record, artifact_root, plan_bytes)
+        if manifest is None:
+            return None
+        if not self._manifest_matches_request(record, manifest):
+            return None
+        return self._built_operations(record, plan, manifest)
+
+    def _promotion_plan_or_verdict(self, record: TransactionRecord):
+        try:
+            plan = self._validated_promotion_plan(record)
+        except TargetBoundaryFailure:
+            return self._quarantine_parent_identity(record)
         except (AssertionError, KeyError, OSError, TypeError, ValueError):
             return "invalid"
+        if plan is None:
+            return "invalid"
+        return plan
 
+    def _bind_existing_reservation(
+        self, database: sqlite3.Connection, record: TransactionRecord
+    ) -> None:
+        reservation_row = database.execute(
+            "SELECT * FROM project_checkpoints WHERE operation_id = ?",
+            (record.operation_id,),
+        ).fetchone()
+        if reservation_row is None:
+            return
+        self._bind_project_reservation(
+            database,
+            self._project_reservation(reservation_row),
+            record.id,
+            record.preconditions,
+        )
+
+    def _quarantine_failed_promotion(
+        self, record: TransactionRecord, exc: TransactionFailure
+    ) -> str:
+        self._set_transaction_state(record.id, "quarantined", error_code=exc.code)
+        with self._connect() as database, begin_immediate(
+            database, before_commit=self._require_current_operation_active
+        ):
+            database.execute(
+                "UPDATE project_checkpoints SET state = 'quarantined' "
+                "WHERE operation_id = ?",
+                (record.operation_id,),
+            )
+            database.execute(
+                "UPDATE project_checkpoint_attempts SET state = 'quarantined' "
+                "WHERE operation_id = ?",
+                (record.operation_id,),
+            )
+        return "quarantined"
+
+    def _commit_promotion(
+        self, record: TransactionRecord, promotion: _PromotionPlan
+    ) -> str | None:
+        """The verdict when the promotion could not commit, otherwise None."""
         try:
             with self._connect() as database, begin_immediate(
                 database, before_commit=self._require_current_operation_active
             ):
-                reservation_row = database.execute(
-                    "SELECT * FROM project_checkpoints WHERE operation_id = ?",
-                    (record.operation_id,),
-                ).fetchone()
-                if reservation_row is not None:
-                    self._bind_project_reservation(
-                        database,
-                        self._project_reservation(reservation_row),
-                        record.id,
-                        record.preconditions,
-                    )
+                self._bind_existing_reservation(database, record)
                 cursor = database.execute(
                     'UPDATE "transaction" SET state = \'prepared\', plan_hash = ?, '
                     "updated_at = ?, owner_pid = NULL WHERE id = ? AND state = 'preparing'",
-                    (manifest["plan_hash"], _now(), record.id),
+                    (promotion.manifest["plan_hash"], _now(), record.id),
                 )
                 if cursor.rowcount != 1:
                     return "invalid"
@@ -4766,31 +4931,23 @@ class MarkdownCoordinator:
                     "(transaction_id, position, kind, path, before_hash, after_hash, "
                     "parent_device, parent_inode, applied) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    operations,
+                    promotion.operations,
                 )
         except ProjectPendingPriorError:
             return "invalid"
         except TransactionFailure as exc:
-            self._set_transaction_state(record.id, "quarantined", error_code=exc.code)
-            with self._connect() as database, begin_immediate(
-                database, before_commit=self._require_current_operation_active
-            ):
-                database.execute(
-                    "UPDATE project_checkpoints SET state = 'quarantined' "
-                    "WHERE operation_id = ?",
-                    (record.operation_id,),
-                )
-                database.execute(
-                    "UPDATE project_checkpoint_attempts SET state = 'quarantined' "
-                    "WHERE operation_id = ?",
-                    (record.operation_id,),
-                )
-            return "quarantined"
-        if parent_mismatch:
-            self._set_transaction_state(
-                record.id, "quarantined", error_code="parent_identity_changed"
-            )
-            return "quarantined"
+            return self._quarantine_failed_promotion(record, exc)
+        return None
+
+    def _promote_preparing(self, record: TransactionRecord) -> str:
+        promotion = self._promotion_plan_or_verdict(record)
+        if isinstance(promotion, str):
+            return promotion
+        verdict = self._commit_promotion(record, promotion)
+        if verdict is not None:
+            return verdict
+        if promotion.parent_mismatch:
+            return self._quarantine_parent_identity(record)
         return "promoted"
 
     def _state_description_hash(self, state: object) -> str:
