@@ -25,7 +25,7 @@ from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 if TYPE_CHECKING:
     from markdown_transaction import IntentFence
@@ -11382,6 +11382,125 @@ def _claim_when_reachable(
             time.sleep(_CLAIM_BUSY_RETRY_SECONDS)
 
 
+class _ProcessorOutcome(NamedTuple):
+    outcome: bool | DeferredResult
+    timed_out: bool
+    cleanup_failed: bool
+
+
+def _adopted_counts(
+    queue: MemoryQueue, lease: QueueLease, counts: dict[str, int]
+) -> bool:
+    """True when a previously published result settled this lease already."""
+    adopted = queue.adopt_published_result(lease, operation_id=lease.id)
+    if adopted == "adopted":
+        _count_terminal(counts, queue.acknowledge(lease))
+        return True
+    if adopted == "corrupt":
+        _count_terminal(counts, queue.get(lease.id))
+        return True
+    return False
+
+
+def _run_processor(
+    processor: Callable[[dict], bool | DeferredResult],
+    processor_runner: Callable[
+        [Callable[[dict], bool | DeferredResult], dict[str, Any], float],
+        bool | DeferredResult,
+    ],
+    lease: QueueLease,
+    remaining: float,
+) -> _ProcessorOutcome:
+    try:
+        outcome = processor_runner(processor, _compat_task(lease), remaining)
+    except TimeoutError:
+        return _ProcessorOutcome(False, True, False)
+    except QueueOperationError as exc:
+        return _ProcessorOutcome(False, False, exc.code == "process_cleanup_failed")
+    except Exception:  # noqa: BLE001 - queue exposes stable codes only
+        return _ProcessorOutcome(False, False, False)
+    return _ProcessorOutcome(outcome, False, False)
+
+
+def _processor_result(
+    processor: Callable[[dict], bool | DeferredResult],
+    processor_runner: Callable[
+        [Callable[[dict], bool | DeferredResult], dict[str, Any], float],
+        bool | DeferredResult,
+    ],
+    lease: QueueLease,
+    heartbeat: _LeaseHeartbeat,
+    deadline: float,
+    monotonic: Callable[[], float],
+) -> _ProcessorOutcome:
+    heartbeat.start()
+    try:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return _ProcessorOutcome(False, True, False)
+        result = _run_processor(processor, processor_runner, lease, remaining)
+        if monotonic() >= deadline:
+            return _ProcessorOutcome(result.outcome, True, result.cleanup_failed)
+        return result
+    finally:
+        heartbeat.stop()
+
+
+def _fail_lease(
+    queue: MemoryQueue,
+    lease: QueueLease,
+    failure: QueueFailure,
+    counts: dict[str, int],
+    *,
+    max_attempts: int,
+    retry_base_seconds: int,
+    retry_cap_seconds: int,
+) -> None:
+    queue.fail(
+        lease,
+        failure,
+        max_attempts=max_attempts,
+        retry_base_seconds=retry_base_seconds,
+        retry_cap_seconds=retry_cap_seconds,
+    )
+    _count_terminal(counts, queue.get(lease.id))
+
+
+def _settle_processor_outcome(
+    queue: MemoryQueue,
+    lease: QueueLease,
+    result: _ProcessorOutcome,
+    counts: dict[str, int],
+    *,
+    max_attempts: int,
+    retry_base_seconds: int,
+    retry_cap_seconds: int,
+) -> None:
+    bounds = {
+        "max_attempts": max_attempts,
+        "retry_base_seconds": retry_base_seconds,
+        "retry_cap_seconds": retry_cap_seconds,
+    }
+    if result.cleanup_failed:
+        counts["halted"] = 1
+        failure = QueueFailure(
+            "process_cleanup_failed", blocked_capability="process_cleanup"
+        )
+        _fail_lease(queue, lease, failure, counts, **bounds)
+        return
+    if result.timed_out:
+        _fail_lease(queue, lease, QueueFailure("worker_timeout"), counts, **bounds)
+        return
+    if not bool(result.outcome):
+        _fail_lease(queue, lease, QueueFailure("processor_failed"), counts, **bounds)
+        return
+    data = b""
+    if isinstance(result.outcome, DeferredResult):
+        data = result.outcome.data
+    queue.publish_result(lease, operation_id=lease.id, result=data)
+    _count_terminal(counts, queue.acknowledge(lease))
+
+
 def _work_one(
     queue: MemoryQueue,
     processor: Callable[[dict], bool | DeferredResult],
@@ -11410,12 +11529,7 @@ def _work_one(
     )
     if lease is None:
         return counts
-    adopted = queue.adopt_published_result(lease, operation_id=lease.id)
-    if adopted == "adopted":
-        _count_terminal(counts, queue.acknowledge(lease))
-        return counts
-    if adopted == "corrupt":
-        _count_terminal(counts, queue.get(lease.id))
+    if _adopted_counts(queue, lease, counts):
         return counts
     heartbeat = _LeaseHeartbeat(
         queue,
@@ -11423,73 +11537,25 @@ def _work_one(
         heartbeat_seconds=heartbeat_seconds,
         lease_seconds=lease_seconds,
     )
-    heartbeat.start()
-    timed_out = False
-    cleanup_failed = False
-    outcome: bool | DeferredResult = False
-    try:
-        remaining = deadline - monotonic()
-        if remaining <= 0:
-            timed_out = True
-        else:
-            try:
-                outcome = processor_runner(processor, _compat_task(lease), remaining)
-            except TimeoutError:
-                timed_out = True
-            except QueueOperationError as exc:
-                if exc.code == "process_cleanup_failed":
-                    cleanup_failed = True
-                else:
-                    outcome = False
-            except Exception:  # noqa: BLE001 - queue exposes stable codes only
-                outcome = False
-        if monotonic() >= deadline:
-            timed_out = True
-    finally:
-        heartbeat.stop()
-    if heartbeat.error is not None and not cleanup_failed:
+    result = _processor_result(
+        processor, processor_runner, lease, heartbeat, deadline, monotonic
+    )
+    if heartbeat.error is not None and not result.cleanup_failed:
         counts["failed"] += 1
         return counts
     try:
-        if cleanup_failed:
-            counts["halted"] = 1
-            queue.fail(
-                lease,
-                QueueFailure(
-                    "process_cleanup_failed",
-                    blocked_capability="process_cleanup",
-                ),
-                max_attempts=max_attempts,
-                retry_base_seconds=retry_base_seconds,
-                retry_cap_seconds=retry_cap_seconds,
-            )
-            _count_terminal(counts, queue.get(lease.id))
-        elif timed_out:
-            queue.fail(
-                lease,
-                QueueFailure("worker_timeout"),
-                max_attempts=max_attempts,
-                retry_base_seconds=retry_base_seconds,
-                retry_cap_seconds=retry_cap_seconds,
-            )
-            _count_terminal(counts, queue.get(lease.id))
-        elif bool(outcome):
-            result = outcome.data if isinstance(outcome, DeferredResult) else b""
-            queue.publish_result(lease, operation_id=lease.id, result=result)
-            _count_terminal(counts, queue.acknowledge(lease))
-        else:
-            queue.fail(
-                lease,
-                QueueFailure("processor_failed"),
-                max_attempts=max_attempts,
-                retry_base_seconds=retry_base_seconds,
-                retry_cap_seconds=retry_cap_seconds,
-            )
-            _count_terminal(counts, queue.get(lease.id))
+        _settle_processor_outcome(
+            queue,
+            lease,
+            result,
+            counts,
+            max_attempts=max_attempts,
+            retry_base_seconds=retry_base_seconds,
+            retry_cap_seconds=retry_cap_seconds,
+        )
     except (LeaseFenceError, ResultConflictError):
         counts["failed"] += 1
-        task = queue.get(lease.id)
-        if task.state == "dead":
+        if queue.get(lease.id).state == "dead":
             counts["dead"] += 1
     return counts
 
