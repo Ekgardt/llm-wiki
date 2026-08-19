@@ -2404,6 +2404,135 @@ def _is_secret_key(key: str) -> bool:
     )
 
 
+def _require_task_kind(kind: object) -> None:
+    if not isinstance(kind, str) or not kind:
+        raise ValueError("kind must be a non-empty bounded string")
+    if len(kind.encode("utf-8")) > 64:
+        raise ValueError("kind must be a non-empty bounded string")
+
+
+def _require_bounded_int(value: object, low: int, high: int, message: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(message)
+    if not low <= value <= high:
+        raise ValueError(message)
+
+
+def _require_dedupe_key(dedupe_key: object) -> None:
+    if dedupe_key is None:
+        return
+    if not isinstance(dedupe_key, str) or not dedupe_key:
+        raise ValueError("dedupe_key must be a non-empty bounded string")
+    if len(dedupe_key.encode("utf-8")) > 512:
+        raise ValueError("dedupe_key must be a non-empty bounded string")
+
+
+def _unsafe_link_path(logical_path: object) -> bool:
+    if not isinstance(logical_path, str) or not logical_path:
+        return True
+    if len(logical_path.encode("utf-8")) > 4096:
+        return True
+    if logical_path.startswith(("/", "\\")) or "\\" in logical_path:
+        return True
+    return any(part in {"", ".", ".."} for part in logical_path.split("/"))
+
+
+def _link_pair(item: object) -> tuple[object, object]:
+    if not isinstance(item, tuple) or len(item) != 2:
+        raise ValueError("source links must be path and digest pairs")
+    return item
+
+
+def _normalized_source_link(item: object) -> tuple[str, str]:
+    logical_path, source_digest = _link_pair(item)
+    if _unsafe_link_path(logical_path):
+        raise ValueError("source link path is invalid")
+    if not isinstance(source_digest, str):
+        raise ValueError("source link digest is invalid")
+    if re.fullmatch(r"[0-9a-f]{64}", source_digest) is None:
+        raise ValueError("source link digest is invalid")
+    return logical_path, source_digest
+
+
+def _normalized_source_links(
+    source_links: tuple[tuple[str, str], ...] | list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    normalized = [_normalized_source_link(item) for item in source_links]
+    if len(normalized) != len(set(normalized)):
+        raise ValueError("source links must be unique")
+    return normalized
+
+
+def _require_enqueue_arguments(
+    kind: object,
+    handler_version: object,
+    priority: object,
+    dedupe_key: object,
+) -> None:
+    _require_task_kind(kind)
+    _require_bounded_int(
+        handler_version,
+        1,
+        2_147_483_647,
+        "handler_version must be a positive bounded integer",
+    )
+    _require_bounded_int(
+        priority, -100, 100, "priority must be an integer from -100 to 100"
+    )
+    _require_dedupe_key(dedupe_key)
+
+
+def _validated_payload_bytes(payload: Mapping[str, object]) -> tuple[bytes, str]:
+    payload_bytes = canonical_json_bytes(_redact_payload(dict(payload)))
+    input_hash = sha256_bytes(payload_bytes)
+    validation = validate_payload_blob(payload_bytes, input_hash, parse=True)
+    if validation.code is not None:
+        raise ValueError(validation.code)
+    return payload_bytes, input_hash
+
+
+def _same_enqueued_task(
+    existing: sqlite3.Row,
+    existing_bytes: bytes,
+    kind: str,
+    handler_version: int,
+    payload_bytes: bytes,
+    input_hash: str,
+) -> bool:
+    if existing["kind"] != kind or existing["handler_version"] != handler_version:
+        return False
+    if existing["input_hash"] != input_hash:
+        return False
+    return existing_bytes == payload_bytes
+
+
+def _require_legacy_enqueue_arguments(
+    kind: object, handler_version: object, priority: object, dedupe_key: object
+) -> None:
+    if not isinstance(kind, str) or not kind:
+        raise ValueError("kind must be a non-empty string")
+    _require_bounded_int(
+        handler_version,
+        1,
+        2_147_483_647,
+        "handler_version must be a positive integer",
+    )
+    _require_bounded_int(
+        priority, -100, 100, "priority must be an integer from -100 to 100"
+    )
+    if dedupe_key is None:
+        return
+    if not isinstance(dedupe_key, str) or not dedupe_key:
+        raise ValueError("dedupe_key must be a non-empty string")
+
+
+def _legacy_payload_bytes(row: sqlite3.Row) -> bytes:
+    try:
+        return str(row["payload_json"]).encode("utf-8", errors="strict")
+    except UnicodeError:
+        return b""
+
+
 def _redact_payload(value: object) -> object:
     if isinstance(value, str):
         return redact_secrets(value)
@@ -2708,6 +2837,69 @@ class MemoryQueue:
                 now,
             )
 
+    def _legacy_deduplicated_task_id(
+        self,
+        connection: sqlite3.Connection,
+        dedupe_key: str | None,
+        kind: str,
+        handler_version: int,
+        payload_bytes: bytes,
+        input_hash: str,
+    ) -> str | None:
+        """The id of an identical task already enqueued under this dedupe key."""
+        if dedupe_key is None:
+            return None
+        existing = connection.execute(
+            """SELECT id, kind, handler_version, payload_json, input_hash
+               FROM tasks WHERE dedupe_key=?""",
+            (dedupe_key,),
+        ).fetchone()
+        if existing is None:
+            return None
+        existing_bytes = _legacy_payload_bytes(existing)
+        validation = validate_payload_blob(
+            existing_bytes, existing["input_hash"], parse=True
+        )
+        if validation.code is None and _same_enqueued_task(
+            existing, existing_bytes, kind, handler_version, payload_bytes, input_hash
+        ):
+            return str(existing["id"])
+        raise QueueOperationError("dedupe_conflict")
+
+    def _insert_legacy_task_row(
+        self,
+        connection: sqlite3.Connection,
+        task_id: str,
+        kind: str,
+        handler_version: int,
+        payload_json: str,
+        input_hash: str,
+        dedupe_key: str | None,
+        priority: int,
+        now: datetime,
+        ready_at: datetime,
+    ) -> None:
+        inserted = connection.execute(
+            """INSERT INTO tasks(
+                   id, kind, handler_version, payload_json, input_hash, dedupe_key,
+                   state, priority, created_at, updated_at, available_at
+               ) VALUES (?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?, ?)""",
+            (
+                task_id,
+                kind,
+                handler_version,
+                payload_json,
+                input_hash,
+                dedupe_key,
+                priority,
+                _timestamp(now),
+                _timestamp(now),
+                _timestamp(ready_at),
+            ),
+        ).rowcount
+        if inserted != 1:
+            raise QueueOperationError("enqueue_failed")
+
     def enqueue(
         self,
         kind: str,
@@ -2718,16 +2910,8 @@ class MemoryQueue:
         available_at: datetime | None = None,
         dedupe_key: str | None = None,
     ) -> str:
-        if not isinstance(kind, str) or not kind:
-            raise ValueError("kind must be a non-empty string")
-        if not isinstance(handler_version, int) or isinstance(handler_version, bool) or handler_version < 1:
-            raise ValueError("handler_version must be a positive integer")
-        if not isinstance(priority, int) or isinstance(priority, bool) or not -100 <= priority <= 100:
-            raise ValueError("priority must be an integer from -100 to 100")
-        if dedupe_key is not None and (not isinstance(dedupe_key, str) or not dedupe_key):
-            raise ValueError("dedupe_key must be a non-empty string")
-        redacted = _redact_payload(dict(payload))
-        payload_bytes = canonical_json_bytes(redacted)
+        _require_legacy_enqueue_arguments(kind, handler_version, priority, dedupe_key)
+        payload_bytes = canonical_json_bytes(_redact_payload(dict(payload)))
         payload_json = payload_bytes.decode("utf-8")
         input_hash = sha256_bytes(payload_bytes)
         now = _as_utc(self._clock())
@@ -2736,51 +2920,23 @@ class MemoryQueue:
         with self._connect() as connection, begin_immediate(connection):
             self._delete_stale_source_fences(connection)
             self._assert_payload_not_fenced(connection, payload_json)
-            if dedupe_key is not None:
-                existing = connection.execute(
-                    """SELECT id, kind, handler_version, payload_json, input_hash
-                       FROM tasks WHERE dedupe_key=?""",
-                    (dedupe_key,),
-                ).fetchone()
-                if existing is not None:
-                    try:
-                        existing_bytes = str(existing["payload_json"]).encode(
-                            "utf-8", errors="strict"
-                        )
-                    except UnicodeError:
-                        existing_bytes = b""
-                    validation = validate_payload_blob(
-                        existing_bytes, existing["input_hash"], parse=True
-                    )
-                    if (
-                        validation.code is None
-                        and existing["kind"] == kind
-                        and existing["handler_version"] == handler_version
-                        and existing["input_hash"] == input_hash
-                        and existing_bytes == payload_bytes
-                    ):
-                        return str(existing["id"])
-                    raise QueueOperationError("dedupe_conflict")
-            inserted = connection.execute(
-                """INSERT INTO tasks(
-                       id, kind, handler_version, payload_json, input_hash, dedupe_key,
-                       state, priority, created_at, updated_at, available_at
-                   ) VALUES (?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?, ?)""",
-                (
-                    task_id,
-                    kind,
-                    handler_version,
-                    payload_json,
-                    input_hash,
-                    dedupe_key,
-                    priority,
-                    _timestamp(now),
-                    _timestamp(now),
-                    _timestamp(ready_at),
-                ),
-            ).rowcount
-            if inserted != 1:
-                raise QueueOperationError("enqueue_failed")
+            deduplicated = self._legacy_deduplicated_task_id(
+                connection, dedupe_key, kind, handler_version, payload_bytes, input_hash
+            )
+            if deduplicated is not None:
+                return deduplicated
+            self._insert_legacy_task_row(
+                connection,
+                task_id,
+                kind,
+                handler_version,
+                payload_json,
+                input_hash,
+                dedupe_key,
+                priority,
+                now,
+                ready_at,
+            )
         return task_id
 
     def claim(
@@ -4216,6 +4372,85 @@ class _QueueV3CandidateReader:
     def _raise_payload_mismatch() -> None:
         raise QueueOperationError("payload_hash_mismatch")
 
+    def _deduplicated_task_id(
+        self,
+        database: sqlite3.Connection,
+        dedupe_key: str | None,
+        kind: str,
+        handler_version: int,
+        payload_bytes: bytes,
+        input_hash: str,
+    ) -> str | None:
+        """The id of an identical task already enqueued under this dedupe key."""
+        if dedupe_key is None:
+            return None
+        existing = database.execute(
+            """SELECT id, kind, handler_version, payload_blob, input_hash
+               FROM tasks WHERE dedupe_key=?""",
+            (dedupe_key,),
+        ).fetchone()
+        if existing is None:
+            return None
+        existing_bytes = bytes(existing["payload_blob"])
+        current = validate_payload_blob(
+            existing_bytes, existing["input_hash"], parse=True
+        )
+        if current.code is None and _same_enqueued_task(
+            existing, existing_bytes, kind, handler_version, payload_bytes, input_hash
+        ):
+            return str(existing["id"])
+        raise QueueOperationError("dedupe_conflict")
+
+    def _insert_task_row(
+        self,
+        database: sqlite3.Connection,
+        task_id: str,
+        kind: str,
+        handler_version: int,
+        payload_bytes: bytes,
+        input_hash: str,
+        dedupe_key: str | None,
+        priority: int,
+        now: datetime,
+        ready_at: datetime,
+    ) -> None:
+        inserted = database.execute(
+            """INSERT INTO tasks(
+                   id,kind,handler_version,payload_blob,input_hash,dedupe_key,
+                   state,priority,created_at,updated_at,available_at
+               ) VALUES (?,?,?,?,?,?,'ready',?,?,?,?)""",
+            (
+                task_id,
+                kind,
+                handler_version,
+                payload_bytes,
+                input_hash,
+                dedupe_key,
+                priority,
+                _timestamp(now),
+                _timestamp(now),
+                _timestamp(ready_at),
+            ),
+        ).rowcount
+        if inserted != 1:
+            raise QueueOperationError("enqueue_failed")
+
+    def _insert_source_links(
+        self,
+        database: sqlite3.Connection,
+        task_id: str,
+        normalized_links: list[tuple[str, str]],
+    ) -> None:
+        for logical_path, source_digest in sorted(normalized_links):
+            linked = database.execute(
+                """INSERT INTO task_source_links(
+                       task_id,logical_path,source_digest
+                   ) VALUES (?,?,?)""",
+                (task_id, logical_path, source_digest),
+            ).rowcount
+            if linked != 1:
+                raise QueueOperationError("source_link_insert_failed")
+
     def enqueue(
         self,
         kind: str,
@@ -4227,106 +4462,31 @@ class _QueueV3CandidateReader:
         dedupe_key: str | None = None,
         source_links: tuple[tuple[str, str], ...] | list[tuple[str, str]] = (),
     ) -> str:
-        if not isinstance(kind, str) or not kind or len(kind.encode("utf-8")) > 64:
-            raise ValueError("kind must be a non-empty bounded string")
-        if (
-            not isinstance(handler_version, int)
-            or isinstance(handler_version, bool)
-            or not 1 <= handler_version <= 2_147_483_647
-        ):
-            raise ValueError("handler_version must be a positive bounded integer")
-        if (
-            not isinstance(priority, int)
-            or isinstance(priority, bool)
-            or not -100 <= priority <= 100
-        ):
-            raise ValueError("priority must be an integer from -100 to 100")
-        if dedupe_key is not None and (
-            not isinstance(dedupe_key, str)
-            or not dedupe_key
-            or len(dedupe_key.encode("utf-8")) > 512
-        ):
-            raise ValueError("dedupe_key must be a non-empty bounded string")
-        normalized_links: list[tuple[str, str]] = []
-        for item in source_links:
-            if not isinstance(item, tuple) or len(item) != 2:
-                raise ValueError("source links must be path and digest pairs")
-            logical_path, source_digest = item
-            if (
-                not isinstance(logical_path, str)
-                or not logical_path
-                or len(logical_path.encode("utf-8")) > 4096
-                or logical_path.startswith(("/", "\\"))
-                or "\\" in logical_path
-                or any(part in {"", ".", ".."} for part in logical_path.split("/"))
-            ):
-                raise ValueError("source link path is invalid")
-            if (
-                not isinstance(source_digest, str)
-                or re.fullmatch(r"[0-9a-f]{64}", source_digest) is None
-            ):
-                raise ValueError("source link digest is invalid")
-            normalized_links.append((logical_path, source_digest))
-        if len(normalized_links) != len(set(normalized_links)):
-            raise ValueError("source links must be unique")
-        payload_bytes = canonical_json_bytes(_redact_payload(dict(payload)))
-        input_hash = sha256_bytes(payload_bytes)
-        validation = validate_payload_blob(payload_bytes, input_hash, parse=True)
-        if validation.code is not None:
-            raise ValueError(validation.code)
+        _require_enqueue_arguments(kind, handler_version, priority, dedupe_key)
+        normalized_links = _normalized_source_links(source_links)
+        payload_bytes, input_hash = _validated_payload_bytes(payload)
         now = _utc_now()
         ready_at = _as_utc(available_at or now)
         task_id = uuid.uuid4().hex
         with closing(self._connect()) as database, begin_immediate(database):
-            if dedupe_key is not None:
-                existing = database.execute(
-                    """SELECT id, kind, handler_version, payload_blob, input_hash
-                       FROM tasks WHERE dedupe_key=?""",
-                    (dedupe_key,),
-                ).fetchone()
-                if existing is not None:
-                    existing_bytes = bytes(existing["payload_blob"])
-                    current = validate_payload_blob(
-                        existing_bytes, existing["input_hash"], parse=True
-                    )
-                    if (
-                        current.code is None
-                        and existing["kind"] == kind
-                        and existing["handler_version"] == handler_version
-                        and existing["input_hash"] == input_hash
-                        and existing_bytes == payload_bytes
-                    ):
-                        return str(existing["id"])
-                    raise QueueOperationError("dedupe_conflict")
-            inserted = database.execute(
-                """INSERT INTO tasks(
-                       id,kind,handler_version,payload_blob,input_hash,dedupe_key,
-                       state,priority,created_at,updated_at,available_at
-                   ) VALUES (?,?,?,?,?,?,'ready',?,?,?,?)""",
-                (
-                    task_id,
-                    kind,
-                    handler_version,
-                    payload_bytes,
-                    input_hash,
-                    dedupe_key,
-                    priority,
-                    _timestamp(now),
-                    _timestamp(now),
-                    _timestamp(ready_at),
-                ),
-            ).rowcount
-            if inserted != 1:
-                raise QueueOperationError("enqueue_failed")
-            for logical_path, source_digest in sorted(normalized_links):
-                linked = database.execute(
-                    """INSERT INTO task_source_links(
-                           task_id,logical_path,source_digest
-                       ) VALUES (?,?,?)""",
-                    (task_id, logical_path, source_digest),
-                ).rowcount
-                if linked != 1:
-                    raise QueueOperationError("source_link_insert_failed")
+            deduplicated = self._deduplicated_task_id(
+                database, dedupe_key, kind, handler_version, payload_bytes, input_hash
+            )
+            if deduplicated is not None:
+                return deduplicated
+            self._insert_task_row(
+                database,
+                task_id,
+                kind,
+                handler_version,
+                payload_bytes,
+                input_hash,
+                dedupe_key,
+                priority,
+                now,
+                ready_at,
+            )
+            self._insert_source_links(database, task_id, normalized_links)
         return task_id
 
     def publish_capture_intent(
