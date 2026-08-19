@@ -1320,45 +1320,94 @@ def _queue_v3_insert_statement(
     )
 
 
-def _queue_v2_migration_statements(
-    source: sqlite3.Connection,
-) -> tuple[tuple[MigrationStatement, ...], dict[str, int]]:
-    _validate_queue_v2_schema_objects(source)
-    tables = _queue_v2_tables(source)
+_QUEUE_V2_REQUIRED_TASK_COLUMNS = {
+    "id",
+    "kind",
+    "handler_version",
+    "payload_json",
+    "input_hash",
+    "dedupe_key",
+    "state",
+    "priority",
+    "created_at",
+    "updated_at",
+    "available_at",
+    "attempts",
+    "last_attempt_at",
+    "lease_owner",
+    "lease_token",
+    "lease_expires_at",
+    "lease_heartbeat_at",
+    "attempt_started_at",
+    "error_code",
+    "blocked_capability",
+    "result_reference",
+    "result_sha256",
+    "result_operation_id",
+    "redrive_of",
+}
+_QUEUE_V3_TASK_COLUMNS = (
+    "id",
+    "kind",
+    "handler_version",
+    "payload_blob",
+    "input_hash",
+    "dedupe_key",
+    "state",
+    "priority",
+    "created_at",
+    "updated_at",
+    "available_at",
+    "attempts",
+    "last_attempt_at",
+    "lease_owner",
+    "lease_token",
+    "lease_expires_at",
+    "lease_heartbeat_at",
+    "attempt_started_at",
+    "error_code",
+    "blocked_capability",
+    "result_reference",
+    "result_sha256",
+    "result_operation_id",
+    "redrive_of",
+    "lineage_generation",
+)
+_QUEUE_V2_HISTORY_COLUMNS = (
+    "sequence",
+    "task_id",
+    "attempt",
+    "started_at",
+    "finished_at",
+    "outcome",
+    "error_code",
+)
+_QUEUE_V2_FAILURE_COLUMNS = (
+    "logical_path",
+    "source_digest",
+    "error_code",
+    "producer",
+    "updated_at",
+)
+
+
+def _require_queue_v2_tasks_schema(
+    source: sqlite3.Connection, tables: set[str]
+) -> None:
     if "tasks" not in tables:
         raise _migration_error(
             "queue_v2_schema_incomplete", "queue v2 source has no tasks table"
         )
-    required_task_columns = {
-        "id",
-        "kind",
-        "handler_version",
-        "payload_json",
-        "input_hash",
-        "dedupe_key",
-        "state",
-        "priority",
-        "created_at",
-        "updated_at",
-        "available_at",
-        "attempts",
-        "last_attempt_at",
-        "lease_owner",
-        "lease_token",
-        "lease_expires_at",
-        "lease_heartbeat_at",
-        "attempt_started_at",
-        "error_code",
-        "blocked_capability",
-        "result_reference",
-        "result_sha256",
-        "result_operation_id",
-        "redrive_of",
-    }
-    if not required_task_columns <= _queue_v2_columns(source, "tasks"):
+    if not _QUEUE_V2_REQUIRED_TASK_COLUMNS <= _queue_v2_columns(source, "tasks"):
         raise _migration_error(
             "queue_v2_schema_incomplete", "queue v2 tasks schema is incomplete"
         )
+
+
+def _require_unambiguous_v2_owners(
+    source: sqlite3.Connection, tables: set[str]
+) -> None:
+    """v2 fences and owners predate the identity v3 needs to fence with."""
     if "source_fences" in tables and source.execute(
         "SELECT 1 FROM source_fences LIMIT 1"
     ).fetchone() is not None:
@@ -1374,59 +1423,25 @@ def _queue_v2_migration_statements(
             "queue v2 ownership lacks canonical process identity",
         )
 
-    statements: list[MigrationStatement] = []
-    summary = {
-        "attempt_history": 0,
-        "payload_hash_mismatches": 0,
-        "source_failures": 0,
-        "source_fences": 0,
-        "task_source_links": 0,
-        "tasks": 0,
-    }
-    task_columns = (
-        "id",
-        "kind",
-        "handler_version",
-        "payload_blob",
-        "input_hash",
-        "dedupe_key",
-        "state",
-        "priority",
-        "created_at",
-        "updated_at",
-        "available_at",
-        "attempts",
-        "last_attempt_at",
-        "lease_owner",
-        "lease_token",
-        "lease_expires_at",
-        "lease_heartbeat_at",
-        "attempt_started_at",
-        "error_code",
-        "blocked_capability",
-        "result_reference",
-        "result_sha256",
-        "result_operation_id",
-        "redrive_of",
-        "lineage_generation",
-    )
-    task_links: list[tuple[str, str, str]] = []
-    task_rows = list(source.execute("SELECT * FROM tasks ORDER BY id"))
-    rows_by_id = {str(row["id"]): row for row in task_rows}
-    if len(rows_by_id) != len(task_rows):
-        raise _migration_error(
-            "queue_v2_task_identity_conflict", "queue v2 task IDs are not unique"
-        )
+
+def _queue_v2_child_counts(
+    task_rows: list, rows_by_id: dict[str, sqlite3.Row]
+) -> dict[str, int]:
     child_counts = {task_id: 0 for task_id in rows_by_id}
     for row in task_rows:
         parent = row["redrive_of"]
-        if parent is not None:
-            if str(parent) not in rows_by_id:
-                raise _migration_error(
-                    "queue_v2_lineage_ambiguous",
-                    "queue v2 redrive parent is missing",
-                )
-            child_counts[str(parent)] += 1
+        if parent is None:
+            continue
+        if str(parent) not in rows_by_id:
+            raise _migration_error(
+                "queue_v2_lineage_ambiguous", "queue v2 redrive parent is missing"
+            )
+        child_counts[str(parent)] += 1
+    return child_counts
+
+
+def _parents_before_children(rows_by_id: dict[str, sqlite3.Row]) -> list:
+    """Redrive parents must be inserted before the tasks that name them."""
     ordered_rows: list[sqlite3.Row] = []
     visited: set[str] = set()
     visiting: set[str] = set()
@@ -1439,78 +1454,128 @@ def _queue_v2_migration_statements(
                 "queue_v2_lineage_ambiguous", "queue v2 redrive lineage is cyclic"
             )
         visiting.add(task_id)
-        row = rows_by_id[task_id]
-        parent = row["redrive_of"]
+        parent = rows_by_id[task_id]["redrive_of"]
         if parent is not None:
             visit_task(str(parent))
         visiting.remove(task_id)
         visited.add(task_id)
-        ordered_rows.append(row)
+        ordered_rows.append(rows_by_id[task_id])
 
     for task_id in sorted(rows_by_id):
         visit_task(task_id)
+    return ordered_rows
 
-    for row in ordered_rows:
-        payload_text = row["payload_json"]
-        if not isinstance(payload_text, str):
-            raise _migration_error(
-                "queue_v2_payload_not_text", "queue v2 payload is not TEXT"
-            )
-        try:
-            payload_bytes = payload_text.encode("utf-8")
-        except UnicodeEncodeError as exc:
-            raise _migration_error(
-                "queue_v2_payload_not_utf8", "queue v2 payload is not UTF-8"
-            ) from exc
-        if len(payload_bytes) > _MAX_QUEUE_PAYLOAD_BYTES:
-            raise _migration_error(
-                "queue_v2_payload_too_large", "queue v2 payload exceeds 1 MiB"
-            )
-        attempts = row["attempts"]
-        if not isinstance(attempts, int) or isinstance(attempts, bool) or not 0 <= attempts <= 100:
-            raise _migration_error(
-                "queue_v2_attempts_out_of_range", "queue v2 attempts exceed v3 bounds"
-            )
-        payload_validation = validate_payload_blob(
-            payload_bytes, row["input_hash"], parse=True
+
+def _ordered_queue_v2_tasks(source: sqlite3.Connection) -> tuple[list, dict[str, int]]:
+    task_rows = list(source.execute("SELECT * FROM tasks ORDER BY id"))
+    rows_by_id = {str(row["id"]): row for row in task_rows}
+    if len(rows_by_id) != len(task_rows):
+        raise _migration_error(
+            "queue_v2_task_identity_conflict", "queue v2 task IDs are not unique"
         )
-        mismatch = payload_validation.code is not None
-        state = "dead" if mismatch else row["state"]
-        error_code = "payload_hash_mismatch" if mismatch else row["error_code"]
-        values = (
-            row["id"],
-            row["kind"],
-            row["handler_version"],
-            payload_bytes,
-            row["input_hash"],
-            row["dedupe_key"],
-            state,
-            row["priority"],
-            row["created_at"],
-            row["updated_at"],
-            row["available_at"],
-            attempts,
-            row["last_attempt_at"],
-            row["lease_owner"],
-            row["lease_token"],
-            row["lease_expires_at"],
-            row["lease_heartbeat_at"],
-            row["attempt_started_at"],
-            error_code,
-            row["blocked_capability"],
-            row["result_reference"],
-            row["result_sha256"],
-            row["result_operation_id"],
-            row["redrive_of"],
-            child_counts[str(row["id"])],
+    child_counts = _queue_v2_child_counts(task_rows, rows_by_id)
+    return _parents_before_children(rows_by_id), child_counts
+
+
+def _migrated_payload_bytes(row: sqlite3.Row) -> bytes:
+    payload_text = row["payload_json"]
+    if not isinstance(payload_text, str):
+        raise _migration_error(
+            "queue_v2_payload_not_text", "queue v2 payload is not TEXT"
+        )
+    try:
+        payload_bytes = payload_text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise _migration_error(
+            "queue_v2_payload_not_utf8", "queue v2 payload is not UTF-8"
+        ) from exc
+    if len(payload_bytes) > _MAX_QUEUE_PAYLOAD_BYTES:
+        raise _migration_error(
+            "queue_v2_payload_too_large", "queue v2 payload exceeds 1 MiB"
+        )
+    return payload_bytes
+
+
+def _migrated_attempts(row: sqlite3.Row) -> int:
+    attempts = row["attempts"]
+    if isinstance(attempts, bool) or not isinstance(attempts, int):
+        raise _migration_error(
+            "queue_v2_attempts_out_of_range", "queue v2 attempts exceed v3 bounds"
+        )
+    if not 0 <= attempts <= 100:
+        raise _migration_error(
+            "queue_v2_attempts_out_of_range", "queue v2 attempts exceed v3 bounds"
+        )
+    return attempts
+
+
+def _migrated_task_values(
+    row: sqlite3.Row,
+    payload_bytes: bytes,
+    attempts: int,
+    child_counts: dict[str, int],
+    mismatch: bool,
+) -> tuple:
+    state = row["state"]
+    error_code = row["error_code"]
+    if mismatch:
+        state = "dead"
+        error_code = "payload_hash_mismatch"
+    return (
+        row["id"],
+        row["kind"],
+        row["handler_version"],
+        payload_bytes,
+        row["input_hash"],
+        row["dedupe_key"],
+        state,
+        row["priority"],
+        row["created_at"],
+        row["updated_at"],
+        row["available_at"],
+        attempts,
+        row["last_attempt_at"],
+        row["lease_owner"],
+        row["lease_token"],
+        row["lease_expires_at"],
+        row["lease_heartbeat_at"],
+        row["attempt_started_at"],
+        error_code,
+        row["blocked_capability"],
+        row["result_reference"],
+        row["result_sha256"],
+        row["result_operation_id"],
+        row["redrive_of"],
+        child_counts[str(row["id"])],
+    )
+
+
+def _task_migration_statements(
+    ordered_rows: list,
+    child_counts: dict[str, int],
+    statements: list[MigrationStatement],
+    summary: dict[str, int],
+) -> list[tuple[str, str, str]]:
+    """Task inserts in lineage order; returns the source links they imply."""
+    task_links: list[tuple[str, str, str]] = []
+    for row in ordered_rows:
+        payload_bytes = _migrated_payload_bytes(row)
+        attempts = _migrated_attempts(row)
+        mismatch = (
+            validate_payload_blob(
+                payload_bytes, row["input_hash"], parse=True
+            ).code
+            is not None
         )
         task_id = str(row["id"])
         statements.append(
             _queue_v3_insert_statement(
                 name=f"migrate_task_{sha256_bytes(task_id.encode('utf-8'))[:16]}",
                 table="tasks",
-                columns=task_columns,
-                values=values,
+                columns=_QUEUE_V3_TASK_COLUMNS,
+                values=_migrated_task_values(
+                    row, payload_bytes, attempts, child_counts, mismatch
+                ),
                 key_column="id",
                 key=row["id"],
             )
@@ -1518,40 +1583,46 @@ def _queue_v2_migration_statements(
         summary["tasks"] += 1
         if mismatch:
             summary["payload_hash_mismatches"] += 1
-        else:
-            task_links.extend(
-                (task_id, logical_path, source_digest)
-                for logical_path, source_digest in _queue_v3_source_links(payload_bytes)
-            )
-
-    if "attempt_history" in tables:
-        history_columns = (
-            "sequence",
-            "task_id",
-            "attempt",
-            "started_at",
-            "finished_at",
-            "outcome",
-            "error_code",
+            continue
+        task_links.extend(
+            (task_id, logical_path, source_digest)
+            for logical_path, source_digest in _queue_v3_source_links(payload_bytes)
         )
-        if set(history_columns) != _queue_v2_columns(source, "attempt_history"):
-            raise _migration_error(
-                "queue_v2_schema_incomplete", "queue v2 attempt history schema is incomplete"
-            )
-        for row in source.execute("SELECT * FROM attempt_history ORDER BY sequence"):
-            values = tuple(row[column] for column in history_columns)
-            statements.append(
-                _queue_v3_insert_statement(
-                    name=f"migrate_attempt_{int(row['sequence'])}",
-                    table="attempt_history",
-                    columns=history_columns,
-                    values=values,
-                    key_column="sequence",
-                    key=row["sequence"],
-                )
-            )
-            summary["attempt_history"] += 1
+    return task_links
 
+
+def _attempt_history_statements(
+    source: sqlite3.Connection,
+    tables: set[str],
+    statements: list[MigrationStatement],
+    summary: dict[str, int],
+) -> None:
+    if "attempt_history" not in tables:
+        return
+    if set(_QUEUE_V2_HISTORY_COLUMNS) != _queue_v2_columns(source, "attempt_history"):
+        raise _migration_error(
+            "queue_v2_schema_incomplete",
+            "queue v2 attempt history schema is incomplete",
+        )
+    for row in source.execute("SELECT * FROM attempt_history ORDER BY sequence"):
+        statements.append(
+            _queue_v3_insert_statement(
+                name=f"migrate_attempt_{int(row['sequence'])}",
+                table="attempt_history",
+                columns=_QUEUE_V2_HISTORY_COLUMNS,
+                values=tuple(row[column] for column in _QUEUE_V2_HISTORY_COLUMNS),
+                key_column="sequence",
+                key=row["sequence"],
+            )
+        )
+        summary["attempt_history"] += 1
+
+
+def _task_source_link_statements(
+    task_links: list[tuple[str, str, str]],
+    statements: list[MigrationStatement],
+    summary: dict[str, int],
+) -> None:
     for task_id, logical_path, source_digest in sorted(task_links):
         values = (task_id, logical_path, source_digest)
         identity = sha256_bytes(canonical_json_bytes(list(values)))[:16]
@@ -1572,42 +1643,69 @@ def _queue_v2_migration_statements(
         )
         summary["task_source_links"] += 1
 
-    if "source_failures" in tables:
-        failure_columns = (
-            "logical_path",
-            "source_digest",
-            "error_code",
-            "producer",
-            "updated_at",
+
+def _source_failure_statements(
+    source: sqlite3.Connection,
+    tables: set[str],
+    statements: list[MigrationStatement],
+    summary: dict[str, int],
+) -> None:
+    if "source_failures" not in tables:
+        return
+    if set(_QUEUE_V2_FAILURE_COLUMNS) != _queue_v2_columns(source, "source_failures"):
+        raise _migration_error(
+            "queue_v2_schema_incomplete",
+            "queue v2 source failure schema is incomplete",
         )
-        if set(failure_columns) != _queue_v2_columns(source, "source_failures"):
-            raise _migration_error(
-                "queue_v2_schema_incomplete", "queue v2 source failure schema is incomplete"
-            )
-        for row in source.execute(
-            "SELECT * FROM source_failures ORDER BY logical_path, source_digest"
-        ):
-            values = tuple(row[column] for column in failure_columns)
-            identity = sha256_bytes(canonical_json_bytes(list(values[:2])))[:16]
-            statements.append(
-                MigrationStatement(
-                    name=f"migrate_source_failure_{identity}",
-                    sql="""INSERT OR IGNORE INTO source_failures(
-                        logical_path, source_digest, error_code, producer, updated_at
-                    ) VALUES (?, ?, ?, ?, ?)""",
-                    parameters=values,
-                    completed=lambda database, expected=values: tuple(
-                        database.execute(
-                            """SELECT error_code, producer, updated_at FROM source_failures
-                               WHERE logical_path=? AND source_digest=?""",
-                            expected[:2],
-                        ).fetchone()
-                        or ()
-                    )
-                    == tuple(expected[2:]),
+    for row in source.execute(
+        "SELECT * FROM source_failures ORDER BY logical_path, source_digest"
+    ):
+        values = tuple(row[column] for column in _QUEUE_V2_FAILURE_COLUMNS)
+        identity = sha256_bytes(canonical_json_bytes(list(values[:2])))[:16]
+        statements.append(
+            MigrationStatement(
+                name=f"migrate_source_failure_{identity}",
+                sql="""INSERT OR IGNORE INTO source_failures(
+                    logical_path, source_digest, error_code, producer, updated_at
+                ) VALUES (?, ?, ?, ?, ?)""",
+                parameters=values,
+                completed=lambda database, expected=values: tuple(
+                    database.execute(
+                        """SELECT error_code, producer, updated_at FROM source_failures
+                           WHERE logical_path=? AND source_digest=?""",
+                        expected[:2],
+                    ).fetchone()
+                    or ()
                 )
+                == tuple(expected[2:]),
             )
-            summary["source_failures"] += 1
+        )
+        summary["source_failures"] += 1
+
+
+def _queue_v2_migration_statements(
+    source: sqlite3.Connection,
+) -> tuple[tuple[MigrationStatement, ...], dict[str, int]]:
+    _validate_queue_v2_schema_objects(source)
+    tables = _queue_v2_tables(source)
+    _require_queue_v2_tasks_schema(source, tables)
+    _require_unambiguous_v2_owners(source, tables)
+    statements: list[MigrationStatement] = []
+    summary = {
+        "attempt_history": 0,
+        "payload_hash_mismatches": 0,
+        "source_failures": 0,
+        "source_fences": 0,
+        "task_source_links": 0,
+        "tasks": 0,
+    }
+    ordered_rows, child_counts = _ordered_queue_v2_tasks(source)
+    task_links = _task_migration_statements(
+        ordered_rows, child_counts, statements, summary
+    )
+    _attempt_history_statements(source, tables, statements, summary)
+    _task_source_link_statements(task_links, statements, summary)
+    _source_failure_statements(source, tables, statements, summary)
     return tuple(statements), summary
 
 
@@ -11524,7 +11622,7 @@ def _emit_invalid_arguments() -> int:
     return 2
 
 
-def _cli() -> int:
+def _build_cli_parser() -> _RedactedArgumentParser:
     parser = _RedactedArgumentParser()
     parser.add_argument(
         "command",
@@ -11564,166 +11662,216 @@ def _cli() -> int:
         help="Also purge attempts-exhausted tasks; they are retained by default.",
     )
     parser.add_argument("--reason")
+    return parser
+
+
+def _cli_list(_args, _parser) -> int:
+    records = [{"id": task.id, "state": task.state} for task in _queue().list_tasks()]
+    print(json.dumps(records, sort_keys=True))
+    return 0
+
+
+def _cli_status(_args, _parser) -> int:
+    print(json.dumps(_operator_status(), sort_keys=True))
+    return 0
+
+
+def _cli_work(args, parser) -> int:
+    try:
+        _validate_worker_policy(
+            args.lease_seconds,
+            args.heartbeat_seconds,
+            args.max_attempts,
+            args.retry_base_seconds,
+            args.retry_cap_seconds,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    summary = run_worker(
+        _manual_processor,
+        max_tasks=args.max_tasks,
+        max_seconds=args.max_seconds,
+        idle_seconds=args.idle_seconds,
+        lease_seconds=args.lease_seconds,
+        heartbeat_seconds=args.heartbeat_seconds,
+        max_attempts=args.max_attempts,
+        retry_base_seconds=args.retry_base_seconds,
+        retry_cap_seconds=args.retry_cap_seconds,
+    )
+    counts = {
+        "dead": summary.dead,
+        "failed": summary.failed,
+        "processed": summary.processed,
+        "remaining_eligible": summary.remaining_eligible,
+        "skipped": summary.skipped,
+        "succeeded": summary.succeeded,
+    }
+    print(json.dumps({"counts": counts}, sort_keys=True))
+    if summary.failed or summary.dead or summary.remaining_eligible:
+        return 1
+    return 0
+
+
+def _cli_migrate(_args, _parser) -> int:
+    receipt = migrate_legacy_queue(_state_root())
+    print(
+        json.dumps(
+            {
+                "codes": list(receipt.codes),
+                "counts": {
+                    "imported": receipt.imported,
+                    "quarantined": receipt.quarantined,
+                },
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _require_cli_task_id(args) -> str:
+    if not args.task_id:
+        raise QueueOperationError("task_id_required")
+    return str(args.task_id)
+
+
+def _cli_quarantine_corrupt(args, _parser) -> int:
+    task_id = _require_cli_task_id(args)
+    if not isinstance(args.reason, str):
+        raise ValueError("quarantine reason is invalid")
+    if not 1 <= len(args.reason.encode("utf-8")) <= 4096:
+        raise ValueError("quarantine reason is invalid")
+    queue = _v3_queue_for_cli()
+    with _repair_owner_for_cli() as owner:
+        progress = queue.quarantine_corrupt(task_id, reason=args.reason, owner=owner)
+    print(
+        json.dumps(
+            {
+                "code": progress.code,
+                "complete": progress.complete,
+                "operation_id": progress.operation_id,
+                "page_count": progress.pages_written,
+                "state": progress.state,
+                "task_id": progress.task_id,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _cli_purge_corrupt(args, _parser) -> int:
+    task_id = _require_cli_task_id(args)
+    queue = _v3_queue_for_cli()
+    with _repair_owner_for_cli() as owner:
+        progress = queue.purge_quarantined(task_id, owner=owner)
+    print(
+        json.dumps(
+            {
+                "code": progress.code,
+                "complete": progress.complete,
+                "links_deleted": progress.links_deleted,
+                "operation_id": progress.operation_id,
+                "page_count": progress.pages_written,
+                "state": progress.state,
+                "task_id": progress.task_id,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _cli_cancel(args, _parser) -> int:
+    task_id = _require_cli_task_id(args)
+    changed = cancel(task_id)
+    state = "unchanged"
+    if changed:
+        state = _queue().get(task_id).state
+    print(json.dumps({"id": task_id, "state": state}, sort_keys=True))
+    if changed:
+        return 0
+    return 1
+
+
+def _cli_redrive(args, _parser) -> int:
+    task_id = redrive(_require_cli_task_id(args))
+    print(json.dumps({"id": task_id, "state": "ready"}, sort_keys=True))
+    return 0
+
+
+def _cli_terminal_before(args) -> datetime:
+    if args.terminal_before is None:
+        raise QueueOperationError("terminal_before_required")
+    try:
+        return datetime.fromisoformat(args.terminal_before)
+    except ValueError:
+        raise QueueOperationError("terminal_before_invalid") from None
+
+
+def _cli_purge(args, _parser) -> int:
+    terminal_before = _cli_terminal_before(args)
+    if args.export is None:
+        raise QueueOperationError("export_required")
+    receipt = purge(
+        terminal_before=terminal_before,
+        export_path=args.export,
+        include_dead=args.include_dead,
+    )
+    print(
+        json.dumps(
+            {"counts": {"purged": receipt.purged}, "ids": list(receipt.task_ids)},
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _cli_restore(args, _parser) -> int:
+    if args.export is None:
+        raise QueueOperationError("export_required")
+    restored = restore(export_path=args.export)
+    print(
+        json.dumps(
+            {
+                "counts": {"restored": restored.restored},
+                "ids": [
+                    {"exported": exported, "restored": current}
+                    for exported, current in restored.task_ids
+                ],
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+_CLI_COMMANDS = {
+    "list": _cli_list,
+    "status": _cli_status,
+    "work": _cli_work,
+    "migrate": _cli_migrate,
+    "quarantine-corrupt": _cli_quarantine_corrupt,
+    "purge-corrupt": _cli_purge_corrupt,
+    "cancel": _cli_cancel,
+    "redrive": _cli_redrive,
+    "purge": _cli_purge,
+    "restore": _cli_restore,
+}
+
+
+def _cli() -> int:
+    parser = _build_cli_parser()
     try:
         args = parser.parse_args()
-        if args.command == "list":
-            records = [
-                {"id": task.id, "state": task.state} for task in _queue().list_tasks()
-            ]
-            print(json.dumps(records, sort_keys=True))
-            return 0
-        if args.command == "status":
-            print(json.dumps(_operator_status(), sort_keys=True))
-            return 0
-        if args.command == "work":
-            try:
-                _validate_worker_policy(
-                    args.lease_seconds,
-                    args.heartbeat_seconds,
-                    args.max_attempts,
-                    args.retry_base_seconds,
-                    args.retry_cap_seconds,
-                )
-            except ValueError as exc:
-                parser.error(str(exc))
-            summary = run_worker(
-                _manual_processor,
-                max_tasks=args.max_tasks,
-                max_seconds=args.max_seconds,
-                idle_seconds=args.idle_seconds,
-                lease_seconds=args.lease_seconds,
-                heartbeat_seconds=args.heartbeat_seconds,
-                max_attempts=args.max_attempts,
-                retry_base_seconds=args.retry_base_seconds,
-                retry_cap_seconds=args.retry_cap_seconds,
-            )
-            counts = {
-                "dead": summary.dead,
-                "failed": summary.failed,
-                "processed": summary.processed,
-                "remaining_eligible": summary.remaining_eligible,
-                "skipped": summary.skipped,
-                "succeeded": summary.succeeded,
-            }
-            print(json.dumps({"counts": counts}, sort_keys=True))
-            return 1 if summary.failed or summary.dead or summary.remaining_eligible else 0
-        if args.command == "migrate":
-            receipt = migrate_legacy_queue(_state_root())
-            print(
-                json.dumps(
-                    {
-                        "codes": list(receipt.codes),
-                        "counts": {
-                            "imported": receipt.imported,
-                            "quarantined": receipt.quarantined,
-                        },
-                    },
-                    sort_keys=True,
-                )
-            )
-            return 0
-        if args.command in ("cancel", "redrive") and not args.task_id:
-            raise QueueOperationError("task_id_required")
-        if args.command == "quarantine-corrupt":
-            if not args.task_id:
-                raise QueueOperationError("task_id_required")
-            if (
-                not isinstance(args.reason, str)
-                or not 1 <= len(args.reason.encode("utf-8")) <= 4096
-            ):
-                raise ValueError("quarantine reason is invalid")
-            queue = _v3_queue_for_cli()
-            with _repair_owner_for_cli() as owner:
-                progress = queue.quarantine_corrupt(
-                    args.task_id, reason=args.reason, owner=owner
-                )
-            print(
-                json.dumps(
-                    {
-                        "code": progress.code,
-                        "complete": progress.complete,
-                        "operation_id": progress.operation_id,
-                        "page_count": progress.pages_written,
-                        "state": progress.state,
-                        "task_id": progress.task_id,
-                    },
-                    sort_keys=True,
-                )
-            )
-            return 0
-        if args.command == "purge-corrupt":
-            if not args.task_id:
-                raise QueueOperationError("task_id_required")
-            queue = _v3_queue_for_cli()
-            with _repair_owner_for_cli() as owner:
-                progress = queue.purge_quarantined(args.task_id, owner=owner)
-            print(
-                json.dumps(
-                    {
-                        "code": progress.code,
-                        "complete": progress.complete,
-                        "links_deleted": progress.links_deleted,
-                        "operation_id": progress.operation_id,
-                        "page_count": progress.pages_written,
-                        "state": progress.state,
-                        "task_id": progress.task_id,
-                    },
-                    sort_keys=True,
-                )
-            )
-            return 0
-        if args.command == "cancel":
-            changed = cancel(args.task_id)
-            state = _queue().get(args.task_id).state if changed else "unchanged"
-            print(json.dumps({"id": args.task_id, "state": state}, sort_keys=True))
-            return 0 if changed else 1
-        if args.command == "redrive":
-            task_id = redrive(args.task_id)
-            print(json.dumps({"id": task_id, "state": "ready"}, sort_keys=True))
-            return 0
-        if args.command == "purge":
-            if args.terminal_before is None:
-                raise QueueOperationError("terminal_before_required")
-            if args.export is None:
-                raise QueueOperationError("export_required")
-            try:
-                terminal_before = datetime.fromisoformat(args.terminal_before)
-            except ValueError:
-                raise QueueOperationError("terminal_before_invalid") from None
-            receipt = purge(
-                terminal_before=terminal_before,
-                export_path=args.export,
-                include_dead=args.include_dead,
-            )
-            print(
-                json.dumps(
-                    {"counts": {"purged": receipt.purged}, "ids": list(receipt.task_ids)},
-                    sort_keys=True,
-                )
-            )
-            return 0
-        if args.command == "restore":
-            if args.export is None:
-                raise QueueOperationError("export_required")
-            restored = restore(export_path=args.export)
-            print(
-                json.dumps(
-                    {
-                        "counts": {"restored": restored.restored},
-                        "ids": [
-                            {"exported": exported, "restored": current}
-                            for exported, current in restored.task_ids
-                        ],
-                    },
-                    sort_keys=True,
-                )
-            )
-            return 0
+        handler = _CLI_COMMANDS.get(args.command)
+        if handler is None:
+            return 2
+        return handler(args, parser)
     except _InvalidArguments:
         return _emit_invalid_arguments()
     except Exception as exc:  # noqa: BLE001 - CLI is a redacted trust boundary
         return _emit_cli_error(exc)
-    return 2
 
 
 if __name__ == "__main__":
