@@ -2130,6 +2130,24 @@ def _neighbour_boost_hits(
     ]
 
 
+def _drop_generation_connection(context: dict[str, Any], connection: Any) -> None:
+    connection.close()
+    context["connection"] = None
+
+
+def _generation_connection_for(
+    search_memory: Any,
+    catalog: Any,
+    manifest: Mapping[str, Any],
+    seal: object,
+    stop: Mapping[str, Any],
+) -> Any:
+    """No seal means no readable generation, so there is nothing to open."""
+    if seal is None:
+        return None
+    return search_memory._generation_connection(catalog, manifest, **stop)
+
+
 def _generation_lexical_hits(
     filters: Mapping[str, Any],
     *,
@@ -2632,39 +2650,65 @@ def retrieve_via_search_memory(
             names.append("evidence.sqlite3")
         return tuple(names)
 
-    def _open_generation(*, want_vectors: bool) -> bool:
-        if selected_catalog is None or force_rebuild or page_paths is not None:
-            return False
+    def _resolved_manifest(want_vectors: bool) -> tuple[Any, Any] | None:
+        """(scope, manifest) for the active generation, or None when unusable."""
         try:
             from repository_scope import resolve_repository_scope
 
-            repository_scope = resolve_repository_scope(
+            scope = resolve_repository_scope(
                 search_memory.ROOT,
                 deadline=deadline_monotonic,
                 cancelled=cancelled,
             )
             manifest = selected_catalog.get_active_for_repository(
-                repository_scope, **generation_stop
+                scope, **generation_stop
             )
-            if not isinstance(manifest, dict):
-                return False
-            if want_vectors and manifest.get("vector_state") == "stale":
-                generation_ctx["dense_fallback"] = "generation_vectors_unavailable"
-                generation_ctx["legacy_dense_blocked"] = True
         except TimeoutError:
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001 - no usable generation is not an error
+            return None
+        if not isinstance(manifest, dict):
+            return None
+        if want_vectors and manifest.get("vector_state") == "stale":
+            generation_ctx["dense_fallback"] = "generation_vectors_unavailable"
+            generation_ctx["legacy_dense_blocked"] = True
+        return scope, manifest
+
+    def _attach_graph(repository_scope: Any, connection: Any) -> bool:
+        try:
+            from evidence_graph import EvidenceGraph
+
+            generation_ctx["graph"] = EvidenceGraph.open_active_for_repository(
+                selected_catalog,
+                repository_scope,
+                deadline=deadline_monotonic,
+                cancelled=cancelled,
+            )
+        except TimeoutError:
+            _drop_generation_connection(generation_ctx, connection)
+            raise
+        except Exception:  # noqa: BLE001 - an unusable graph drops the generation
+            _drop_generation_connection(generation_ctx, connection)
+            generation_ctx["graph"] = None
             return False
+        if generation_ctx["graph"] is None:
+            _drop_generation_connection(generation_ctx, connection)
+            return False
+        return True
+
+    def _open_generation(*, want_vectors: bool) -> bool:
+        if selected_catalog is None or force_rebuild or page_paths is not None:
+            return False
+        resolved = _resolved_manifest(want_vectors)
+        if resolved is None:
+            return False
+        repository_scope, manifest = resolved
         artifact_names = _artifact_names_for(manifest, want_vectors=want_vectors)
         seal = search_memory._generation_consumption_seal(
             selected_catalog, manifest, artifact_names, **generation_stop
         )
-        connection = (
-            search_memory._generation_connection(
-                selected_catalog, manifest, **generation_stop
-            )
-            if seal is not None
-            else None
+        connection = _generation_connection_for(
+            search_memory, selected_catalog, manifest, seal, generation_stop
         )
         if connection is None:
             return False
@@ -2672,30 +2716,9 @@ def retrieve_via_search_memory(
         generation_ctx["connection"] = connection
         generation_ctx["seal"] = seal
         generation_ctx["artifact_names"] = artifact_names
-        if "evidence.sqlite3" in artifact_names:
-            try:
-                from evidence_graph import EvidenceGraph
-
-                generation_ctx["graph"] = EvidenceGraph.open_active_for_repository(
-                    selected_catalog,
-                    repository_scope,
-                    deadline=deadline_monotonic,
-                    cancelled=cancelled,
-                )
-                if generation_ctx["graph"] is None:
-                    connection.close()
-                    generation_ctx["connection"] = None
-                    return False
-            except TimeoutError:
-                connection.close()
-                generation_ctx["connection"] = None
-                raise
-            except Exception:
-                connection.close()
-                generation_ctx["connection"] = None
-                generation_ctx["graph"] = None
-                return False
-        return True
+        if "evidence.sqlite3" not in artifact_names:
+            return True
+        return _attach_graph(repository_scope, connection)
 
     catalog_requested = (
         selected_catalog is not None and not force_rebuild and page_paths is None
