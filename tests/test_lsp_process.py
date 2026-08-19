@@ -473,6 +473,44 @@ def _assert_single_cause(errors) -> list:
     return causes
 
 
+def _lease_heartbeat(lease_path: Path, timeout: float = 30.0) -> str:
+    """The lease's heartbeat stamp, waiting out a writer that holds the file.
+
+    On Windows the heartbeat holds lease.json exclusively while rewriting it,
+    so an eager read raises PermissionError and a partial read is not JSON.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        stamp = _read_lease_heartbeat(lease_path)
+        if stamp is not None:
+            return stamp
+        time.sleep(0.01)
+    raise AssertionError(f"lease heartbeat was never readable in {lease_path}")
+
+
+def _read_lease_heartbeat(lease_path: Path) -> str | None:
+    """One attempt at the heartbeat stamp; None while the writer holds the file."""
+    try:
+        record = json.loads(lease_path.read_bytes())
+    except (OSError, ValueError):
+        return None
+    stamp = record.get("heartbeat_at")
+    return stamp if isinstance(stamp, str) else None
+
+
+def _await_new_heartbeat(
+    lease_path: Path, previous: str, timeout: float = 30.0
+) -> str:
+    """Wait for the heartbeat to move past the stamp we already saw."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        stamp = _read_lease_heartbeat(lease_path)
+        if stamp is not None and stamp != previous:
+            return stamp
+        time.sleep(0.01)
+    raise AssertionError(f"lease heartbeat never moved past {previous}")
+
+
 def _await_lease_refresh(read_lease, lease_exists: bool):
     """Wait for one heartbeat to move the lease record, bounded to a second."""
     if not lease_exists:
@@ -7064,7 +7102,9 @@ def test_windows_owner_acl_uses_one_bounded_change_and_one_verification(
         assert kwargs["shell"] is False
         assert kwargs["check"] is False
         assert kwargs["capture_output"] is True
-        assert 0 < float(kwargs["timeout"]) <= lsp_process._STARTUP_WAIT_SECONDS
+        # The budget is a deadline minus a later clock read, so rounding can
+        # leave it an ulp above the constant it was derived from.
+        assert 0 < float(kwargs["timeout"]) <= lsp_process._STARTUP_WAIT_SECONDS + 1e-6
     assert set(path.name for path in owner.iterdir()) == {
         "cancellation",
         "failure.json",
@@ -7513,7 +7553,7 @@ def test_tree_cleanup_fault_retains_tree_owner_lease_and_scratch_until_retry(
     heartbeat = coordinator.heartbeat_thread
     assert heartbeat is not None
     lease_path = process.owner_root / "lease.json"
-    first_timestamp = json.loads(lease_path.read_bytes())["heartbeat_at"]
+    first_timestamp = _lease_heartbeat(lease_path)
     terminate = lsp_process.ProcessTree.terminate
     fault_enabled = True
 
@@ -7533,12 +7573,7 @@ def test_tree_cleanup_fault_retains_tree_owner_lease_and_scratch_until_retry(
     assert coordinator.cleanup_result.ownership_pending is True
     assert heartbeat.is_alive()
     coordinator.heartbeat_wake.set()
-    heartbeat_deadline = time.monotonic() + 30
-    while time.monotonic() < heartbeat_deadline:
-        if json.loads(lease_path.read_bytes())["heartbeat_at"] != first_timestamp:
-            break
-        time.sleep(0.01)
-    assert json.loads(lease_path.read_bytes())["heartbeat_at"] != first_timestamp
+    _await_new_heartbeat(lease_path, first_timestamp)
 
     fault_enabled = False
     process.shutdown(time.monotonic() + 60)

@@ -1338,15 +1338,25 @@ def test_concurrent_stale_lock_reclaimers_have_one_winner(
         raising=False,
     )
 
+    start = threading.Barrier(2)
+    acquired = threading.Event()
+
     def try_acquire() -> tuple[object, object | None]:
         # Retry the way the installer does: losing one attempt means another
-        # reclaimer got there first, not that this one may never proceed. The
-        # winner holds the lock, so the loser still exhausts its deadline.
+        # reclaimer got there first, not that this one may never proceed. Both
+        # threads try at least once, and the loser stops as soon as the winner
+        # holds the lock rather than spinning out a deadline sized for the
+        # slowest supported machine.
         parent = installer_module._open_absolute_directory(parent_path, writable=True)
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 120
+        start.wait(timeout=120)
         lock = None
-        while lock is None and time.monotonic() < deadline:
+        while lock is None:
             lock = installer_module._try_create_lock(parent, deadline)
+            if acquired.is_set() or time.monotonic() >= deadline:
+                break
+        if lock is not None:
+            acquired.set()
         return parent, lock
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
