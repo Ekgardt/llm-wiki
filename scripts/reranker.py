@@ -14,6 +14,8 @@ import re
 import time
 from typing import Any
 
+from provenance import authority_weight
+
 # Lazy-loaded model + tokenizer cache (kept together).
 _reranker_bundle: dict[str, Any] | None = None
 
@@ -84,6 +86,14 @@ def _get_reranker_bundle() -> dict[str, Any] | None:
         return _reranker_bundle
     except Exception:
         return None
+
+
+def _authority_weight_of(item: dict) -> float:
+    """Reuse the weight fusion recorded; fall back to the item's own authority."""
+    recorded = item.get("authority_weight")
+    if isinstance(recorded, (int, float)) and not isinstance(recorded, bool):
+        return float(recorded)
+    return authority_weight(item.get("authority"))
 
 
 def _sigmoid(x: float) -> float:
@@ -232,7 +242,11 @@ def rerank(
         raw = scores[index] if index < len(scores) else 0.0
         normalized = _sigmoid(raw)
         rrf = float(item.get("rrf_score") or item.get("score") or 0.0)
-        final = RERANK_BLEND_RERANK * normalized + RERANK_BLEND_RRF * rrf
+        # Typed provenance weighs on the score that decides the order here too,
+        # or a reranked list would silently drop the trust contract that fusion
+        # applied. The weight is the one fusion computed for this candidate.
+        weight = _authority_weight_of(item)
+        final = (RERANK_BLEND_RERANK * normalized + RERANK_BLEND_RRF * rrf) * weight
         item["rerank_score"] = round(raw, 6)
         item["rerank_score_normalized"] = round(normalized, 6)
         item["final_score"] = round(final, 6)
@@ -256,7 +270,8 @@ def rerank(
     for doc in tail:
         item = dict(doc)
         item.setdefault("rrf_score", item.get("score"))
-        item.setdefault("final_score", item.get("rrf_score") or item.get("score") or 0.0)
+        fused = float(item.get("rrf_score") or item.get("score") or 0.0)
+        item.setdefault("final_score", round(fused * _authority_weight_of(item), 6))
         item["reranker_applied"] = True
         item["reranker_prefix"] = False
         item["reranker_model_id"] = used_model_id

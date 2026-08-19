@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from provenance import authority_weight
+
 MAX_OPTIONAL_STRAGGLERS = 2
 OPTIONAL_STAGE_MAX_SECONDS = 0.5
 _OPTIONAL_STAGE_SLOTS = threading.BoundedSemaphore(MAX_OPTIONAL_STRAGGLERS)
@@ -307,6 +309,9 @@ class RetrievalCandidate:
     rerank_score: float | None
     final_score: float
     evidence_ids: tuple[str, ...]
+    # Typed provenance weighs on the score that decides the order; see
+    # scripts/provenance.py. 1.0 means unknown or unweighted provenance.
+    authority_weight: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -754,6 +759,22 @@ def expand_evidence_graph(
     return tuple(results[:global_limit])
 
 
+def _weigh_by_authority(
+    scores: Mapping[str, float],
+    meta: dict[str, dict[str, Any]],
+) -> dict[str, float]:
+    """Multiply each fused score by its typed-provenance weight.
+
+    The weight is recorded on the candidate so the ordering can be explained.
+    """
+    weighted: dict[str, float] = {}
+    for key, value in scores.items():
+        weight = authority_weight(meta[key].get("authority"))
+        meta[key]["authority_weight"] = weight
+        weighted[key] = value * weight
+    return weighted
+
+
 def fuse_rrf(
     *,
     lexical: Sequence[Mapping[str, Any]] | None,
@@ -894,7 +915,8 @@ def fuse_rrf(
                 row.get("graph_boost") if "graph_boost" in row else row.get("score")
             )
 
-    ordered = sorted(scores, key=lambda item: (-scores[item], item))
+    weighted = _weigh_by_authority(scores, meta)
+    ordered = sorted(weighted, key=lambda item: (-weighted[item], item))
     candidates: list[RetrievalCandidate] = []
     for key in ordered:
         rrf = round(scores[key], 6)
@@ -916,8 +938,9 @@ def fuse_rrf(
                 graph_score=info["graph_score"],
                 rrf_score=rrf,
                 rerank_score=None,
-                final_score=rrf,
+                final_score=round(weighted[key], 6),
                 evidence_ids=info["evidence_ids"],
+                authority_weight=info["authority_weight"],
             )
         )
     return tuple(candidates), meta
@@ -1227,6 +1250,8 @@ def retrieve(
                         "byte_end": c.byte_end,
                         "evidence_ids": c.evidence_ids,
                         "lance_distance": info.get("lance_distance"),
+                        "authority": info.get("authority"),
+                        "authority_weight": c.authority_weight,
                     }
                 )
             if exact_title_hit:
@@ -1313,6 +1338,9 @@ def retrieve(
                                 graph_score=_as_float(row.get("graph_score")),
                                 rrf_score=float(row.get("rrf_score") or 0.0),
                                 rerank_score=_as_float(row.get("rerank_score")),
+                                authority_weight=float(
+                                    row.get("authority_weight") or 1.0
+                                ),
                                 final_score=float(
                                     row.get("final_score")
                                     or row.get("rrf_score")

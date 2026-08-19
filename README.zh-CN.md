@@ -82,7 +82,7 @@ provider：OpenCode、Codex、Claude 和 OpenAI 可能使用云服务；Ollama �
 - **可用时进行 Triple-fusion**：BM25（FTS5）+ Vector（sentence-transformers）+ evidence-backed Graph-neighbor RRF
 - **加权 RRF**：BM25=2.0、Vector=1.0、Graph=0.5——防止已知项查询回归
 - **Title + filename 提升**——文件名精确匹配直接短路到 rank 1
-- **Typed-provenance 排序**——`source_authority: user` 高于 `ai-derived` / `inferred`
+- **Typed-provenance 排序**——同一张权重表（`user` 1.35、`web` 1.1、`ai-derived` 1.0、`inferred` 0.8）在每条路径上乘以决定顺序的分数：BM25、融合 RRF 与重排序之后
 - **时间查询**——`--as-of YYYY-MM-DD` 按 `valid_to` frontmatter 过滤
 - **本地检索模式**——小规模直接读取页面，始终可用的 SQLite FTS5 BM25，以及可选的 vectors/LanceDB + graph + reranker 混合检索
 - **Grounded QA**——检索到的 source span 带有 citation ID、路径、source/span 哈希、revision 及 byte/line 范围；证据不足、冲突或超出时间范围时会拒答

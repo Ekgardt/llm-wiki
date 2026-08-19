@@ -83,7 +83,7 @@ LLM Wiki даёт каждому AI-агенту, которым вы польз
 - **Triple-fusion при доступности**: BM25 (FTS5) + Vector (sentence-transformers) + evidence-backed Graph-neighbor RRF
 - **Взвешенный RRF**: BM25=2.0, Vector=1.0, Graph=0.5 — предотвращает регрессию на known-item запросах
 - **Title + filename boost** — точное совпадение имени файла даёт rank 1 сразу
-- **Typed-provenance ранжирование** — `source_authority: user` выше, чем `ai-derived` / `inferred`
+- **Typed-provenance ранжирование** — одна таблица весов (`user` 1.35, `web` 1.1, `ai-derived` 1.0, `inferred` 0.8) умножает балл, который определяет порядок, на каждом пути: BM25, слитый RRF и после реранкера
 - **Темпоральные запросы** — `--as-of YYYY-MM-DD` фильтрует по `valid_to` frontmatter
 - **Локальные режимы retrieval** — прямое чтение страниц на малом масштабе, всегда доступный SQLite FTS5 BM25 и опциональный hybrid с vectors/LanceDB + graph + reranker
 - **Grounded QA** — извлечённые source spans содержат citation ID, пути, хеши source/span, revision и byte/line ranges; при недостаточных, конфликтующих или не соответствующих времени данных система воздерживается от ответа

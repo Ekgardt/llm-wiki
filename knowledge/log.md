@@ -41,6 +41,8 @@
 
 - 2026-08-19 — Raised the Pyright qualification gate `warm_overhead_p95_ms` from 20 to 30 ms after three consecutive four-vCPU hosted runs measured 22.80, 22.08, and 22.16 ms. The spread is under a millisecond, so the number is the machine class, not noise: the facade pays for its freshness guarantee with an extra workspace-revision walk. The gate still fails closed and now names the slowest supported machine. Recorded in `warm-navigation-overhead-threshold-decision.md`.
 
+- 2026-08-19 — Closed audit item OPEN-036: the typed-provenance weights now live in one table that both the lexical and the hybrid paths import, and the weight multiplies the score that decides the order in fusion and after reranking. Every frozen retrieval-v2 metric and gate is unchanged; the behaviour is proved by unit tests. Recorded in `one-trust-weight-across-retrieval-paths-decision.md`.
+
 ## Editorial note
 This log is vault metadata — an append-only editorial changelog of compile passes and hygiene actions over `knowledge/`, not content derived from `knowledge/raw/` or `knowledge/inbox/`. New entries are appended at the bottom by compile passes and by hand; entries are never rewritten or removed.
 

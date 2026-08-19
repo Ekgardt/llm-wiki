@@ -49,6 +49,8 @@ from corpus_snapshot import (  # noqa: E402
 )
 from generation_catalog import GenerationCatalog  # noqa: E402
 from memory_state import ROOT, STATE_ROOT, _is_pid_alive, atomic_write  # noqa: E402
+from provenance import AUTHORITY_WEIGHTS as _AUTHORITY_WEIGHTS  # noqa: E402
+from provenance import authority_weight  # noqa: E402
 from reliable_memory import (  # noqa: E402
     canonical_json_bytes,
     fsync_directory,
@@ -831,16 +833,8 @@ AUTHORITY_FIELD_RE = re.compile(
 )
 VALID_TO_FIELD_RE = re.compile(r"^valid_to:\s*(.+?)\s*$", re.MULTILINE)
 
-# Higher weight = preferred in ranking (typed provenance).
-AUTHORITY_WEIGHTS = {
-    "user": 1.35,
-    "human": 1.35,
-    "web": 1.1,
-    "ai-derived": 1.0,
-    "ai": 1.0,
-    "inferred": 0.8,
-    "unknown": 1.0,
-}
+# The one trust table, shared with the hybrid path (see scripts/provenance.py).
+AUTHORITY_WEIGHTS = _AUTHORITY_WEIGHTS
 
 
 def _extract_title_and_summary(content: str, fallback_stem: str) -> tuple[str, str]:
@@ -1179,10 +1173,7 @@ def _authority_weight(path: str) -> float:
         content = p.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return 1.0
-    auth = _extract_frontmatter_field(content, AUTHORITY_FIELD_RE)
-    if not auth:
-        return 1.0
-    return AUTHORITY_WEIGHTS.get(auth.strip().lower(), 1.0)
+    return authority_weight(_extract_frontmatter_field(content, AUTHORITY_FIELD_RE))
 
 
 def _valid_as_of(path: str, as_of: str) -> bool:

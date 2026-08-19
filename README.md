@@ -82,7 +82,7 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 - **Triple-fusion when available**: BM25 (FTS5) + Vector (sentence-transformers) + evidence-backed Graph-neighbor RRF
 - **Weighted RRF**: BM25=2.0, Vector=1.0, Graph=0.5 — prevents regression on known-item queries
 - **Title + filename boost** — exact filename match short-circuits to rank 1
-- **Typed-provenance ranking** — `source_authority: user` outranks `ai-derived` / `inferred`
+- **Typed-provenance ranking** — one weight table (`user` 1.35, `web` 1.1, `ai-derived` 1.0, `inferred` 0.8) multiplies the score that decides the order on every path: BM25, fused RRF, and reranked
 - **Temporal queries** — `--as-of YYYY-MM-DD` filters by `valid_to` frontmatter
 - **Local retrieval modes** — direct page reads at small scale, SQLite FTS5 BM25 as the always-available base, and optional vectors/LanceDB + graph + reranker for hybrid retrieval
 - **Grounded QA** — retrieved source spans carry citation IDs, paths, source/span hashes, revisions, and byte/line ranges; unsupported, conflicting, or out-of-scope answers abstain
