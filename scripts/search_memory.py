@@ -707,6 +707,151 @@ def _cosine_similarity(query_vec: list[float], doc_vecs: list[list[float]]) -> l
     return (docs_norm @ q_norm).tolist()
 
 
+class _PageWalkLimits:
+    """Bounded traversal budget for one page collection."""
+
+    def __init__(self, deadline: float) -> None:
+        self.deadline = deadline
+        self.entries = 0
+        self.directories = 0
+
+    def check_deadline(self) -> None:
+        if time.monotonic() >= self.deadline:
+            raise TimeoutError("searchable page collection deadline reached")
+
+    def count_directory(self) -> None:
+        self.directories += 1
+        if self.directories > MAX_SEARCH_DIRECTORIES:
+            raise ValueError("searchable directory limit exceeded")
+
+    def count_entry(self) -> None:
+        self.entries += 1
+        if self.entries > MAX_SEARCH_ENTRIES:
+            raise ValueError("searchable entry limit exceeded")
+
+
+def _is_safe_entry(path: Path, *, directory: bool) -> bool:
+    """No symlinks, no reparse points, and the kind the caller expects."""
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    if path.is_symlink():
+        return False
+    reparse = getattr(info, "st_file_attributes", 0) & getattr(
+        stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400
+    )
+    if reparse:
+        return False
+    if directory:
+        return stat.S_ISDIR(info.st_mode)
+    return stat.S_ISREG(info.st_mode)
+
+
+def _require_safe_ancestry(root: Path, source_root: Path) -> None:
+    """Every directory from the vault down to the root must be safe."""
+    try:
+        relative_root = root.relative_to(source_root)
+    except ValueError as exc:
+        raise OSError("searchable knowledge root escapes the vault") from exc
+    component = source_root
+    components = [source_root]
+    for part in relative_root.parts:
+        component /= part
+        components.append(component)
+    if not all(_is_safe_entry(item, directory=True) for item in components):
+        raise OSError("unsafe knowledge directory")
+
+
+def _scan_directory(
+    current_path: Path, limits: _PageWalkLimits
+) -> tuple[list[Path], list[str]] | None:
+    """(safe subdirectories, markdown names), or None when it cannot be read."""
+    directories: list[Path] = []
+    filenames: list[str] = []
+    try:
+        with os.scandir(current_path) as entries:
+            for entry in entries:
+                limits.check_deadline()
+                limits.count_entry()
+                path = current_path / entry.name
+                if entry.name not in SKIP_DIRS and _is_safe_entry(path, directory=True):
+                    directories.append(path)
+                elif entry.name.endswith(".md"):
+                    filenames.append(entry.name)
+    except OSError:
+        return None
+    return directories, filenames
+
+
+def _is_retired_page(content: str) -> bool:
+    """Superseded and archived pages are history, not search results."""
+    frontmatter = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
+    if not frontmatter:
+        return False
+    status = re.search(r"^status:\s*(.+?)\s*$", frontmatter.group(1), re.MULTILINE)
+    return bool(status) and status.group(1).strip() in ("superseded", "archived")
+
+
+def _searchable_page(md: Path, name: str, seen: set[Path]) -> bool:
+    if name in SKIP_NAMES or md in seen:
+        return False
+    if not _is_safe_entry(md, directory=False):
+        return False
+    try:
+        raw = read_stable_bytes(md, MAX_PAGE_BYTES, label="search page")
+    except (OSError, ValueError):
+        return False
+    return not _is_retired_page(raw.decode("utf-8", errors="ignore"))
+
+
+def _collect_directory_pages(
+    current_path: Path,
+    filenames: list[str],
+    *,
+    pages: list[Path],
+    seen: set[Path],
+    limits: _PageWalkLimits,
+) -> None:
+    for name in sorted(filenames):
+        limits.check_deadline()
+        md = current_path / name
+        if not _searchable_page(md, name, seen):
+            continue
+        seen.add(md)
+        pages.append(md)
+        if len(pages) > MAX_SEARCHABLE_PAGES:
+            raise ValueError("searchable page limit exceeded")
+
+
+def _walk_knowledge_root(
+    root: Path,
+    *,
+    pages: list[Path],
+    seen: set[Path],
+    limits: _PageWalkLimits,
+) -> None:
+    pending = [(root, 0)]
+    while pending:
+        current_path, depth = pending.pop()
+        limits.check_deadline()
+        limits.count_directory()
+        if depth > MAX_SEARCH_DEPTH:
+            raise ValueError("searchable directory depth limit exceeded")
+        scanned = _scan_directory(current_path, limits)
+        if scanned is None:
+            continue
+        directories, filenames = scanned
+        if depth >= MAX_SEARCH_DEPTH and directories:
+            raise ValueError("searchable directory depth limit exceeded")
+        limits.check_deadline()
+        _collect_directory_pages(
+            current_path, filenames, pages=pages, seen=seen, limits=limits
+        )
+        limits.check_deadline()
+        pending.extend((directory, depth + 1) for directory in reversed(sorted(directories)))
+
+
 def _collect_pages(
     scope: str = "all",
     *,
@@ -715,104 +860,21 @@ def _collect_pages(
     deadline: float = float("inf"),
 ) -> list[Path]:
     """Collect bounded regular markdown pages without following links."""
-    pages: list[Path] = []
-    seen: set[Path] = set()
-    inspected_entries = 0
-    traversed_directories = 0
+    # Every scope resolves to the one knowledge/notes tree after the three-zone
+    # consolidation; "wiki" and "memory" remain accepted aliases.
+    if scope not in ("wiki", "memory", "knowledge", "all"):
+        return []
     selected_knowledge = knowledge_dir or KNOWLEDGE_DIR
     source_root = root or selected_knowledge.parents[1]
-
-    def check_deadline() -> None:
-        if time.monotonic() >= deadline:
-            raise TimeoutError("searchable page collection deadline reached")
-
-    def is_safe(path: Path, *, directory: bool) -> bool:
-        try:
-            info = path.lstat()
-        except OSError:
-            return False
-        unsafe = path.is_symlink() or bool(
-            getattr(info, "st_file_attributes", 0)
-            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-        )
-        expected = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
-        return not unsafe and expected
-
-    roots: list[Path] = []
-    # All scope values resolve to the single knowledge/notes tree after the
-    # three-zone consolidation; "wiki" and "memory" are kept as legacy aliases.
-    if scope in ("wiki", "memory", "knowledge", "all"):
-        roots.append(selected_knowledge)
-
-    for root in roots:
-        check_deadline()
-        if not root.exists():
-            continue
-        try:
-            relative_root = root.relative_to(source_root)
-        except ValueError as exc:
-            raise OSError("searchable knowledge root escapes the vault") from exc
-        components = [source_root]
-        component = source_root
-        for part in relative_root.parts:
-            component /= part
-            components.append(component)
-        if not all(is_safe(component, directory=True) for component in components):
-            raise OSError("unsafe knowledge directory")
-        pending = [(root, 0)]
-        while pending:
-            current_path, depth = pending.pop()
-            check_deadline()
-            traversed_directories += 1
-            if traversed_directories > MAX_SEARCH_DIRECTORIES:
-                raise ValueError("searchable directory limit exceeded")
-            if depth > MAX_SEARCH_DEPTH:
-                raise ValueError("searchable directory depth limit exceeded")
-            safe_directories: list[Path] = []
-            filenames: list[str] = []
-            try:
-                with os.scandir(current_path) as entries:
-                    for entry in entries:
-                        check_deadline()
-                        inspected_entries += 1
-                        if inspected_entries > MAX_SEARCH_ENTRIES:
-                            raise ValueError("searchable entry limit exceeded")
-                        name = entry.name
-                        path = current_path / name
-                        if name not in SKIP_DIRS and is_safe(path, directory=True):
-                            safe_directories.append(path)
-                        elif name.endswith(".md"):
-                            filenames.append(name)
-            except OSError:
-                continue
-            if depth >= MAX_SEARCH_DEPTH and safe_directories:
-                raise ValueError("searchable directory depth limit exceeded")
-            check_deadline()
-            for name in sorted(filenames):
-                check_deadline()
-                md = current_path / name
-                if not name.endswith(".md") or name in SKIP_NAMES or md in seen:
-                    continue
-                if not is_safe(md, directory=False):
-                    continue
-                try:
-                    content = read_stable_bytes(md, MAX_PAGE_BYTES, label="search page").decode(
-                        "utf-8", errors="ignore"
-                    )
-                except (OSError, ValueError):
-                    continue
-                fm = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
-                if fm:
-                    status_m = re.search(r"^status:\s*(.+?)\s*$", fm.group(1), re.MULTILINE)
-                    if status_m and status_m.group(1).strip() in ("superseded", "archived"):
-                        continue
-                seen.add(md)
-                pages.append(md)
-                if len(pages) > MAX_SEARCHABLE_PAGES:
-                    raise ValueError("searchable page limit exceeded")
-            check_deadline()
-            for directory in reversed(sorted(safe_directories)):
-                pending.append((directory, depth + 1))
+    limits = _PageWalkLimits(deadline)
+    limits.check_deadline()
+    if not selected_knowledge.exists():
+        return []
+    _require_safe_ancestry(selected_knowledge, source_root)
+    pages: list[Path] = []
+    _walk_knowledge_root(
+        selected_knowledge, pages=pages, seen=set(), limits=limits
+    )
     return pages
 
 
