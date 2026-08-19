@@ -2073,6 +2073,63 @@ def _dense_filtered_hits(
     )
 
 
+def _require_seal(catalog: Any, context: Mapping[str, Any], stop: Mapping[str, Any]) -> None:
+    if not _generation_seal_holds(catalog, context, stop):
+        raise GenerationSealChanged
+
+
+def _generation_graph_hits(
+    active_graph: Any,
+    filters: Mapping[str, Any],
+    *,
+    catalog: Any,
+    context: Mapping[str, Any],
+    stop: Mapping[str, Any],
+    cancelled: Callable[[], bool] | None,
+) -> Sequence[Mapping[str, Any]]:
+    """One hop out of the active generation, sealed before and after the read."""
+    _require_seal(catalog, context, stop)
+    rows = expand_evidence_graph(
+        active_graph,
+        seeds=filters["seeds"],
+        directions=filters["directions"],
+        edge_types=filters["edge_types"],
+        per_seed_limit=filters["per_seed_limit"],
+        global_limit=filters["global_limit"],
+        deadline_monotonic=filters["deadline_monotonic"],
+        cancelled=cancelled,
+    )
+    _require_seal(catalog, context, stop)
+    return rows
+
+
+def _neighbour_boost_hits(
+    lexical_backend: BackendFn, filters: Mapping[str, Any]
+) -> Sequence[Mapping[str, Any]]:
+    """Legacy path: neighbours of the lexical hits, scored by their boost."""
+    from graph_neighbors import boost_graph_neighbors
+
+    seed_filters = {
+        key: filters[key]
+        for key in ("query", "scope", "limit", "project", "since", "as_of")
+    }
+    seeds = list(lexical_backend(**seed_filters))
+    boosts = boost_graph_neighbors(
+        [{"path": hit["path"], "score": hit.get("score", 0)} for hit in seeds], None
+    )
+    return [
+        _backend_hit_from_legacy(
+            {
+                "path": item["path"],
+                "candidate_id": item["path"],
+                "score": item.get("graph_boost", 0.0),
+                "graph_boost": item.get("graph_boost", 0.0),
+            }
+        )
+        for item in boosts
+    ]
+
+
 def _generation_lexical_hits(
     filters: Mapping[str, Any],
     *,
@@ -2776,59 +2833,19 @@ def retrieve_via_search_memory(
             active_graph = generation_ctx.get("graph")
             if active_graph is None:
                 return None
-            if not search_memory._generation_consumption_unchanged(
-                selected_catalog,
-                generation_ctx["manifest"],
-                generation_ctx["artifact_names"],
-                generation_ctx["seal"],
-                **generation_stop,
-            ):
-                raise _GenerationSealChanged
-            rows = expand_evidence_graph(
+            return _generation_graph_hits(
                 active_graph,
-                seeds=filters["seeds"],
-                directions=filters["directions"],
-                edge_types=filters["edge_types"],
-                per_seed_limit=filters["per_seed_limit"],
-                global_limit=filters["global_limit"],
-                deadline_monotonic=filters["deadline_monotonic"],
+                filters,
+                catalog=selected_catalog,
+                context=generation_ctx,
+                stop=generation_stop,
                 cancelled=cancelled,
             )
-            if not search_memory._generation_consumption_unchanged(
-                selected_catalog,
-                generation_ctx["manifest"],
-                generation_ctx["artifact_names"],
-                generation_ctx["seal"],
-                **generation_stop,
-            ):
-                raise _GenerationSealChanged
-            return rows
         try:
-            seed_filters = {
-                key: filters[key]
-                for key in ("query", "scope", "limit", "project", "since", "as_of")
-            }
-            seeds = list(lexical_backend(**seed_filters))
-            from graph_neighbors import boost_graph_neighbors
-
-            boosts = boost_graph_neighbors(
-                [{"path": h["path"], "score": h.get("score", 0)} for h in seeds],
-                None,
-            )
-            return [
-                _backend_hit_from_legacy(
-                    {
-                        "path": item["path"],
-                        "candidate_id": item["path"],
-                        "score": item.get("graph_boost", 0.0),
-                        "graph_boost": item.get("graph_boost", 0.0),
-                    }
-                )
-                for item in boosts
-            ]
+            return _neighbour_boost_hits(lexical_backend, filters)
         except TimeoutError:
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001 - the graph signal degrades on its own
             return None
 
     def run_retrieval() -> RetrievalResult:
