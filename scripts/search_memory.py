@@ -1622,26 +1622,23 @@ def _valid_generation_fts(
         )
 
 
-def _generation_authoritative_sources(
-    generation_path: Path,
-    manifest: dict[str, object],
+def _read_identity_stable_bytes(
+    file_path: Path,
+    expected: os.stat_result,
     *,
-    state_root: Path,
+    max_bytes: int,
+    label: str,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
-) -> dict[str, dict[str, object]]:
-    _check_generation_stop(deadline, cancelled)
-    source_manifest_path = generation_path / "source-manifest.json"
-    expected_manifest = validate_runtime_file(
-        source_manifest_path, state_root, max_bytes=MAX_CORPUS_TOTAL_BYTES
-    )
+) -> bytes:
+    """Read a file whose identity is proved unchanged before, during and after."""
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(source_manifest_path, flags)
+    descriptor = os.open(file_path, flags)
     try:
-        opened_manifest = os.fstat(descriptor)
-        if not os.path.samestat(expected_manifest, opened_manifest):
-            raise PermissionError("generation source manifest identity changed before read")
-        chunks = []
+        opened = os.fstat(descriptor)
+        if not os.path.samestat(expected, opened):
+            raise PermissionError(f"{label} identity changed before read")
+        chunks: list[bytes] = []
         total = 0
         while True:
             _check_generation_stop(deadline, cancelled)
@@ -1649,84 +1646,129 @@ def _generation_authoritative_sources(
             if not chunk:
                 break
             total += len(chunk)
-            if total > MAX_CORPUS_TOTAL_BYTES:
-                raise ValueError("generation source manifest exceeds its byte ceiling")
+            if total > max_bytes:
+                raise ValueError(f"{label} exceeds its byte ceiling")
             chunks.append(chunk)
-        after_manifest = os.fstat(descriptor)
-        if not os.path.samestat(opened_manifest, after_manifest) or (
-            opened_manifest.st_size,
-            opened_manifest.st_mtime_ns,
-        ) != (after_manifest.st_size, after_manifest.st_mtime_ns):
-            raise PermissionError("generation source manifest changed during read")
-        source_manifest_raw = b"".join(chunks)
+        after = os.fstat(descriptor)
+        _require_same_file(opened, after, label)
     finally:
         os.close(descriptor)
-    current_manifest = source_manifest_path.stat(follow_symlinks=False)
-    if not os.path.samestat(after_manifest, current_manifest):
-        raise PermissionError("generation source manifest identity changed after read")
+    current = file_path.stat(follow_symlinks=False)
+    if not os.path.samestat(after, current):
+        raise PermissionError(f"{label} identity changed after read")
+    return b"".join(chunks)
+
+
+def _require_same_file(before: os.stat_result, after: os.stat_result, label: str) -> None:
+    same_identity = os.path.samestat(before, after)
+    same_content = (before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns)
+    if not same_identity or not same_content:
+        raise PermissionError(f"{label} changed during read")
+
+
+def _validated_source_manifest(
+    generation_path: Path,
+    manifest: Mapping[str, object],
+    *,
+    state_root: Path,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> dict:
+    source_manifest_path = generation_path / "source-manifest.json"
+    expected = validate_runtime_file(
+        source_manifest_path, state_root, max_bytes=MAX_CORPUS_TOTAL_BYTES
+    )
+    raw = _read_identity_stable_bytes(
+        source_manifest_path,
+        expected,
+        max_bytes=MAX_CORPUS_TOTAL_BYTES,
+        label="generation source manifest",
+        deadline=deadline,
+        cancelled=cancelled,
+    )
     _check_generation_stop(deadline, cancelled)
     try:
-        source_manifest_value = json.loads(source_manifest_raw)
+        value = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("generation source manifest is invalid") from exc
-    source_manifest = validate_canonical_source_manifest(source_manifest_value)
-    if (
-        canonical_json_bytes(source_manifest) != source_manifest_raw
-        or hashlib.sha256(source_manifest_raw).hexdigest()
-        != manifest.get("source_manifest_sha256")
-    ):
+    source_manifest = validate_canonical_source_manifest(value)
+    if canonical_json_bytes(source_manifest) != raw:
         raise ValueError("generation source manifest hash is invalid")
+    if hashlib.sha256(raw).hexdigest() != manifest.get("source_manifest_sha256"):
+        raise ValueError("generation source manifest hash is invalid")
+    return source_manifest
 
-    evidence_path = generation_path / "evidence.sqlite3"
-    validate_runtime_file(evidence_path, state_root, max_bytes=16 * 1024 * 1024 * 1024)
-    uri = f"{evidence_path.resolve(strict=True).as_uri()}?mode=ro&immutable=1"
-    source_metadata: list[tuple[str, str, str, int]] = []
-    seen_source_ids: set[str] = set()
+
+def _valid_source_row(row: tuple[object, ...], seen: set[str]) -> bool:
+    source_id, relative_path, digest, size, content_size = row
+    if not isinstance(source_id, str) or source_id in seen:
+        return False
+    if not isinstance(relative_path, str) or not isinstance(digest, str):
+        return False
+    if not isinstance(size, int) or not isinstance(content_size, int):
+        return False
+    return content_size <= MAX_CORPUS_FILE_BYTES and size == content_size
+
+
+def _source_metadata_rows(
+    database: sqlite3.Connection,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[tuple[str, str, str, int]]:
+    """Bounded source identity rows, refusing anything past a ceiling."""
+    metadata: list[tuple[str, str, str, int]] = []
+    seen: set[str] = set()
     total_bytes = 0
-    with closing(sqlite3.connect(uri, uri=True, timeout=0)) as database:
-        with _generation_sqlite_guard(database, deadline, cancelled):
-            rows = database.execute(
-                "SELECT source_id, relative_path, sha256, size, length(content) FROM source "
-                "ORDER BY relative_path, source_id LIMIT ?",
-                (MAX_CORPUS_FILES + 1,),
-            )
-            for row in rows:
-                _check_generation_stop(deadline, cancelled)
-                if len(source_metadata) >= MAX_CORPUS_FILES:
-                    raise ValueError("generation source row ceiling exceeded")
-                source_id, relative_path, digest, size, content_size = row
-                if (
-                    not isinstance(source_id, str)
-                    or source_id in seen_source_ids
-                    or not isinstance(relative_path, str)
-                    or not isinstance(digest, str)
-                    or not isinstance(size, int)
-                    or not isinstance(content_size, int)
-                    or content_size > MAX_CORPUS_FILE_BYTES
-                    or size != content_size
-                ):
-                    raise ValueError("generation evidence source rows are invalid")
-                total_bytes += content_size
-                if total_bytes > MAX_CORPUS_TOTAL_BYTES:
-                    raise ValueError("generation evidence source bytes exceed their ceiling")
-                seen_source_ids.add(source_id)
-                source_metadata.append((source_id, relative_path, digest, size))
-            sources: dict[str, dict[str, object]] = {}
-            for source_id, relative_path, digest, size in source_metadata:
-                _check_generation_stop(deadline, cancelled)
-                content_row = database.execute(
-                    "SELECT content FROM source WHERE source_id = ?", (source_id,)
-                ).fetchone()
-                if content_row is None:
-                    raise ValueError("generation evidence source content is missing")
-                content = bytes(content_row[0])
-                if len(content) != size or hashlib.sha256(content).hexdigest() != digest:
-                    raise ValueError("generation evidence source content is invalid")
-                sources[source_id] = {
-                    "relative_path": relative_path,
-                    "sha256": digest,
-                    "content": content,
-                }
+    rows = database.execute(
+        "SELECT source_id, relative_path, sha256, size, length(content) FROM source "
+        "ORDER BY relative_path, source_id LIMIT ?",
+        (MAX_CORPUS_FILES + 1,),
+    )
+    for row in rows:
+        _check_generation_stop(deadline, cancelled)
+        if len(metadata) >= MAX_CORPUS_FILES:
+            raise ValueError("generation source row ceiling exceeded")
+        if not _valid_source_row(row, seen):
+            raise ValueError("generation evidence source rows are invalid")
+        source_id, relative_path, digest, size, content_size = row
+        total_bytes += content_size
+        if total_bytes > MAX_CORPUS_TOTAL_BYTES:
+            raise ValueError("generation evidence source bytes exceed their ceiling")
+        seen.add(source_id)
+        metadata.append((source_id, relative_path, digest, size))
+    return metadata
+
+
+def _verified_source_contents(
+    database: sqlite3.Connection,
+    metadata: list[tuple[str, str, str, int]],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> dict[str, dict[str, object]]:
+    sources: dict[str, dict[str, object]] = {}
+    for source_id, relative_path, digest, size in metadata:
+        _check_generation_stop(deadline, cancelled)
+        row = database.execute(
+            "SELECT content FROM source WHERE source_id = ?", (source_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError("generation evidence source content is missing")
+        content = bytes(row[0])
+        if len(content) != size or hashlib.sha256(content).hexdigest() != digest:
+            raise ValueError("generation evidence source content is invalid")
+        sources[source_id] = {
+            "relative_path": relative_path,
+            "sha256": digest,
+            "content": content,
+        }
+    return sources
+
+
+def _require_membership_matches(
+    sources: Mapping[str, Mapping[str, object]], source_manifest: Mapping[str, object]
+) -> None:
     membership = [
         {
             "logical_id": source_id,
@@ -1739,6 +1781,37 @@ def _generation_authoritative_sources(
     ]
     if membership != source_manifest["sources"]:
         raise ValueError("generation evidence source membership does not match source manifest")
+
+
+def _generation_authoritative_sources(
+    generation_path: Path,
+    manifest: dict[str, object],
+    *,
+    state_root: Path,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> dict[str, dict[str, object]]:
+    """Every source the generation claims, read back and verified byte for byte."""
+    _check_generation_stop(deadline, cancelled)
+    source_manifest = _validated_source_manifest(
+        generation_path,
+        manifest,
+        state_root=state_root,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    evidence_path = generation_path / "evidence.sqlite3"
+    validate_runtime_file(evidence_path, state_root, max_bytes=16 * 1024 * 1024 * 1024)
+    uri = f"{evidence_path.resolve(strict=True).as_uri()}?mode=ro&immutable=1"
+    with closing(sqlite3.connect(uri, uri=True, timeout=0)) as database:
+        with _generation_sqlite_guard(database, deadline, cancelled):
+            metadata = _source_metadata_rows(
+                database, deadline=deadline, cancelled=cancelled
+            )
+            sources = _verified_source_contents(
+                database, metadata, deadline=deadline, cancelled=cancelled
+            )
+    _require_membership_matches(sources, source_manifest)
     return sources
 
 
