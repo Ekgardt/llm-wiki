@@ -83,22 +83,102 @@ def test_job_level_env_avoids_contexts_unavailable_before_runner_assignment() ->
     assert invalid == []
 
 
+SHARD_COUNT = 4
+
+
 def test_full_suite_matrix_contains_every_supported_python_endpoint() -> None:
     job = _workflow()["jobs"]["pytest-full"]
     assert job["runs-on"] == "${{ matrix.os }}"
     assert job["timeout-minutes"] == "${{ matrix.timeout }}"
     assert job["strategy"]["fail-fast"] is False
     assert job["strategy"]["matrix"]["include"] == [
-        {"os": "ubuntu-24.04", "python": "3.10", "timeout": 45, "class": "linux_full"},
-        {"os": "ubuntu-24.04", "python": "3.14", "timeout": 45, "class": "linux_full"},
-        {"os": "windows-2025", "python": "3.10", "timeout": 90, "class": "windows_full"},
-        {"os": "windows-2025", "python": "3.11", "timeout": 90, "class": "windows_full"},
-        {"os": "windows-2025", "python": "3.12", "timeout": 90, "class": "windows_full"},
-        {"os": "windows-2025", "python": "3.13", "timeout": 90, "class": "windows_full"},
-        {"os": "windows-2025", "python": "3.14", "timeout": 90, "class": "windows_full"},
-        {"os": "macos-15", "python": "3.10", "timeout": 45, "class": "macos_full"},
-        {"os": "macos-15", "python": "3.14", "timeout": 45, "class": "macos_full"},
+        {
+            "target": "linux-py3.10",
+            "os": "ubuntu-24.04",
+            "python": "3.10",
+            "timeout": 20,
+            "class": "linux_full",
+        },
+        {
+            "target": "linux-py3.14",
+            "os": "ubuntu-24.04",
+            "python": "3.14",
+            "timeout": 20,
+            "class": "linux_full",
+        },
+        {
+            "target": "windows-py3.10",
+            "os": "windows-2025",
+            "python": "3.10",
+            "timeout": 40,
+            "class": "windows_full",
+        },
+        {
+            "target": "windows-py3.11",
+            "os": "windows-2025",
+            "python": "3.11",
+            "timeout": 40,
+            "class": "windows_full",
+        },
+        {
+            "target": "windows-py3.12",
+            "os": "windows-2025",
+            "python": "3.12",
+            "timeout": 40,
+            "class": "windows_full",
+        },
+        {
+            "target": "windows-py3.13",
+            "os": "windows-2025",
+            "python": "3.13",
+            "timeout": 40,
+            "class": "windows_full",
+        },
+        {
+            "target": "windows-py3.14",
+            "os": "windows-2025",
+            "python": "3.14",
+            "timeout": 40,
+            "class": "windows_full",
+        },
+        {
+            "target": "macos-py3.10",
+            "os": "macos-15",
+            "python": "3.10",
+            "timeout": 20,
+            "class": "macos_full",
+        },
+        {
+            "target": "macos-py3.14",
+            "os": "macos-15",
+            "python": "3.14",
+            "timeout": 20,
+            "class": "macos_full",
+        },
     ]
+
+
+def test_every_full_suite_target_runs_all_four_shards() -> None:
+    """Each target is one runner per shard, and the run step selects its own."""
+    job = _workflow()["jobs"]["pytest-full"]
+    matrix = job["strategy"]["matrix"]
+    assert matrix["shard"] == list(range(1, SHARD_COUNT + 1))
+    assert [entry["target"] for entry in matrix["include"]] == matrix["target"]
+    assert job["name"].endswith("-s${{ matrix.shard }}")
+    commands = _commands(job)
+    assert "python -m tests.shard_plan" in commands
+    assert f"--shard ${{{{ matrix.shard }}}} --of {SHARD_COUNT}" in commands
+    assert "-s${{ matrix.shard }}" in job["env"]["LLM_WIKI_STATE_ROOT"]
+
+
+def test_the_shards_cover_every_test_file_exactly_once() -> None:
+    from tests import shard_plan
+
+    shards = shard_plan.plan(SHARD_COUNT)
+    selected = [name for shard in shards for name in shard]
+    assert sorted(selected) == shard_plan.test_files()
+    assert len(selected) == len(set(selected))
+    assert all(shard for shard in shards)
 
 
 def test_clean_profiles_are_isolated_and_never_auto_sync() -> None:
@@ -167,7 +247,7 @@ def test_job_timeouts_names_and_timing_artifacts_match_approved_classes() -> Non
         assert jobs[name]["name"].startswith("timing::clean::")
 
     full = jobs["pytest-full"]
-    assert full["name"] == "timing::${{ matrix.class }}::py${{ matrix.python }}"
+    assert full["name"] == "timing::${{ matrix.class }}::py${{ matrix.python }}-s${{ matrix.shard }}"
     commands = _commands(full)
     assert "--junitxml" in commands and "--durations=0" in commands
     upload = [
@@ -178,7 +258,7 @@ def test_job_timeouts_names_and_timing_artifacts_match_approved_classes() -> Non
     assert len(upload) == 1
     assert upload[0]["if"] == "always()"
     assert upload[0]["with"]["name"] == (
-        "pytest-timings-${{ matrix.class }}-py${{ matrix.python }}-"
+        "pytest-timings-${{ matrix.class }}-py${{ matrix.python }}-s${{ matrix.shard }}-"
         "attempt-${{ github.run_attempt }}"
     )
 

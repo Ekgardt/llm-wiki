@@ -57,56 +57,78 @@ jobs:
       - run: bash -n install.sh
 
   pytest-full:
-    name: timing::${{ matrix.class }}::py${{ matrix.python }}
+    name: timing::${{ matrix.class }}::py${{ matrix.python }}-s${{ matrix.shard }}
     strategy:
       fail-fast: false
       matrix:
+        # The suite is split across four shards. A single Windows job took 57
+        # minutes, and a run that long starves its own concurrency tests; each
+        # shard is a separate runner with its own cores, so the split shortens
+        # the wall clock without adding contention on one machine. Setup is
+        # about half a minute, so the extra jobs cost almost nothing.
+        target:
+          - linux-py3.10
+          - linux-py3.14
+          - windows-py3.10
+          - windows-py3.11
+          - windows-py3.12
+          - windows-py3.13
+          - windows-py3.14
+          - macos-py3.10
+          - macos-py3.14
+        shard: [1, 2, 3, 4]
         include:
-          - os: ubuntu-24.04
+          - target: linux-py3.10
+            os: ubuntu-24.04
             python: "3.10"
-            timeout: 45
+            timeout: 20
             class: linux_full
-          - os: ubuntu-24.04
+          - target: linux-py3.14
+            os: ubuntu-24.04
             python: "3.14"
-            timeout: 45
+            timeout: 20
             class: linux_full
-          # The hosted Windows image runs the full suite in 47 to 59 minutes,
-          # and a slow one was cancelled at the sixty-minute mark with a third
-          # of the suite unrun. Ninety minutes keeps a slow image legible.
-          - os: windows-2025
+          - target: windows-py3.10
+            os: windows-2025
             python: "3.10"
-            timeout: 90
+            timeout: 40
             class: windows_full
-          - os: windows-2025
+          - target: windows-py3.11
+            os: windows-2025
             python: "3.11"
-            timeout: 90
+            timeout: 40
             class: windows_full
-          - os: windows-2025
+          - target: windows-py3.12
+            os: windows-2025
             python: "3.12"
-            timeout: 90
+            timeout: 40
             class: windows_full
-          - os: windows-2025
+          - target: windows-py3.13
+            os: windows-2025
             python: "3.13"
-            timeout: 90
+            timeout: 40
             class: windows_full
-          - os: windows-2025
+          - target: windows-py3.14
+            os: windows-2025
             python: "3.14"
-            timeout: 90
+            timeout: 40
             class: windows_full
-          - os: macos-15
+          - target: macos-py3.10
+            os: macos-15
             python: "3.10"
-            timeout: 45
+            timeout: 20
             class: macos_full
-          - os: macos-15
+          - target: macos-py3.14
+            os: macos-15
             python: "3.14"
-            timeout: 45
+            timeout: 20
             class: macos_full
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.timeout }}
     env:
       UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/../llm-wiki-full-${{ matrix.class }}-py${{ matrix.python }}
       LLM_WIKI_ROOT: ${{ github.workspace }}
-      LLM_WIKI_STATE_ROOT: ${{ github.workspace }}/../llm-wiki-state-${{ matrix.class }}-py${{ matrix.python }}
+      LLM_WIKI_STATE_ROOT: ${{ github.workspace }}/../llm-wiki-state-${{ matrix.class }}-py${{ matrix.python }}-s${{ matrix.shard }}
       LLM_WIKI_TEST_USE_EXTERNAL_STATE: "1"
       MEMORY_LLM_PROVIDER: fake
     steps:
@@ -130,13 +152,16 @@ jobs:
           "import os, pathlib;
           print('LLM_WIKI_STATE_ROOT=' + str(pathlib.Path(os.environ['LLM_WIKI_STATE_ROOT']).resolve()))"
           >> "$GITHUB_ENV"
-      - run: uv run --locked --no-sync pytest -q --durations=0 --junitxml="${{ runner.temp }}/pytest-timings/junit.xml"
-      - if: matrix.class == 'linux_full' && matrix.python == '3.14'
+      - run: >
+          uv run --locked --no-sync python -m tests.shard_plan
+          --shard ${{ matrix.shard }} --of 4 --
+          -q --durations=0 --junitxml="${{ runner.temp }}/pytest-timings/junit.xml"
+      - if: matrix.class == 'linux_full' && matrix.python == '3.14' && matrix.shard == 1
         run: uv run --locked --no-sync python benchmark/run_benchmark.py --legacy-only
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: pytest-timings-${{ matrix.class }}-py${{ matrix.python }}-attempt-${{ github.run_attempt }}
+          name: pytest-timings-${{ matrix.class }}-py${{ matrix.python }}-s${{ matrix.shard }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/pytest-timings/junit.xml
           if-no-files-found: error
 
