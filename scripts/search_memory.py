@@ -2770,19 +2770,29 @@ def apply_hard_filters(
     ]
 
 
+def _row_text(row: sqlite3.Row, key: str) -> str:
+    return row[key] or ""
+
+
+def _first_line(content: str) -> str:
+    stripped = content.strip()
+    if not stripped:
+        return ""
+    return stripped.splitlines()[0][:120]
+
+
 def _generation_result(row: sqlite3.Row, generation_id: str) -> dict[str, object]:
-    score = -float(row["rank"])
-    authority = row["authority"] or ""
-    score *= authority_weight(authority)
-    content = row["content"] or ""
+    authority = _row_text(row, "authority")
+    score = -float(row["rank"]) * authority_weight(authority)
+    content = _row_text(row, "content")
     return {
         "path": row["source_path"],
         "title": row["title"] or Path(row["source_path"]).stem,
-        "summary": content.strip().splitlines()[0][:120] if content.strip() else "",
+        "summary": _first_line(content),
         "content": content,
         "score": score,
-        "project": row["project"] or "",
-        "timestamp": (row["valid_from"] or "")[:10],
+        "project": _row_text(row, "project"),
+        "timestamp": _row_text(row, "valid_from")[:10],
         "chunk_id": row["chunk_id"],
         "candidate_id": row["chunk_id"],
         "source_id": row["source_id"],
@@ -2790,8 +2800,8 @@ def _generation_result(row: sqlite3.Row, generation_id: str) -> dict[str, object
         "heading_ancestry": json.loads(row["heading_ancestry"]),
         "type": row["type"],
         "authority": authority,
-        "confidence": row["confidence"] or "",
-        "status": row["status"] or "",
+        "confidence": _row_text(row, "confidence"),
+        "status": _row_text(row, "status"),
         "valid_from": row["valid_from"],
         "valid_to": row["valid_to"],
         "language": row["language"],
@@ -3767,6 +3777,20 @@ def _numpy_dense_hits(
     return [_as_legacy_dense_row(row, "score") for row in results]
 
 
+def _dense_backend_ready(query: str) -> bool:
+    if not query or not query.strip():
+        return False
+    return _have_sentence_transformers()
+
+
+def _resolved_pages(
+    page_paths: list[Path] | None, scope: str, deadline: float | None
+) -> list[Path]:
+    if page_paths is not None:
+        return page_paths
+    return _collect_pages(scope, deadline=deadline or float("inf"))
+
+
 def _legacy_dense_hits(
     query: str,
     *,
@@ -3783,13 +3807,9 @@ def _legacy_dense_hits(
     _check_legacy_stop(deadline, cancelled)
     if deadline is not None:
         return None
-    if not query or not query.strip() or not _have_sentence_transformers():
+    if not _dense_backend_ready(query):
         return None
-    pages = (
-        page_paths
-        if page_paths is not None
-        else _collect_pages(scope, deadline=deadline or float("inf"))
-    )
+    pages = _resolved_pages(page_paths, scope, deadline)
     if not pages:
         return None
     hits = _lance_dense_hits(
@@ -4429,6 +4449,58 @@ def _reranked_or_capped(
     return _maybe_rerank(query, results, limit)
 
 
+def _fold_ranked(
+    scores: dict[str, float],
+    metadata: dict[str, dict],
+    ranked: list[dict],
+    *,
+    weight: float,
+    k: int,
+) -> None:
+    """Add one ranked list to the fused scores, keeping the first metadata seen."""
+    for rank, result in enumerate(ranked):
+        path = result["path"]
+        scores[path] = scores.get(path, 0) + weight / (k + rank + 1)
+        metadata.setdefault(path, result)
+
+
+def _graph_only_metadata(path: str) -> dict:
+    """A neighbour reached only through links has no row of its own."""
+    return {
+        "path": path,
+        "title": path.split("/")[-1].replace(".md", ""),
+        "summary": "",
+        "score": 0,
+        "project": "",
+        "timestamp": "",
+    }
+
+
+def _fold_graph_boosts(
+    scores: dict[str, float],
+    metadata: dict[str, dict],
+    boosts: list[dict],
+    *,
+    k: int,
+) -> None:
+    for rank, result in enumerate(boosts):
+        path = result["path"]
+        contribution = 0.5 * result.get("graph_boost", 0) / (k * 2 + rank + 1)
+        scores[path] = scores.get(path, 0) + contribution
+        metadata.setdefault(path, _graph_only_metadata(path))
+
+
+def _fused_in_score_order(
+    scores: dict[str, float], metadata: dict[str, dict]
+) -> list[dict]:
+    results = []
+    for path, score in sorted(scores.items(), key=lambda item: item[1], reverse=True):
+        result = metadata[path].copy()
+        result["fused_score"] = round(score, 4)
+        results.append(result)
+    return results
+
+
 def _rrf_fuse_triple(
     bm25_results: list[dict],
     vector_results: list[dict] | None,
@@ -4448,43 +4520,12 @@ def _rrf_fuse_triple(
     """
     scores: dict[str, float] = {}
     metadata: dict[str, dict] = {}
-
-    # BM25 — weight 2.0 (most reliable signal)
-    for rank, r in enumerate(bm25_results):
-        path = r["path"]
-        scores[path] = scores.get(path, 0) + 2.0 / (k + rank + 1)
-        metadata[path] = r
-
-    # Vector — weight 1.0 (helps when BM25 misses)
+    _fold_ranked(scores, metadata, bm25_results, weight=2.0, k=k)
     if vector_results:
-        for rank, r in enumerate(vector_results):
-            path = r["path"]
-            scores[path] = scores.get(path, 0) + 1.0 / (k + rank + 1)
-            if path not in metadata:
-                metadata[path] = r
-
-    # Graph-neighbor — weight 0.5 (softest signal, boosts through links)
+        _fold_ranked(scores, metadata, vector_results, weight=1.0, k=k)
     if graph_boosts:
-        for rank, r in enumerate(graph_boosts):
-            path = r["path"]
-            scores[path] = scores.get(path, 0) + 0.5 * r.get("graph_boost", 0) / (k * 2 + rank + 1)
-            if path not in metadata:
-                metadata[path] = {
-                    "path": path,
-                    "title": path.split("/")[-1].replace(".md", ""),
-                    "summary": "",
-                    "score": 0,
-                    "project": "",
-                    "timestamp": "",
-                }
-
-    sorted_paths = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    results = []
-    for path, score in sorted_paths:
-        r = metadata[path].copy()
-        r["fused_score"] = round(score, 4)
-        results.append(r)
-    return results
+        _fold_graph_boosts(scores, metadata, graph_boosts, k=k)
+    return _fused_in_score_order(scores, metadata)
 
 
 _PAGE_STATUS_RE = re.compile(r"^status:\s*[\"\']?([^\"\'\n]+)[\"\']?\s*$", re.MULTILINE)
