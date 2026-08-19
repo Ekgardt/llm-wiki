@@ -1675,7 +1675,10 @@ def test_ownership_waits_for_post_write_evidence_after_fast_completion() -> None
     runtime = object.__new__(_RealNavigationRuntime)
     runtime._cleanup_failed = False
     try:
-        with pytest.raises(RuntimeError, match="expected terminal"):
+        with pytest.raises(
+            benchmark_runner._ProbeRacedError,
+            match="answered before interruption",
+        ):
             runtime._observe_inflight_interruption(
                 Process(),
                 "cancellation",
@@ -4243,3 +4246,56 @@ def test_pinned_constants_match_approved_contract() -> None:
         "client_rss_mib": 100,
     }
     assert os.path.isabs(str(BENCHMARK_ROOT))
+
+
+def test_a_raced_ownership_probe_is_retried_until_it_measures_something() -> None:
+    """A server that answers first measured nothing; the next attempt may not."""
+    attempts: list[str] = []
+    runtime = object.__new__(_RealNavigationRuntime)
+    runtime._cleanup_failed = False
+
+    def run(scenario: str, deadline: float) -> int:
+        attempts.append(scenario)
+        if len(attempts) < 3:
+            raise benchmark_runner._ProbeRacedError("answered before interruption")
+        return 0
+
+    runtime._run_ownership_scenario = run
+    runtime._reset = lambda deadline: 0
+    outcome = runtime._ownership_outcome("cancellation", time.monotonic() + 60)
+    assert outcome == {"available": True, "orphan_count": 0}
+    assert attempts == ["cancellation"] * 3
+
+
+def test_an_always_raced_ownership_probe_reports_the_scenario_unavailable() -> None:
+    """The retry is bounded, so a server that always wins is still reported."""
+    attempts: list[str] = []
+    runtime = object.__new__(_RealNavigationRuntime)
+    runtime._cleanup_failed = False
+
+    def run(scenario: str, deadline: float) -> int:
+        attempts.append(scenario)
+        raise benchmark_runner._ProbeRacedError("answered before interruption")
+
+    runtime._run_ownership_scenario = run
+    runtime._reset = lambda deadline: 0
+    outcome = runtime._ownership_outcome("cancellation", time.monotonic() + 60)
+    assert outcome == {"available": False, "orphan_count": None}
+    assert len(attempts) == benchmark_runner._OWNERSHIP_PROBE_ATTEMPTS
+
+
+def test_a_failing_ownership_probe_is_not_retried() -> None:
+    """A real failure is a finding, not a race; one attempt settles it."""
+    attempts: list[str] = []
+    runtime = object.__new__(_RealNavigationRuntime)
+    runtime._cleanup_failed = False
+
+    def run(scenario: str, deadline: float) -> int:
+        attempts.append(scenario)
+        raise RuntimeError("ownership probe reached the wrong terminal")
+
+    runtime._run_ownership_scenario = run
+    runtime._reset = lambda deadline: 0
+    outcome = runtime._ownership_outcome("cancellation", time.monotonic() + 60)
+    assert outcome == {"available": False, "orphan_count": None}
+    assert attempts == ["cancellation"]

@@ -89,6 +89,11 @@ PERFORMANCE_SAMPLES = 20
 FRESHNESS_CHECKS_PER_CYCLE = 5
 _OWNERSHIP_TIMEOUT_SECONDS = 0.05
 _OWNERSHIP_POLL_SECONDS = 0.001
+_OWNERSHIP_PROBE_METHOD = "workspace/symbol"
+# A cancellation probe only measures something when the request is still in
+# flight. A fast machine can answer first, so give the probe a few tries.
+_OWNERSHIP_PROBE_ATTEMPTS = 5
+_OWNERSHIP_RESET_SECONDS = 60.0
 _DIRECT_VALIDATION_MAX_SOURCE_BYTES = 16 * 1024 * 1024
 OPERATOR_MAX_SCANNED_ENTRIES = 10_000
 OPERATOR_MAX_DEPTH = 32
@@ -157,6 +162,53 @@ class BenchmarkTimeoutError(TimeoutError):
 
 class _CleanupProofError(RuntimeError):
     """Raised when zero retained ownership cannot be proven after one retry."""
+
+
+class _ProbeRacedError(RuntimeError):
+    """Raised when the server answered before the probe could interrupt it."""
+
+
+def _wait_one_poll(completed: threading.Event, deadline: float) -> None:
+    """Yield for one poll interval, whether or not the request has finished."""
+    wait_for = min(_OWNERSHIP_POLL_SECONDS, max(0.0, deadline - time.monotonic()))
+    if completed.is_set():
+        time.sleep(wait_for)
+        return
+    completed.wait(wait_for)
+
+
+def _check_probe_error(error: BaseException, scenario: str) -> None:
+    """The probe has to end in the terminal its scenario asked for."""
+    expected = TimeoutError if scenario == "timeout" else RequestCancelled
+    if isinstance(error, expected):
+        return
+    if isinstance(error, (KeyboardInterrupt, SystemExit)):
+        raise error
+    raise RuntimeError("ownership probe reached the wrong terminal") from error
+
+
+def _check_probe_terminal(
+    outcome: list[tuple[str, object]], scenario: str, dispatched: bool
+) -> None:
+    """What the probe ended with, refusing anything that measured nothing."""
+    if not dispatched:
+        raise RuntimeError("ownership probe request was not sent")
+    if len(outcome) != 1:
+        raise RuntimeError("ownership probe did not reach the expected terminal")
+    if outcome[0][0] != "error":
+        # The server answered inside the window between dispatch and the
+        # interruption. Nothing was in flight to interrupt, so this attempt
+        # measured nothing; the caller retries rather than calling the
+        # scenario unavailable.
+        raise _ProbeRacedError("ownership probe was answered before interruption")
+    _check_probe_error(outcome[0][1], scenario)
+
+
+def _probe_request_deadline(scenario: str, now: float, deadline: float) -> float:
+    """The timeout scenario gets a short budget; the others get the full one."""
+    if scenario != "timeout":
+        return deadline
+    return min(deadline, now + _OWNERSHIP_TIMEOUT_SECONDS)
 
 
 class _OperatorTraversalError(RuntimeError):
@@ -1297,32 +1349,21 @@ class _RealNavigationRuntime:
             raise RuntimeError("ownership probe has no live process")
         return request, process
 
-    def _observe_inflight_interruption(
+    def _start_probe_request(
         self,
         process: object,
         scenario: str,
-        deadline: float,
-    ) -> None:
-        method = "workspace/symbol"
-        protocol = process.protocol
-        baseline_sequence, _baseline_method = protocol._sent_request_evidence()
-        source = CancellationSource()
-        now = time.monotonic()
-        request_deadline = (
-            min(deadline, now + _OWNERSHIP_TIMEOUT_SECONDS)
-            if scenario == "timeout"
-            else deadline
-        )
-        if now >= request_deadline:
-            raise TimeoutError("ownership probe deadline expired")
-
-        completed = threading.Event()
-        outcome: list[tuple[str, object]] = []
+        request_deadline: float,
+        source: CancellationSource,
+        outcome: list[tuple[str, object]],
+        completed: threading.Event,
+    ) -> threading.Thread:
+        """Send the probe request from a worker so the caller can interrupt it."""
 
         def request_workspace_symbols() -> None:
             try:
                 result = process.request(
-                    method,
+                    _OWNERSHIP_PROBE_METHOD,
                     {"query": "__llm_wiki_ownership_probe_no_match__"},
                     deadline=request_deadline,
                     cancellation=source.token,
@@ -1340,24 +1381,30 @@ class _RealNavigationRuntime:
             daemon=True,
         )
         worker.start()
-        dispatched = False
+        return worker
+
+    def _await_probe_dispatch(
+        self,
+        protocol: object,
+        baseline_sequence: int,
+        completed: threading.Event,
+        deadline: float,
+    ) -> bool:
+        """Whether the probe request reached the wire before the deadline."""
         while time.monotonic() < deadline:
             sent_sequence, sent_method = protocol._sent_request_evidence()
-            if sent_sequence > baseline_sequence and sent_method == method:
-                dispatched = True
-                break
-            wait_for = min(
-                _OWNERSHIP_POLL_SECONDS,
-                max(0.0, deadline - time.monotonic()),
-            )
-            if completed.is_set():
-                time.sleep(wait_for)
-            else:
-                completed.wait(wait_for)
+            if (
+                sent_sequence > baseline_sequence
+                and sent_method == _OWNERSHIP_PROBE_METHOD
+            ):
+                return True
+            _wait_one_poll(completed, deadline)
+        return False
 
-        if dispatched and scenario == "cancellation":
-            source.cancel()
-
+    def _join_probe_worker(
+        self, worker: threading.Thread, completed: threading.Event, deadline: float
+    ) -> None:
+        """The probe owns a thread and a request; neither may outlive the probe."""
         if not completed.wait(max(0.0, deadline - time.monotonic())):
             self._cleanup_failed = True
             raise _CleanupProofError("ownership probe request did not terminate")
@@ -1365,16 +1412,33 @@ class _RealNavigationRuntime:
         if worker.is_alive():
             self._cleanup_failed = True
             raise _CleanupProofError("ownership probe request owner did not stop")
-        if not dispatched:
-            raise RuntimeError("ownership probe request was not sent")
-        if len(outcome) != 1 or outcome[0][0] != "error":
-            raise RuntimeError("ownership probe did not reach the expected terminal")
-        error = outcome[0][1]
-        expected = TimeoutError if scenario == "timeout" else RequestCancelled
-        if not isinstance(error, expected):
-            if isinstance(error, (KeyboardInterrupt, SystemExit)):
-                raise error
-            raise RuntimeError("ownership probe reached the wrong terminal") from error
+
+    def _observe_inflight_interruption(
+        self,
+        process: object,
+        scenario: str,
+        deadline: float,
+    ) -> None:
+        protocol = process.protocol
+        baseline_sequence, _baseline_method = protocol._sent_request_evidence()
+        source = CancellationSource()
+        now = time.monotonic()
+        request_deadline = _probe_request_deadline(scenario, now, deadline)
+        if now >= request_deadline:
+            raise TimeoutError("ownership probe deadline expired")
+
+        completed = threading.Event()
+        outcome: list[tuple[str, object]] = []
+        worker = self._start_probe_request(
+            process, scenario, request_deadline, source, outcome, completed
+        )
+        dispatched = self._await_probe_dispatch(
+            protocol, baseline_sequence, completed, deadline
+        )
+        if dispatched and scenario == "cancellation":
+            source.cancel()
+        self._join_probe_worker(worker, completed, deadline)
+        _check_probe_terminal(outcome, scenario, dispatched)
 
     def ownership_checks(self, *, deadline: float) -> dict[str, dict[str, int | bool | None]]:
         outcomes: dict[str, dict[str, int | bool | None]] = {
@@ -1384,28 +1448,55 @@ class _RealNavigationRuntime:
         for scenario in _OWNERSHIP_SCENARIOS:
             if self.cleanup_failed:
                 break
-            available = True
-            orphan: int | None = None
-            try:
-                request, process = self._prepare_process(deadline)
-                if scenario == "crash":
-                    process.process.kill()
-                    self._query_after_crash(request, deadline)
-                elif scenario == "timeout":
-                    self._observe_inflight_interruption(process, scenario, deadline)
-                elif scenario == "cancellation":
-                    self._observe_inflight_interruption(process, scenario, deadline)
-                orphan = self._reset(deadline)
-            except Exception:
-                available = False
-                if not self.cleanup_failed:
-                    with contextlib.suppress(Exception):
-                        self._reset(deadline)
-            outcomes[scenario] = {
-                "available": available,
-                "orphan_count": orphan,
-            }
+            outcomes[scenario] = self._ownership_outcome(scenario, deadline)
         return outcomes
+
+    def _can_attempt_ownership(self, deadline: float) -> bool:
+        return not self.cleanup_failed and time.monotonic() < deadline
+
+    def _attempt_ownership_scenario(
+        self, scenario: str, deadline: float
+    ) -> tuple[int | None, bool]:
+        """The retained-owner count, or None and whether a retry is worthwhile."""
+        try:
+            return self._run_ownership_scenario(scenario, deadline), False
+        except _ProbeRacedError:
+            self._recover_ownership_scenario()
+            return None, True
+        except Exception:
+            self._recover_ownership_scenario()
+            return None, False
+
+    def _ownership_outcome(
+        self, scenario: str, deadline: float
+    ) -> dict[str, int | bool | None]:
+        """One scenario's result, retrying attempts that measured nothing."""
+        for _attempt in range(_OWNERSHIP_PROBE_ATTEMPTS):
+            if not self._can_attempt_ownership(deadline):
+                break
+            orphan, retry = self._attempt_ownership_scenario(scenario, deadline)
+            if orphan is not None:
+                return {"available": True, "orphan_count": orphan}
+            if not retry:
+                break
+        return {"available": False, "orphan_count": None}
+
+    def _recover_ownership_scenario(self) -> None:
+        """Put the harness back where the next attempt can start."""
+        if self.cleanup_failed:
+            return
+        with contextlib.suppress(Exception):
+            self._reset(time.monotonic() + _OWNERSHIP_RESET_SECONDS)
+
+    def _run_ownership_scenario(self, scenario: str, deadline: float) -> int:
+        """Drive one scenario to its terminal and return the retained owners."""
+        request, process = self._prepare_process(deadline)
+        if scenario == "crash":
+            process.process.kill()
+            self._query_after_crash(request, deadline)
+        elif scenario in {"timeout", "cancellation"}:
+            self._observe_inflight_interruption(process, scenario, deadline)
+        return self._reset(deadline)
 
     def close(self, *, deadline: float) -> int:
         return self._close_and_count(deadline)
