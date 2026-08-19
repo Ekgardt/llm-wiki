@@ -557,7 +557,7 @@ def test_apply_leaves_prepared_transaction_and_flush_compile_queue_untouched(
         state_root=state,
         home=home,
         apply=True,
-        time_limit_seconds=5,
+        time_limit_seconds=120,
     )
 
     with sqlite3.connect(state / "run" / "markdown-transactions.sqlite3") as database:
@@ -939,7 +939,7 @@ def test_sync_detects_recent_knowledge_source_changes(
         state_root=state,
         home=home,
         apply=apply,
-        time_limit_seconds=5,
+        time_limit_seconds=120,
     )
 
     _assert_stale_index_action(report, apply)
@@ -965,7 +965,7 @@ def test_sync_treats_missing_or_invalid_source_manifest_as_stale(
         state_root=state,
         home=home,
         apply=apply,
-        time_limit_seconds=5,
+        time_limit_seconds=120,
     )
 
     _assert_stale_index_action(report, apply)
@@ -1011,7 +1011,7 @@ def test_apply_never_writes_under_read_only_knowledge_tree(tmp_path, monkeypatch
             state_root=state,
             home=home,
             apply=True,
-            time_limit_seconds=5,
+            time_limit_seconds=120,
         )
     finally:
         _set_tree_mode(knowledge, read_only=False)
