@@ -1916,6 +1916,112 @@ def _start_configured_lsp_process(
     )
 
 
+def _startup_already_terminal(
+    coordinator: _LifecycleCoordinator,
+    generation: object,
+    process: object,
+    protocol: object,
+) -> bool:
+    """True when anything already recorded a terminal failure for this start."""
+    if coordinator.terminal_outcome is not None:
+        return True
+    if coordinator.mandatory_failure_intent is not None:
+        return True
+    if coordinator.pending_failure_intents > 0 or coordinator.success_committed:
+        return True
+    if generation._exit_observed or generation.failure_queued:
+        return True
+    if generation.expected_exit.is_set():
+        return True
+    return process.poll() is not None or protocol.fatal
+
+
+def _promote_started_generation(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    generation: object,
+    process: object,
+    protocol: object,
+    generation_state: ProcessState,
+    startup_deadline: float,
+) -> None:
+    _acquire_lifecycle(coordinator, startup_deadline)
+    try:
+        with generation.failure_lock, coordinator.terminal_state_lock:
+            if _startup_already_terminal(coordinator, generation, process, protocol):
+                raise RuntimeError("LSP terminal failure was recorded during startup")
+            coordinator.active = generation
+            coordinator.candidate = None
+            coordinator.lease_generation = generation
+            coordinator.phase = _LifecyclePhase.RUNNING
+            coordinator.startup_complete = True
+            instance.state = generation_state
+        _notify_lifecycle_locked(coordinator)
+    finally:
+        _release_lifecycle(coordinator)
+
+
+def _startup_cleanup_errors(
+    instance: LspProcess | None,
+    coordinator: _LifecycleCoordinator,
+    deadline: float,
+) -> list[BaseException]:
+    cleanup_errors: list[BaseException] = []
+    try:
+        _mark_terminal_failure(instance, coordinator, _STARTUP_FAILED, deadline)
+    except BaseException as cleanup_error:
+        cleanup_errors.append(cleanup_error)
+    try:
+        cleanup_errors.extend(
+            _drive_cleanup(
+                instance,
+                deadline,
+                terminal=True,
+                failure_code=_STARTUP_FAILED,
+                coordinator_override=coordinator,
+            )
+        )
+    except BaseException as cleanup_error:
+        cleanup_errors.append(cleanup_error)
+    return cleanup_errors
+
+
+def _interrupted_startup(
+    startup_error: BaseException, cleanup_errors: list[BaseException]
+) -> bool:
+    if _interruption_in_chain(startup_error) is not None:
+        return True
+    return any(_interruption_in_chain(error) is not None for error in cleanup_errors)
+
+
+def _startup_cleanup_error(coordinator: _LifecycleCoordinator) -> StartupCleanupError:
+    message = "LSP startup cleanup retains retryable ownership"
+    if coordinator.cleanup_result.evidence == "failed":
+        message = (
+            "LSP startup failed and retained evidence could not be written safely"
+        )
+    return StartupCleanupError(message, coordinator=coordinator)
+
+
+def _fail_startup(
+    instance: LspProcess | None,
+    coordinator: _LifecycleCoordinator,
+    startup_error: BaseException,
+) -> None:
+    """Record the failure, clean up, and raise what the caller must see."""
+    deadline = _fresh_cleanup_deadline()
+    _remember_mandatory_terminal_failure(instance, coordinator, _STARTUP_FAILED)
+    cleanup_errors = _startup_cleanup_errors(instance, coordinator, deadline)
+    pending = _coordinator_has_ownership(coordinator)
+    if pending:
+        _register_startup_cleanup(coordinator)
+    if _interrupted_startup(startup_error, cleanup_errors):
+        _raise_cleanup_failures(cleanup_errors, prior_error=startup_error)
+    if pending:
+        raise _startup_cleanup_error(coordinator) from startup_error
+    raise startup_error
+
+
 def _start_lsp_process_impl(
     cls: type[LspProcess],
     command: Sequence[str],
@@ -2027,33 +2133,15 @@ def _start_lsp_process_impl(
         _require_startup_deadline(startup_deadline, "generation guard completion")
         assert instance is not None
 
-        _acquire_lifecycle(coordinator, startup_deadline)
-        try:
-            with generation.failure_lock:
-                with coordinator.terminal_state_lock:
-                    if (
-                        coordinator.terminal_outcome is not None
-                        or coordinator.mandatory_failure_intent is not None
-                        or coordinator.pending_failure_intents > 0
-                        or coordinator.success_committed
-                        or generation._exit_observed
-                        or generation.failure_queued
-                        or generation.expected_exit.is_set()
-                        or process.poll() is not None
-                        or protocol.fatal
-                    ):
-                        raise RuntimeError(
-                            "LSP terminal failure was recorded during startup"
-                        )
-                    coordinator.active = generation
-                    coordinator.candidate = None
-                    coordinator.lease_generation = generation
-                    coordinator.phase = _LifecyclePhase.RUNNING
-                    coordinator.startup_complete = True
-                    instance.state = generation_state
-            _notify_lifecycle_locked(coordinator)
-        finally:
-            _release_lifecycle(coordinator)
+        _promote_started_generation(
+            instance,
+            coordinator,
+            generation,
+            process,
+            protocol,
+            generation_state,
+            startup_deadline,
+        )
 
         _start_lifecycle_workers(instance, startup_deadline)
         _require_startup_deadline(startup_deadline, "lifecycle worker start")
@@ -2065,51 +2153,7 @@ def _start_lsp_process_impl(
         _unregister_startup_cleanup(coordinator)
         return instance
     except BaseException as startup_error:
-        deadline = _fresh_cleanup_deadline()
-        cleanup_errors: list[BaseException] = []
-        _remember_mandatory_terminal_failure(
-            instance,
-            coordinator,
-            _STARTUP_FAILED,
-        )
-        try:
-            _mark_terminal_failure(
-                instance,
-                coordinator,
-                _STARTUP_FAILED,
-                deadline,
-            )
-        except BaseException as cleanup_error:
-            cleanup_errors.append(cleanup_error)
-        try:
-            cleanup_errors.extend(
-                _drive_cleanup(
-                    instance,
-                    deadline,
-                    terminal=True,
-                    failure_code=_STARTUP_FAILED,
-                    coordinator_override=coordinator,
-                )
-            )
-        except BaseException as cleanup_error:
-            cleanup_errors.append(cleanup_error)
-        pending = _coordinator_has_ownership(coordinator)
-        if pending:
-            _register_startup_cleanup(coordinator)
-        if _interruption_in_chain(startup_error) is not None or any(
-            _interruption_in_chain(error) is not None for error in cleanup_errors
-        ):
-            _raise_cleanup_failures(cleanup_errors, prior_error=startup_error)
-        if pending:
-            evidence_failed = coordinator.cleanup_result.evidence == "failed"
-            message = (
-                "LSP startup failed and retained evidence could not be written safely"
-                if evidence_failed
-                else "LSP startup cleanup retains retryable ownership"
-            )
-            error = StartupCleanupError(message, coordinator=coordinator)
-            raise error from startup_error
-        raise startup_error
+        _fail_startup(instance, coordinator, startup_error)
     finally:
         try:
             if driver_acquired:
