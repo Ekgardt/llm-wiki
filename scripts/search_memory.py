@@ -1004,6 +1004,16 @@ def _collect_directory_pages(
             raise ValueError("searchable page limit exceeded")
 
 
+def _require_depth_within_limit(depth: int) -> None:
+    if depth > MAX_SEARCH_DEPTH:
+        raise ValueError("searchable directory depth limit exceeded")
+
+
+def _require_no_deeper_directories(depth: int, directories: list[str]) -> None:
+    if depth >= MAX_SEARCH_DEPTH and directories:
+        raise ValueError("searchable directory depth limit exceeded")
+
+
 def _walk_knowledge_root(
     root: Path,
     *,
@@ -1016,14 +1026,12 @@ def _walk_knowledge_root(
         current_path, depth = pending.pop()
         limits.check_deadline()
         limits.count_directory()
-        if depth > MAX_SEARCH_DEPTH:
-            raise ValueError("searchable directory depth limit exceeded")
+        _require_depth_within_limit(depth)
         scanned = _scan_directory(current_path, limits)
         if scanned is None:
             continue
         directories, filenames = scanned
-        if depth >= MAX_SEARCH_DEPTH and directories:
-            raise ValueError("searchable directory depth limit exceeded")
+        _require_no_deeper_directories(depth, directories)
         limits.check_deadline()
         _collect_directory_pages(
             current_path, filenames, pages=pages, seen=seen, limits=limits
@@ -3506,6 +3514,13 @@ def _exact_page_eligible(
     return not as_of or _valid_as_of(relative_path, as_of)
 
 
+def _matching_page(pages: list[Path], normalized_stem: str) -> Path | None:
+    for item in pages:
+        if _normalized_filename_stem(item.name) == normalized_stem:
+            return item
+    return None
+
+
 def _with_exact_page(
     hits: list[dict],
     pages: list[Path],
@@ -3515,10 +3530,7 @@ def _with_exact_page(
     since: str | None,
     as_of: str | None,
 ) -> list[dict]:
-    page = next(
-        (item for item in pages if _normalized_filename_stem(item.name) == normalized_stem),
-        None,
-    )
+    page = _matching_page(pages, normalized_stem)
     if page is None:
         return hits
     relative = page.relative_to(ROOT).as_posix()
@@ -3565,11 +3577,7 @@ def _legacy_lexical_hits(
     _check_legacy_stop(deadline, cancelled)
     if not query or not query.strip():
         return []
-    pages = (
-        page_paths
-        if page_paths is not None
-        else _collect_pages(scope, deadline=deadline or float("inf"))
-    )
+    pages = _resolved_pages(page_paths, scope, deadline)
     if not pages:
         return []
     rows = _legacy_rows_or_rebuild(
@@ -3593,6 +3601,38 @@ def _legacy_lexical_hits(
             deadline=deadline,
             cancelled=cancelled,
         )
+    return _ranked_lexical_hits(
+        rows,
+        pages,
+        query,
+        limit=limit,
+        project=project,
+        since=since,
+        as_of=as_of,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+
+
+def _round_scores(hits: list[dict]) -> None:
+    for hit in hits:
+        hit["score"] = round(float(hit["score"]), 2)
+        hit["bm25_score"] = round(float(hit["bm25_score"]), 2)
+
+
+def _ranked_lexical_hits(
+    rows: list[tuple],
+    pages: list[Path],
+    query: str,
+    *,
+    limit: int,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[dict]:
+    """Score the matched rows, then let an exact filename match come first."""
     query_lower = query.lower().strip()
     hits = _legacy_hit_rows(
         rows,
@@ -3609,9 +3649,7 @@ def _legacy_lexical_hits(
         hits, pages, normalized_stem, project=project, since=since, as_of=as_of
     )
     hits.sort(key=lambda hit: (-hit["score"], hit["path"]))
-    for hit in hits:
-        hit["score"] = round(float(hit["score"]), 2)
-        hit["bm25_score"] = round(float(hit["bm25_score"]), 2)
+    _round_scores(hits)
     hits = _promoted_filename_first(hits, normalized_stem)
     return hits[: max(limit * 3, limit)]
 
