@@ -1354,6 +1354,39 @@ class _CloseTargets:
     process: LspProcess | None
 
 
+def _check_document_unchanged(
+    current: OpenDocument,
+    source: RepositorySource,
+    content: bytes,
+    digest: str,
+) -> None:
+    """An open document must not change behind the session's back."""
+    if (
+        current.source != source
+        or current.content != content
+        or current.source_sha256 != digest
+    ):
+        raise RuntimeError(
+            "open Pyright document changed without synchronization"
+        )
+
+
+def _check_did_open_encodable(params: dict[str, object]) -> None:
+    """Refuse a document the wire could never carry."""
+    try:
+        encode_frame(
+            {
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": params,
+            }
+        )
+    except ProtocolViolation as error:
+        raise ValueError(
+            "Pyright source document exceeds the LSP frame"
+        ) from error
+
+
 class _LaunchServerGuard:
     def __init__(
         self,
@@ -2977,90 +3010,105 @@ class PyrightSession:
             self._ready_uri_generations[document.source.uri] = generation
             self._refresh_readiness_locked(deadline=deadline)
 
+    def _document_source_bytes(
+        self, path: str, deadline: float
+    ) -> tuple[RepositorySource, bytes, str]:
+        """The resolved source, its verified bytes, and their digest."""
+        source = resolve_repository_source(self._repository, path)
+        content = read_stable_bytes(
+            source.absolute_path,
+            _MAX_DOCUMENT_BYTES,
+            label="Pyright source document",
+            deadline=deadline,
+        )
+        content.decode("utf-8", errors="strict")
+        return source, content, hashlib.sha256(content).hexdigest()
+
+    def _try_process_did_open(
+        self, document: OpenDocument, process: LspProcess, deadline: float
+    ) -> bool:
+        """Announce the document; a refusal is an answer, not a failure."""
+        try:
+            return self._send_process_did_open(document, process, deadline=deadline)
+        except (ProtocolViolation, RuntimeError, TimeoutError):
+            return False
+
+    def _reopen_existing_document(
+        self,
+        current: OpenDocument,
+        process: LspProcess,
+        *,
+        ready: bool,
+        deadline: float,
+    ) -> OpenDocument:
+        """A document we already hold; re-announce it if the server lost it."""
+        if ready:
+            return current
+        did_open = self._try_process_did_open(current, process, deadline)
+        self._mark_protocol_initialized(did_open=did_open, deadline=deadline)
+        if not did_open:
+            return current
+        self._probe_document(current, process, deadline=deadline)
+        return current
+
+    def _register_document_locked(
+        self, document: OpenDocument, content: bytes
+    ) -> None:
+        """Take the document into the open set, within its count and byte bounds."""
+        if len(self._documents) >= _MAX_OPEN_DOCUMENTS:
+            raise RuntimeError("Pyright open document count limit exceeded")
+        document_bytes = self._document_bytes + len(content)
+        if document_bytes > _MAX_OPEN_DOCUMENT_BYTES:
+            raise RuntimeError("Pyright open document source bytes limit exceeded")
+        uri = document.source.uri
+        self._documents[uri] = document
+        self._document_bytes = document_bytes
+        self._readiness_target_uri = uri
+        self._ready_uri_generations.pop(uri, None)
+
+    def _open_new_document(
+        self,
+        source: RepositorySource,
+        content: bytes,
+        digest: str,
+        process: LspProcess,
+        deadline: float,
+    ) -> OpenDocument:
+        document = OpenDocument(source, content, digest, 1)
+        _check_did_open_encodable(self._did_open_params(document))
+        with self._lock:
+            self._register_document_locked(document, content)
+        sent = self._try_process_did_open(document, process, deadline)
+        self._mark_protocol_initialized(did_open=sent, deadline=deadline)
+        if not sent:
+            return document
+        self._probe_document(document, process, deadline=deadline)
+        return document
+
+    def _open_document_within_operation(
+        self, path: str, deadline: float
+    ) -> OpenDocument:
+        self.start(deadline=deadline)
+        source, content, digest = self._document_source_bytes(path, deadline)
+        with self._lock:
+            current = self._documents.get(source.uri)
+            process = self._process
+            ready = self._document_ready_locked(source.uri)
+        if process is None:
+            raise RuntimeError("Pyright session is not protocol initialized")
+        if current is None:
+            return self._open_new_document(source, content, digest, process, deadline)
+        _check_document_unchanged(current, source, content, digest)
+        return self._reopen_existing_document(
+            current, process, ready=ready, deadline=deadline
+        )
+
     def open_document(self, path: str, *, deadline: float) -> OpenDocument:
         deadline = _validated_deadline(deadline)
         if time.monotonic() >= deadline:
             raise TimeoutError("Pyright document deadline expired")
         with self._document_operation_lock(deadline), self._operation():
-            self.start(deadline=deadline)
-            source = resolve_repository_source(self._repository, path)
-            content = read_stable_bytes(
-                source.absolute_path,
-                _MAX_DOCUMENT_BYTES,
-                label="Pyright source document",
-                deadline=deadline,
-            )
-            content.decode("utf-8", errors="strict")
-            digest = hashlib.sha256(content).hexdigest()
-            with self._lock:
-                current = self._documents.get(source.uri)
-                process = self._process
-                ready = self._document_ready_locked(source.uri)
-            if process is None:
-                raise RuntimeError("Pyright session is not protocol initialized")
-            if current is not None:
-                if (
-                    current.source != source
-                    or current.content != content
-                    or current.source_sha256 != digest
-                ):
-                    raise RuntimeError("open Pyright document changed without synchronization")
-                if not ready:
-                    try:
-                        did_open = self._send_process_did_open(
-                            current,
-                            process,
-                            deadline=deadline,
-                        )
-                    except (ProtocolViolation, RuntimeError, TimeoutError):
-                        did_open = False
-                    self._mark_protocol_initialized(
-                        did_open=did_open,
-                        deadline=deadline,
-                    )
-                    if not did_open:
-                        return current
-                    self._probe_document(current, process, deadline=deadline)
-                return current
-
-            document = OpenDocument(source, content, digest, 1)
-            did_open = self._did_open_params(document)
-            try:
-                encode_frame(
-                    {
-                        "jsonrpc": "2.0",
-                        "method": "textDocument/didOpen",
-                        "params": did_open,
-                    }
-                )
-            except ProtocolViolation as error:
-                raise ValueError("Pyright source document exceeds the LSP frame") from error
-            with self._lock:
-                if len(self._documents) >= _MAX_OPEN_DOCUMENTS:
-                    raise RuntimeError("Pyright open document count limit exceeded")
-                document_bytes = self._document_bytes + len(content)
-                if document_bytes > _MAX_OPEN_DOCUMENT_BYTES:
-                    raise RuntimeError(
-                        "Pyright open document source bytes limit exceeded"
-                    )
-                self._documents[source.uri] = document
-                self._document_bytes = document_bytes
-                self._readiness_target_uri = source.uri
-                self._ready_uri_generations.pop(source.uri, None)
-            try:
-                sent = self._send_process_did_open(
-                    document,
-                    process,
-                    deadline=deadline,
-                )
-            except (ProtocolViolation, RuntimeError, TimeoutError):
-                self._mark_protocol_initialized(did_open=False, deadline=deadline)
-                return document
-            self._mark_protocol_initialized(did_open=sent, deadline=deadline)
-            if not sent:
-                return document
-            self._probe_document(document, process, deadline=deadline)
-            return document
+            return self._open_document_within_operation(path, deadline)
 
     def _normalize_location(self, value: object) -> LspLocation | None:
         if not isinstance(value, dict):
