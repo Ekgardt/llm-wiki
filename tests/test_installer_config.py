@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import shutil
@@ -471,6 +472,7 @@ def test_configure_opencode_merges_global_source_and_copies_plugin(
         expected_opencode_entry(root)
     )
     published = plugin.read_text(encoding="utf-8")
-    assert f'const _EMBEDDED_ROOT = "{root}";' in published
-    assert published.replace(f'"{root}"', "null") == plugin_source.read_text(encoding="utf-8")
+    encoded_root = json.dumps(str(root))
+    assert f"const _EMBEDDED_ROOT = {encoded_root};" in published
+    assert published.replace(encoded_root, "null") == plugin_source.read_text(encoding="utf-8")
     assert (caller / "debug.cwd").read_text(encoding="utf-8") == str(caller)
