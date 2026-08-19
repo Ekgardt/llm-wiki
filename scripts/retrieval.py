@@ -1548,6 +1548,120 @@ def trace_to_dict(trace: RetrievalTrace) -> dict[str, object]:
     }
 
 
+_LEGACY_DISPLAY_FIELDS = (
+    "authority",
+    "confidence",
+    "status",
+    "type",
+    "valid_from",
+    "valid_to",
+    "language",
+    "source_id",
+    "content",
+    "lance_distance",
+    "graph_seed_id",
+    "graph_direction",
+    "graph_edge_type",
+    "graph_text_overlap",
+)
+
+
+def _legacy_trace_fields(trace: RetrievalTrace) -> dict[str, Any]:
+    return {
+        "requested_mode": trace.requested_mode,
+        "effective_mode": trace.effective_mode,
+        "signals_used": list(trace.signals_used),
+        "fallback_reason": trace.fallback_reason,
+        "generation": trace.corpus_generation,
+        "partial": trace.partial,
+        "reranker_applied": trace.reranker_applied,
+        "reranker_model_id": trace.reranker_model_id,
+        "reranker_model_revision": trace.reranker_model_revision,
+        "reranker_depth": trace.reranker_depth,
+        "reranker_duration_ms": trace.reranker_duration_ms,
+        "reranker_fallback_reason": trace.reranker_fallback_reason,
+    }
+
+
+def _legacy_scores(candidate: RetrievalCandidate) -> dict[str, Any]:
+    return {
+        "candidate_id": candidate.candidate_id,
+        "source_sha256": candidate.source_sha256,
+        "heading_ancestry": list(candidate.heading_path),
+        "bm25_rank": candidate.bm25_rank,
+        "bm25_score": candidate.bm25_score,
+        "vector_rank": candidate.vector_rank,
+        "vector_score": candidate.vector_score,
+        "graph_rank": candidate.graph_rank,
+        "graph_score": candidate.graph_score,
+        "rrf_score": round(candidate.rrf_score, 4),
+        "rerank_score": candidate.rerank_score,
+        "final_score": round(candidate.final_score, 4),
+        "score": round(candidate.final_score, 4),
+    }
+
+
+def _display_value(
+    override: Mapping[str, str], info: Mapping[str, Any], path: str, key: str, fallback: str
+) -> str:
+    """Caller-supplied text wins, then the candidate's own metadata."""
+    return override.get(path) or info.get(key) or fallback
+
+
+def _legacy_display(
+    path: str,
+    info: Mapping[str, Any],
+    overrides: Mapping[str, Mapping[str, str]],
+) -> dict[str, Any]:
+    return {
+        "path": path,
+        "title": _display_value(overrides["titles"], info, path, "title", Path(path).stem),
+        "summary": _display_value(overrides["summaries"], info, path, "summary", ""),
+        "project": _display_value(overrides["projects"], info, path, "project", ""),
+        "timestamp": _display_value(overrides["timestamps"], info, path, "timestamp", ""),
+    }
+
+
+def _legacy_assertion_path(info: Mapping[str, Any]) -> list[dict[str, Any]] | None:
+    steps = info.get("assertion_path")
+    if not steps:
+        return None
+    return [
+        {**dict(step), "evidence_ids": list(step.get("evidence_ids") or ())}
+        for step in steps
+    ]
+
+
+def _legacy_extras(
+    candidate: RetrievalCandidate, info: Mapping[str, Any]
+) -> dict[str, Any]:
+    extras: dict[str, Any] = {
+        key: info[key]
+        for key in _LEGACY_DISPLAY_FIELDS
+        if info.get(key) not in (None, "")
+    }
+    assertion_path = _legacy_assertion_path(info)
+    if assertion_path is not None:
+        extras["assertion_path"] = assertion_path
+    if candidate.evidence_ids:
+        extras["evidence_ids"] = list(candidate.evidence_ids)
+    return extras
+
+
+def _display_overrides(
+    titles: Mapping[str, str] | None,
+    summaries: Mapping[str, str] | None,
+    projects: Mapping[str, str] | None,
+    timestamps: Mapping[str, str] | None,
+) -> dict[str, Mapping[str, str]]:
+    return {
+        "titles": titles or {},
+        "summaries": summaries or {},
+        "projects": projects or {},
+        "timestamps": timestamps or {},
+    }
+
+
 def candidates_to_legacy(
     result: RetrievalResult,
     *,
@@ -1558,83 +1672,33 @@ def candidates_to_legacy(
     display_meta: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Convert orchestrator output to the historical search() dict rows."""
-    title_map = titles or {}
-    summary_map = summaries or {}
-    project_map = projects or {}
-    timestamp_map = timestamps or {}
+    overrides = _display_overrides(titles, summaries, projects, timestamps)
     meta = display_meta if display_meta is not None else (result.display_meta or {})
-    rows: list[dict[str, Any]] = []
-    for candidate in result.candidates:
-        path = candidate.relative_path
-        info = meta.get(candidate.candidate_id, {}) if isinstance(meta, dict) else {}
-        title = title_map.get(path) or info.get("title") or Path(path).stem
-        summary = summary_map.get(path) or info.get("summary") or ""
-        project = project_map.get(path) or info.get("project") or ""
-        timestamp = timestamp_map.get(path) or info.get("timestamp") or ""
-        row: dict[str, Any] = {
-            "path": path,
-            "title": title,
-            "summary": summary,
-            "score": round(candidate.final_score, 4),
-            "project": project,
-            "timestamp": timestamp,
-            "candidate_id": candidate.candidate_id,
-            "chunk_id": info.get("chunk_id") or candidate.candidate_id,
-            "source_sha256": candidate.source_sha256,
-            "heading_ancestry": list(candidate.heading_path),
-            "bm25_rank": candidate.bm25_rank,
-            "bm25_score": candidate.bm25_score,
-            "vector_rank": candidate.vector_rank,
-            "vector_score": candidate.vector_score,
-            "graph_rank": candidate.graph_rank,
-            "graph_score": candidate.graph_score,
-            "rrf_score": round(candidate.rrf_score, 4),
-            "rerank_score": candidate.rerank_score,
-            "final_score": round(candidate.final_score, 4),
-            "requested_mode": result.trace.requested_mode,
-            "effective_mode": result.trace.effective_mode,
-            "signals_used": list(result.trace.signals_used),
-            "fallback_reason": result.trace.fallback_reason,
-            "generation": result.trace.corpus_generation,
-            "partial": result.trace.partial,
-            "reranker_applied": result.trace.reranker_applied,
-            "reranker_model_id": result.trace.reranker_model_id,
-            "reranker_model_revision": result.trace.reranker_model_revision,
-            "reranker_depth": result.trace.reranker_depth,
-            "reranker_duration_ms": result.trace.reranker_duration_ms,
-            "reranker_fallback_reason": result.trace.reranker_fallback_reason,
-        }
-        for key in (
-            "authority",
-            "confidence",
-            "status",
-            "type",
-            "valid_from",
-            "valid_to",
-            "language",
-            "source_id",
-            "content",
-            "lance_distance",
-            "graph_seed_id",
-            "graph_direction",
-            "graph_edge_type",
-            "graph_text_overlap",
-        ):
-            if info.get(key) not in (None, ""):
-                row[key] = info[key]
-        assertion_path = info.get("assertion_path")
-        if assertion_path:
-            row["assertion_path"] = [
-                {
-                    **dict(step),
-                    "evidence_ids": list(step.get("evidence_ids") or ()),
-                }
-                for step in assertion_path
-            ]
-        if candidate.evidence_ids:
-            row["evidence_ids"] = list(candidate.evidence_ids)
-        rows.append(row)
-    return rows
+    trace_fields = _legacy_trace_fields(result.trace)
+    return [
+        _legacy_row(candidate, _candidate_info(meta, candidate), overrides, trace_fields)
+        for candidate in result.candidates
+    ]
+
+
+def _candidate_info(meta: object, candidate: RetrievalCandidate) -> Mapping[str, Any]:
+    if not isinstance(meta, dict):
+        return {}
+    return meta.get(candidate.candidate_id, {})
+
+
+def _legacy_row(
+    candidate: RetrievalCandidate,
+    info: Mapping[str, Any],
+    overrides: Mapping[str, Mapping[str, str]],
+    trace_fields: Mapping[str, Any],
+) -> dict[str, Any]:
+    row = _legacy_display(candidate.relative_path, info, overrides)
+    row.update(_legacy_scores(candidate))
+    row["chunk_id"] = info.get("chunk_id") or candidate.candidate_id
+    row.update(trace_fields)
+    row.update(_legacy_extras(candidate, info))
+    return row
 
 
 # Fields a backend may supply that pass through untouched when present.
