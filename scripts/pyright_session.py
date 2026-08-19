@@ -2199,17 +2199,24 @@ class PyrightSession:
                 if self._bootstrap_generation_owners.get(generation_nonce) == owner_nonce:
                     self._bootstrap_generation_owners.pop(generation_nonce, None)
 
-    def _bootstrap_generation(
-        self,
-        protocol: LspProtocol,
-        _process_id: int,
-        _generation_nonce: str,
-        deadline: float,
-    ) -> ProcessState:
+    def _bootstrap_owner(self, generation_nonce: str) -> str:
+        """The owner nonce this bootstrap belongs to, while it is still accepted."""
         with self._lock:
-            owner_nonce = self._bootstrap_generation_owners.get(_generation_nonce)
+            owner_nonce = self._bootstrap_generation_owners.get(generation_nonce)
             if owner_nonce is None or self._bootstrap_owner_nonce != owner_nonce:
                 raise RuntimeError("Pyright process owner is no longer accepted")
+        return owner_nonce
+
+    def _require_bootstrap_owner(self, owner_nonce: str) -> None:
+        """The owner that started this bootstrap must still be the accepted one."""
+        with self._lock:
+            if self._bootstrap_owner_nonce != owner_nonce:
+                raise RuntimeError("Pyright process owner is no longer accepted")
+
+    def _initialize_protocol(
+        self, protocol: LspProtocol, deadline: float
+    ) -> tuple[dict[str, bool], PositionEncoding]:
+        """Initialize the server, then hand it our configuration."""
         root = Path(self._repository.checkout_root)
         root_uri = path_to_file_uri(root)
         result = protocol.request(
@@ -2233,81 +2240,149 @@ class PyrightSession:
             {"settings": thaw_pyright_profile_value(PYRIGHT_CONFIGURATION)},
             deadline=deadline,
         )
+        return capabilities, encoding
+
+    def _publish_generation_locked(
+        self,
+        generation_nonce: str,
+        capabilities: dict[str, bool],
+        encoding: PositionEncoding,
+    ) -> tuple[OpenDocument, ...]:
+        """Make the new generation current and report the documents to reopen."""
+        documents = tuple(self._documents.values())
+        self._generation_nonce = generation_nonce
+        self._ready_uri_generations.clear()
+        self._diagnostics.clear()
+        self._diagnostic_bytes = 0
+        self._capabilities = capabilities
+        self._position_encoding = encoding
+        self._readiness_evidence = (
+            "initialize",
+            "initialized",
+            "configuration",
+        )
+        self._readiness = "protocol_initialized"
+        return documents
+
+    def _adopt_generation(
+        self,
+        owner_nonce: str,
+        generation_nonce: str,
+        capabilities: dict[str, bool],
+        encoding: PositionEncoding,
+    ) -> tuple[OpenDocument, ...]:
+        self._require_bootstrap_owner(owner_nonce)
+        self._begin_wire_generation(generation_nonce)
+        with self._lock:
+            if self._bootstrap_owner_nonce != owner_nonce:
+                raise RuntimeError("Pyright process owner is no longer accepted")
+            return self._publish_generation_locked(
+                generation_nonce, capabilities, encoding
+            )
+
+    def _reopen_documents(
+        self,
+        documents: tuple[OpenDocument, ...],
+        protocol: LspProtocol,
+        owner_nonce: str,
+        generation_nonce: str,
+        deadline: float,
+    ) -> None:
+        """Every document we hold open is opened again on the new generation."""
+        for document in documents:
+            self._require_bootstrap_owner(owner_nonce)
+            if not self._send_protocol_did_open(
+                document,
+                protocol,
+                generation_nonce,
+                deadline=deadline,
+            ):
+                raise RuntimeError("Pyright generation changed during didOpen")
+
+    def _mark_document_ready(self, uri: str, generation_nonce: str) -> None:
+        with self._lock:
+            if self._generation_nonce == generation_nonce:
+                self._ready_uri_generations[uri] = generation_nonce
+
+    def _prime_one_document(
+        self,
+        document: OpenDocument,
+        protocol: LspProtocol,
+        generation_nonce: str,
+        deadline: float,
+    ) -> None:
+        """A document whose symbols come back complete counts as query-ready."""
+        try:
+            symbols = protocol.request(
+                "textDocument/documentSymbol",
+                {"textDocument": {"uri": document.source.uri}},
+                deadline=deadline,
+            )
+        except JsonRpcResponseError:
+            return
+        if self._normalize_document_symbols(symbols, document.source.uri)[1]:
+            return
+        self._mark_document_ready(document.source.uri, generation_nonce)
+
+    def _prime_document_readiness(
+        self,
+        documents: tuple[OpenDocument, ...],
+        protocol: LspProtocol,
+        generation_nonce: str,
+        deadline: float,
+    ) -> None:
+        for document in documents:
+            self._prime_one_document(document, protocol, generation_nonce, deadline)
+
+    def _bootstrap_ready_state(self, deadline: float) -> ProcessState:
+        with self._lock:
+            self._refresh_readiness_locked(deadline=deadline)
+            ready = self._readiness == "query_ready"
+        if ready:
+            return ProcessState.WORKSPACE_READY
+        return ProcessState.PROTOCOL_INITIALIZED
+
+    def _fail_bootstrap_locked(self) -> None:
+        """A failed re-bootstrap leaves the session degraded, not quietly ready."""
+        self._readiness = "not_ready"
+        self._readiness_evidence = ()
+        self._ready_uri_generations.clear()
+        self._degradation_codes = tuple(
+            sorted({*self._degradation_codes, "pyright_restart_bootstrap_failed"})
+        )
+
+    def _fail_generation_bootstrap(
+        self, documents: tuple[OpenDocument, ...], generation_nonce: str
+    ) -> None:
+        if documents:
+            with self._lock:
+                self._fail_bootstrap_locked()
+        self._discard_wire_generation(generation_nonce)
+
+    def _bootstrap_generation(
+        self,
+        protocol: LspProtocol,
+        _process_id: int,
+        _generation_nonce: str,
+        deadline: float,
+    ) -> ProcessState:
+        owner_nonce = self._bootstrap_owner(_generation_nonce)
+        capabilities, encoding = self._initialize_protocol(protocol, deadline)
         documents: tuple[OpenDocument, ...] = ()
         try:
-            with self._lock:
-                if self._bootstrap_owner_nonce != owner_nonce:
-                    raise RuntimeError("Pyright process owner is no longer accepted")
-            self._begin_wire_generation(_generation_nonce)
-            with self._lock:
-                if self._bootstrap_owner_nonce != owner_nonce:
-                    raise RuntimeError("Pyright process owner is no longer accepted")
-                documents = tuple(self._documents.values())
-                self._generation_nonce = _generation_nonce
-                self._ready_uri_generations.clear()
-                self._diagnostics.clear()
-                self._diagnostic_bytes = 0
-                self._capabilities = capabilities
-                self._position_encoding = encoding
-                self._readiness_evidence = (
-                    "initialize",
-                    "initialized",
-                    "configuration",
-                )
-                self._readiness = "protocol_initialized"
-            for document in documents:
-                with self._lock:
-                    if self._bootstrap_owner_nonce != owner_nonce:
-                        raise RuntimeError("Pyright process owner is no longer accepted")
-                if not self._send_protocol_did_open(
-                    document,
-                    protocol,
-                    _generation_nonce,
-                    deadline=deadline,
-                ):
-                    raise RuntimeError("Pyright generation changed during didOpen")
+            documents = self._adopt_generation(
+                owner_nonce, _generation_nonce, capabilities, encoding
+            )
+            self._reopen_documents(
+                documents, protocol, owner_nonce, _generation_nonce, deadline
+            )
             if capabilities["document_symbols"]:
-                for document in documents:
-                    try:
-                        symbols = protocol.request(
-                            "textDocument/documentSymbol",
-                            {"textDocument": {"uri": document.source.uri}},
-                            deadline=deadline,
-                        )
-                    except JsonRpcResponseError:
-                        continue
-                    if not self._normalize_document_symbols(
-                        symbols,
-                        document.source.uri,
-                    )[1]:
-                        with self._lock:
-                            if self._generation_nonce == _generation_nonce:
-                                self._ready_uri_generations[
-                                    document.source.uri
-                                ] = _generation_nonce
-                with self._lock:
-                    self._refresh_readiness_locked(deadline=deadline)
-                    ready = self._readiness == "query_ready"
-                return (
-                    ProcessState.WORKSPACE_READY
-                    if ready
-                    else ProcessState.PROTOCOL_INITIALIZED
+                self._prime_document_readiness(
+                    documents, protocol, _generation_nonce, deadline
                 )
+                return self._bootstrap_ready_state(deadline)
         except BaseException:
-            if documents:
-                with self._lock:
-                    self._readiness = "not_ready"
-                    self._readiness_evidence = ()
-                    self._ready_uri_generations.clear()
-                    self._degradation_codes = tuple(
-                        sorted(
-                            {
-                                *self._degradation_codes,
-                                "pyright_restart_bootstrap_failed",
-                            }
-                        )
-                    )
-            self._discard_wire_generation(_generation_nonce)
+            self._fail_generation_bootstrap(documents, _generation_nonce)
             raise
         return ProcessState.PROTOCOL_INITIALIZED
 
