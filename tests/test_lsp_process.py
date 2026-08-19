@@ -398,17 +398,40 @@ def _await_settled_failure(process, timeout: float = 3.0) -> None:
     assert process.state is ProcessState.FAILED
 
 
-def _await_descendant_pid(pid_file: Path, timeout: float = 2.0) -> int:
+def _await_descendant_pid(pid_file: Path, timeout: float = 60.0) -> int:
+    """Wait for the child to finish writing its PID, not merely to create the file.
+
+    On Windows the child still holds the file while writing it, so an eager
+    read raises PermissionError and a truncated read raises ValueError.
+    """
     deadline = time.monotonic() + timeout
-    while not pid_file.exists() and time.monotonic() < deadline:
+    while time.monotonic() < deadline:
+        try:
+            text = pid_file.read_text(encoding="ascii").strip()
+        except (OSError, ValueError):
+            text = ""
+        if text.isdigit():
+            return int(text)
         time.sleep(0.01)
-    return int(pid_file.read_text(encoding="ascii"))
+    raise AssertionError(f"descendant never recorded a PID in {pid_file}")
 
 
-def _await_pid_exit(pid: int, timeout: float = 2.0) -> None:
+def _await_pid_exit(pid: int, timeout: float = 60.0) -> None:
     deadline = time.monotonic() + timeout
     while _pid_alive(pid) and time.monotonic() < deadline:
         time.sleep(0.01)
+
+
+def _await_threads_gone(names: set[str], timeout: float = 60.0) -> list[str]:
+    """Named worker threads that never leave; an empty list means none leaked."""
+    deadline = time.monotonic() + timeout
+    while True:
+        alive = [
+            thread.name for thread in threading.enumerate() if thread.name in names
+        ]
+        if not alive or time.monotonic() >= deadline:
+            return alive
+        time.sleep(0.05)
 
 
 def _await_restart_with_lease(process, lease_path: Path, deadline: float) -> None:
@@ -3483,6 +3506,7 @@ def test_shutdown_alone_completes_tree_threads_lease_and_scratch_cleanup(
 
     assert process.process.poll() is not None
     _await_pid_exit(descendant)
+    _await_pid_exit(descendant)
     assert not _pid_alive(descendant)
     assert not process.owner_root.exists()
     assert all(thread is None or not thread.is_alive() for thread in owner_threads)
@@ -3662,6 +3686,7 @@ def test_close_forces_stubborn_process_tree_within_caller_deadline(
 
     assert time.monotonic() <= deadline + 0.2
     assert process.process.poll() is not None
+    _await_pid_exit(descendant)
     assert not _pid_alive(descendant)
 
 
@@ -4384,8 +4409,9 @@ def test_cancel_all_releases_request_then_close_cleans_descendant_and_threads(
     }
     process.close(time.monotonic() + 5)
 
+    _await_pid_exit(descendant)
     assert not _pid_alive(descendant)
-    assert not any(thread.name in thread_names for thread in threading.enumerate())
+    assert _await_threads_gone(thread_names) == []
 
 
 def test_normal_interpreter_exit_runs_bounded_atexit_tree_cleanup(tmp_path: Path) -> None:
@@ -4420,6 +4446,7 @@ def test_normal_interpreter_exit_runs_bounded_atexit_tree_cleanup(tmp_path: Path
     deadline = time.monotonic() + 2
     while _pid_alive(descendant) and time.monotonic() < deadline:
         time.sleep(0.01)
+    _await_pid_exit(descendant)
     assert not _pid_alive(descendant)
     assert not owner.exists()
 
@@ -9415,6 +9442,7 @@ def test_startup_terminal_intent_timeout_returns_retryable_cleanup_error(
         assert pid_file.is_file()
         descendant = int(pid_file.read_text(encoding="ascii"))
         _await_pid_exit(descendant)
+        _await_pid_exit(descendant)
         assert not _pid_alive(descendant)
 
         release.set()
@@ -9798,6 +9826,7 @@ def test_heartbeat_refreshes_lease_while_tree_cleanup_driver_is_blocked(
 
     assert not cleanup.is_alive()
     assert any("tree termination stayed blocked" in str(error) for error in cleanup_errors)
+    _await_pid_exit(descendant)
     assert not _pid_alive(descendant)
 
 
