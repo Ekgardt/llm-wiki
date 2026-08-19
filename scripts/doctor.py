@@ -2693,6 +2693,315 @@ def _snapshot_lsp_runtime(
     return [], True, False
 
 
+class _LspLiveness(NamedTuple):
+    live: bool
+    heartbeat_at: datetime | None
+    unreadable: bool
+    stop: bool
+
+
+class _LspOwnerReading(NamedTuple):
+    record: dict
+    codes: list[str]
+    unreadable: bool
+    stop: bool
+
+
+def _lsp_records_missing(child_names: set[str], owner: object, lease: object) -> bool:
+    if "owner.json" not in child_names or owner is None:
+        return True
+    return "lease.json" in child_names and lease is None
+
+
+def _validated_lsp_owner_record(
+    owner: dict | None, entry_name: str, now: datetime
+) -> tuple[dict | None, bool]:
+    if owner is None:
+        return None, False
+    if not _valid_lsp_owner(owner, entry_name):
+        return None, True
+    started_at = _parse_lsp_timestamp(owner.get("started_at"))
+    return owner, started_at is not None and started_at > now
+
+
+def _validated_lsp_lease_record(
+    lease: dict | None, entry_name: str
+) -> tuple[dict | None, bool]:
+    if lease is None:
+        return None, False
+    if not _valid_lsp_lease(lease, entry_name):
+        return None, True
+    return lease, False
+
+
+def _validated_lsp_records(
+    entry_name: str,
+    child_names: set[str],
+    owner: dict | None,
+    lease: dict | None,
+    now: datetime,
+) -> tuple[dict | None, dict | None, bool]:
+    missing = _lsp_records_missing(child_names, owner, lease)
+    owner, owner_invalid = _validated_lsp_owner_record(owner, entry_name, now)
+    lease, lease_invalid = _validated_lsp_lease_record(lease, entry_name)
+    return owner, lease, missing or owner_invalid or lease_invalid
+
+
+def _lsp_nonces_match(owner: dict, lease: dict, entry_name: str) -> bool:
+    if owner.get("owner_nonce") != entry_name or lease.get("owner_nonce") != entry_name:
+        return False
+    return owner.get("generation_nonce") == lease.get("generation_nonce")
+
+
+def _lsp_records_match(
+    owner: dict,
+    lease: dict,
+    entry_name: str,
+    now: datetime,
+    heartbeat_at: datetime | None,
+) -> bool:
+    if not _lsp_nonces_match(owner, lease, entry_name):
+        return False
+    if owner.get("owner_pid") != lease.get("server_pid"):
+        return False
+    started_at = _parse_lsp_timestamp(owner.get("started_at"))
+    if started_at is None or heartbeat_at is None:
+        return False
+    return started_at <= heartbeat_at <= now
+
+
+def _valid_lsp_pid(pid: object) -> bool:
+    return isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
+
+
+def _lease_still_live(
+    matching: bool, expires_at: datetime | None, now: datetime, pids: tuple
+) -> bool:
+    if not matching or expires_at is None or expires_at <= now:
+        return False
+    return all(_valid_lsp_pid(pid) for pid in pids)
+
+
+def _lsp_pid_states(pids: tuple, deadline: float) -> list[str]:
+    states: list[str] = []
+    for pid in pids:
+        _require_lsp_deadline(deadline)
+        try:
+            pid_state = _lsp_pid_state(pid)
+        finally:
+            _require_lsp_deadline(deadline)
+        states.append(pid_state)
+    return states
+
+
+def _lsp_pid_liveness(
+    pids: tuple, heartbeat_at: datetime | None, deadline: float
+) -> _LspLiveness:
+    try:
+        pid_states = _lsp_pid_states(pids, deadline)
+    except TimeoutError:
+        return _LspLiveness(False, heartbeat_at, True, _deadline_reached(deadline))
+    except Exception:  # noqa: BLE001
+        return _LspLiveness(False, heartbeat_at, True, False)
+    live = all(state == "alive" for state in pid_states)
+    return _LspLiveness(live, heartbeat_at, "unknown" in pid_states, False)
+
+
+def _lsp_liveness(
+    owner: dict | None,
+    lease: dict | None,
+    entry_name: str,
+    now: datetime,
+    deadline: float,
+) -> _LspLiveness:
+    """Whether this owner still holds live processes, and what that cost to learn."""
+    if not isinstance(owner, dict) or not isinstance(lease, dict):
+        return _LspLiveness(False, None, False, False)
+    heartbeat_at = _parse_lsp_timestamp(lease.get("heartbeat_at"))
+    matching = _lsp_records_match(owner, lease, entry_name, now, heartbeat_at)
+    pids = (lease.get("manager_pid"), lease.get("server_pid"))
+    expires_at = _parse_lsp_timestamp(lease.get("expires_at"))
+    if not _lease_still_live(matching, expires_at, now, pids):
+        return _LspLiveness(False, heartbeat_at, not matching, False)
+    return _lsp_pid_liveness(pids, heartbeat_at, deadline)
+
+
+def _failure_identity_mismatch(owner: dict, failure: dict) -> bool:
+    if failure.get("generation_nonce") != owner.get("generation_nonce"):
+        return True
+    return "server_pid" in failure and failure.get("server_pid") != owner.get(
+        "owner_pid"
+    )
+
+
+def _failure_time_invalid(owner: dict, failure: dict, now: datetime) -> bool:
+    owner_started_at = _parse_lsp_timestamp(owner.get("started_at"))
+    failed_at = _parse_lsp_timestamp(failure.get("timestamp"))
+    if owner_started_at is None or failed_at is None:
+        return True
+    return not owner_started_at <= failed_at <= now
+
+
+def _failure_contradicts_owner(
+    owner: object, failure: object, now: datetime
+) -> bool:
+    if not isinstance(owner, dict) or not isinstance(failure, dict):
+        return False
+    return _failure_identity_mismatch(owner, failure) or _failure_time_invalid(
+        owner, failure, now
+    )
+
+
+def _validated_failure_record(
+    failure: dict | None, entry_name: str
+) -> tuple[dict | None, bool]:
+    if failure is None:
+        return None, True
+    if not _valid_lsp_failure(failure, entry_name):
+        return None, True
+    return failure, False
+
+
+def _failure_age_days(failure: object, now: datetime) -> float | None:
+    if not isinstance(failure, dict):
+        return None
+    failed_at = _parse_lsp_timestamp(failure.get("timestamp"))
+    if failed_at is None:
+        return None
+    return (now - failed_at).total_seconds() / 86400.0
+
+
+def _record_explicit_failure(
+    record: dict,
+    codes: list[str],
+    failure: dict | None,
+    owner: object,
+    entry_name: str,
+    now: datetime,
+) -> bool:
+    failure, unreadable = _validated_failure_record(failure, entry_name)
+    if _failure_contradicts_owner(owner, failure, now):
+        unreadable = True
+    age_days = _failure_age_days(failure, now)
+    record["failure_evidence"] = True
+    record["failure_age_days"] = age_days
+    retention_days = LSP_FAILURE_RETENTION.total_seconds() / 86400.0
+    if age_days is None or age_days < retention_days:
+        codes.append("lsp_failure_evidence_retained")
+    return unreadable
+
+
+def _crash_timestamp(owner: object, heartbeat_at: datetime | None):
+    if heartbeat_at is not None:
+        return heartbeat_at
+    if not isinstance(owner, dict):
+        return None
+    return _parse_lsp_timestamp(owner.get("started_at"))
+
+
+def _record_crash_evidence(
+    record: dict,
+    codes: list[str],
+    owner: object,
+    heartbeat_at: datetime | None,
+    now: datetime,
+) -> None:
+    crash_at = _crash_timestamp(owner, heartbeat_at)
+    if crash_at is not None:
+        record["failure_evidence"] = True
+        record["failure_age_days"] = (now - crash_at).total_seconds() / 86400.0
+    crash_age = record["failure_age_days"]
+    if crash_age is None or crash_age < 7:
+        codes.append("lsp_failure_evidence_retained")
+
+
+def _record_failure_evidence(
+    record: dict,
+    codes: list[str],
+    child_names: set[str],
+    failure: dict | None,
+    owner: object,
+    entry_name: str,
+    now: datetime,
+    heartbeat_at: datetime | None,
+) -> bool:
+    if "failure.json" in child_names:
+        return _record_explicit_failure(record, codes, failure, owner, entry_name, now)
+    if record["live"]:
+        return False
+    _record_crash_evidence(record, codes, owner, heartbeat_at, now)
+    return False
+
+
+def _read_lsp_owner(snapshot: tuple, now: datetime, deadline: float) -> _LspOwnerReading:
+    entry_name, child_names, owner, lease, failure = snapshot
+    record: dict[str, Any] = {
+        "owner_nonce": entry_name,
+        "live": False,
+        "failure_evidence": False,
+        "failure_age_days": None,
+    }
+    codes: list[str] = []
+    owner, lease, unreadable = _validated_lsp_records(
+        entry_name, child_names, owner, lease, now
+    )
+    liveness = _lsp_liveness(owner, lease, entry_name, now, deadline)
+    record["live"] = liveness.live
+    if liveness.live:
+        codes.append("lsp_owner_live")
+    failure_unreadable = _record_failure_evidence(
+        record,
+        codes,
+        child_names,
+        failure,
+        owner,
+        entry_name,
+        now,
+        liveness.heartbeat_at,
+    )
+    stop = liveness.stop or _deadline_reached(deadline)
+    unreadable = unreadable or liveness.unreadable or failure_unreadable
+    return _LspOwnerReading(record, codes, unreadable, stop)
+
+
+def _scan_lsp_owners(
+    snapshots: list[tuple], now: datetime, deadline: float
+) -> tuple[list[dict], list[str], bool]:
+    owners: list[dict] = []
+    codes: list[str] = []
+    unreadable = False
+    for snapshot in snapshots:
+        if _deadline_reached(deadline):
+            return owners, codes, True
+        reading = _read_lsp_owner(snapshot, now, deadline)
+        unreadable = unreadable or reading.unreadable
+        if reading.stop:
+            return owners, codes, True
+        owners.append(reading.record)
+        codes.extend(reading.codes)
+    return owners, codes, unreadable
+
+
+def _lsp_result(owners: list[dict], codes: list[str], *, unreadable: bool) -> dict:
+    if unreadable and "lsp_state_unreadable" not in codes:
+        codes.append("lsp_state_unreadable")
+    message = "LSP runtime owners are live or retained."
+    status = "degraded"
+    if not codes:
+        message, status = "LSP runtime owners are bounded.", "ok"
+    return _result(
+        "lsp",
+        status,
+        message,
+        {
+            "codes": codes,
+            "owners": owners,
+            "deletion_codes": list(codes),
+            "read_error": unreadable,
+        },
+    )
+
+
 def _lsp_runtime_check(
     state_root: Path,
     now: datetime,
@@ -2700,8 +3009,6 @@ def _lsp_runtime_check(
     deadline: float = float("inf"),
 ) -> dict:
     """Bound the live and retained LSP owner evidence under run/lsp."""
-    codes: list[str] = []
-    owners: list[dict[str, Any]] = []
     snapshots, unreadable, absent = _snapshot_lsp_runtime(state_root, deadline)
     if _deadline_reached(deadline):
         unreadable = True
@@ -2711,151 +3018,10 @@ def _lsp_runtime_check(
             "lsp",
             "ok",
             "No LSP runtime owners are present.",
-            {
-                "codes": codes,
-                "owners": owners,
-                "deletion_codes": [],
-                "read_error": False,
-            },
+            {"codes": [], "owners": [], "deletion_codes": [], "read_error": False},
         )
-    for entry_name, child_names, owner, lease, failure in snapshots:
-        if _deadline_reached(deadline):
-            unreadable = True
-            break
-        semantic_codes: list[str] = []
-        owner_record = {
-            "owner_nonce": entry_name,
-            "live": False,
-            "failure_evidence": False,
-            "failure_age_days": None,
-        }
-        if (
-            "owner.json" not in child_names
-            or owner is None
-            or "lease.json" in child_names
-            and lease is None
-        ):
-            unreadable = True
-        if owner is not None and not _valid_lsp_owner(owner, entry_name):
-            unreadable = True
-            owner = None
-        if owner is not None:
-            owner_started_at = _parse_lsp_timestamp(owner.get("started_at"))
-            if owner_started_at is not None and owner_started_at > now:
-                unreadable = True
-        if lease is not None and not _valid_lsp_lease(lease, entry_name):
-            unreadable = True
-            lease = None
-        live = False
-        heartbeat_at: datetime | None = None
-        if isinstance(owner, dict) and isinstance(lease, dict):
-            owner_pid = owner.get("owner_pid")
-            manager_pid = lease.get("manager_pid")
-            server_pid = lease.get("server_pid")
-            expires_at = _parse_lsp_timestamp(lease.get("expires_at"))
-            heartbeat_at = _parse_lsp_timestamp(lease.get("heartbeat_at"))
-            started_at = _parse_lsp_timestamp(owner.get("started_at"))
-            matching = (
-                owner.get("owner_nonce") == entry_name
-                and lease.get("owner_nonce") == entry_name
-                and owner.get("generation_nonce") == lease.get("generation_nonce")
-                and owner_pid == server_pid
-                and started_at is not None
-                and heartbeat_at is not None
-                and started_at <= heartbeat_at <= now
-            )
-            if not matching:
-                unreadable = True
-            pids = (manager_pid, server_pid)
-            if (
-                matching
-                and expires_at is not None
-                and expires_at > now
-                and all(
-                    isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 for pid in pids
-                )
-            ):
-                pid_states: list[str] = []
-                try:
-                    for pid in pids:
-                        _require_lsp_deadline(deadline)
-                        try:
-                            pid_state = _lsp_pid_state(pid)
-                        finally:
-                            _require_lsp_deadline(deadline)
-                        pid_states.append(pid_state)
-                    if "unknown" in pid_states:
-                        unreadable = True
-                    live = all(state == "alive" for state in pid_states)
-                except TimeoutError:
-                    unreadable = True
-                    if _deadline_reached(deadline):
-                        break
-                except Exception:  # noqa: BLE001
-                    unreadable = True
-        owner_record["live"] = live
-        if live:
-            semantic_codes.append("lsp_owner_live")
-        if "failure.json" in child_names:
-            if failure is None:
-                unreadable = True
-            elif not _valid_lsp_failure(failure, entry_name):
-                unreadable = True
-                failure = None
-            if isinstance(owner, dict) and isinstance(failure, dict):
-                owner_started_at = _parse_lsp_timestamp(owner.get("started_at"))
-                failed_at = _parse_lsp_timestamp(failure.get("timestamp"))
-                if (
-                    failure.get("generation_nonce") != owner.get("generation_nonce")
-                    or (
-                        "server_pid" in failure
-                        and failure.get("server_pid") != owner.get("owner_pid")
-                    )
-                    or owner_started_at is None
-                    or failed_at is None
-                    or not owner_started_at <= failed_at <= now
-                ):
-                    unreadable = True
-            age_days: float | None = None
-            if isinstance(failure, dict):
-                failed_at = _parse_lsp_timestamp(failure.get("timestamp"))
-                if failed_at is not None:
-                    age_days = (now - failed_at).total_seconds() / 86400.0
-            owner_record["failure_evidence"] = True
-            owner_record["failure_age_days"] = age_days
-            if age_days is None or age_days < LSP_FAILURE_RETENTION.total_seconds() / 86400.0:
-                semantic_codes.append("lsp_failure_evidence_retained")
-        elif not live:
-            crash_at = heartbeat_at
-            if crash_at is None and isinstance(owner, dict):
-                crash_at = _parse_lsp_timestamp(owner.get("started_at"))
-            if crash_at is not None:
-                owner_record["failure_evidence"] = True
-                owner_record["failure_age_days"] = (now - crash_at).total_seconds() / 86400.0
-            crash_age = owner_record["failure_age_days"]
-            if crash_age is None or crash_age < 7:
-                semantic_codes.append("lsp_failure_evidence_retained")
-        if _deadline_reached(deadline):
-            unreadable = True
-            break
-        owners.append(owner_record)
-        codes.extend(semantic_codes)
-    if unreadable and "lsp_state_unreadable" not in codes:
-        codes.append("lsp_state_unreadable")
-    status = "ok" if not codes else "degraded"
-    return _result(
-        "lsp",
-        status,
-        "LSP runtime owners are bounded."
-        if status == "ok"
-        else "LSP runtime owners are live or retained.",
-        {
-            "codes": codes,
-            "owners": owners,
-            "deletion_codes": list(codes),
-            "read_error": unreadable,
-        },
-    )
+    owners, codes, scan_unreadable = _scan_lsp_owners(snapshots, now, deadline)
+    return _lsp_result(owners, codes, unreadable=unreadable or scan_unreadable)
 
 
 def _index_deferred(message: str, detail: str) -> dict:
