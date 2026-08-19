@@ -4725,6 +4725,95 @@ def _open_existing_lock(path: Path, root: Path) -> int | None:
         return None
 
 
+def _lock_acquired_at(existing: dict) -> datetime | None:
+    try:
+        acquired = datetime.fromisoformat(str(existing.get("lock_acquired_at", "")))
+    except (TypeError, ValueError):
+        return None
+    if acquired.tzinfo is None:
+        acquired = acquired.replace(tzinfo=timezone.utc)
+    return acquired.astimezone(timezone.utc)
+
+
+def _dead_lock_pid(pid: object) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    return not _pid_alive(pid)
+
+
+def _known_lock_owner(existing: dict) -> str | None:
+    if not _dead_lock_pid(existing.get("lock_pid")):
+        return None
+    old_token = existing.get("lock_token")
+    if not isinstance(old_token, str) or not old_token:
+        return None
+    return old_token
+
+
+def _stale_lock_owner(existing: dict, now: datetime) -> str | None:
+    """The token of a lock whose owner is both timed out and gone."""
+    acquired = _lock_acquired_at(existing)
+    if acquired is None:
+        return None
+    if (now - acquired).total_seconds() <= LOCK_STALE_SECONDS:
+        return None
+    return _known_lock_owner(existing)
+
+
+def _lock_unchanged(fd: int, path: Path, old_token: str, opened_stat) -> bool:
+    current_value, current_opened_stat = _read_lock_fd(fd)
+    if current_value is None or current_opened_stat is None:
+        return False
+    if current_value.get("lock_token") != old_token:
+        return False
+    try:
+        current_path_stat = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return False
+    return os.path.samestat(opened_stat, current_path_stat)
+
+
+def _remove_path_quietly(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _replace_stale_lock(path: Path, token: str, now: datetime) -> str | None:
+    quarantine = path.with_name(f"{path.name}.stale-{token}")
+    try:
+        path.rename(quarantine)
+    except OSError:
+        return None
+    try:
+        if _create_owned_lock(path, token, now):
+            return token
+        return None
+    finally:
+        _remove_path_quietly(quarantine)
+
+
+def _readable_lock(existing: object, opened_stat: object) -> bool:
+    return existing is not None and opened_stat is not None
+
+
+def _take_over_stale_lock(
+    fd: int, path: Path, token: str, now: datetime
+) -> str | None:
+    if not _lock_file_nonblocking(fd):
+        return None
+    existing, opened_stat = _read_lock_fd(fd)
+    if not _readable_lock(existing, opened_stat):
+        return None
+    old_token = _stale_lock_owner(existing, now)
+    if old_token is None:
+        return None
+    if not _lock_unchanged(fd, path, old_token, opened_stat):
+        return None
+    return _replace_stale_lock(path, token, now)
+
+
 def _acquire_lock(path: Path, root: Path, now: datetime) -> str | None:
     token = secrets.token_hex(16)
     if _create_owned_lock(path, token, now):
@@ -4733,54 +4822,7 @@ def _acquire_lock(path: Path, root: Path, now: datetime) -> str | None:
     if fd is None:
         return None
     try:
-        if not _lock_file_nonblocking(fd):
-            return None
-        existing, opened_stat = _read_lock_fd(fd)
-        if existing is None or opened_stat is None:
-            return None
-        pid = existing.get("lock_pid")
-        old_token = existing.get("lock_token")
-        try:
-            acquired = datetime.fromisoformat(str(existing.get("lock_acquired_at", "")))
-            if acquired.tzinfo is None:
-                acquired = acquired.replace(tzinfo=timezone.utc)
-            stale = (now - acquired.astimezone(timezone.utc)).total_seconds() > LOCK_STALE_SECONDS
-        except (TypeError, ValueError):
-            return None
-        if (
-            not stale
-            or not isinstance(pid, int)
-            or pid <= 0
-            or not isinstance(old_token, str)
-            or not old_token
-            or _pid_alive(pid)
-        ):
-            return None
-        current_value, current_opened_stat = _read_lock_fd(fd)
-        if (
-            current_value is None
-            or current_opened_stat is None
-            or current_value.get("lock_token") != old_token
-        ):
-            return None
-        try:
-            current_path_stat = os.stat(path, follow_symlinks=False)
-        except OSError:
-            return None
-        if not os.path.samestat(opened_stat, current_path_stat):
-            return None
-        quarantine = path.with_name(f"{path.name}.stale-{token}")
-        try:
-            path.rename(quarantine)
-        except OSError:
-            return None
-        try:
-            return token if _create_owned_lock(path, token, now) else None
-        finally:
-            try:
-                quarantine.unlink()
-            except OSError:
-                pass
+        return _take_over_stale_lock(fd, path, token, now)
     finally:
         _unlock_file(fd)
         os.close(fd)
