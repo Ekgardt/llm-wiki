@@ -1664,10 +1664,8 @@ def _queue_v2_check(state_root: Path, now: datetime, deadline: float) -> dict:
     return _result("queue", status, message, details)
 
 
-def _archive_check(root: Path, state_root: Path, deadline: float = float("inf")) -> dict:
-    archive = _archive_path(root)
-    quarantine = state_root / "run" / "archive-quarantine"
-    details = {
+def _empty_archive_details() -> dict:
+    return {
         "bags": 0,
         "duplicates": 0,
         "quarantined": 0,
@@ -1676,128 +1674,205 @@ def _archive_check(root: Path, state_root: Path, deadline: float = float("inf"))
         "read_error": False,
         "deletion_codes": [],
     }
-    quarantine_entries, truncated, error = _bounded_runtime_entries(
+
+
+def _any_irregular_entry(entries: list[Path], state_root: Path) -> bool:
+    return any(_safe_kind(item, state_root)[0] != "regular" for item in entries)
+
+
+def _record_quarantine_state(
+    state_root: Path, deadline: float, details: dict
+) -> None:
+    quarantine = state_root / "run" / "archive-quarantine"
+    entries, truncated, error = _bounded_runtime_entries(
         quarantine,
         state_root,
         limit=MAX_RUNTIME_ENTRIES,
         deadline=deadline,
     )
-    details["quarantined"] = len(quarantine_entries)
+    details["quarantined"] = len(entries)
     if details["quarantined"]:
         details["deletion_codes"].append("archive_quarantine_retained")
-    if (
-        truncated
-        or error
-        or any(_safe_kind(item, state_root)[0] != "regular" for item in quarantine_entries)
-    ):
+    if truncated or error or _any_irregular_entry(entries, state_root):
         details["read_error"] = True
         details["deletion_codes"].append("archive_quarantine_state_unknown")
-    archive_kind = _safe_kind(archive, root)
-    if archive_kind[0] == "missing":
+
+
+def _archive_month_directory(month: Path, root: Path) -> bool:
+    if _safe_kind(month, root)[0] != "directory":
+        return False
+    return re.fullmatch(r"\d{4}-\d{2}", month.name) is not None
+
+
+def _archive_months(
+    archive: Path, root: Path, deadline: float, details: dict
+) -> list[Path]:
+    months, truncated, error = _bounded_runtime_entries(
+        archive, root, limit=121, deadline=deadline
+    )
+    if error:
+        raise OSError("archive month scan failed")
+    months = [month for month in months if _archive_month_directory(month, root)]
+    if truncated or len(months) > 120:
+        details["codes"].append("archive_scan_truncated")
+        details["deletion_codes"].append("archive_state_unknown")
+        return months[:120]
+    return months
+
+
+def _is_bag_directory(item: Path, root: Path) -> bool:
+    return _safe_kind(item, root)[0] == "directory" and item.name.startswith("bag-")
+
+
+def _record_bag_overflow(details: dict, bags: list[Path]) -> None:
+    details["codes"].append("archive_scan_truncated")
+    details["deletion_codes"].append("archive_state_unknown")
+    del bags[MAX_RUNTIME_ENTRIES:]
+
+
+def _collect_month_bags(
+    month: Path, root: Path, deadline: float, details: dict, bags: list[Path]
+) -> None:
+    entries, truncated, error = _bounded_runtime_entries(
+        month,
+        root,
+        limit=MAX_RUNTIME_ENTRIES + 1,
+        deadline=deadline,
+    )
+    if error:
+        raise OSError("archive bag scan failed")
+    if truncated:
+        details["codes"].append("archive_scan_truncated")
+        details["deletion_codes"].append("archive_state_unknown")
+    for item in entries:
+        if _is_bag_directory(item, root):
+            bags.append(item)
+        if len(bags) > MAX_RUNTIME_ENTRIES:
+            _record_bag_overflow(details, bags)
+            return
+
+
+def _archive_bags(
+    months: list[Path], root: Path, deadline: float, details: dict
+) -> list[Path]:
+    bags: list[Path] = []
+    for month in months:
+        _collect_month_bags(month, root, deadline, details, bags)
+        if len(bags) >= MAX_RUNTIME_ENTRIES:
+            return bags[:MAX_RUNTIME_ENTRIES]
+    return bags
+
+
+def _archive_manifest_key(bag: Path, archive: Path, details: dict) -> tuple | None:
+    manifest, problem = _read_bounded_json(
+        bag / "archive-manifest.json", archive, max_bytes=MAX_MANIFEST_BYTES
+    )
+    if problem or not isinstance(manifest, dict):
+        details["codes"].append("archive_manifest_invalid")
+        return None
+    return manifest.get("logical_daily_id"), manifest.get("source_hash")
+
+
+def _scan_archive_manifests(
+    bags: list[Path], archive: Path, root: Path, deadline: float, details: dict
+) -> set[str]:
+    """Bag paths that carry a readable manifest, counting duplicates on the way."""
+    seen: set[tuple[object, object]] = set()
+    bag_paths: set[str] = set()
+    for bag in bags:
+        if _deadline_reached(deadline):
+            raise TimeoutError("archive check deadline")
+        key = _archive_manifest_key(bag, archive, details)
+        if key is None:
+            continue
+        if key in seen:
+            details["duplicates"] += 1
+        seen.add(key)
+        bag_paths.add(bag.relative_to(root).as_posix())
+    return bag_paths
+
+
+def _bag_path_entry(item: object) -> bool:
+    return isinstance(item, dict) and isinstance(item.get("bag_path"), str)
+
+
+def _index_validity(index: dict, bag_paths: set[str]) -> str:
+    indexed = index.get("bags", [])
+    indexed_paths = {
+        str(item.get("bag_path")) for item in indexed if _bag_path_entry(item)
+    }
+    if index.get("schema_version") != "archive-index/v1":
+        return "invalid"
+    if indexed_paths != bag_paths or len(indexed_paths) != len(indexed):
+        return "invalid"
+    return "valid"
+
+
+def _archive_index_state(
+    archive: Path, root: Path, bag_paths: set[str], deadline: float
+) -> str:
+    index_path = archive / "archive-index.json"
+    index_kind = _safe_kind(index_path, root)[0]
+    if index_kind == "missing":
+        return "missing"
+    if index_kind != "regular":
+        return "invalid"
+    index, problem = _read_bounded_json(
+        index_path,
+        archive,
+        max_bytes=MAX_MANIFEST_BYTES,
+        deadline=deadline,
+    )
+    if problem or not isinstance(index, dict):
+        return "invalid"
+    return _index_validity(index, bag_paths)
+
+
+def _scan_archive(
+    archive: Path, root: Path, deadline: float, details: dict
+) -> None:
+    months = _archive_months(archive, root, deadline, details)
+    bags = _archive_bags(months, root, deadline, details)
+    details["bags"] = len(bags)
+    bag_paths = _scan_archive_manifests(bags, archive, root, deadline, details)
+    details["index"] = _archive_index_state(archive, root, bag_paths, deadline)
+
+
+def _archive_problem(details: dict) -> bool:
+    if details["duplicates"] or details["quarantined"]:
+        return True
+    return bool(details["codes"]) or details["index"] == "invalid"
+
+
+def _archive_result(details: dict) -> dict:
+    problem = _archive_problem(details)
+    status = "degraded" if problem else "ok"
+    if details["codes"]:
+        status = "error"
+    message = "Archive state is healthy."
+    if problem:
+        message = "Archive state requires operator attention."
+    return _result("archives", status, message, details)
+
+
+def _archive_check(root: Path, state_root: Path, deadline: float = float("inf")) -> dict:
+    archive = _archive_path(root)
+    details = _empty_archive_details()
+    _record_quarantine_state(state_root, deadline, details)
+    archive_kind = _safe_kind(archive, root)[0]
+    if archive_kind == "missing":
         return _result("archives", "ok", "No archive exists.", details)
-    if archive_kind[0] != "directory":
+    if archive_kind != "directory":
         details["read_error"] = True
         details["deletion_codes"].append("archive_state_unreadable")
         return _result("archives", "error", "Archive root is unsafe.", details)
     try:
-        months, month_truncated, month_error = _bounded_runtime_entries(
-            archive, root, limit=121, deadline=deadline
-        )
-        if month_error:
-            raise OSError("archive month scan failed")
-        months = [
-            month
-            for month in months
-            if _safe_kind(month, root)[0] == "directory"
-            and re.fullmatch(r"\d{4}-\d{2}", month.name)
-        ]
-        if month_truncated or len(months) > 120:
-            details["codes"].append("archive_scan_truncated")
-            details["deletion_codes"].append("archive_state_unknown")
-            months = months[:120]
-        bags = []
-        for month in months:
-            entries, entry_truncated, entry_error = _bounded_runtime_entries(
-                month,
-                root,
-                limit=MAX_RUNTIME_ENTRIES + 1,
-                deadline=deadline,
-            )
-            if entry_error:
-                raise OSError("archive bag scan failed")
-            if entry_truncated:
-                details["codes"].append("archive_scan_truncated")
-                details["deletion_codes"].append("archive_state_unknown")
-            for item in entries:
-                if _safe_kind(item, root)[0] == "directory" and item.name.startswith("bag-"):
-                    bags.append(item)
-                    if len(bags) > MAX_RUNTIME_ENTRIES:
-                        details["codes"].append("archive_scan_truncated")
-                        details["deletion_codes"].append("archive_state_unknown")
-                        bags = bags[:MAX_RUNTIME_ENTRIES]
-                        break
-            if len(bags) >= MAX_RUNTIME_ENTRIES:
-                break
-        details["bags"] = len(bags)
-        seen: set[tuple[object, object]] = set()
-        bag_paths: set[str] = set()
-        for bag in bags:
-            if _deadline_reached(deadline):
-                raise TimeoutError("archive check deadline")
-            manifest, problem = _read_bounded_json(
-                bag / "archive-manifest.json", archive, max_bytes=MAX_MANIFEST_BYTES
-            )
-            if problem or not isinstance(manifest, dict):
-                details["codes"].append("archive_manifest_invalid")
-                continue
-            key = (manifest.get("logical_daily_id"), manifest.get("source_hash"))
-            if key in seen:
-                details["duplicates"] += 1
-            seen.add(key)
-            bag_paths.add(bag.relative_to(root).as_posix())
-        index_kind = _safe_kind(archive / "archive-index.json", root)[0]
-        index, problem = (
-            _read_bounded_json(
-                archive / "archive-index.json",
-                archive,
-                max_bytes=MAX_MANIFEST_BYTES,
-                deadline=deadline,
-            )
-            if index_kind == "regular"
-            else (None, "missing" if index_kind == "missing" else "unsafe")
-        )
-        if not problem and isinstance(index, dict):
-            indexed = index.get("bags", [])
-            indexed_paths = {
-                str(item.get("bag_path"))
-                for item in indexed
-                if isinstance(item, dict) and isinstance(item.get("bag_path"), str)
-            }
-            details["index"] = (
-                "valid"
-                if index.get("schema_version") == "archive-index/v1"
-                and indexed_paths == bag_paths
-                and len(indexed_paths) == len(indexed)
-                else "invalid"
-            )
-        else:
-            details["index"] = "invalid" if problem != "missing" else "missing"
+        _scan_archive(archive, root, deadline, details)
     except (OSError, TimeoutError):
         details["codes"].append("archive_unreadable")
         details["read_error"] = True
         details["deletion_codes"].append("archive_state_unreadable")
-    problem = (
-        details["duplicates"]
-        or details["quarantined"]
-        or details["codes"]
-        or details["index"] == "invalid"
-    )
-    return _result(
-        "archives",
-        "error" if details["codes"] else "degraded" if problem else "ok",
-        "Archive state requires operator attention." if problem else "Archive state is healthy.",
-        details,
-    )
+    return _archive_result(details)
 
 
 def _claim_check(root: Path, state_root: Path, deadline: float = float("inf")) -> dict:
