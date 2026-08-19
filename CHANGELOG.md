@@ -8,6 +8,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Completing a blackboard task and resolving a blackboard conflict survive a
+  retry. Both publish under a stable operation id but stamped the record with
+  the moment of the write, so a caller retrying after a transient failure was
+  refused with `operation_id is already bound to a different request` instead
+  of finding its own earlier publication already there.
+
 - `doctor` reports a locked FTS index as busy instead of as an exhausted time
   budget. The two verdicts were decided by the clock, so on a slow machine the
   wait for the lock consumed the budget and the more actionable answer was

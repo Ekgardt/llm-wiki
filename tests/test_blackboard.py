@@ -354,3 +354,51 @@ def test_conflict_and_resolution_are_immutable_events(
         vault / "knowledge/projects/demo/.blackboard/conflicts.jsonl"
     )
     assert [record["kind"] for record in records] == ["conflict", "resolution"]
+
+
+def test_a_retried_completion_keeps_the_first_published_record(blackboard_vault):
+    """A completion is published once; a retry must not re-stamp or be refused."""
+    claim = blackboard.claim_task(
+        "demo", "shared task", "agent-a", resources=["src/one.py"]
+    )
+    published = blackboard._completion_record(claim, blackboard._utc_now(None))
+    completed_file = blackboard._bb_dir("demo") / "completed.jsonl"
+    blackboard._append_jsonl(
+        completed_file, published, f"blackboard-complete:{claim.claim_id}"
+    )
+
+    time.sleep(0.01)
+    assert blackboard.complete_task("demo", claim) is True
+
+    records = blackboard._read_jsonl(completed_file)
+    assert [record["id"] for record in records] == [claim.claim_id]
+    assert records[0]["completed_at"] == published["completed_at"]
+    assert blackboard.get_status("demo")["active_tasks"] == 0
+
+
+def test_a_reconciled_activation_does_not_break_the_claimer(blackboard_vault):
+    """The reader may publish the activation first; the claimer must still finish."""
+    claim = blackboard._new_claim(
+        "demo",
+        "shared task",
+        "agent-a",
+        blackboard._normalize_resources(["src/one.py", "src/two.py"]),
+        30,
+        blackboard._utc_now(None),
+    )
+    tasks_file = blackboard._bb_dir("demo") / "tasks.jsonl"
+    blackboard._append_jsonl(
+        tasks_file,
+        blackboard._claim_request_record(claim),
+        f"blackboard-request:{claim.claim_id}",
+    )
+    acquired = blackboard._acquire_claim(blackboard._coordinator(), claim)
+
+    blackboard.get_status("demo")
+
+    blackboard._append_jsonl(
+        tasks_file,
+        blackboard._claim_active_record(acquired),
+        f"blackboard-active:{claim.claim_id}",
+    )
+    assert blackboard.get_status("demo")["active_tasks"] == 1

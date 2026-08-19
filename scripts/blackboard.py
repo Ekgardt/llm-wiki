@@ -134,6 +134,23 @@ def _append_jsonl(
     append_knowledge(operation_id, path, block)
 
 
+def _append_once(
+    path: Path, record: dict, operation_id: str, *, key: str, value: str
+) -> None:
+    """Publish one record under a stable operation id, so a retry is a no-op.
+
+    The transaction layer binds an operation id to exact bytes, and these
+    records carry the moment they were written. A caller that retries after a
+    transient failure would otherwise re-stamp the record and be refused, even
+    though its first attempt already published the very act it is repeating.
+    """
+    try:
+        _append_jsonl(path, record, operation_id)
+    except ValueError:
+        if not any(item.get(key) == value for item in _read_jsonl(path)):
+            raise
+
+
 def _decode_jsonl(path: Path, content: bytes) -> str:
     if len(content) > MAX_KNOWLEDGE_TARGET_BYTES:
         raise ValueError(f"{path.name} exceeds the blackboard stream limit")
@@ -576,11 +593,12 @@ def complete_task(project: str, claim: BlackboardClaim) -> bool:
     current = _utc_now(None)
     coordinator = _coordinator()
     _load_live_claim(coordinator, claim, current)
-    record = _completion_record(claim, current)
-    _append_jsonl(
+    _append_once(
         _bb_dir(slug) / "completed.jsonl",
-        record,
+        _completion_record(claim, current),
         f"blackboard-complete:{claim.claim_id}",
+        key="id",
+        value=claim.claim_id,
     )
     _delete_exact_claim(coordinator, claim)
     return True
@@ -786,10 +804,12 @@ def resolve_conflict(
         "resolution": _bounded_text(resolution, "resolution", _MAX_TASK_BYTES),
         "at": _timestamp(_utc_now(None)),
     }
-    _append_jsonl(
+    _append_once(
         _bb_dir(slug) / "conflicts.jsonl",
         record,
         f"blackboard-resolution:{identity}",
+        key="conflict_id",
+        value=identity,
     )
 
 
