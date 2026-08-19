@@ -749,6 +749,211 @@ def _prepare_graph_hits(
     )
 
 
+def _normalized_graph_directions(directions: Sequence[str]) -> tuple[str, ...]:
+    normalized = tuple(dict.fromkeys(str(item) for item in directions))
+    if not normalized or any(item not in {"in", "out"} for item in normalized):
+        raise ValueError("graph directions must contain only in or out")
+    return normalized
+
+
+def _normalized_graph_edges(edge_types: Sequence[str]) -> tuple[str, ...]:
+    normalized = tuple(sorted(dict.fromkeys(str(item) for item in edge_types)))
+    if not normalized or len(normalized) > 64:
+        raise ValueError("graph edge types must contain between 1 and 64 values")
+    return normalized
+
+
+def _direction_columns(direction: str) -> tuple[str, str]:
+    if direction == "out":
+        return "source_node_id", "target_node_id"
+    return "target_node_id", "source_node_id"
+
+
+def _neighbour_rows(
+    graph: Any,
+    *,
+    seed_path: str,
+    direction: str,
+    edges: tuple[str, ...],
+    per_seed_limit: int,
+    deadline_monotonic: float | None,
+) -> Any:
+    """One evidenced typed hop out of the sealed graph, in deterministic order."""
+    source_column, target_column = _direction_columns(direction)
+    edge_placeholders = ",".join("?" for _ in edges)
+    rows = graph._execute(
+        f"""
+        SELECT a.assertion_id, a.source_node_id, a.target_node_id,
+               a.edge_type, a.confidence, a.authority, a.extractor,
+               neighbor.node_id, neighbor.kind, neighbor.metadata_json,
+               target_occ.byte_start, target_occ.byte_end,
+               target_source.relative_path, target_source.sha256,
+               target_source.content,
+               e.evidence_id, e.source_id AS evidence_source_id,
+               e.byte_start AS evidence_byte_start,
+               e.byte_end AS evidence_byte_end, e.span_sha256,
+               evidence_source.relative_path AS evidence_relative_path
+        FROM occurrence seed_occ
+        JOIN source seed_source ON seed_source.source_id = seed_occ.source_id
+        JOIN assertion a ON a.{source_column} = seed_occ.node_id
+        JOIN node neighbor ON neighbor.node_id = a.{target_column}
+        JOIN occurrence target_occ ON target_occ.node_id = neighbor.node_id
+        JOIN source target_source ON target_source.source_id = target_occ.source_id
+        JOIN evidence e ON e.assertion_id = a.assertion_id
+        JOIN source evidence_source ON evidence_source.source_id = e.source_id
+        WHERE seed_source.relative_path = ?
+          AND a.resolution = 'resolved'
+          AND a.target_node_id IS NOT NULL
+          AND a.edge_type IN ({edge_placeholders})
+          AND target_occ.occurrence_id = (
+            SELECT min(chosen.occurrence_id) FROM occurrence chosen
+            WHERE chosen.node_id = neighbor.node_id
+          )
+        ORDER BY a.edge_type, neighbor.node_id, a.assertion_id, e.evidence_id
+        LIMIT ?
+        """,
+        (seed_path, *edges),
+        max_rows=min(1000, max(32, per_seed_limit * 16)),
+        deadline=deadline_monotonic,
+    )
+    return rows
+
+
+def _evidence_record(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "evidence_id": str(row["evidence_id"]),
+        "source_id": str(row["evidence_source_id"]),
+        "relative_path": str(row["evidence_relative_path"]),
+        "byte_start": int(row["evidence_byte_start"]),
+        "byte_end": int(row["evidence_byte_end"]),
+        "span_sha256": str(row["span_sha256"]),
+    }
+
+
+def _decoded_content(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _assertion_step_record(row: Mapping[str, Any], direction: str) -> dict[str, Any]:
+    return {
+        "assertion_id": str(row["assertion_id"]),
+        "source_node_id": str(row["source_node_id"]),
+        "target_node_id": str(row["target_node_id"]),
+        "edge_type": str(row["edge_type"]),
+        "direction": direction,
+        "confidence": str(row["confidence"]),
+        "authority": str(row["authority"]),
+        "extractor": str(row["extractor"]),
+        "evidence_ids": [],
+        "evidence": [],
+    }
+
+
+def _neighbour_item(
+    row: Mapping[str, Any], *, seed_id: str, direction: str, graph: Any
+) -> dict[str, Any]:
+    metadata = json.loads(str(row["metadata_json"]))
+    relative_path = str(row["relative_path"])
+    return {
+        "candidate_id": str(row["node_id"]),
+        "parent_id": relative_path,
+        "relative_path": relative_path,
+        "source_sha256": str(row["sha256"]),
+        "byte_start": int(row["byte_start"]),
+        "byte_end": int(row["byte_end"]),
+        "title": metadata.get("name") or Path(relative_path).stem,
+        "content": _decoded_content(row["content"]),
+        "seed_id": seed_id,
+        "hop": 1,
+        "direction": direction,
+        "edge_type": str(row["edge_type"]),
+        "assertion_path": [_assertion_step_record(row, direction)],
+        "evidence_ids": [],
+        "generation": getattr(graph, "generation_id", None),
+    }
+
+
+def _freeze_neighbour(item: dict[str, Any]) -> dict[str, Any]:
+    step = item["assertion_path"][0]
+    step["evidence_ids"] = tuple(step["evidence_ids"])
+    step["evidence"] = tuple(step["evidence"])
+    item["assertion_path"] = tuple(item["assertion_path"])
+    item["evidence_ids"] = tuple(item["evidence_ids"])
+    return item
+
+
+def _group_neighbour_rows(
+    rows: Any,
+    *,
+    seed_id: str,
+    direction: str,
+    graph: Any,
+    deadline_monotonic: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[dict[str, Any]]:
+    """One item per (assertion, neighbour), with its evidence collected."""
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        _check_stopped(deadline_monotonic, cancelled)
+        key = (str(row["assertion_id"]), str(row["node_id"]))
+        item = grouped.get(key)
+        if item is None:
+            item = _neighbour_item(row, seed_id=seed_id, direction=direction, graph=graph)
+            grouped[key] = item
+        evidence = _evidence_record(row)
+        step = item["assertion_path"][0]
+        step["evidence_ids"].append(evidence["evidence_id"])
+        step["evidence"].append(evidence)
+        item["evidence_ids"].append(evidence["evidence_id"])
+    return [_freeze_neighbour(item) for item in grouped.values()]
+
+
+def _seed_expansion(
+    graph: Any,
+    seed: Mapping[str, Any],
+    *,
+    directions: tuple[str, ...],
+    edges: tuple[str, ...],
+    per_seed_limit: int,
+    deadline_monotonic: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[dict[str, Any]]:
+    seed_id = _candidate_key(seed)
+    seed_path = _hit_path(seed)
+    seed_results: list[dict[str, Any]] = []
+    for direction in directions:
+        _check_stopped(deadline_monotonic, cancelled)
+        rows = _neighbour_rows(
+            graph,
+            seed_path=seed_path,
+            direction=direction,
+            edges=edges,
+            per_seed_limit=per_seed_limit,
+            deadline_monotonic=deadline_monotonic,
+        )
+        seed_results.extend(
+            _group_neighbour_rows(
+                rows,
+                seed_id=seed_id,
+                direction=direction,
+                graph=graph,
+                deadline_monotonic=deadline_monotonic,
+                cancelled=cancelled,
+            )
+        )
+    seed_results.sort(
+        key=lambda item: (
+            str(item["edge_type"]),
+            str(item["candidate_id"]),
+            str(item["direction"]),
+            str(item["assertion_path"][0]["assertion_id"]),
+        )
+    )
+    return seed_results[:per_seed_limit]
+
+
 def expand_evidence_graph(
     graph: Any,
     *,
@@ -763,132 +968,22 @@ def expand_evidence_graph(
     """Read one evidenced typed hop from a sealed ``EvidenceGraph`` handle."""
     if not 1 <= per_seed_limit <= 100 or not 1 <= global_limit <= 1000:
         raise ValueError("graph expansion caps are outside supported bounds")
-    normalized_directions = tuple(dict.fromkeys(str(item) for item in directions))
-    if not normalized_directions or any(item not in {"in", "out"} for item in normalized_directions):
-        raise ValueError("graph directions must contain only in or out")
-    normalized_edges = tuple(sorted(dict.fromkeys(str(item) for item in edge_types)))
-    if not normalized_edges or len(normalized_edges) > 64:
-        raise ValueError("graph edge types must contain between 1 and 64 values")
-
+    normalized_directions = _normalized_graph_directions(directions)
+    normalized_edges = _normalized_graph_edges(edge_types)
     results: list[Mapping[str, Any]] = []
-    edge_placeholders = ",".join("?" for _ in normalized_edges)
     for seed in seeds:
         _check_stopped(deadline_monotonic, cancelled)
-        seed_id = _candidate_key(seed)
-        seed_path = _hit_path(seed)
-        seed_results: list[Mapping[str, Any]] = []
-        for direction in normalized_directions:
-            _check_stopped(deadline_monotonic, cancelled)
-            source_column, target_column = (
-                ("source_node_id", "target_node_id")
-                if direction == "out"
-                else ("target_node_id", "source_node_id")
-            )
-            rows = graph._execute(
-                f"""
-                SELECT a.assertion_id, a.source_node_id, a.target_node_id,
-                       a.edge_type, a.confidence, a.authority, a.extractor,
-                       neighbor.node_id, neighbor.kind, neighbor.metadata_json,
-                       target_occ.byte_start, target_occ.byte_end,
-                       target_source.relative_path, target_source.sha256,
-                       target_source.content,
-                       e.evidence_id, e.source_id AS evidence_source_id,
-                       e.byte_start AS evidence_byte_start,
-                       e.byte_end AS evidence_byte_end, e.span_sha256,
-                       evidence_source.relative_path AS evidence_relative_path
-                FROM occurrence seed_occ
-                JOIN source seed_source ON seed_source.source_id = seed_occ.source_id
-                JOIN assertion a ON a.{source_column} = seed_occ.node_id
-                JOIN node neighbor ON neighbor.node_id = a.{target_column}
-                JOIN occurrence target_occ ON target_occ.node_id = neighbor.node_id
-                JOIN source target_source ON target_source.source_id = target_occ.source_id
-                JOIN evidence e ON e.assertion_id = a.assertion_id
-                JOIN source evidence_source ON evidence_source.source_id = e.source_id
-                WHERE seed_source.relative_path = ?
-                  AND a.resolution = 'resolved'
-                  AND a.target_node_id IS NOT NULL
-                  AND a.edge_type IN ({edge_placeholders})
-                  AND target_occ.occurrence_id = (
-                    SELECT min(chosen.occurrence_id) FROM occurrence chosen
-                    WHERE chosen.node_id = neighbor.node_id
-                  )
-                ORDER BY a.edge_type, neighbor.node_id, a.assertion_id, e.evidence_id
-                LIMIT ?
-                """,
-                (seed_path, *normalized_edges),
-                max_rows=min(1000, max(32, per_seed_limit * 16)),
-                deadline=deadline_monotonic,
-            )
-            grouped: dict[tuple[str, str], dict[str, Any]] = {}
-            for row in rows:
-                _check_stopped(deadline_monotonic, cancelled)
-                key = (str(row["assertion_id"]), str(row["node_id"]))
-                item = grouped.get(key)
-                evidence = {
-                    "evidence_id": str(row["evidence_id"]),
-                    "source_id": str(row["evidence_source_id"]),
-                    "relative_path": str(row["evidence_relative_path"]),
-                    "byte_start": int(row["evidence_byte_start"]),
-                    "byte_end": int(row["evidence_byte_end"]),
-                    "span_sha256": str(row["span_sha256"]),
-                }
-                if item is None:
-                    metadata = json.loads(str(row["metadata_json"]))
-                    content = row["content"]
-                    if isinstance(content, bytes):
-                        content = content.decode("utf-8", errors="replace")
-                    item = {
-                        "candidate_id": str(row["node_id"]),
-                        "parent_id": str(row["relative_path"]),
-                        "relative_path": str(row["relative_path"]),
-                        "source_sha256": str(row["sha256"]),
-                        "byte_start": int(row["byte_start"]),
-                        "byte_end": int(row["byte_end"]),
-                        "title": metadata.get("name") or Path(str(row["relative_path"])).stem,
-                        "content": str(content),
-                        "seed_id": seed_id,
-                        "hop": 1,
-                        "direction": direction,
-                        "edge_type": str(row["edge_type"]),
-                        "assertion_path": [
-                            {
-                                "assertion_id": str(row["assertion_id"]),
-                                "source_node_id": str(row["source_node_id"]),
-                                "target_node_id": str(row["target_node_id"]),
-                                "edge_type": str(row["edge_type"]),
-                                "direction": direction,
-                                "confidence": str(row["confidence"]),
-                                "authority": str(row["authority"]),
-                                "extractor": str(row["extractor"]),
-                                "evidence_ids": [],
-                                "evidence": [],
-                            }
-                        ],
-                        "evidence_ids": [],
-                        "generation": getattr(graph, "generation_id", None),
-                    }
-                    grouped[key] = item
-                step = item["assertion_path"][0]
-                step["evidence_ids"].append(evidence["evidence_id"])
-                step["evidence"].append(evidence)
-                item["evidence_ids"].append(evidence["evidence_id"])
-            for item in grouped.values():
-                _check_stopped(deadline_monotonic, cancelled)
-                step = item["assertion_path"][0]
-                step["evidence_ids"] = tuple(step["evidence_ids"])
-                step["evidence"] = tuple(step["evidence"])
-                item["assertion_path"] = tuple(item["assertion_path"])
-                item["evidence_ids"] = tuple(item["evidence_ids"])
-                seed_results.append(item)
-        seed_results.sort(
-            key=lambda item: (
-                str(item["edge_type"]),
-                str(item["candidate_id"]),
-                str(item["direction"]),
-                str(item["assertion_path"][0]["assertion_id"]),
+        results.extend(
+            _seed_expansion(
+                graph,
+                seed,
+                directions=normalized_directions,
+                edges=normalized_edges,
+                per_seed_limit=per_seed_limit,
+                deadline_monotonic=deadline_monotonic,
+                cancelled=cancelled,
             )
         )
-        results.extend(seed_results[:per_seed_limit])
         if len(results) >= global_limit:
             break
     return tuple(results[:global_limit])
