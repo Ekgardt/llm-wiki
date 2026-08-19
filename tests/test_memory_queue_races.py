@@ -252,7 +252,7 @@ def test_drain_heartbeats_long_handler_past_270_seconds(
             if len(waits) == 7:
                 completed.set()
             return False
-        return stop.wait(2)
+        return stop.wait(60)
 
     queue = MemoryQueue(
         tmp_path,
@@ -272,7 +272,10 @@ def test_drain_heartbeats_long_handler_past_270_seconds(
     monkeypatch.setattr(memory_queue, "_queue", lambda: queue)
 
     counts = memory_queue.drain_with(
-        lambda task: completed.wait(2),
+        # The handler waits for the heartbeat thread to reach its seventh beat.
+        # Two seconds was not enough on a loaded runner, and the task then
+        # failed on the fixture rather than on the behaviour under test.
+        lambda task: completed.wait(60),
         max_tasks=1,
     )
     assert counts == {"ok": 1, "failed": 0, "dead": 0, "skipped": 0}
