@@ -1971,6 +1971,40 @@ def _sealed_generation(
     return hashlib.sha256(canonical).hexdigest(), manifest_seal, tuple(seals)
 
 
+def _active_for_repository(
+    catalog: object,
+    repository_scope: object,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> object:
+    if _no_stop_requested(deadline, cancelled):
+        return catalog.get_active_for_repository(repository_scope)
+    return catalog.get_active_for_repository(
+        repository_scope, deadline=deadline, cancelled=cancelled
+    )
+
+
+def _same_sealed_generation(
+    catalog: object,
+    active: object,
+    manifest: dict[str, object],
+    artifact_names: tuple[str, ...],
+    expected_seal: tuple,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    """The active generation is still the one this reader sealed."""
+    if not isinstance(active, dict):
+        return False
+    if _canonical_manifest_bytes(active) != _canonical_manifest_bytes(manifest):
+        return False
+    seal = _generation_consumption_seal(
+        catalog, active, artifact_names, deadline=deadline, cancelled=cancelled
+    )
+    return seal == expected_seal
+
+
 def _generation_consumption_unchanged(
     catalog: object,
     manifest: dict[str, object],
@@ -1984,24 +2018,20 @@ def _generation_consumption_unchanged(
         from repository_scope import RepositoryScope
 
         _check_generation_stop(deadline, cancelled)
-        repository_scope = RepositoryScope.from_dict(manifest.get("repository_scope"))
-        if deadline is None and cancelled is None:
-            active = catalog.get_active_for_repository(repository_scope)
-        else:
-            active = catalog.get_active_for_repository(
-                repository_scope, deadline=deadline, cancelled=cancelled
-            )
-        return (
-            isinstance(active, dict)
-            and _canonical_manifest_bytes(active) == _canonical_manifest_bytes(manifest)
-            and _generation_consumption_seal(
-                catalog,
-                active,
-                artifact_names,
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-            == expected_seal
+        active = _active_for_repository(
+            catalog,
+            RepositoryScope.from_dict(manifest.get("repository_scope")),
+            deadline,
+            cancelled,
+        )
+        return _same_sealed_generation(
+            catalog,
+            active,
+            manifest,
+            artifact_names,
+            expected_seal,
+            deadline=deadline,
+            cancelled=cancelled,
         )
     except TimeoutError:
         raise
@@ -2094,6 +2124,27 @@ def _valid_generation_fts(
         )
 
 
+def _read_bounded_chunks(
+    descriptor: int,
+    *,
+    max_bytes: int,
+    label: str,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[bytes]:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        _check_generation_stop(deadline, cancelled)
+        chunk = os.read(descriptor, 64 * 1024)
+        if not chunk:
+            return chunks
+        total += len(chunk)
+        if total > max_bytes:
+            raise ValueError(f"{label} exceeds its byte ceiling")
+        chunks.append(chunk)
+
+
 def _read_identity_stable_bytes(
     file_path: Path,
     expected: os.stat_result,
@@ -2110,17 +2161,13 @@ def _read_identity_stable_bytes(
         opened = os.fstat(descriptor)
         if not os.path.samestat(expected, opened):
             raise PermissionError(f"{label} identity changed before read")
-        chunks: list[bytes] = []
-        total = 0
-        while True:
-            _check_generation_stop(deadline, cancelled)
-            chunk = os.read(descriptor, 64 * 1024)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > max_bytes:
-                raise ValueError(f"{label} exceeds its byte ceiling")
-            chunks.append(chunk)
+        chunks = _read_bounded_chunks(
+            descriptor,
+            max_bytes=max_bytes,
+            label=label,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
         after = os.fstat(descriptor)
         _require_same_file(opened, after, label)
     finally:
@@ -2626,6 +2673,41 @@ def _stored_chunks_match(
     return len(seen) == count
 
 
+_UNUSABLE_CHUNKS = object()
+
+
+def _valid_fts_metadata(
+    connection: sqlite3.Connection, manifest: dict[str, object]
+) -> dict | None:
+    """The metadata row, or None when the artifact does not describe itself."""
+    if not _valid_fts_schema(connection):
+        return None
+    metadata = _generation_metadata(connection)
+    if metadata is None or not _metadata_matches_manifest(metadata, manifest):
+        return None
+    return metadata
+
+
+def _expected_chunks(
+    authoritative_sources: dict[str, dict[str, object]] | None,
+    manifest: dict[str, object],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+):
+    """Rows the sources must produce, None when unchecked, sentinel when unusable."""
+    if authoritative_sources is None:
+        return None
+    rows = _expected_chunk_rows(
+        authoritative_sources,
+        manifest=manifest,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    if rows is None:
+        return _UNUSABLE_CHUNKS
+    return rows
+
+
 def _valid_generation_fts_contents(
     connection: sqlite3.Connection,
     manifest: dict[str, object],
@@ -2635,21 +2717,14 @@ def _valid_generation_fts_contents(
     authoritative_sources: dict[str, dict[str, object]] | None = None,
 ) -> bool:
     """Every structural claim the FTS artifact makes about itself must hold."""
-    if not _valid_fts_schema(connection):
+    metadata = _valid_fts_metadata(connection, manifest)
+    if metadata is None:
         return False
-    metadata = _generation_metadata(connection)
-    if metadata is None or not _metadata_matches_manifest(metadata, manifest):
+    expected_chunks = _expected_chunks(
+        authoritative_sources, manifest, deadline, cancelled
+    )
+    if expected_chunks is _UNUSABLE_CHUNKS:
         return False
-    expected_chunks = None
-    if authoritative_sources is not None:
-        expected_chunks = _expected_chunk_rows(
-            authoritative_sources,
-            manifest=manifest,
-            deadline=deadline,
-            cancelled=cancelled,
-        )
-        if expected_chunks is None:
-            return False
     count = _stored_chunk_count(connection)
     if not _chunk_count_agrees(count, metadata, expected_chunks):
         return False
