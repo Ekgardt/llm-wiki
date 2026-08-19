@@ -3808,6 +3808,82 @@ def _rrf_fuse_triple(
     return results
 
 
+_PAGE_STATUS_RE = re.compile(r"^status:\s*[\"\']?([^\"\'\n]+)[\"\']?\s*$", re.MULTILINE)
+
+
+def _page_status(path: str) -> str:
+    """The page's own status, or "active" when it does not say."""
+    try:
+        page = ROOT / path if not Path(path).is_absolute() else Path(path)
+        content = page.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return "active"
+    status = _extract_frontmatter_field(content, _PAGE_STATUS_RE) or "active"
+    return status.strip().lower()
+
+
+def _legacy_vector_excluded(
+    path: str, timestamp: str, *, since: str | None, as_of: str | None
+) -> bool:
+    if _legacy_row_excluded(path, timestamp, since, as_of):
+        return True
+    if as_of:
+        return False
+    # Without an as-of date, a superseded page is history.
+    status = _page_status(path)
+    return bool(status) and status != "active"
+
+
+def _vector_cache_matrix(vectors_data: Mapping[str, object]) -> object | None:
+    """The cached matrix as an ndarray, or None when the cache is unusable."""
+    import numpy as np
+
+    vectors = vectors_data["vectors"]
+    if isinstance(vectors, list):
+        # Refuse list-converted caches; require ndarray/mmap.
+        return None
+    matrix = np.asarray(vectors)
+    if matrix.ndim != 2 or matrix.shape[0] != len(vectors_data["paths"]):
+        return None
+    return matrix
+
+
+def _query_vector_for(
+    query: str, matrix: object, *, deadline: float | None, cancelled
+) -> object | None:
+    import numpy as np
+
+    embedded = _embed_texts([query], is_query=True, deadline=deadline, cancelled=cancelled)
+    if not embedded:
+        return None
+    vector = np.asarray(embedded[0], dtype=np.float32)
+    if vector.shape[0] != matrix.shape[1] or not np.isfinite(vector).all():
+        return None
+    return vector
+
+
+def _vector_hit(
+    index: int,
+    similarity: float,
+    vectors_data: Mapping[str, object],
+    project: str | None,
+) -> dict:
+    path = vectors_data["paths"][index]
+    row_project = vectors_data["projects"][index]
+    score = round(float(similarity), 4)
+    if project and row_project and row_project.lower() == project.lower():
+        score = round(score * 1.5, 4)
+    return {
+        "path": path,
+        "title": vectors_data["titles"][index],
+        "summary": (vectors_data["summaries"][index] or "")[:120],
+        "score": score,
+        "project": row_project,
+        "timestamp": vectors_data["timestamps"][index],
+        "candidate_id": Path(path).stem,
+    }
+
+
 def _vector_search(
     query: str,
     pages: list[Path],
@@ -3819,94 +3895,32 @@ def _vector_search(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> list[dict] | None:
-    """Run vector similarity search using sentence-transformers.
-
-    Builds embeddings for all pages (cached) and the query, then
-    returns pages ranked by cosine similarity.
-    """
-    import numpy as np
-
-    # Load or build vector cache
+    """Rank pages by cosine similarity against the cached page embeddings."""
     _check_legacy_stop(deadline, cancelled)
-    vectors_data = _load_or_build_vectors(
-        pages, deadline=deadline, cancelled=cancelled
-    )
+    vectors_data = _load_or_build_vectors(pages, deadline=deadline, cancelled=cancelled)
     if not vectors_data:
         return None
-
-    paths = vectors_data["paths"]
-    titles = vectors_data["titles"]
-    summaries = vectors_data["summaries"]
-    projects = vectors_data["projects"]
-    timestamps = vectors_data["timestamps"]
-    vectors = vectors_data["vectors"]
-    if isinstance(vectors, list):
-        # Refuse list-converted caches; require ndarray/mmap.
+    matrix = _vector_cache_matrix(vectors_data)
+    if matrix is None:
         return None
-    matrix = np.asarray(vectors)
-    if matrix.ndim != 2 or matrix.shape[0] != len(paths):
-        return None
-
-    # Embed the query
-    query_vec = _embed_texts(
-        [query], is_query=True, deadline=deadline, cancelled=cancelled
+    query_vector = _query_vector_for(
+        query, matrix, deadline=deadline, cancelled=cancelled
     )
-    if not query_vec:
+    if query_vector is None:
         return None
-    q = np.asarray(query_vec[0], dtype=np.float32)
-    if q.shape[0] != matrix.shape[1] or not np.isfinite(q).all():
-        return None
-
-    # Compute cosine similarity without materializing full Python lists.
-    sims = _cosine_similarity(q, matrix)
-
-    # Build results
+    similarities = _cosine_similarity(query_vector, matrix)
     results = []
-    for i, sim in enumerate(sims):
+    for index, similarity in enumerate(similarities):
         _check_legacy_stop(deadline, cancelled)
-        proj = projects[i]
-        ts = timestamps[i]
-        path = paths[i]
-        if since and ts:
-            try:
-                if ts[:10] < since:
-                    continue
-            except (IndexError, TypeError):
-                pass
-        if as_of and ts:
-            try:
-                if ts[:10] > as_of[:10]:
-                    continue
-            except (IndexError, TypeError):
-                pass
-        if as_of and not _valid_as_of(path, as_of):
+        if _legacy_vector_excluded(
+            vectors_data["paths"][index],
+            str(vectors_data["timestamps"][index] or ""),
+            since=since,
+            as_of=as_of,
+        ):
             continue
-        # status filter parity when frontmatter status is superseded and no as_of
-        if not as_of:
-            try:
-                p = ROOT / path if not Path(path).is_absolute() else Path(path)
-                content = p.read_text(encoding="utf-8", errors="ignore")
-                status = (_extract_frontmatter_field(content, re.compile(
-                    r"^status:\s*[\"']?([^\"'\n]+)[\"']?\s*$", re.MULTILINE
-                )) or "active").strip().lower()
-                if status and status not in {"active", ""}:
-                    continue
-            except OSError:
-                pass
-        score = round(float(sim), 4)
-        if project and proj and proj.lower() == project.lower():
-            score = round(score * 1.5, 4)
-        results.append({
-            "path": path,
-            "title": titles[i],
-            "summary": (summaries[i] or "")[:120],
-            "score": score,
-            "project": proj,
-            "timestamp": ts,
-            "candidate_id": Path(path).stem,
-        })
-
-    results.sort(key=lambda x: (-x["score"], x["path"]))
+        results.append(_vector_hit(index, similarity, vectors_data, project))
+    results.sort(key=lambda hit: (-hit["score"], hit["path"]))
     return results[:limit]
 
 
