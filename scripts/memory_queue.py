@@ -3114,6 +3114,193 @@ def _corrupt_disposition_key(
     )
 
 
+def _corrupt_child_leaf_blocker(
+    queue: MemoryQueue, database: sqlite3.Connection, child: sqlite3.Row, now: datetime
+) -> str | None:
+    """A child something else was redriven from is not a leaf."""
+    row = database.execute(
+        "SELECT 1 FROM tasks WHERE redrive_of=? LIMIT 1", (str(child["id"]),)
+    ).fetchone()
+    return "corrupt_child_not_leaf" if row is not None else None
+
+
+def _corrupt_child_state_blocker(
+    queue: MemoryQueue, database: sqlite3.Connection, child: sqlite3.Row, now: datetime
+) -> str | None:
+    """A child still running, or one whose kind is kept forever."""
+    if child["state"] not in _TERMINAL_STATES:
+        return "corrupt_child_nonterminal"
+    if child["state"] == "dead" and DEFAULTS.dead_task_retention_days is None:
+        return "corrupt_child_retained"
+    return None
+
+
+def _child_retention_days(child: sqlite3.Row) -> int | None:
+    if child["state"] == "dead":
+        return DEFAULTS.dead_task_retention_days
+    return DEFAULTS.queue_result_retention_days
+
+
+def _corrupt_child_retention_blocker(
+    queue: MemoryQueue, database: sqlite3.Connection, child: sqlite3.Row, now: datetime
+) -> str | None:
+    """A child whose retention window has not run out yet."""
+    updated_at = _parse_timestamp(str(child["updated_at"]))
+    retention_days = _child_retention_days(child)
+    if updated_at is None or retention_days is None:
+        return "corrupt_child_retention_active"
+    if updated_at + timedelta(days=retention_days) > now:
+        return "corrupt_child_retention_active"
+    return None
+
+
+def _corrupt_child_fence_blocker(
+    queue: MemoryQueue, database: sqlite3.Connection, child: sqlite3.Row, now: datetime
+) -> str | None:
+    row = database.execute(
+        "SELECT 1 FROM task_fences WHERE task_id=? LIMIT 1", (str(child["id"]),)
+    ).fetchone()
+    return "corrupt_child_fenced" if row is not None else None
+
+
+def _active_binding_or_block(
+    queue: MemoryQueue, database: sqlite3.Connection, child_id: str
+) -> tuple[object | None, str | None]:
+    """The child's active capture binding, or why it cannot be read."""
+    link_exists = (
+        database.execute(
+            "SELECT 1 FROM capture_task_links WHERE task_id=?", (child_id,)
+        ).fetchone()
+        is not None
+    )
+    try:
+        return queue.active_capture_binding(database, child_id), None
+    except QueueOperationError:
+        if link_exists:
+            return None, "corrupt_child_intent_unresolved"
+        return None, None
+
+
+def _corrupt_child_intent_blocker(
+    queue: MemoryQueue, database: sqlite3.Connection, child: sqlite3.Row, now: datetime
+) -> str | None:
+    """A child whose capture intent has no terminal record yet."""
+    child_id = str(child["id"])
+    binding, blocker = _active_binding_or_block(queue, database, child_id)
+    if blocker is not None:
+        return blocker
+    if binding is None or binding.intent_id is None:
+        return None
+    if queue._capture_terminal_blocker(database, child_id, binding) is None:
+        return None
+    return "corrupt_child_intent_unresolved"
+
+
+def _corrupt_child_decision_blocker(
+    queue: MemoryQueue, database: sqlite3.Connection, child: sqlite3.Row, now: datetime
+) -> str | None:
+    row = database.execute(
+        """SELECT 1 FROM capture_task_link_seals
+           WHERE task_id=? AND consumer_kind='semantic-decision' LIMIT 1""",
+        (str(child["id"]),),
+    ).fetchone()
+    return "corrupt_child_decision_retained" if row is not None else None
+
+
+def _corrupt_child_result_blocker(
+    queue: MemoryQueue, database: sqlite3.Connection, child: sqlite3.Row, now: datetime
+) -> str | None:
+    fields = ("result_reference", "result_sha256", "result_operation_id")
+    if any(child[field] is not None for field in fields):
+        return "corrupt_child_result_retained"
+    return None
+
+
+_CORRUPT_CHILD_CHECKS = (
+    _corrupt_child_leaf_blocker,
+    _corrupt_child_state_blocker,
+    _corrupt_child_retention_blocker,
+    _corrupt_child_fence_blocker,
+    _corrupt_child_intent_blocker,
+    _corrupt_child_decision_blocker,
+    _corrupt_child_result_blocker,
+)
+
+
+def _owner_only_directory(package: Path) -> bool:
+    """A real, owner-only directory — not a link, a reparse point, or a file."""
+    metadata = package.lstat()
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if stat.S_ISLNK(metadata.st_mode):
+        return False
+    if getattr(metadata, "st_file_attributes", 0) & reparse_flag:
+        return False
+    if not stat.S_ISDIR(metadata.st_mode):
+        return False
+    return _is_owner_only(package)
+
+
+def _validated_corrupt_records(
+    package: Path,
+) -> tuple[bytes, bytes, dict[str, object], dict[str, object]]:
+    """The manifest and disposition bytes, and the objects they parse into."""
+    schemas = Path(__file__).with_name("schemas")
+    manifest_bytes = _read_stable_owner_file(package / "manifest.json", 64 * 1024)
+    disposition_bytes = _read_stable_owner_file(
+        package / "disposition.json", 64 * 1024
+    )
+    manifest = json.loads(manifest_bytes.decode("utf-8", errors="strict"))
+    record = json.loads(disposition_bytes.decode("utf-8", errors="strict"))
+    validate_schema(manifest, schemas / "corrupt-task-manifest-v1.json")
+    validate_schema(record, schemas / "corrupt-task-disposition-v1.json")
+    return manifest_bytes, disposition_bytes, manifest, record
+
+
+def _corrupt_records_match(
+    manifest_bytes: bytes,
+    disposition_bytes: bytes,
+    manifest: Mapping[str, object],
+    record: Mapping[str, object],
+    disposition: sqlite3.Row,
+) -> bool:
+    """The package's own records agree with the row that points at them."""
+    if sha256_bytes(manifest_bytes) != disposition["manifest_sha256"]:
+        return False
+    if sha256_bytes(disposition_bytes) != disposition["disposition_sha256"]:
+        return False
+    task_id = disposition["task_id"]
+    package_path = disposition["package_path"]
+    named = (
+        manifest["task_id"],
+        record["task_id"],
+        manifest["package_path"],
+        record["package_path"],
+    )
+    return named == (task_id, task_id, package_path, package_path)
+
+
+def _corrupt_payload_matches(
+    package: Path, manifest: Mapping[str, object], disposition: sqlite3.Row
+) -> bool:
+    """The exported bytes still hash to what the manifest recorded."""
+    raw = _read_stable_owner_file(package / "payload.bin", _MAX_QUEUE_PAYLOAD_BYTES)
+    history = _read_stable_owner_file(
+        package / "attempt-history.json", _MAX_EXPORT_METADATA_BYTES
+    )
+    metadata = _read_stable_owner_file(
+        package / "task-metadata.json", _MAX_EXPORT_METADATA_BYTES
+    )
+    digests = (sha256_bytes(raw), sha256_bytes(history), sha256_bytes(metadata))
+    expected = (
+        manifest["raw_sha256"],
+        manifest["history_sha256"],
+        manifest["metadata_sha256"],
+    )
+    if digests != expected:
+        return False
+    return manifest["rolling_root"] == disposition["original_frozen_root"]
+
+
 class MemoryQueue:
     """Durable priority queue with lease-token fencing and at-least-once delivery."""
 
@@ -7411,57 +7598,11 @@ class _QueueV3CandidateReader:
         *,
         now: datetime,
     ) -> str | None:
-        child_id = str(child["id"])
-        if database.execute(
-            "SELECT 1 FROM tasks WHERE redrive_of=? LIMIT 1", (child_id,)
-        ).fetchone() is not None:
-            return "corrupt_child_not_leaf"
-        if child["state"] not in _TERMINAL_STATES:
-            return "corrupt_child_nonterminal"
-        if child["state"] == "dead" and DEFAULTS.dead_task_retention_days is None:
-            return "corrupt_child_retained"
-        updated_at = _parse_timestamp(str(child["updated_at"]))
-        retention_days = (
-            DEFAULTS.dead_task_retention_days
-            if child["state"] == "dead"
-            else DEFAULTS.queue_result_retention_days
-        )
-        if (
-            updated_at is None
-            or retention_days is None
-            or updated_at + timedelta(days=retention_days) > now
-        ):
-            return "corrupt_child_retention_active"
-        if database.execute(
-            "SELECT 1 FROM task_fences WHERE task_id=? LIMIT 1", (child_id,)
-        ).fetchone() is not None:
-            return "corrupt_child_fenced"
-        link_exists = database.execute(
-            "SELECT 1 FROM capture_task_links WHERE task_id=?", (child_id,)
-        ).fetchone() is not None
-        try:
-            binding = self.active_capture_binding(database, child_id)
-        except QueueOperationError:
-            if link_exists:
-                return "corrupt_child_intent_unresolved"
-            binding = None
-        if binding is not None and binding.intent_id is not None:
-            terminal_code = self._capture_terminal_blocker(
-                database, child_id, binding
-            )
-            if terminal_code is not None:
-                return "corrupt_child_intent_unresolved"
-        if database.execute(
-            """SELECT 1 FROM capture_task_link_seals
-               WHERE task_id=? AND consumer_kind='semantic-decision' LIMIT 1""",
-            (child_id,),
-        ).fetchone() is not None:
-            return "corrupt_child_decision_retained"
-        if any(
-            child[field] is not None
-            for field in ("result_reference", "result_sha256", "result_operation_id")
-        ):
-            return "corrupt_child_result_retained"
+        """Why this child of a corrupt export cannot be purged yet."""
+        for check in _CORRUPT_CHILD_CHECKS:
+            code = check(self, database, child, now)
+            if code is not None:
+                return code
         return None
 
     def _corrupt_purge_child_descriptor(
@@ -8294,64 +8435,16 @@ class _QueueV3CandidateReader:
     def _corrupt_package_purge_blocker(
         self, package: Path, disposition: sqlite3.Row
     ) -> str | None:
+        """Why the exported package cannot be trusted as the task's evidence."""
         try:
-            metadata = package.lstat()
-            reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-            if (
-                stat.S_ISLNK(metadata.st_mode)
-                or getattr(metadata, "st_file_attributes", 0) & reparse_flag
-                or not stat.S_ISDIR(metadata.st_mode)
-                or not _is_owner_only(package)
-            ):
+            if not _owner_only_directory(package):
                 return "corrupt_package_invalid"
-            manifest_bytes = _read_stable_owner_file(
-                package / "manifest.json", 64 * 1024
-            )
-            disposition_bytes = _read_stable_owner_file(
-                package / "disposition.json", 64 * 1024
-            )
-            manifest = json.loads(manifest_bytes.decode("utf-8", errors="strict"))
-            disposition_record = json.loads(
-                disposition_bytes.decode("utf-8", errors="strict")
-            )
-            validate_schema(
-                manifest,
-                Path(__file__).with_name("schemas") / "corrupt-task-manifest-v1.json",
-            )
-            validate_schema(
-                disposition_record,
-                Path(__file__).with_name("schemas")
-                / "corrupt-task-disposition-v1.json",
-            )
+            records = _validated_corrupt_records(package)
+            if not _corrupt_records_match(*records, disposition):
+                return "corrupt_package_invalid"
+            if not _corrupt_payload_matches(package, records[2], disposition):
+                return "corrupt_package_invalid"
         except (OSError, PermissionError, ValueError, json.JSONDecodeError):
-            return "corrupt_package_invalid"
-        if (
-            sha256_bytes(manifest_bytes) != disposition["manifest_sha256"]
-            or sha256_bytes(disposition_bytes) != disposition["disposition_sha256"]
-            or manifest["task_id"] != disposition["task_id"]
-            or disposition_record["task_id"] != disposition["task_id"]
-            or manifest["package_path"] != disposition["package_path"]
-            or disposition_record["package_path"] != disposition["package_path"]
-        ):
-            return "corrupt_package_invalid"
-        try:
-            raw = _read_stable_owner_file(
-                package / "payload.bin", _MAX_QUEUE_PAYLOAD_BYTES
-            )
-            history = _read_stable_owner_file(
-                package / "attempt-history.json", _MAX_EXPORT_METADATA_BYTES
-            )
-            metadata = _read_stable_owner_file(
-                package / "task-metadata.json", _MAX_EXPORT_METADATA_BYTES
-            )
-        except (OSError, PermissionError, ValueError):
-            return "corrupt_package_invalid"
-        if (
-            sha256_bytes(raw) != manifest["raw_sha256"]
-            or sha256_bytes(history) != manifest["history_sha256"]
-            or sha256_bytes(metadata) != manifest["metadata_sha256"]
-            or manifest["rolling_root"] != disposition["original_frozen_root"]
-        ):
             return "corrupt_package_invalid"
         return None
 
