@@ -796,50 +796,113 @@ def read_repository_source_bytes(
     return content
 
 
-def _decoded_provider_uri(uri: object) -> tuple[str, str] | None:
-    if (
-        not isinstance(uri, str)
-        or not uri
-        or len(uri) > _MAX_PROVIDER_URI
-        or any(ord(character) > 127 or _is_control(character) for character in uri)
-        or any(character.isspace() for character in uri)
-        or "\\" in uri
-        or "?" in uri
-        or "#" in uri
-        or _MALFORMED_PERCENT.search(uri)
-        or _ENCODED_SEPARATOR.search(uri)
-    ):
-        return None
+def _unsafe_uri_shape(uri: object) -> bool:
+    if not isinstance(uri, str) or not uri:
+        return True
+    return len(uri) > _MAX_PROVIDER_URI
+
+
+def _outside_printable_ascii(character: str) -> bool:
+    return ord(character) > 127 or _is_control(character) or character.isspace()
+
+
+def _unsafe_uri_characters(uri: str) -> bool:
+    if any(_outside_printable_ascii(character) for character in uri):
+        return True
+    return any(character in uri for character in ("\\", "?", "#"))
+
+
+def _unsafe_provider_uri_text(uri: object) -> bool:
+    """Refuse anything the URI grammar allows but our path rules do not."""
+    if _unsafe_uri_shape(uri):
+        return True
+    if _unsafe_uri_characters(uri):
+        return True
+    return bool(_MALFORMED_PERCENT.search(uri) or _ENCODED_SEPARATOR.search(uri))
+
+
+def _split_provider_uri(uri: str) -> tuple[object, str, str] | None:
     try:
         parsed = urlsplit(uri)
         authority = unquote_to_bytes(parsed.netloc).decode("utf-8", errors="strict")
         path = unquote_to_bytes(parsed.path).decode("utf-8", errors="strict")
     except (UnicodeError, ValueError):
         return None
-    if (
-        parsed.scheme.casefold() != "file"
-        or parsed.query
-        or parsed.fragment
-        or authority.casefold() not in {"", "localhost"}
-        or "@" in authority
-        or any(_is_control(character) for character in authority + path)
-        or "\\" in path
-        or path.startswith("//")
-    ):
-        return None
+    return parsed, authority, path
 
-    if os.name == "nt":
-        local = path[1:] if path.startswith("/") else path
-        if not _WINDOWS_DRIVE_PATH.match(local):
-            return None
-        components = local[3:].split("/") if len(local) > 3 else []
-    elif os.name == "posix":
-        if not path.startswith("/") or path.startswith("//"):
-            return None
-        components = path[1:].split("/") if len(path) > 1 else []
-    else:
+
+def _unsafe_provider_scheme(parsed: object) -> bool:
+    if parsed.scheme.casefold() != "file":
+        return True
+    return bool(parsed.query or parsed.fragment)
+
+
+def _unsafe_provider_authority(authority: str) -> bool:
+    if authority.casefold() not in {"", "localhost"}:
+        return True
+    return "@" in authority
+
+
+def _unsafe_provider_path(path: str) -> bool:
+    return "\\" in path or path.startswith("//")
+
+
+def _unsafe_provider_parts(parsed: object, authority: str, path: str) -> bool:
+    if _unsafe_provider_scheme(parsed) or _unsafe_provider_authority(authority):
+        return True
+    if any(_is_control(character) for character in authority + path):
+        return True
+    return _unsafe_provider_path(path)
+
+
+def _windows_path_components(path: str) -> list[str] | None:
+    local = path[1:] if path.startswith("/") else path
+    if not _WINDOWS_DRIVE_PATH.match(local):
         return None
-    if any(component in {"", ".", ".."} for component in components):
+    if len(local) > 3:
+        return local[3:].split("/")
+    return []
+
+
+def _posix_path_components(path: str) -> list[str] | None:
+    if not path.startswith("/") or path.startswith("//"):
+        return None
+    if len(path) > 1:
+        return path[1:].split("/")
+    return []
+
+
+def _provider_path_components(path: str) -> list[str] | None:
+    if os.name == "nt":
+        return _windows_path_components(path)
+    if os.name == "posix":
+        return _posix_path_components(path)
+    return None
+
+
+def _traversing_components(components: list[str]) -> bool:
+    return any(component in {"", ".", ".."} for component in components)
+
+
+def _validated_provider_parts(uri: object) -> tuple[str, str] | None:
+    if _unsafe_provider_uri_text(uri):
+        return None
+    split = _split_provider_uri(uri)
+    if split is None:
+        return None
+    parsed, authority, path = split
+    if _unsafe_provider_parts(parsed, authority, path):
+        return None
+    return authority, path
+
+
+def _decoded_provider_uri(uri: object) -> tuple[str, str] | None:
+    parts = _validated_provider_parts(uri)
+    if parts is None:
+        return None
+    authority, path = parts
+    components = _provider_path_components(path)
+    if components is None or _traversing_components(components):
         return None
     return authority, path
 
@@ -2053,108 +2116,168 @@ def _redact_path(value: str, path: Path, marker: str) -> str:
     return _redact_posix_path_tokens(value, path, marker)
 
 
-def _normalize_log_text(value: str) -> str:
-    pieces: list[str] = []
-    index = 0
-    state = "ground"
-    osc = False
-    string_introducers = {
+def _collapses_to_space(character: str) -> bool:
+    if ord(character) < 32 or 127 <= ord(character) <= 159:
+        return True
+    return unicodedata.category(character) in {"Zl", "Zp"}
+
+
+class _LogScanner:
+    """Drop terminal control sequences while keeping every printable character."""
+
+    _STRING_INTRODUCERS = {
         "P": False,
         "X": False,
         "]": True,
         "^": False,
         "_": False,
     }
-    c1_string_introducers = {
+    _C1_STRING_INTRODUCERS = {
         "\x90": False,
         "\x98": False,
         "\x9d": True,
         "\x9e": False,
         "\x9f": False,
     }
-    c1_introducers = frozenset(("\x9b", *c1_string_introducers))
+    _C1_INTRODUCERS = frozenset(("\x9b", *_C1_STRING_INTRODUCERS))
 
-    def append_safe_space() -> None:
-        if not pieces or pieces[-1] != " ":
-            pieces.append(" ")
+    def __init__(self, value: str) -> None:
+        self.value = value
+        self.pieces: list[str] = []
+        self.index = 0
+        self.state = "ground"
+        self.osc = False
 
-    while index < len(value):
-        character = value[index]
-        if state == "string":
-            if character == "\x9c":
-                state = "ground"
-                index += 1
-                continue
-            if character == "\x1b" and value[index + 1 : index + 2] == "\\":
-                state = "ground"
-                index += 2
-                continue
-            if osc and character == "\x07":
-                state = "ground"
-                index += 1
-                continue
-        if state != "ground" and (
-            character == "\x1b" or character in c1_introducers
-        ):
-            state = "ground"
-            continue
-        if state == "escape":
-            index += 1
-            if "0" <= character <= "~":
-                state = "ground"
-            elif not " " <= character <= "/":
-                state = "ground"
-            continue
-        if state == "csi":
-            index += 1
+    def run(self) -> str:
+        while self.index < len(self.value):
+            self._step()
+        return "".join(self.pieces)
+
+    def _step(self) -> None:
+        character = self.value[self.index]
+        if self._string_terminated(character):
+            return
+        if self._interrupted_by_introducer(character):
+            return
+        if self._inside_sequence(character):
+            return
+        if self._introduces_sequence(character):
+            return
+        self._emit(character)
+        self.index += 1
+
+    def _string_terminator_length(self, character: str) -> int:
+        if character == "\x9c":
+            return 1
+        if character == "\x1b" and self.value[self.index + 1 : self.index + 2] == "\\":
+            return 2
+        if self.osc and character == "\x07":
+            return 1
+        return 0
+
+    def _string_terminated(self, character: str) -> bool:
+        if self.state != "string":
+            return False
+        length = self._string_terminator_length(character)
+        if not length:
+            return False
+        self.state = "ground"
+        self.index += length
+        return True
+
+    def _interrupted_by_introducer(self, character: str) -> bool:
+        """A new introducer inside a sequence abandons the unfinished one."""
+        if self.state == "ground":
+            return False
+        if character != "\x1b" and character not in self._C1_INTRODUCERS:
+            return False
+        self.state = "ground"
+        return True
+
+    @staticmethod
+    def _escape_next_state(character: str) -> str:
+        if "0" <= character <= "~":
+            return "ground"
+        if not " " <= character <= "/":
+            return "ground"
+        return "escape"
+
+    def _inside_sequence(self, character: str) -> bool:
+        if self.state == "escape":
+            self.index += 1
+            self.state = self._escape_next_state(character)
+            return True
+        if self.state == "csi":
+            self.index += 1
             if "@" <= character <= "~":
-                state = "ground"
-            continue
-        if state == "string":
-            index += 1
-            continue
+                self.state = "ground"
+            return True
+        if self.state == "string":
+            self.index += 1
+            return True
+        return False
+
+    def _skip_known_escape(self, following: str) -> None:
+        if " " <= following <= "/":
+            self.state = "escape"
+            self.index += 2
+            return
+        if "0" <= following <= "~":
+            self.index += 2
+            return
+        self.index += 1
+
+    def _skip_escape_body(self, following: str) -> None:
+        if following == "\\":
+            self.index += 2
+            return
+        if not following:
+            self.index += 1
+            return
+        self._skip_known_escape(following)
+
+    def _escape_introducer(self) -> None:
+        following = self.value[self.index + 1 : self.index + 2]
+        if following == "[":
+            self.state = "csi"
+            self.index += 2
+            return
+        if following in self._STRING_INTRODUCERS:
+            self.state = "string"
+            self.osc = self._STRING_INTRODUCERS[following]
+            self.index += 2
+            return
+        self._skip_escape_body(following)
+
+    def _introduces_sequence(self, character: str) -> bool:
         if character == "\x1b":
-            following = value[index + 1 : index + 2]
-            if following == "[":
-                state = "csi"
-                index += 2
-                continue
-            if following in string_introducers:
-                state = "string"
-                osc = string_introducers[following]
-                index += 2
-                continue
-            if following == "\\":
-                index += 2
-                continue
-            if following and " " <= following <= "/":
-                state = "escape"
-                index += 2
-                continue
-            if following and "0" <= following <= "~":
-                index += 2
-                continue
-            index += 1
-            continue
-        elif character == "\x9b":
-            state = "csi"
-            index += 1
-            continue
-        elif character in c1_string_introducers:
-            state = "string"
-            osc = c1_string_introducers[character]
-            index += 1
-            continue
+            self._escape_introducer()
+            return True
+        if character == "\x9b":
+            self.state = "csi"
+            self.index += 1
+            return True
+        if character in self._C1_STRING_INTRODUCERS:
+            self.state = "string"
+            self.osc = self._C1_STRING_INTRODUCERS[character]
+            self.index += 1
+            return True
+        return False
+
+    def _append_safe_space(self) -> None:
+        if not self.pieces or self.pieces[-1] != " ":
+            self.pieces.append(" ")
+
+    def _emit(self, character: str) -> None:
         if not _is_control(character):
-            pieces.append(character)
-        elif (
-            ord(character) < 32
-            or 127 <= ord(character) <= 159
-            or unicodedata.category(character) in {"Zl", "Zp"}
-        ):
-            append_safe_space()
-        index += 1
-    return "".join(pieces)
+            self.pieces.append(character)
+            return
+        if _collapses_to_space(character):
+            self._append_safe_space()
+
+
+def _normalize_log_text(value: str) -> str:
+    return _LogScanner(value).run()
 
 
 def redact_lsp_text(
