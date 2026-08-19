@@ -511,10 +511,16 @@ def _graph_seeds(
     """Select rank-qualified seeds without comparing backend score magnitudes."""
     selected: dict[str, Mapping[str, Any]] = {}
     for rows in (lexical or (), dense or ()):
-        for rank, row in enumerate(rows, start=1):
-            if _seed_qualifies(row, rank):
-                selected.setdefault(_candidate_key(row), row)
+        _collect_seeds(selected, rows)
     return tuple(selected.values())[:GRAPH_SEED_LIMIT]
+
+
+def _collect_seeds(
+    selected: dict[str, Mapping[str, Any]], rows: Sequence[Mapping[str, Any]]
+) -> None:
+    for rank, row in enumerate(rows, start=1):
+        if _seed_qualifies(row, rank):
+            selected.setdefault(_candidate_key(row), row)
 
 
 def _seed_qualifies(row: Mapping[str, Any], rank: int) -> bool:
@@ -1125,6 +1131,79 @@ def _merge_candidate_meta(meta: dict[str, Any], row: Mapping[str, Any]) -> None:
     )
 
 
+# Per-backend fusion contribution: rank field, score field, raw source field.
+# The weights are read per call so a caller can still tune them at runtime.
+_FUSION_BACKENDS = (
+    ("lexical", "bm25_rank", "bm25_score", "bm25_score"),
+    ("dense", "vector_rank", "vector_score", "vector_score"),
+    ("graph", "graph_rank", "graph_score", "graph_boost"),
+)
+
+
+def _fusion_weights() -> dict[str, float]:
+    return {"lexical": BM25_WEIGHT, "dense": DENSE_WEIGHT, "graph": GRAPH_WEIGHT}
+
+
+def _raw_backend_score(row: Mapping[str, Any], field: str) -> float | None:
+    """The backend's own magnitude, kept for display but never fused."""
+    if field in row:
+        return _as_float(row.get(field))
+    return _as_float(row.get("score"))
+
+
+def _accumulate_backend(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    weight: float,
+    rank_field: str,
+    score_field: str,
+    raw_field: str,
+    k: int,
+    scores: dict[str, float],
+    meta: dict[str, dict[str, Any]],
+) -> None:
+    for rank, row in enumerate(rows, start=1):
+        key = _ensure_candidate_meta(meta, row)
+        scores[key] = scores.get(key, 0.0) + weight / (k + rank)
+        meta[key][rank_field] = rank
+        meta[key][score_field] = _raw_backend_score(row, raw_field)
+
+
+def _ensure_candidate_meta(meta: dict[str, dict[str, Any]], row: Mapping[str, Any]) -> str:
+    key = _candidate_key(row)
+    if key not in meta:
+        meta[key] = _new_candidate_meta(key, row)
+        return key
+    _merge_candidate_meta(meta[key], row)
+    return key
+
+
+def _fused_candidate(
+    key: str, info: Mapping[str, Any], rrf: float, final: float
+) -> RetrievalCandidate:
+    del key
+    return RetrievalCandidate(
+        candidate_id=info["candidate_id"],
+        parent_id=info["parent_id"],
+        relative_path=info["relative_path"],
+        heading_path=info["heading_path"],
+        source_sha256=info["source_sha256"],
+        byte_start=info["byte_start"],
+        byte_end=info["byte_end"],
+        bm25_rank=info["bm25_rank"],
+        bm25_score=info["bm25_score"],
+        vector_rank=info["vector_rank"],
+        vector_score=info["vector_score"],
+        graph_rank=info["graph_rank"],
+        graph_score=info["graph_score"],
+        rrf_score=rrf,
+        rerank_score=None,
+        final_score=final,
+        evidence_ids=info["evidence_ids"],
+        authority_weight=info["authority_weight"],
+    )
+
+
 def fuse_rrf(
     *,
     lexical: Sequence[Mapping[str, Any]] | None,
@@ -1140,71 +1219,27 @@ def fuse_rrf(
     """
     scores: dict[str, float] = {}
     meta: dict[str, dict[str, Any]] = {}
-
-    def ensure(row: Mapping[str, Any]) -> str:
-        key = _candidate_key(row)
-        if key not in meta:
-            meta[key] = _new_candidate_meta(key, row)
-            return key
-        _merge_candidate_meta(meta[key], row)
-        return key
-
-    if lexical:
-        for rank, row in enumerate(lexical, start=1):
-            key = ensure(row)
-            scores[key] = scores.get(key, 0.0) + BM25_WEIGHT / (k + rank)
-            meta[key]["bm25_rank"] = rank
-            meta[key]["bm25_score"] = _as_float(
-                row.get("bm25_score") if "bm25_score" in row else row.get("score")
+    supplied = {"lexical": lexical, "dense": dense, "graph": graph}
+    weights = _fusion_weights()
+    for name, rank_field, score_field, raw_field in _FUSION_BACKENDS:
+        rows = supplied[name]
+        if rows:
+            _accumulate_backend(
+                rows,
+                weight=weights[name],
+                rank_field=rank_field,
+                score_field=score_field,
+                raw_field=raw_field,
+                k=k,
+                scores=scores,
+                meta=meta,
             )
-
-    if dense:
-        for rank, row in enumerate(dense, start=1):
-            key = ensure(row)
-            scores[key] = scores.get(key, 0.0) + DENSE_WEIGHT / (k + rank)
-            meta[key]["vector_rank"] = rank
-            meta[key]["vector_score"] = _as_float(
-                row.get("vector_score") if "vector_score" in row else row.get("score")
-            )
-
-    if graph:
-        for rank, row in enumerate(graph, start=1):
-            key = ensure(row)
-            # Rank-only contribution; store raw boost separately.
-            scores[key] = scores.get(key, 0.0) + GRAPH_WEIGHT / (k + rank)
-            meta[key]["graph_rank"] = rank
-            meta[key]["graph_score"] = _as_float(
-                row.get("graph_boost") if "graph_boost" in row else row.get("score")
-            )
-
     weighted = _weigh_by_authority(scores, meta)
     ordered = sorted(weighted, key=lambda item: (-weighted[item], item))
-    candidates: list[RetrievalCandidate] = []
-    for key in ordered:
-        rrf = round(scores[key], 6)
-        info = meta[key]
-        candidates.append(
-            RetrievalCandidate(
-                candidate_id=info["candidate_id"],
-                parent_id=info["parent_id"],
-                relative_path=info["relative_path"],
-                heading_path=info["heading_path"],
-                source_sha256=info["source_sha256"],
-                byte_start=info["byte_start"],
-                byte_end=info["byte_end"],
-                bm25_rank=info["bm25_rank"],
-                bm25_score=info["bm25_score"],
-                vector_rank=info["vector_rank"],
-                vector_score=info["vector_score"],
-                graph_rank=info["graph_rank"],
-                graph_score=info["graph_score"],
-                rrf_score=rrf,
-                rerank_score=None,
-                final_score=round(weighted[key], 6),
-                evidence_ids=info["evidence_ids"],
-                authority_weight=info["authority_weight"],
-            )
-        )
+    candidates = [
+        _fused_candidate(key, meta[key], round(scores[key], 6), round(weighted[key], 6))
+        for key in ordered
+    ]
     return tuple(candidates), meta
 
 
@@ -1561,13 +1596,7 @@ def _promote_exact_title(
     query_norm: str,
 ) -> tuple[RetrievalCandidate, ...]:
     """A title equal to the query goes first, before any reranking."""
-    rows.sort(
-        key=lambda row: (
-            0 if str(row.get("title", "")).casefold().strip() == query_norm else 1,
-            -float(row.get("rrf_score") or 0.0),
-            str(row.get("candidate_id") or ""),
-        )
-    )
+    rows.sort(key=lambda row: _exact_title_order(row, query_norm))
     by_id = {candidate.candidate_id: candidate for candidate in candidates}
     promoted = [
         by_id[str(row["candidate_id"])]
@@ -1577,13 +1606,19 @@ def _promote_exact_title(
     return tuple(promoted) or tuple(candidates)
 
 
+def _exact_title_order(row: Mapping[str, Any], query_norm: str) -> tuple[Any, ...]:
+    exact = str(row.get("title", "")).casefold().strip() == query_norm
+    return (0 if exact else 1, -float(row.get("rrf_score") or 0.0), str(row.get("candidate_id") or ""))
+
+
 def _candidate_from_rerank_row(row: Mapping[str, Any]) -> RetrievalCandidate:
+    path = str(_first_present(row, ("relative_path", "path"), ""))
     return RetrievalCandidate(
-        candidate_id=str(row.get("candidate_id") or row.get("path")),
-        parent_id=str(row.get("parent_id") or row.get("path") or ""),
-        relative_path=str(row.get("relative_path") or row.get("path") or ""),
+        candidate_id=str(_first_present(row, ("candidate_id", "path"), "")),
+        parent_id=str(_first_present(row, ("parent_id", "path"), "")),
+        relative_path=path,
         heading_path=_heading_path(row.get("heading_path")),
-        source_sha256=str(row.get("source_sha256") or ("0" * 64)),
+        source_sha256=_source_sha256(row),
         byte_start=_as_int(row.get("byte_start"), 0),
         byte_end=_as_int(row.get("byte_end"), 0),
         bm25_rank=_as_optional_int(row.get("bm25_rank")),
@@ -1592,13 +1627,11 @@ def _candidate_from_rerank_row(row: Mapping[str, Any]) -> RetrievalCandidate:
         vector_score=_as_float(row.get("vector_score")),
         graph_rank=_as_optional_int(row.get("graph_rank")),
         graph_score=_as_float(row.get("graph_score")),
-        rrf_score=float(row.get("rrf_score") or 0.0),
+        rrf_score=float(_first_present(row, ("rrf_score",), 0.0)),
         rerank_score=_as_float(row.get("rerank_score")),
-        authority_weight=float(row.get("authority_weight") or 1.0),
-        final_score=float(row.get("final_score") or row.get("rrf_score") or 0.0),
-        evidence_ids=tuple(
-            str(item) for item in (row.get("evidence_ids") or ()) if isinstance(item, str)
-        ),
+        authority_weight=float(_first_present(row, ("authority_weight",), 1.0)),
+        final_score=float(_first_present(row, ("final_score", "rrf_score"), 0.0)),
+        evidence_ids=_evidence_ids_of(row),
     )
 
 
@@ -1766,6 +1799,24 @@ def _rerank_or_promote(
         )
 
 
+def _wanted_backend(backend: BackendFn | None, wanted: bool) -> BackendFn | None:
+    """Hand `retrieve` only the backends this profile and these switches allow."""
+    if wanted:
+        return backend
+    return None
+
+
+def _fusion_input(
+    hits: Sequence[Mapping[str, Any]] | None,
+    signal: str,
+    signals: Sequence[str],
+) -> Sequence[Mapping[str, Any]] | None:
+    """Only a backend that actually answered contributes a list to the fusion."""
+    if signal not in signals:
+        return None
+    return hits
+
+
 def _backend_limit(limit: int, max_candidates: int | None) -> int:
     """How many rows each backend may return before fusion trims them."""
     if max_candidates is None or int(max_candidates) <= 0:
@@ -1893,9 +1944,9 @@ def retrieve(
     )
     fallback = graph_failure or fallback
 
-    fuse_lexical = lexical_hits if "lexical" in signals else None
-    fuse_dense = dense_hits if "dense" in signals and dense_hits is not None else None
-    fuse_graph = graph_hits if "graph" in signals and graph_hits is not None else None
+    fuse_lexical = _fusion_input(lexical_hits, "lexical", signals)
+    fuse_dense = _fusion_input(dense_hits, "dense", signals)
+    fuse_graph = _fusion_input(graph_hits, "graph", signals)
     candidates, display_meta = fuse_rrf(
         lexical=fuse_lexical, dense=fuse_dense, graph=fuse_graph
     )
@@ -2075,6 +2126,14 @@ def _legacy_extras(
     return extras
 
 
+def _display_source(
+    display_meta: Mapping[str, Mapping[str, Any]] | None, result: RetrievalResult
+) -> Mapping[str, Mapping[str, Any]]:
+    if display_meta is not None:
+        return display_meta
+    return result.display_meta or {}
+
+
 def _display_overrides(
     titles: Mapping[str, str] | None,
     summaries: Mapping[str, str] | None,
@@ -2100,7 +2159,7 @@ def candidates_to_legacy(
 ) -> list[dict[str, Any]]:
     """Convert orchestrator output to the historical search() dict rows."""
     overrides = _display_overrides(titles, summaries, projects, timestamps)
-    meta = display_meta if display_meta is not None else (result.display_meta or {})
+    meta = _display_source(display_meta, result)
     trace_fields = _legacy_trace_fields(result.trace)
     return [
         _legacy_row(candidate, _candidate_info(meta, candidate), overrides, trace_fields)
@@ -2640,9 +2699,13 @@ def retrieve_via_search_memory(
             project=project,
             since=since,
             as_of=as_of,
-            lexical_backend=lexical_backend if "lexical" in wanted_tuple else None,
-            dense_backend=dense_backend if ("dense" in wanted_tuple and semantic) else None,
-            graph_backend=graph_backend if ("graph" in wanted_tuple and graph) else None,
+            lexical_backend=_wanted_backend(lexical_backend, "lexical" in wanted_tuple),
+            dense_backend=_wanted_backend(
+                dense_backend, "dense" in wanted_tuple and semantic
+            ),
+            graph_backend=_wanted_backend(
+                graph_backend, "graph" in wanted_tuple and graph
+            ),
             corpus_generation=corpus_generation,
             graph_enabled=graph,
             rerank_enabled=rerank,
