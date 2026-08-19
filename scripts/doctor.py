@@ -22,7 +22,7 @@ from collections.abc import Callable, Mapping
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import reliable_memory
 from bounded_io import read_stable_bytes
@@ -1171,8 +1171,24 @@ def _transaction_check(state_root: Path, now: datetime, deadline: float = float(
     return _transaction_result(details, states)
 
 
-def _queue_v2_check(state_root: Path, now: datetime, deadline: float) -> dict:
-    path = state_root / "run" / "queue.sqlite3"
+_QUEUE_COUNT_QUERIES = {
+    "source_failures": "SELECT 1 FROM source_failures LIMIT ?",
+    "source_fences": "SELECT 1 FROM source_fences LIMIT ?",
+}
+
+
+class _TaskVerdict(NamedTuple):
+    unknown_state: bool
+    corrupt: bool
+
+
+class _QueueScan(NamedTuple):
+    result: dict | None
+    unknown_state: bool
+    corrupt_metadata: bool
+
+
+def _empty_queue_details() -> tuple[dict, dict[str, int]]:
     states = {state: 0 for state in QUEUE_STATES}
     details: dict[str, Any] = {
         "states": states,
@@ -1188,7 +1204,10 @@ def _queue_v2_check(state_root: Path, now: datetime, deadline: float) -> dict:
         "read_error": False,
         "deletion_codes": [],
     }
-    details.update(_queue_artifact_state(state_root, deadline))
+    return details, states
+
+
+def _record_queue_migration(state_root: Path, details: dict) -> None:
     marker = state_root / "run" / "queue-migrated-v2"
     marker_kind = _safe_kind(marker, state_root)[0]
     details["migration"] = "complete" if marker_kind == "regular" else "pending"
@@ -1197,199 +1216,382 @@ def _queue_v2_check(state_root: Path, now: datetime, deadline: float) -> dict:
         details["deletion_codes"].append("queue_migration_state_unknown")
     if marker_kind == "regular" and details["legacy_retained"]:
         details["migration"] = "conflict"
+
+
+def _valid_queue_error_code(error_code: object) -> bool:
+    if error_code is None:
+        return True
+    if not isinstance(error_code, str) or not 1 <= len(error_code) <= 200:
+        return False
+    return not any(char in error_code for char in "\r\n")
+
+
+def _failed_state_metadata(
+    state: str, error_code: object, blocked_capability: object
+) -> bool:
+    if error_code is None:
+        return False
+    if state == "blocked":
+        return isinstance(blocked_capability, str) and bool(blocked_capability)
+    if state == "dead":
+        return blocked_capability is None
+    return False
+
+
+def _queue_error_metadata_valid(
+    state: str,
+    error_code: object,
+    blocked_capability: object,
+    valid_error_code: bool,
+) -> bool:
+    if not valid_error_code:
+        return False
+    if state == "ready":
+        return blocked_capability is None
+    return _failed_state_metadata(state, error_code, blocked_capability)
+
+
+def _queue_metadata_matches_state(
+    state: str,
+    error_code: object,
+    blocked_capability: object,
+    valid_error_code: bool,
+) -> bool:
+    """Each task state allows exactly one shape of error metadata."""
+    if state in {"leased", "succeeded"}:
+        return error_code is None and blocked_capability is None
+    if state == "cancelled":
+        return error_code == "cancelled" and blocked_capability is None
+    return _queue_error_metadata_valid(
+        state, error_code, blocked_capability, valid_error_code
+    )
+
+
+def _collect_task_codes(
+    error_code: object,
+    blocked_capability: object,
+    codes: set[str],
+    capabilities: set[str],
+) -> None:
+    if error_code:
+        codes.add(str(error_code))
+    if blocked_capability:
+        capabilities.add(str(blocked_capability))
+
+
+def _collect_task_result(
+    row: sqlite3.Row,
+    row_columns: set[str],
+    references: set[str],
+    result_hashes: dict[str, object],
+) -> None:
+    if "result_reference" not in row_columns or not row["result_reference"]:
+        return
+    reference = str(row["result_reference"])
+    references.add(reference)
+    stored = row["result_sha256"] if "result_sha256" in row_columns else None
+    result_hashes[reference] = stored
+
+
+def _task_lease_live(
+    row: sqlite3.Row, row_columns: set[str], state: str, now: datetime
+) -> bool:
+    if state != "leased" or "lease_expires_at" not in row_columns:
+        return False
+    expires = _parse_utc(row["lease_expires_at"]) or datetime.min.replace(
+        tzinfo=timezone.utc
+    )
+    return expires > now
+
+
+def _scan_one_task_row(
+    row: sqlite3.Row,
+    *,
+    now: datetime,
+    states: dict[str, int],
+    details: dict,
+    codes: set[str],
+    capabilities: set[str],
+    references: set[str],
+    result_hashes: dict[str, object],
+) -> _TaskVerdict:
+    row_columns = set(row.keys())
+    state = row["state"]
+    if not isinstance(state, str) or state not in QUEUE_STATES:
+        return _TaskVerdict(True, False)
+    states[state] += 1
+    if not {"error_code", "blocked_capability"}.issubset(row_columns):
+        return _TaskVerdict(False, True)
+    error_code = row["error_code"]
+    blocked_capability = row["blocked_capability"]
+    matches = _queue_metadata_matches_state(
+        state, error_code, blocked_capability, _valid_queue_error_code(error_code)
+    )
+    _collect_task_codes(error_code, blocked_capability, codes, capabilities)
+    _collect_task_result(row, row_columns, references, result_hashes)
+    if _task_lease_live(row, row_columns, state, now):
+        details["live_workers"] += 1
+    return _TaskVerdict(False, not matches)
+
+
+def _scan_queue_tasks(
+    rows: list[sqlite3.Row],
+    *,
+    now: datetime,
+    deadline: float,
+    details: dict,
+    states: dict[str, int],
+) -> tuple[bool, bool, set[str], dict[str, object]]:
+    codes: set[str] = set()
+    capabilities: set[str] = set()
+    references: set[str] = set()
+    result_hashes: dict[str, object] = {}
+    unknown_state = False
+    corrupt_metadata = False
+    for row in rows:
+        if _deadline_reached(deadline):
+            raise TimeoutError("queue check deadline")
+        verdict = _scan_one_task_row(
+            row,
+            now=now,
+            states=states,
+            details=details,
+            codes=codes,
+            capabilities=capabilities,
+            references=references,
+            result_hashes=result_hashes,
+        )
+        unknown_state = unknown_state or verdict.unknown_state
+        corrupt_metadata = corrupt_metadata or verdict.corrupt
+    details["codes"] = sorted(set(details["codes"]) | codes)
+    details["capabilities"] = sorted(capabilities)
+    return unknown_state, corrupt_metadata, references, result_hashes
+
+
+def _bounded_task_rows(database: sqlite3.Connection, details: dict) -> list[sqlite3.Row]:
+    rows = database.execute(
+        "SELECT * FROM tasks LIMIT ?", (MAX_OPERATIONAL_ROWS + 1,)
+    ).fetchall()
+    if len(rows) <= MAX_OPERATIONAL_ROWS:
+        return rows
+    details["codes"].append("queue_scan_truncated")
+    details["deletion_codes"].append("queue_state_unknown")
+    return rows[:MAX_OPERATIONAL_ROWS]
+
+
+def _append_queue_scan_codes(
+    details: dict, unknown_state: bool, corrupt_metadata: bool, rows: list
+) -> None:
+    if unknown_state:
+        details["deletion_codes"].append("queue_state_unknown")
+    if corrupt_metadata:
+        details["deletion_codes"].append("queue_state_corrupt")
+    if rows:
+        details["deletion_codes"].append("queue_task_retained")
+
+
+def _count_queue_rows(
+    database: sqlite3.Connection,
+    tables: set[str],
+    details: dict,
+    *,
+    table: str,
+    retained_code: str,
+    unknown_code: str,
+) -> None:
+    if table not in tables:
+        return
+    rows = database.execute(
+        _QUEUE_COUNT_QUERIES[table], (MAX_OPERATIONAL_ROWS + 1,)
+    ).fetchall()
+    details[table] = len(rows)
+    if rows:
+        details["deletion_codes"].append(retained_code)
+    if len(rows) > MAX_OPERATIONAL_ROWS:
+        details["deletion_codes"].append(unknown_code)
+
+
+def _count_owner_role(row: sqlite3.Row, details: dict) -> None:
+    if row["role"] == "worker":
+        details["live_workers"] += 1
+    if row["role"] == "migration":
+        details["live_migrations"] += 1
+
+
+def _count_one_queue_owner(row: sqlite3.Row, details: dict, now: datetime) -> None:
+    if row["token"] is None:
+        return
+    if not _owner_row_known(row, pid_column="pid"):
+        details["deletion_codes"].append("queue_owner_state_unknown")
+        return
+    if not _live_owner(row, now, pid_column="pid"):
+        return
+    _count_owner_role(row, details)
+
+
+def _count_queue_ownership(
+    database: sqlite3.Connection, tables: set[str], details: dict, now: datetime
+) -> None:
+    if "queue_ownership" not in tables:
+        return
+    rows = database.execute(
+        "SELECT * FROM queue_ownership LIMIT ?", (MAX_OPERATIONAL_ROWS + 1,)
+    ).fetchall()
+    if len(rows) > MAX_OPERATIONAL_ROWS:
+        details["deletion_codes"].append("queue_owner_state_unknown")
+    for row in rows[:MAX_OPERATIONAL_ROWS]:
+        _count_one_queue_owner(row, details, now)
+
+
+def _count_queue_side_tables(
+    database: sqlite3.Connection, tables: set[str], details: dict, now: datetime
+) -> None:
+    _count_queue_rows(
+        database,
+        tables,
+        details,
+        table="source_failures",
+        retained_code="queue_source_failure_retained",
+        unknown_code="queue_source_failure_state_unknown",
+    )
+    _count_queue_rows(
+        database,
+        tables,
+        details,
+        table="source_fences",
+        retained_code="queue_source_fence_retained",
+        unknown_code="queue_source_fence_state_unknown",
+    )
+    _count_queue_ownership(database, tables, details, now)
+
+
+def _queue_result_bytes(state_root: Path, reference: str) -> bytes | None:
+    """The stored result, or None when the reference is unsafe or unreadable."""
+    results = state_root / "run" / "queue-results"
     try:
-        with _readonly_database(path, state_root, deadline=deadline) as database:
-            if _deadline_reached(deadline):
-                raise TimeoutError("queue check deadline")
-            tables = _tables(database, deadline)
-            if "tasks" not in tables:
-                raise sqlite3.DatabaseError("tasks table missing")
-            task_columns = _columns(database, "tasks", deadline)
-            if not {"state", "error_code", "blocked_capability"}.issubset(task_columns):
-                details["codes"].append("queue_metadata_missing")
-                details["deletion_codes"].append("queue_state_corrupt")
-                return _result(
-                    "queue",
-                    "error",
-                    "Queue task metadata is incomplete.",
-                    details,
-                )
-            rows = database.execute(
-                "SELECT * FROM tasks LIMIT ?", (MAX_OPERATIONAL_ROWS + 1,)
-            ).fetchall()
-            if len(rows) > MAX_OPERATIONAL_ROWS:
-                details["codes"].append("queue_scan_truncated")
-                details["deletion_codes"].append("queue_state_unknown")
-                rows = rows[:MAX_OPERATIONAL_ROWS]
-            codes: set[str] = set()
-            capabilities: set[str] = set()
-            references: set[str] = set()
-            result_hashes: dict[str, object] = {}
-            unknown_state = False
-            corrupt_metadata = False
-            for row in rows:
-                if _deadline_reached(deadline):
-                    raise TimeoutError("queue check deadline")
-                row_columns = set(row.keys())
-                state = row["state"]
-                if not isinstance(state, str) or state not in QUEUE_STATES:
-                    unknown_state = True
-                    continue
-                states[state] += 1
-                if not {"error_code", "blocked_capability"}.issubset(row_columns):
-                    corrupt_metadata = True
-                    continue
-                error_code = row["error_code"]
-                blocked_capability = row["blocked_capability"]
-                valid_error_code = error_code is None or (
-                    isinstance(error_code, str)
-                    and 1 <= len(error_code) <= 200
-                    and not any(char in error_code for char in "\r\n")
-                )
-                metadata_matches_state = (
-                    state == "ready"
-                    and valid_error_code
-                    and blocked_capability is None
-                    or state in {"leased", "succeeded"}
-                    and error_code is None
-                    and blocked_capability is None
-                    or state == "blocked"
-                    and error_code is not None
-                    and valid_error_code
-                    and isinstance(blocked_capability, str)
-                    and bool(blocked_capability)
-                    or state == "dead"
-                    and error_code is not None
-                    and valid_error_code
-                    and blocked_capability is None
-                    or state == "cancelled"
-                    and error_code == "cancelled"
-                    and blocked_capability is None
-                )
-                if not metadata_matches_state:
-                    corrupt_metadata = True
-                if error_code:
-                    codes.add(str(error_code))
-                if blocked_capability:
-                    capabilities.add(str(blocked_capability))
-                if "result_reference" in row_columns and row["result_reference"]:
-                    reference = str(row["result_reference"])
-                    references.add(reference)
-                    result_hashes[reference] = (
-                        row["result_sha256"] if "result_sha256" in row_columns else None
-                    )
-                if (
-                    state == "leased"
-                    and "lease_expires_at" in row_columns
-                    and (
-                        _parse_utc(row["lease_expires_at"])
-                        or datetime.min.replace(tzinfo=timezone.utc)
-                    )
-                    > now
-                ):
-                    details["live_workers"] += 1
-            details["codes"] = sorted(set(details["codes"]) | codes)
-            details["capabilities"] = sorted(capabilities)
-            if unknown_state:
-                details["deletion_codes"].append("queue_state_unknown")
-            if corrupt_metadata:
-                details["deletion_codes"].append("queue_state_corrupt")
-            if rows:
-                details["deletion_codes"].append("queue_task_retained")
-            if "source_failures" in tables:
-                source_failures = database.execute(
-                    "SELECT 1 FROM source_failures LIMIT ?",
-                    (MAX_OPERATIONAL_ROWS + 1,),
-                ).fetchall()
-                details["source_failures"] = len(source_failures)
-                if source_failures:
-                    details["deletion_codes"].append("queue_source_failure_retained")
-                if len(source_failures) > MAX_OPERATIONAL_ROWS:
-                    details["deletion_codes"].append("queue_source_failure_state_unknown")
-            if "source_fences" in tables:
-                source_fences = database.execute(
-                    "SELECT 1 FROM source_fences LIMIT ?",
-                    (MAX_OPERATIONAL_ROWS + 1,),
-                ).fetchall()
-                details["source_fences"] = len(source_fences)
-                if source_fences:
-                    details["deletion_codes"].append("queue_source_fence_retained")
-                if len(source_fences) > MAX_OPERATIONAL_ROWS:
-                    details["deletion_codes"].append("queue_source_fence_state_unknown")
-            if "queue_ownership" in tables:
-                owner_rows = database.execute(
-                    "SELECT * FROM queue_ownership LIMIT ?",
-                    (MAX_OPERATIONAL_ROWS + 1,),
-                ).fetchall()
-                if len(owner_rows) > MAX_OPERATIONAL_ROWS:
-                    details["deletion_codes"].append("queue_owner_state_unknown")
-                for row in owner_rows[:MAX_OPERATIONAL_ROWS]:
-                    if row["token"] is None:
-                        continue
-                    if not _owner_row_known(row, pid_column="pid"):
-                        details["deletion_codes"].append("queue_owner_state_unknown")
-                        continue
-                    if not _live_owner(row, now, pid_column="pid"):
-                        continue
-                    if row["role"] == "worker":
-                        details["live_workers"] += 1
-                    if row["role"] == "migration":
-                        details["live_migrations"] += 1
-            results = state_root / "run" / "queue-results"
-            for reference in references:
-                try:
-                    reference_path = Path(reference)
-                    if reference_path.is_absolute() or ".." in reference_path.parts:
-                        raise PermissionError("unsafe queue result reference")
-                    candidate = state_root / reference_path
-                    if candidate.parent.resolve(strict=True) != results.resolve(strict=True):
-                        raise PermissionError("queue result reference escapes result root")
-                    raw = read_runtime_bytes(
-                        candidate,
-                        state_root,
-                        max_bytes=MAX_QUEUE_RESULT_BYTES,
-                        owner_only=True,
-                    )
-                except (OSError, PermissionError, ValueError):
-                    details["results_invalid"] += 1
-                    continue
-                expected = result_hashes.get(reference)
-                if not isinstance(expected, str) or hashlib.sha256(raw).hexdigest() != expected:
-                    details["results_invalid"] += 1
+        reference_path = Path(reference)
+        if reference_path.is_absolute() or ".." in reference_path.parts:
+            raise PermissionError("unsafe queue result reference")
+        candidate = state_root / reference_path
+        if candidate.parent.resolve(strict=True) != results.resolve(strict=True):
+            raise PermissionError("queue result reference escapes result root")
+        return read_runtime_bytes(
+            candidate,
+            state_root,
+            max_bytes=MAX_QUEUE_RESULT_BYTES,
+            owner_only=True,
+        )
+    except (OSError, PermissionError, ValueError):
+        return None
+
+
+def _validate_queue_results(
+    state_root: Path,
+    references: set[str],
+    result_hashes: dict[str, object],
+    details: dict,
+) -> None:
+    for reference in references:
+        raw = _queue_result_bytes(state_root, reference)
+        expected = result_hashes.get(reference)
+        if raw is None or not isinstance(expected, str):
+            details["results_invalid"] += 1
+            continue
+        if hashlib.sha256(raw).hexdigest() != expected:
+            details["results_invalid"] += 1
+
+
+def _scan_queue_database(
+    path: Path,
+    state_root: Path,
+    now: datetime,
+    deadline: float,
+    details: dict,
+    states: dict[str, int],
+) -> _QueueScan:
+    with _readonly_database(path, state_root, deadline=deadline) as database:
+        if _deadline_reached(deadline):
+            raise TimeoutError("queue check deadline")
+        tables = _tables(database, deadline)
+        if "tasks" not in tables:
+            raise sqlite3.DatabaseError("tasks table missing")
+        task_columns = _columns(database, "tasks", deadline)
+        if not {"state", "error_code", "blocked_capability"}.issubset(task_columns):
+            details["codes"].append("queue_metadata_missing")
+            details["deletion_codes"].append("queue_state_corrupt")
+            return _QueueScan(
+                _result("queue", "error", "Queue task metadata is incomplete.", details),
+                False,
+                False,
+            )
+        rows = _bounded_task_rows(database, details)
+        unknown_state, corrupt_metadata, references, result_hashes = _scan_queue_tasks(
+            rows, now=now, deadline=deadline, details=details, states=states
+        )
+        _append_queue_scan_codes(details, unknown_state, corrupt_metadata, rows)
+        _count_queue_side_tables(database, tables, details, now)
+        _validate_queue_results(state_root, references, result_hashes, details)
+        return _QueueScan(None, unknown_state, corrupt_metadata)
+
+
+def _queue_error_state(
+    details: dict, unknown_state: bool, corrupt_metadata: bool
+) -> bool:
+    if unknown_state or corrupt_metadata:
+        return True
+    return bool(details["results_invalid"]) or details["migration"] == "conflict"
+
+
+def _queue_pending_work(states: dict[str, int], details: dict) -> bool:
+    if states["ready"] or states["leased"] or states["blocked"]:
+        return True
+    return details["migration"] == "pending"
+
+
+def _queue_status(
+    states: dict[str, int],
+    details: dict,
+    unknown_state: bool,
+    corrupt_metadata: bool,
+) -> str:
+    if _queue_error_state(details, unknown_state, corrupt_metadata):
+        return "error"
+    if _queue_pending_work(states, details):
+        return "degraded"
+    return "ok"
+
+
+def _append_queue_deletion_codes(details: dict) -> None:
+    for key, code in (
+        ("live_workers", "queue_worker_live"),
+        ("live_migrations", "queue_migration_live"),
+        ("results_invalid", "queue_result_state_unknown"),
+    ):
+        if details[key]:
+            details["deletion_codes"].append(code)
+
+
+def _queue_v2_check(state_root: Path, now: datetime, deadline: float) -> dict:
+    path = state_root / "run" / "queue.sqlite3"
+    details, states = _empty_queue_details()
+    details.update(_queue_artifact_state(state_root, deadline))
+    _record_queue_migration(state_root, details)
+    try:
+        scan = _scan_queue_database(path, state_root, now, deadline, details, states)
     except (OSError, PermissionError, sqlite3.Error, TimeoutError, ValueError):
         details["read_error"] = True
         details["deletion_codes"].append("queue_state_unreadable")
         return _result("queue", "error", "Queue state is unreadable.", details)
+    if scan.result is not None:
+        return scan.result
     if time.monotonic() >= deadline:
         details["budget_exhausted"] = True
-    if (
-        unknown_state
-        or corrupt_metadata
-        or details["results_invalid"]
-        or details["migration"] == "conflict"
-    ):
-        status = "error"
-    elif (
-        states["ready"]
-        or states["leased"]
-        or states["blocked"]
-        or details["migration"] == "pending"
-    ):
-        status = "degraded"
-    else:
-        status = "ok"
-    if details["live_workers"]:
-        details["deletion_codes"].append("queue_worker_live")
-    if details["live_migrations"]:
-        details["deletion_codes"].append("queue_migration_live")
-    if details["results_invalid"]:
-        details["deletion_codes"].append("queue_result_state_unknown")
-    return _result(
-        "queue",
-        status,
-        "Queue state requires operator attention." if status != "ok" else "Queue state is healthy.",
-        details,
-    )
+    status = _queue_status(states, details, scan.unknown_state, scan.corrupt_metadata)
+    _append_queue_deletion_codes(details)
+    message = "Queue state is healthy."
+    if status != "ok":
+        message = "Queue state requires operator attention."
+    return _result("queue", status, message, details)
 
 
 def _archive_check(root: Path, state_root: Path, deadline: float = float("inf")) -> dict:
