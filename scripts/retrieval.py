@@ -2160,6 +2160,9 @@ def _close_generation_handles(context: Mapping[str, Any]) -> None:
             pass
 
 
+_DENSE_REPLACEABLE_REASONS = frozenset({None, "dense_unavailable"})
+
+
 def _reported_fallback(
     trace_reason: str | None,
     *,
@@ -2170,11 +2173,17 @@ def _reported_fallback(
     """One reason, in the order the operator needs to hear it."""
     if legacy_fallback:
         return legacy_fallback
-    if dense_fallback and trace_reason in {None, "dense_unavailable"}:
+    if _dense_reason_wins(trace_reason, dense_fallback):
         return str(dense_fallback)
     if generation_fallback and trace_reason is None:
         return generation_fallback
     return trace_reason
+
+
+def _dense_reason_wins(trace_reason: str | None, dense_fallback: str | None) -> bool:
+    if not dense_fallback:
+        return False
+    return trace_reason in _DENSE_REPLACEABLE_REASONS
 
 
 def _is_exact_filename_answer(result: RetrievalResult, query: str) -> bool:
@@ -2183,6 +2192,22 @@ def _is_exact_filename_answer(result: RetrievalResult, query: str) -> bool:
         return False
     first = _normalized_filename_stem(result.candidates[0].relative_path)
     return first == _normalized_filename_stem(query)
+
+
+def _reported_mode(result: RetrievalResult, query: str) -> str:
+    if _is_exact_filename_answer(result, query):
+        return "EXACT"
+    return result.trace.effective_mode
+
+
+def _trace_unchanged(
+    trace: RetrievalTrace, effective_mode: str, fallback_reason: str | None, partial: bool
+) -> bool:
+    return (
+        effective_mode == trace.effective_mode
+        and fallback_reason == trace.fallback_reason
+        and partial == trace.partial
+    )
 
 
 def _with_reported_trace(
@@ -2194,7 +2219,7 @@ def _with_reported_trace(
     legacy_fallback: str | None,
 ) -> RetrievalResult:
     trace = result.trace
-    effective_mode = "EXACT" if _is_exact_filename_answer(result, query) else trace.effective_mode
+    effective_mode = _reported_mode(result, query)
     fallback_reason = _reported_fallback(
         trace.fallback_reason,
         dense_fallback=dense_fallback,
@@ -2202,11 +2227,7 @@ def _with_reported_trace(
         legacy_fallback=legacy_fallback,
     )
     partial = trace.partial or legacy_fallback is not None
-    if (
-        effective_mode == trace.effective_mode
-        and fallback_reason == trace.fallback_reason
-        and partial == trace.partial
-    ):
+    if _trace_unchanged(trace, effective_mode, fallback_reason, partial):
         return result
     return RetrievalResult(
         candidates=result.candidates,
@@ -2239,25 +2260,95 @@ def _record_impressions(
     if not rows:
         return
     try:
-        from retrieval_telemetry import best_effort_make_event, best_effort_record_events
-
-        events = [
-            best_effort_make_event(
-                event_kind="impression",
-                query=query,
-                retrieval_mode=str(item.get("effective_mode") or "base").lower(),
-                candidate_id=_impression_candidate_id(item),
-                rank=rank,
-                generation=str(item.get("generation") or corpus_generation),
-                source_tool=source_tool,
-            )
-            for rank, item in enumerate(rows, start=1)
-        ]
-        recorded = [event for event in events if event is not None]
-        if recorded:
-            best_effort_record_events(recorded)
+        _emit_impressions(
+            rows, query=query, corpus_generation=corpus_generation, source_tool=source_tool
+        )
     except Exception:  # noqa: BLE001 - telemetry is never load-bearing
         pass
+
+
+def _emit_impressions(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    query: str,
+    corpus_generation: str,
+    source_tool: str,
+) -> None:
+    from retrieval_telemetry import best_effort_make_event, best_effort_record_events
+
+    events = [
+        best_effort_make_event(
+            event_kind="impression",
+            query=query,
+            retrieval_mode=str(item.get("effective_mode") or "base").lower(),
+            candidate_id=_impression_candidate_id(item),
+            rank=rank,
+            generation=str(item.get("generation") or corpus_generation),
+            source_tool=source_tool,
+        )
+        for rank, item in enumerate(rows, start=1)
+    ]
+    best_effort_record_events([event for event in events if event is not None])
+
+
+def _generation_dense_hits(
+    filters: Mapping[str, Any],
+    *,
+    catalog: Any,
+    context: dict[str, Any],
+    stop: Mapping[str, Any],
+    require_seal: Callable[[], None],
+    own_connection: bool,
+    embedder: object,
+    model_id: object,
+    model_revision: object,
+) -> Sequence[Mapping[str, Any]] | None:
+    """Vectors from the active generation, sealed before and after the read.
+
+    Under a hard deadline the search gets its own connection so a straggler
+    cannot outlive the caller on the shared one.
+    """
+    import search_memory
+
+    connection = context["connection"]
+    owned = None
+    try:
+        require_seal()
+        if own_connection:
+            owned = search_memory._generation_connection(catalog, context["manifest"], **stop)
+            if owned is None:
+                context["dense_fallback"] = "generation_vectors_unavailable"
+                return None
+            connection = owned
+        rows = search_memory._generation_vectors_search(
+            filters["query"],
+            catalog,
+            context["manifest"],
+            connection,
+            embedder=embedder,
+            model_id=model_id,
+            model_revision=model_revision,
+            scope=filters["scope"],
+            limit=filters["limit"],
+            project=filters["project"],
+            since=filters["since"],
+            as_of=filters["as_of"],
+            **stop,
+        )
+        require_seal()
+        if rows is None:
+            context["dense_fallback"] = "generation_vectors_unavailable"
+            return None
+        return _dense_filtered_hits(rows, filters)
+    except (GenerationSealChanged, TimeoutError):
+        raise
+    except Exception:  # noqa: BLE001 - unreadable vectors degrade one signal
+        require_seal()
+        context["dense_fallback"] = "generation_vectors_unavailable"
+        return None
+    finally:
+        if owned is not None:
+            owned.close()
 
 
 def _generation_lexical_hits(
@@ -2689,6 +2780,25 @@ def _backend_hit_from_legacy(
     return hit
 
 
+def _requested_profile(
+    profile: str | None, analysis: QueryAnalysis, *, semantic: bool
+) -> str:
+    """`semantic=False` forces the lexical profile whatever the planner says."""
+    if not semantic:
+        return "BASE"
+    requested = _normalize_profile(profile)
+    if requested is not None:
+        return requested
+    return "HYBRID"
+
+
+def _wanted_signals(requested: str, *, semantic: bool) -> tuple[str, ...]:
+    wanted = PROFILE_SIGNALS[requested]
+    if semantic:
+        return tuple(wanted)
+    return tuple(signal for signal in wanted if signal != "dense") or ("lexical",)
+
+
 def retrieve_via_search_memory(
     query: str,
     *,
@@ -2721,18 +2831,8 @@ def retrieve_via_search_memory(
     _GenerationSealChanged = GenerationSealChanged
 
     analysis = analyze_query(query)
-    requested = _normalize_profile(profile)
-    # semantic=False always forces BASE/lexical regardless of planner profile.
-    if not semantic:
-        requested = "BASE"
-    elif requested is None:
-        requested = "HYBRID" if semantic else analysis.recommended_profile
-    if requested is None:
-        requested = analysis.recommended_profile
-
-    wanted_tuple = PROFILE_SIGNALS[requested]
-    if not semantic:
-        wanted_tuple = tuple(s for s in wanted_tuple if s != "dense") or ("lexical",)
+    requested = _requested_profile(profile, analysis, semantic=semantic)
+    wanted_tuple = _wanted_signals(requested, semantic=semantic)
     hard_deadline = deadline_monotonic is not None
 
     selected_catalog = catalog if catalog is not None else search_memory._active_generation_catalog()
@@ -2903,49 +3003,17 @@ def retrieve_via_search_memory(
             if unusable is not None:
                 generation_ctx["dense_fallback"] = unusable
                 return None
-            dense_connection = generation_ctx["connection"]
-            owns_dense_connection = False
-            try:
-                require_seal()
-                if hard_deadline:
-                    dense_connection = search_memory._generation_connection(
-                        selected_catalog,
-                        generation_ctx["manifest"],
-                        **optional_generation_stop,
-                    )
-                    owns_dense_connection = dense_connection is not None
-                    if dense_connection is None:
-                        generation_ctx["dense_fallback"] = "generation_vectors_unavailable"
-                        return None
-                rows = search_memory._generation_vectors_search(
-                    filters["query"],
-                    selected_catalog,
-                    generation_ctx["manifest"],
-                    dense_connection,
-                    embedder=generation_embedder,
-                    model_id=generation_model_id,
-                    model_revision=generation_model_revision,
-                    scope=filters["scope"],
-                    limit=filters["limit"],
-                    project=filters["project"],
-                    since=filters["since"],
-                    as_of=filters["as_of"],
-                    **optional_generation_stop,
-                )
-                require_seal()
-                if rows is None:
-                    generation_ctx["dense_fallback"] = "generation_vectors_unavailable"
-                    return None
-                return _dense_filtered_hits(rows, filters)
-            except (_GenerationSealChanged, TimeoutError):
-                raise
-            except Exception:
-                require_seal()
-                generation_ctx["dense_fallback"] = "generation_vectors_unavailable"
-                return None
-            finally:
-                if owns_dense_connection:
-                    dense_connection.close()
+            return _generation_dense_hits(
+                filters,
+                catalog=selected_catalog,
+                context=generation_ctx,
+                stop=optional_generation_stop,
+                require_seal=require_seal,
+                own_connection=hard_deadline,
+                embedder=generation_embedder,
+                model_id=generation_model_id,
+                model_revision=generation_model_revision,
+            )
         rows = search_memory._legacy_dense_hits(
             filters["query"],
             scope=filters["scope"],
@@ -3008,18 +3076,20 @@ def retrieve_via_search_memory(
             cancelled=cancelled,
         )
 
+    def run_under_seal() -> RetrievalResult:
+        """One run, valid only while the generation seal still holds."""
+        outcome = run_retrieval()
+        if use_generation and not _generation_seal_holds(
+            selected_catalog, generation_ctx, generation_stop
+        ):
+            nonlocal generation_fallback
+            generation_fallback = "generation_seal_changed"
+            raise _GenerationSealChanged
+        return outcome
+
     try:
         try:
-            result = run_retrieval()
-            if use_generation and not search_memory._generation_consumption_unchanged(
-                selected_catalog,
-                generation_ctx["manifest"],
-                generation_ctx["artifact_names"],
-                generation_ctx["seal"],
-                **generation_stop,
-            ):
-                generation_fallback = "generation_seal_changed"
-                raise _GenerationSealChanged
+            result = run_under_seal()
         except _GenerationSealChanged:
             use_generation = False
             corpus_generation = "legacy"
