@@ -10850,88 +10850,158 @@ def _commit_migration_marker(
     return replace(lease, expires_at=expires_at)
 
 
+@dataclass
+class _MigrationGuard:
+    """One migration's deadline, cancellation, and owner heartbeat."""
+
+    deadline: float
+    cancelled: Callable[[], bool] | None
+    owner: QueueOwnerLease | None = None
+
+    def check(self) -> None:
+        if time.monotonic() >= self.deadline or bool(
+            self.cancelled and self.cancelled()
+        ):
+            raise TimeoutError("queue migration cancelled or deadline reached")
+
+    def beat(self) -> None:
+        self.owner = _heartbeat_queue_owner(self.owner)
+
+
+def _migration_already_done(marker: Path, state_root: Path) -> bool:
+    """A valid marker means it ran; a legacy directory beside it is a conflict."""
+    if not _path_present(marker):
+        return False
+    _validate_migration_marker(marker)
+    _post_marker_legacy_conflict(state_root)
+    return True
+
+
+def _single_migration_input(run_dir: Path, legacy_dir: Path) -> list[Path]:
+    """At most one staged migration, and never one beside a live legacy dir."""
+    inputs = sorted(run_dir.glob("queue-migration-*"))
+    if inputs and legacy_dir.exists():
+        raise MigrationBusy("legacy_migration_conflict")
+    if len(inputs) > 1:
+        raise MigrationBusy("legacy_migration_conflict")
+    return inputs
+
+
+def _migration_input(run_dir: Path, legacy_dir: Path) -> Path | None:
+    """The directory this migration consumes, claimed exactly once."""
+    inputs = _single_migration_input(run_dir, legacy_dir)
+    if inputs:
+        return inputs[0]
+    if not legacy_dir.exists():
+        return None
+    claimed = run_dir / f"queue-migration-{uuid.uuid4().hex}"
+    legacy_dir.replace(claimed)
+    fsync_directory(run_dir)
+    return claimed
+
+
+def _scanned_legacy_records(migration_input: Path | None):
+    """The readable and the malformed legacy records, or nothing to migrate."""
+    if migration_input is None:
+        return [], []
+    return _scan_legacy_records(migration_input)
+
+
+def _import_legacy_records(
+    state_root: Path, valid: list[tuple[Path, object]], guard: _MigrationGuard
+) -> list[str]:
+    """Import every readable legacy record, keeping the owner alive as we go."""
+    if not valid:
+        return []
+    queue = MemoryQueue(Path(state_root))
+    imported: list[str] = []
+    for source, record in valid:
+        guard.check()
+        imported.append(_import_legacy_record(queue, record, source))
+        source.unlink()
+        guard.beat()
+    return imported
+
+
+def _quarantine_legacy_records(
+    run_dir: Path, malformed: list[tuple[Path, bytes]], guard: _MigrationGuard
+) -> None:
+    """Keep every unreadable record as evidence rather than dropping it."""
+    for source, raw in malformed:
+        guard.check()
+        _quarantine_legacy_record(run_dir, source, raw)
+        source.unlink(missing_ok=True)
+        guard.beat()
+
+
+def _retire_migration_input(migration_input: Path | None, run_dir: Path) -> None:
+    """Remove the consumed input directory, durably."""
+    if migration_input is None:
+        return
+    fsync_directory(migration_input)
+    migration_input.rmdir()
+    fsync_directory(run_dir)
+
+
+def _refuse_live_legacy_dir(run_dir: Path, legacy_dir: Path) -> None:
+    """A legacy directory that reappeared mid-migration stops it."""
+    if not legacy_dir.exists():
+        return
+    _quarantine_legacy_directory(run_dir, legacy_dir, code="legacy_backend_conflict")
+    raise LegacyBackendDisabled("legacy_backend_conflict")
+
+
+def _run_migration(
+    guard: _MigrationGuard,
+    state_root: Path,
+    run_dir: Path,
+    legacy_dir: Path,
+    marker: Path,
+) -> MigrationReceipt:
+    """Consume the staged legacy records, then commit the migration marker."""
+    migration_input = _migration_input(run_dir, legacy_dir)
+    guard.beat()
+    guard.check()
+    valid, malformed = _scanned_legacy_records(migration_input)
+    guard.beat()
+    imported = _import_legacy_records(state_root, valid, guard)
+    _quarantine_legacy_records(run_dir, malformed, guard)
+    _retire_migration_input(migration_input, run_dir)
+    guard.beat()
+    _refuse_live_legacy_dir(run_dir, legacy_dir)
+    guard.owner = _commit_migration_marker(guard.owner, marker, run_dir)
+    codes = ("legacy_invalid",) if malformed else ()
+    return MigrationReceipt(len(imported), len(malformed), tuple(imported), codes)
+
+
 def migrate_legacy_queue(
     state_root: Path,
     *,
     deadline: float = float("inf"),
     cancelled: Callable[[], bool] | None = None,
 ) -> MigrationReceipt:
-    def require_active() -> None:
-        if time.monotonic() >= deadline or bool(cancelled and cancelled()):
-            raise TimeoutError("queue migration cancelled or deadline reached")
-
-    require_active()
+    guard = _MigrationGuard(deadline, cancelled)
+    guard.check()
     run_dir, legacy_dir, _db_path, marker = _migration_paths(state_root)
-    if _path_present(marker):
-        _validate_migration_marker(marker)
-        _post_marker_legacy_conflict(state_root)
+    if _migration_already_done(marker, state_root):
         return MigrationReceipt(0, 0, (), ())
-    owner = _acquire_queue_owner(state_root, "migration", "migration_busy")
+    guard.owner = _acquire_queue_owner(state_root, "migration", "migration_busy")
     legacy_owner: QueueOwnerLease | None = None
     try:
-        require_active()
-        if _path_present(marker):
-            _validate_migration_marker(marker)
-            _post_marker_legacy_conflict(state_root)
+        guard.check()
+        if _migration_already_done(marker, state_root):
             return MigrationReceipt(0, 0, (), ())
         legacy_owner = _acquire_queue_owner(state_root, "legacy", "legacy_owner_busy")
-        owner = _heartbeat_queue_owner(owner)
-        require_active()
+        guard.beat()
+        guard.check()
         _prove_no_live_processing(legacy_dir)
-        owner = _heartbeat_queue_owner(owner)
-        require_active()
-        migration_inputs = sorted(run_dir.glob("queue-migration-*"))
-        if migration_inputs and legacy_dir.exists():
-            raise MigrationBusy("legacy_migration_conflict")
-        if len(migration_inputs) > 1:
-            raise MigrationBusy("legacy_migration_conflict")
-        if migration_inputs:
-            migration_input = migration_inputs[0]
-        elif legacy_dir.exists():
-            migration_input = run_dir / f"queue-migration-{uuid.uuid4().hex}"
-            legacy_dir.replace(migration_input)
-            fsync_directory(run_dir)
-        else:
-            migration_input = None
-        owner = _heartbeat_queue_owner(owner)
-        require_active()
-        valid, malformed = (
-            _scan_legacy_records(migration_input)
-            if migration_input is not None
-            else ([], [])
-        )
-        owner = _heartbeat_queue_owner(owner)
-        queue = MemoryQueue(Path(state_root)) if valid else None
-        imported: list[str] = []
-        for source, record in valid:
-            require_active()
-            if queue is None:  # pragma: no cover - guarded by valid
-                raise AssertionError
-            imported.append(_import_legacy_record(queue, record, source))
-            source.unlink()
-            owner = _heartbeat_queue_owner(owner)
-        for source, raw in malformed:
-            require_active()
-            _quarantine_legacy_record(run_dir, source, raw)
-            source.unlink(missing_ok=True)
-            owner = _heartbeat_queue_owner(owner)
-        if migration_input is not None:
-            fsync_directory(migration_input)
-            migration_input.rmdir()
-            fsync_directory(run_dir)
-        owner = _heartbeat_queue_owner(owner)
-        if legacy_dir.exists():
-            _quarantine_legacy_directory(
-                run_dir, legacy_dir, code="legacy_backend_conflict"
-            )
-            raise LegacyBackendDisabled("legacy_backend_conflict")
-        owner = _commit_migration_marker(owner, marker, run_dir)
-        codes = ("legacy_invalid",) if malformed else ()
-        return MigrationReceipt(len(imported), len(malformed), tuple(imported), codes)
+        guard.beat()
+        guard.check()
+        return _run_migration(guard, state_root, run_dir, legacy_dir, marker)
     finally:
         if legacy_owner is not None:
             _release_queue_owner(legacy_owner)
-        _release_queue_owner(owner)
+        _release_queue_owner(guard.owner)
 
 
 def _ensure_sqlite_enabled() -> None:
