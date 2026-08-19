@@ -323,6 +323,21 @@ def _queue_artifact_state(state_root: Path, deadline: float) -> dict[str, Any]:
     )
     details["artifact_truncated"] |= truncated
     details["artifact_error"] |= error
+    _count_legacy_queue_entries(entries, legacy, deadline, details)
+    for key, relative in (
+        ("results_retained", "run/queue-results"),
+        ("queue_quarantined", "run/queue-quarantine"),
+    ):
+        _count_queue_artifact_directory(
+            state_root, relative, key, deadline, details
+        )
+    _append_queue_artifact_codes(details)
+    return details
+
+
+def _count_legacy_queue_entries(
+    entries: list[Path], legacy: Path, deadline: float, details: dict
+) -> None:
     for path in entries:
         if path.suffix not in {".json", ".processing"}:
             details["artifact_error"] = True
@@ -331,32 +346,35 @@ def _queue_artifact_state(state_root: Path, deadline: float) -> dict[str, Any]:
         _value, problem = _read_bounded_json(path, legacy, deadline=deadline)
         if problem:
             details["legacy_malformed"] += 1
-    for key, relative in (
-        ("results_retained", "run/queue-results"),
-        ("queue_quarantined", "run/queue-quarantine"),
+
+
+def _count_queue_artifact_directory(
+    state_root: Path, relative: str, key: str, deadline: float, details: dict
+) -> None:
+    entries, truncated, error = _bounded_runtime_entries(
+        state_root / relative,
+        state_root,
+        limit=MAX_RUNTIME_ENTRIES,
+        deadline=deadline,
+    )
+    details[key] = len(entries)
+    details["artifact_truncated"] |= truncated
+    details["artifact_error"] |= error
+    if _any_irregular_entry(entries, state_root):
+        details["artifact_error"] = True
+
+
+def _append_queue_artifact_codes(details: dict) -> None:
+    for key, code in (
+        ("legacy_retained", "legacy_queue_retained"),
+        ("legacy_malformed", "legacy_queue_malformed"),
+        ("results_retained", "queue_result_retained"),
+        ("queue_quarantined", "queue_quarantine_retained"),
     ):
-        entries, truncated, error = _bounded_runtime_entries(
-            state_root / relative,
-            state_root,
-            limit=MAX_RUNTIME_ENTRIES,
-            deadline=deadline,
-        )
-        details[key] = len(entries)
-        details["artifact_truncated"] |= truncated
-        details["artifact_error"] |= error
-        if any(_safe_kind(path, state_root)[0] != "regular" for path in entries):
-            details["artifact_error"] = True
-    if details["legacy_retained"]:
-        details["deletion_codes"].append("legacy_queue_retained")
-    if details["legacy_malformed"]:
-        details["deletion_codes"].append("legacy_queue_malformed")
-    if details["results_retained"]:
-        details["deletion_codes"].append("queue_result_retained")
-    if details["queue_quarantined"]:
-        details["deletion_codes"].append("queue_quarantine_retained")
+        if details[key]:
+            details["deletion_codes"].append(code)
     if details["artifact_error"] or details["artifact_truncated"]:
         details["deletion_codes"].append("queue_artifact_state_unknown")
-    return details
 
 
 def _unreadable_queue_result(state_root: Path, deadline: float, message: str) -> dict:
@@ -1875,6 +1893,38 @@ def _archive_check(root: Path, state_root: Path, deadline: float = float("inf"))
     return _archive_result(details)
 
 
+def _count_claims(database: sqlite3.Connection, details: dict) -> None:
+    details["claims"] = len(
+        database.execute(
+            "SELECT 1 FROM claim LIMIT ?", (MAX_OPERATIONAL_ROWS + 1,)
+        ).fetchall()
+    )
+    rows = database.execute(
+        "SELECT code FROM claim_index_diagnostic ORDER BY code LIMIT ?",
+        (MAX_OPERATIONAL_ROWS + 1,),
+    ).fetchall()
+    details["diagnostics"] = min(len(rows), MAX_OPERATIONAL_ROWS)
+    details["codes"] = sorted({str(row[0]) for row in rows})
+    if len(rows) > MAX_OPERATIONAL_ROWS or details["claims"] > MAX_OPERATIONAL_ROWS:
+        details["codes"].append("claim_scan_truncated")
+
+
+def _claim_status(details: dict) -> str:
+    if details["index"] == "invalid":
+        return "error"
+    if details["diagnostics"]:
+        return "degraded"
+    return "ok"
+
+
+def _claim_result(details: dict) -> dict:
+    status = _claim_status(details)
+    message = "Claim index is healthy."
+    if status != "ok":
+        message = "Claim index requires operator attention."
+    return _result("claims", status, message, details)
+
+
 def _claim_check(root: Path, state_root: Path, deadline: float = float("inf")) -> dict:
     path = state_root / "cache" / "claims.sqlite3"
     details = {
@@ -1897,34 +1947,14 @@ def _claim_check(root: Path, state_root: Path, deadline: float = float("inf")) -
         with _readonly_database(path, state_root, deadline=deadline) as database:
             if _deadline_reached(deadline):
                 raise TimeoutError("claim check deadline")
-            compatible = ClaimIndex._schema_compatible(database)
+            compatible = ClaimIndex._schema_compatible(database)  # noqa: SLF001
             details["index"] = "valid" if compatible else "invalid"
             if compatible:
-                details["claims"] = len(
-                    database.execute(
-                        "SELECT 1 FROM claim LIMIT ?", (MAX_OPERATIONAL_ROWS + 1,)
-                    ).fetchall()
-                )
-                rows = database.execute(
-                    "SELECT code FROM claim_index_diagnostic ORDER BY code LIMIT ?",
-                    (MAX_OPERATIONAL_ROWS + 1,),
-                ).fetchall()
-                details["diagnostics"] = min(len(rows), MAX_OPERATIONAL_ROWS)
-                details["codes"] = sorted({str(row[0]) for row in rows})
-                if len(rows) > MAX_OPERATIONAL_ROWS or details["claims"] > MAX_OPERATIONAL_ROWS:
-                    details["codes"].append("claim_scan_truncated")
+                _count_claims(database, details)
     except (OSError, PermissionError, sqlite3.Error, TimeoutError, ValueError):
         details["index"] = "invalid"
         details["read_error"] = True
-    status = (
-        "error" if details["index"] == "invalid" else "degraded" if details["diagnostics"] else "ok"
-    )
-    return _result(
-        "claims",
-        status,
-        "Claim index requires operator attention." if status != "ok" else "Claim index is healthy.",
-        details,
-    )
+    return _claim_result(details)
 
 
 def _filesystem_check(state_root: Path, deadline: float = float("inf")) -> dict:
@@ -1989,6 +2019,81 @@ def _filesystem_check(state_root: Path, deadline: float = float("inf")) -> dict:
     )
 
 
+def _deletion_snapshot(codes: list[str]) -> dict[str, object]:
+    blockers = [{"code": code} for code in sorted(set(codes))]
+    return {
+        "schema_version": "run-deletion-snapshot/v1",
+        "quiescent": not blockers,
+        "permit": False,
+        "offline_action_required": True,
+        "blockers": blockers,
+    }
+
+
+def _derived_deletion_codes(check: dict) -> list[str]:
+    """Deletion codes a check contributes, including its own unreadable state."""
+    details = check.get("details", {})
+    codes = [str(code) for code in details.get("deletion_codes", [])]
+    if codes or not details.get("read_error"):
+        return codes
+    return [f"{check['id']}_state_unreadable"]
+
+
+def _snapshot_deletion_codes(
+    root_path: Path,
+    state_path: Path,
+    now: datetime,
+    snapshot_deadline: float,
+    owner: object,
+    validate_reliability_v3_runtime,
+) -> list[str]:
+    codes = list(
+        validate_reliability_v3_runtime(
+            root=root_path,
+            state_root=state_path,
+            now=now,
+            deadline=snapshot_deadline,
+            excluded_owner=owner,
+        )
+    )
+    for check in (
+        _archive_check(root_path, state_path, snapshot_deadline),
+        _lsp_runtime_check(state_path, now, deadline=snapshot_deadline),
+    ):
+        codes.extend(_derived_deletion_codes(check))
+    return codes
+
+
+def _observed_deletion_codes(
+    root_path: Path,
+    state_path: Path,
+    now: datetime,
+    snapshot_deadline: float,
+    owner: object,
+    validate_reliability_v3_runtime,
+) -> list[str]:
+    try:
+        codes = _snapshot_deletion_codes(
+            root_path,
+            state_path,
+            now,
+            snapshot_deadline,
+            owner,
+            validate_reliability_v3_runtime,
+        )
+    except (OSError, PermissionError, sqlite3.Error, TimeoutError, ValueError):
+        codes = ["run_deletion_state_unknown"]
+    if _deadline_reached(snapshot_deadline):
+        codes.append("run_deletion_state_unknown")
+    return codes
+
+
+def _deletion_root(root: Path | None, state_path: Path) -> Path:
+    if root is None:
+        return state_path
+    return Path(root)
+
+
 def _run_deletion_check(
     state_root: Path,
     now: datetime,
@@ -2004,35 +2109,19 @@ def _run_deletion_check(
         require_reliability_v3_adopted,
         validate_reliability_v3_runtime,
     )
-    from operational_ownership import (
-        OperationalOwnershipError,
-        OwnershipRegistry,
-    )
-
-    def result(codes: list[str]) -> dict[str, object]:
-        blockers = [{"code": code} for code in sorted(set(codes))]
-        return {
-            "schema_version": "run-deletion-snapshot/v1",
-            "quiescent": not blockers,
-            "permit": False,
-            "offline_action_required": True,
-            "blockers": blockers,
-        }
+    from operational_ownership import OperationalOwnershipError, OwnershipRegistry
 
     state_path = Path(state_root)
-    root_path = Path(root) if root is not None else state_path
+    root_path = _deletion_root(root, state_path)
     try:
         require_reliability_v3_adopted(root=root_path, state_root=state_path)
     except ReliabilityV3ValidationError as exc:
-        code = (
-            "legacy_protocol_unquiesced" if exc.code == "legacy_protocol_unquiesced" else exc.code
-        )
-        return result([code])
+        return _deletion_snapshot([exc.code])
 
     snapshot_deadline = min(deadline, time.monotonic() + 20.0)
     if _deadline_reached(snapshot_deadline):
-        return result(["run_deletion_state_unknown"])
-    registry = OwnershipRegistry._from_adopted_database(
+        return _deletion_snapshot(["run_deletion_state_unknown"])
+    registry = OwnershipRegistry._from_adopted_database(  # noqa: SLF001
         state_path,
         state_path / "run" / "markdown-transactions-v3.sqlite3",
     )
@@ -2040,38 +2129,24 @@ def _run_deletion_check(
         owner = registry.acquire("runtime-deletion-check", scope="global")
     except (OperationalOwnershipError, OSError, sqlite3.Error, ValueError) as exc:
         code = getattr(exc, "code", "runtime_deletion_check_unavailable")
-        return result([str(code)])
+        return _deletion_snapshot([str(code)])
 
     codes: list[str] = []
     try:
-        try:
-            codes.extend(
-                validate_reliability_v3_runtime(
-                    root=root_path,
-                    state_root=state_path,
-                    now=now,
-                    deadline=snapshot_deadline,
-                    excluded_owner=owner,
-                )
-            )
-            for check in (
-                _archive_check(root_path, state_path, snapshot_deadline),
-                _lsp_runtime_check(state_path, now, deadline=snapshot_deadline),
-            ):
-                details = check.get("details", {})
-                codes.extend(str(code) for code in details.get("deletion_codes", []))
-                if details.get("read_error") and not details.get("deletion_codes"):
-                    codes.append(f"{check['id']}_state_unreadable")
-        except (OSError, PermissionError, sqlite3.Error, TimeoutError, ValueError):
-            codes.append("run_deletion_state_unknown")
-        if _deadline_reached(snapshot_deadline):
-            codes.append("run_deletion_state_unknown")
+        codes = _observed_deletion_codes(
+            root_path,
+            state_path,
+            now,
+            snapshot_deadline,
+            owner,
+            validate_reliability_v3_runtime,
+        )
     finally:
         try:
             registry.release(owner)
         except (OperationalOwnershipError, OSError, sqlite3.Error, ValueError):
             codes.append("runtime_deletion_check_release_failed")
-    return result(codes)
+    return _deletion_snapshot(codes)
 
 
 LSP_FAILURE_RETENTION = timedelta(days=7)
@@ -2133,24 +2208,46 @@ def _valid_lsp_owner(record: dict[str, Any], owner_nonce: str) -> bool:
     )
 
 
-def _valid_lsp_lease(record: dict[str, Any], owner_nonce: str) -> bool:
+def _lsp_schema_version_one(record: dict[str, Any]) -> bool:
+    version = record.get("schema_version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        return False
+    return version == 1
+
+
+def _lsp_generation_nonce_valid(record: dict[str, Any]) -> bool:
+    nonce = record.get("generation_nonce")
+    if not isinstance(nonce, str):
+        return False
+    return _LSP_OWNER_NONCE.fullmatch(nonce) is not None
+
+
+def _lsp_lease_window_valid(record: dict[str, Any]) -> bool:
     heartbeat = _parse_lsp_timestamp(record.get("heartbeat_at"))
     expires = _parse_lsp_timestamp(record.get("expires_at"))
-    return (
-        set(record) == _LSP_LEASE_FIELDS
-        and isinstance(record.get("schema_version"), int)
-        and not isinstance(record.get("schema_version"), bool)
-        and record.get("schema_version") == 1
-        and record.get("owner_nonce") == owner_nonce
-        and isinstance(record.get("generation_nonce"), str)
-        and _LSP_OWNER_NONCE.fullmatch(record["generation_nonce"]) is not None
-        and _lsp_positive_pid(record.get("manager_pid"))
-        and _lsp_positive_pid(record.get("server_pid"))
-        and record.get("state") == "live"
-        and heartbeat is not None
-        and expires is not None
-        and heartbeat < expires
-    )
+    if heartbeat is None or expires is None:
+        return False
+    return heartbeat < expires
+
+
+def _lsp_lease_identity_valid(record: dict[str, Any], owner_nonce: str) -> bool:
+    if set(record) != _LSP_LEASE_FIELDS or not _lsp_schema_version_one(record):
+        return False
+    if record.get("owner_nonce") != owner_nonce:
+        return False
+    return _lsp_generation_nonce_valid(record)
+
+
+def _valid_lsp_lease(record: dict[str, Any], owner_nonce: str) -> bool:
+    if not _lsp_lease_identity_valid(record, owner_nonce):
+        return False
+    if not _lsp_positive_pid(record.get("manager_pid")):
+        return False
+    if not _lsp_positive_pid(record.get("server_pid")):
+        return False
+    if record.get("state") != "live":
+        return False
+    return _lsp_lease_window_valid(record)
 
 
 def _valid_lsp_failure(record: dict[str, Any], owner_nonce: str) -> bool:
@@ -6015,6 +6112,83 @@ def _build_or_refresh_generation(
     return _generation_build_result(built, snapshot)
 
 
+def _maintenance_outcome(
+    status: str, reason: str, *, partial: bool, repairs: list[dict] | None = None
+) -> dict:
+    outcome = {
+        "status": status,
+        "generation_id": None,
+        "sources": 0,
+        "partial": partial,
+        "reason": reason,
+    }
+    if repairs is not None:
+        outcome["repairs"] = repairs
+    return outcome
+
+
+def _require_positive_time_budget(time_budget_seconds: object) -> None:
+    if isinstance(time_budget_seconds, bool):
+        raise ValueError("time_budget_seconds must be positive and finite")
+    if not isinstance(time_budget_seconds, (int, float)):
+        raise ValueError("time_budget_seconds must be positive and finite")
+    if not math.isfinite(time_budget_seconds) or time_budget_seconds <= 0:
+        raise ValueError("time_budget_seconds must be positive and finite")
+
+
+def _unusable_filesystem_outcome(state_path: Path, deadline: float) -> dict | None:
+    filesystem = _filesystem_check(state_path, deadline)
+    if filesystem["status"] != "error":
+        return None
+    if filesystem["details"].get("budget_exhausted"):
+        return _maintenance_outcome("deferred", "time_limit", partial=True)
+    return _maintenance_outcome("error", "unsupported_filesystem", partial=False)
+
+
+def _value_error_outcome(exc: ValueError, repaired: list[dict]) -> dict:
+    lowered = str(exc).casefold()
+    if "limit" in lowered or "ceiling" in lowered:
+        return _maintenance_outcome(
+            "deferred", "source_limit", partial=True, repairs=repaired
+        )
+    return _maintenance_outcome(
+        "error", type(exc).__name__, partial=False, repairs=repaired
+    )
+
+
+def _refreshed_generation(
+    root_path: Path,
+    state_path: Path,
+    coordinator: Any,
+    lease: dict[str, object],
+    deadline: float,
+    max_sources: int,
+    force_rebuild: bool,
+    repaired: list[dict],
+) -> dict:
+    with _MaintenanceHeartbeat(coordinator, lease, deadline=deadline) as guard:
+        guard.run(
+            _repair_generation_catalog,
+            root_path,
+            state_path,
+            deadline=deadline,
+            cancelled=guard.cancelled,
+            repaired=repaired,
+        )
+        result = guard.run(
+            _build_or_refresh_generation,
+            root_path,
+            state_path,
+            deadline=deadline,
+            cancelled=guard.cancelled,
+            max_sources=max_sources,
+            force_rebuild=force_rebuild,
+            coordinator=coordinator,
+        )
+        result["repairs"] = repaired
+        return result
+
+
 def run_generation_maintenance(
     root: Path | str | None = None,
     state_root: Path | str | None = None,
@@ -6024,15 +6198,8 @@ def run_generation_maintenance(
     force_rebuild: bool = False,
 ) -> dict:
     """Run one bounded fenced generation refresh; never mutate knowledge."""
-    if (
-        isinstance(time_budget_seconds, bool)
-        or not isinstance(time_budget_seconds, (int, float))
-        or not math.isfinite(time_budget_seconds)
-        or time_budget_seconds <= 0
-    ):
-        raise ValueError("time_budget_seconds must be positive and finite")
-    if isinstance(max_sources, bool) or not isinstance(max_sources, int) or max_sources < 1:
-        raise ValueError("max_sources must be a positive integer")
+    _require_positive_time_budget(time_budget_seconds)
+    _require_positive_source_limit(max_sources)
     root_path = Path(
         root or os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent)
     ).resolve()
@@ -6040,92 +6207,37 @@ def run_generation_maintenance(
         os.path.abspath(state_root or os.environ.get("LLM_WIKI_STATE_ROOT", root_path))
     )
     deadline = time.monotonic() + float(time_budget_seconds)
-    filesystem = _filesystem_check(state_path, deadline)
-    if filesystem["status"] == "error":
-        if filesystem["details"].get("budget_exhausted"):
-            return {
-                "status": "deferred",
-                "generation_id": None,
-                "sources": 0,
-                "partial": True,
-                "reason": "time_limit",
-            }
-        return {
-            "status": "error",
-            "generation_id": None,
-            "sources": 0,
-            "partial": False,
-            "reason": "unsupported_filesystem",
-        }
-    acquired = _acquire_maintenance_owner(root_path, state_path, datetime.now(timezone.utc))
+    unusable = _unusable_filesystem_outcome(state_path, deadline)
+    if unusable is not None:
+        return unusable
+    acquired = _acquire_maintenance_owner(
+        root_path, state_path, datetime.now(timezone.utc)
+    )
     if acquired is None:
-        return {
-            "status": "deferred",
-            "generation_id": None,
-            "sources": 0,
-            "partial": True,
-            "reason": "maintenance_owner_busy",
-        }
+        return _maintenance_outcome("deferred", "maintenance_owner_busy", partial=True)
     coordinator, lease = acquired
     repaired: list[dict] = []
     try:
-        with _MaintenanceHeartbeat(coordinator, lease, deadline=deadline) as guard:
-            guard.run(
-                _repair_generation_catalog,
-                root_path,
-                state_path,
-                deadline=deadline,
-                cancelled=guard.cancelled,
-                repaired=repaired,
-            )
-            result = guard.run(
-                _build_or_refresh_generation,
-                root_path,
-                state_path,
-                deadline=deadline,
-                cancelled=guard.cancelled,
-                max_sources=max_sources,
-                force_rebuild=force_rebuild,
-                coordinator=coordinator,
-            )
-            result["repairs"] = repaired
-            return result
+        return _refreshed_generation(
+            root_path,
+            state_path,
+            coordinator,
+            lease,
+            deadline,
+            max_sources,
+            force_rebuild,
+            repaired,
+        )
     except TimeoutError:
-        return {
-            "status": "deferred",
-            "generation_id": None,
-            "sources": 0,
-            "partial": True,
-            "reason": "time_limit",
-            "repairs": repaired,
-        }
+        return _maintenance_outcome(
+            "deferred", "time_limit", partial=True, repairs=repaired
+        )
     except ValueError as exc:
-        if "limit" in str(exc).casefold() or "ceiling" in str(exc).casefold():
-            return {
-                "status": "deferred",
-                "generation_id": None,
-                "sources": 0,
-                "partial": True,
-                "reason": "source_limit",
-                "repairs": repaired,
-            }
-        return {
-            "status": "error",
-            "generation_id": None,
-            "sources": 0,
-            "partial": False,
-            "reason": type(exc).__name__,
-            "repairs": repaired,
-        }
+        return _value_error_outcome(exc, repaired)
     except (OSError, PermissionError, sqlite3.Error) as exc:
-        return {
-            "status": "error",
-            "generation_id": None,
-            "sources": 0,
-            "partial": False,
-            "reason": type(exc).__name__,
-            "repairs": repaired,
-        }
+        return _maintenance_outcome(
+            "error", type(exc).__name__, partial=False, repairs=repaired
+        )
 
 
 def _repair_queue_capabilities(state_root: Path) -> int:

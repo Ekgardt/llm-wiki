@@ -1654,6 +1654,126 @@ class TargetTooLargeError(ValueError):
     """A transaction target exceeds the authoritative target-size contract."""
 
 
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+_CLAIM_TARGET_FIELDS = {
+    "page",
+    "claim_id",
+    "fingerprint",
+    "record_hash",
+    "evidence_hash",
+}
+
+
+def _is_sha256_hex(value: object) -> bool:
+    return isinstance(value, str) and _SHA256_HEX.fullmatch(value) is not None
+
+
+def _is_filled_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _valid_positive_epoch(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return False
+    return value >= 1
+
+
+def _require_bounded_sequence(expected: object, name: str) -> None:
+    if not isinstance(expected, Sequence) or isinstance(expected, (str, bytes)):
+        raise TypeError(f"{name} precondition must be an array")
+    if not 1 <= len(expected) <= 1000:
+        raise ValueError(f"{name} precondition must be bounded")
+
+
+def _require_mapping_fields(expected: object, required: set[str], name: str) -> None:
+    if not isinstance(expected, Mapping):
+        raise TypeError(f"{name} precondition must be a mapping")
+    if set(expected) != required:
+        raise ValueError(f"{name} precondition has invalid fields")
+
+
+def _require_claim_target_hashes(item: Mapping[str, object]) -> None:
+    for field in ("fingerprint", "record_hash", "evidence_hash"):
+        if not _is_sha256_hex(item[field]):
+            raise ValueError("claim_targets precondition has invalid hash")
+
+
+def _valid_project_lease_values(expected: Mapping[str, object]) -> bool:
+    if not _is_filled_string(expected["project"]):
+        return False
+    if not _is_filled_string(expected["lease_token"]):
+        return False
+    if not isinstance(expected["fencing_epoch"], int):
+        return False
+    if expected["fencing_epoch"] < 1:
+        return False
+    return isinstance(expected["expires_at"], str)
+
+
+def _validated_project_lease(expected: object) -> dict:
+    _require_mapping_fields(
+        expected,
+        {"project", "lease_token", "fencing_epoch", "expires_at"},
+        "project_lease",
+    )
+    if not _valid_project_lease_values(expected):
+        raise ValueError("project_lease precondition has invalid values")
+    _parse_timestamp(expected["expires_at"])
+    return dict(expected)
+
+
+def _valid_intent_fence_values(expected: Mapping[str, object]) -> bool:
+    if not _is_sha256_hex(str(expected["intent_id"])):
+        return False
+    if expected["mode"] not in {"capture", "worker", "operator"}:
+        return False
+    if not _is_filled_string(expected["token"]):
+        return False
+    if not _valid_positive_epoch(expected["fencing_epoch"]):
+        return False
+    return isinstance(expected["expires_at"], str)
+
+
+def _validated_intent_fence(expected: object) -> dict:
+    _require_mapping_fields(
+        expected,
+        {"intent_id", "mode", "token", "fencing_epoch", "expires_at"},
+        "intent_fence",
+    )
+    if not _valid_intent_fence_values(expected):
+        raise ValueError("intent_fence precondition has invalid values")
+    _parse_timestamp(str(expected["expires_at"]))
+    return dict(expected)
+
+
+def _valid_capture_binding_values(expected: Mapping[str, object]) -> bool:
+    if not _is_sha256_hex(str(expected["intent_id"])):
+        return False
+    if not _is_filled_string(expected["task_id"]):
+        return False
+    if not _is_sha256_hex(str(expected["active_link_digest"])):
+        return False
+    return _is_sha256_hex(str(expected["seal_digest"]))
+
+
+def _validated_capture_binding(expected: object) -> dict:
+    _require_mapping_fields(
+        expected,
+        {"intent_id", "task_id", "active_link_digest", "seal_digest"},
+        "capture_binding",
+    )
+    if not _valid_capture_binding_values(expected):
+        raise ValueError("capture_binding precondition has invalid values")
+    return dict(expected)
+
+
+def _require_hash_or_absent(expected: object) -> None:
+    if expected == ABSENT:
+        return
+    if not _is_sha256_hex(expected):
+        raise ValueError("precondition values must be 'absent' or SHA-256 hashes")
+
+
 def _is_target_boundary_error(error: BaseException) -> bool:
     if isinstance(error, (TargetBoundaryFailure, FileNotFoundError)):
         return True
@@ -5521,130 +5641,57 @@ class MarkdownCoordinator:
             raise ValueError(f"target parent does not exist: {value}")
         return target
 
+    def _require_claim_target_identity(self, item: object) -> None:
+        if not isinstance(item, Mapping) or set(item) != _CLAIM_TARGET_FIELDS:
+            raise ValueError("claim_targets precondition has invalid fields")
+        self._target(str(item["page"]))
+        if not _is_filled_string(item["claim_id"]):
+            raise ValueError("claim_targets precondition has invalid claim id")
+
+    def _require_claim_target(self, item: object, identities: set) -> None:
+        self._require_claim_target_identity(item)
+        _require_claim_target_hashes(item)
+        identity = (str(item["page"]), item["claim_id"])
+        if identity in identities:
+            raise ValueError("claim_targets precondition contains duplicates")
+        identities.add(identity)
+
+    def _validated_claim_targets(self, expected: object) -> list[dict]:
+        _require_bounded_sequence(expected, "claim_targets")
+        targets: list[dict] = []
+        identities: set = set()
+        for item in expected:
+            self._require_claim_target(item, identities)
+            targets.append(dict(item))
+        return sorted(targets, key=lambda item: (item["page"], item["claim_id"]))
+
+    def _validated_fence_precondition(self, path: str, expected: object) -> object:
+        if path == "project_lease":
+            return _validated_project_lease(expected)
+        if path == "intent_fence":
+            return _validated_intent_fence(expected)
+        if path == "capture_binding":
+            return _validated_capture_binding(expected)
+        self._target(path)
+        _require_hash_or_absent(expected)
+        return expected
+
+    def _validated_precondition(self, path: str, expected: object) -> object:
+        """One precondition value, validated by the kind its key names."""
+        if path == "claim_targets":
+            return self._validated_claim_targets(expected)
+        if path == "claim_tree_manifest":
+            return validate_claim_tree_manifest(expected)
+        if path == "guardrails_source_manifest":
+            return validate_guardrail_source_manifest(expected)
+        return self._validated_fence_precondition(path, expected)
+
     def _validate_preconditions(self, preconditions: Mapping[str, object]) -> dict[str, object]:
         if not isinstance(preconditions, Mapping):
             raise TypeError("preconditions must be a mapping")
         result: dict[str, object] = {}
         for path, expected in preconditions.items():
-            if path == "claim_targets":
-                if not isinstance(expected, Sequence) or isinstance(expected, (str, bytes)):
-                    raise TypeError("claim_targets precondition must be an array")
-                if not 1 <= len(expected) <= 1000:
-                    raise ValueError("claim_targets precondition must be bounded")
-                targets = []
-                identities = set()
-                required = {
-                    "page", "claim_id", "fingerprint", "record_hash", "evidence_hash"
-                }
-                for item in expected:
-                    if not isinstance(item, Mapping) or set(item) != required:
-                        raise ValueError("claim_targets precondition has invalid fields")
-                    self._target(str(item["page"]))
-                    if not isinstance(item["claim_id"], str) or not item["claim_id"]:
-                        raise ValueError("claim_targets precondition has invalid claim id")
-                    for field in ("fingerprint", "record_hash", "evidence_hash"):
-                        value = item[field]
-                        if (
-                            not isinstance(value, str)
-                            or len(value) != 64
-                            or any(character not in "0123456789abcdef" for character in value)
-                        ):
-                            raise ValueError("claim_targets precondition has invalid hash")
-                    identity = (str(item["page"]), item["claim_id"])
-                    if identity in identities:
-                        raise ValueError("claim_targets precondition contains duplicates")
-                    identities.add(identity)
-                    targets.append(dict(item))
-                result[path] = sorted(
-                    targets, key=lambda item: (item["page"], item["claim_id"])
-                )
-                continue
-            if path == "claim_tree_manifest":
-                result[path] = validate_claim_tree_manifest(expected)
-                continue
-            if path == "guardrails_source_manifest":
-                result[path] = validate_guardrail_source_manifest(expected)
-                continue
-            if path == "project_lease":
-                if not isinstance(expected, Mapping):
-                    raise TypeError("project_lease precondition must be a mapping")
-                required = {"project", "lease_token", "fencing_epoch", "expires_at"}
-                if set(expected) != required:
-                    raise ValueError("project_lease precondition has invalid fields")
-                if (
-                    not isinstance(expected["project"], str)
-                    or not expected["project"]
-                    or not isinstance(expected["lease_token"], str)
-                    or not expected["lease_token"]
-                    or not isinstance(expected["fencing_epoch"], int)
-                    or expected["fencing_epoch"] < 1
-                    or not isinstance(expected["expires_at"], str)
-                ):
-                    raise ValueError("project_lease precondition has invalid values")
-                _parse_timestamp(expected["expires_at"])
-                result[path] = dict(expected)
-                continue
-            if path == "intent_fence":
-                if not isinstance(expected, Mapping):
-                    raise TypeError("intent_fence precondition must be a mapping")
-                required = {
-                    "intent_id",
-                    "mode",
-                    "token",
-                    "fencing_epoch",
-                    "expires_at",
-                }
-                if set(expected) != required:
-                    raise ValueError("intent_fence precondition has invalid fields")
-                if (
-                    re.fullmatch(r"[0-9a-f]{64}", str(expected["intent_id"]))
-                    is None
-                    or expected["mode"] not in {"capture", "worker", "operator"}
-                    or not isinstance(expected["token"], str)
-                    or not expected["token"]
-                    or not isinstance(expected["fencing_epoch"], int)
-                    or isinstance(expected["fencing_epoch"], bool)
-                    or expected["fencing_epoch"] < 1
-                    or not isinstance(expected["expires_at"], str)
-                ):
-                    raise ValueError("intent_fence precondition has invalid values")
-                _parse_timestamp(str(expected["expires_at"]))
-                result[path] = dict(expected)
-                continue
-            if path == "capture_binding":
-                if not isinstance(expected, Mapping):
-                    raise TypeError("capture_binding precondition must be a mapping")
-                required = {
-                    "intent_id",
-                    "task_id",
-                    "active_link_digest",
-                    "seal_digest",
-                }
-                if set(expected) != required:
-                    raise ValueError("capture_binding precondition has invalid fields")
-                if (
-                    re.fullmatch(r"[0-9a-f]{64}", str(expected["intent_id"]))
-                    is None
-                    or not isinstance(expected["task_id"], str)
-                    or not expected["task_id"]
-                    or re.fullmatch(
-                        r"[0-9a-f]{64}", str(expected["active_link_digest"])
-                    )
-                    is None
-                    or re.fullmatch(r"[0-9a-f]{64}", str(expected["seal_digest"]))
-                    is None
-                ):
-                    raise ValueError("capture_binding precondition has invalid values")
-                result[path] = dict(expected)
-                continue
-            self._target(path)
-            if expected != ABSENT and (
-                not isinstance(expected, str)
-                or len(expected) != 64
-                or any(character not in "0123456789abcdef" for character in expected)
-            ):
-                raise ValueError("precondition values must be 'absent' or SHA-256 hashes")
-            result[path] = expected
+            result[path] = self._validated_precondition(path, expected)
         canonical_json_bytes(result)
         return result
 
