@@ -3289,6 +3289,68 @@ def _vector_scored_rows(
     return results
 
 
+def _generation_vector_rows(
+    query: str,
+    connection: sqlite3.Connection,
+    manifest: dict[str, object],
+    directory: Path,
+    generation_id: str,
+    *,
+    embedder: object,
+    model_id: str,
+    model_revision: str,
+    scope: str,
+    limit: int,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[dict[str, object]] | None:
+    """The scored rows, or None when the stored vectors cannot be trusted."""
+    import numpy as np
+
+    metadata = _read_vector_metadata(directory, deadline, cancelled)
+    matrix = np.load(directory / "vectors.npy", mmap_mode="r", allow_pickle=False)
+    _check_generation_stop(deadline, cancelled)
+    ordered = _ordered_chunk_identity(connection, deadline, cancelled)
+    dimensions = manifest.get("vector_dimensions")
+    if not _vector_metadata_matches(
+        metadata,
+        manifest,
+        ordered,
+        model_id=model_id,
+        model_revision=model_revision,
+        dimensions=dimensions,
+    ):
+        return None
+    if not _usable_vector_matrix(
+        matrix, ordered, dimensions, deadline=deadline, cancelled=cancelled
+    ):
+        return None
+    _check_generation_stop(deadline, cancelled)
+    query_matrix = np.asarray(_call_generation_embedder(embedder, [query]))
+    _check_generation_stop(deadline, cancelled)
+    if not _usable_query_vector(query_matrix, dimensions):
+        return None
+    similarities = _cosine_similarities(
+        matrix, query_matrix[0], deadline=deadline, cancelled=cancelled
+    )
+    results = _vector_scored_rows(
+        connection,
+        similarities,
+        generation_id,
+        scope=scope,
+        since=since,
+        as_of=as_of,
+        project=project,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    _check_generation_stop(deadline, cancelled)
+    return results[: limit * 3]
+
+
 def _generation_vectors_search(
     query: str,
     catalog: object,
@@ -3313,47 +3375,23 @@ def _generation_vectors_search(
     generation_id = str(manifest["generation_id"])
     directory = Path(getattr(catalog, "generations_path")) / generation_id
     try:
-        import numpy as np
-
-        metadata = _read_vector_metadata(directory, deadline, cancelled)
-        matrix = np.load(directory / "vectors.npy", mmap_mode="r", allow_pickle=False)
-        _check_generation_stop(deadline, cancelled)
-        ordered = _ordered_chunk_identity(connection, deadline, cancelled)
-        dimensions = manifest.get("vector_dimensions")
-        if not _vector_metadata_matches(
-            metadata,
+        return _generation_vector_rows(
+            query,
+            connection,
             manifest,
-            ordered,
+            directory,
+            generation_id,
+            embedder=embedder,
             model_id=model_id,
             model_revision=model_revision,
-            dimensions=dimensions,
-        ):
-            return None
-        if not _usable_vector_matrix(
-            matrix, ordered, dimensions, deadline=deadline, cancelled=cancelled
-        ):
-            return None
-        _check_generation_stop(deadline, cancelled)
-        query_matrix = np.asarray(_call_generation_embedder(embedder, [query]))
-        _check_generation_stop(deadline, cancelled)
-        if not _usable_query_vector(query_matrix, dimensions):
-            return None
-        similarities = _cosine_similarities(
-            matrix, query_matrix[0], deadline=deadline, cancelled=cancelled
-        )
-        results = _vector_scored_rows(
-            connection,
-            similarities,
-            generation_id,
             scope=scope,
+            limit=limit,
+            project=project,
             since=since,
             as_of=as_of,
-            project=project,
             deadline=deadline,
             cancelled=cancelled,
         )
-        _check_generation_stop(deadline, cancelled)
-        return results[: limit * 3]
     except TimeoutError:
         raise
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
@@ -4310,6 +4348,38 @@ def _generation_search_results(
     )
 
 
+def _generation_attempt_inputs(
+    catalog: GenerationCatalog,
+    stop_options: Mapping[str, object],
+    *,
+    semantic: bool,
+    embedder: object | None,
+    model_id: str | None,
+    model_revision: str | None,
+) -> tuple | None:
+    """The manifest, its sealed artifact set, the seal, and an open artifact."""
+    manifest = _active_manifest(catalog, stop_options)
+    if manifest is None:
+        return None
+    artifact_names = _generation_artifact_names(
+        manifest,
+        semantic=semantic,
+        embedder=embedder,
+        model_id=model_id,
+        model_revision=model_revision,
+    )
+    seal = _generation_consumption_seal(
+        catalog, manifest, artifact_names, **stop_options
+    )
+    if seal is None:
+        return None
+    # Opened last: an unusable seal must not leave a connection behind.
+    connection = _generation_connection(catalog, manifest, **stop_options)
+    if connection is None:
+        return None
+    return manifest, artifact_names, seal, connection
+
+
 def _try_generation_search(
     query: str,
     catalog: GenerationCatalog,
@@ -4330,24 +4400,17 @@ def _try_generation_search(
     cancelled: Callable[[], bool] | None,
 ) -> list[dict] | None:
     """One attempt through the active generation; None means fall back."""
-    manifest = _active_manifest(catalog, stop_options)
-    if manifest is None:
-        return None
-    artifact_names = _generation_artifact_names(
-        manifest,
+    inputs = _generation_attempt_inputs(
+        catalog,
+        stop_options,
         semantic=semantic,
         embedder=embedder,
         model_id=model_id,
         model_revision=model_revision,
     )
-    consumption_seal = _generation_consumption_seal(
-        catalog, manifest, artifact_names, **stop_options
-    )
-    if consumption_seal is None:
+    if inputs is None:
         return None
-    connection = _generation_connection(catalog, manifest, **stop_options)
-    if connection is None:
-        return None
+    manifest, artifact_names, consumption_seal, connection = inputs
     try:
         return _generation_search_results(
             query,
