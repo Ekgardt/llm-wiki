@@ -5197,6 +5197,122 @@ class _MaintenanceHeartbeat:
         return result
 
 
+def _generation_cache_absent(state_root: Path, graph_root: Path) -> bool:
+    if _safe_kind(graph_root / "catalog.sqlite3", state_root)[0] != "missing":
+        return False
+    return _safe_kind(graph_root / "generations", state_root)[0] == "missing"
+
+
+def _active_pointer_value(catalog: object) -> str | None:
+    with closing(
+        catalog._readonly()  # noqa: SLF001 - repair needs pointer comparison
+    ) as database:
+        return _active_pointer(database)
+
+
+def _record_generation_recovery(
+    catalog: object, deadline: float, repaired: list[dict], active_before: str | None
+) -> None:
+    recovered = catalog.recover_orphans(deadline=deadline)
+    if recovered:
+        repaired.append(
+            {"action": "recover_generation_orphans", "count": len(recovered)}
+        )
+    active_manifest = catalog.get_active(deadline=deadline)
+    active_after = _active_generation_id(active_manifest)
+    if active_after != active_before:
+        repaired.append(
+            {
+                "action": "fallback_generation",
+                "from": active_before,
+                "to": active_after,
+            }
+        )
+
+
+def _registered_generation_ids(catalog: object, generation_catalog) -> set[str]:
+    with closing(catalog._readonly()) as database:  # noqa: SLF001 - bounded repair
+        rows = database.execute(
+            "SELECT generation_id FROM generations LIMIT ?",
+            (generation_catalog.MAX_GENERATIONS + 1,),
+        ).fetchall()
+    if len(rows) > generation_catalog.MAX_GENERATIONS:
+        raise ValueError("generation catalog exceeds cleanup bound")
+    return {str(row[0]) for row in rows}
+
+
+def _cleanup_stop_reached(deadline: float, cancelled) -> bool:
+    return bool(cancelled and cancelled()) or _deadline_reached(deadline)
+
+
+def _skip_generation_child(entry: os.DirEntry, registered: set[str]) -> bool:
+    return entry.name in registered or not entry.is_dir(follow_symlinks=False)
+
+
+def _removable_generation_orphan(
+    path: Path,
+    entry_name: str,
+    state_root: Path,
+    catalog: object,
+    generation_catalog,
+    deadline: float,
+    cancelled,
+) -> bool:
+    """True only for an unregistered child that fails validation in place."""
+    try:
+        generation_catalog._generation_id(entry_name)  # noqa: SLF001
+        if generation_catalog._is_link_or_reparse(path):  # noqa: SLF001
+            return False
+        generation_catalog._validate_generation(  # noqa: SLF001
+            path,
+            state_root,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+    except TimeoutError:
+        raise
+    except (FileNotFoundError, OSError, PermissionError, TypeError, ValueError):
+        parent = path.parent.resolve(strict=True)
+        return parent == catalog.generations_path.resolve(strict=True)
+    return False
+
+
+def _cleanup_generation_orphans(
+    catalog: object,
+    generation_catalog,
+    state_root: Path,
+    registered: set[str],
+    deadline: float,
+    cancelled,
+) -> int:
+    children = generation_catalog._bounded_scandir(  # noqa: SLF001
+        catalog.generations_path,
+        generation_catalog.MAX_GENERATION_CHILDREN,
+        "generation child count exceeds cleanup bound",
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    removed = 0
+    for entry in children:
+        if _cleanup_stop_reached(deadline, cancelled):
+            raise TimeoutError("generation cleanup deadline reached")
+        if _skip_generation_child(entry, registered):
+            continue
+        path = Path(entry.path)
+        if _removable_generation_orphan(
+            path,
+            entry.name,
+            state_root,
+            catalog,
+            generation_catalog,
+            deadline,
+            cancelled,
+        ):
+            shutil.rmtree(path)
+            removed += 1
+    return removed
+
+
 def _repair_generation_catalog(
     root: Path,
     state_root: Path,
@@ -5210,73 +5326,15 @@ def _repair_generation_catalog(
     import generation_catalog
 
     graph_root = state_root / "cache" / "evidence-graph"
-    if (
-        _safe_kind(graph_root / "catalog.sqlite3", state_root)[0] == "missing"
-        and _safe_kind(graph_root / "generations", state_root)[0] == "missing"
-    ):
+    if _generation_cache_absent(state_root, graph_root):
         return
     catalog = generation_catalog.GenerationCatalog(state_root)
-    with closing(
-        catalog._readonly()  # noqa: SLF001 - repair needs pointer comparison
-    ) as database:
-        row = database.execute(
-            "SELECT active_generation_id FROM catalog_state WHERE singleton=1"
-        ).fetchone()
-        active_before = None if row is None else row[0]
-    recovered = catalog.recover_orphans(deadline=deadline)
-    if recovered:
-        repaired.append({"action": "recover_generation_orphans", "count": len(recovered)})
-
-    active_manifest = catalog.get_active(deadline=deadline)
-    active_after = None if active_manifest is None else str(active_manifest["generation_id"])
-    if active_after != active_before:
-        repaired.append(
-            {
-                "action": "fallback_generation",
-                "from": active_before,
-                "to": active_after,
-            }
-        )
-
-    with closing(catalog._readonly()) as database:  # noqa: SLF001 - bounded catalog repair
-        rows = database.execute(
-            "SELECT generation_id FROM generations LIMIT ?",
-            (generation_catalog.MAX_GENERATIONS + 1,),
-        ).fetchall()
-    if len(rows) > generation_catalog.MAX_GENERATIONS:
-        raise ValueError("generation catalog exceeds cleanup bound")
-    registered = {str(row[0]) for row in rows}
-    removed = 0
-    children = generation_catalog._bounded_scandir(  # noqa: SLF001
-        catalog.generations_path,
-        generation_catalog.MAX_GENERATION_CHILDREN,
-        "generation child count exceeds cleanup bound",
-        deadline=deadline,
-        cancelled=cancelled,
+    active_before = _active_pointer_value(catalog)
+    _record_generation_recovery(catalog, deadline, repaired, active_before)
+    registered = _registered_generation_ids(catalog, generation_catalog)
+    removed = _cleanup_generation_orphans(
+        catalog, generation_catalog, state_root, registered, deadline, cancelled
     )
-    for entry in children:
-        if bool(cancelled and cancelled()) or _deadline_reached(deadline):
-            raise TimeoutError("generation cleanup deadline reached")
-        path = Path(entry.path)
-        if entry.name in registered or not entry.is_dir(follow_symlinks=False):
-            continue
-        try:
-            generation_catalog._generation_id(entry.name)  # noqa: SLF001
-            if generation_catalog._is_link_or_reparse(path):  # noqa: SLF001
-                continue
-            generation_catalog._validate_generation(  # noqa: SLF001
-                path,
-                state_root,
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-        except TimeoutError:
-            raise
-        except (FileNotFoundError, OSError, PermissionError, TypeError, ValueError):
-            if path.parent.resolve(strict=True) != catalog.generations_path.resolve(strict=True):
-                continue
-            shutil.rmtree(path)
-            removed += 1
     if removed:
         repaired.append({"action": "cleanup_generation_orphans", "count": removed})
 
