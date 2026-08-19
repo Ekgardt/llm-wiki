@@ -32,7 +32,7 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, closing, contextmanager, nullcontext
 from pathlib import Path
 
@@ -2613,6 +2613,97 @@ def _generation_result(row: sqlite3.Row, generation_id: str) -> dict[str, object
     }
 
 
+_GENERATION_CHUNK_COLUMNS = (
+    "chunk_id, chunk_order, source_id, source_path, source_sha256, "
+    "heading_ancestry, type, project, authority, confidence, status, valid_from, "
+    "valid_to, language, title, content"
+)
+
+
+def _register_filename_stem_function(connection: sqlite3.Connection) -> None:
+    connection.create_function(
+        "llm_wiki_filename_stem",
+        1,
+        lambda value: _normalized_filename_stem(value) if isinstance(value, str) else "",
+        deterministic=True,
+    )
+
+
+def _exact_filename_rows(
+    connection: sqlite3.Connection,
+    normalized_stem: str,
+    filters: str,
+    values: Sequence[object],
+    project: str | None,
+) -> list[sqlite3.Row]:
+    """The one chunk whose file name is the query, if the corpus holds it."""
+    exact_filters = filters
+    exact_values = list(values)
+    if project:
+        exact_filters += " AND lower(project) = lower(?)"
+        exact_values.append(project)
+    return connection.execute(
+        f"SELECT {_GENERATION_CHUNK_COLUMNS}, 0.0 AS rank FROM chunks "
+        "WHERE llm_wiki_filename_stem(source_path) = ?"
+        f"{exact_filters} ORDER BY source_path, chunk_order LIMIT 1",
+        [normalized_stem, *exact_values],
+    ).fetchall()
+
+
+def _generation_matched_rows(
+    connection: sqlite3.Connection,
+    query: str,
+    filters: str,
+    values: Sequence[object],
+    limit: int,
+) -> list[sqlite3.Row]:
+    return connection.execute(
+        f"SELECT {_GENERATION_CHUNK_COLUMNS}, bm25(chunks) AS rank FROM chunks "
+        f"WHERE chunks MATCH ?{filters} ORDER BY rank, chunk_order LIMIT ?",
+        [_fts_query(query), *values, limit * 5],
+    ).fetchall()
+
+
+def _deduplicated_results(
+    rows: Sequence[sqlite3.Row],
+    generation_id: str,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[dict[str, object]]:
+    results: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for row in rows:
+        _check_generation_stop(deadline, cancelled)
+        chunk_id = str(row["chunk_id"])
+        if chunk_id in seen:
+            continue
+        seen.add(chunk_id)
+        results.append(_generation_result(row, generation_id))
+    return results
+
+
+def _boost_generation_results(
+    results: list[dict[str, object]],
+    query: str,
+    project: str | None,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    """Project match doubles the score here; a title containing the query triples it."""
+    query_words = set(query.casefold().split())
+    for result in results:
+        _check_generation_stop(deadline, cancelled)
+        score = float(result["score"])
+        if project and str(result["project"]).casefold() == project.casefold():
+            score *= 2.0
+        title_words = set(str(result["title"]).casefold().split())
+        if query_words and query_words.issubset(title_words):
+            score *= 3.0
+        result["score"] = score
+
+
 def _generation_fts_search(
     query: str,
     manifest: dict[str, object],
@@ -2626,57 +2717,25 @@ def _generation_fts_search(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> list[dict[str, object]]:
+    """BM25 over one generation, with an exact filename match kept in front."""
     with _generation_sqlite_guard(connection, deadline, cancelled):
         connection.row_factory = sqlite3.Row
         filters, values = _generation_filters(scope=scope, since=since, as_of=as_of)
-        normalized_stem = _normalized_filename_stem(query)
-        connection.create_function(
-            "llm_wiki_filename_stem",
-            1,
-            lambda value: (
-                _normalized_filename_stem(value) if isinstance(value, str) else ""
-            ),
-            deterministic=True,
+        _register_filename_stem_function(connection)
+        exact_rows = _exact_filename_rows(
+            connection, _normalized_filename_stem(query), filters, values, project
         )
-        exact_filters = filters
-        exact_values = list(values)
-        if project:
-            exact_filters += " AND lower(project) = lower(?)"
-            exact_values.append(project)
-        exact_rows = connection.execute(
-            "SELECT chunk_id, chunk_order, source_id, source_path, source_sha256, "
-            "heading_ancestry, type, project, authority, confidence, status, valid_from, "
-            "valid_to, language, title, content, 0.0 AS rank FROM chunks "
-            "WHERE llm_wiki_filename_stem(source_path) = ?"
-            f"{exact_filters} ORDER BY source_path, chunk_order LIMIT 1",
-            [normalized_stem, *exact_values],
-        ).fetchall()
-        rows = connection.execute(
-            "SELECT chunk_id, chunk_order, source_id, source_path, source_sha256, "
-            "heading_ancestry, type, project, authority, confidence, status, valid_from, "
-            "valid_to, language, title, content, bm25(chunks) AS rank FROM chunks "
-            f"WHERE chunks MATCH ?{filters} ORDER BY rank, chunk_order LIMIT ?",
-            [_fts_query(query), *values, limit * 5],
-        ).fetchall()
-    generation_id = str(manifest["generation_id"])
-    results = []
-    seen_chunk_ids: set[str] = set()
+        rows = _generation_matched_rows(connection, query, filters, values, limit)
     exact_path = str(exact_rows[0]["source_path"]) if exact_rows else None
-    for row in [*exact_rows, *rows]:
-        _check_generation_stop(deadline, cancelled)
-        chunk_id = str(row["chunk_id"])
-        if chunk_id in seen_chunk_ids:
-            continue
-        seen_chunk_ids.add(chunk_id)
-        results.append(_generation_result(row, generation_id))
-    query_words = set(query.casefold().split())
-    for result in results:
-        _check_generation_stop(deadline, cancelled)
-        if project and str(result["project"]).casefold() == project.casefold():
-            result["score"] = float(result["score"]) * 2.0
-        title_words = set(str(result["title"]).casefold().split())
-        if query_words and query_words.issubset(title_words):
-            result["score"] = float(result["score"]) * 3.0
+    results = _deduplicated_results(
+        [*exact_rows, *rows],
+        str(manifest["generation_id"]),
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    _boost_generation_results(
+        results, query, project, deadline=deadline, cancelled=cancelled
+    )
     results.sort(
         key=lambda item: (
             0 if item["path"] == exact_path else 1,
@@ -2689,10 +2748,10 @@ def _generation_fts_search(
         _check_generation_stop(deadline, cancelled)
         result["score"] = round(float(result["score"]), 4)
         result.pop("_chunk_order", None)
-    results = apply_hard_filters(
+    filtered = apply_hard_filters(
         results, project=project, since=since, as_of=as_of, scope=scope
     )
-    return results[:limit]
+    return filtered[:limit]
 
 
 def _vectors_match_manifest(
