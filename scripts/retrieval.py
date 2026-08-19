@@ -573,6 +573,152 @@ def _evidence_id_tuple(raw_evidence: object) -> tuple[str, ...]:
     return tuple(item for item in raw_evidence if isinstance(item, str) and item)
 
 
+def _graph_row_is_valid(
+    row: Mapping[str, Any],
+    path: tuple[dict[str, Any], ...],
+    allowed_directions: set[str],
+    allowed_edges: set[str],
+) -> bool:
+    """A usable expansion: in-range hop, allowed edge and direction, real path."""
+    hop = _as_int(row.get("hop"), 0)
+    if not 1 <= hop <= GRAPH_MAX_HOPS:
+        return False
+    if row.get("direction") not in allowed_directions:
+        return False
+    if row.get("edge_type") not in allowed_edges:
+        return False
+    return bool(path)
+
+
+def _path_evidence_ids(path: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            evidence_id for step in path for evidence_id in step["evidence_ids"]
+        )
+    )
+
+
+def _scored_graph_row(
+    row: dict[str, Any],
+    *,
+    query: str,
+    direct_graph_query: bool,
+    path: tuple[dict[str, Any], ...],
+) -> tuple[tuple[object, ...], dict[str, Any]] | None:
+    """Rank key and enriched row, or None when the text says it is unrelated."""
+    overlap, full_match = _graph_text_relevance(query, row)
+    if overlap == 0 and not direct_graph_query:
+        return None
+    hop = _as_int(row.get("hop"), 0)
+    decay = GRAPH_EDGE_DECAY[str(row.get("edge_type"))] ** hop
+    row.update(
+        assertion_path=path,
+        evidence_ids=_path_evidence_ids(path),
+        graph_boost=decay,
+        graph_text_overlap=overlap,
+    )
+    key = (-full_match, -overlap, hop, -decay, str(row.get("seed_id")), _candidate_key(row))
+    return key, row
+
+
+def _prepared_graph_row(
+    raw: Mapping[str, Any],
+    backend_rank: int,
+    *,
+    query: str,
+    direct_graph_query: bool,
+    seed_ids: set[str],
+    allowed_directions: set[str],
+    allowed_edges: set[str],
+) -> tuple[tuple[object, ...], dict[str, Any]] | None:
+    row = dict(raw)
+    seed_id = row.get("seed_id")
+    if seed_id is None:
+        # Independent pre-Task22 graph retrievers remain rank-only inputs.
+        return (0, 0, 0, backend_rank, _candidate_key(row)), row
+    if not isinstance(seed_id, str) or seed_id not in seed_ids:
+        return None
+    path = _assertion_path(row)
+    if not _graph_row_is_valid(row, path, allowed_directions, allowed_edges):
+        return None
+    return _scored_graph_row(
+        row, query=query, direct_graph_query=direct_graph_query, path=path
+    )
+
+
+def _merged_assertion_path(
+    existing: Mapping[str, Any], row: Mapping[str, Any]
+) -> tuple[Any, ...]:
+    merged = list(existing.get("assertion_path") or ())
+    for step in row.get("assertion_path") or ():
+        if step not in merged:
+            merged.append(step)
+    return tuple(merged)
+
+
+def _merge_graph_duplicate(existing: dict[str, Any], row: Mapping[str, Any]) -> None:
+    """Two paths to the same candidate keep both routes and the stronger boost."""
+    existing["assertion_path"] = _merged_assertion_path(existing, row)
+    existing["evidence_ids"] = tuple(
+        dict.fromkeys((*existing.get("evidence_ids", ()), *row.get("evidence_ids", ())))
+    )
+    existing["graph_boost"] = max(
+        float(existing.get("graph_boost") or 0.0),
+        float(row.get("graph_boost") or 0.0),
+    )
+
+
+def _accept_graph_row(
+    selected: dict[str, dict[str, Any]],
+    row: Mapping[str, Any],
+    global_limit: int,
+) -> bool:
+    """Take the row, or merge it into the candidate already chosen."""
+    candidate_id = _candidate_key(row)
+    existing = selected.get(candidate_id)
+    if existing is not None:
+        _merge_graph_duplicate(existing, row)
+        return True
+    if len(selected) >= global_limit:
+        return False
+    selected[candidate_id] = dict(row)
+    return True
+
+
+def _select_graph_hits(
+    prepared: list[tuple[tuple[object, ...], dict[str, Any]]],
+    *,
+    per_seed_limit: int,
+    global_limit: int,
+) -> tuple[Mapping[str, Any], ...]:
+    selected: dict[str, dict[str, Any]] = {}
+    per_seed: dict[str, int] = {}
+    for _key, row in sorted(prepared, key=lambda item: item[0]):
+        seed_id = str(row.get("seed_id") or "")
+        if _seed_quota_left(per_seed, seed_id, per_seed_limit):
+            _take_graph_row(selected, per_seed, row, seed_id, global_limit)
+    return tuple(selected.values())
+
+
+def _seed_quota_left(per_seed: dict[str, int], seed_id: str, per_seed_limit: int) -> bool:
+    if not seed_id:
+        return True
+    return per_seed.get(seed_id, 0) < per_seed_limit
+
+
+def _take_graph_row(
+    selected: dict[str, dict[str, Any]],
+    per_seed: dict[str, int],
+    row: Mapping[str, Any],
+    seed_id: str,
+    global_limit: int,
+) -> None:
+    if not _accept_graph_row(selected, row, global_limit):
+        return
+    if seed_id:
+        per_seed[seed_id] = per_seed.get(seed_id, 0) + 1
+
+
 def _prepare_graph_hits(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -585,92 +731,22 @@ def _prepare_graph_hits(
     global_limit: int,
 ) -> tuple[Mapping[str, Any], ...]:
     """Validate, text-rerank, decay, and cap graph expansions deterministically."""
-    seed_ids = {_candidate_key(seed) for seed in seeds}
-    allowed_directions = set(directions)
-    allowed_edges = set(edge_types)
-    direct_graph_query = requested_profile == "GRAPH"
     prepared: list[tuple[tuple[object, ...], dict[str, Any]]] = []
     for backend_rank, raw in enumerate(rows, start=1):
-        row = dict(raw)
-        seed_id = row.get("seed_id")
-        if seed_id is None:
-            # Independent pre-Task22 graph retrievers remain rank-only inputs.
-            prepared.append(((0, 0, 0, backend_rank, _candidate_key(row)), row))
-            continue
-        if not isinstance(seed_id, str) or seed_id not in seed_ids:
-            continue
-        hop = _as_int(row.get("hop"), 0)
-        direction = row.get("direction")
-        edge_type = row.get("edge_type")
-        path = _assertion_path(row)
-        if (
-            not 1 <= hop <= GRAPH_MAX_HOPS
-            or direction not in allowed_directions
-            or edge_type not in allowed_edges
-            or not path
-        ):
-            continue
-        evidence_ids = tuple(
-            dict.fromkeys(
-                evidence_id
-                for step in path
-                for evidence_id in step["evidence_ids"]
-            )
+        item = _prepared_graph_row(
+            raw,
+            backend_rank,
+            query=query,
+            direct_graph_query=requested_profile == "GRAPH",
+            seed_ids={_candidate_key(seed) for seed in seeds},
+            allowed_directions=set(directions),
+            allowed_edges=set(edge_types),
         )
-        overlap, full_match = _graph_text_relevance(query, row)
-        if overlap == 0 and not direct_graph_query:
-            continue
-        decay = GRAPH_EDGE_DECAY[str(edge_type)] ** hop
-        row.update(
-            assertion_path=path,
-            evidence_ids=evidence_ids,
-            graph_boost=decay,
-            graph_text_overlap=overlap,
-        )
-        prepared.append(
-            (
-                (
-                    -full_match,
-                    -overlap,
-                    hop,
-                    -decay,
-                    seed_id,
-                    _candidate_key(row),
-                ),
-                row,
-            )
-        )
-
-    selected: dict[str, dict[str, Any]] = {}
-    per_seed: dict[str, int] = {}
-    for _key, row in sorted(prepared, key=lambda item: item[0]):
-        seed_id = str(row.get("seed_id") or "")
-        if seed_id and per_seed.get(seed_id, 0) >= per_seed_limit:
-            continue
-        candidate_id = _candidate_key(row)
-        existing = selected.get(candidate_id)
-        if existing is None:
-            if len(selected) >= global_limit:
-                continue
-            selected[candidate_id] = dict(row)
-        else:
-            existing_path = list(existing.get("assertion_path") or ())
-            for step in row.get("assertion_path") or ():
-                if step not in existing_path:
-                    existing_path.append(step)
-            existing["assertion_path"] = tuple(existing_path)
-            existing["evidence_ids"] = tuple(
-                dict.fromkeys(
-                    (*existing.get("evidence_ids", ()), *row.get("evidence_ids", ()))
-                )
-            )
-            existing["graph_boost"] = max(
-                float(existing.get("graph_boost") or 0.0),
-                float(row.get("graph_boost") or 0.0),
-            )
-        if seed_id:
-            per_seed[seed_id] = per_seed.get(seed_id, 0) + 1
-    return tuple(selected.values())
+        if item is not None:
+            prepared.append(item)
+    return _select_graph_hits(
+        prepared, per_seed_limit=per_seed_limit, global_limit=global_limit
+    )
 
 
 def expand_evidence_graph(

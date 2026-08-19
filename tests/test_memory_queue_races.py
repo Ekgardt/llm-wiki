@@ -364,43 +364,15 @@ def test_a_busy_database_makes_the_worker_wait_instead_of_dying(tmp_path, monkey
     assert queue.get(task_id).state == "succeeded"
 
 
-def test_windows_process_pairs_come_from_the_kernel_snapshot_first(monkeypatch):
-    """`wmic` is gone from current Windows and the CIM fallback costs seconds.
-
-    Cleanup verification failed for lack of an answer when both were slow or
-    missing, so the kernel snapshot is asked first and the tools only back it up.
-    """
-    calls = []
-    monkeypatch.setattr(
-        memory_queue, "_windows_process_pairs", lambda: calls.append("snapshot") or [(7, 3)]
-    )
-    monkeypatch.setattr(
-        memory_queue,
-        "_windows_pairs_via_tools",
-        lambda: calls.append("tools") or [(9, 3)],
-    )
-
-    assert memory_queue._tracked_descendant_pids(3, "nt") == {7}
-    assert calls == ["snapshot"]
-
-
-def test_the_legacy_tools_still_answer_when_the_snapshot_cannot(monkeypatch):
-    monkeypatch.setattr(memory_queue, "_windows_process_pairs", lambda: None)
-    monkeypatch.setattr(memory_queue, "_windows_pairs_via_tools", lambda: [(11, 5), (12, 11)])
+def test_the_windows_process_tree_comes_from_the_kernel_snapshot(monkeypatch):
+    """One source, present on every supported Windows and needing no subprocess."""
+    monkeypatch.setattr(memory_queue, "_windows_process_pairs", lambda: [(11, 5), (12, 11)])
 
     assert memory_queue._tracked_descendant_pids(5, "nt") == {11, 12}
 
 
-def test_no_process_source_reports_unknown_rather_than_empty(monkeypatch):
+def test_a_failed_snapshot_reports_unknown_rather_than_empty(monkeypatch):
     """An unknown descendant set must not read as a verified clean tree."""
     monkeypatch.setattr(memory_queue, "_windows_process_pairs", lambda: None)
-    monkeypatch.setattr(memory_queue, "_windows_pairs_via_tools", lambda: None)
 
     assert memory_queue._tracked_descendant_pids(5, "nt") is None
-
-
-def test_the_wmic_and_cim_parsers_read_their_own_formats():
-    wmic = "Node,ParentProcessId,ProcessId\r\nHOST,4,880\r\nHOST,880,1204\r\n\r\n"
-    assert memory_queue._parse_wmic_pairs(wmic) == [(880, 4), (1204, 880)]
-    assert memory_queue._parse_cim_pairs('{"ProcessId":9,"ParentProcessId":4}') == [(9, 4)]
-    assert memory_queue._parse_cim_pairs("not json") is None
