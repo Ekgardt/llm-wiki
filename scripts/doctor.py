@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import functools
 import hashlib
 import importlib.util
 import json
@@ -5149,6 +5150,471 @@ def _run_bounded_worker(
         _release_queue_owner(owner)
 
 
+_DEFERRED_BY_ACTION = {
+    "runtime": {"runtime"},
+    "transactions": {"transactions"},
+    "queue": {"queue"},
+    "indexes": {"index", "claims"},
+    "archives": {"archives"},
+    "generations": {"generation"},
+}
+
+
+class _RepairContext(NamedTuple):
+    """Everything a repair step is allowed to read or record."""
+
+    root_path: Path
+    state_path: Path
+    generated_at: datetime
+    deadline: float
+    rebuild_generation: bool
+    selected_repairs: set[str]
+    repaired: list[dict]
+    repair_errors: dict[str, list[str]]
+    repair_deferred: set[str]
+
+
+def _validated_repairs(repair_actions: set[str] | frozenset[str] | None) -> set[str]:
+    selected = set(VALID_REPAIR_ACTIONS if repair_actions is None else repair_actions)
+    unknown = selected - VALID_REPAIR_ACTIONS
+    if unknown:
+        raise ValueError(f"unknown doctor repair actions: {sorted(unknown)}")
+    return selected
+
+
+def _resolved_doctor_paths(
+    root: Path | str | None, state_root: Path | str | None, home: Path | str | None
+) -> tuple[Path, Path, Path]:
+    root_path = Path(
+        root or os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent)
+    ).resolve()
+    state_path = Path(
+        os.path.abspath(state_root or os.environ.get("LLM_WIKI_STATE_ROOT", root_path))
+    )
+    home_path = Path(home).resolve() if home is not None else Path.home().resolve()
+    return root_path, state_path, home_path
+
+
+def _validated_doctor_deadline(
+    deadline: float | None, time_budget_seconds: float
+) -> float:
+    if deadline is None:
+        return time.monotonic() + max(0.0, time_budget_seconds)
+    if (
+        isinstance(deadline, bool)
+        or not isinstance(deadline, (int, float))
+        or not math.isfinite(deadline)
+    ):
+        raise ValueError("deadline must be a finite monotonic timestamp")
+    return float(deadline)
+
+
+def _defer_all_repairs(context: _RepairContext) -> None:
+    for action in context.selected_repairs:
+        context.repair_deferred.update(_DEFERRED_BY_ACTION[action])
+
+
+def _repair_generations_action(guard: Any, context: _RepairContext) -> None:
+    guard.run(
+        _repair_generation_catalog,
+        context.root_path,
+        context.state_path,
+        deadline=context.deadline,
+        cancelled=guard.cancelled,
+        repaired=context.repaired,
+    )
+    if not context.rebuild_generation:
+        return
+    result = guard.run(
+        _build_or_refresh_generation,
+        context.root_path,
+        context.state_path,
+        deadline=context.deadline,
+        cancelled=guard.cancelled,
+        max_sources=DEFAULT_GENERATION_SOURCE_LIMIT,
+        force_rebuild=True,
+    )
+    if result["status"] == "built":
+        context.repaired.append(
+            {
+                "action": "rebuild_generation",
+                "generation_id": result["generation_id"],
+            }
+        )
+        return
+    if result["status"] == "deferred":
+        context.repair_deferred.add("generation")
+
+
+def _repair_transactions_action(
+    guard: Any, coordinator: Any, context: _RepairContext
+) -> None:
+    recovered = guard.run(
+        coordinator.recover,
+        writer_wait_seconds=0,
+        max_transactions=MAX_OPERATIONAL_ROWS,
+        deadline=context.deadline,
+        cancelled=guard.cancelled,
+    )
+    if recovered:
+        context.repaired.append(
+            {"action": "recover_transactions", "count": len(recovered)}
+        )
+
+
+def _record_queue_migration_repair(
+    migration: Any, marker_existed: bool, context: _RepairContext
+) -> None:
+    if migration is None:
+        return
+    if marker_existed and not migration.imported and not migration.quarantined:
+        return
+    context.repaired.append(
+        {
+            "action": "migrate_queue",
+            "count": migration.imported + migration.quarantined,
+        }
+    )
+
+
+def _repair_queue_action(guard: Any, context: _RepairContext) -> bool:
+    """Repair the legacy queue and report whether the v2 queue is usable."""
+    from memory_queue import MemoryQueue, migrate_legacy_queue
+
+    legacy_available = guard.run(
+        _repair_leases, context.state_path, context.generated_at, context.repaired
+    )
+    if not legacy_available:
+        context.repair_deferred.add("queue")
+    marker = context.state_path / "run" / "queue-migrated-v2"
+    marker_existed = _safe_kind(marker, context.state_path)[0] == "regular"
+    migration = None
+    if legacy_available:
+        migration = guard.run(
+            migrate_legacy_queue,
+            context.state_path,
+            deadline=context.deadline,
+            cancelled=guard.cancelled,
+        )
+    _record_queue_migration_repair(migration, marker_existed, context)
+    marker_valid = _safe_kind(marker, context.state_path)[0] == "regular"
+    if migration is None and not marker_valid:
+        return False
+    guard.run(MemoryQueue, context.state_path)
+    return True
+
+
+def _index_repair_failure_message(index_after: dict) -> str:
+    if index_after["details"].get("freshness") == "missing":
+        return "Index repair failed: index was not created"
+    return "Index repair failed: rebuilt index did not validate as fresh"
+
+
+def _rebuild_and_verify_index(guard: Any, context: _RepairContext) -> None:
+    guard.run(
+        _rebuild_index,
+        context.root_path,
+        context.state_path,
+        deadline=context.deadline,
+        cancelled=guard.cancelled,
+    )
+    index_after = _index_check(
+        context.state_path,
+        context.generated_at,
+        context.deadline,
+        root=context.root_path,
+    )
+    if index_after["status"] == "ok":
+        context.repaired.append({"action": "rebuild_index"})
+        return
+    context.repair_errors.setdefault("index", []).append(
+        _index_repair_failure_message(index_after)
+    )
+
+
+def _repair_index_action(guard: Any, context: _RepairContext) -> None:
+    index_before = _index_check(
+        context.state_path,
+        context.generated_at,
+        context.deadline,
+        root=context.root_path,
+    )
+    if not index_before["details"].get("repairable") or index_before["status"] == "ok":
+        return
+    index_lock = context.state_path / "cache" / ".doctor-index.lock"
+    lock_token = guard.run(
+        _acquire_lock,
+        index_lock,
+        context.state_path / "cache",
+        context.generated_at,
+    )
+    if lock_token is None:
+        context.repair_deferred.add("index")
+        return
+    try:
+        _rebuild_and_verify_index(guard, context)
+    except Exception as exc:  # noqa: BLE001
+        context.repair_errors.setdefault("index", []).append(
+            f"Index repair failed: {type(exc).__name__}"
+        )
+    finally:
+        guard.cleanup(
+            _release_lock, index_lock, context.state_path / "cache", lock_token
+        )
+
+
+def _repair_archives_action(guard: Any, context: _RepairContext) -> None:
+    archive_before = _archive_check(
+        context.root_path, context.state_path, context.deadline
+    )
+    archive_root = _archive_path(context.root_path)
+    if _safe_kind(archive_root, context.root_path)[0] != "directory":
+        return
+    if archive_before["status"] == "ok":
+        return
+    from archive_daily import DailyArchiver
+
+    guard.run(
+        lambda: DailyArchiver(context.root_path, context.state_path).recover(
+            deadline=context.deadline,
+            cancelled=guard.cancelled,
+        )
+    )
+    context.repaired.append({"action": "recover_archives"})
+
+
+def _claim_sources(root_path: Path) -> list[Path]:
+    sources = [root_path / "knowledge" / "notes"]
+    projects = root_path / "knowledge" / "projects"
+    if _safe_kind(projects, root_path)[0] == "directory":
+        sources.append(projects)
+    return sources
+
+
+def _repair_claims_action(guard: Any, context: _RepairContext) -> None:
+    claim_before = _claim_check(
+        context.root_path, context.state_path, context.deadline
+    )
+    if claim_before["status"] == "ok":
+        return
+    from claims import ClaimIndex
+
+    claim_index = ClaimIndex(context.state_path, vault=context.root_path)
+    guard.run(
+        claim_index.rebuild,
+        _claim_sources(context.root_path),
+        deadline=context.deadline,
+        cancelled=guard.cancelled,
+    )
+    context.repaired.append({"action": "rebuild_claim_index"})
+
+
+def _repair_queue_followups(
+    guard: Any, context: _RepairContext, queue_v2_ready: bool
+) -> None:
+    if not queue_v2_ready:
+        return
+    unblocked = guard.run(_repair_queue_capabilities, context.state_path)
+    if unblocked:
+        context.repaired.append(
+            {"action": "unblock_capabilities", "count": unblocked}
+        )
+    processed = guard.run(
+        _run_bounded_worker,
+        context.state_path,
+        deadline=context.deadline,
+        cancelled=guard.cancelled,
+    )
+    if processed:
+        context.repaired.append({"action": "run_bounded_worker", "count": processed})
+
+
+def _repair_state_actions(
+    guard: Any, coordinator: Any, context: _RepairContext
+) -> bool:
+    if "runtime" in context.selected_repairs:
+        guard.run(_repair_runtime, context.state_path, context.repaired)
+    if "generations" in context.selected_repairs:
+        _repair_generations_action(guard, context)
+    if "transactions" in context.selected_repairs:
+        _repair_transactions_action(guard, coordinator, context)
+    if "queue" not in context.selected_repairs:
+        return False
+    return _repair_queue_action(guard, context)
+
+
+def _repair_derived_actions(
+    guard: Any, context: _RepairContext, queue_v2_ready: bool
+) -> None:
+    if "indexes" in context.selected_repairs:
+        _repair_index_action(guard, context)
+    if "archives" in context.selected_repairs:
+        _repair_archives_action(guard, context)
+    if "indexes" in context.selected_repairs:
+        _repair_claims_action(guard, context)
+    if "queue" in context.selected_repairs:
+        _repair_queue_followups(guard, context, queue_v2_ready)
+
+
+def _release_unentered_maintenance(
+    maintenance: tuple | None, guard_entered: bool, context: _RepairContext
+) -> None:
+    if maintenance is None or guard_entered:
+        return
+    try:
+        _release_maintenance_owner(*maintenance)
+    except Exception as exc:  # noqa: BLE001
+        context.repair_errors.setdefault("runtime", []).append(
+            f"Maintenance owner release failed: {type(exc).__name__}"
+        )
+
+
+def _run_repairs(context: _RepairContext) -> None:
+    """Run every selected repair under one maintenance owner."""
+    maintenance: tuple[Any, dict[str, object]] | None = None
+    guard_entered = False
+    try:
+        maintenance = _acquire_maintenance_owner(
+            context.root_path, context.state_path, context.generated_at
+        )
+        if maintenance is None:
+            _defer_all_repairs(context)
+        else:
+            coordinator, lease = maintenance
+            with _MaintenanceHeartbeat(
+                coordinator, lease, deadline=context.deadline
+            ) as guard:
+                guard_entered = True
+                queue_v2_ready = _repair_state_actions(guard, coordinator, context)
+                _repair_derived_actions(guard, context, queue_v2_ready)
+    except Exception as exc:  # noqa: BLE001
+        context.repair_errors.setdefault("runtime", []).append(
+            f"Repair failed: {type(exc).__name__}"
+        )
+    finally:
+        _release_unentered_maintenance(maintenance, guard_entered, context)
+
+
+def _deferrable_checks(
+    root_path: Path,
+    state_path: Path,
+    home_path: Path,
+    generated_at: datetime,
+    deadline: float,
+) -> tuple[tuple[str, Callable[[], dict]], ...]:
+    partial = functools.partial
+    return (
+        (
+            "generation",
+            partial(_generation_check, root_path, state_path, generated_at, deadline),
+        ),
+        (
+            "index",
+            partial(_index_check, state_path, generated_at, deadline, root=root_path),
+        ),
+        (
+            "scheduler",
+            partial(_scheduler_check, root_path, state_path, generated_at, deadline),
+        ),
+        ("capture", partial(_capture_check, state_path, deadline)),
+        ("mcp", partial(_mcp_check, root_path)),
+        (
+            "integrations",
+            partial(_integration_check, root_path, home_path, deadline=deadline),
+        ),
+        ("pyright", partial(_pyright_check, root_path, state_path, deadline=deadline)),
+        (
+            "lsp",
+            partial(_lsp_runtime_check, state_path, generated_at, deadline=deadline),
+        ),
+    )
+
+
+def _completed_or_deferred(
+    check_id: str, operation: Callable[[], dict], deadline: float
+) -> dict:
+    """The LSP check owns its own budget; the rest defer once time is up."""
+    if check_id != "lsp" and time.monotonic() >= deadline:
+        return _result(
+            check_id,
+            "degraded",
+            "Check not completed because the doctor time budget was exhausted.",
+            {"budget_exhausted": True},
+        )
+    return operation()
+
+
+def _collect_checks(
+    root_path: Path,
+    state_path: Path,
+    home_path: Path,
+    generated_at: datetime,
+    deadline: float,
+) -> list[dict]:
+    checks = [
+        _environment_check(root_path, state_path),
+        _runtime_check(state_path),
+        _filesystem_check(state_path, deadline),
+        _transaction_check(state_path, generated_at, deadline),
+        _queue_check(state_path, generated_at, deadline),
+        _archive_check(root_path, state_path, deadline),
+        _claim_check(root_path, state_path, deadline),
+    ]
+    for check_id, operation in _deferrable_checks(
+        root_path, state_path, home_path, generated_at, deadline
+    ):
+        checks.append(_completed_or_deferred(check_id, operation, deadline))
+    return checks
+
+
+def _mark_repair_deferred(check: dict) -> None:
+    check["status"] = "degraded"
+    check["message"] = (
+        f"{check['id'].title()} repair deferred because another owner "
+        "holds the repair lock."
+    )
+    check["details"]["repair_deferred"] = True
+
+
+def _mark_repair_failed(check: dict, errors: list[str]) -> None:
+    check["status"] = "error"
+    check["message"] = f"{check['id'].title()} repair failed."
+    check["details"]["repair_errors"] = errors
+
+
+def _apply_repair_outcomes(checks: list[dict], context: _RepairContext) -> None:
+    for check in checks:
+        if check["id"] in context.repair_deferred:
+            _mark_repair_deferred(check)
+        errors = context.repair_errors.get(check["id"])
+        if errors:
+            _mark_repair_failed(check, errors)
+
+
+def _status_counts(checks: list[dict]) -> dict[str, int]:
+    return {
+        status: sum(check["status"] == status for check in checks)
+        for status in VALID_STATUSES
+    }
+
+
+def _overall_status(counts: dict[str, int]) -> str:
+    if counts["error"]:
+        return "error"
+    if counts["degraded"]:
+        return "degraded"
+    return "ok"
+
+
+def _run_deletion_result(run_deletion: dict) -> dict:
+    message = "Runtime history must be retained."
+    if run_deletion["quiescent"]:
+        message = (
+            "Runtime state was observed quiescent; offline action is still required."
+        )
+    return _result("run_deletion", "ok", message, run_deletion)
+
+
 def run_doctor(
     root: Path | str | None = None,
     state_root: Path | str | None = None,
@@ -5161,349 +5627,40 @@ def run_doctor(
     deadline: float | None = None,
 ) -> dict:
     """Return a JSON-safe local health report; mutate only with ``repair=True``."""
-    selected_repairs = set(VALID_REPAIR_ACTIONS if repair_actions is None else repair_actions)
-    unknown_repairs = selected_repairs - VALID_REPAIR_ACTIONS
-    if unknown_repairs:
-        raise ValueError(f"unknown doctor repair actions: {sorted(unknown_repairs)}")
-    root_path = Path(
-        root or os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent)
-    ).resolve()
-    state_path = Path(
-        os.path.abspath(state_root or os.environ.get("LLM_WIKI_STATE_ROOT", root_path))
-    )
-    home_path = Path(home).resolve() if home is not None else Path.home().resolve()
+    root_path, state_path, home_path = _resolved_doctor_paths(root, state_root, home)
     generated_at = _as_utc(now)
-    repaired: list[dict] = []
-    repair_errors: dict[str, list[str]] = {}
-    repair_deferred: set[str] = set()
-    if deadline is None:
-        deadline = time.monotonic() + max(0.0, time_budget_seconds)
-    elif (
-        isinstance(deadline, bool)
-        or not isinstance(deadline, (int, float))
-        or not math.isfinite(deadline)
-    ):
-        raise ValueError("deadline must be a finite monotonic timestamp")
-    else:
-        deadline = float(deadline)
-
-    if repair:
-        maintenance: tuple[Any, dict[str, object]] | None = None
-        guard_entered = False
-        try:
-            maintenance = _acquire_maintenance_owner(root_path, state_path, generated_at)
-            if maintenance is None:
-                deferred_by_action = {
-                    "runtime": {"runtime"},
-                    "transactions": {"transactions"},
-                    "queue": {"queue"},
-                    "indexes": {"index", "claims"},
-                    "archives": {"archives"},
-                    "generations": {"generation"},
-                }
-                for action in selected_repairs:
-                    repair_deferred.update(deferred_by_action[action])
-            else:
-                coordinator, lease = maintenance
-                with _MaintenanceHeartbeat(coordinator, lease, deadline=deadline) as guard:
-                    guard_entered = True
-                    if "runtime" in selected_repairs:
-                        guard.run(_repair_runtime, state_path, repaired)
-                    if "generations" in selected_repairs:
-                        guard.run(
-                            _repair_generation_catalog,
-                            root_path,
-                            state_path,
-                            deadline=deadline,
-                            cancelled=guard.cancelled,
-                            repaired=repaired,
-                        )
-                        if rebuild_generation:
-                            generation_result = guard.run(
-                                _build_or_refresh_generation,
-                                root_path,
-                                state_path,
-                                deadline=deadline,
-                                cancelled=guard.cancelled,
-                                max_sources=DEFAULT_GENERATION_SOURCE_LIMIT,
-                                force_rebuild=True,
-                            )
-                            if generation_result["status"] == "built":
-                                repaired.append(
-                                    {
-                                        "action": "rebuild_generation",
-                                        "generation_id": generation_result["generation_id"],
-                                    }
-                                )
-                            elif generation_result["status"] == "deferred":
-                                repair_deferred.add("generation")
-                    if "transactions" in selected_repairs:
-                        recovered = guard.run(
-                            coordinator.recover,
-                            writer_wait_seconds=0,
-                            max_transactions=MAX_OPERATIONAL_ROWS,
-                            deadline=deadline,
-                            cancelled=guard.cancelled,
-                        )
-                        if recovered:
-                            repaired.append(
-                                {
-                                    "action": "recover_transactions",
-                                    "count": len(recovered),
-                                }
-                            )
-                    queue_v2_ready = False
-                    if "queue" in selected_repairs:
-                        legacy_available = guard.run(
-                            _repair_leases, state_path, generated_at, repaired
-                        )
-                        if not legacy_available:
-                            repair_deferred.add("queue")
-                        from memory_queue import MemoryQueue, migrate_legacy_queue
-
-                        marker = state_path / "run" / "queue-migrated-v2"
-                        marker_existed = _safe_kind(marker, state_path)[0] == "regular"
-                        migration = (
-                            guard.run(
-                                migrate_legacy_queue,
-                                state_path,
-                                deadline=deadline,
-                                cancelled=guard.cancelled,
-                            )
-                            if legacy_available
-                            else None
-                        )
-                        if migration is not None and (
-                            not marker_existed or migration.imported or migration.quarantined
-                        ):
-                            repaired.append(
-                                {
-                                    "action": "migrate_queue",
-                                    "count": migration.imported + migration.quarantined,
-                                }
-                            )
-                        marker_valid = _safe_kind(marker, state_path)[0] == "regular"
-                        if migration is not None or marker_valid:
-                            guard.run(MemoryQueue, state_path)
-                        queue_v2_ready = migration is not None or marker_valid
-                    if "indexes" in selected_repairs:
-                        index_before = _index_check(
-                            state_path, generated_at, deadline, root=root_path
-                        )
-                        if (
-                            index_before["details"].get("repairable")
-                            and index_before["status"] != "ok"
-                        ):
-                            index_lock = state_path / "cache" / ".doctor-index.lock"
-                            lock_token = guard.run(
-                                _acquire_lock,
-                                index_lock,
-                                state_path / "cache",
-                                generated_at,
-                            )
-                            if lock_token is None:
-                                repair_deferred.add("index")
-                            else:
-                                try:
-                                    guard.run(
-                                        _rebuild_index,
-                                        root_path,
-                                        state_path,
-                                        deadline=deadline,
-                                        cancelled=guard.cancelled,
-                                    )
-                                    index_after = _index_check(
-                                        state_path,
-                                        generated_at,
-                                        deadline,
-                                        root=root_path,
-                                    )
-                                    if index_after["status"] == "ok":
-                                        repaired.append({"action": "rebuild_index"})
-                                    else:
-                                        message = (
-                                            "Index repair failed: index was not created"
-                                            if index_after["details"].get("freshness") == "missing"
-                                            else "Index repair failed: rebuilt index did not validate as fresh"
-                                        )
-                                        repair_errors.setdefault("index", []).append(message)
-                                except Exception as exc:  # noqa: BLE001
-                                    repair_errors.setdefault("index", []).append(
-                                        f"Index repair failed: {type(exc).__name__}"
-                                    )
-                                finally:
-                                    guard.cleanup(
-                                        _release_lock,
-                                        index_lock,
-                                        state_path / "cache",
-                                        lock_token,
-                                    )
-                    if "archives" in selected_repairs:
-                        archive_before = _archive_check(root_path, state_path, deadline)
-                        archive_root = _archive_path(root_path)
-                        if (
-                            _safe_kind(archive_root, root_path)[0] == "directory"
-                            and archive_before["status"] != "ok"
-                        ):
-                            from archive_daily import DailyArchiver
-
-                            guard.run(
-                                lambda: DailyArchiver(root_path, state_path).recover(
-                                    deadline=deadline,
-                                    cancelled=guard.cancelled,
-                                )
-                            )
-                            repaired.append({"action": "recover_archives"})
-                    if "indexes" in selected_repairs:
-                        claim_before = _claim_check(root_path, state_path, deadline)
-                        if claim_before["status"] != "ok":
-                            from claims import ClaimIndex
-
-                            sources = [root_path / "knowledge" / "notes"]
-                            projects = root_path / "knowledge" / "projects"
-                            if _safe_kind(projects, root_path)[0] == "directory":
-                                sources.append(projects)
-                            claim_index = ClaimIndex(state_path, vault=root_path)
-                            guard.run(
-                                claim_index.rebuild,
-                                sources,
-                                deadline=deadline,
-                                cancelled=guard.cancelled,
-                            )
-                            repaired.append({"action": "rebuild_claim_index"})
-                    if "queue" in selected_repairs:
-                        unblocked = (
-                            guard.run(_repair_queue_capabilities, state_path)
-                            if queue_v2_ready
-                            else 0
-                        )
-                        if unblocked:
-                            repaired.append(
-                                {
-                                    "action": "unblock_capabilities",
-                                    "count": unblocked,
-                                }
-                            )
-                        processed = (
-                            guard.run(
-                                _run_bounded_worker,
-                                state_path,
-                                deadline=deadline,
-                                cancelled=guard.cancelled,
-                            )
-                            if queue_v2_ready
-                            else 0
-                        )
-                        if processed:
-                            repaired.append({"action": "run_bounded_worker", "count": processed})
-        except Exception as exc:  # noqa: BLE001
-            repair_errors.setdefault("runtime", []).append(f"Repair failed: {type(exc).__name__}")
-        finally:
-            if maintenance is not None and not guard_entered:
-                try:
-                    _release_maintenance_owner(*maintenance)
-                except Exception as exc:  # noqa: BLE001
-                    repair_errors.setdefault("runtime", []).append(
-                        f"Maintenance owner release failed: {type(exc).__name__}"
-                    )
-
-    checks = [
-        _environment_check(root_path, state_path),
-        _runtime_check(state_path),
-        _filesystem_check(state_path, deadline),
-        _transaction_check(state_path, generated_at, deadline),
-        _queue_check(state_path, generated_at, deadline),
-        _archive_check(root_path, state_path, deadline),
-        _claim_check(root_path, state_path, deadline),
-    ]
-    remaining = (
-        (
-            "generation",
-            lambda: _generation_check(
-                root_path,
-                state_path,
-                generated_at,
-                deadline,
-            ),
-        ),
-        (
-            "index",
-            lambda: _index_check(state_path, generated_at, deadline, root=root_path),
-        ),
-        (
-            "scheduler",
-            lambda: _scheduler_check(root_path, state_path, generated_at, deadline),
-        ),
-        ("capture", lambda: _capture_check(state_path, deadline)),
-        ("mcp", lambda: _mcp_check(root_path)),
-        (
-            "integrations",
-            lambda: _integration_check(root_path, home_path, deadline=deadline),
-        ),
-        (
-            "pyright",
-            lambda: _pyright_check(root_path, state_path, deadline=deadline),
-        ),
-        (
-            "lsp",
-            lambda: _lsp_runtime_check(state_path, generated_at, deadline=deadline),
-        ),
+    context = _RepairContext(
+        root_path=root_path,
+        state_path=state_path,
+        generated_at=generated_at,
+        deadline=_validated_doctor_deadline(deadline, time_budget_seconds),
+        rebuild_generation=rebuild_generation,
+        selected_repairs=_validated_repairs(repair_actions),
+        repaired=[],
+        repair_errors={},
+        repair_deferred=set(),
     )
-    for check_id, operation in remaining:
-        if check_id != "lsp" and time.monotonic() >= deadline:
-            checks.append(
-                _result(
-                    check_id,
-                    "degraded",
-                    "Check not completed because the doctor time budget was exhausted.",
-                    {"budget_exhausted": True},
-                )
-            )
-        else:
-            checks.append(operation())
-    for check in checks:
-        if check["id"] in repair_deferred:
-            check["status"] = "degraded"
-            check["message"] = (
-                f"{check['id'].title()} repair deferred because another owner "
-                "holds the repair lock."
-            )
-            check["details"]["repair_deferred"] = True
-        if errors := repair_errors.get(check["id"]):
-            check["status"] = "error"
-            check["message"] = f"{check['id'].title()} repair failed."
-            check["details"]["repair_errors"] = errors
-    counts = {
-        status: sum(check["status"] == status for check in checks) for status in VALID_STATUSES
-    }
-    overall = "error" if counts["error"] else "degraded" if counts["degraded"] else "ok"
-    collected = {check["id"]: check for check in checks}
+    if repair:
+        _run_repairs(context)
+
+    checks = _collect_checks(
+        root_path, state_path, home_path, generated_at, context.deadline
+    )
+    _apply_repair_outcomes(checks, context)
     run_deletion = _run_deletion_check(
         state_path,
         generated_at,
         root=root_path,
-        deadline=deadline,
-        collected=collected,
+        deadline=context.deadline,
+        collected={check["id"]: check for check in checks},
     )
-    checks.append(
-        _result(
-            "run_deletion",
-            "ok",
-            "Runtime state was observed quiescent; offline action is still required."
-            if run_deletion["quiescent"]
-            else "Runtime history must be retained.",
-            run_deletion,
-        )
-    )
-    counts = {
-        status: sum(check["status"] == status for check in checks) for status in VALID_STATUSES
-    }
-    overall = "error" if counts["error"] else "degraded" if counts["degraded"] else "ok"
+    checks.append(_run_deletion_result(run_deletion))
+    counts = _status_counts(checks)
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at.isoformat(),
-        "overall_status": overall,
-        "repaired": repaired,
+        "overall_status": _overall_status(counts),
+        "repaired": context.repaired,
         "checks": checks,
         "counts": counts,
         "run_deletion": run_deletion,
