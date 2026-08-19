@@ -1964,6 +1964,123 @@ def _preparing_owner_alive(selected_state: str, owner_pid: object) -> bool:
     return _pid_alive(owner_pid)
 
 
+class _ArtifactRoots(NamedTuple):
+    artifact: Path
+    before: Path
+    after: Path
+
+
+class _StagedOperation(NamedTuple):
+    operation: MarkdownOperation
+    parent_identity: tuple[int, int]
+    plan_entry: dict[str, object]
+
+
+class _StagedPlan(NamedTuple):
+    operations: list[MarkdownOperation]
+    parent_identities: list[tuple[int, int]]
+    plan_operations: list[dict[str, object]]
+
+
+def _require_prepare_arguments(
+    operation_id: object, changes: Sequence[MarkdownChange], content_guard: object
+) -> None:
+    if not isinstance(operation_id, str) or not operation_id:
+        raise ValueError("operation_id must be a non-empty string")
+    if not changes:
+        raise ValueError("a transaction requires at least one change")
+    if content_guard not in {None, "model_output"}:
+        raise ValueError("content_guard must be 'model_output' or None")
+
+
+def _require_matching_reservation(
+    project_reservation: object,
+    operation_id: str,
+    persisted_preconditions: Mapping[str, object],
+) -> None:
+    if project_reservation is None:
+        return
+    if not isinstance(project_reservation, ProjectCheckpointReservation):
+        raise TypeError("project_reservation must be a ProjectCheckpointReservation")
+    if project_reservation.operation_id != operation_id:
+        raise ValueError("project reservation operation_id does not match")
+    if "project_lease" not in persisted_preconditions:
+        raise ValueError("project reservation requires a project lease precondition")
+
+
+def _require_capture_matches_kind(change: MarkdownChange, before: bytes | None) -> None:
+    if change.kind == "create" and before is not None:
+        raise FileExistsError(change.path)
+    if change.kind in {"replace", "delete"} and before is None:
+        raise FileNotFoundError(change.path)
+
+
+def _require_change_precondition(
+    change: MarkdownChange,
+    before_hash: str,
+    persisted_preconditions: Mapping[str, object],
+) -> None:
+    expected_before = persisted_preconditions.get(change.path)
+    if expected_before is not None and expected_before != before_hash:
+        raise ValueError(
+            f"target precondition changed before prepare: {change.path}"
+        )
+
+
+def _content_hash(content: bytes | None) -> str:
+    if content is None:
+        return ABSENT
+    return sha256_bytes(content)
+
+
+def _run_plan_validators(plan: dict, validators: Sequence[Validator]) -> None:
+    for validator in validators:
+        if not callable(validator):
+            raise TypeError("validators must be callable")
+        if validator(copy.deepcopy(plan)) is False:
+            raise ValueError("transaction validator rejected the plan")
+
+
+def _validated_plan(
+    transaction_id: str,
+    plan_operations: list[dict[str, object]],
+    content_guard: object,
+    validators: Sequence[Validator],
+) -> dict[str, object]:
+    plan: dict[str, object] = {
+        "schema_version": "markdown-transaction/v1",
+        "transaction_id": transaction_id,
+        "operations": plan_operations,
+    }
+    if content_guard is not None:
+        plan["content_guard"] = content_guard
+    validate_schema(plan, _SCHEMA)
+    _run_plan_validators(plan, validators)
+    validate_schema(plan, _SCHEMA)
+    return plan
+
+
+def _recovery_manifest(
+    transaction_id: str, request_hash: str, plan_bytes: bytes, staged: _StagedPlan
+) -> dict[str, object]:
+    return {
+        "schema_version": "markdown-transaction-recovery/v1",
+        "transaction_id": transaction_id,
+        "request_hash": request_hash,
+        "plan_hash": sha256_bytes(plan_bytes),
+        "operations": [
+            {
+                "position": position,
+                "before_hash": operation.before_hash,
+                "after_hash": operation.after_hash,
+                "parent_device": staged.parent_identities[position][0],
+                "parent_inode": staged.parent_identities[position][1],
+            }
+            for position, operation in enumerate(staged.operations)
+        ],
+    }
+
+
 def _is_target_boundary_error(error: BaseException) -> bool:
     if isinstance(error, (TargetBoundaryFailure, FileNotFoundError)):
         return True
@@ -3762,48 +3879,31 @@ class MarkdownCoordinator:
                 (*_encode_parent_identity(identity), row["transaction_id"], row["position"]),
             )
 
-    def prepare(
-        self,
-        changes: Sequence[MarkdownChange],
-        *,
-        operation_id: str,
-        preconditions: Mapping[str, object] | None = None,
-        validators: Sequence[Validator] = (),
-        content_guard: Literal["model_output"] | None = None,
-        project_reservation: ProjectCheckpointReservation | None = None,
-        _parent_transaction_id: str | None = None,
-        deadline: float = float("inf"),
-        cancelled: Callable[[], bool] | None = None,
-    ) -> TransactionRecord:
-        self._require_operation_active(deadline, cancelled)
-        if not isinstance(operation_id, str) or not operation_id:
-            raise ValueError("operation_id must be a non-empty string")
-        if not changes:
-            raise ValueError("a transaction requires at least one change")
-        if content_guard not in {None, "model_output"}:
-            raise ValueError("content_guard must be 'model_output' or None")
+    def _normalized_changes(
+        self, changes: Sequence[MarkdownChange]
+    ) -> tuple[MarkdownChange, ...]:
         normalized = tuple(self._validate_change(change) for change in changes)
-        paths = [unicodedata.normalize("NFC", change.path).casefold() for change in normalized]
+        paths = [
+            unicodedata.normalize("NFC", change.path).casefold()
+            for change in normalized
+        ]
         if len(paths) != len(set(paths)):
             raise ValueError("duplicate transaction target")
-        persisted_preconditions = self._validate_preconditions(preconditions or {})
-        if project_reservation is not None:
-            if not isinstance(project_reservation, ProjectCheckpointReservation):
-                raise TypeError("project_reservation must be a ProjectCheckpointReservation")
-            if project_reservation.operation_id != operation_id:
-                raise ValueError("project reservation operation_id does not match")
-            if "project_lease" not in persisted_preconditions:
-                raise ValueError("project reservation requires a project lease precondition")
-        request_hash = self._request_hash(normalized, persisted_preconditions)
-        self.recover(deadline=deadline, cancelled=cancelled)
-        self._require_operation_active(deadline, cancelled)
-        existing = self._record_for_operation_id(operation_id)
-        if existing is not None:
-            if self._request_hash_for_operation_id(operation_id) != request_hash:
-                raise ValueError("operation_id is already bound to a different request")
-            return existing
+        return normalized
 
-        transaction_id = uuid.uuid4().hex
+    def _existing_bound_record(
+        self, operation_id: str, request_hash: str
+    ) -> TransactionRecord | None:
+        existing = self._record_for_operation_id(operation_id)
+        if existing is None:
+            return None
+        if self._request_hash_for_operation_id(operation_id) != request_hash:
+            raise ValueError("operation_id is already bound to a different request")
+        return existing
+
+    def _create_artifact_roots(
+        self, transaction_id: str, deadline: float, cancelled: Callable[[], bool] | None
+    ) -> _ArtifactRoots:
         artifact_root = self.transaction_root / transaction_id
         before_root = artifact_root / "before"
         after_root = artifact_root / "after"
@@ -3819,8 +3919,21 @@ class MarkdownCoordinator:
         except BaseException:
             self._remove_artifacts(artifact_root)
             raise
+        return _ArtifactRoots(artifact_root, before_root, after_root)
 
-        timestamp = _now()
+    def _insert_preparing_row(
+        self,
+        transaction_id: str,
+        operation_id: str,
+        request_hash: str,
+        persisted_preconditions: Mapping[str, object],
+        timestamp: str,
+        parent_transaction_id: str | None,
+        artifact_root: Path,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> TransactionRecord | None:
+        """None once the row is inserted, or the record that already owns the id."""
         try:
             self._require_operation_active(deadline, cancelled)
             with self._connect() as database, begin_immediate(
@@ -3841,160 +3954,309 @@ class MarkdownCoordinator:
                         canonical_json_bytes(persisted_preconditions).decode("utf-8"),
                         timestamp,
                         timestamp,
-                        _parent_transaction_id,
+                        parent_transaction_id,
                         os.getpid(),
                     ),
                 )
         except sqlite3.IntegrityError:
             self._remove_artifacts(artifact_root)
             existing = self._record_for_operation_id(operation_id)
-            if existing is None or self._request_hash_for_operation_id(operation_id) != request_hash:
-                raise ValueError("operation_id is already bound to a different request") from None
+            if existing is None:
+                raise ValueError(
+                    "operation_id is already bound to a different request"
+                ) from None
+            if self._request_hash_for_operation_id(operation_id) != request_hash:
+                raise ValueError(
+                    "operation_id is already bound to a different request"
+                ) from None
             return existing
-        self._killpoint("after_preparing", _parent_transaction_id)
+        return None
 
+    def _staged_change(
+        self,
+        position: int,
+        change: MarkdownChange,
+        roots: _ArtifactRoots,
+        persisted_preconditions: Mapping[str, object],
+    ) -> _StagedOperation:
+        target = self._target(change.path)
+        before, parent_identity = self._capture_target(
+            target, max_before_bytes=change.max_before_bytes
+        )
+        _require_capture_matches_kind(change, before)
+        before_hash = _content_hash(before)
+        _require_change_precondition(change, before_hash, persisted_preconditions)
+        before_description = self._stage_state(roots.before, position, before)
+        after_description = self._stage_state(roots.after, position, change.content)
+        return _StagedOperation(
+            MarkdownOperation(
+                change.kind, change.path, before_hash, _content_hash(change.content)
+            ),
+            parent_identity,
+            {
+                "kind": change.kind,
+                "path": change.path,
+                "before": before_description,
+                "after": after_description,
+            },
+        )
+
+    def _staged_operations(
+        self,
+        normalized: tuple[MarkdownChange, ...],
+        roots: _ArtifactRoots,
+        persisted_preconditions: Mapping[str, object],
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> _StagedPlan:
         operations: list[MarkdownOperation] = []
         parent_identities: list[tuple[int, int]] = []
         plan_operations: list[dict[str, object]] = []
-        try:
-            for position, change in enumerate(normalized):
-                self._require_operation_active(deadline, cancelled)
-                target = self._target(change.path)
-                before, parent_identity = self._capture_target(
-                    target, max_before_bytes=change.max_before_bytes
-                )
-                if change.kind == "create" and before is not None:
-                    raise FileExistsError(change.path)
-                if change.kind in {"replace", "delete"} and before is None:
-                    raise FileNotFoundError(change.path)
-                after = change.content
-                before_hash = ABSENT if before is None else sha256_bytes(before)
-                expected_before = persisted_preconditions.get(change.path)
-                if expected_before is not None and expected_before != before_hash:
-                    raise ValueError(
-                        f"target precondition changed before prepare: {change.path}"
-                    )
-                before_description = self._stage_state(before_root, position, before)
-                after_description = self._stage_state(after_root, position, after)
-                after_hash = ABSENT if after is None else sha256_bytes(after)
-                operations.append(
-                    MarkdownOperation(change.kind, change.path, before_hash, after_hash)
-                )
-                parent_identities.append(parent_identity)
-                plan_operations.append(
-                    {
-                        "kind": change.kind,
-                        "path": change.path,
-                        "before": before_description,
-                        "after": after_description,
-                    }
-                )
-
-            self._killpoint("after_images_fsynced", _parent_transaction_id)
-
-            plan: dict[str, object] = {
-                "schema_version": "markdown-transaction/v1",
-                "transaction_id": transaction_id,
-                "operations": plan_operations,
-            }
-            if content_guard is not None:
-                plan["content_guard"] = content_guard
-            validate_schema(plan, _SCHEMA)
-            for validator in validators:
-                if not callable(validator):
-                    raise TypeError("validators must be callable")
-                result = validator(copy.deepcopy(plan))
-                if result is False:
-                    raise ValueError("transaction validator rejected the plan")
-            validate_schema(plan, _SCHEMA)
-            self._verify_plan_artifacts(plan, artifact_root)
-            plan_bytes = canonical_json_bytes(plan)
-            plan_path = artifact_root / "plan.json"
-            self._write_new_file(plan_path, plan_bytes)
-            manifest = {
-                "schema_version": "markdown-transaction-recovery/v1",
-                "transaction_id": transaction_id,
-                "request_hash": request_hash,
-                "plan_hash": sha256_bytes(plan_bytes),
-                "operations": [
-                    {
-                        "position": position,
-                        "before_hash": operation.before_hash,
-                        "after_hash": operation.after_hash,
-                        "parent_device": parent_identities[position][0],
-                        "parent_inode": parent_identities[position][1],
-                    }
-                    for position, operation in enumerate(operations)
-                ],
-            }
-            self._write_new_file(
-                artifact_root / "manifest.json", canonical_json_bytes(manifest)
+        for position, change in enumerate(normalized):
+            self._require_operation_active(deadline, cancelled)
+            staged = self._staged_change(
+                position, change, roots, persisted_preconditions
             )
-            for directory in (before_root, after_root, artifact_root, self.transaction_root):
-                fsync_directory(directory)
-            self._killpoint("after_plan_fsynced", _parent_transaction_id)
+            operations.append(staged.operation)
+            parent_identities.append(staged.parent_identity)
+            plan_operations.append(staged.plan_entry)
+        return _StagedPlan(operations, parent_identities, plan_operations)
 
-            try:
-                self._require_operation_active(deadline, cancelled)
-                with self._connect() as database, begin_immediate(
-                    database,
-                    before_commit=lambda: self._require_operation_active(
-                        deadline, cancelled
-                    ),
-                ):
-                    if project_reservation is not None:
-                        self._bind_project_reservation(
-                            database,
-                            project_reservation,
-                            transaction_id,
-                            persisted_preconditions,
-                        )
-                    database.execute(
-                        'UPDATE "transaction" SET state = \'prepared\', plan_hash = ?, '
-                        "updated_at = ?, owner_pid = NULL "
-                        "WHERE id = ? AND state = 'preparing'",
-                        (
-                            sha256_bytes(plan_bytes),
-                            timestamp,
-                            transaction_id,
-                        ),
+    def _write_plan_artifacts(
+        self,
+        plan: dict[str, object],
+        roots: _ArtifactRoots,
+        transaction_id: str,
+        request_hash: str,
+        staged: _StagedPlan,
+    ) -> bytes:
+        self._verify_plan_artifacts(plan, roots.artifact)
+        plan_bytes = canonical_json_bytes(plan)
+        self._write_new_file(roots.artifact / "plan.json", plan_bytes)
+        self._write_new_file(
+            roots.artifact / "manifest.json",
+            canonical_json_bytes(
+                _recovery_manifest(transaction_id, request_hash, plan_bytes, staged)
+            ),
+        )
+        for directory in (
+            roots.before,
+            roots.after,
+            roots.artifact,
+            self.transaction_root,
+        ):
+            fsync_directory(directory)
+        return plan_bytes
+
+    def _operation_rows_for_insert(
+        self, transaction_id: str, staged: _StagedPlan
+    ) -> list[tuple]:
+        return [
+            (
+                transaction_id,
+                position,
+                operation.kind,
+                operation.path,
+                operation.before_hash,
+                operation.after_hash,
+                *_encode_parent_identity(staged.parent_identities[position]),
+            )
+            for position, operation in enumerate(staged.operations)
+        ]
+
+    def _commit_prepared_row(
+        self,
+        transaction_id: str,
+        plan_bytes: bytes,
+        timestamp: str,
+        staged: _StagedPlan,
+        project_reservation: ProjectCheckpointReservation | None,
+        persisted_preconditions: Mapping[str, object],
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> None:
+        try:
+            self._require_operation_active(deadline, cancelled)
+            with self._connect() as database, begin_immediate(
+                database,
+                before_commit=lambda: self._require_operation_active(
+                    deadline, cancelled
+                ),
+            ):
+                if project_reservation is not None:
+                    self._bind_project_reservation(
+                        database,
+                        project_reservation,
+                        transaction_id,
+                        persisted_preconditions,
                     )
-                    database.executemany(
-                        'INSERT INTO "operation" '
-                        "(transaction_id, position, kind, path, before_hash, after_hash, "
-                        "parent_device, parent_inode) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                        [
-                            (
-                                transaction_id,
-                                position,
-                                operation.kind,
-                                operation.path,
-                                operation.before_hash,
-                                operation.after_hash,
-                                *_encode_parent_identity(parent_identities[position]),
-                            )
-                            for position, operation in enumerate(operations)
-                        ],
-                    )
-            except sqlite3.IntegrityError:
-                raise RuntimeError("transaction operations could not be persisted") from None
-            self._killpoint("after_prepared", _parent_transaction_id)
-            return self._record(transaction_id)
+                database.execute(
+                    'UPDATE "transaction" SET state = \'prepared\', plan_hash = ?, '
+                    "updated_at = ?, owner_pid = NULL "
+                    "WHERE id = ? AND state = 'preparing'",
+                    (sha256_bytes(plan_bytes), timestamp, transaction_id),
+                )
+                database.executemany(
+                    'INSERT INTO "operation" '
+                    "(transaction_id, position, kind, path, before_hash, after_hash, "
+                    "parent_device, parent_inode) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    self._operation_rows_for_insert(transaction_id, staged),
+                )
+        except sqlite3.IntegrityError:
+            raise RuntimeError(
+                "transaction operations could not be persisted"
+            ) from None
+
+    def _discard_failed_preparation(
+        self,
+        transaction_id: str,
+        artifact_root: Path,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> None:
+        record = self._record_if_present(transaction_id)
+        if record is not None and record.state != "preparing":
+            return
+        with self._connect() as database, begin_immediate(
+            database,
+            before_commit=lambda: self._require_operation_active(deadline, cancelled),
+        ):
+            database.execute(
+                'DELETE FROM "transaction" WHERE id = ? AND state = \'preparing\'',
+                (transaction_id,),
+            )
+        self._remove_artifacts(artifact_root)
+
+    def _stage_and_commit(
+        self,
+        normalized: tuple[MarkdownChange, ...],
+        roots: _ArtifactRoots,
+        persisted_preconditions: Mapping[str, object],
+        request_hash: str,
+        transaction_id: str,
+        timestamp: str,
+        *,
+        validators: Sequence[Validator],
+        content_guard: object,
+        project_reservation: ProjectCheckpointReservation | None,
+        parent_transaction_id: str | None,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> TransactionRecord:
+        staged = self._staged_operations(
+            normalized, roots, persisted_preconditions, deadline, cancelled
+        )
+        self._killpoint("after_images_fsynced", parent_transaction_id)
+        plan = _validated_plan(
+            transaction_id, staged.plan_operations, content_guard, validators
+        )
+        plan_bytes = self._write_plan_artifacts(
+            plan, roots, transaction_id, request_hash, staged
+        )
+        self._killpoint("after_plan_fsynced", parent_transaction_id)
+        self._commit_prepared_row(
+            transaction_id,
+            plan_bytes,
+            timestamp,
+            staged,
+            project_reservation,
+            persisted_preconditions,
+            deadline,
+            cancelled,
+        )
+        self._killpoint("after_prepared", parent_transaction_id)
+        return self._record(transaction_id)
+
+    def _prepare_new_transaction(
+        self,
+        normalized: tuple[MarkdownChange, ...],
+        persisted_preconditions: Mapping[str, object],
+        request_hash: str,
+        *,
+        operation_id: str,
+        validators: Sequence[Validator],
+        content_guard: object,
+        project_reservation: ProjectCheckpointReservation | None,
+        parent_transaction_id: str | None,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> TransactionRecord:
+        transaction_id = uuid.uuid4().hex
+        roots = self._create_artifact_roots(transaction_id, deadline, cancelled)
+        timestamp = _now()
+        existing = self._insert_preparing_row(
+            transaction_id,
+            operation_id,
+            request_hash,
+            persisted_preconditions,
+            timestamp,
+            parent_transaction_id,
+            roots.artifact,
+            deadline,
+            cancelled,
+        )
+        if existing is not None:
+            return existing
+        self._killpoint("after_preparing", parent_transaction_id)
+        try:
+            return self._stage_and_commit(
+                normalized,
+                roots,
+                persisted_preconditions,
+                request_hash,
+                transaction_id,
+                timestamp,
+                validators=validators,
+                content_guard=content_guard,
+                project_reservation=project_reservation,
+                parent_transaction_id=parent_transaction_id,
+                deadline=deadline,
+                cancelled=cancelled,
+            )
         except BaseException:
-            record = self._record_if_present(transaction_id)
-            if record is None or record.state == "preparing":
-                with self._connect() as database, begin_immediate(
-                    database,
-                    before_commit=lambda: self._require_operation_active(
-                        deadline, cancelled
-                    ),
-                ):
-                    database.execute(
-                        'DELETE FROM "transaction" WHERE id = ? AND state = \'preparing\'',
-                        (transaction_id,),
-                    )
-                self._remove_artifacts(artifact_root)
+            self._discard_failed_preparation(
+                transaction_id, roots.artifact, deadline, cancelled
+            )
             raise
+
+    def prepare(
+        self,
+        changes: Sequence[MarkdownChange],
+        *,
+        operation_id: str,
+        preconditions: Mapping[str, object] | None = None,
+        validators: Sequence[Validator] = (),
+        content_guard: Literal["model_output"] | None = None,
+        project_reservation: ProjectCheckpointReservation | None = None,
+        _parent_transaction_id: str | None = None,
+        deadline: float = float("inf"),
+        cancelled: Callable[[], bool] | None = None,
+    ) -> TransactionRecord:
+        self._require_operation_active(deadline, cancelled)
+        _require_prepare_arguments(operation_id, changes, content_guard)
+        normalized = self._normalized_changes(changes)
+        persisted_preconditions = self._validate_preconditions(preconditions or {})
+        _require_matching_reservation(
+            project_reservation, operation_id, persisted_preconditions
+        )
+        request_hash = self._request_hash(normalized, persisted_preconditions)
+        self.recover(deadline=deadline, cancelled=cancelled)
+        self._require_operation_active(deadline, cancelled)
+        existing = self._existing_bound_record(operation_id, request_hash)
+        if existing is not None:
+            return existing
+        return self._prepare_new_transaction(
+            normalized,
+            persisted_preconditions,
+            request_hash,
+            operation_id=operation_id,
+            validators=validators,
+            content_guard=content_guard,
+            project_reservation=project_reservation,
+            parent_transaction_id=_parent_transaction_id,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
 
     def _bind_project_reservation(
         self,
