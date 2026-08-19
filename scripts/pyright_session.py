@@ -1432,78 +1432,96 @@ class _LaunchServerGuard:
         self._launch_descriptor: int | None = None
         self._state: tuple[int, int, int, int, int, int] | None = None
 
+    def _open_source_descriptor(self) -> int:
+        """Open the server file exclusively, the way this platform allows."""
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        if os.name != "nt":
+            return os.open(
+                self._path,
+                flags | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+        import msvcrt
+
+        handle = _windows_workspace.open_exclusive_readonly_source_file(self._path)
+        try:
+            return msvcrt.open_osfhandle(handle, flags)
+        except BaseException:
+            _windows_workspace.close_handle(handle)
+            raise
+
+    def _check_unchanged(self, before: os.stat_result, descriptor: int) -> None:
+        """What we opened has to be the same regular file we just measured."""
+        opened = os.fstat(descriptor)
+        state = _launch_file_state(opened)
+        if _launch_file_state(before) != state or not stat.S_ISREG(opened.st_mode):
+            raise _BootstrapDegradation("pyright_executable_digest_mismatch")
+        self._state = state
+
+    def _open_snapshot(self) -> BinaryIO:
+        """A private copy of the server, under our own owner root."""
+        snapshot_descriptor, snapshot_name = tempfile.mkstemp(
+            prefix=".launch-",
+            suffix=".tmp",
+            dir=self._owner_root,
+        )
+        self._snapshot_path = Path(snapshot_name)
+        try:
+            snapshot = os.fdopen(snapshot_descriptor, "w+b")
+        except BaseException:
+            os.close(snapshot_descriptor)
+            raise
+        self._snapshot = snapshot
+        return snapshot
+
+    @staticmethod
+    def _check_snapshot_launchable(
+        launch_info: os.stat_result,
+        snapshot_info: os.stat_result,
+        before: os.stat_result,
+    ) -> None:
+        """The descriptor we will launch has to name our verified copy."""
+        if not stat.S_ISREG(launch_info.st_mode):
+            raise _BootstrapDegradation("pyright_executable_digest_mismatch")
+        if launch_info.st_size != before.st_size:
+            raise _BootstrapDegradation("pyright_executable_digest_mismatch")
+        if _launch_file_state(launch_info) != _launch_file_state(snapshot_info):
+            raise _BootstrapDegradation("pyright_executable_digest_mismatch")
+
+    def _posix_launch(self, before: os.stat_result) -> GenerationLaunch:
+        """Copy the server aside, verify it, and launch from the copy."""
+        snapshot = self._open_snapshot()
+        self._verify_digest(self._copy_snapshot(snapshot))
+        launch_descriptor = os.open(
+            self._snapshot_path,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        self._launch_descriptor = launch_descriptor
+        self._check_snapshot_launchable(
+            os.fstat(launch_descriptor), os.fstat(snapshot.fileno()), before
+        )
+        os.unlink(self._snapshot_path)
+        self._snapshot_path = None
+        snapshot.close()
+        self._snapshot = None
+        return GenerationLaunch(
+            self._posix_launch_command(launch_descriptor),
+            (launch_descriptor,),
+        )
+
     def __enter__(self) -> "_LaunchServerGuard | GenerationLaunch":
         _require_startup_deadline(self._deadline)
         before = _path_identity(self._path)
         if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_SERVER_BYTES:
             raise _BootstrapDegradation("pyright_executable_digest_mismatch")
-        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
         _require_startup_deadline(self._deadline)
-        if os.name == "nt":
-            import msvcrt
-
-            handle = _windows_workspace.open_exclusive_readonly_source_file(
-                self._path
-            )
-            try:
-                descriptor = msvcrt.open_osfhandle(handle, flags)
-            except BaseException:
-                _windows_workspace.close_handle(handle)
-                raise
-        else:
-            descriptor = os.open(
-                self._path,
-                flags | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
-            )
-        self._descriptor = descriptor
+        self._descriptor = self._open_source_descriptor()
         try:
             _require_startup_deadline(self._deadline)
-            opened = os.fstat(descriptor)
-            state = _launch_file_state(opened)
-            if _launch_file_state(before) != state or not stat.S_ISREG(opened.st_mode):
-                raise _BootstrapDegradation("pyright_executable_digest_mismatch")
-            self._state = state
+            self._check_unchanged(before, self._descriptor)
             if os.name == "posix":
-                snapshot_descriptor, snapshot_name = tempfile.mkstemp(
-                    prefix=".launch-",
-                    suffix=".tmp",
-                    dir=self._owner_root,
-                )
-                self._snapshot_path = Path(snapshot_name)
-                try:
-                    snapshot = os.fdopen(snapshot_descriptor, "w+b")
-                except BaseException:
-                    os.close(snapshot_descriptor)
-                    raise
-                self._snapshot = snapshot
-                actual = self._copy_snapshot(snapshot)
-                self._verify_digest(actual)
-                launch_descriptor = os.open(
-                    self._snapshot_path,
-                    os.O_RDONLY
-                    | getattr(os, "O_CLOEXEC", 0)
-                    | getattr(os, "O_NOFOLLOW", 0),
-                )
-                self._launch_descriptor = launch_descriptor
-                launch_info = os.fstat(launch_descriptor)
-                snapshot_info = os.fstat(snapshot.fileno())
-                if (
-                    not stat.S_ISREG(launch_info.st_mode)
-                    or launch_info.st_size != before.st_size
-                    or _launch_file_state(launch_info)
-                    != _launch_file_state(snapshot_info)
-                ):
-                    raise _BootstrapDegradation(
-                        "pyright_executable_digest_mismatch"
-                    )
-                os.unlink(self._snapshot_path)
-                self._snapshot_path = None
-                snapshot.close()
-                self._snapshot = None
-                return GenerationLaunch(
-                    self._posix_launch_command(launch_descriptor),
-                    (launch_descriptor,),
-                )
+                return self._posix_launch(before)
             self.verify()
         except BaseException:
             self.close()
