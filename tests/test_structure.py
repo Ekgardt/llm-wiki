@@ -10,6 +10,7 @@ fix the reference first, then the code.
 """
 from __future__ import annotations
 
+import ast
 import os
 import re
 from datetime import date, datetime
@@ -704,8 +705,6 @@ def test_docs_name_stage_two_runtime_artifacts():
 
 def _duplicate_top_level_names(source: str) -> list[str]:
     """Names a module binds twice at top level, where the second silently wins."""
-    import ast
-
     seen: set[str] = set()
     duplicates: list[str] = []
     definition = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
@@ -740,5 +739,65 @@ def test_no_module_defines_the_same_top_level_name_twice() -> None:
         duplicates = _duplicate_top_level_names(path.read_text(encoding="utf-8"))
         if duplicates:
             offenders[str(path.relative_to(ROOT))] = duplicates
+
+    assert offenders == {}
+
+
+def _decorator_root_name(node: ast.expr) -> str:
+    """The bare name a decorator expression ultimately refers to."""
+    while isinstance(node, ast.Call):
+        node = node.func
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else ""
+
+
+def _binds_instance(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    arguments = function.args.posonlyargs + function.args.args
+    return bool(arguments) and arguments[0].arg in {"self", "cls"}
+
+
+def _declared_static(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    names = {_decorator_root_name(item) for item in function.decorator_list}
+    return bool(names & {"staticmethod", "classmethod"})
+
+
+def _unbound_methods(source: str) -> list[str]:
+    """Methods that take no instance and never said they were static."""
+    offenders: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ClassDef):
+            offenders.extend(_unbound_class_methods(node))
+    return offenders
+
+
+def _unbound_class_methods(node: ast.ClassDef) -> list[str]:
+    functions = [
+        item
+        for item in node.body
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    return [
+        f"{node.name}.{item.name}"
+        for item in functions
+        if not _binds_instance(item) and not _declared_static(item)
+    ]
+
+
+def test_the_unbound_method_detector_sees_a_lost_staticmethod() -> None:
+    lost = "class A:\n    def f(value):\n        return value\n"
+    assert _unbound_methods(lost) == ["A.f"]
+    kept = "class A:\n    @staticmethod\n    def f(value):\n        return value\n"
+    assert _unbound_methods(kept) == []
+    assert _unbound_methods("class A:\n    def f(self):\n        return self\n") == []
+
+
+def test_no_method_silently_lost_its_staticmethod_decorator() -> None:
+    """Without the decorator the first argument becomes the instance, quietly."""
+    offenders = {}
+    for path in _python_sources():
+        unbound = _unbound_methods(path.read_text(encoding="utf-8"))
+        if unbound:
+            offenders[str(path.relative_to(ROOT))] = unbound
 
     assert offenders == {}

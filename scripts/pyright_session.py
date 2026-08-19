@@ -1124,6 +1124,227 @@ def _published_version(value: object) -> tuple[int | None, bool]:
     return version, version is not None
 
 
+def _usable_kind(kind: int | None) -> bool:
+    """A symbol kind the protocol actually assigns."""
+    return kind is not None and kind != 0
+
+
+def _call_item_ranges(
+    value: Mapping[str, object],
+) -> tuple[LspRange, LspRange] | None:
+    """The item's range and selection range, when the selection sits inside it."""
+    range_ = _lsp_range(value.get("range"))
+    selection = _lsp_range(value.get("selectionRange"))
+    if range_ is None or selection is None:
+        return None
+    if not _range_contains(range_, selection):
+        return None
+    return range_, selection
+
+
+def _call_item_core(
+    value: Mapping[str, object],
+) -> tuple[str, int, str, LspRange, LspRange] | None:
+    """The required fields of a call item, when all are present and consistent."""
+    name = _bounded_text(value.get("name"), _MAX_CALL_ITEM_TEXT_BYTES)
+    kind = _lsp_coordinate(value.get("kind"))
+    uri = value.get("uri")
+    if not name or not _usable_kind(kind) or not isinstance(uri, str):
+        return None
+    ranges = _call_item_ranges(value)
+    if ranges is None:
+        return None
+    return name, kind, uri, ranges[0], ranges[1]
+
+
+def _call_item_detail(
+    value: Mapping[str, object], item: dict[str, object]
+) -> bool:
+    """Copy the optional detail; False when it is present but unusable."""
+    detail = value.get("detail")
+    if detail is None:
+        return True
+    bounded = _bounded_text(detail, _MAX_CALL_ITEM_TEXT_BYTES)
+    if bounded is None:
+        return False
+    item["detail"] = bounded
+    return True
+
+
+def _call_item_tags(value: Mapping[str, object], item: dict[str, object]) -> bool:
+    """Copy the optional tags; False when they are present but unusable."""
+    tags = value.get("tags")
+    if tags is None:
+        return True
+    if not _symbol_tags_ok(tags):
+        return False
+    item["tags"] = list(tags)
+    return True
+
+
+def _call_item_optionals(
+    value: Mapping[str, object], item: dict[str, object]
+) -> bool:
+    """Copy detail, tags and opaque data; False when one is present but unusable."""
+    if not _call_item_detail(value, item):
+        return False
+    if not _call_item_tags(value, item):
+        return False
+    if "data" in value:
+        item["data"] = value["data"]
+    return True
+
+
+def _progress_token(value: object) -> str | int | None:
+    """The progress token, bounded when textual; None when it is unusable."""
+    if isinstance(value, str):
+        return _bounded_text(value, 256)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _progress_text(value: Mapping[str, object], kind: str) -> tuple[str | None, bool]:
+    """The progress text, and whether the field was readable at all."""
+    raw = value.get("title") if kind == "begin" else value.get("message")
+    if raw is None:
+        return "", True
+    text = _bounded_text(raw, _MAX_PROGRESS_TEXT_BYTES)
+    return text, text is not None
+
+
+def _progress_payload(params: object) -> tuple[object, Mapping[str, object]] | None:
+    """The token and value of a `$/progress` payload, when it is well formed."""
+    if not isinstance(params, dict) or set(params) != {"token", "value"}:
+        return None
+    value = params["value"]
+    if not isinstance(value, dict):
+        return None
+    return params["token"], value
+
+
+def _progress_record(method: str, params: object) -> tuple[object, ...] | None:
+    """The `$/progress` record to retain, or None when the payload is unusable."""
+    payload = _progress_payload(params)
+    if payload is None:
+        return None
+    raw_token, value = payload
+    token = _progress_token(raw_token)
+    kind = value.get("kind")
+    if token is None or kind not in {"begin", "report", "end"}:
+        return None
+    text, readable = _progress_text(value, kind)
+    if not readable:
+        return None
+    return method, token, kind, text
+
+
+def _pyright_marker_record(method: str, params: object) -> tuple[object, ...] | None:
+    """A begin/end marker carries no payload of its own."""
+    if params is None or params == {}:
+        return (method,)
+    return None
+
+
+def _pyright_report_record(method: str, params: object) -> tuple[object, ...] | None:
+    """A progress report carries one bounded message."""
+    value = params.get("message") if isinstance(params, dict) else params
+    text = _bounded_text(value, _MAX_PROGRESS_TEXT_BYTES)
+    if text is None:
+        return None
+    return method, text
+
+
+_PROGRESS_RECORDS = MappingProxyType(
+    {
+        "$/progress": _progress_record,
+        "pyright/beginProgress": _pyright_marker_record,
+        "pyright/endProgress": _pyright_marker_record,
+        "pyright/reportProgress": _pyright_report_record,
+    }
+)
+
+
+def _progress_notification_record(
+    method: str, params: object
+) -> tuple[object, ...] | None:
+    """What to retain for this progress notification, if anything."""
+    build = _PROGRESS_RECORDS.get(method)
+    if build is None:
+        return None
+    return build(method, params)
+
+
+def _configuration_items(params: object) -> list[object] | None:
+    """The configuration items requested, when the request is well formed."""
+    if not isinstance(params, dict) or set(params) - {"items"}:
+        return None
+    items = params.get("items")
+    if not isinstance(items, list) or len(items) > _MAX_CONFIGURATION_ITEMS:
+        return None
+    return items
+
+
+def _usable_scope_uri(scope_uri: object) -> bool:
+    """An absent scope is fine; a present one has to be bounded text."""
+    if scope_uri is None:
+        return True
+    if not isinstance(scope_uri, str):
+        return False
+    return len(scope_uri.encode("utf-8", errors="strict")) <= 16 * 1024
+
+
+def _usable_section(section: object) -> bool:
+    """A section name has to be non-empty, encodable and bounded."""
+    if not isinstance(section, str) or not section:
+        return False
+    try:
+        size = len(section.encode("utf-8", errors="strict"))
+    except UnicodeEncodeError:
+        return False
+    return size <= _MAX_CONFIGURATION_SECTION_BYTES
+
+
+def _configuration_item_ok(item: object) -> bool:
+    """The item names only fields we accept, and carries a usable scope."""
+    if not isinstance(item, dict) or set(item) - {"scopeUri", "section"}:
+        return False
+    return _usable_scope_uri(item.get("scopeUri"))
+
+
+def _configuration_section(item: object) -> tuple[str | None, bool]:
+    """The section requested, and whether the item was usable at all."""
+    if not _configuration_item_ok(item):
+        return None, False
+    assert isinstance(item, dict)
+    section = item.get("section")
+    if section is None:
+        return None, True
+    if not _usable_section(section):
+        return None, False
+    return section, True
+
+
+def _configuration_value(settings: Mapping[str, object], section: str) -> object:
+    """The setting the dotted section names, or None when it is absent."""
+    current: object = settings
+    for component in section.split("."):
+        if not component or not isinstance(current, dict):
+            return None
+        current = current.get(component)
+    return current
+
+
+def _configuration_result(settings: Mapping[str, object], item: object) -> object:
+    """What to answer for one requested configuration item."""
+    section, usable = _configuration_section(item)
+    if not usable:
+        return None
+    if section is None:
+        return thaw_pyright_profile_value(PYRIGHT_CONFIGURATION)
+    return _configuration_value(settings, section)
+
+
 class _LaunchServerGuard:
     def __init__(
         self,
@@ -1577,46 +1798,10 @@ class PyrightSession:
     def _configuration(self, params: object) -> object:
         settings = thaw_pyright_profile_value(PYRIGHT_CONFIGURATION)
         assert isinstance(settings, dict)
-        if not isinstance(params, dict) or set(params) - {"items"}:
+        items = _configuration_items(params)
+        if items is None:
             return []
-        items = params.get("items")
-        if not isinstance(items, list) or len(items) > _MAX_CONFIGURATION_ITEMS:
-            return []
-        results: list[object] = []
-        for item in items:
-            if not isinstance(item, dict) or set(item) - {"scopeUri", "section"}:
-                results.append(None)
-                continue
-            scope_uri = item.get("scopeUri")
-            if scope_uri is not None and (
-                not isinstance(scope_uri, str)
-                or len(scope_uri.encode("utf-8", errors="strict")) > 16 * 1024
-            ):
-                results.append(None)
-                continue
-            section = item.get("section")
-            if section is None:
-                results.append(thaw_pyright_profile_value(PYRIGHT_CONFIGURATION))
-                continue
-            if not isinstance(section, str):
-                results.append(None)
-                continue
-            try:
-                section_size = len(section.encode("utf-8", errors="strict"))
-            except UnicodeEncodeError:
-                results.append(None)
-                continue
-            if not section or section_size > _MAX_CONFIGURATION_SECTION_BYTES:
-                results.append(None)
-                continue
-            current: object = settings
-            for component in section.split("."):
-                if not component or not isinstance(current, dict):
-                    current = None
-                    break
-                current = current.get(component)
-            results.append(current)
-        return results
+        return [_configuration_result(settings, item) for item in items]
 
     @staticmethod
     def _benign_server_request(params: object) -> None:
@@ -1783,40 +1968,9 @@ class PyrightSession:
                     return False
 
     def _progress(self, method: str, params: object) -> None:
-        if method == "$/progress":
-            if not isinstance(params, dict) or set(params) != {"token", "value"}:
-                return
-            token = params["token"]
-            if isinstance(token, str):
-                token = _bounded_text(token, 256)
-            elif isinstance(token, bool) or not isinstance(token, int):
-                return
-            if token is None:
-                return
-            value = params["value"]
-            if not isinstance(value, dict):
-                return
-            kind = value.get("kind")
-            if kind not in {"begin", "report", "end"}:
-                return
-            text_value = value.get("title") if kind == "begin" else value.get("message")
-            if text_value is None:
-                text = ""
-            else:
-                text = _bounded_text(text_value, _MAX_PROGRESS_TEXT_BYTES)
-                if text is None:
-                    return
-            self._retain_progress((method, token, kind, text))
-            return
-        if method in {"pyright/beginProgress", "pyright/endProgress"}:
-            if params is None or params == {}:
-                self._retain_progress((method,))
-            return
-        if method == "pyright/reportProgress":
-            value = params.get("message") if isinstance(params, dict) else params
-            text = _bounded_text(value, _MAX_PROGRESS_TEXT_BYTES)
-            if text is not None:
-                self._retain_progress((method, text))
+        record = _progress_notification_record(method, params)
+        if record is not None:
+            self._retain_progress(record)
 
     def _diagnostic_core(
         self, value: Mapping[str, object]
@@ -3184,27 +3338,10 @@ class PyrightSession:
     def _sanitize_call_item(self, value: object) -> dict[str, object] | None:
         if not isinstance(value, dict):
             return None
-        name = _bounded_text(value.get("name"), _MAX_CALL_ITEM_TEXT_BYTES)
-        kind = _lsp_coordinate(value.get("kind"))
-        uri = value.get("uri")
-        range_ = _lsp_range(value.get("range"))
-        selection = _lsp_range(value.get("selectionRange"))
-        if (
-            not name
-            or kind is None
-            or kind == 0
-            or not isinstance(uri, str)
-            or range_ is None
-            or selection is None
-        ):
+        core = _call_item_core(value)
+        if core is None:
             return None
-        if (
-            (selection.start.line, selection.start.character)
-            < (range_.start.line, range_.start.character)
-            or (selection.end.line, selection.end.character)
-            > (range_.end.line, range_.end.character)
-        ):
-            return None
+        name, kind, uri, range_, selection = core
         source = normalize_provider_uri(self._repository, uri)
         if source is None:
             return None
@@ -3215,23 +3352,8 @@ class PyrightSession:
             "range": _range_json(range_),
             "selectionRange": _range_json(selection),
         }
-        detail = value.get("detail")
-        if detail is not None:
-            detail = _bounded_text(detail, _MAX_CALL_ITEM_TEXT_BYTES)
-            if detail is None:
-                return None
-            item["detail"] = detail
-        tags = value.get("tags")
-        if tags is not None:
-            if (
-                not isinstance(tags, list)
-                or len(tags) > 32
-                or any(_lsp_coordinate(tag) is None for tag in tags)
-            ):
-                return None
-            item["tags"] = list(tags)
-        if "data" in value:
-            item["data"] = value["data"]
+        if not _call_item_optionals(value, item):
+            return None
         return item
 
     def _call_location(self, value: object) -> LspLocation | None:
