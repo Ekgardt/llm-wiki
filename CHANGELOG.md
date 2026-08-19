@@ -8,6 +8,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Windows cleanup verification no longer depends on `wmic`, which current
+  Windows no longer ships, or on a PowerShell CIM enumeration that can take
+  seconds on a loaded machine. The process tree is read from the kernel
+  snapshot, and the two tools remain as fallbacks. Without an answer the worker
+  reported `process_cleanup_failed` for a tree it had already terminated.
+
 - A grounded answer now fails when a cited span shares no content with the claim
   it is offered for, which is the case where a truthful citation about a
   different subject passed every other gate. It is a necessary condition, not

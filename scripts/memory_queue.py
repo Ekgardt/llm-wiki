@@ -10335,65 +10335,172 @@ def _process_snapshot_posix() -> list[tuple[int, int, int, str]] | None:
     return rows
 
 
-def _tracked_descendant_pids(root_pid: int, platform_name: str) -> set[int] | None:
-    if platform_name == "nt":
+_TH32CS_SNAPPROCESS = 0x2
+_MAX_PROCESS_PATH = 260
+
+
+def _process_entry_type():
+    """The PROCESSENTRY32 layout, built only when ctypes has Windows types."""
+    import ctypes
+    from ctypes import wintypes
+
+    class ProcessEntry32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            # ULONG_PTR: a pointer keeps the right width on 32- and 64-bit.
+            ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", ctypes.c_char * _MAX_PROCESS_PATH),
+        ]
+
+    return ProcessEntry32
+
+
+def _walk_process_snapshot(kernel32, snapshot) -> list[tuple[int, int]]:
+    import ctypes
+
+    entry = _process_entry_type()()
+    entry.dwSize = ctypes.sizeof(entry)
+    pairs: list[tuple[int, int]] = []
+    ok = kernel32.Process32First(snapshot, ctypes.byref(entry))
+    while ok:
+        pairs.append((int(entry.th32ProcessID), int(entry.th32ParentProcessID)))
+        ok = kernel32.Process32Next(snapshot, ctypes.byref(entry))
+    return pairs
+
+
+def _windows_process_pairs() -> list[tuple[int, int]] | None:
+    """Every (pid, parent pid) from the kernel32 process snapshot.
+
+    `wmic` is gone from current Windows, and the CIM fallback costs a
+    PowerShell start plus a full WMI enumeration — seconds on a loaded machine,
+    which is how cleanup verification came to fail for lack of an answer. This
+    asks the kernel directly and returns None only when that fails.
+    """
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        snapshot = kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
+        if snapshot in (None, -1, ctypes.c_void_p(-1).value):
+            return None
         try:
-            result = subprocess.run(
-                ["wmic", "process", "get", "ParentProcessId,ProcessId", "/format:csv"],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=2,
-            )
-            if result.returncode != 0:
-                raise OSError
-            pairs = []
-            for line in result.stdout.splitlines():
-                fields = [field.strip() for field in line.split(",")]
-                if len(fields) >= 3 and fields[-1].isdigit() and fields[-2].isdigit():
-                    pairs.append((int(fields[-1]), int(fields[-2])))
-        except (OSError, ValueError, subprocess.SubprocessError):
-            command = (
-                "Get-CimInstance Win32_Process | "
-                "Select-Object ProcessId,ParentProcessId | ConvertTo-Json -Compress"
-            )
-            try:
-                result = subprocess.run(
-                    ["powershell", "-NoProfile", "-Command", command],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-                if result.returncode != 0:
-                    return None
-                decoded = json.loads(result.stdout or "[]")
-                items = decoded if isinstance(decoded, list) else [decoded]
-                pairs = [
-                    (int(item["ProcessId"]), int(item["ParentProcessId"]))
-                    for item in items
-                    if isinstance(item, dict)
-                ]
-            except (
-                OSError,
-                ValueError,
-                KeyError,
-                json.JSONDecodeError,
-                subprocess.SubprocessError,
-            ):
-                return None
-    else:
-        snapshot = _process_snapshot_posix()
-        if snapshot is None:
-            return set()
-        pairs = [(pid, ppid) for pid, ppid, _pgrp, _state in snapshot]
+            return _walk_process_snapshot(kernel32, snapshot)
+        finally:
+            kernel32.CloseHandle(snapshot)
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
+def _windows_pairs_via_tools() -> list[tuple[int, int]] | None:
+    """Legacy fallbacks: wmic where it still exists, then CIM through PowerShell."""
+    pairs = _wmic_process_pairs()
+    if pairs is not None:
+        return pairs
+    return _cim_process_pairs()
+
+
+def _wmic_process_pairs() -> list[tuple[int, int]] | None:
+    try:
+        result = subprocess.run(
+            ["wmic", "process", "get", "ParentProcessId,ProcessId", "/format:csv"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return _parse_wmic_pairs(result.stdout)
+
+
+def _parse_wmic_pairs(output: str) -> list[tuple[int, int]]:
+    pairs = []
+    for line in output.splitlines():
+        pair = _wmic_pair(line)
+        if pair is not None:
+            pairs.append(pair)
+    return pairs
+
+
+def _wmic_pair(line: str) -> tuple[int, int] | None:
+    fields = [field.strip() for field in line.split(",")]
+    if len(fields) < 3:
+        return None
+    if not fields[-1].isdigit() or not fields[-2].isdigit():
+        return None
+    return (int(fields[-1]), int(fields[-2]))
+
+
+def _cim_process_pairs() -> list[tuple[int, int]] | None:
+    command = (
+        "Get-CimInstance Win32_Process | "
+        "Select-Object ProcessId,ParentProcessId | ConvertTo-Json -Compress"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", command],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return _parse_cim_pairs(result.stdout)
+
+
+def _parse_cim_pairs(output: str) -> list[tuple[int, int]] | None:
+    try:
+        decoded = json.loads(output or "[]")
+        items = decoded if isinstance(decoded, list) else [decoded]
+        return [
+            (int(item["ProcessId"]), int(item["ParentProcessId"]))
+            for item in items
+            if isinstance(item, dict)
+        ]
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def _descendants_of(root_pid: int, pairs: list[tuple[int, int]]) -> set[int]:
     descendants: set[int] = set()
     frontier = {root_pid}
     while frontier:
-        children = {pid for pid, ppid in pairs if ppid in frontier and pid not in descendants}
+        children = {
+            pid for pid, ppid in pairs if ppid in frontier and pid not in descendants
+        }
         descendants.update(children)
         frontier = children
     return descendants
+
+
+def _posix_process_pairs() -> list[tuple[int, int]]:
+    snapshot = _process_snapshot_posix()
+    if snapshot is None:
+        return []
+    return [(pid, ppid) for pid, ppid, _pgrp, _state in snapshot]
+
+
+def _tracked_descendant_pids(root_pid: int, platform_name: str) -> set[int] | None:
+    if platform_name != "nt":
+        return _descendants_of(root_pid, _posix_process_pairs())
+    pairs = _windows_process_pairs()
+    if pairs is None:
+        pairs = _windows_pairs_via_tools()
+    if pairs is None:
+        return None
+    return _descendants_of(root_pid, pairs)
 
 
 def _process_group_alive(group_id: int) -> bool:
