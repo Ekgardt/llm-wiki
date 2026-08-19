@@ -3949,6 +3949,108 @@ def _linearize_terminal_outcome(
     finally:
         _release_lifecycle(coordinator)
 @dataclass
+class _CleanupRun:
+    """What every cleanup step shares: whose, how long, and where to record."""
+
+    instance: LspProcess | None
+    coordinator: _LifecycleCoordinator
+    deadline: float
+    terminal: bool
+    failure_code: str | None
+    result: _CleanupResult
+    errors: list[BaseException]
+
+    def failed(self, step: str, error: BaseException) -> None:
+        _record_cleanup_error(self.result, self.errors, step, error)
+
+
+class _CleanupStart(NamedTuple):
+    """What the locked opening pass settled for the rest of the cleanup."""
+
+    generations: list[_Generation]
+    outcome: str | None
+    code: str
+    terminal_outcome_ready: bool
+
+
+def _cleanup_failure_code(
+    coordinator: _LifecycleCoordinator, failure_code: str | None
+) -> str:
+    """The code terminal failure evidence will carry."""
+    return coordinator.terminal_code or failure_code or _PROCESS_EXITED
+
+
+def _try_failure_evidence(run: _CleanupRun, code: str) -> None:
+    """Write terminal failure evidence; a refusal is recorded against the step."""
+    try:
+        _ensure_failure_evidence(run.instance, run.coordinator, code, run.deadline)
+    except BaseException as error:
+        run.failed("evidence", error)
+
+
+def _cleanup_outcome_locked(run: _CleanupRun) -> tuple[str | None, bool]:
+    """The outcome cleanup acts on, and whether reading it settled anything."""
+    coordinator = run.coordinator
+    if not run.terminal:
+        return coordinator.terminal_outcome, True
+    try:
+        outcome = _linearize_terminal_outcome_locked(
+            run.instance, coordinator, run.deadline, commit_success=False
+        )
+    except BaseException as error:
+        run.failed("recovery_join", error)
+        return coordinator.terminal_outcome, False
+    return outcome, True
+
+
+def _begin_cleanup_locked(run: _CleanupRun) -> _CleanupStart:
+    coordinator = run.coordinator
+    generations = _generations_locked(coordinator)
+    outcome, outcome_ready = _cleanup_outcome_locked(run)
+    code = _cleanup_failure_code(coordinator, run.failure_code)
+    if run.terminal:
+        for generation in generations:
+            _mark_generation_expected_exit(generation)
+    _notify_lifecycle_locked(coordinator)
+    return _CleanupStart(generations, outcome, code, outcome_ready)
+
+
+def _open_cleanup(run: _CleanupRun) -> _CleanupStart | None:
+    """The locked opening pass, or None when the lifecycle lock is out of reach."""
+    coordinator = run.coordinator
+    try:
+        _acquire_lifecycle(coordinator, run.deadline, allow_expired=True)
+    except BaseException as error:
+        run.failed("generation_joins", error)
+        run.result.ownership_pending = True
+        return None
+    try:
+        return _begin_cleanup_locked(run)
+    finally:
+        _release_lifecycle(coordinator)
+
+
+def _evidence_unavailable(run: _CleanupRun, start: _CleanupStart) -> bool:
+    """A failure with no owner directory able to hold its evidence."""
+    if not run.terminal or start.outcome != "failure":
+        return False
+    owner = run.coordinator.owner_directory
+    if owner is None:
+        return True
+    return not start.generations and not owner.owner_permissions_verified
+
+
+def _record_initial_evidence(run: _CleanupRun, start: _CleanupStart) -> None:
+    """Write failure evidence up front, or mark the step as not applicable."""
+    if not run.terminal:
+        return
+    if start.outcome != "failure" or _evidence_unavailable(run, start):
+        run.result.succeeded("evidence", "not_applicable")
+        return
+    _try_failure_evidence(run, start.code)
+
+
+@dataclass
 class _GenerationCleanup:
     """Which cleanup steps still hold, and which are merely not finished yet."""
 
@@ -4294,60 +4396,29 @@ def _drive_cleanup_owned(
     coordinator: _LifecycleCoordinator,
     renew_deadline_after_evidence: bool,
 ) -> list[BaseException]:
-    result = coordinator.cleanup_result
-    current_errors: list[BaseException] = []
-    terminal_outcome_ready = not terminal
-
-    try:
-        _acquire_lifecycle(coordinator, deadline, allow_expired=True)
-    except BaseException as error:
-        _record_cleanup_error(result, current_errors, "generation_joins", error)
-        result.ownership_pending = True
-        return current_errors
-    try:
-        generations = _generations_locked(coordinator)
-        if terminal:
-            try:
-                outcome = _linearize_terminal_outcome_locked(
-                    instance, coordinator, deadline, commit_success=False
-                )
-            except BaseException as error:
-                terminal_outcome_ready = False
-                _record_cleanup_error(result, current_errors, "recovery_join", error)
-                outcome = coordinator.terminal_outcome
-            else:
-                terminal_outcome_ready = True
-        else:
-            outcome = coordinator.terminal_outcome
-        code = coordinator.terminal_code or failure_code or _PROCESS_EXITED
-        if terminal:
-            for generation in generations:
-                _mark_generation_expected_exit(generation)
-        _notify_lifecycle_locked(coordinator)
-    finally:
-        _release_lifecycle(coordinator)
-
-    owner = coordinator.owner_directory
-    evidence_unavailable = (
-        terminal
-        and outcome == "failure"
-        and (
-            owner is None
-            or (not generations and not owner.owner_permissions_verified)
-        )
+    run = _CleanupRun(
+        instance=instance,
+        coordinator=coordinator,
+        deadline=deadline,
+        terminal=terminal,
+        failure_code=failure_code,
+        result=coordinator.cleanup_result,
+        errors=[],
     )
-    if evidence_unavailable:
-        result.succeeded("evidence", "not_applicable")
-    elif terminal and outcome == "failure":
-        try:
-            _ensure_failure_evidence(instance, coordinator, code, deadline)
-        except BaseException as error:
-            _record_cleanup_error(result, current_errors, "evidence", error)
-    elif terminal:
-        result.succeeded("evidence", "not_applicable")
+    result = run.result
+    current_errors = run.errors
+    start = _open_cleanup(run)
+    if start is None:
+        return current_errors
+    generations = start.generations
+    outcome = start.outcome
+    terminal_outcome_ready = start.terminal_outcome_ready
 
+    _record_initial_evidence(run, start)
     if renew_deadline_after_evidence:
-        deadline = _fresh_cleanup_deadline()
+        run.deadline = _fresh_cleanup_deadline()
+    # One working deadline from here on; the renewal above is its last change.
+    deadline = run.deadline
 
     _release_generations(generations, deadline, result, current_errors)
 
