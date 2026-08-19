@@ -834,6 +834,126 @@ def _weigh_by_authority(
     return weighted
 
 
+_GRAPH_META_FIELDS = (
+    "graph_seed_id",
+    "graph_direction",
+    "graph_edge_type",
+    "assertion_path",
+    "graph_text_overlap",
+)
+
+# Display fields any backend may fill; the first non-empty value wins.
+_MERGEABLE_META_FIELDS = (
+    "title",
+    "summary",
+    "content",
+    "project",
+    "timestamp",
+    "chunk_id",
+    "authority",
+    "confidence",
+    "status",
+    "type",
+    "valid_from",
+    "valid_to",
+    "language",
+    "source_id",
+    "lance_distance",
+    *_GRAPH_META_FIELDS,
+)
+
+
+def _source_sha256(row: Mapping[str, Any]) -> str:
+    sha = row.get("source_sha256") or row.get("sha256") or ("0" * 64)
+    if not isinstance(sha, str) or len(sha) != 64:
+        return "0" * 64
+    return sha
+
+
+def _evidence_ids_of(row: Mapping[str, Any]) -> tuple[str, ...]:
+    return tuple(
+        str(item)
+        for item in (row.get("evidence_ids") or ())
+        if isinstance(item, str) and item
+    )
+
+
+def _graph_meta(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "graph_seed_id": row.get("seed_id"),
+        "graph_direction": row.get("direction"),
+        "graph_edge_type": row.get("edge_type"),
+        "assertion_path": _assertion_path(row),
+        "graph_text_overlap": row.get("graph_text_overlap"),
+    }
+
+
+def _new_candidate_meta(key: str, row: Mapping[str, Any]) -> dict[str, Any]:
+    """The display and provenance record for a candidate seen for the first time."""
+    path = _hit_path(row)
+    meta: dict[str, Any] = {
+        "candidate_id": key,
+        "parent_id": str(_first_present(row, ("parent_id", "parent_page"), path)),
+        "relative_path": path,
+        "heading_path": _heading_path(
+            _first_present(row, ("heading_path", "heading_ancestry"), None)
+        ),
+        "source_sha256": _source_sha256(row),
+        "byte_start": _as_int(row.get("byte_start"), 0),
+        "byte_end": _as_int(row.get("byte_end"), 0),
+        "bm25_rank": None,
+        "bm25_score": None,
+        "vector_rank": None,
+        "vector_score": None,
+        "graph_rank": None,
+        "graph_score": None,
+        "evidence_ids": _evidence_ids_of(row),
+    }
+    meta.update(
+        {
+            field: row.get(field)
+            for field in ("title", "summary", "project", "timestamp", "authority",
+                          "confidence", "status", "type", "valid_from", "valid_to",
+                          "language", "source_id", "lance_distance")
+        }
+    )
+    meta["content"] = row.get("content") or row.get("summary")
+    meta["chunk_id"] = row.get("chunk_id") or key
+    meta.update(_graph_meta(row))
+    return meta
+
+
+_EMPTY_GRAPH_VALUES = (None, "", ())
+_EMPTY_DISPLAY_VALUES = (None, "")
+
+
+def _fill_blank_fields(
+    meta: dict[str, Any],
+    values: Mapping[str, Any],
+    empty: tuple[Any, ...],
+) -> None:
+    for field, value in values.items():
+        if meta.get(field) in empty and value not in empty:
+            meta[field] = value
+
+
+def _merge_evidence_ids(meta: dict[str, Any], row: Mapping[str, Any]) -> None:
+    incoming = _evidence_ids_of(row)
+    if incoming:
+        meta["evidence_ids"] = tuple(dict.fromkeys((*meta["evidence_ids"], *incoming)))
+
+
+def _merge_candidate_meta(meta: dict[str, Any], row: Mapping[str, Any]) -> None:
+    """Fill blanks from another backend's view of the same candidate."""
+    _fill_blank_fields(meta, _graph_meta(row), _EMPTY_GRAPH_VALUES)
+    _merge_evidence_ids(meta, row)
+    _fill_blank_fields(
+        meta,
+        {field: row.get(field) for field in _MERGEABLE_META_FIELDS},
+        _EMPTY_DISPLAY_VALUES,
+    )
+
+
 def fuse_rrf(
     *,
     lexical: Sequence[Mapping[str, Any]] | None,
@@ -853,97 +973,9 @@ def fuse_rrf(
     def ensure(row: Mapping[str, Any]) -> str:
         key = _candidate_key(row)
         if key not in meta:
-            path = _hit_path(row)
-            sha = row.get("source_sha256") or row.get("sha256") or ("0" * 64)
-            if not isinstance(sha, str) or len(sha) != 64:
-                sha = "0" * 64
-            meta[key] = {
-                "candidate_id": key,
-                "parent_id": str(row.get("parent_id") or row.get("parent_page") or path),
-                "relative_path": path,
-                "heading_path": _heading_path(
-                    row.get("heading_path") or row.get("heading_ancestry")
-                ),
-                "source_sha256": sha,
-                "byte_start": _as_int(row.get("byte_start"), 0),
-                "byte_end": _as_int(row.get("byte_end"), 0),
-                "bm25_rank": None,
-                "bm25_score": None,
-                "vector_rank": None,
-                "vector_score": None,
-                "graph_rank": None,
-                "graph_score": None,
-                "evidence_ids": tuple(
-                    str(item)
-                    for item in (row.get("evidence_ids") or ())
-                    if isinstance(item, str) and item
-                ),
-                "title": row.get("title"),
-                "summary": row.get("summary"),
-                "content": row.get("content") or row.get("summary"),
-                "project": row.get("project"),
-                "timestamp": row.get("timestamp"),
-                "chunk_id": row.get("chunk_id") or key,
-                "authority": row.get("authority"),
-                "confidence": row.get("confidence"),
-                "status": row.get("status"),
-                "type": row.get("type"),
-                "valid_from": row.get("valid_from"),
-                "valid_to": row.get("valid_to"),
-                "language": row.get("language"),
-                "source_id": row.get("source_id"),
-                "lance_distance": row.get("lance_distance"),
-                "graph_seed_id": row.get("seed_id"),
-                "graph_direction": row.get("direction"),
-                "graph_edge_type": row.get("edge_type"),
-                "assertion_path": _assertion_path(row),
-                "graph_text_overlap": row.get("graph_text_overlap"),
-            }
-        else:
-            graph_fields = {
-                "graph_seed_id": row.get("seed_id"),
-                "graph_direction": row.get("direction"),
-                "graph_edge_type": row.get("edge_type"),
-                "assertion_path": _assertion_path(row),
-                "graph_text_overlap": row.get("graph_text_overlap"),
-            }
-            for field, value in graph_fields.items():
-                if meta[key].get(field) in (None, "", ()) and value not in (None, "", ()):
-                    meta[key][field] = value
-            incoming_evidence = tuple(
-                str(item)
-                for item in (row.get("evidence_ids") or ())
-                if isinstance(item, str) and item
-            )
-            if incoming_evidence:
-                meta[key]["evidence_ids"] = tuple(
-                    dict.fromkeys((*meta[key]["evidence_ids"], *incoming_evidence))
-                )
-            # Prefer first non-empty display fields from any backend.
-            for field in (
-                "title",
-                "summary",
-                "content",
-                "project",
-                "timestamp",
-                "chunk_id",
-                "authority",
-                "confidence",
-                "status",
-                "type",
-                "valid_from",
-                "valid_to",
-                "language",
-                "source_id",
-                "lance_distance",
-                "graph_seed_id",
-                "graph_direction",
-                "graph_edge_type",
-                "assertion_path",
-                "graph_text_overlap",
-            ):
-                if meta[key].get(field) in (None, "") and row.get(field) not in (None, ""):
-                    meta[key][field] = row.get(field)
+            meta[key] = _new_candidate_meta(key, row)
+            return key
+        _merge_candidate_meta(meta[key], row)
         return key
 
     if lexical:
