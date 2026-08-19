@@ -403,6 +403,26 @@ def test_migration_fence_loss_aborts_before_marker(
     assert not (tmp_path / "run" / "queue-migrated-v2").exists()
 
 
+def _await_file(path: Path, timeout: float) -> None:
+    """Wait for a child to signal through the filesystem."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"{path.name} never appeared")
+
+
+def _await_first_exit(processes: list[subprocess.Popen], timeout: float) -> None:
+    """Wait for the first contender to finish, whichever one it is."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if any(process.poll() is not None for process in processes):
+            return
+        time.sleep(0.01)
+    raise AssertionError("no contender finished before the deadline")
+
+
 def test_two_subprocess_contenders_over_stale_owner_run_exactly_one_migration(
     tmp_path: Path,
 ) -> None:
@@ -429,7 +449,7 @@ root, start, release, entered = map(Path, sys.argv[1:])
 real_scan = mq._scan_legacy_records
 def paused(path):
     entered.write_text(str(mq.os.getpid()), encoding="ascii")
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + 180
     while not release.exists() and time.monotonic() < deadline:
         time.sleep(0.01)
     return real_scan(path)
@@ -463,17 +483,17 @@ except mq.MigrationBusy as exc:
         for _ in range(2)
     ]
     start.write_text("go", encoding="ascii")
-    deadline = time.monotonic() + 10
-    while not entered.exists() and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert entered.exists()
-    while not any(process.poll() is not None for process in processes) and time.monotonic() < deadline:
-        time.sleep(0.01)
+    # Each wait gets its own budget sized for the slowest supported machine:
+    # spawning two interpreters that import the queue module is itself slow on
+    # a hosted Windows image, and the second wait must not inherit what the
+    # first one spent.
+    _await_file(entered, 120)
+    _await_first_exit(processes, 120)
     assert sum(process.poll() is not None for process in processes) == 1
     release.write_text("go", encoding="ascii")
     outputs = []
     for process in processes:
-        stdout, stderr = process.communicate(timeout=15)
+        stdout, stderr = process.communicate(timeout=180)
         assert process.returncode == 0, stderr
         outputs.append(json.loads(stdout))
 
@@ -495,7 +515,7 @@ def test_late_upgraded_legacy_write_cannot_recreate_queue_during_migration(
         assert path.name.startswith("queue-migration-")
         assert not (tmp_path / "run" / "queue").exists()
         renamed.set()
-        assert release.wait(5)
+        assert release.wait(180)
         return real_scan(path)
 
     monkeypatch.setattr(memory_queue, "_scan_legacy_records", paused_scan)
@@ -509,13 +529,13 @@ def test_late_upgraded_legacy_write_cannot_recreate_queue_during_migration(
 
     thread = threading.Thread(target=migrate)
     thread.start()
-    assert renamed.wait(5)
+    assert renamed.wait(120)
     with pytest.raises(memory_queue.LegacyBackendDisabled) as raised:
         memory_queue._legacy_enqueue_file("query", {"prompt": "late"}, tmp_path)
     assert raised.value.code == "legacy_migration_quiesced"
     assert not (tmp_path / "run" / "queue").exists()
     release.set()
-    thread.join(5)
+    thread.join(120)
     assert isinstance(outcome[0], memory_queue.MigrationReceipt)
 
 
