@@ -18,7 +18,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -332,14 +332,45 @@ def build_grounded_context(
     )
 
 
-def verify_grounded_answer(
-    document: object,
-    context: GroundedContext,
-    *,
-    vault: Path,
-) -> dict[str, object]:
-    """Apply citation, abstention, and supplied-span hard gates."""
-    from evidence_resolver import EvidenceResolutionError, verify_supplied_citation
+_RELEVANCE_MIN_TOKEN_LENGTH = 3
+# Function words carry no evidence, so sharing only these proves nothing.
+_RELEVANCE_STOPWORDS = frozenset(
+    {
+        "and", "are", "but", "для", "for", "from", "has", "have", "not", "the",
+        "that", "this", "was", "were", "with", "что", "как", "это", "или",
+    }
+)
+
+
+def _content_tokens(text: str) -> set[str]:
+    """Words worth matching on, plus CJK character bigrams for unspaced scripts."""
+    lowered = str(text).casefold()
+    words = {
+        token
+        for token in re.findall(r"\w+", lowered, flags=re.UNICODE)
+        if len(token) >= _RELEVANCE_MIN_TOKEN_LENGTH and token not in _RELEVANCE_STOPWORDS
+    }
+    ideographs = re.findall(r"[\u3400-\u9fff]", lowered)
+    return words | {a + b for a, b in zip(ideographs, ideographs[1:])}
+
+
+def _require_citation_touches_claim(claim_text: str, span_text: str) -> None:
+    """Reject a citation that shares nothing with the claim it is offered for.
+
+    This is a necessary condition, not proof of entailment: a span from the
+    right page that happens to repeat a word still passes. What it does close
+    is the case the audit named — a truthful citation about something else.
+    """
+    claim_tokens = _content_tokens(claim_text)
+    if not claim_tokens:
+        return
+    if claim_tokens & _content_tokens(span_text):
+        return
+    raise GroundedQAError("cited evidence shares no content with the claim it supports")
+
+
+def _validated_answer_document(document: object) -> dict:
+    from evidence_resolver import EvidenceResolutionError
     from reliable_memory import SchemaValidationError, validate_schema
 
     try:
@@ -347,38 +378,86 @@ def verify_grounded_answer(
     except SchemaValidationError as exc:
         raise EvidenceResolutionError("grounded answer schema validation failed") from exc
     assert isinstance(document, dict)
-    status = document["status"]
-    claims = document["claims"]
-    citations = document["citations"]
+    return document
+
+
+def _require_answered_shape(document: Mapping[str, object]) -> None:
+    populated = bool(document["claims"]) and bool(document["citations"])
+    if not populated or document["reason"] is not None:
+        raise GroundedQAError(
+            "answered status requires claims with citations and no abstention reason"
+        )
+
+
+def _require_abstention_shape(document: Mapping[str, object]) -> None:
     reason = document["reason"]
-    if status == "answered":
-        if not claims or not citations or reason is not None:
-            raise GroundedQAError(
-                "answered status requires claims with citations and no abstention reason"
-            )
-    elif claims or citations or not isinstance(reason, str) or not reason.strip():
+    stated = isinstance(reason, str) and bool(reason.strip())
+    if document["claims"] or document["citations"] or not stated:
         raise GroundedQAError("abstention statuses require a reason and no factual claims")
 
-    supplied = {item.citation_id: asdict(item) for item in context.evidence}
-    cited_documents: dict[str, Mapping[str, object]] = {}
+
+def _require_status_shape(document: Mapping[str, object]) -> None:
+    """An answer carries claims and citations; an abstention carries a reason."""
+    if document["status"] == "answered":
+        _require_answered_shape(document)
+        return
+    _require_abstention_shape(document)
+
+
+def _verified_citations(
+    citations: Sequence[Mapping[str, object]],
+    supplied: Mapping[str, Mapping[str, object]],
+    *,
+    vault: Path,
+) -> dict[str, Mapping[str, object]]:
+    from evidence_resolver import EvidenceResolutionError, verify_supplied_citation
+
+    cited: dict[str, Mapping[str, object]] = {}
     for citation in citations:
         citation_id = citation["citation_id"]
-        if citation_id in cited_documents or citation_id not in supplied:
+        if citation_id in cited or citation_id not in supplied:
             raise EvidenceResolutionError("citation ID is duplicate or was not supplied")
         verify_supplied_citation(citation, supplied[citation_id], vault=vault)
-        cited_documents[citation_id] = citation
+        cited[str(citation_id)] = citation
+    return cited
+
+
+def _cited_ids_of_claim(
+    claim: Mapping[str, object],
+    cited: Mapping[str, Mapping[str, object]],
+    supplied: Mapping[str, Mapping[str, object]],
+) -> set[str]:
+    from evidence_resolver import EvidenceResolutionError
+
+    ids = claim["citation_ids"]
+    if not ids:
+        raise GroundedQAError("every atomic factual claim requires an adjacent citation")
+    for citation_id in ids:
+        if citation_id not in cited:
+            raise EvidenceResolutionError("claim cites evidence not supplied to generation")
+        _require_citation_touches_claim(
+            str(claim["text"]), str(supplied[citation_id]["text"])
+        )
+    return {str(item) for item in ids}
+
+
+def verify_grounded_answer(
+    document: object,
+    context: GroundedContext,
+    *,
+    vault: Path,
+) -> dict[str, object]:
+    """Apply citation, abstention, relevance, and supplied-span hard gates."""
+    validated = _validated_answer_document(document)
+    _require_status_shape(validated)
+    supplied = {item.citation_id: asdict(item) for item in context.evidence}
+    cited = _verified_citations(validated["citations"], supplied, vault=vault)
     claim_ids: set[str] = set()
-    for claim in claims:
-        ids = claim["citation_ids"]
-        if not ids:
-            raise GroundedQAError("every atomic factual claim requires an adjacent citation")
-        for citation_id in ids:
-            if citation_id not in cited_documents:
-                raise EvidenceResolutionError("claim cites evidence not supplied to generation")
-            claim_ids.add(citation_id)
-    if claim_ids != set(cited_documents):
+    for claim in validated["claims"]:
+        claim_ids |= _cited_ids_of_claim(claim, cited, supplied)
+    if claim_ids != set(cited):
         raise GroundedQAError("citation precision and recall gates require exact citation use")
-    return document
+    return validated
 
 
 def _default_candidates(question: str, *, profile: str, deadline: float) -> tuple[object, ...]:

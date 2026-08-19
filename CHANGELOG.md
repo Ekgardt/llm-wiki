@@ -8,6 +8,11 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A grounded answer now fails when a cited span shares no content with the claim
+  it is offered for, which is the case where a truthful citation about a
+  different subject passed every other gate. It is a necessary condition, not
+  entailment: support itself is still unverified and is not claimed.
+
 - A Markdown write no longer fails when the writer-gate heartbeat is starved by a
   busy database. Ownership loss is now decided by the projection row, which a
   reclaim deletes, and the error names its cause. A queue worker likewise waits

@@ -14,6 +14,7 @@ This index catalogs durable memory distilled from AI agent sessions
 - [[knowledge/notes/provenance-rule-6]] — CLAUDE.md rule 6 — "mark uncertainty explicitly" — is the root constraint that justifies preliminary flagging, editorial notes, and every "inferred from…" caveat in this vault.
 
 ## Decisions
+- [[knowledge/notes/citation-relevance-gate-decision]] — A citation that shares no content with the claim it is offered for is rejected; entailment itself is still not verified and is not claimed.
 - [[knowledge/notes/dead-task-retirement-and-restore-decision]] — A task whose attempts are exhausted is retired only when asked for by name, through the same verified export, and one command brings its work back.
 - [[knowledge/notes/one-trust-weight-across-retrieval-paths-decision]] — Typed provenance multiplies the score that decides the order on every retrieval path, from one shared table, and the weight is reported.
 - [[knowledge/notes/warm-navigation-overhead-threshold-decision]] — The warm navigation overhead gate is 30 ms p95, measured on the slowest supported machine class rather than on a quiet one.

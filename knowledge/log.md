@@ -45,6 +45,8 @@
 
 - 2026-08-19 — Closed audit item OPEN-020: `purge --include-dead` retires attempts-exhausted tasks through the existing export-first, manifest-verified path, and `restore --export` brings the work back from a verified export as new ready tasks. Retention stays the default because a dead task records work that never happened. Recorded in `dead-task-retirement-and-restore-decision.md`.
 
+- 2026-08-19 — Narrowed audit item OPEN-017: a cited span that shares no content token with the claim now fails the answer, covering unspaced scripts through character bigrams. Entailment is still not verified and is not claimed anywhere. Recorded in `citation-relevance-gate-decision.md`.
+
 ## Editorial note
 This log is vault metadata — an append-only editorial changelog of compile passes and hygiene actions over `knowledge/`, not content derived from `knowledge/raw/` or `knowledge/inbox/`. New entries are appended at the bottom by compile passes and by hand; entries are never rewritten or removed.
 
