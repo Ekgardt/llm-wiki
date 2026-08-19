@@ -1704,6 +1704,66 @@ def _sealed_file(
     )
 
 
+def _artifact_descriptors(manifest: Mapping[str, object]) -> dict[str, dict] | None:
+    """One descriptor per artifact path, or None when the manifest is malformed."""
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list):
+        return None
+    descriptors = {
+        item.get("path"): item for item in artifacts if _is_path_descriptor(item)
+    }
+    if len(descriptors) != len(artifacts):
+        return None
+    return descriptors
+
+
+def _is_path_descriptor(item: object) -> bool:
+    return isinstance(item, dict) and isinstance(item.get("path"), str)
+
+
+def _artifact_seals(
+    directory: Path,
+    descriptors: Mapping[str, dict],
+    artifact_names: tuple[str, ...],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[tuple[str, object]] | None:
+    seals: list[tuple[str, object]] = []
+    for name in artifact_names:
+        _check_generation_stop(deadline, cancelled)
+        descriptor = descriptors.get(name)
+        if not isinstance(descriptor, dict):
+            return None
+        seals.append(
+            (
+                name,
+                _sealed_file(
+                    directory / name, descriptor, deadline=deadline, cancelled=cancelled
+                ),
+            )
+        )
+    return seals
+
+
+def _manifest_seal(
+    manifest_path: Path,
+    canonical: bytes,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> object | None:
+    """A generation may predate the on-disk manifest; absence is not a failure."""
+    if not manifest_path.exists() and not manifest_path.is_symlink():
+        return None
+    return _sealed_file(
+        manifest_path,
+        {"size": len(canonical), "sha256": hashlib.sha256(canonical).hexdigest()},
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+
+
 def _generation_consumption_seal(
     catalog: object,
     manifest: dict[str, object],
@@ -1712,59 +1772,41 @@ def _generation_consumption_seal(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> tuple | None:
+    """What this reader saw, so a later check can prove nothing moved."""
     try:
-        _check_generation_stop(deadline, cancelled)
-        generation_id = manifest["generation_id"]
-        generations_path = Path(getattr(catalog, "generations_path"))
-        if not isinstance(generation_id, str):
-            return None
-        artifacts = manifest.get("artifacts")
-        if not isinstance(artifacts, list):
-            return None
-        descriptors = {
-            item.get("path"): item
-            for item in artifacts
-            if isinstance(item, dict) and isinstance(item.get("path"), str)
-        }
-        if len(descriptors) != len(artifacts):
-            return None
-        directory = generations_path / generation_id
-        seals = []
-        for name in artifact_names:
-            _check_generation_stop(deadline, cancelled)
-            descriptor = descriptors.get(name)
-            if not isinstance(descriptor, dict):
-                return None
-            seals.append(
-                (
-                    name,
-                    _sealed_file(
-                        directory / name,
-                        descriptor,
-                        deadline=deadline,
-                        cancelled=cancelled,
-                    ),
-                )
-            )
-        manifest_path = directory / "manifest.json"
-        canonical = _canonical_manifest_bytes(manifest)
-        if manifest_path.exists() or manifest_path.is_symlink():
-            manifest_seal = _sealed_file(
-                manifest_path,
-                {
-                    "size": len(canonical),
-                    "sha256": hashlib.sha256(canonical).hexdigest(),
-                },
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-        else:
-            manifest_seal = None
-        return hashlib.sha256(canonical).hexdigest(), manifest_seal, tuple(seals)
+        return _sealed_generation(
+            catalog, manifest, artifact_names, deadline=deadline, cancelled=cancelled
+        )
     except TimeoutError:
         raise
     except (OSError, PermissionError, TypeError, ValueError):
         return None
+
+
+def _sealed_generation(
+    catalog: object,
+    manifest: Mapping[str, object],
+    artifact_names: tuple[str, ...],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> tuple | None:
+    _check_generation_stop(deadline, cancelled)
+    generation_id = manifest["generation_id"]
+    descriptors = _artifact_descriptors(manifest)
+    if not isinstance(generation_id, str) or descriptors is None:
+        return None
+    directory = Path(getattr(catalog, "generations_path")) / generation_id
+    seals = _artifact_seals(
+        directory, descriptors, artifact_names, deadline=deadline, cancelled=cancelled
+    )
+    if seals is None:
+        return None
+    canonical = _canonical_manifest_bytes(manifest)
+    manifest_seal = _manifest_seal(
+        directory / "manifest.json", canonical, deadline=deadline, cancelled=cancelled
+    )
+    return hashlib.sha256(canonical).hexdigest(), manifest_seal, tuple(seals)
 
 
 def _generation_consumption_unchanged(
