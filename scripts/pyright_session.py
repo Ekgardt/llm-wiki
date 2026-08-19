@@ -1103,6 +1103,27 @@ def _position_params(
     }
 
 
+def _published_diagnostics_params(
+    params: object,
+) -> tuple[str, list[object], object] | None:
+    """The URI, diagnostics and version of a publish notification, when readable."""
+    if not isinstance(params, dict):
+        return None
+    uri_value = params.get("uri")
+    diagnostics_value = params.get("diagnostics")
+    if not isinstance(uri_value, str) or not isinstance(diagnostics_value, list):
+        return None
+    return uri_value, diagnostics_value, params.get("version")
+
+
+def _published_version(value: object) -> tuple[int | None, bool]:
+    """The document version, and whether the field was readable at all."""
+    if value is None:
+        return None, True
+    version = _lsp_coordinate(value)
+    return version, version is not None
+
+
 class _LaunchServerGuard:
     def __init__(
         self,
@@ -1902,71 +1923,94 @@ class PyrightSession:
             and version < existing.document_version
         ) or (version is None and existing.document_version is not None)
 
-    def _publish_diagnostics(self, params: object) -> None:
-        if not isinstance(params, dict):
-            return
-        uri_value = params.get("uri")
-        diagnostics_value = params.get("diagnostics")
-        if not isinstance(uri_value, str) or not isinstance(diagnostics_value, list):
-            return
-        source = normalize_provider_uri(self._repository, uri_value)
-        if source is None:
-            return
-        version_value = params.get("version")
-        if version_value is None:
-            version = None
-        else:
-            version = _lsp_coordinate(version_value)
-            if version is None:
-                return
-        with self._lock:
-            document = self._documents.get(source.uri)
-            if document is None:
-                return
-            existing = self._diagnostics.get(source.uri)
-            if self._diagnostic_update_is_stale(document, existing, version):
-                return
-            if existing is None and len(self._diagnostics) >= _MAX_DIAGNOSTIC_URIS:
-                return
+    def _diagnostic_update_admissible_locked(
+        self, uri: str, version: int | None
+    ) -> bool:
+        """Whether a diagnostic update for this URI is still worth keeping."""
+        document = self._documents.get(uri)
+        if document is None:
+            return False
+        existing = self._diagnostics.get(uri)
+        if self._diagnostic_update_is_stale(document, existing, version):
+            return False
+        return existing is not None or len(self._diagnostics) < _MAX_DIAGNOSTIC_URIS
 
-        partial = len(diagnostics_value) > MAX_LOCATIONS
+    def _parsed_diagnostics(
+        self, values: list[object], uri: str
+    ) -> tuple[list[LspDiagnostic], bool]:
+        """Every readable diagnostic, and whether anything had to be dropped."""
+        partial = len(values) > MAX_LOCATIONS
         diagnostics: list[LspDiagnostic] = []
-        for value in diagnostics_value[:MAX_LOCATIONS]:
-            diagnostic, filtered = self._parse_diagnostic(value, source.uri)
+        for value in values[:MAX_LOCATIONS]:
+            diagnostic, filtered = self._parse_diagnostic(value, uri)
             partial = partial or filtered
             if diagnostic is not None:
                 diagnostics.append(diagnostic)
+        return diagnostics, partial
+
+    def _diagnostic_snapshot(
+        self, values: list[object], uri: str, version: int | None
+    ) -> _DiagnosticSnapshot | None:
+        """The snapshot to publish, or None when it would not fit the budget."""
+        diagnostics, partial = self._parsed_diagnostics(values, uri)
         retained_bytes = _DIAGNOSTIC_BASE_BYTES + sum(
             self._diagnostic_retained_bytes(diagnostic) for diagnostic in diagnostics
         )
         if retained_bytes > _MAX_DIAGNOSTIC_BYTES:
-            return
-        snapshot = _DiagnosticSnapshot(
+            return None
+        return _DiagnosticSnapshot(
             tuple(diagnostics),
             version,
             partial,
             retained_bytes,
         )
+
+    def _store_diagnostics(
+        self, uri: str, version: int | None, snapshot: _DiagnosticSnapshot
+    ) -> None:
+        """Publish the snapshot, unless the session moved on or ran out of budget."""
         with self._lock:
-            current_document = self._documents.get(source.uri)
-            if current_document is None:
+            if not self._diagnostic_update_admissible_locked(uri, version):
                 return
-            existing = self._diagnostics.get(source.uri)
-            if self._diagnostic_update_is_stale(
-                current_document,
-                existing,
-                version,
-            ):
-                return
-            if existing is None and len(self._diagnostics) >= _MAX_DIAGNOSTIC_URIS:
-                return
+            existing = self._diagnostics.get(uri)
             previous_bytes = existing.retained_bytes if existing is not None else 0
-            aggregate_bytes = self._diagnostic_bytes - previous_bytes + retained_bytes
+            aggregate_bytes = (
+                self._diagnostic_bytes - previous_bytes + snapshot.retained_bytes
+            )
             if aggregate_bytes > _MAX_DIAGNOSTIC_BYTES:
                 return
-            self._diagnostics[source.uri] = snapshot
+            self._diagnostics[uri] = snapshot
             self._diagnostic_bytes = aggregate_bytes
             self._condition.notify_all()
+
+    def _diagnostic_target(
+        self, params: object
+    ) -> tuple[str, list[object], int | None] | None:
+        """The URI, diagnostics and version to publish, when all are readable."""
+        published = _published_diagnostics_params(params)
+        if published is None:
+            return None
+        uri_value, values, version_value = published
+        source = normalize_provider_uri(self._repository, uri_value)
+        if source is None:
+            return None
+        version, version_ok = _published_version(version_value)
+        if not version_ok:
+            return None
+        return source.uri, values, version
+
+    def _publish_diagnostics(self, params: object) -> None:
+        target = self._diagnostic_target(params)
+        if target is None:
+            return
+        uri, values, version = target
+        with self._lock:
+            if not self._diagnostic_update_admissible_locked(uri, version):
+                return
+        snapshot = self._diagnostic_snapshot(values, uri, version)
+        if snapshot is None:
+            return
+        self._store_diagnostics(uri, version, snapshot)
 
     def _bootstrap_owned_generation(
         self,
