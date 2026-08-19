@@ -2407,6 +2407,155 @@ def _generation_fts_search(
     return results[:limit]
 
 
+def _vectors_match_manifest(
+    manifest: Mapping[str, object], model_id: str, model_revision: str
+) -> bool:
+    """The generation must claim complete vectors from this exact model."""
+    if manifest.get("vector_state") != "complete":
+        return False
+    if manifest.get("embedding_model_id") != model_id:
+        return False
+    if manifest.get("embedding_model_revision") != model_revision:
+        return False
+    return all(_generation_artifact(manifest, name) for name in GENERATION_VECTOR_ARTIFACTS)
+
+
+def _read_vector_metadata(
+    directory: Path, deadline: float | None, cancelled: Callable[[], bool] | None
+) -> dict:
+    metadata_bytes = bytearray()
+    with (directory / "vectors.json").open("rb") as source:
+        while chunk := source.read(64 * 1024):
+            _check_generation_stop(deadline, cancelled)
+            metadata_bytes.extend(chunk)
+    _check_generation_stop(deadline, cancelled)
+    return json.loads(metadata_bytes.decode("utf-8"))
+
+
+def _matrix_is_finite(
+    matrix: object, deadline: float | None, cancelled: Callable[[], bool] | None
+) -> bool:
+    import numpy as np
+
+    for start in range(0, len(matrix), 4096):
+        _check_generation_stop(deadline, cancelled)
+        if not np.isfinite(matrix[start : start + 4096]).all():
+            return False
+    return True
+
+
+def _vector_metadata_matches(
+    metadata: Mapping[str, object],
+    manifest: Mapping[str, object],
+    ordered: list[sqlite3.Row],
+    *,
+    model_id: str,
+    model_revision: str,
+    dimensions: object,
+) -> bool:
+    """Every claim vectors.json makes about its corpus must hold."""
+    expected = {
+        "schema_version": "corpus-vectors/v1",
+        "corpus_sha256": manifest.get("source_manifest_sha256"),
+        "collector_version": manifest.get("collector_version"),
+        "extractor_version": manifest.get("extractor_version"),
+        "model_id": model_id,
+        "model_revision": model_revision,
+        "dimensions": dimensions,
+        "chunk_ids": [row[0] for row in ordered],
+        "source_ids": [row[1] for row in ordered],
+        "source_paths": [row[2] for row in ordered],
+        "source_sha256": [row[3] for row in ordered],
+    }
+    return all(metadata.get(key) == value for key, value in expected.items())
+
+
+def _usable_vector_matrix(
+    matrix: object, ordered: list[sqlite3.Row], dimensions: object, *, deadline, cancelled
+) -> bool:
+    import numpy as np
+
+    if matrix.shape != (len(ordered), dimensions):
+        return False
+    if matrix.dtype != np.dtype(np.float32):
+        return False
+    return _matrix_is_finite(matrix, deadline, cancelled)
+
+
+def _usable_query_vector(query_matrix: object, dimensions: object) -> bool:
+    import numpy as np
+
+    if query_matrix.shape != (1, dimensions):
+        return False
+    if query_matrix.dtype.kind != "f":
+        return False
+    return bool(np.isfinite(query_matrix).all())
+
+
+def _cosine_similarities(
+    matrix: object, query_vector: object, *, deadline, cancelled
+) -> object:
+    import numpy as np
+
+    query_norm = np.linalg.norm(query_vector) + 1e-10
+    similarities = np.empty(len(matrix), dtype=np.float32)
+    for start in range(0, len(matrix), 4096):
+        _check_generation_stop(deadline, cancelled)
+        block = matrix[start : start + 4096]
+        similarities[start : start + len(block)] = (block @ query_vector) / (
+            (np.linalg.norm(block, axis=1) + 1e-10) * query_norm
+        )
+    return similarities
+
+
+def _ordered_chunk_identity(
+    connection: sqlite3.Connection, deadline, cancelled
+) -> list[sqlite3.Row]:
+    with _generation_sqlite_guard(connection, deadline, cancelled):
+        connection.row_factory = sqlite3.Row
+        return connection.execute(
+            "SELECT chunk_id, source_id, source_path, source_sha256 "
+            "FROM chunks ORDER BY chunk_order"
+        ).fetchall()
+
+
+def _vector_scored_rows(
+    connection: sqlite3.Connection,
+    similarities: object,
+    generation_id: str,
+    *,
+    scope: str,
+    since: str | None,
+    as_of: str | None,
+    project: str | None,
+    deadline,
+    cancelled,
+) -> list[dict[str, object]]:
+    filters, values = _generation_filters(scope=scope, since=since, as_of=as_of)
+    with _generation_sqlite_guard(connection, deadline, cancelled):
+        rows = connection.execute(
+            "SELECT chunk_id, chunk_order, source_id, source_path, source_sha256, "
+            "heading_ancestry, type, project, authority, confidence, status, valid_from, "
+            "valid_to, language, title, content, 0.0 AS rank FROM chunks "
+            f"WHERE 1=1{filters} ORDER BY chunk_order",
+            values,
+        ).fetchall()
+    results = []
+    for row in rows:
+        _check_generation_stop(deadline, cancelled)
+        result = _generation_result(row, generation_id)
+        score = float(similarities[row["chunk_order"]])
+        # The vector path boosts a project match by 1.5, not by the lexical 2.0.
+        if project and str(result["project"]).casefold() == project.casefold():
+            score *= 1.5
+        result["score"] = round(score, 4)
+        result["requested_mode"] = "hybrid"
+        result["effective_mode"] = "hybrid"
+        results.append(result)
+    results.sort(key=lambda item: (-float(item["score"]), str(item["chunk_id"])))
+    return results
+
+
 def _generation_vectors_search(
     query: str,
     catalog: object,
@@ -2424,97 +2573,52 @@ def _generation_vectors_search(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> list[dict[str, object]] | None:
+    """Cosine search over one generation's vectors, or None when unusable."""
     _check_generation_stop(deadline, cancelled)
-    if (
-        manifest.get("vector_state") != "complete"
-        or manifest.get("embedding_model_id") != model_id
-        or manifest.get("embedding_model_revision") != model_revision
-        or not all(_generation_artifact(manifest, name) for name in GENERATION_VECTOR_ARTIFACTS)
-    ):
+    if not _vectors_match_manifest(manifest, model_id, model_revision):
         return None
     generation_id = str(manifest["generation_id"])
     directory = Path(getattr(catalog, "generations_path")) / generation_id
     try:
         import numpy as np
 
-        metadata_bytes = bytearray()
-        with (directory / "vectors.json").open("rb") as source:
-            while chunk := source.read(64 * 1024):
-                _check_generation_stop(deadline, cancelled)
-                metadata_bytes.extend(chunk)
-        _check_generation_stop(deadline, cancelled)
-        metadata = json.loads(metadata_bytes.decode("utf-8"))
+        metadata = _read_vector_metadata(directory, deadline, cancelled)
         matrix = np.load(directory / "vectors.npy", mmap_mode="r", allow_pickle=False)
         _check_generation_stop(deadline, cancelled)
-        with _generation_sqlite_guard(connection, deadline, cancelled):
-            connection.row_factory = sqlite3.Row
-            ordered = connection.execute(
-                "SELECT chunk_id, source_id, source_path, source_sha256 "
-                "FROM chunks ORDER BY chunk_order"
-            ).fetchall()
+        ordered = _ordered_chunk_identity(connection, deadline, cancelled)
         dimensions = manifest.get("vector_dimensions")
-        matrix_finite = True
-        for start in range(0, len(matrix), 4096):
-            _check_generation_stop(deadline, cancelled)
-            if not np.isfinite(matrix[start : start + 4096]).all():
-                matrix_finite = False
-                break
-        if (
-            metadata.get("schema_version") != "corpus-vectors/v1"
-            or metadata.get("corpus_sha256") != manifest.get("source_manifest_sha256")
-            or metadata.get("collector_version") != manifest.get("collector_version")
-            or metadata.get("extractor_version") != manifest.get("extractor_version")
-            or metadata.get("model_id") != model_id
-            or metadata.get("model_revision") != model_revision
-            or metadata.get("dimensions") != dimensions
-            or metadata.get("chunk_ids") != [row[0] for row in ordered]
-            or metadata.get("source_ids") != [row[1] for row in ordered]
-            or metadata.get("source_paths") != [row[2] for row in ordered]
-            or metadata.get("source_sha256") != [row[3] for row in ordered]
-            or matrix.shape != (len(ordered), dimensions)
-            or matrix.dtype != np.dtype(np.float32)
-            or not matrix_finite
+        if not _vector_metadata_matches(
+            metadata,
+            manifest,
+            ordered,
+            model_id=model_id,
+            model_revision=model_revision,
+            dimensions=dimensions,
+        ):
+            return None
+        if not _usable_vector_matrix(
+            matrix, ordered, dimensions, deadline=deadline, cancelled=cancelled
         ):
             return None
         _check_generation_stop(deadline, cancelled)
         query_matrix = np.asarray(_call_generation_embedder(embedder, [query]))
         _check_generation_stop(deadline, cancelled)
-        if (
-            query_matrix.shape != (1, dimensions)
-            or query_matrix.dtype.kind != "f"
-            or not np.isfinite(query_matrix).all()
-        ):
+        if not _usable_query_vector(query_matrix, dimensions):
             return None
-        query_vector = query_matrix[0]
-        query_norm = np.linalg.norm(query_vector) + 1e-10
-        similarities = np.empty(len(matrix), dtype=np.float32)
-        for start in range(0, len(matrix), 4096):
-            _check_generation_stop(deadline, cancelled)
-            block = matrix[start : start + 4096]
-            similarities[start : start + len(block)] = (block @ query_vector) / (
-                (np.linalg.norm(block, axis=1) + 1e-10) * query_norm
-            )
-        filters, values = _generation_filters(scope=scope, since=since, as_of=as_of)
-        with _generation_sqlite_guard(connection, deadline, cancelled):
-            rows = connection.execute(
-                "SELECT chunk_id, chunk_order, source_id, source_path, source_sha256, "
-                "heading_ancestry, type, project, authority, confidence, status, valid_from, "
-                "valid_to, language, title, content, 0.0 AS rank FROM chunks "
-                f"WHERE 1=1{filters} ORDER BY chunk_order",
-                values,
-            ).fetchall()
-        results = []
-        for row in rows:
-            _check_generation_stop(deadline, cancelled)
-            result = _generation_result(row, generation_id)
-            score = float(similarities[row["chunk_order"]])
-            if project and str(result["project"]).casefold() == project.casefold():
-                score *= 1.5
-            result["score"] = round(score, 4)
-            result["requested_mode"] = "hybrid"
-            result["effective_mode"] = "hybrid"
-            results.append(result)
-        results.sort(key=lambda item: (-float(item["score"]), str(item["chunk_id"])))
+        similarities = _cosine_similarities(
+            matrix, query_matrix[0], deadline=deadline, cancelled=cancelled
+        )
+        results = _vector_scored_rows(
+            connection,
+            similarities,
+            generation_id,
+            scope=scope,
+            since=since,
+            as_of=as_of,
+            project=project,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
         _check_generation_stop(deadline, cancelled)
         return results[: limit * 3]
     except TimeoutError:
