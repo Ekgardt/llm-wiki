@@ -3948,6 +3948,311 @@ def _linearize_terminal_outcome(
         return outcome
     finally:
         _release_lifecycle(coordinator)
+@dataclass
+class _GenerationCleanup:
+    """Which cleanup steps still hold, and which are merely not finished yet."""
+
+    tree_termination_ok: bool = True
+    protocol_stop_ok: bool = True
+    protocol_stop_pending: bool = False
+    tree_release_ok: bool = True
+    tree_release_pending: bool = False
+    joins_ok: bool = True
+    joins_pending: bool = False
+
+
+_COLLECTIVE_CLEANUP_STEPS = (
+    ("tree_termination", "tree_termination_ok", None),
+    ("protocol_stop", "protocol_stop_ok", "protocol_stop_pending"),
+    ("tree_release", "tree_release_ok", "tree_release_pending"),
+    ("generation_joins", "joins_ok", "joins_pending"),
+)
+
+
+def _stop_generation_protocol_io(
+    generation: _Generation,
+    result: _CleanupResult,
+    errors: list[BaseException],
+    flags: _GenerationCleanup,
+) -> None:
+    protocol = generation.protocol
+    if protocol is None:
+        return
+    try:
+        protocol._stop_io_for_process_cleanup()
+    except BaseException as error:
+        flags.protocol_stop_ok = False
+        _record_cleanup_error(result, errors, "protocol_stop", error)
+
+
+def _terminate_generation_tree(
+    generation: _Generation,
+    deadline: float,
+    result: _CleanupResult,
+    errors: list[BaseException],
+    flags: _GenerationCleanup,
+) -> None:
+    tree = generation.tree
+    if tree is None:
+        return
+    try:
+        tree.terminate(deadline=deadline)
+    except BaseException as error:
+        flags.tree_termination_ok = False
+        _record_cleanup_error(result, errors, "tree_termination", error)
+
+
+def _generation_process_exited(
+    generation: _Generation,
+    result: _CleanupResult,
+    errors: list[BaseException],
+    flags: _GenerationCleanup,
+) -> bool:
+    """Whether the server is gone; a process we cannot read counts as alive."""
+    process = generation.process
+    try:
+        return process is None or process.poll() is not None
+    except BaseException as error:
+        flags.tree_termination_ok = False
+        _record_cleanup_error(result, errors, "tree_termination", error)
+        return False
+
+
+def _finish_generation_protocol(
+    generation: _Generation,
+    process_exited: bool,
+    deadline: float,
+    result: _CleanupResult,
+    errors: list[BaseException],
+    flags: _GenerationCleanup,
+) -> None:
+    protocol = generation.protocol
+    if protocol is None:
+        return
+    if not process_exited:
+        flags.protocol_stop_pending = True
+        return
+    try:
+        protocol._finish_io_after_process_exit(deadline)
+    except BaseException as error:
+        flags.protocol_stop_ok = False
+        _record_cleanup_error(result, errors, "protocol_stop", error)
+        return
+    generation.protocol = None
+
+
+def _close_one_pipe(
+    stream: BinaryIO | None,
+    result: _CleanupResult,
+    errors: list[BaseException],
+    flags: _GenerationCleanup,
+) -> bool:
+    if stream is None or getattr(stream, "closed", False):
+        return True
+    try:
+        stream.close()
+    except BaseException as error:
+        flags.protocol_stop_ok = False
+        _record_cleanup_error(result, errors, "protocol_stop", error)
+        return False
+    return True
+
+
+def _close_generation_pipes(
+    generation: _Generation,
+    process_exited: bool,
+    result: _CleanupResult,
+    errors: list[BaseException],
+    flags: _GenerationCleanup,
+) -> bool:
+    """Close the server's pipes once it is gone; False when one refused."""
+    process = generation.process
+    if process is None or not process_exited:
+        return True
+    streams = (process.stdin, process.stdout, process.stderr)
+    closed = True
+    for stream in streams:
+        closed = _close_one_pipe(stream, result, errors, flags) and closed
+    return closed
+
+
+def _release_posix_tree(
+    generation: _Generation,
+    result: _CleanupResult,
+    errors: list[BaseException],
+    flags: _GenerationCleanup,
+) -> None:
+    tree = generation.tree
+    if tree is None or os.name == "nt":
+        return
+    try:
+        tree.close()
+    except BaseException as error:
+        flags.tree_release_ok = False
+        _record_cleanup_error(result, errors, "tree_release", error)
+        return
+    generation.tree = None
+
+
+def _join_one_generation_thread(
+    generation: _Generation,
+    attribute: str,
+    deadline: float,
+    result: _CleanupResult,
+    errors: list[BaseException],
+    flags: _GenerationCleanup,
+) -> None:
+    thread = getattr(generation, attribute)
+    if _join_owned_thread(thread, deadline):
+        setattr(generation, attribute, None)
+        return
+    flags.joins_ok = False
+    error = TimeoutError("LSP generation thread did not stop before deadline")
+    _record_cleanup_error(result, errors, "generation_joins", error)
+
+
+def _join_generation_threads(
+    generation: _Generation,
+    process_exited: bool,
+    deadline: float,
+    result: _CleanupResult,
+    errors: list[BaseException],
+    flags: _GenerationCleanup,
+) -> None:
+    if not process_exited:
+        flags.joins_pending = True
+        return
+    for attribute in ("stderr_thread", "exit_thread"):
+        _join_one_generation_thread(
+            generation, attribute, deadline, result, errors, flags
+        )
+
+
+def _windows_release_ready(generation: _Generation, process_exited: bool) -> bool:
+    """Nothing of ours still holds the process, so the job object can go."""
+    return (
+        process_exited
+        and generation.protocol is None
+        and generation.stderr_thread is None
+        and generation.exit_thread is None
+    )
+
+
+def _release_windows_tree(
+    generation: _Generation,
+    ready: bool,
+    result: _CleanupResult,
+    errors: list[BaseException],
+    flags: _GenerationCleanup,
+) -> None:
+    tree = generation.tree
+    if tree is None or os.name != "nt":
+        return
+    if not ready:
+        flags.tree_release_pending = True
+        return
+    try:
+        tree.close()
+    except BaseException as error:
+        flags.tree_release_ok = False
+        _record_cleanup_error(result, errors, "tree_release", error)
+        return
+    generation.tree = None
+
+
+def _release_windows_job(
+    generation: _Generation,
+    ready: bool,
+    result: _CleanupResult,
+    errors: list[BaseException],
+    flags: _GenerationCleanup,
+) -> None:
+    windows_job = generation.windows_job
+    if windows_job is None:
+        return
+    if not ready:
+        flags.tree_release_pending = True
+        return
+    try:
+        _lsp_process_tree._close_windows_handle(windows_job)
+    except BaseException as error:
+        flags.tree_release_ok = False
+        _record_cleanup_error(result, errors, "tree_release", error)
+        return
+    generation.windows_job = None
+
+
+def _generation_fully_released(
+    generation: _Generation, process_exited: bool, pipes_closed: bool
+) -> bool:
+    handles = (
+        generation.tree,
+        generation.protocol,
+        generation.stderr_thread,
+        generation.exit_thread,
+    )
+    return (
+        process_exited
+        and pipes_closed
+        and all(handle is None for handle in handles)
+    )
+
+
+def _forget_released_process(
+    generation: _Generation, process_exited: bool, pipes_closed: bool
+) -> None:
+    """Drop the process handle once nothing of ours refers to it any more."""
+    if generation.process is None:
+        return
+    if _generation_fully_released(generation, process_exited, pipes_closed):
+        generation.process = None
+
+
+def _release_one_generation(
+    generation: _Generation,
+    deadline: float,
+    result: _CleanupResult,
+    errors: list[BaseException],
+    flags: _GenerationCleanup,
+) -> None:
+    """Every cleanup step for one generation, in the order they depend on."""
+    _stop_generation_protocol_io(generation, result, errors, flags)
+    _terminate_generation_tree(generation, deadline, result, errors, flags)
+    exited = _generation_process_exited(generation, result, errors, flags)
+    _finish_generation_protocol(generation, exited, deadline, result, errors, flags)
+    pipes_closed = _close_generation_pipes(generation, exited, result, errors, flags)
+    _release_posix_tree(generation, result, errors, flags)
+    _join_generation_threads(generation, exited, deadline, result, errors, flags)
+    ready = _windows_release_ready(generation, exited)
+    _release_windows_tree(generation, ready, result, errors, flags)
+    _release_windows_job(generation, ready, result, errors, flags)
+    _forget_released_process(generation, exited, pipes_closed)
+
+
+def _collective_step_done(
+    flags: _GenerationCleanup, ok_field: str, pending_field: str | None
+) -> bool:
+    """Nothing failed, and nothing is still owed."""
+    if not getattr(flags, ok_field):
+        return False
+    return pending_field is None or not getattr(flags, pending_field)
+
+
+def _release_generations(
+    generations: Sequence[_Generation],
+    deadline: float,
+    result: _CleanupResult,
+    errors: list[BaseException],
+) -> None:
+    """Release every generation, then mark the steps that came out clean."""
+    flags = _GenerationCleanup()
+    for generation in generations:
+        _release_one_generation(generation, deadline, result, errors, flags)
+    for step, ok_field, pending_field in _COLLECTIVE_CLEANUP_STEPS:
+        if _collective_step_done(flags, ok_field, pending_field):
+            result.succeeded(step)
+
+
 
 
 def _drive_cleanup(
@@ -4044,141 +4349,7 @@ def _drive_cleanup_owned(
     if renew_deadline_after_evidence:
         deadline = _fresh_cleanup_deadline()
 
-    tree_termination_ok = True
-    protocol_stop_ok = True
-    protocol_stop_pending = False
-    tree_release_ok = True
-    tree_release_pending = False
-    joins_ok = True
-    joins_pending = False
-    for generation in generations:
-        protocol = generation.protocol
-        if protocol is not None:
-            try:
-                protocol._stop_io_for_process_cleanup()
-            except BaseException as error:
-                protocol_stop_ok = False
-                _record_cleanup_error(result, current_errors, "protocol_stop", error)
-
-        tree = generation.tree
-        if tree is not None:
-            try:
-                tree.terminate(deadline=deadline)
-            except BaseException as error:
-                tree_termination_ok = False
-                _record_cleanup_error(
-                    result, current_errors, "tree_termination", error
-                )
-
-        process = generation.process
-        try:
-            process_exited = process is None or process.poll() is not None
-        except BaseException as error:
-            process_exited = False
-            tree_termination_ok = False
-            _record_cleanup_error(
-                result, current_errors, "tree_termination", error
-            )
-        pipes_closed = True
-        if protocol is not None and process_exited:
-            try:
-                protocol._finish_io_after_process_exit(deadline)
-            except BaseException as error:
-                protocol_stop_ok = False
-                _record_cleanup_error(result, current_errors, "protocol_stop", error)
-            else:
-                generation.protocol = None
-        elif protocol is not None:
-            protocol_stop_pending = True
-
-        if process is not None and process_exited:
-            for stream in (process.stdin, process.stdout, process.stderr):
-                if stream is None or getattr(stream, "closed", False):
-                    continue
-                try:
-                    stream.close()
-                except BaseException as error:
-                    pipes_closed = False
-                    protocol_stop_ok = False
-                    _record_cleanup_error(
-                        result, current_errors, "protocol_stop", error
-                    )
-
-        if tree is not None and os.name != "nt":
-            try:
-                tree.close()
-            except BaseException as error:
-                tree_release_ok = False
-                _record_cleanup_error(result, current_errors, "tree_release", error)
-            else:
-                generation.tree = None
-
-        if process_exited:
-            for attribute in ("stderr_thread", "exit_thread"):
-                thread = getattr(generation, attribute)
-                if _join_owned_thread(thread, deadline):
-                    setattr(generation, attribute, None)
-                else:
-                    joins_ok = False
-                    error = TimeoutError(
-                        "LSP generation thread did not stop before deadline"
-                    )
-                    _record_cleanup_error(
-                        result, current_errors, "generation_joins", error
-                    )
-        else:
-            joins_pending = True
-
-        windows_release_ready = (
-            process_exited
-            and generation.protocol is None
-            and generation.stderr_thread is None
-            and generation.exit_thread is None
-        )
-        if tree is not None and os.name == "nt":
-            if windows_release_ready:
-                try:
-                    tree.close()
-                except BaseException as error:
-                    tree_release_ok = False
-                    _record_cleanup_error(result, current_errors, "tree_release", error)
-                else:
-                    generation.tree = None
-            else:
-                tree_release_pending = True
-
-        windows_job = generation.windows_job
-        if windows_job is not None:
-            if windows_release_ready:
-                try:
-                    _lsp_process_tree._close_windows_handle(windows_job)
-                except BaseException as error:
-                    tree_release_ok = False
-                    _record_cleanup_error(result, current_errors, "tree_release", error)
-                else:
-                    generation.windows_job = None
-            else:
-                tree_release_pending = True
-
-        if (
-            process is not None
-            and process_exited
-            and generation.tree is None
-            and generation.protocol is None
-            and generation.stderr_thread is None
-            and generation.exit_thread is None
-            and pipes_closed
-        ):
-            generation.process = None
-
-    if tree_termination_ok:
-        result.succeeded("tree_termination")
-    if protocol_stop_ok and not protocol_stop_pending:
-        result.succeeded("protocol_stop")
-    if tree_release_ok and not tree_release_pending:
-        result.succeeded("tree_release")
-    if joins_ok and not joins_pending:
-        result.succeeded("generation_joins")
+    _release_generations(generations, deadline, result, current_errors)
 
     all_generations_released = all(generation.released for generation in generations)
     recovery_stopped = (
