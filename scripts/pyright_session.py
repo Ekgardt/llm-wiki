@@ -1345,6 +1345,15 @@ def _configuration_result(settings: Mapping[str, object], item: object) -> objec
     return _configuration_value(settings, section)
 
 
+@dataclass(frozen=True)
+class _CloseTargets:
+    """What a close has to shut down, captured under the state lock."""
+
+    cleanup_error: StartupCleanupError | None
+    startup_process: LspProcess | None
+    process: LspProcess | None
+
+
 class _LaunchServerGuard:
     def __init__(
         self,
@@ -4169,76 +4178,109 @@ class PyrightSession:
         finally:
             self._close_lock.release()
 
-    def _close_owned(self, deadline: float) -> None:
+    def _close_finished_locked(
+        self,
+        cleanup_error: StartupCleanupError | None,
+        startup_process: LspProcess | None,
+    ) -> bool:
+        """Nothing of ours is left to close."""
+        return (
+            self._closed
+            and self._process is None
+            and cleanup_error is None
+            and startup_process is None
+        )
+
+    def _close_attempt_locked(self) -> tuple[bool, _CloseTargets | None]:
+        """Whether the close already happened, and what is ready to be closed."""
+        cleanup_error = self._startup_cleanup_error
+        startup_process = self._startup_process
+        if self._close_finished_locked(cleanup_error, startup_process):
+            return True, None
+        if not self._closing:
+            self._closing = True
+            self._condition.notify_all()
+        if self._starting or self._active_operations:
+            return False, None
+        return False, _CloseTargets(cleanup_error, startup_process, self._process)
+
+    def _close_attempt(self, deadline: float) -> tuple[bool, _CloseTargets | None]:
+        self._acquire_state_lock(
+            deadline,
+            "Pyright close state lock deadline expired",
+        )
+        try:
+            return self._close_attempt_locked()
+        finally:
+            self._lock.release()
+
+    def _await_close_targets(self, deadline: float) -> _CloseTargets | None:
+        """What to close, or None when this session was already closed."""
         while True:
-            self._acquire_state_lock(
-                deadline,
-                "Pyright close state lock deadline expired",
-            )
-            try:
-                cleanup_error = self._startup_cleanup_error
-                startup_process = self._startup_process
-                if (
-                    self._closed
-                    and self._process is None
-                    and cleanup_error is None
-                    and startup_process is None
-                ):
-                    return
-                if not self._closing:
-                    self._closing = True
-                    self._condition.notify_all()
-                if not self._starting and self._active_operations == 0:
-                    process = self._process
-                    break
-            finally:
-                self._lock.release()
+            finished, targets = self._close_attempt(deadline)
+            if finished:
+                return None
+            if targets is not None:
+                return targets
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("Pyright operations did not finish before close")
             time.sleep(min(_LOCK_POLL_SECONDS, remaining))
+
+    @staticmethod
+    def _shut_down_targets(targets: _CloseTargets, deadline: float) -> None:
+        """Close what this session owns, in the order it took them on."""
         try:
-            if cleanup_error is not None:
-                cleanup_error.retry_cleanup(deadline)
-            if startup_process is not None:
-                startup_process.close(deadline)
-            if process is not None:
-                process.close(deadline)
+            if targets.cleanup_error is not None:
+                targets.cleanup_error.retry_cleanup(deadline)
+            if targets.startup_process is not None:
+                targets.startup_process.close(deadline)
+            if targets.process is not None:
+                targets.process.close(deadline)
         except BaseException as error:
             _raise_collected_errors([], prior_error=error)
+
+    def _forget_closed_owners_locked(self, targets: _CloseTargets) -> None:
+        """Drop the owners we just closed, if they are still the current ones."""
+        if self._startup_cleanup_error is targets.cleanup_error:
+            self._startup_cleanup_error = None
+        if self._startup_process is targets.startup_process:
+            self._startup_process = None
+        self._sync_startup_atexit_locked()
+        if self._process is targets.process:
+            self._process = None
+        self._bootstrap_owner_nonce = None
+
+    def _forget_session_state_locked(self) -> None:
+        """Everything a running session accumulated is dropped on close."""
+        self._reset_readiness_locked()
+        self._documents.clear()
+        self._document_bytes = 0
+        self._readiness_target_uri = None
+        self._forget_generation_locked()
+        self._progress_events.clear()
+        self._progress_bytes = 0
+
+    def _finish_close(self, targets: _CloseTargets, deadline: float) -> None:
         self._acquire_state_lock(
             deadline,
             "Pyright close final state lock deadline expired",
         )
         try:
-            if self._startup_cleanup_error is cleanup_error:
-                self._startup_cleanup_error = None
-            if self._startup_process is startup_process:
-                self._startup_process = None
-            self._sync_startup_atexit_locked()
-            if self._process is process:
-                self._process = None
-            self._bootstrap_owner_nonce = None
-            self._readiness = "not_ready"
-            self._readiness_evidence = ()
-            self._position_encoding = None
-            self._capabilities = {}
-            self._documents.clear()
-            self._document_bytes = 0
-            self._readiness_target_uri = None
-            self._workspace_revision = None
-            self._generation_nonce = None
-            self._ready_uri_generations.clear()
-            self._diagnostics.clear()
-            self._diagnostic_bytes = 0
-            self._progress_events.clear()
-            self._progress_bytes = 0
-            self._clear_wire_state()
+            self._forget_closed_owners_locked(targets)
+            self._forget_session_state_locked()
             self._closing = False
             self._closed = True
             self._condition.notify_all()
         finally:
             self._lock.release()
+
+    def _close_owned(self, deadline: float) -> None:
+        targets = self._await_close_targets(deadline)
+        if targets is None:
+            return
+        self._shut_down_targets(targets, deadline)
+        self._finish_close(targets, deadline)
 
 
 class _KeyLockState:
