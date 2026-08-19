@@ -3044,6 +3044,76 @@ def _discard_temporary(path: Path) -> None:
         pass
 
 
+@dataclass(frozen=True)
+class _CorruptEvidence:
+    """The immutable bytes and digests one corrupt export is derived from."""
+
+    raw: bytes
+    history: bytes
+    metadata: bytes
+    raw_sha256: str
+    history_sha256: str
+    metadata_sha256: str
+    disposition_key: str
+    lineage_generation: int
+
+
+def _check_quarantine_names(task_id: str, reason: str) -> None:
+    """A quarantine names one task and says why, both within bounds."""
+    if not isinstance(task_id, str) or not 1 <= len(task_id.encode("utf-8")) <= 256:
+        raise ValueError("task ID is invalid")
+    if not isinstance(reason, str) or not 1 <= len(reason.encode("utf-8")) <= 4096:
+        raise ValueError("quarantine reason is invalid")
+
+
+def _attempt_history_entry(item: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "attempt": int(item["attempt"]),
+        "started_at": str(item["started_at"]),
+        "finished_at": str(item["finished_at"]),
+        "outcome": str(item["outcome"]),
+        "error_code": item["error_code"],
+    }
+
+
+def _corrupt_metadata(task_id: str, row: Mapping[str, object]) -> bytes:
+    return canonical_json_bytes(
+        {
+            "task_id": task_id,
+            "kind": str(row["kind"]),
+            "handler_version": int(row["handler_version"]),
+            "input_hash": str(row["input_hash"]),
+            "state": "dead",
+            "error_code": row["error_code"],
+            "lineage_generation": int(row["lineage_generation"]),
+        }
+    )
+
+
+def _corrupt_disposition_key(
+    *,
+    actor: str,
+    history_sha256: str,
+    metadata_sha256: str,
+    raw_sha256: str,
+    reason: str,
+    task_id: str,
+) -> str:
+    """One key for exactly this task, these bytes, this actor and this reason."""
+    return sha256_bytes(
+        canonical_json_bytes(
+            {
+                "actor_identity": actor,
+                "history_sha256": history_sha256,
+                "metadata_sha256": metadata_sha256,
+                "raw_sha256": raw_sha256,
+                "reason": reason,
+                "task_id": task_id,
+            }
+        )
+    )
+
+
 class MemoryQueue:
     """Durable priority queue with lease-token fencing and at-least-once delivery."""
 
@@ -6385,6 +6455,260 @@ class _QueueV3CandidateReader:
         if inserted != 1:
             raise QueueOperationError("corrupt_disposition_failed")
 
+    @staticmethod
+    def _corrupt_task_row(
+        database: sqlite3.Connection, task_id: str
+    ) -> sqlite3.Row:
+        """The task being quarantined, in a state that allows it."""
+        row = database.execute(
+            "SELECT * FROM tasks WHERE id=?", (task_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(task_id)
+        if row["state"] not in {"dead", "quarantine_pending"}:
+            raise QueueOperationError("corrupt_quarantine_state_invalid")
+        return row
+
+    @staticmethod
+    def _corrupt_attempt_history(
+        database: sqlite3.Connection, task_id: str
+    ) -> bytes:
+        rows = database.execute(
+            """SELECT attempt,started_at,finished_at,outcome,error_code
+               FROM attempt_history WHERE task_id=? ORDER BY sequence""",
+            (task_id,),
+        ).fetchall()
+        return canonical_json_bytes([_attempt_history_entry(item) for item in rows])
+
+    def _corrupt_evidence(
+        self,
+        database: sqlite3.Connection,
+        task_id: str,
+        reason: str,
+        actor: str,
+    ) -> _CorruptEvidence:
+        """Everything the export is derived from, read under one transaction."""
+        row = self._corrupt_task_row(database, task_id)
+        raw = bytes(row["payload_blob"])
+        raw_sha256 = validate_payload_blob(
+            raw, row["input_hash"], parse=False
+        ).input_hash
+        history = self._corrupt_attempt_history(database, task_id)
+        metadata = _corrupt_metadata(task_id, row)
+        history_sha256 = sha256_bytes(history)
+        metadata_sha256 = sha256_bytes(metadata)
+        return _CorruptEvidence(
+            raw=raw,
+            history=history,
+            metadata=metadata,
+            raw_sha256=raw_sha256,
+            history_sha256=history_sha256,
+            metadata_sha256=metadata_sha256,
+            disposition_key=_corrupt_disposition_key(
+                actor=actor,
+                history_sha256=history_sha256,
+                metadata_sha256=metadata_sha256,
+                raw_sha256=raw_sha256,
+                reason=reason,
+                task_id=task_id,
+            ),
+            lineage_generation=int(row["lineage_generation"]),
+        )
+
+    def _begin_corrupt_export(
+        self,
+        database: sqlite3.Connection,
+        *,
+        task_id: str,
+        evidence: _CorruptEvidence,
+        operation_id: str,
+        task_fence: object,
+        actor: str,
+        reason: str,
+        now: datetime,
+    ) -> None:
+        """Record a new export operation and move the task into quarantine."""
+        inserted = database.execute(
+            """INSERT INTO corrupt_export_operations(
+                   operation_id,task_id,disposition_key,
+                   task_fence_token_digest,task_fence_epoch,
+                   intent_fence_digest,raw_sha256,history_sha256,
+                   metadata_sha256,lineage_generation,cursor_task_id,
+                   link_count,page_count,rolling_root,state,
+                   actor_identity,reason,created_at,updated_at
+               ) VALUES (?,?,?,?,?,NULL,?,?,?,?, '',0,0,?,'exporting',?,?,?,?)""",
+            (
+                operation_id,
+                task_id,
+                evidence.disposition_key,
+                sha256_bytes(task_fence.token.encode("utf-8")),
+                task_fence.epoch,
+                evidence.raw_sha256,
+                evidence.history_sha256,
+                evidence.metadata_sha256,
+                evidence.lineage_generation,
+                sha256_bytes(b""),
+                actor,
+                reason,
+                _timestamp(now),
+                _timestamp(now),
+            ),
+        ).rowcount
+        if inserted != 1:
+            raise QueueOperationError("corrupt_export_start_failed")
+        changed = database.execute(
+            """UPDATE tasks SET state='quarantine_pending',updated_at=?
+               WHERE id=? AND state='dead'""",
+            (_timestamp(now), task_id),
+        ).rowcount
+        if changed != 1:
+            raise QueueOperationError("corrupt_quarantine_start_failed")
+
+    @staticmethod
+    def _corrupt_export_conflict(
+        database: sqlite3.Connection, existing: sqlite3.Row, task_id: str
+    ) -> CorruptExportProgress:
+        """A different export already ran; a disposed one is reported as done."""
+        if existing["state"] == "disposed":
+            disposition = database.execute(
+                "SELECT * FROM corrupt_dispositions WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            if disposition is not None:
+                return CorruptExportProgress(
+                    task_id=task_id,
+                    operation_id=str(existing["operation_id"]),
+                    state="quarantined",
+                    pages_written=int(existing["page_count"]),
+                    links_exported=int(existing["link_count"]),
+                    complete=True,
+                    code=None,
+                )
+        raise QueueOperationError("corrupt_export_conflict")
+
+    def _open_corrupt_export(
+        self,
+        database: sqlite3.Connection,
+        *,
+        task_id: str,
+        evidence: _CorruptEvidence,
+        task_fence: object,
+        actor: str,
+        reason: str,
+        now: datetime,
+    ) -> tuple[str, str] | CorruptExportProgress:
+        """The operation to continue, or the progress of one already finished."""
+        operation_id = f"corrupt-export:{evidence.disposition_key}"
+        existing = database.execute(
+            "SELECT * FROM corrupt_export_operations WHERE task_id=?",
+            (task_id,),
+        ).fetchone()
+        if existing is None:
+            self._begin_corrupt_export(
+                database,
+                task_id=task_id,
+                evidence=evidence,
+                operation_id=operation_id,
+                task_fence=task_fence,
+                actor=actor,
+                reason=reason,
+                now=now,
+            )
+            return operation_id, evidence.disposition_key
+        if (
+            existing["operation_id"] == operation_id
+            and existing["disposition_key"] == evidence.disposition_key
+        ):
+            return str(existing["operation_id"]), str(existing["disposition_key"])
+        return self._corrupt_export_conflict(database, existing, task_id)
+
+    def _advance_corrupt_export_once(
+        self, task_id: str, operation_id: str, package: Path
+    ) -> None:
+        """Move an in-progress export one page forward, under its own lock."""
+        with closing(self._connect()) as database, begin_immediate(database):
+            operation = database.execute(
+                "SELECT * FROM corrupt_export_operations WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            if operation is None:
+                raise QueueOperationError("corrupt_export_lost")
+            if operation["state"] == "exporting":
+                self._advance_corrupt_export(
+                    database, operation, operation_id, task_id, package
+                )
+
+    def _corrupt_export_operation(self, task_id: str) -> sqlite3.Row:
+        with closing(self._connect()) as database:
+            operation = database.execute(
+                "SELECT * FROM corrupt_export_operations WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+        if operation is None:
+            raise QueueOperationError("corrupt_export_lost")
+        return operation
+
+    def _quarantine_corrupt_owned(
+        self,
+        task_id: str,
+        *,
+        reason: str,
+        actor: str,
+        task_fence: object,
+        capture_binding: object,
+        intent_fence: object,
+    ) -> CorruptExportProgress:
+        """Export and dispose one corrupt task while holding every fence."""
+        now = _utc_now()
+        with closing(self._connect()) as database, begin_immediate(database):
+            evidence = self._corrupt_evidence(database, task_id, reason, actor)
+            opened = self._open_corrupt_export(
+                database,
+                task_id=task_id,
+                evidence=evidence,
+                task_fence=task_fence,
+                actor=actor,
+                reason=reason,
+                now=now,
+            )
+        if isinstance(opened, CorruptExportProgress):
+            return opened
+        operation_id, disposition_key = opened
+        package = self.results_dir / f"corrupt-{disposition_key}"
+        self._publish_corrupt_fixed_files(
+            package,
+            payload=evidence.raw,
+            history=evidence.history,
+            metadata=evidence.metadata,
+        )
+        self._advance_corrupt_export_once(task_id, operation_id, package)
+        operation = self._corrupt_export_operation(task_id)
+        if operation["state"] != "manifested":
+            return CorruptExportProgress(
+                task_id=task_id,
+                operation_id=operation_id,
+                state="quarantine_pending",
+                pages_written=int(operation["page_count"]),
+                links_exported=int(operation["link_count"]),
+                complete=False,
+                code=None,
+            )
+        return self._dispose_corrupt_export(
+            operation,
+            operation_id=operation_id,
+            task_id=task_id,
+            disposition_key=disposition_key,
+            package=package,
+            raw=evidence.raw,
+            history=evidence.history,
+            metadata=evidence.metadata,
+            actor=actor,
+            reason=reason,
+            task_fence=task_fence,
+            capture_binding=capture_binding,
+            intent_fence=intent_fence,
+        )
+
     def quarantine_corrupt(
         self,
         task_id: str,
@@ -6399,10 +6723,7 @@ class _QueueV3CandidateReader:
         _require_active(deadline, cancelled)
         if not isinstance(owner, OwnerLease) or owner.role != "repair":
             raise ValueError("corrupt quarantine requires a repair owner")
-        if not isinstance(task_id, str) or not 1 <= len(task_id.encode("utf-8")) <= 256:
-            raise ValueError("task ID is invalid")
-        if not isinstance(reason, str) or not 1 <= len(reason.encode("utf-8")) <= 4096:
-            raise ValueError("quarantine reason is invalid")
+        _check_quarantine_names(task_id, reason)
         registry = self.ownership_registry()
         actor = current_actor_identity()
         with closing(registry._connect()) as coordinator_database:
@@ -6416,172 +6737,13 @@ class _QueueV3CandidateReader:
         ) as task_fence, self._corrupt_intent_fence(
             task_id, owner=owner
         ) as (capture_binding, intent_fence):
-            now = _utc_now()
-            with closing(self._connect()) as database, begin_immediate(database):
-                row = database.execute(
-                    "SELECT * FROM tasks WHERE id=?", (task_id,)
-                ).fetchone()
-                if row is None:
-                    raise KeyError(task_id)
-                if row["state"] not in {"dead", "quarantine_pending"}:
-                    raise QueueOperationError("corrupt_quarantine_state_invalid")
-                raw = bytes(row["payload_blob"])
-                raw_validation = validate_payload_blob(
-                    raw, row["input_hash"], parse=False
-                )
-                raw_sha256 = raw_validation.input_hash
-                history_rows = database.execute(
-                    """SELECT attempt,started_at,finished_at,outcome,error_code
-                       FROM attempt_history WHERE task_id=? ORDER BY sequence""",
-                    (task_id,),
-                ).fetchall()
-                history = canonical_json_bytes(
-                    [
-                        {
-                            "attempt": int(item["attempt"]),
-                            "started_at": str(item["started_at"]),
-                            "finished_at": str(item["finished_at"]),
-                            "outcome": str(item["outcome"]),
-                            "error_code": item["error_code"],
-                        }
-                        for item in history_rows
-                    ]
-                )
-                metadata = canonical_json_bytes(
-                    {
-                        "task_id": task_id,
-                        "kind": str(row["kind"]),
-                        "handler_version": int(row["handler_version"]),
-                        "input_hash": str(row["input_hash"]),
-                        "state": "dead",
-                        "error_code": row["error_code"],
-                        "lineage_generation": int(row["lineage_generation"]),
-                    }
-                )
-                history_sha256 = sha256_bytes(history)
-                metadata_sha256 = sha256_bytes(metadata)
-                disposition_key = sha256_bytes(
-                    canonical_json_bytes(
-                        {
-                            "actor_identity": actor,
-                            "history_sha256": history_sha256,
-                            "metadata_sha256": metadata_sha256,
-                            "raw_sha256": raw_sha256,
-                            "reason": reason,
-                            "task_id": task_id,
-                        }
-                    )
-                )
-                operation_id = f"corrupt-export:{disposition_key}"
-                existing = database.execute(
-                    "SELECT * FROM corrupt_export_operations WHERE task_id=?",
-                    (task_id,),
-                ).fetchone()
-                if existing is None:
-                    inserted = database.execute(
-                        """INSERT INTO corrupt_export_operations(
-                               operation_id,task_id,disposition_key,
-                               task_fence_token_digest,task_fence_epoch,
-                               intent_fence_digest,raw_sha256,history_sha256,
-                               metadata_sha256,lineage_generation,cursor_task_id,
-                               link_count,page_count,rolling_root,state,
-                               actor_identity,reason,created_at,updated_at
-                           ) VALUES (?,?,?,?,?,NULL,?,?,?,?, '',0,0,?,'exporting',?,?,?,?)""",
-                        (
-                            operation_id,
-                            task_id,
-                            disposition_key,
-                            sha256_bytes(task_fence.token.encode("utf-8")),
-                            task_fence.epoch,
-                            raw_sha256,
-                            history_sha256,
-                            metadata_sha256,
-                            int(row["lineage_generation"]),
-                            sha256_bytes(b""),
-                            actor,
-                            reason,
-                            _timestamp(now),
-                            _timestamp(now),
-                        ),
-                    ).rowcount
-                    if inserted != 1:
-                        raise QueueOperationError("corrupt_export_start_failed")
-                    changed = database.execute(
-                        """UPDATE tasks SET state='quarantine_pending',updated_at=?
-                           WHERE id=? AND state='dead'""",
-                        (_timestamp(now), task_id),
-                    ).rowcount
-                    if changed != 1:
-                        raise QueueOperationError("corrupt_quarantine_start_failed")
-                elif (
-                    existing["operation_id"] != operation_id
-                    or existing["disposition_key"] != disposition_key
-                ):
-                    if existing["state"] == "disposed":
-                        disposition = database.execute(
-                            "SELECT * FROM corrupt_dispositions WHERE task_id=?",
-                            (task_id,),
-                        ).fetchone()
-                        if disposition is not None:
-                            return CorruptExportProgress(
-                                task_id=task_id,
-                                operation_id=str(existing["operation_id"]),
-                                state="quarantined",
-                                pages_written=int(existing["page_count"]),
-                                links_exported=int(existing["link_count"]),
-                                complete=True,
-                                code=None,
-                            )
-                    raise QueueOperationError("corrupt_export_conflict")
-                else:
-                    operation_id = str(existing["operation_id"])
-                    disposition_key = str(existing["disposition_key"])
-            package = self.results_dir / f"corrupt-{disposition_key}"
-            self._publish_corrupt_fixed_files(
-                package, payload=raw, history=history, metadata=metadata
-            )
-            with closing(self._connect()) as database, begin_immediate(database):
-                operation = database.execute(
-                    "SELECT * FROM corrupt_export_operations WHERE task_id=?",
-                    (task_id,),
-                ).fetchone()
-                if operation is None:
-                    raise QueueOperationError("corrupt_export_lost")
-                if operation["state"] == "exporting":
-                    self._advance_corrupt_export(
-                        database, operation, operation_id, task_id, package
-                    )
-            with closing(self._connect()) as database:
-                operation = database.execute(
-                    "SELECT * FROM corrupt_export_operations WHERE task_id=?",
-                    (task_id,),
-                ).fetchone()
-            if operation is None:
-                raise QueueOperationError("corrupt_export_lost")
-            if operation["state"] == "manifested":
-                return self._dispose_corrupt_export(
-                    operation,
-                    operation_id=operation_id,
-                    task_id=task_id,
-                    disposition_key=disposition_key,
-                    package=package,
-                    raw=raw,
-                    history=history,
-                    metadata=metadata,
-                    actor=actor,
-                    reason=reason,
-                    task_fence=task_fence,
-                    capture_binding=capture_binding,
-                    intent_fence=intent_fence,
-                )
-            return CorruptExportProgress(
-                task_id=task_id,
-                operation_id=operation_id,
-                state="quarantine_pending",
-                pages_written=int(operation["page_count"]),
-                links_exported=int(operation["link_count"]),
-                complete=False,
-                code=None,
+            return self._quarantine_corrupt_owned(
+                task_id,
+                reason=reason,
+                actor=actor,
+                task_fence=task_fence,
+                capture_binding=capture_binding,
+                intent_fence=intent_fence,
             )
 
     def _dispose_corrupt_export(
