@@ -1183,6 +1183,54 @@ def test_writer_gate_exit_retries_locked_database_then_releases_owner(
         assert database.execute("SELECT * FROM writer_owners").fetchall() == []
 
 
+def test_a_heartbeat_that_failed_does_not_fail_a_write_this_owner_still_holds(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A busy database briefly starving the heartbeat is contention, not a loss.
+
+    Hosted runners produced `Markdown writer gate ownership was lost` while the
+    owner still held the gate row, which failed the caller's write for nothing.
+    Only a reclaim — which deletes this owner's row and bumps the fence — is a
+    real loss.
+    """
+    target = vault / "knowledge/notes/page.md"
+    target.write_bytes(b"before")
+    coordinator = MarkdownCoordinator(vault, state_root)
+    transaction = coordinator.prepare(
+        [MarkdownChange.replace("knowledge/notes/page.md", b"after")],
+        operation_id="heartbeat-starved",
+    )
+
+    def starved_heartbeat(owner_token, fencing_epoch, stop, lost):
+        lost.set()
+
+    monkeypatch.setattr(coordinator, "_heartbeat_writer_gate", starved_heartbeat)
+
+    coordinator.apply(transaction.id)
+
+    assert target.read_bytes() == b"after"
+    with sqlite3.connect(coordinator.database_path) as database:
+        assert database.execute("SELECT * FROM writer_owners").fetchall() == []
+
+
+def test_a_reclaimed_gate_still_reports_the_loss_and_names_the_heartbeat(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Losing the row to another owner remains a hard failure with a reason."""
+    coordinator = MarkdownCoordinator(vault, state_root)
+
+    def starved_heartbeat(owner_token, fencing_epoch, stop, lost):
+        lost.set()
+
+    monkeypatch.setattr(coordinator, "_heartbeat_writer_gate", starved_heartbeat)
+
+    with pytest.raises(RuntimeError, match="another owner reclaimed the gate"):
+        with coordinator.writer_gate():
+            with sqlite3.connect(coordinator.database_path) as database:
+                database.execute("DELETE FROM writer_owners WHERE gate_name = 'global'")
+                database.commit()
+
+
 def test_reclaimed_writer_fails_fence_before_filesystem_mutation(
     vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
 ):

@@ -264,6 +264,7 @@ Markdown 仍是权威来源。Runtime SQLite 用于协调可恢复写入和排�
 ```bash
 uv run python scripts/doctor.py
 uv run python scripts/doctor.py --repair
+uv run python scripts/doctor.py --time-budget 60
 uv run python scripts/markdown_transaction.py recover
 uv run python scripts/markdown_transaction.py undo <transaction-id>
 uv run python scripts/markdown_transaction.py prune --retention-days 30

@@ -266,6 +266,7 @@ Markdown remains authoritative. Runtime SQLite coordinates recoverable writes an
 ```bash
 uv run python scripts/doctor.py
 uv run python scripts/doctor.py --repair
+uv run python scripts/doctor.py --time-budget 60
 uv run python scripts/markdown_transaction.py recover
 uv run python scripts/markdown_transaction.py undo <transaction-id>
 uv run python scripts/markdown_transaction.py prune --retention-days 30

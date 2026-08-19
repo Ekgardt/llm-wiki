@@ -21,6 +21,30 @@ SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 DOCTOR = SCRIPTS / "doctor.py"
 
 
+GENEROUS_BUDGET_SECONDS = 120.0
+
+
+@pytest.fixture(autouse=True)
+def _budget_that_survives_a_slow_runner(monkeypatch):
+    """Give every doctor run in this file enough time to reach its findings.
+
+    `run_doctor` bounds itself at five seconds and reports "budget exhausted"
+    instead of a finding when it runs out. On a loaded hosted Windows runner a
+    single repair pass took 8.5 seconds, so tests asserting on findings were
+    reading the clock rather than the behaviour. Tests about the budget itself
+    pass their own value and keep it.
+    """
+    import doctor
+
+    original = doctor.run_doctor
+
+    def run(**kwargs):
+        kwargs.setdefault("time_budget_seconds", GENEROUS_BUDGET_SECONDS)
+        return original(**kwargs)
+
+    monkeypatch.setattr(doctor, "run_doctor", run)
+
+
 def _codex_hooks_fixture() -> dict:
     command = {
         "type": "command",
@@ -326,6 +350,34 @@ def test_environment_reports_missing_root_layout_and_python(tmp_path, monkeypatc
     assert check["status"] == "error"
     assert check["details"]["python"]["status"] == "error"
     assert check["details"]["vault_root"]["status"] == "error"
+
+
+def test_the_cli_accepts_a_larger_time_budget_and_refuses_an_impossible_one(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    """A slow machine must be able to ask for more time than the five-second default."""
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    seen = {}
+
+    def record(**kwargs):
+        seen.update(kwargs)
+        return {"overall_status": "ok", "repaired": [], "checks": []}
+
+    monkeypatch.setattr(doctor, "run_doctor", record)
+
+    assert doctor.main(["--time-budget", "45"]) == 0
+    assert seen["time_budget_seconds"] == 45.0
+    assert doctor.main([]) == 0
+    assert seen["time_budget_seconds"] == doctor.DEFAULT_TIME_BUDGET_SECONDS
+
+    with pytest.raises(SystemExit):
+        doctor.main(["--time-budget", "0"])
+    assert "positive" in capsys.readouterr().err
+    del root, state_root, home
 
 
 def test_read_only_runtime_probe_leaves_no_files_or_directories(tmp_path):
@@ -1487,17 +1539,12 @@ def test_cli_repair_json_is_idempotent(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
     clock = iter([0.0])
     monkeypatch.setattr(doctor.time, "monotonic", lambda: next(clock, 6.0))
-    run_doctor = doctor.run_doctor
+    budgeted = ["--repair", "--json", "--time-budget", "30"]
 
-    def run_doctor_with_test_budget(**kwargs):
-        return run_doctor(time_budget_seconds=30, **kwargs)
-
-    monkeypatch.setattr(doctor, "run_doctor", run_doctor_with_test_budget)
-
-    first_return_code = doctor.main(["--repair", "--json"])
+    first_return_code = doctor.main(budgeted)
     first_report = json.loads(capsys.readouterr().out)
     after_first = _snapshot(state_root)
-    second_return_code = doctor.main(["--repair", "--json"])
+    second_return_code = doctor.main(budgeted)
     second_report = json.loads(capsys.readouterr().out)
 
     assert first_return_code == 0

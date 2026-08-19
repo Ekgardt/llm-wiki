@@ -4932,10 +4932,22 @@ def main(argv: list[str] | None = None) -> int:
         help="Explicitly rebuild the immutable evidence generation under the repair fence.",
     )
     parser.add_argument("--json", action="store_true", help="Emit the structured report as JSON.")
+    parser.add_argument(
+        "--time-budget",
+        type=float,
+        default=DEFAULT_TIME_BUDGET_SECONDS,
+        help=(
+            "Seconds this run may spend before unfinished checks report "
+            f"a budget exhaustion (default {DEFAULT_TIME_BUDGET_SECONDS:g})."
+        ),
+    )
     args = parser.parse_args(argv)
+    if not math.isfinite(args.time_budget) or args.time_budget <= 0:
+        parser.error("--time-budget must be a positive number of seconds")
     report = run_doctor(
         repair=args.repair or args.rebuild_generation,
         rebuild_generation=args.rebuild_generation,
+        time_budget_seconds=args.time_budget,
     )
     if args.json:
         print(json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False))

@@ -1683,6 +1683,16 @@ def _is_transient_writer_contention(error: BaseException) -> bool:
     return False
 
 
+def _writer_gate_loss_message(heartbeat_lost: bool) -> str:
+    """Say what actually went wrong, since only a reclaim is a real loss."""
+    if heartbeat_lost:
+        return (
+            "Markdown writer gate ownership was lost: the lease heartbeat stopped "
+            "and another owner reclaimed the gate"
+        )
+    return "Markdown writer gate ownership was lost: another owner holds the gate"
+
+
 def _writer_retry_delay(attempt: int, deadline: float) -> float:
     delay = min(
         _WRITER_RETRY_BASE_SECONDS * (2 ** min(attempt, 8)),
@@ -5161,11 +5171,13 @@ class MarkdownCoordinator:
             stop.set()
             heartbeat.join(timeout=lease.heartbeat_seconds * 2)
             try:
+                # A heartbeat that failed transiently is not a lost gate. What
+                # proves the loss is the projection row: reclaiming it deletes
+                # this owner's row and bumps the fence, so a delete that removes
+                # our row means nobody else ever took the gate.
                 with self._connect() as database, begin_immediate(database):
                     self._delete_writer_projection(database, lease)
                     registry._release_in_transaction(database, lease)
-                if lost.is_set():
-                    raise RuntimeError("Markdown writer gate ownership was lost")
             finally:
                 self._local.gate_depth = 0
                 self._local.gate_token = None
@@ -5216,7 +5228,7 @@ class MarkdownCoordinator:
             ),
         ).rowcount
         if deleted != 1:
-            raise RuntimeError("Markdown writer gate ownership was lost")
+            raise RuntimeError(_writer_gate_loss_message(heartbeat_lost=False))
 
     def _heartbeat_canonical_writer_gate(
         self,
@@ -5309,8 +5321,8 @@ class MarkdownCoordinator:
                             "AND owner_token = ? AND fencing_epoch = ?",
                             (owner_token, fencing_epoch),
                         )
-                if not still_owner or heartbeat_lost:
-                    raise RuntimeError("Markdown writer gate ownership was lost")
+                if not still_owner:
+                    raise RuntimeError(_writer_gate_loss_message(heartbeat_lost))
                 return
             except (OSError, sqlite3.Error) as exc:
                 if not _is_transient_writer_contention(exc):
