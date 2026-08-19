@@ -3582,7 +3582,11 @@ def _idle_boundary_probe(process) -> tuple[bool, bool, bool]:
     when the probe starts. Pinning the value first makes a stamp visible as a
     moved baseline instead of a silently wrong comparison.
     """
-    baseline = time.monotonic()
+    # A whole number well inside float precision: `baseline + 300.0` is then
+    # exact. Taking the baseline from the clock made the comparison depend on
+    # the low bits of `time.monotonic()`, and on Windows the boundary probe
+    # came back one ulp short of the 300 seconds it was asserting.
+    baseline = 1_000_000.0
     process.last_used_monotonic = baseline
     below = process.idle_expired(baseline + 299.999)
     at_boundary = process.idle_expired(baseline + 300.0)

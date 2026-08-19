@@ -629,6 +629,12 @@ def _safe_info(path: Path) -> os.stat_result:
     return info
 
 
+# Only the two attribute bits that change what an ancestor *is*. Windows sets
+# and clears others — indexing, offline, pinning — while a path is being walked,
+# and a seal that compares the whole DWORD reads that as a swapped ancestor.
+_SEAL_ATTRIBUTES = 0x10 | 0x400  # FILE_ATTRIBUTE_DIRECTORY, _REPARSE_POINT
+
+
 def _identity(path: Path, info: os.stat_result) -> _PathIdentity:
     return _PathIdentity(
         path=path,
@@ -637,7 +643,7 @@ def _identity(path: Path, info: os.stat_result) -> _PathIdentity:
         mode=info.st_mode,
         size=info.st_size,
         ctime_ns=info.st_ctime_ns,
-        attributes=getattr(info, "st_file_attributes", 0) or 0,
+        attributes=(getattr(info, "st_file_attributes", 0) or 0) & _SEAL_ATTRIBUTES,
     )
 
 
@@ -711,6 +717,17 @@ def _open_sealed_posix_path(
     return seal, descriptor
 
 
+def _identity_delta(expected: _PathIdentity, current: _PathIdentity) -> str:
+    """Name the fields that moved, so the refusal can be acted on."""
+    fields = ("device", "inode", "mode", "size", "ctime_ns", "attributes")
+    changed = [
+        f"{name}: {getattr(expected, name)} -> {getattr(current, name)}"
+        for name in fields
+        if getattr(expected, name) != getattr(current, name)
+    ]
+    return ", ".join(changed) or "identical fields"
+
+
 def _verify_seal(
     seal: tuple[_PathIdentity, ...], *, changed_error: type[Exception] = CorpusChanged
 ) -> None:
@@ -720,7 +737,9 @@ def _verify_seal(
         except (OSError, PermissionError) as exc:
             raise changed_error(f"corpus ancestor changed: {expected.path}") from exc
         if current != expected:
-            raise changed_error(f"corpus ancestor changed: {expected.path}")
+            raise changed_error(
+                f"corpus ancestor changed: {expected.path} ({_identity_delta(expected, current)})"
+            )
     _verify_descriptor_chain(seal, changed_error=changed_error)
 
 
