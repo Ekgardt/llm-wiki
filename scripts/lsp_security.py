@@ -137,47 +137,77 @@ def _fits_utf8_redaction_ceiling(value: str) -> bool:
     return True
 
 
+def _unnormalized_path_text(value: str) -> bool:
+    if unicodedata.normalize("NFC", value) != value:
+        return True
+    return any(_is_control(character) for character in value)
+
+
+def _uncanonical_path_text(value: str) -> bool:
+    if not value or len(value) > _MAX_RELATIVE_PATH:
+        return True
+    if value.endswith("/") or "\\" in value:
+        return True
+    return _unnormalized_path_text(value)
+
+
+def _encoded_relative_path(value: str) -> bytes:
+    try:
+        return value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise PathContainmentError(
+            "repository source path is not canonical"
+        ) from exc
+
+
+def _rooted_path_text(value: str) -> bool:
+    windows = PureWindowsPath(value)
+    if PurePosixPath(value).is_absolute():
+        return True
+    return bool(windows.drive or windows.root)
+
+
+def _uncanonical_path_shape(value: str, parts: tuple[str, ...]) -> bool:
+    if _rooted_path_text(value) or len(parts) > _MAX_COMPONENTS:
+        return True
+    return any(part in {"", ".", ".."} for part in parts)
+
+
+def _oversized_component(component: str) -> bool:
+    if len(component) > _MAX_COMPONENT_CHARACTERS:
+        return True
+    return len(component.encode("utf-8")) > _MAX_COMPONENT_BYTES
+
+
+def _unsafe_path_component(component: str) -> bool:
+    if _oversized_component(component):
+        return True
+    if component[-1] in {".", " "}:
+        return True
+    if any(character in '<>:"|?*' for character in component):
+        return True
+    return component.split(".", 1)[0].rstrip(" .").casefold() in _WINDOWS_RESERVED
+
+
+def _require_safe_components(parts: tuple[str, ...]) -> None:
+    for component in parts:
+        if _unsafe_path_component(component):
+            raise PathContainmentError(
+                "repository source path contains an unsafe component"
+            )
+
+
 def _validate_relative_path(value: object) -> tuple[str, tuple[str, ...]]:
     if not isinstance(value, str):
         raise TypeError("relative_path must be a string")
-    if (
-        not value
-        or len(value) > _MAX_RELATIVE_PATH
-        or value.endswith("/")
-        or "\\" in value
-        or unicodedata.normalize("NFC", value) != value
-        or any(_is_control(character) for character in value)
-    ):
+    if _uncanonical_path_text(value):
         raise PathContainmentError("repository source path is not canonical")
-    try:
-        encoded_value = value.encode("utf-8", errors="strict")
-    except UnicodeEncodeError as exc:
-        raise PathContainmentError("repository source path is not canonical") from exc
-    if len(encoded_value) > _MAX_RELATIVE_PATH:
+    if len(_encoded_relative_path(value)) > _MAX_RELATIVE_PATH:
         raise PathContainmentError("repository source path exceeds its byte ceiling")
-
-    posix = PurePosixPath(value)
-    windows = PureWindowsPath(value)
     parts = tuple(value.split("/"))
-    if (
-        posix.is_absolute()
-        or windows.drive
-        or windows.root
-        or len(parts) > _MAX_COMPONENTS
-        or any(part in {"", ".", ".."} for part in parts)
-    ):
+    if _uncanonical_path_shape(value, parts):
         raise PathContainmentError("repository source path is not canonical")
-
-    for component in parts:
-        reserved_base = component.split(".", 1)[0].rstrip(" .").casefold()
-        if (
-            len(component) > _MAX_COMPONENT_CHARACTERS
-            or len(component.encode("utf-8")) > _MAX_COMPONENT_BYTES
-            or component[-1] in {".", " "}
-            or any(character in '<>:"|?*' for character in component)
-            or reserved_base in _WINDOWS_RESERVED
-        ):
-            raise PathContainmentError("repository source path contains an unsafe component")
+    _require_safe_components(parts)
     return value, parts
 
 
