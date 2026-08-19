@@ -8,6 +8,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Read-only opens on the generation catalog, retrieval telemetry, the MCP queue
+  view, and `doctor` wait out a lock instead of failing on one. A commit on a
+  rollback-journal database locks readers out for milliseconds, and a
+  zero-length wait turned that normal moment into `database is locked` — a
+  flaky test failure and a false `doctor` finding about an unreadable database.
+  `doctor` spends at most half of its remaining budget waiting, so a genuinely
+  busy database is still reported as busy rather than as an exhausted budget.
+
 - A generation-catalog writer without a caller deadline waits out contention
   instead of surfacing `database is locked`. Two compare-and-swaps on a loaded
   machine can hold the write lock for longer than the previous five-second
