@@ -8,6 +8,16 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- `doctor` reports a locked FTS index as busy instead of as an exhausted time
+  budget. The two verdicts were decided by the clock, so on a slow machine the
+  wait for the lock consumed the budget and the more actionable answer was
+  lost.
+
+- A new structural test fails when any module we own binds the same top-level
+  name twice. A second definition silently replaces the first, so an edit to
+  the wrong copy changes nothing and an edit to the right one changes
+  everything.
+
 - Read-only opens on the generation catalog, retrieval telemetry, the MCP queue
   view, and `doctor` wait out a lock instead of failing on one. A commit on a
   rollback-journal database locks readers out for milliseconds, and a
