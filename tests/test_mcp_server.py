@@ -1900,7 +1900,9 @@ class TestHandleToolCall:
         monkeypatch.setattr(memory_queue, "MemoryQueue", lambda _root: queue)
         monkeypatch.setattr(memory_state, "ROOT", vault)
         monkeypatch.setattr(memory_state, "STATE_ROOT", state_root)
-        monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 3.0)
+        # The operation has to reach its commit before the budget expires;
+        # three seconds was not enough for that on a loaded Windows runner.
+        monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 15.0)
         monkeypatch.setattr(mcp_server, "_MCP_WORKERS", set())
         monkeypatch.setattr(mcp_server, "_MCP_WORKERS_LOCK", threading.Lock())
 
@@ -1964,7 +1966,9 @@ class TestHandleToolCall:
         monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
         monkeypatch.setattr(memory_state, "ROOT", vault)
         monkeypatch.setattr(markdown_transaction, "begin_immediate", delayed_begin)
-        monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 3.0)
+        # The operation has to reach its commit before the budget expires;
+        # three seconds was not enough for that on a loaded Windows runner.
+        monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 15.0)
         monkeypatch.setattr(mcp_server, "_MCP_WORKERS", set())
         monkeypatch.setattr(mcp_server, "_MCP_WORKERS_LOCK", threading.Lock())
 
