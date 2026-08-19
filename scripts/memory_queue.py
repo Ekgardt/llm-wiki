@@ -5973,98 +5973,9 @@ class _QueueV3CandidateReader:
                 if operation is None:
                     raise QueueOperationError("corrupt_export_lost")
                 if operation["state"] == "exporting":
-                    started = time.monotonic()
-                    candidates = database.execute(
-                        """SELECT id,state,created_at,updated_at,input_hash
-                           FROM tasks WHERE redrive_of=? AND id>?
-                           ORDER BY id LIMIT 1001""",
-                        (task_id, operation["cursor_task_id"]),
-                    ).fetchall()
-                    links: list[dict[str, object]] = []
-                    for child in candidates[:1000]:
-                        candidate = {
-                            "created_at": str(child["created_at"]),
-                            "input_hash": str(child["input_hash"]),
-                            "state": str(child["state"]),
-                            "task_id": str(child["id"]),
-                            "updated_at": str(child["updated_at"]),
-                        }
-                        prospective = canonical_json_bytes(
-                            {
-                                "operation_id": operation_id,
-                                "page_number": int(operation["page_count"]) + 1,
-                                "previous_root": str(operation["rolling_root"]),
-                                "links": [*links, candidate],
-                            }
-                        )
-                        if len(prospective) > 1024 * 1024 or time.monotonic() - started >= 5:
-                            break
-                        links.append(candidate)
-                    if links:
-                        page_number = int(operation["page_count"]) + 1
-                        page = {
-                            "operation_id": operation_id,
-                            "page_number": page_number,
-                            "previous_root": str(operation["rolling_root"]),
-                            "links": links,
-                        }
-                        page_bytes = canonical_json_bytes(page)
-                        page_sha256 = sha256_bytes(page_bytes)
-                        rolling_root = sha256_bytes(
-                            bytes.fromhex(str(operation["rolling_root"]))
-                            + bytes.fromhex(page_sha256)
-                        )
-                        page_path = package / f"lineage-page-{page_number:08d}.json"
-                        _write_durable_file(page_path, page_bytes)
-                        if _read_stable_owner_file(page_path, 1024 * 1024) != page_bytes:
-                            raise QueueOperationError("corrupt_page_verification_failed")
-                        inserted = database.execute(
-                            """INSERT INTO corrupt_export_pages(
-                                   operation_id,page_number,first_task_id,last_task_id,
-                                   link_count,page_sha256,rolling_root
-                               ) VALUES (?,?,?,?,?,?,?)""",
-                            (
-                                operation_id,
-                                page_number,
-                                links[0]["task_id"],
-                                links[-1]["task_id"],
-                                len(links),
-                                page_sha256,
-                                rolling_root,
-                            ),
-                        ).rowcount
-                        if inserted != 1:
-                            raise QueueOperationError("corrupt_page_insert_failed")
-                        stable_end = len(candidates) <= len(links)
-                        state = "manifested" if stable_end else "exporting"
-                        updated = database.execute(
-                            """UPDATE corrupt_export_operations
-                               SET cursor_task_id=?,link_count=link_count+?,
-                                   page_count=page_count+1,rolling_root=?,state=?,updated_at=?
-                               WHERE operation_id=? AND state='exporting'
-                                 AND cursor_task_id=? AND page_count=?""",
-                            (
-                                links[-1]["task_id"],
-                                len(links),
-                                rolling_root,
-                                state,
-                                _timestamp(_utc_now()),
-                                operation_id,
-                                operation["cursor_task_id"],
-                                operation["page_count"],
-                            ),
-                        ).rowcount
-                        if updated != 1:
-                            raise QueueOperationError("corrupt_page_fence_lost")
-                    elif not candidates:
-                        updated = database.execute(
-                            """UPDATE corrupt_export_operations
-                               SET state='manifested',updated_at=?
-                               WHERE operation_id=? AND state='exporting'""",
-                            (_timestamp(_utc_now()), operation_id),
-                        ).rowcount
-                        if updated != 1:
-                            raise QueueOperationError("corrupt_manifest_fence_lost")
+                    self._advance_corrupt_export(
+                        database, operation, operation_id, task_id, package
+                    )
             with closing(self._connect()) as database:
                 operation = database.execute(
                     "SELECT * FROM corrupt_export_operations WHERE task_id=?",
@@ -6073,162 +5984,20 @@ class _QueueV3CandidateReader:
             if operation is None:
                 raise QueueOperationError("corrupt_export_lost")
             if operation["state"] == "manifested":
-                manifest = {
-                    "schema_version": "corrupt-task-manifest/v1",
-                    "operation_id": operation_id,
-                    "task_id": task_id,
-                    "package_key": disposition_key,
-                    "package_path": f"run/queue-results/corrupt-{disposition_key}",
-                    "raw_sha256": str(operation["raw_sha256"]),
-                    "history_sha256": str(operation["history_sha256"]),
-                    "metadata_sha256": str(operation["metadata_sha256"]),
-                    "lineage_generation": int(operation["lineage_generation"]),
-                    "link_count": int(operation["link_count"]),
-                    "page_count": int(operation["page_count"]),
-                    "rolling_root": str(operation["rolling_root"]),
-                }
-                validate_schema(
-                    manifest,
-                    Path(__file__).with_name("schemas")
-                    / "corrupt-task-manifest-v1.json",
-                )
-                _write_durable_file(package / "manifest.json", canonical_json_bytes(manifest))
-                if capture_binding is None or intent_fence is None:
-                    return CorruptExportProgress(
-                        task_id=task_id,
-                        operation_id=operation_id,
-                        state="blocked",
-                        pages_written=int(operation["page_count"]),
-                        links_exported=int(operation["link_count"]),
-                        complete=False,
-                        code="capture_link_conflicted",
-                    )
-                sealed = self.seal_capture_binding(
-                    task_id,
-                    consumer_kind="corrupt-disposition",
-                    consumer_id=operation_id,
-                    active_link_digest=capture_binding.active_digest,
-                )
-                manifest_bytes = _read_stable_owner_file(
-                    package / "manifest.json", 64 * 1024
-                )
-                manifest_sha256 = sha256_bytes(manifest_bytes)
-                disposed_at = str(operation["created_at"])
-                disposition_record = {
-                    "schema_version": "corrupt-task-disposition/v1",
-                    "operation_id": operation_id,
-                    "task_id": task_id,
-                    "package_key": disposition_key,
-                    "package_path": f"run/queue-results/corrupt-{disposition_key}",
-                    "manifest_path": (
-                        f"run/queue-results/corrupt-{disposition_key}/manifest.json"
-                    ),
-                    "manifest_sha256": manifest_sha256,
-                    "active_link_digest": sealed.active_digest,
-                    "actor_identity": actor,
-                    "reason": reason,
-                    "disposed_at": disposed_at,
-                }
-                validate_schema(
-                    disposition_record,
-                    Path(__file__).with_name("schemas")
-                    / "corrupt-task-disposition-v1.json",
-                )
-                disposition_bytes = canonical_json_bytes(disposition_record)
-                _write_durable_file(package / "disposition.json", disposition_bytes)
-                if (
-                    _read_stable_owner_file(package / "payload.bin", _MAX_QUEUE_PAYLOAD_BYTES)
-                    != raw
-                    or _read_stable_owner_file(
-                        package / "attempt-history.json", _MAX_EXPORT_METADATA_BYTES
-                    )
-                    != history
-                    or _read_stable_owner_file(
-                        package / "task-metadata.json", _MAX_EXPORT_METADATA_BYTES
-                    )
-                    != metadata
-                    or _read_stable_owner_file(
-                        package / "disposition.json", 64 * 1024
-                    )
-                    != disposition_bytes
-                ):
-                    raise QueueOperationError("corrupt_export_verification_failed")
-                disposition_sha256 = sha256_bytes(disposition_bytes)
-                with closing(self._connect()) as database, begin_immediate(database):
-                    current_task = database.execute(
-                        "SELECT * FROM tasks WHERE id=?", (task_id,)
-                    ).fetchone()
-                    current_operation = database.execute(
-                        "SELECT * FROM corrupt_export_operations WHERE operation_id=?",
-                        (operation_id,),
-                    ).fetchone()
-                    current_fence = database.execute(
-                        """SELECT 1 FROM task_fences WHERE task_id=? AND token=?
-                           AND fencing_epoch=? AND expires_at>?""",
-                        (
-                            task_id,
-                            task_fence.token,
-                            task_fence.epoch,
-                            _timestamp(_utc_now()),
-                        ),
-                    ).fetchone()
-                    current_seal = database.execute(
-                        """SELECT 1 FROM capture_task_link_seals
-                           WHERE task_id=? AND active_digest=? AND seal_digest=?
-                             AND consumer_kind='corrupt-disposition' AND consumer_id=?""",
-                        (
-                            task_id,
-                            sealed.active_digest,
-                            sealed.seal_digest,
-                            operation_id,
-                        ),
-                    ).fetchone()
-                    incoming_count = database.execute(
-                        "SELECT COUNT(*) FROM tasks WHERE redrive_of=?", (task_id,)
-                    ).fetchone()[0]
-                    if (
-                        current_task is None
-                        or current_task["state"] != "quarantine_pending"
-                        or current_operation is None
-                        or current_operation["state"] != "manifested"
-                        or current_operation["lineage_generation"]
-                        != current_task["lineage_generation"]
-                        or current_operation["link_count"] != incoming_count
-                        or current_fence is None
-                        or current_seal is None
-                    ):
-                        raise QueueOperationError("corrupt_export_verification_failed")
-                    self._insert_corrupt_disposition(
-                        database,
-                        task_id=task_id,
-                        operation_id=operation_id,
-                        package_path=str(disposition_record["package_path"]),
-                        manifest_sha256=manifest_sha256,
-                        disposition_sha256=disposition_sha256,
-                        active_link_digest=sealed.active_digest,
-                        disposed_at=disposed_at,
-                    )
-                    changed = database.execute(
-                        """UPDATE tasks SET state='quarantined',updated_at=?
-                           WHERE id=? AND state='quarantine_pending'""",
-                        (_timestamp(_utc_now()), task_id),
-                    ).rowcount
-                    advanced = database.execute(
-                        """UPDATE corrupt_export_operations
-                           SET state='disposed',updated_at=?
-                           WHERE operation_id=? AND state='manifested'""",
-                        (_timestamp(_utc_now()), operation_id),
-                    ).rowcount
-                    if (changed, advanced) != (1, 1):
-                        raise QueueOperationError("corrupt_disposition_failed")
-                return CorruptExportProgress(
-                    task_id=task_id,
+                return self._dispose_corrupt_export(
+                    operation,
                     operation_id=operation_id,
-                    state="quarantined",
-                    pages_written=int(operation["page_count"]),
-                    links_exported=int(operation["link_count"]),
-                    complete=True,
-                    code=None,
+                    task_id=task_id,
+                    disposition_key=disposition_key,
+                    package=package,
+                    raw=raw,
+                    history=history,
+                    metadata=metadata,
+                    actor=actor,
+                    reason=reason,
+                    task_fence=task_fence,
+                    capture_binding=capture_binding,
+                    intent_fence=intent_fence,
                 )
             return CorruptExportProgress(
                 task_id=task_id,
@@ -6239,6 +6008,316 @@ class _QueueV3CandidateReader:
                 complete=False,
                 code=None,
             )
+
+    def _dispose_corrupt_export(
+        self,
+        operation: sqlite3.Row,
+        *,
+        operation_id: str,
+        task_id: str,
+        disposition_key: str,
+        package: Path,
+        raw: bytes,
+        history: bytes,
+        metadata: bytes,
+        actor: str,
+        reason: str,
+        task_fence: object,
+        capture_binding: object,
+        intent_fence: object,
+    ) -> CorruptExportProgress:
+        """Publish the manifest and disposition, then retire the task."""
+        manifest = {
+            "schema_version": "corrupt-task-manifest/v1",
+            "operation_id": operation_id,
+            "task_id": task_id,
+            "package_key": disposition_key,
+            "package_path": f"run/queue-results/corrupt-{disposition_key}",
+            "raw_sha256": str(operation["raw_sha256"]),
+            "history_sha256": str(operation["history_sha256"]),
+            "metadata_sha256": str(operation["metadata_sha256"]),
+            "lineage_generation": int(operation["lineage_generation"]),
+            "link_count": int(operation["link_count"]),
+            "page_count": int(operation["page_count"]),
+            "rolling_root": str(operation["rolling_root"]),
+        }
+        validate_schema(
+            manifest,
+            Path(__file__).with_name("schemas")
+            / "corrupt-task-manifest-v1.json",
+        )
+        _write_durable_file(package / "manifest.json", canonical_json_bytes(manifest))
+        if capture_binding is None or intent_fence is None:
+            return CorruptExportProgress(
+                task_id=task_id,
+                operation_id=operation_id,
+                state="blocked",
+                pages_written=int(operation["page_count"]),
+                links_exported=int(operation["link_count"]),
+                complete=False,
+                code="capture_link_conflicted",
+            )
+        sealed = self.seal_capture_binding(
+            task_id,
+            consumer_kind="corrupt-disposition",
+            consumer_id=operation_id,
+            active_link_digest=capture_binding.active_digest,
+        )
+        manifest_bytes = _read_stable_owner_file(
+            package / "manifest.json", 64 * 1024
+        )
+        manifest_sha256 = sha256_bytes(manifest_bytes)
+        disposed_at = str(operation["created_at"])
+        disposition_record = {
+            "schema_version": "corrupt-task-disposition/v1",
+            "operation_id": operation_id,
+            "task_id": task_id,
+            "package_key": disposition_key,
+            "package_path": f"run/queue-results/corrupt-{disposition_key}",
+            "manifest_path": (
+                f"run/queue-results/corrupt-{disposition_key}/manifest.json"
+            ),
+            "manifest_sha256": manifest_sha256,
+            "active_link_digest": sealed.active_digest,
+            "actor_identity": actor,
+            "reason": reason,
+            "disposed_at": disposed_at,
+        }
+        validate_schema(
+            disposition_record,
+            Path(__file__).with_name("schemas")
+            / "corrupt-task-disposition-v1.json",
+        )
+        disposition_bytes = canonical_json_bytes(disposition_record)
+        _write_durable_file(package / "disposition.json", disposition_bytes)
+        if (
+            _read_stable_owner_file(package / "payload.bin", _MAX_QUEUE_PAYLOAD_BYTES)
+            != raw
+            or _read_stable_owner_file(
+                package / "attempt-history.json", _MAX_EXPORT_METADATA_BYTES
+            )
+            != history
+            or _read_stable_owner_file(
+                package / "task-metadata.json", _MAX_EXPORT_METADATA_BYTES
+            )
+            != metadata
+            or _read_stable_owner_file(
+                package / "disposition.json", 64 * 1024
+            )
+            != disposition_bytes
+        ):
+            raise QueueOperationError("corrupt_export_verification_failed")
+        disposition_sha256 = sha256_bytes(disposition_bytes)
+        with closing(self._connect()) as database, begin_immediate(database):
+            current_task = database.execute(
+                "SELECT * FROM tasks WHERE id=?", (task_id,)
+            ).fetchone()
+            current_operation = database.execute(
+                "SELECT * FROM corrupt_export_operations WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            current_fence = database.execute(
+                """SELECT 1 FROM task_fences WHERE task_id=? AND token=?
+                   AND fencing_epoch=? AND expires_at>?""",
+                (
+                    task_id,
+                    task_fence.token,
+                    task_fence.epoch,
+                    _timestamp(_utc_now()),
+                ),
+            ).fetchone()
+            current_seal = database.execute(
+                """SELECT 1 FROM capture_task_link_seals
+                   WHERE task_id=? AND active_digest=? AND seal_digest=?
+                     AND consumer_kind='corrupt-disposition' AND consumer_id=?""",
+                (
+                    task_id,
+                    sealed.active_digest,
+                    sealed.seal_digest,
+                    operation_id,
+                ),
+            ).fetchone()
+            incoming_count = database.execute(
+                "SELECT COUNT(*) FROM tasks WHERE redrive_of=?", (task_id,)
+            ).fetchone()[0]
+            if (
+                current_task is None
+                or current_task["state"] != "quarantine_pending"
+                or current_operation is None
+                or current_operation["state"] != "manifested"
+                or current_operation["lineage_generation"]
+                != current_task["lineage_generation"]
+                or current_operation["link_count"] != incoming_count
+                or current_fence is None
+                or current_seal is None
+            ):
+                raise QueueOperationError("corrupt_export_verification_failed")
+            self._insert_corrupt_disposition(
+                database,
+                task_id=task_id,
+                operation_id=operation_id,
+                package_path=str(disposition_record["package_path"]),
+                manifest_sha256=manifest_sha256,
+                disposition_sha256=disposition_sha256,
+                active_link_digest=sealed.active_digest,
+                disposed_at=disposed_at,
+            )
+            changed = database.execute(
+                """UPDATE tasks SET state='quarantined',updated_at=?
+                   WHERE id=? AND state='quarantine_pending'""",
+                (_timestamp(_utc_now()), task_id),
+            ).rowcount
+            advanced = database.execute(
+                """UPDATE corrupt_export_operations
+                   SET state='disposed',updated_at=?
+                   WHERE operation_id=? AND state='manifested'""",
+                (_timestamp(_utc_now()), operation_id),
+            ).rowcount
+            if (changed, advanced) != (1, 1):
+                raise QueueOperationError("corrupt_disposition_failed")
+        return CorruptExportProgress(
+            task_id=task_id,
+            operation_id=operation_id,
+            state="quarantined",
+            pages_written=int(operation["page_count"]),
+            links_exported=int(operation["link_count"]),
+            complete=True,
+            code=None,
+        )
+
+    def _bounded_lineage_links(
+        self,
+        candidates: list,
+        operation: sqlite3.Row,
+        operation_id: str,
+        started: float,
+    ) -> list[dict[str, object]]:
+        """As many lineage links as fit one bounded page inside its time slice."""
+        links: list[dict[str, object]] = []
+        for child in candidates[:1000]:
+            candidate = {
+                "created_at": str(child["created_at"]),
+                "input_hash": str(child["input_hash"]),
+                "state": str(child["state"]),
+                "task_id": str(child["id"]),
+                "updated_at": str(child["updated_at"]),
+            }
+            prospective = canonical_json_bytes(
+                {
+                    "operation_id": operation_id,
+                    "page_number": int(operation["page_count"]) + 1,
+                    "previous_root": str(operation["rolling_root"]),
+                    "links": [*links, candidate],
+                }
+            )
+            if len(prospective) > 1024 * 1024 or time.monotonic() - started >= 5:
+                break
+            links.append(candidate)
+        return links
+
+    def _write_lineage_page(
+        self,
+        database: sqlite3.Connection,
+        operation: sqlite3.Row,
+        operation_id: str,
+        package: Path,
+        links: list[dict[str, object]],
+        candidates: list,
+    ) -> None:
+        page_number = int(operation["page_count"]) + 1
+        page_bytes = canonical_json_bytes(
+            {
+                "operation_id": operation_id,
+                "page_number": page_number,
+                "previous_root": str(operation["rolling_root"]),
+                "links": links,
+            }
+        )
+        page_sha256 = sha256_bytes(page_bytes)
+        rolling_root = sha256_bytes(
+            bytes.fromhex(str(operation["rolling_root"]))
+            + bytes.fromhex(page_sha256)
+        )
+        page_path = package / f"lineage-page-{page_number:08d}.json"
+        _write_durable_file(page_path, page_bytes)
+        if _read_stable_owner_file(page_path, 1024 * 1024) != page_bytes:
+            raise QueueOperationError("corrupt_page_verification_failed")
+        inserted = database.execute(
+            """INSERT INTO corrupt_export_pages(
+                   operation_id,page_number,first_task_id,last_task_id,
+                   link_count,page_sha256,rolling_root
+               ) VALUES (?,?,?,?,?,?,?)""",
+            (
+                operation_id,
+                page_number,
+                links[0]["task_id"],
+                links[-1]["task_id"],
+                len(links),
+                page_sha256,
+                rolling_root,
+            ),
+        ).rowcount
+        if inserted != 1:
+            raise QueueOperationError("corrupt_page_insert_failed")
+        state = "manifested" if len(candidates) <= len(links) else "exporting"
+        updated = database.execute(
+            """UPDATE corrupt_export_operations
+               SET cursor_task_id=?,link_count=link_count+?,
+                   page_count=page_count+1,rolling_root=?,state=?,updated_at=?
+               WHERE operation_id=? AND state='exporting'
+                 AND cursor_task_id=? AND page_count=?""",
+            (
+                links[-1]["task_id"],
+                len(links),
+                rolling_root,
+                state,
+                _timestamp(_utc_now()),
+                operation_id,
+                operation["cursor_task_id"],
+                operation["page_count"],
+            ),
+        ).rowcount
+        if updated != 1:
+            raise QueueOperationError("corrupt_page_fence_lost")
+
+    def _finish_corrupt_export(
+        self, database: sqlite3.Connection, operation_id: str
+    ) -> None:
+        updated = database.execute(
+            """UPDATE corrupt_export_operations
+               SET state='manifested',updated_at=?
+               WHERE operation_id=? AND state='exporting'""",
+            (_timestamp(_utc_now()), operation_id),
+        ).rowcount
+        if updated != 1:
+            raise QueueOperationError("corrupt_manifest_fence_lost")
+
+    def _advance_corrupt_export(
+        self,
+        database: sqlite3.Connection,
+        operation: sqlite3.Row,
+        operation_id: str,
+        task_id: str,
+        package: Path,
+    ) -> None:
+        """One bounded step of the resumable lineage export."""
+        started = time.monotonic()
+        candidates = database.execute(
+            """SELECT id,state,created_at,updated_at,input_hash
+               FROM tasks WHERE redrive_of=? AND id>?
+               ORDER BY id LIMIT 1001""",
+            (task_id, operation["cursor_task_id"]),
+        ).fetchall()
+        links = self._bounded_lineage_links(
+            candidates, operation, operation_id, started
+        )
+        if links:
+            self._write_lineage_page(
+                database, operation, operation_id, package, links, candidates
+            )
+            return
+        if not candidates:
+            self._finish_corrupt_export(database, operation_id)
 
     def _purge_corrupt_lineage_page(
         self,
