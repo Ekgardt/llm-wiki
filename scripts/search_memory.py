@@ -32,7 +32,7 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import closing, contextmanager, nullcontext
 from pathlib import Path
 
@@ -401,38 +401,41 @@ def _call_generation_embedder(embedder: object, texts: list[str]):
     return encode(texts, show_progress_bar=False, convert_to_numpy=True)
 
 
-def build_generation_numpy_vectors(
-    snapshot: CorpusSnapshot,
-    generation_directory: Path,
-    *,
-    embedder: object,
-    model_id: str,
-    model_revision: str,
-    dimensions: int,
-) -> list[dict[str, object]]:
-    """Build an exact NumPy matrix and closed metadata from one chunk sequence."""
+def _require_vector_build_inputs(
+    snapshot: object, model_id: str, model_revision: str, dimensions: int
+) -> None:
     if not isinstance(snapshot, CorpusSnapshot):
         raise TypeError("snapshot must be a CorpusSnapshot")
     if not model_id or not model_revision:
         raise ValueError("model ID and revision must be non-empty")
     if isinstance(dimensions, bool) or not isinstance(dimensions, int) or dimensions < 1:
         raise ValueError("dimensions must be a positive integer")
-    directory = _generation_directory(generation_directory)
-    destinations = [directory / name for name in GENERATION_VECTOR_ARTIFACTS]
+
+
+def _require_absent_artifacts(destinations: list[Path]) -> None:
     for destination in destinations:
         if destination.exists() or destination.is_symlink():
             raise FileExistsError(destination)
 
+
+def _embedded_matrix(
+    snapshot: CorpusSnapshot, embedder: object, dimensions: int
+) -> object:
+    """The embedder's output, refused unless it is finite and the right shape."""
     import numpy as np
 
-    texts = [chunk.text for chunk in snapshot.chunks]
-    matrix = np.asarray(_call_generation_embedder(embedder, texts))
+    matrix = np.asarray(_call_generation_embedder(embedder, [c.text for c in snapshot.chunks]))
     if matrix.ndim != 2 or matrix.shape != (len(snapshot.chunks), dimensions):
         raise ValueError("embedder returned a matrix with incompatible shape")
     if matrix.dtype.kind not in "fiu" or not np.isfinite(matrix).all():
         raise ValueError("embedder returned a non-finite numeric matrix")
-    matrix = np.ascontiguousarray(matrix, dtype=np.float32)
-    metadata = {
+    return np.ascontiguousarray(matrix, dtype=np.float32)
+
+
+def _vector_metadata(
+    snapshot: CorpusSnapshot, *, model_id: str, model_revision: str, dimensions: int
+) -> dict[str, object]:
+    return {
         "schema_version": "corpus-vectors/v1",
         "corpus_sha256": snapshot.corpus_sha256,
         "collector_version": snapshot.collector_version,
@@ -445,6 +448,25 @@ def build_generation_numpy_vectors(
         "source_paths": [chunk.source_path for chunk in snapshot.chunks],
         "source_sha256": [chunk.source_sha256 for chunk in snapshot.chunks],
     }
+
+
+def _remove_quietly(paths: Iterable[Path]) -> None:
+    for path in paths:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _publish_vector_artifacts(
+    directory: Path,
+    destinations: list[Path],
+    metadata: Mapping[str, object],
+    matrix: object,
+) -> None:
+    """Write both artifacts to temporaries and publish them, or leave neither."""
+    import numpy as np
+
     temporary_json = directory / f".vectors.json.{uuid.uuid4().hex}.tmp"
     temporary_npy = directory / f".vectors.npy.{uuid.uuid4().hex}.tmp"
     created: list[Path] = []
@@ -462,18 +484,37 @@ def build_generation_numpy_vectors(
             _publish_new_file(temporary, destination)
             created.append(destination)
     except BaseException:
-        for path in created:
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
+        _remove_quietly(created)
         raise
     finally:
-        for path in (temporary_json, temporary_npy):
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
+        _remove_quietly((temporary_json, temporary_npy))
+
+
+def build_generation_numpy_vectors(
+    snapshot: CorpusSnapshot,
+    generation_directory: Path,
+    *,
+    embedder: object,
+    model_id: str,
+    model_revision: str,
+    dimensions: int,
+) -> list[dict[str, object]]:
+    """Build an exact NumPy matrix and closed metadata from one chunk sequence."""
+    _require_vector_build_inputs(snapshot, model_id, model_revision, dimensions)
+    directory = _generation_directory(generation_directory)
+    destinations = [directory / name for name in GENERATION_VECTOR_ARTIFACTS]
+    _require_absent_artifacts(destinations)
+    _publish_vector_artifacts(
+        directory,
+        destinations,
+        _vector_metadata(
+            snapshot,
+            model_id=model_id,
+            model_revision=model_revision,
+            dimensions=dimensions,
+        ),
+        _embedded_matrix(snapshot, embedder, dimensions),
+    )
     return [
         _artifact_descriptor(directory / name, name)
         for name in GENERATION_VECTOR_ARTIFACTS
