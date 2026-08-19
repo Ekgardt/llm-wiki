@@ -5509,58 +5509,20 @@ def _generation_source_extractor(snapshot, repository_id: str):
     return extract
 
 
-def _build_or_refresh_generation(
-    root: Path,
-    state_root: Path,
-    *,
-    deadline: float,
-    cancelled,
-    max_sources: int,
-    force_rebuild: bool,
-    coordinator: object | None = None,
-) -> dict:
-    from corpus_snapshot import (
-        APPROVED_CODE_ROOTS,
-        collect_corpus,
-    )
-    from evidence_graph_builder import (
-        GRAPH_SCHEMA_VERSION,
-        IncrementalReuseConfig,
-        build_incremental_generation,
-    )
-    from generation_catalog import GenerationCatalog
-    from reliable_memory import canonical_json_bytes
-    from repository_scope import resolve_repository_scope
-
-    repository_scope = resolve_repository_scope(
-        root,
-        deadline=deadline,
-        cancelled=cancelled,
-    )
-    maintenance_extractor_version = _maintenance_extractor_identity()
-
-    code_roots = tuple(
-        relative for relative in sorted(APPROVED_CODE_ROOTS) if (root / relative).is_dir()
-    )
-    snapshot = collect_corpus(
-        root,
-        code_roots=code_roots,
-        max_files=max_sources,
-        deadline=deadline,
-    )
-    if len(snapshot.sources) > max_sources:
-        raise ValueError("corpus source limit exceeded")
-    catalog = GenerationCatalog(state_root)
-    parent = catalog.get_active(deadline=deadline)
-    parent_id = None if parent is None else str(parent["generation_id"])
-    source_manifest_sha256 = snapshot.corpus_sha256
-    policy = {
+def _corpus_policy(snapshot: object) -> dict:
+    return {
         "daily_paths": list(snapshot.policy.daily_paths),
         "code_roots": list(snapshot.policy.code_roots),
         "include_historical": snapshot.policy.include_historical,
         "as_of": snapshot.policy.as_of,
     }
-    workspace_membership = sorted(
+
+
+def _workspace_manifest_sha256(snapshot: object) -> str:
+    """Identity of the non-knowledge sources, which decides graph reuse."""
+    from reliable_memory import canonical_json_bytes
+
+    membership = sorted(
         [
             source.record.logical_id,
             source.record.relative_path,
@@ -5569,49 +5531,64 @@ def _build_or_refresh_generation(
         for source in snapshot.sources
         if not source.record.relative_path.startswith("knowledge/")
     )
-    workspace_manifest_sha256 = hashlib.sha256(
-        canonical_json_bytes(workspace_membership)
-    ).hexdigest()
-    parent_workspace_manifest_sha256 = None
-    if parent_id is not None:
-        from evidence_graph_builder import _load_incremental_manifest
+    return hashlib.sha256(canonical_json_bytes(membership)).hexdigest()
 
-        parent_incremental, _parent_generation = _load_incremental_manifest(
-            catalog,
-            parent_id,
-            deadline=deadline,
-            cancelled=cancelled,
-        )
-        if parent_incremental is not None:
-            parent_workspace_manifest_sha256 = parent_incremental["reuse_config"].get(
-                "workspace_manifest_sha256"
-            )
-    if (
-        parent is not None
-        and not force_rebuild
-        and parent.get("schema_version") == "corpus-generation/v2"
-        and parent.get("repository_scope") == repository_scope.as_dict()
-        and parent.get("collector_version") == snapshot.collector_version
-        and parent.get("extractor_version") == snapshot.extractor_version
-        and parent.get("graph_extractor_version") == maintenance_extractor_version
-        and parent.get("source_manifest_sha256") == source_manifest_sha256
-        and parent_workspace_manifest_sha256 == workspace_manifest_sha256
-    ):
-        return {
-            "status": "current",
-            "generation_id": parent_id,
-            "sources": len(snapshot.sources),
-            "partial": False,
-        }
-    config = IncrementalReuseConfig(
-        extractor_version=maintenance_extractor_version,
-        grammar_version="builtin-grammars/v1",
-        compiler_version=f"python-{sys.version_info.major}.{sys.version_info.minor}",
-        resolver_config_sha256=hashlib.sha256(b"llm-wiki-maintenance-resolver/v1").hexdigest(),
-        schema_version=GRAPH_SCHEMA_VERSION,
-        workspace_manifest_sha256=workspace_manifest_sha256,
+
+def _parent_workspace_manifest(
+    catalog: object, parent_id: str | None, deadline: float, cancelled
+) -> str | None:
+    if parent_id is None:
+        return None
+    from evidence_graph_builder import _load_incremental_manifest
+
+    parent_incremental, _parent_generation = _load_incremental_manifest(  # noqa: SLF001
+        catalog,
+        parent_id,
+        deadline=deadline,
+        cancelled=cancelled,
     )
-    source_rows = [
+    if parent_incremental is None:
+        return None
+    return parent_incremental["reuse_config"].get("workspace_manifest_sha256")
+
+
+def _parent_matches_identity(
+    parent: dict, repository_scope: object, snapshot: object, extractor_version: str
+) -> bool:
+    if parent.get("schema_version") != "corpus-generation/v2":
+        return False
+    if parent.get("repository_scope") != repository_scope.as_dict():
+        return False
+    if parent.get("collector_version") != snapshot.collector_version:
+        return False
+    if parent.get("extractor_version") != snapshot.extractor_version:
+        return False
+    return parent.get("graph_extractor_version") == extractor_version
+
+
+def _parent_is_current(
+    parent: dict | None,
+    force_rebuild: bool,
+    repository_scope: object,
+    snapshot: object,
+    extractor_version: str,
+    parent_workspace_sha256: str | None,
+    workspace_sha256: str,
+) -> bool:
+    """True when the active generation already describes the live sources."""
+    if parent is None or force_rebuild:
+        return False
+    if not _parent_matches_identity(
+        parent, repository_scope, snapshot, extractor_version
+    ):
+        return False
+    if parent.get("source_manifest_sha256") != snapshot.corpus_sha256:
+        return False
+    return parent_workspace_sha256 == workspace_sha256
+
+
+def _generation_source_rows(snapshot: object) -> list[dict]:
+    return [
         {
             "source_id": source.record.logical_id,
             "relative_path": source.record.relative_path,
@@ -5623,28 +5600,38 @@ def _build_or_refresh_generation(
         }
         for source in snapshot.sources
     ]
-    source_bytes = {source.record.logical_id: source.content for source in snapshot.sources}
+
+
+def _generation_source_bytes(snapshot: object) -> dict:
+    return {source.record.logical_id: source.content for source in snapshot.sources}
+
+
+def _approved_code_roots(root: Path, approved: set[str]) -> tuple[str, ...]:
+    return tuple(
+        relative for relative in sorted(approved) if (root / relative).is_dir()
+    )
+
+
+def _active_generation_id(parent: dict | None) -> str | None:
+    if parent is None:
+        return None
+    return str(parent["generation_id"])
+
+
+def _reuse_parent_id(force_rebuild: bool, parent_id: str | None) -> str | None:
+    if force_rebuild:
+        return None
+    return parent_id
+
+
+def _fresh_generation_id(catalog: object) -> str:
     while True:
         generation_id = f"generation-{time.time_ns():x}-{secrets.token_hex(4)}"
         if not (catalog.generations_path / generation_id).exists():
-            break
-    built = build_incremental_generation(
-        catalog,
-        sources=source_rows,
-        source_bytes=source_bytes,
-        extractor=_generation_source_extractor(snapshot, repository_scope.repository_id),
-        reuse_config=config,
-        generation_id=generation_id,
-        parent_generation_id=None if force_rebuild else parent_id,
-        policy=policy,
-        expected_active=parent_id,
-        deadline=deadline,
-        cancelled=cancelled,
-        repository_scope=repository_scope,
-        snapshot=snapshot,
-        publication_root=root,
-        coordinator=coordinator,
-    )
+            return generation_id
+
+
+def _generation_build_result(built: object, snapshot: object) -> dict:
     if not built.activated:
         return {
             "status": "deferred",
@@ -5661,6 +5648,93 @@ def _build_or_refresh_generation(
         "reused_sources": len(built.reused_sources),
         "partial": False,
     }
+
+
+def _build_or_refresh_generation(
+    root: Path,
+    state_root: Path,
+    *,
+    deadline: float,
+    cancelled,
+    max_sources: int,
+    force_rebuild: bool,
+    coordinator: object | None = None,
+) -> dict:
+    from corpus_snapshot import APPROVED_CODE_ROOTS, collect_corpus
+    from evidence_graph_builder import (
+        GRAPH_SCHEMA_VERSION,
+        IncrementalReuseConfig,
+        build_incremental_generation,
+    )
+    from generation_catalog import GenerationCatalog
+    from repository_scope import resolve_repository_scope
+
+    repository_scope = resolve_repository_scope(
+        root, deadline=deadline, cancelled=cancelled
+    )
+    extractor_version = _maintenance_extractor_identity()
+    snapshot = collect_corpus(
+        root,
+        code_roots=_approved_code_roots(root, APPROVED_CODE_ROOTS),
+        max_files=max_sources,
+        deadline=deadline,
+    )
+    if len(snapshot.sources) > max_sources:
+        raise ValueError("corpus source limit exceeded")
+
+    catalog = GenerationCatalog(state_root)
+    parent = catalog.get_active(deadline=deadline)
+    parent_id = _active_generation_id(parent)
+    workspace_sha256 = _workspace_manifest_sha256(snapshot)
+    parent_workspace_sha256 = _parent_workspace_manifest(
+        catalog, parent_id, deadline, cancelled
+    )
+    if _parent_is_current(
+        parent,
+        force_rebuild,
+        repository_scope,
+        snapshot,
+        extractor_version,
+        parent_workspace_sha256,
+        workspace_sha256,
+    ):
+        return {
+            "status": "current",
+            "generation_id": parent_id,
+            "sources": len(snapshot.sources),
+            "partial": False,
+        }
+
+    config = IncrementalReuseConfig(
+        extractor_version=extractor_version,
+        grammar_version="builtin-grammars/v1",
+        compiler_version=f"python-{sys.version_info.major}.{sys.version_info.minor}",
+        resolver_config_sha256=hashlib.sha256(
+            b"llm-wiki-maintenance-resolver/v1"
+        ).hexdigest(),
+        schema_version=GRAPH_SCHEMA_VERSION,
+        workspace_manifest_sha256=workspace_sha256,
+    )
+    built = build_incremental_generation(
+        catalog,
+        sources=_generation_source_rows(snapshot),
+        source_bytes=_generation_source_bytes(snapshot),
+        extractor=_generation_source_extractor(
+            snapshot, repository_scope.repository_id
+        ),
+        reuse_config=config,
+        generation_id=_fresh_generation_id(catalog),
+        parent_generation_id=_reuse_parent_id(force_rebuild, parent_id),
+        policy=_corpus_policy(snapshot),
+        expected_active=parent_id,
+        deadline=deadline,
+        cancelled=cancelled,
+        repository_scope=repository_scope,
+        snapshot=snapshot,
+        publication_root=root,
+        coordinator=coordinator,
+    )
+    return _generation_build_result(built, snapshot)
 
 
 def run_generation_maintenance(

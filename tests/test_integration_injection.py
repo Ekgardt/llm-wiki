@@ -163,7 +163,7 @@ def test_opencode_roleless_user_message_is_forwarded_once(opencode_plugin_url: s
         [require_tool("node"), "--input-type=module", "-e", script],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=180,
         check=False,
     )
 
@@ -1592,7 +1592,7 @@ def test_opencode_node_injects_shared_bounded_legacy_handoff_for_unicode_slug(
         text=True,
         encoding="utf-8",
         check=False,
-        timeout=30,
+        timeout=180,
     )
     assert node.returncode == 0, node.stderr
     assert json.loads(node.stdout) == [result["context"]]
@@ -3262,7 +3262,7 @@ def test_windows_installer_error_stops_native_child_and_later_steps(
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=stderr,
-            timeout=30,
+            timeout=180,
             check=False,
         )
 

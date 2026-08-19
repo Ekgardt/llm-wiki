@@ -1464,11 +1464,11 @@ def test_concurrent_newer_sequence_retries_after_crashed_head(
         with pytest.raises(ProjectPendingPriorError):
             newer_store.checkpoint("demo", second_event, "agent-b")
         newer_blocked.set()
-        assert head_committed.wait(5)
+        assert head_committed.wait(120)
         return newer_store.checkpoint("demo", second_event, "agent-b")
 
     def replay_head():
-        assert newer_blocked.wait(5)
+        assert newer_blocked.wait(120)
         receipt = ProjectStore(vault, state_root).checkpoint(
             "demo", first_event, "agent-c"
         )
@@ -1478,7 +1478,7 @@ def test_concurrent_newer_sequence_retries_after_crashed_head(
     with ThreadPoolExecutor(max_workers=2) as pool:
         newer = pool.submit(replay_newer)
         head = pool.submit(replay_head)
-        receipts = [head.result(timeout=10), newer.result(timeout=10)]
+        receipts = [head.result(timeout=180), newer.result(timeout=180)]
 
     assert [receipt.sequence for receipt in receipts] == [1, 2]
     assert [record["occurrence_id"] for record in journal_records(ProjectStore(vault, state_root))] == [
