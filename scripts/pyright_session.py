@@ -732,7 +732,7 @@ class _BoundedLocations:
 
 
 @dataclass(frozen=True)
-class _CallQuery:
+class _DocumentQuery:
     """The process, generation, document and encoding one query is bound to."""
 
     process: LspProcess
@@ -966,6 +966,92 @@ def _progress_handler(
 ) -> Callable[[object], None]:
     """One notification handler bound to the progress method it reports."""
     return lambda params: session._progress(method, params)
+
+
+@dataclass(frozen=True)
+class _WorkspaceState:
+    """The session state a workspace-wide query was admitted against."""
+
+    process: LspProcess | None
+    generation: str | None
+    readiness: str
+    supported: bool
+    initialized: bool
+    current: bool
+
+
+@dataclass(frozen=True)
+class _WorkspaceQuery:
+    """What one workspace-wide query is bound to."""
+
+    process: LspProcess
+    generation: str
+    readiness: str
+    epoch: int
+
+
+def _workspace_query_status(state: _WorkspaceState) -> str | None:
+    """The status refusing a workspace query, or None when it may proceed."""
+    if state.process is None or state.generation is None:
+        return "not_ready"
+    if not state.initialized or not state.current:
+        return "not_ready"
+    if not state.supported:
+        return "unsupported"
+    if state.readiness != "query_ready":
+        return "not_ready"
+    return None
+
+
+def _check_symbol_query(query: str) -> None:
+    if not isinstance(query, str):
+        raise TypeError("query must be a string")
+    if len(query.encode("utf-8", errors="strict")) > 4096:
+        raise ValueError("query exceeds 4096 bytes")
+
+
+def _symbol_locations_payload(result: list[object]) -> tuple[list[object], bool]:
+    """Every well-formed symbol's location, and whether any had to be dropped."""
+    values: list[object] = []
+    partial = len(result) > MAX_LOCATIONS
+    for symbol in result[:MAX_LOCATIONS]:
+        if not isinstance(symbol, dict) or "location" not in symbol:
+            partial = True
+            continue
+        values.append(symbol["location"])
+    return values, partial
+
+
+def _hover_range(result: Mapping[str, object]) -> tuple[LspRange | None, bool]:
+    """The hover's range, and whether it was readable."""
+    if "range" not in result:
+        return None, True
+    range_ = _lsp_range(result["range"])
+    return range_, range_ is not None
+
+
+def _hover_response(result: object) -> ProviderHover:
+    """The hover the server reported, or an explicitly partial answer."""
+    if result is None:
+        return ProviderHover(None, None, False)
+    if not isinstance(result, dict) or "contents" not in result:
+        return ProviderHover(None, None, True)
+    contents, partial = _hover_contents(result["contents"])
+    range_, range_ok = _hover_range(result)
+    return ProviderHover(contents, range_, partial or not range_ok)
+
+
+def _position_params(
+    query: _DocumentQuery, position: LspPosition
+) -> dict[str, object]:
+    """The textDocument/position pair every anchored request sends."""
+    return {
+        "textDocument": {"uri": query.document.source.uri},
+        "position": {
+            "line": position.line,
+            "character": position.character,
+        },
+    }
 
 
 class _LaunchServerGuard:
@@ -2948,162 +3034,121 @@ class PyrightSession:
                     return ProviderLocations((), "not_ready", True)
                 return response
 
-    def workspace_symbols(
-        self,
-        query: str,
-        *,
-        deadline: float,
-    ) -> ProviderLocations:
-        if not isinstance(query, str):
-            raise TypeError("query must be a string")
-        if len(query.encode("utf-8", errors="strict")) > 4096:
-            raise ValueError("query exceeds 4096 bytes")
-        deadline = _validated_deadline(deadline)
-        with self._operation():
-            with self._lock:
-                synchronize_epoch = self._semantic_query_epoch_locked()
-            if synchronize_epoch is None:
-                return ProviderLocations((), "not_ready", True)
-            self.start(deadline=deadline)
-            with self._lock:
-                supported = self._capabilities.get("workspace_symbols", False)
-                readiness = self._readiness
-                process = self._process
-                generation = self._generation_nonce
-                initialized = self._position_encoding is not None
-                current = self._semantic_query_epoch_current_locked(synchronize_epoch)
-            if (
-                process is None
-                or generation is None
-                or not initialized
-                or not current
-            ):
-                return ProviderLocations((), "not_ready", True)
-            if not supported:
-                return ProviderLocations((), "unsupported", True)
-            if readiness != "query_ready":
-                return ProviderLocations((), "not_ready", True)
-            result = process.request(
-                "workspace/symbol",
-                {"query": query},
-                deadline=deadline,
-            )
-            if result is None:
-                response = ProviderLocations((), "provider_reported", False)
-            elif not isinstance(result, list):
-                response = ProviderLocations((), "provider_reported", True)
-            else:
-                values: list[object] = []
-                partial = len(result) > MAX_LOCATIONS
-                for symbol in result[:MAX_LOCATIONS]:
-                    if not isinstance(symbol, dict) or "location" not in symbol:
-                        partial = True
-                        continue
-                    values.append(symbol["location"])
-                locations, filtered = self._normalize_locations(values)
-                response = ProviderLocations(
-                    locations,
-                    "provider_reported",
-                    partial or filtered,
-                )
-            with self._lock:
-                if (
-                    self._process is not process
-                    or self._generation_nonce != generation
-                    or self._readiness != readiness
-                    or not self._semantic_query_epoch_current_locked(
-                        synchronize_epoch
-                    )
-                ):
-                    return ProviderLocations((), "not_ready", True)
-                return response
+
+    def _anchor_position(
+        self, query: _DocumentQuery, anchor: SourceAnchor
+    ) -> LspPosition:
+        """The anchor as a position in the document this query is bound to."""
+        source_document = SourceDocument.from_bytes(
+            query.document.source.relative_path,
+            query.document.content,
+        )
+        return source_document.to_lsp(anchor, query.encoding)
+
+    def _begin_anchor_query(
+        self, capability: str, anchor: SourceAnchor, *, deadline: float
+    ) -> _DocumentQuery | None:
+        """The bound query for this anchor, or None when it cannot be served."""
+        epoch = self._semantic_query_epoch()
+        if epoch is None:
+            return None
+        self.start(deadline=deadline)
+        if self._capability_status(capability, epoch) is not None:
+            return None
+        document = self.open_document(anchor.path, deadline=deadline)
+        return self._document_query(document, epoch)
+
+    def _hover_within_operation(
+        self, anchor: SourceAnchor, *, deadline: float
+    ) -> ProviderHover:
+        query = self._begin_anchor_query("hover", anchor, deadline=deadline)
+        if query is None:
+            return ProviderHover(None, None, True)
+        position = self._anchor_position(query, anchor)
+        if not self._query_still_current(query):
+            return ProviderHover(None, None, True)
+        result = query.process.request(
+            "textDocument/hover",
+            _position_params(query, position),
+            deadline=deadline,
+        )
+        response = _hover_response(result)
+        if not self._query_still_current(query):
+            return ProviderHover(None, None, True)
+        return response
 
     def hover(self, anchor: SourceAnchor, *, deadline: float) -> ProviderHover:
         if not isinstance(anchor, SourceAnchor):
             raise TypeError("anchor must be a SourceAnchor")
         deadline = _validated_deadline(deadline)
         with self._operation():
-            with self._lock:
-                synchronize_epoch = self._semantic_query_epoch_locked()
-            if synchronize_epoch is None:
-                return ProviderHover(None, None, True)
-            self.start(deadline=deadline)
-            with self._lock:
-                process = self._process
-                encoding = self._position_encoding
-                supported = self._capabilities.get("hover", False)
-                if (
-                    process is None
-                    or encoding is None
-                    or not self._semantic_query_epoch_current_locked(
-                        synchronize_epoch
-                    )
-                ):
-                    return ProviderHover(None, None, True)
-            if not supported:
-                return ProviderHover(None, None, True)
-            document = self.open_document(anchor.path, deadline=deadline)
-            with self._lock:
-                encoding = self._position_encoding
-                process = self._process
-                generation = self._generation_nonce
-                ready = (
-                    process is not None
-                    and generation is not None
-                    and self._document_query_current_locked(
-                        process,
-                        generation,
-                        document,
-                        synchronize_epoch,
-                    )
-                )
-            if not ready or encoding is None or process is None or generation is None:
-                return ProviderHover(None, None, True)
-            source_document = SourceDocument.from_bytes(
-                document.source.relative_path,
-                document.content,
+            return self._hover_within_operation(anchor, deadline=deadline)
+
+    def _workspace_state(self, capability: str, epoch: int) -> _WorkspaceState:
+        with self._lock:
+            return _WorkspaceState(
+                process=self._process,
+                generation=self._generation_nonce,
+                readiness=self._readiness,
+                supported=self._capabilities.get(capability, False),
+                initialized=self._position_encoding is not None,
+                current=self._semantic_query_epoch_current_locked(epoch),
             )
-            position = source_document.to_lsp(anchor, encoding)
-            with self._lock:
-                if not self._document_query_current_locked(
-                    process,
-                    generation,
-                    document,
-                    synchronize_epoch,
-                ):
-                    return ProviderHover(None, None, True)
-            result = process.request(
-                "textDocument/hover",
-                {
-                    "textDocument": {"uri": document.source.uri},
-                    "position": {
-                        "line": position.line,
-                        "character": position.character,
-                    },
-                },
-                deadline=deadline,
-            )
-            if result is None:
-                response = ProviderHover(None, None, False)
-            elif not isinstance(result, dict) or "contents" not in result:
-                response = ProviderHover(None, None, True)
-            else:
-                contents, partial = _hover_contents(result["contents"])
-                range_ = None
-                if "range" in result:
-                    range_ = _lsp_range(result["range"])
-                    if range_ is None:
-                        partial = True
-                response = ProviderHover(contents, range_, partial)
-            with self._lock:
-                if not self._document_query_current_locked(
-                    process,
-                    generation,
-                    document,
-                    synchronize_epoch,
-                ):
-                    return ProviderHover(None, None, True)
-                return response
+
+    def _workspace_query_current(self, query: _WorkspaceQuery) -> bool:
+        """Whether the session still stands where the workspace query began."""
+        with self._lock:
+            if self._process is not query.process:
+                return False
+            if self._generation_nonce != query.generation:
+                return False
+            if self._readiness != query.readiness:
+                return False
+            return self._semantic_query_epoch_current_locked(query.epoch)
+
+    def _workspace_symbol_response(self, result: object) -> ProviderLocations:
+        """The locations the server reported for a workspace symbol query."""
+        if result is None:
+            return ProviderLocations((), "provider_reported", False)
+        if not isinstance(result, list):
+            return ProviderLocations((), "provider_reported", True)
+        values, partial = _symbol_locations_payload(result)
+        locations, filtered = self._normalize_locations(values)
+        return ProviderLocations(locations, "provider_reported", partial or filtered)
+
+    def _workspace_symbols_within_operation(
+        self, query: str, *, deadline: float
+    ) -> ProviderLocations:
+        epoch = self._semantic_query_epoch()
+        if epoch is None:
+            return ProviderLocations((), "not_ready", True)
+        self.start(deadline=deadline)
+        state = self._workspace_state("workspace_symbols", epoch)
+        status = _workspace_query_status(state)
+        if status is not None:
+            return ProviderLocations((), status, True)
+        bound = _WorkspaceQuery(
+            state.process, state.generation, state.readiness, epoch
+        )
+        result = bound.process.request(
+            "workspace/symbol", {"query": query}, deadline=deadline
+        )
+        response = self._workspace_symbol_response(result)
+        if not self._workspace_query_current(bound):
+            return ProviderLocations((), "not_ready", True)
+        return response
+
+    def workspace_symbols(
+        self,
+        query: str,
+        *,
+        deadline: float,
+    ) -> ProviderLocations:
+        _check_symbol_query(query)
+        deadline = _validated_deadline(deadline)
+        with self._operation():
+            return self._workspace_symbols_within_operation(query, deadline=deadline)
+
 
     def _sanitize_call_item(self, value: object) -> dict[str, object] | None:
         if not isinstance(value, dict):
@@ -3188,19 +3233,19 @@ class PyrightSession:
             process, generation, document, epoch
         )
 
-    def _query_still_current(self, query: _CallQuery) -> bool:
+    def _query_still_current(self, query: _DocumentQuery) -> bool:
         """Whether the query still refers to the workspace it started on."""
         with self._lock:
             return self._document_query_current_locked(
                 query.process, query.generation, query.document, query.epoch
             )
 
-    def _call_support_status(self, epoch: int) -> str | None:
-        """A refusal status for call hierarchy, or None when it may proceed."""
+    def _capability_status(self, capability: str, epoch: int) -> str | None:
+        """A refusal status for this capability, or None when it may proceed."""
         with self._lock:
             process = self._process
             encoding = self._position_encoding
-            supported = self._capabilities.get("calls", False)
+            supported = self._capabilities.get(capability, False)
             current = self._semantic_query_epoch_current_locked(epoch)
         if process is None or encoding is None or not current:
             return "not_ready"
@@ -3208,7 +3253,7 @@ class PyrightSession:
             return "unsupported"
         return None
 
-    def _call_query(self, document: OpenDocument, epoch: int) -> _CallQuery | None:
+    def _document_query(self, document: OpenDocument, epoch: int) -> _DocumentQuery | None:
         """The bound query, or None when the workspace moved under it."""
         with self._lock:
             encoding = self._position_encoding
@@ -3217,28 +3262,18 @@ class PyrightSession:
             ready = self._query_ready_locked(process, generation, document, epoch)
         if not ready or encoding is None or process is None or generation is None:
             return None
-        return _CallQuery(process, generation, document, epoch, encoding)
+        return _DocumentQuery(process, generation, document, epoch, encoding)
 
     def _prepare_call_hierarchy(
-        self, anchor: SourceAnchor, query: _CallQuery, *, deadline: float
+        self, anchor: SourceAnchor, query: _DocumentQuery, *, deadline: float
     ) -> tuple[bool, object]:
         """Whether the query held, and what the server prepared for the anchor."""
-        source_document = SourceDocument.from_bytes(
-            query.document.source.relative_path,
-            query.document.content,
-        )
-        position = source_document.to_lsp(anchor, query.encoding)
+        position = self._anchor_position(query, anchor)
         if not self._query_still_current(query):
             return False, None
         prepared = query.process.request(
             "textDocument/prepareCallHierarchy",
-            {
-                "textDocument": {"uri": query.document.source.uri},
-                "position": {
-                    "line": position.line,
-                    "character": position.character,
-                },
-            },
+            _position_params(query, position),
             deadline=deadline,
         )
         if not self._query_still_current(query):
@@ -3254,7 +3289,7 @@ class PyrightSession:
         return items
 
     def _call_result(
-        self, item: object, query: _CallQuery, *, method: str, deadline: float
+        self, item: object, query: _DocumentQuery, *, method: str, deadline: float
     ) -> tuple[bool, object]:
         """Whether the query held across the request, and what came back."""
         if not self._query_still_current(query):
@@ -3284,7 +3319,7 @@ class PyrightSession:
     def _call_locations(
         self,
         items: list[object],
-        query: _CallQuery,
+        query: _DocumentQuery,
         *,
         direction: str,
         deadline: float,
@@ -3307,7 +3342,7 @@ class PyrightSession:
     def _collect_calls(
         self,
         anchor: SourceAnchor,
-        query: _CallQuery,
+        query: _DocumentQuery,
         *,
         direction: str,
         deadline: float,
@@ -3334,11 +3369,11 @@ class PyrightSession:
         if epoch is None:
             return ProviderCalls(direction, (), "not_ready", True)
         self.start(deadline=deadline)
-        status = self._call_support_status(epoch)
+        status = self._capability_status("calls", epoch)
         if status is not None:
             return ProviderCalls(direction, (), status, True)
         document = self.open_document(anchor.path, deadline=deadline)
-        query = self._call_query(document, epoch)
+        query = self._document_query(document, epoch)
         if query is None:
             return ProviderCalls(direction, (), "not_ready", True)
         return self._collect_calls(
