@@ -1949,6 +1949,21 @@ def _require_approved_suffix(relative: Path, normalized: str) -> None:
     raise ValueError("transaction targets must use an approved file type")
 
 
+def _require_recovery_bound(max_transactions: object) -> None:
+    if max_transactions is None:
+        return
+    if isinstance(max_transactions, bool) or not isinstance(max_transactions, int):
+        raise ValueError("max_transactions must be a non-negative integer or None")
+    if max_transactions < 0:
+        raise ValueError("max_transactions must be a non-negative integer or None")
+
+
+def _preparing_owner_alive(selected_state: str, owner_pid: object) -> bool:
+    if selected_state != "preparing" or owner_pid is None:
+        return False
+    return _pid_alive(owner_pid)
+
+
 def _is_target_boundary_error(error: BaseException) -> bool:
     if isinstance(error, (TargetBoundaryFailure, FileNotFoundError)):
         return True
@@ -4623,6 +4638,150 @@ class MarkdownCoordinator:
             aborted_at=chosen_at,
         )
 
+    def _incomplete_transaction_rows(self, max_transactions: int | None) -> list[tuple]:
+        query = (
+            'SELECT id, state, owner_pid FROM "transaction" '
+            "WHERE state IN ('aborting','aborted','preparing','prepared','applying') "
+            "ORDER BY CASE state WHEN 'aborting' THEN 0 WHEN 'aborted' THEN 1 ELSE 2 END, "
+            "created_at, id"
+        )
+        parameters: tuple[object, ...] = ()
+        if max_transactions is not None:
+            query += " LIMIT ?"
+            parameters = (max_transactions,)
+        with self._connect() as database:
+            return [
+                (row["id"], row["state"], row["owner_pid"])
+                for row in database.execute(query, parameters)
+            ]
+
+    def _quarantine_dlp(self, transaction_id: str, exc: BaseException) -> None:
+        code = "dlp_content_blocked"
+        if isinstance(exc, DLPPolicyError):
+            code = "dlp_policy_error"
+        self._rollback_for_quarantine(transaction_id, code)
+
+    def _settle_transaction_failure(
+        self, transaction_id: str, exc: TransactionFailure
+    ) -> None:
+        if exc.code == "precondition_failed":
+            self._rollback_for_quarantine(transaction_id, exc.code)
+            return
+        self._set_transaction_state(transaction_id, exc.state, error_code=exc.code)
+
+    def _conflicted(self, transaction_id: str, code: str) -> TransactionRecord:
+        self._set_transaction_state(transaction_id, "conflicted", error_code=code)
+        return self._record(transaction_id)
+
+    def _before_mismatch_code(self, transaction_id: str) -> str:
+        create_conflict = any(
+            row["kind"] == "create" and self._operation_hash(row) != row["before_hash"]
+            for row in self._operation_rows(transaction_id)
+        )
+        if create_conflict:
+            return "before_hash_mismatch"
+        return "unknown_target_bytes"
+
+    def _conflicted_from_message(
+        self, transaction_id: str, exc: BaseException, message: str
+    ) -> TransactionRecord:
+        if "before state mismatch" in message:
+            return self._conflicted(
+                transaction_id, self._before_mismatch_code(transaction_id)
+            )
+        if "after state mismatch" in message:
+            return self._conflicted(transaction_id, "unknown_target_bytes")
+        raise exc
+
+    def _recovered_from_message(
+        self, transaction_id: str, exc: BaseException
+    ) -> TransactionRecord:
+        """Turn a known apply failure into the state it should settle in."""
+        message = str(exc)
+        if _is_target_boundary_error(exc):
+            self._set_transaction_state(
+                transaction_id, "quarantined", error_code="parent_identity_changed"
+            )
+            return self._record(transaction_id)
+        if "after-image is corrupt" in message or "plan hash mismatch" in message:
+            return self._recover_corrupt_after_image(transaction_id)
+        return self._conflicted_from_message(transaction_id, exc, message)
+
+    def _apply_recovered(
+        self, transaction_id: str, recovered: list[TransactionRecord]
+    ) -> None:
+        try:
+            recovered.append(self._apply_locked(transaction_id))
+        except (DLPContentBlocked, DLPPolicyError) as exc:
+            self._quarantine_dlp(transaction_id, exc)
+            recovered.append(self._record(transaction_id))
+        except TransactionFailure as exc:
+            self._settle_transaction_failure(transaction_id, exc)
+            recovered.append(self._record(transaction_id))
+        except (FileNotFoundError, RuntimeError, ValueError) as exc:
+            recovered.append(self._recovered_from_message(transaction_id, exc))
+
+    def _promoted_for_recovery(
+        self, transaction_id: str, recovered: list[TransactionRecord]
+    ) -> bool:
+        """False when the record settled here and needs no apply."""
+        record = self._record(transaction_id)
+        if record.state != "preparing":
+            return True
+        promotion = self._promote_preparing(record)
+        if promotion == "invalid":
+            self._set_transaction_state(transaction_id, "discarded")
+            self._remove_artifacts(self.transaction_root / transaction_id)
+            recovered.append(self._record(transaction_id))
+            return False
+        if promotion == "quarantined":
+            recovered.append(self._record(transaction_id))
+            return False
+        return True
+
+    def _recover_one(
+        self,
+        transaction_id: str,
+        selected_state: str,
+        owner_pid: object,
+        recovered: list[TransactionRecord],
+    ) -> None:
+        if selected_state == "aborting":
+            self._recover_aborting(transaction_id)
+            recovered.append(self._record(transaction_id))
+            return
+        if selected_state == "aborted":
+            self._validate_aborted(transaction_id)
+            recovered.append(self._record(transaction_id))
+            return
+        if _preparing_owner_alive(selected_state, owner_pid):
+            return
+        if not self._promoted_for_recovery(transaction_id, recovered):
+            return
+        self._apply_recovered(transaction_id, recovered)
+
+    def _recover_selected(
+        self,
+        max_transactions: int | None,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> list[TransactionRecord]:
+        rows = self._incomplete_transaction_rows(max_transactions)
+        self._local.recovery_deadline = deadline
+        self._local.recovery_cancelled = cancelled
+        recovered: list[TransactionRecord] = []
+        try:
+            for transaction_id, selected_state, owner_pid in rows:
+                if self._recovery_stopped(deadline, cancelled):
+                    break
+                self._recover_one(
+                    transaction_id, selected_state, owner_pid, recovered
+                )
+        finally:
+            self._local.recovery_deadline = None
+            self._local.recovery_cancelled = None
+        return recovered
+
     def recover(
         self,
         *,
@@ -4633,123 +4792,13 @@ class MarkdownCoordinator:
         cancelled: Callable[[], bool] | None = None,
     ) -> list[TransactionRecord]:
         """Converge every incomplete transaction without overwriting unknown bytes."""
-        if max_transactions is not None and (
-            isinstance(max_transactions, bool)
-            or not isinstance(max_transactions, int)
-            or max_transactions < 0
-        ):
-            raise ValueError("max_transactions must be a non-negative integer or None")
+        _require_recovery_bound(max_transactions)
         if max_transactions == 0 or self._recovery_stopped(deadline, cancelled):
             return []
-        recovered: list[TransactionRecord] = []
         with self.writer_gate(owner=owner, wait_seconds=writer_wait_seconds):
             if self._recovery_stopped(deadline, cancelled):
                 return []
-            query = (
-                'SELECT id, state, owner_pid FROM "transaction" '
-                "WHERE state IN ('aborting','aborted','preparing','prepared','applying') "
-                "ORDER BY CASE state WHEN 'aborting' THEN 0 WHEN 'aborted' THEN 1 ELSE 2 END, "
-                "created_at, id"
-            )
-            parameters: tuple[object, ...] = ()
-            if max_transactions is not None:
-                query += " LIMIT ?"
-                parameters = (max_transactions,)
-            with self._connect() as database:
-                rows = [
-                    (row["id"], row["state"], row["owner_pid"])
-                    for row in database.execute(query, parameters)
-                ]
-            self._local.recovery_deadline = deadline
-            self._local.recovery_cancelled = cancelled
-            try:
-                for transaction_id, selected_state, owner_pid in rows:
-                    if self._recovery_stopped(deadline, cancelled):
-                        break
-                    if selected_state == "aborting":
-                        self._recover_aborting(transaction_id)
-                        recovered.append(self._record(transaction_id))
-                        continue
-                    if selected_state == "aborted":
-                        self._validate_aborted(transaction_id)
-                        recovered.append(self._record(transaction_id))
-                        continue
-                    if (
-                        selected_state == "preparing"
-                        and owner_pid is not None
-                        and _pid_alive(owner_pid)
-                    ):
-                        continue
-                    record = self._record(transaction_id)
-                    if record.state == "preparing":
-                        promotion = self._promote_preparing(record)
-                        if promotion == "invalid":
-                            self._set_transaction_state(transaction_id, "discarded")
-                            self._remove_artifacts(self.transaction_root / transaction_id)
-                            recovered.append(self._record(transaction_id))
-                            continue
-                        if promotion == "quarantined":
-                            recovered.append(self._record(transaction_id))
-                            continue
-                        record = self._record(transaction_id)
-                    try:
-                        recovered.append(self._apply_locked(transaction_id))
-                    except (DLPContentBlocked, DLPPolicyError) as exc:
-                        code = (
-                            "dlp_policy_error"
-                            if isinstance(exc, DLPPolicyError)
-                            else "dlp_content_blocked"
-                        )
-                        self._rollback_for_quarantine(transaction_id, code)
-                        recovered.append(self._record(transaction_id))
-                    except TransactionFailure as exc:
-                        if exc.code == "precondition_failed":
-                            self._rollback_for_quarantine(transaction_id, exc.code)
-                        else:
-                            self._set_transaction_state(
-                                transaction_id, exc.state, error_code=exc.code
-                            )
-                        recovered.append(self._record(transaction_id))
-                    except (FileNotFoundError, RuntimeError, ValueError) as exc:
-                        message = str(exc)
-                        if _is_target_boundary_error(exc):
-                            self._set_transaction_state(
-                                transaction_id,
-                                "quarantined",
-                                error_code="parent_identity_changed",
-                            )
-                            recovered.append(self._record(transaction_id))
-                        elif "after-image is corrupt" in message or "plan hash mismatch" in message:
-                            recovered.append(self._recover_corrupt_after_image(transaction_id))
-                        elif "before state mismatch" in message:
-                            operation_rows = self._operation_rows(transaction_id)
-                            create_conflict = any(
-                                row["kind"] == "create"
-                                and self._operation_hash(row) != row["before_hash"]
-                                for row in operation_rows
-                            )
-                            code = (
-                                "before_hash_mismatch"
-                                if create_conflict
-                                else "unknown_target_bytes"
-                            )
-                            self._set_transaction_state(
-                                transaction_id, "conflicted", error_code=code
-                            )
-                            recovered.append(self._record(transaction_id))
-                        elif "after state mismatch" in message:
-                            self._set_transaction_state(
-                                transaction_id,
-                                "conflicted",
-                                error_code="unknown_target_bytes",
-                            )
-                            recovered.append(self._record(transaction_id))
-                        else:
-                            raise
-            finally:
-                self._local.recovery_deadline = None
-                self._local.recovery_cancelled = None
-        return recovered
+            return self._recover_selected(max_transactions, deadline, cancelled)
 
     def _recover_aborting(self, transaction_id: str) -> None:
         rows = self._operation_rows(transaction_id)
