@@ -114,7 +114,12 @@ GATE_THRESHOLDS: dict[str, float | int] = {
     "recovery_rate": 1.0,
     "default_items": 10,
     "default_estimated_tokens": 1200,
-    "warm_overhead_p95_ms": 20,
+    # 30 ms, not 20: three consecutive GitHub-hosted four-vCPU runs measured
+    # 22.8, 22.08, and 22.16 ms. The facade walks the workspace revision an
+    # extra time to guarantee freshness, and that cost is real on a slow
+    # machine. Approved by the operator 2026-08-19; see
+    # knowledge/notes/warm-navigation-overhead-threshold-decision.md.
+    "warm_overhead_p95_ms": 30,
     "cold_readiness_seconds": 60,
     "client_rss_mib": 100,
 }

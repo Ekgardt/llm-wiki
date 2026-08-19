@@ -10295,7 +10295,10 @@ def _terminate_processor_child(
     process: multiprocessing.Process,
     *,
     platform_name: str | None = None,
-    cleanup_timeout: float = 1.0,
+    # One second was not enough to see a terminated Windows tree disappear on a
+    # loaded machine, and the worker then reported `process_cleanup_failed` for
+    # a cleanup that was merely still in progress. The wait stays bounded.
+    cleanup_timeout: float = 15.0,
     tracked_descendants: set[int] | None | object = _DISCOVER_DESCENDANTS,
 ) -> set[int]:
     platform_name = platform_name or os.name

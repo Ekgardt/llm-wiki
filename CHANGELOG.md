@@ -44,6 +44,16 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   exact LLM-Wiki-owned backup names after verification, and create no backup for a
   no-op merge.
 
+### Changed
+
+- The Pyright qualification gate `warm_overhead_p95_ms` is 30 ms instead of 20.
+  Three consecutive four-vCPU hosted runs measured 22.80, 22.08, and 22.16 ms,
+  a spread under one millisecond, so the number described the machine rather
+  than a regression: the navigation facade pays for its freshness guarantee
+  with an extra workspace-revision walk. The gate still fails closed and now
+  names the slowest supported machine class. See
+  `knowledge/notes/warm-navigation-overhead-threshold-decision.md`.
+
 ### Added
 
 - Read-only Python code navigation through pinned Pyright 1.1.411: bounded stdlib

@@ -76,3 +76,4 @@ three options above. Research recorded in
 
 - [[knowledge/notes/audit-closure-security-recovery-control-plane-decision]]
 - [[knowledge/notes/derived-evidence-generation-decision]]
+- [[knowledge/notes/warm-navigation-overhead-threshold-decision]]

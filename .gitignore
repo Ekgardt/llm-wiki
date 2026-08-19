@@ -55,6 +55,7 @@ knowledge/notes/*
 !knowledge/notes/centralized-memory-subsystem.md
 !knowledge/notes/agent-native-mcp-foundation.md
 !knowledge/notes/baseline-environment-binding-decision.md
+!knowledge/notes/warm-navigation-overhead-threshold-decision.md
 !knowledge/notes/audit-closure-security-recovery-control-plane-decision.md
 !knowledge/notes/derived-evidence-generation-decision.md
 !knowledge/notes/lsp-live-lease-decision.md

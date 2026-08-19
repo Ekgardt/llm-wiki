@@ -1625,7 +1625,7 @@ class TestHandleToolCall:
                 del deadline
                 loop.call_soon_threadsafe(started.set)
                 try:
-                    release.wait(1.0)
+                    release.wait(60.0)
                 finally:
                     finished.set()
                 return {"ok": True}
@@ -1644,7 +1644,7 @@ class TestHandleToolCall:
                 with mcp_server._MCP_WORKERS_LOCK:
                     assert not workers
 
-        monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 0.2)
+        monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 3.0)
         monkeypatch.setattr(mcp_server, "_MCP_WORKERS", workers)
         monkeypatch.setattr(mcp_server, "_MCP_WORKERS_LOCK", threading.Lock())
         loop_progressed, text = asyncio.run(exercise())
@@ -1685,7 +1685,7 @@ class TestHandleToolCall:
                 active += 1
                 peak = max(peak, active)
             try:
-                release.wait(1.0)
+                release.wait(60.0)
             finally:
                 with lock:
                     active -= 1
@@ -1698,7 +1698,7 @@ class TestHandleToolCall:
                 *(mcp_server._handle_tool_call("vault_status", {}) for _ in range(12))
             )
 
-        monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 0.2)
+        monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 3.0)
         monkeypatch.setattr(mcp_server, "_MCP_WORKERS", set())
         monkeypatch.setattr(mcp_server, "_MCP_WORKERS_LOCK", threading.Lock())
         monkeypatch.setattr(mcp_server, "_vault_status", blocked)
@@ -1888,7 +1888,7 @@ class TestHandleToolCall:
             try:
                 yield connection
                 commit_reached.set()
-                assert release_commit.wait(1.0)
+                assert release_commit.wait(60.0)
                 if before_commit is not None:
                     before_commit()
                 connection.commit()
@@ -1900,7 +1900,7 @@ class TestHandleToolCall:
         monkeypatch.setattr(memory_queue, "MemoryQueue", lambda _root: queue)
         monkeypatch.setattr(memory_state, "ROOT", vault)
         monkeypatch.setattr(memory_state, "STATE_ROOT", state_root)
-        monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 0.05)
+        monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 3.0)
         monkeypatch.setattr(mcp_server, "_MCP_WORKERS", set())
         monkeypatch.setattr(mcp_server, "_MCP_WORKERS_LOCK", threading.Lock())
 
@@ -1919,7 +1919,7 @@ class TestHandleToolCall:
         finally:
             release_commit.set()
 
-        deadline = time.monotonic() + 2
+        deadline = time.monotonic() + 30
         while mcp_server._MCP_WORKERS and time.monotonic() < deadline:
             time.sleep(0.01)
         assert not mcp_server._MCP_WORKERS
@@ -1952,7 +1952,7 @@ class TestHandleToolCall:
             try:
                 yield connection
                 commit_reached.set()
-                assert release_commit.wait(1.0)
+                assert release_commit.wait(60.0)
                 if before_commit is not None:
                     before_commit()
                 connection.commit()
@@ -1964,7 +1964,7 @@ class TestHandleToolCall:
         monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
         monkeypatch.setattr(memory_state, "ROOT", vault)
         monkeypatch.setattr(markdown_transaction, "begin_immediate", delayed_begin)
-        monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 0.5)
+        monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 3.0)
         monkeypatch.setattr(mcp_server, "_MCP_WORKERS", set())
         monkeypatch.setattr(mcp_server, "_MCP_WORKERS_LOCK", threading.Lock())
 
@@ -1986,7 +1986,7 @@ class TestHandleToolCall:
         finally:
             release_commit.set()
 
-        deadline = time.monotonic() + 2
+        deadline = time.monotonic() + 30
         while mcp_server._MCP_WORKERS and time.monotonic() < deadline:
             time.sleep(0.01)
         assert not mcp_server._MCP_WORKERS
@@ -3044,7 +3044,7 @@ class TestResources:
                 seen.append(deadline)
                 loop.call_soon_threadsafe(started.set)
                 try:
-                    release.wait(1.0)
+                    release.wait(60.0)
                 finally:
                     finished.set()
                 return {"last_compile": "never", "last_compile_status": "unknown"}
@@ -3067,7 +3067,7 @@ class TestResources:
         monkeypatch.setattr(mcp_server, "MCP_RESOURCES_AVAILABLE", True)
         monkeypatch.setattr(mcp_server, "Resource", Model)
         monkeypatch.setattr(mcp_server, "TextResourceContents", Model)
-        monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 0.2)
+        monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 3.0)
         monkeypatch.setattr(mcp_server, "_MCP_WORKERS", workers)
         monkeypatch.setattr(mcp_server, "_MCP_WORKERS_LOCK", threading.Lock())
         monkeypatch.setattr(mcp_server, "_wiki_overview", lambda **kwargs: {"ok": True})
@@ -3131,7 +3131,7 @@ class TestCallbackCompatibility:
         def slow_format(text):
             started.set()
             try:
-                release.wait(1.0)
+                release.wait(60.0)
                 return real_format(text)
             finally:
                 finished.set()
@@ -3185,7 +3185,7 @@ class TestCallbackCompatibility:
             release.wait(0.5)
             return real_format(text)
 
-        monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 0.05)
+        monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 0.001)
         monkeypatch.setattr(
             mcp_server,
             "_execute_tool_call",

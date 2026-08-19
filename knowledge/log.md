@@ -39,6 +39,8 @@
 - 2026-08-18 — Closed the three silent-loss paths from the developer audit: capture failures now leave a durable trace with a counter surfaced at session start (`OPEN-013`), maintenance step output streams to owner-only artifacts under age/count/size retention (`OPEN-040`), and the injected SessionStart payload is bounded by a hard character ceiling (`NEW-02`). Recorded in `observable-capture-and-bounded-maintenance-decision.md`.
 - 2026-08-18 — Replaced the blanket symlink refusal in bounded reads with an ownership rule: an ancestor symlink is accepted only when root owns both it and the directory holding it. macOS reaches every temporary file through root's `/var` symlink, so the old rule refused to read them at all. Current traversal-resistant APIs draw the line at escape rather than at symlinks; recorded in `system-symlink-ancestor-decision.md` with the research in `docs/research/2026-08-18-traversal-resistant-reads.md`.
 
+- 2026-08-19 — Raised the Pyright qualification gate `warm_overhead_p95_ms` from 20 to 30 ms after three consecutive four-vCPU hosted runs measured 22.80, 22.08, and 22.16 ms. The spread is under a millisecond, so the number is the machine class, not noise: the facade pays for its freshness guarantee with an extra workspace-revision walk. The gate still fails closed and now names the slowest supported machine. Recorded in `warm-navigation-overhead-threshold-decision.md`.
+
 ## Editorial note
 This log is vault metadata — an append-only editorial changelog of compile passes and hygiene actions over `knowledge/`, not content derived from `knowledge/raw/` or `knowledge/inbox/`. New entries are appended at the bottom by compile passes and by hand; entries are never rewritten or removed.
 

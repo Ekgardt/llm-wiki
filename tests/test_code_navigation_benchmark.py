@@ -1161,7 +1161,7 @@ def test_present_operator_corpus_must_be_available_and_error_free() -> None:
         ("recovery_rate", 0.999999),
         ("default_items", 11),
         ("default_estimated_tokens", 1201),
-        ("warm_overhead_p95_ms", 20.000001),
+        ("warm_overhead_p95_ms", 30.000001),
         ("cold_readiness_seconds", 60.000001),
         ("client_rss_mib", 100.0),
     ],
@@ -4234,7 +4234,7 @@ def test_pinned_constants_match_approved_contract() -> None:
         "recovery_rate": 1.0,
         "default_items": 10,
         "default_estimated_tokens": 1200,
-        "warm_overhead_p95_ms": 20,
+        "warm_overhead_p95_ms": 30,
         "cold_readiness_seconds": 60,
         "client_rss_mib": 100,
     }
