@@ -943,6 +943,17 @@ def _require_safe_ancestry(root: Path, source_root: Path) -> None:
         raise OSError("unsafe knowledge directory")
 
 
+def _classify_entry(
+    name: str, parent: Path, directories: list[Path], filenames: list[str]
+) -> None:
+    path = parent / name
+    if name not in SKIP_DIRS and _is_safe_entry(path, directory=True):
+        directories.append(path)
+        return
+    if name.endswith(".md"):
+        filenames.append(name)
+
+
 def _scan_directory(
     current_path: Path, limits: _PageWalkLimits
 ) -> tuple[list[Path], list[str]] | None:
@@ -954,11 +965,7 @@ def _scan_directory(
             for entry in entries:
                 limits.check_deadline()
                 limits.count_entry()
-                path = current_path / entry.name
-                if entry.name not in SKIP_DIRS and _is_safe_entry(path, directory=True):
-                    directories.append(path)
-                elif entry.name.endswith(".md"):
-                    filenames.append(entry.name)
+                _classify_entry(entry.name, current_path, directories, filenames)
     except OSError:
         return None
     return directories, filenames
@@ -1124,13 +1131,23 @@ def _index_schema_is_current(columns: tuple[str, ...], schema_sql: str) -> bool:
     return all(marker in normalized for marker in _SEARCH_INDEX_MARKERS)
 
 
+def _deadline_timeout_options(deadline: float | None) -> dict[str, object]:
+    if deadline is None:
+        return {}
+    return {"timeout": max(0.0, min(5.0, deadline - time.monotonic()))}
+
+
+def _schema_sql(schema_row: object) -> str:
+    if not schema_row or not isinstance(schema_row[0], str):
+        return ""
+    return schema_row[0]
+
+
 def _index_state(
     current_index: Path, deadline: float | None, cancelled: Callable[[], bool] | None
 ) -> tuple[tuple[str, ...], str, list[str]] | None:
     """(columns, schema SQL, manifest paths) read from the live index."""
-    connect_options: dict[str, object] = {}
-    if deadline is not None:
-        connect_options["timeout"] = max(0.0, min(5.0, deadline - time.monotonic()))
+    connect_options = _deadline_timeout_options(deadline)
     with closing(sqlite3.connect(str(current_index), **connect_options)) as conn:
         with _legacy_sqlite_guard(conn, deadline, cancelled):
             columns = tuple(row[1] for row in conn.execute("PRAGMA table_info(pages)"))
@@ -1143,8 +1160,7 @@ def _index_state(
             ).fetchone()
     if manifest_row is None:
         return None
-    schema_sql = schema_row[0] if schema_row and isinstance(schema_row[0], str) else ""
-    return columns, schema_sql, json.loads(manifest_row[0])
+    return columns, _schema_sql(schema_row), json.loads(manifest_row[0])
 
 
 def _any_page_newer_than(
@@ -1578,6 +1594,11 @@ def _maybe_rerank(query: str, results: list[dict], limit: int) -> list[dict]:
     """Apply cross-encoder reranker if available, else return results as-is."""
     if not results or len(results) <= 1:
         return results[:limit]
+    return _deduplicate_by_slug(_reranked(query, results, limit))[:limit]
+
+
+def _reranked(query: str, results: list[dict], limit: int) -> list[dict]:
+    """The reranker is optional; any failure leaves the order untouched."""
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         from reranker import rerank, should_rerank
@@ -1588,14 +1609,11 @@ def _maybe_rerank(query: str, results: list[dict], limit: int) -> list[dict]:
             analysis_intents=(),
             rerank_enabled=True,
         )
-        if apply:
-            results = rerank(query, results, limit=max(limit, len(results)))
+        if not apply:
+            return results
+        return rerank(query, results, limit=max(limit, len(results)))
     except Exception:
-        pass
-
-    results = _deduplicate_by_slug(results)
-
-    return results[:limit]
+        return results
 
 
 def _stamp_retrieval_mode(results: list[dict], mode: str) -> None:
@@ -1950,10 +1968,7 @@ def _generation_consumption_unchanged(
 
 
 def _read_only_connect_options(deadline: float | None) -> dict[str, object]:
-    options: dict[str, object] = {"uri": True}
-    if deadline is not None:
-        options["timeout"] = max(0.0, min(5.0, deadline - time.monotonic()))
-    return options
+    return {"uri": True, **_deadline_timeout_options(deadline)}
 
 
 def _close_quietly(connection: sqlite3.Connection) -> None:
@@ -3498,6 +3513,18 @@ def _exact_page_hit(
     }
 
 
+def _project_matches(page_project: str, project: str | None) -> bool:
+    if not project:
+        return True
+    return page_project.casefold() == project.casefold()
+
+
+def _before_since(timestamp: str, since: str | None) -> bool:
+    if not since or not timestamp:
+        return False
+    return timestamp < since[:10]
+
+
 def _exact_page_eligible(
     relative_path: str,
     *,
@@ -3507,9 +3534,9 @@ def _exact_page_eligible(
     since: str | None,
     as_of: str | None,
 ) -> bool:
-    if project and page_project.casefold() != project.casefold():
+    if not _project_matches(page_project, project):
         return False
-    if since and timestamp and timestamp < since[:10]:
+    if _before_since(timestamp, since):
         return False
     return not as_of or _valid_as_of(relative_path, as_of)
 
@@ -3542,20 +3569,20 @@ def _with_exact_page(
     return [*hits, extra]
 
 
+def _filename_matches(hits: list[dict], normalized_stem: str) -> list[dict]:
+    return [
+        hit
+        for hit in hits
+        if _normalized_filename_stem(str(hit["path"])) == normalized_stem
+    ]
+
+
 def _promoted_filename_first(hits: list[dict], normalized_stem: str) -> list[dict]:
     """Keep a pure ranked list, but a filename match leads it."""
-    matches = [
-        hit for hit in hits if _normalized_filename_stem(str(hit["path"])) == normalized_stem
-    ]
+    matches = _filename_matches(hits, normalized_stem)
     if not matches:
         return hits
-    matches.sort(
-        key=lambda hit: (
-            0 if "knowledge/notes/" in hit["path"] else 1,
-            -hit["score"],
-            hit["path"],
-        )
-    )
+    matches.sort(key=lambda hit: (_notes_first(hit), -hit["score"], hit["path"]))
     best = matches[0]
     return [best, *(hit for hit in hits if hit["path"] != best["path"])]
 
@@ -4293,6 +4320,15 @@ def _legacy_scored_row(
     }
 
 
+def _notes_first(row: dict) -> int:
+    """Duplicates prefer the canonical notes tree."""
+    return 0 if "knowledge/notes/" in row["path"] else 1
+
+
+def _stem_matches(rows: list[dict], normalized: str) -> list[dict]:
+    return [row for row in rows if Path(row["path"]).stem.lower() == normalized]
+
+
 def _exact_filename_answer(rows: list[dict], query: str, limit: int) -> list[dict] | None:
     """A page whose filename is the query wins outright, before any fusion.
 
@@ -4300,10 +4336,10 @@ def _exact_filename_answer(rows: list[dict], query: str, limit: int) -> list[dic
     Duplicates prefer the canonical notes tree.
     """
     normalized = query.lower().strip().replace(" ", "-")
-    matches = [row for row in rows[:10] if Path(row["path"]).stem.lower() == normalized]
+    matches = _stem_matches(rows[:10], normalized)
     if not matches:
         return None
-    matches.sort(key=lambda row: (0 if "knowledge/notes/" in row["path"] else 1, -row["score"]))
+    matches.sort(key=lambda row: (_notes_first(row), -row["score"]))
     best = matches[0]
     rest = [row for row in rows if row["path"] != best["path"]][: limit - 1]
     return [best, *rest]
