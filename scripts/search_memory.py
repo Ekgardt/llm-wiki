@@ -2576,6 +2576,238 @@ def search(
     )
 
 
+def _legacy_fetch_rows(
+    query: str,
+    *,
+    limit: int,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[tuple]:
+    """One bounded BM25 read from the legacy index."""
+    _check_legacy_stop(deadline, cancelled)
+    connect_timeout = 5.0
+    if deadline is not None:
+        connect_timeout = max(0.0, min(connect_timeout, deadline - time.monotonic()))
+    conn = sqlite3.connect(str(INDEX_FILE), timeout=connect_timeout)
+    try:
+        _check_legacy_stop(deadline, cancelled)
+        with _legacy_sqlite_guard(conn, deadline, cancelled):
+            return _legacy_bm25_rows(conn, query, limit)
+    finally:
+        conn.close()
+
+
+def _legacy_rows_or_rebuild(
+    query: str,
+    pages: list[Path],
+    *,
+    limit: int,
+    needs_rebuild: bool,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[tuple] | None:
+    """BM25 rows, rebuilding once if the index is missing or broken.
+
+    None means the index could not be read at all, and the caller reads
+    Markdown directly instead.
+    """
+    rebuilt = False
+    if needs_rebuild:
+        if not _rebuild_legacy_index(pages, deadline=deadline, cancelled=cancelled):
+            return None
+        rebuilt = True
+    try:
+        return _legacy_fetch_rows(query, limit=limit, deadline=deadline, cancelled=cancelled)
+    except sqlite3.DatabaseError:
+        pass
+    if not rebuilt and not _rebuild_legacy_index(
+        pages, deadline=deadline, cancelled=cancelled
+    ):
+        return None
+    try:
+        return _legacy_fetch_rows(query, limit=limit, deadline=deadline, cancelled=cancelled)
+    except sqlite3.DatabaseError:
+        return None
+
+
+def _rebuild_legacy_index(
+    pages: list[Path],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    try:
+        if deadline is None and cancelled is None:
+            _build_index(pages)
+        else:
+            _build_index(pages, deadline=deadline, cancelled=cancelled)
+    except sqlite3.DatabaseError:
+        return False
+    return True
+
+
+def _legacy_index_needs_rebuild(
+    pages: list[Path],
+    *,
+    force_rebuild: bool,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    if force_rebuild:
+        return True
+    if deadline is None and cancelled is None:
+        return _needs_rebuild(pages)
+    return _needs_rebuild(pages, deadline=deadline, cancelled=cancelled)
+
+
+def _legacy_hit_rows(
+    rows: list[tuple],
+    *,
+    query_lower: str,
+    query_words: set[str],
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[dict]:
+    hits: list[dict] = []
+    for row in rows:
+        _check_legacy_stop(deadline, cancelled)
+        path, title, summary, proj, timestamp, rank = row
+        if _legacy_row_excluded(str(path), str(timestamp or ""), since, as_of):
+            continue
+        score = _boosted_lexical_score(
+            rank,
+            path=path,
+            title=title,
+            row_project=proj or "",
+            query_lower=query_lower,
+            query_words=query_words,
+            project=project,
+        )
+        hits.append(
+            {
+                "path": path,
+                "title": title,
+                "summary": summary[:120] if summary else "",
+                "score": score,
+                "bm25_score": score,
+                "project": proj or "",
+                "timestamp": timestamp or "",
+                "candidate_id": Path(path).stem,
+                "generation": "legacy",
+            }
+        )
+    return hits
+
+
+def _exact_page_hit(
+    page: Path,
+    *,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+) -> dict | None:
+    """A page whose filename is the query, read straight from Markdown.
+
+    The index may not contain it yet; a filename match is too strong a signal
+    to lose to a stale index.
+    """
+    try:
+        relative_path = page.relative_to(ROOT).as_posix()
+        raw = read_stable_bytes(page, MAX_PAGE_BYTES, label="exact filename search page")
+        content = raw.decode("utf-8", errors="ignore")
+    except (OSError, ValueError):
+        return None
+    title, summary = _extract_title_and_summary(content, page.stem)
+    page_project = _extract_frontmatter_field(content, PROJECT_FIELD_RE) or ""
+    timestamp = (_extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or "")[:10]
+    if not _exact_page_eligible(
+        relative_path,
+        page_project=page_project,
+        timestamp=timestamp,
+        project=project,
+        since=since,
+        as_of=as_of,
+    ):
+        return None
+    authority = _extract_frontmatter_field(content, AUTHORITY_FIELD_RE) or ""
+    return {
+        "path": relative_path,
+        "title": title,
+        "summary": summary[:120],
+        "score": round(10.0 * authority_weight(authority), 2),
+        "bm25_score": 0.0,
+        "project": page_project,
+        "timestamp": timestamp,
+        "candidate_id": page.stem,
+        "source_sha256": hashlib.sha256(raw).hexdigest(),
+        "byte_start": 0,
+        "byte_end": len(raw),
+        "generation": "legacy",
+        "authority": authority,
+    }
+
+
+def _exact_page_eligible(
+    relative_path: str,
+    *,
+    page_project: str,
+    timestamp: str,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+) -> bool:
+    if project and page_project.casefold() != project.casefold():
+        return False
+    if since and timestamp and timestamp < since[:10]:
+        return False
+    return not as_of or _valid_as_of(relative_path, as_of)
+
+
+def _with_exact_page(
+    hits: list[dict],
+    pages: list[Path],
+    normalized_stem: str,
+    *,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+) -> list[dict]:
+    page = next(
+        (item for item in pages if _normalized_filename_stem(item.name) == normalized_stem),
+        None,
+    )
+    if page is None:
+        return hits
+    relative = page.relative_to(ROOT).as_posix()
+    if any(hit["path"] == relative for hit in hits):
+        return hits
+    extra = _exact_page_hit(page, project=project, since=since, as_of=as_of)
+    if extra is None:
+        return hits
+    return [*hits, extra]
+
+
+def _promoted_filename_first(hits: list[dict], normalized_stem: str) -> list[dict]:
+    """Keep a pure ranked list, but a filename match leads it."""
+    matches = [
+        hit for hit in hits if _normalized_filename_stem(str(hit["path"])) == normalized_stem
+    ]
+    if not matches:
+        return hits
+    matches.sort(
+        key=lambda hit: (
+            0 if "knowledge/notes/" in hit["path"] else 1,
+            -hit["score"],
+            hit["path"],
+        )
+    )
+    best = matches[0]
+    return [best, *(hit for hit in hits if hit["path"] != best["path"])]
+
+
 def _legacy_lexical_hits(
     query: str,
     *,
@@ -2593,7 +2825,6 @@ def _legacy_lexical_hits(
     _check_legacy_stop(deadline, cancelled)
     if not query or not query.strip():
         return []
-
     pages = (
         page_paths
         if page_paths is not None
@@ -2601,55 +2832,17 @@ def _legacy_lexical_hits(
     )
     if not pages:
         return []
-
-    needs_rebuild = force_rebuild
-    if not needs_rebuild:
-        if deadline is None and cancelled is None:
-            needs_rebuild = _needs_rebuild(pages)
-        else:
-            needs_rebuild = _needs_rebuild(
-                pages, deadline=deadline, cancelled=cancelled
-            )
-    def rebuild() -> None:
-        if deadline is None and cancelled is None:
-            _build_index(pages)
-        else:
-            _build_index(pages, deadline=deadline, cancelled=cancelled)
-
-    def query_index() -> list[tuple]:
-        _check_legacy_stop(deadline, cancelled)
-        connect_timeout = 5.0
-        if deadline is not None:
-            connect_timeout = max(
-                0.0, min(connect_timeout, deadline - time.monotonic())
-            )
-        conn = sqlite3.connect(str(INDEX_FILE), timeout=connect_timeout)
-        try:
-            _check_legacy_stop(deadline, cancelled)
-            with _legacy_sqlite_guard(conn, deadline, cancelled):
-                fts_terms = []
-                for word in query.split():
-                    if not word:
-                        continue
-                    safe = word.replace('"', '""')
-                    fts_terms.append(f'"{safe}"')
-                fts_query = " ".join(fts_terms)
-                query_word_count = len([word for word in query.split() if word])
-                fetch_multiplier = 5 if query_word_count <= 3 else 3
-                return conn.execute(
-                    """
-                    SELECT path, title, summary, project, timestamp, bm25(pages) as rank
-                    FROM pages
-                    WHERE pages MATCH ?
-                    ORDER BY rank
-                    LIMIT ?
-                    """,
-                    (fts_query, limit * fetch_multiplier),
-                ).fetchall()
-        finally:
-            conn.close()
-
-    def direct_fallback() -> list[dict]:
+    rows = _legacy_rows_or_rebuild(
+        query,
+        pages,
+        limit=limit,
+        needs_rebuild=_legacy_index_needs_rebuild(
+            pages, force_rebuild=force_rebuild, deadline=deadline, cancelled=cancelled
+        ),
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    if rows is None:
         return _direct_markdown_hits(
             query,
             pages,
@@ -2660,137 +2853,27 @@ def _legacy_lexical_hits(
             deadline=deadline,
             cancelled=cancelled,
         )
-
-    rebuilt = False
-    if needs_rebuild:
-        try:
-            rebuild()
-            rebuilt = True
-        except sqlite3.DatabaseError:
-            return direct_fallback()
-
-    try:
-        bm25_raw = query_index()
-    except sqlite3.DatabaseError:
-        if not rebuilt:
-            try:
-                rebuild()
-                rebuilt = True
-            except sqlite3.DatabaseError:
-                return direct_fallback()
-        try:
-            bm25_raw = query_index()
-        except sqlite3.DatabaseError:
-            return direct_fallback()
-
     query_lower = query.lower().strip()
-    query_words = set(query_lower.split())
-    bm25_results: list[dict] = []
-    for row in bm25_raw:
-        _check_legacy_stop(deadline, cancelled)
-        path, title, summary, proj, ts, rank = row
-        if since and ts:
-            try:
-                if ts[:10] < since:
-                    continue
-            except (IndexError, TypeError):
-                pass
-        if as_of and ts:
-            try:
-                if ts[:10] > as_of[:10]:
-                    continue
-            except (IndexError, TypeError):
-                pass
-        if as_of and not _valid_as_of(path, as_of):
-            continue
-        score = _boosted_lexical_score(
-            rank,
-            path=path,
-            title=title,
-            row_project=proj or "",
-            query_lower=query_lower,
-            query_words=query_words,
-            project=project,
-        )
-        bm25_results.append(
-            {
-                "path": path,
-                "title": title,
-                "summary": summary[:120] if summary else "",
-                "score": score,
-                "bm25_score": score,
-                "project": proj or "",
-                "timestamp": ts or "",
-                "candidate_id": Path(path).stem,
-                "generation": "legacy",
-            }
-        )
-    normalized_stem = _normalized_filename_stem(query)
-    exact_page = next(
-        (page for page in pages if _normalized_filename_stem(page.name) == normalized_stem),
-        None,
+    hits = _legacy_hit_rows(
+        rows,
+        query_lower=query_lower,
+        query_words=set(query_lower.split()),
+        project=project,
+        since=since,
+        as_of=as_of,
+        deadline=deadline,
+        cancelled=cancelled,
     )
-    if exact_page is not None:
-        try:
-            relative_path = exact_page.relative_to(ROOT).as_posix()
-            raw = read_stable_bytes(
-                exact_page, MAX_PAGE_BYTES, label="exact filename search page"
-            )
-            content = raw.decode("utf-8", errors="ignore")
-        except (OSError, ValueError):
-            exact_page = None
-        else:
-            title, summary = _extract_title_and_summary(content, exact_page.stem)
-            page_project = _extract_frontmatter_field(content, PROJECT_FIELD_RE) or ""
-            timestamp = _extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or ""
-            timestamp = timestamp[:10] if timestamp else ""
-            eligible = not project or page_project.casefold() == project.casefold()
-            eligible = eligible and (not since or not timestamp or timestamp >= since[:10])
-            eligible = eligible and (not as_of or _valid_as_of(relative_path, as_of))
-            if eligible and all(item["path"] != relative_path for item in bm25_results):
-                authority = _extract_frontmatter_field(content, AUTHORITY_FIELD_RE) or ""
-                bm25_results.append(
-                    {
-                        "path": relative_path,
-                        "title": title,
-                        "summary": summary[:120],
-                        "score": round(
-                            10.0 * authority_weight(authority),
-                            2,
-                        ),
-                        "bm25_score": 0.0,
-                        "project": page_project,
-                        "timestamp": timestamp,
-                        "candidate_id": exact_page.stem,
-                        "source_sha256": hashlib.sha256(raw).hexdigest(),
-                        "byte_start": 0,
-                        "byte_end": len(raw),
-                        "generation": "legacy",
-                        "authority": authority,
-                    }
-                )
-    bm25_results.sort(key=lambda x: (-x["score"], x["path"]))
-    for result in bm25_results:
-        result["score"] = round(float(result["score"]), 2)
-        result["bm25_score"] = round(float(result["bm25_score"]), 2)
-    # Prefer filename exact matches first while remaining a pure ranked list.
-    filename_matches = [
-        result
-        for result in bm25_results
-        if _normalized_filename_stem(str(result["path"])) == normalized_stem
-    ]
-    if filename_matches:
-        filename_matches.sort(
-            key=lambda r: (
-                0 if "knowledge/notes/" in r["path"] else 1,
-                -r["score"],
-                r["path"],
-            )
-        )
-        best = filename_matches[0]
-        rest = [x for x in bm25_results if x["path"] != best["path"]]
-        bm25_results = [best] + rest
-    return bm25_results[: max(limit * 3, limit)]
+    normalized_stem = _normalized_filename_stem(query)
+    hits = _with_exact_page(
+        hits, pages, normalized_stem, project=project, since=since, as_of=as_of
+    )
+    hits.sort(key=lambda hit: (-hit["score"], hit["path"]))
+    for hit in hits:
+        hit["score"] = round(float(hit["score"]), 2)
+        hit["bm25_score"] = round(float(hit["bm25_score"]), 2)
+    hits = _promoted_filename_first(hits, normalized_stem)
+    return hits[: max(limit * 3, limit)]
 
 
 def _direct_markdown_hits(
