@@ -1387,6 +1387,28 @@ def _check_did_open_encodable(params: dict[str, object]) -> None:
         ) from error
 
 
+def _matching_diagnostics(
+    snapshot: _DiagnosticSnapshot | None, version: int
+) -> ProviderDiagnostics | None:
+    """The snapshot, when it describes exactly this document version."""
+    if snapshot is None or snapshot.document_version != version:
+        return None
+    return ProviderDiagnostics(
+        snapshot.diagnostics,
+        snapshot.document_version,
+        snapshot.partial,
+    )
+
+
+def _expired_diagnostics(
+    snapshot: _DiagnosticSnapshot | None,
+) -> ProviderDiagnostics:
+    """What to answer when the wait ran out: a versionless snapshot, or nothing."""
+    if snapshot is not None and snapshot.document_version is None:
+        return ProviderDiagnostics(snapshot.diagnostics, None, True)
+    return ProviderDiagnostics((), None, True)
+
+
 class _LaunchServerGuard:
     def __init__(
         self,
@@ -3696,62 +3718,70 @@ class PyrightSession:
     ) -> ProviderCalls:
         return self._calls(anchor, direction="outgoing", deadline=deadline)
 
+    def _diagnostics_ready(self, epoch: int) -> bool:
+        """The session can answer for diagnostics at this synchronize epoch."""
+        with self._lock:
+            initialized = (
+                self._process is not None and self._position_encoding is not None
+            )
+            current = self._semantic_query_epoch_current_locked(epoch)
+        return initialized and current
+
+    def _await_diagnostics_locked(
+        self,
+        document: OpenDocument,
+        process: LspProcess,
+        generation: str,
+        epoch: int,
+        deadline: float,
+    ) -> ProviderDiagnostics:
+        """Wait for a snapshot of this document version; the caller holds the lock."""
+        while True:
+            if not self._document_query_current_locked(
+                process, generation, document, epoch
+            ):
+                return ProviderDiagnostics((), None, True)
+            snapshot = self._diagnostics.get(document.source.uri)
+            matched = _matching_diagnostics(snapshot, document.version)
+            if matched is not None:
+                return matched
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return _expired_diagnostics(snapshot)
+            self._condition.wait(remaining)
+
+    def _diagnostics_for_document(
+        self, document: OpenDocument, epoch: int, deadline: float
+    ) -> ProviderDiagnostics:
+        with self._lock:
+            process = self._process
+            generation = self._generation_nonce
+            if process is None or generation is None:
+                return ProviderDiagnostics((), None, True)
+            if not self._document_query_current_locked(
+                process, generation, document, epoch
+            ):
+                return ProviderDiagnostics((), None, True)
+            return self._await_diagnostics_locked(
+                document, process, generation, epoch, deadline
+            )
+
+    def _diagnostics_within_operation(
+        self, path: str, deadline: float
+    ) -> ProviderDiagnostics:
+        epoch = self._semantic_query_epoch()
+        if epoch is None:
+            return ProviderDiagnostics((), None, True)
+        self.start(deadline=deadline)
+        if not self._diagnostics_ready(epoch):
+            return ProviderDiagnostics((), None, True)
+        document = self.open_document(path, deadline=deadline)
+        return self._diagnostics_for_document(document, epoch, deadline)
+
     def diagnostics(self, path: str, *, deadline: float) -> ProviderDiagnostics:
         deadline = _validated_deadline(deadline)
         with self._operation():
-            with self._lock:
-                synchronize_epoch = self._semantic_query_epoch_locked()
-            if synchronize_epoch is None:
-                return ProviderDiagnostics((), None, True)
-            self.start(deadline=deadline)
-            with self._lock:
-                initialized = self._process is not None and self._position_encoding is not None
-                current = self._semantic_query_epoch_current_locked(synchronize_epoch)
-            if not initialized or not current:
-                return ProviderDiagnostics((), None, True)
-            document = self.open_document(path, deadline=deadline)
-            with self._lock:
-                process = self._process
-                generation = self._generation_nonce
-                if (
-                    process is None
-                    or generation is None
-                    or not self._document_query_current_locked(
-                        process,
-                        generation,
-                        document,
-                        synchronize_epoch,
-                    )
-                ):
-                    return ProviderDiagnostics((), None, True)
-                while True:
-                    if not self._document_query_current_locked(
-                        process,
-                        generation,
-                        document,
-                        synchronize_epoch,
-                    ):
-                        return ProviderDiagnostics((), None, True)
-                    snapshot = self._diagnostics.get(document.source.uri)
-                    if (
-                        snapshot is not None
-                        and snapshot.document_version == document.version
-                    ):
-                        return ProviderDiagnostics(
-                            snapshot.diagnostics,
-                            snapshot.document_version,
-                            snapshot.partial,
-                        )
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        if snapshot is not None and snapshot.document_version is None:
-                            return ProviderDiagnostics(
-                                snapshot.diagnostics,
-                                None,
-                                True,
-                            )
-                        return ProviderDiagnostics((), None, True)
-                    self._condition.wait(remaining)
+            return self._diagnostics_within_operation(path, deadline)
 
     def _watched_uri(self, relative_path: str) -> str:
         absolute = Path(self._repository.checkout_root, relative_path)
@@ -3771,6 +3801,100 @@ class PyrightSession:
             )
         )
 
+    def _recovery_unnecessary_locked(
+        self, process: LspProcess, failed_generation: str
+    ) -> bool:
+        """Another generation already replayed the snapshot for us."""
+        return (
+            self._generation_nonce != failed_generation
+            and self._synchronize_snapshot_replayed_locked(process)
+        )
+
+    def _forget_readiness_for_recovery_locked(self) -> None:
+        self._readiness = "not_ready"
+        self._readiness_evidence = ()
+        self._ready_uri_generations.clear()
+        self._diagnostics.clear()
+        self._diagnostic_bytes = 0
+
+    def _check_recovery_owners_locked(self, process: LspProcess) -> None:
+        """Only the process we are recovering may be under our own ownership."""
+        if self._process is not process:
+            raise RuntimeError(
+                "Pyright synchronization process changed before recovery"
+            )
+        if (
+            self._startup_process is not None
+            and self._startup_process is not process
+        ):
+            raise RuntimeError("Pyright synchronization cleanup owner is unavailable")
+
+    def _take_recovery_ownership_locked(self, process: LspProcess) -> None:
+        """Hold the process as a startup owner while it restarts."""
+        self._process = None
+        self._startup_process = process
+        self._starting = True
+        self._position_encoding = None
+        self._capabilities = {}
+        self._generation_nonce = None
+        self._clear_wire_state()
+        self._sync_startup_atexit_locked()
+        self._condition.notify_all()
+
+    def _claim_recovery(
+        self, process: LspProcess, failed_generation: str
+    ) -> tuple[bool, str | None]:
+        """Whether this call owns the recovery, and the bootstrap owner it took."""
+        with self._lock:
+            if self._recovery_unnecessary_locked(process, failed_generation):
+                return False, None
+            self._forget_readiness_for_recovery_locked()
+            self._check_recovery_owners_locked(process)
+            bootstrap_owner_nonce = self._bootstrap_owner_nonce
+            self._take_recovery_ownership_locked(process)
+            return True, bootstrap_owner_nonce
+
+    def _replayed_after_restart(self, process: LspProcess) -> bool:
+        """Whether the restarted process proves the snapshot it had before."""
+        with self._lock:
+            if self._startup_process is not process or self._process is not None:
+                return False
+            self._process = process
+            if self._synchronize_snapshot_replayed_locked(process):
+                self._startup_process = None
+                self._sync_startup_atexit_locked()
+                return True
+            self._process = None
+            return False
+
+    def _forget_recovery_state_locked(self) -> None:
+        self._reset_readiness_locked()
+        self._generation_nonce = None
+        self._ready_uri_generations.clear()
+        self._diagnostics.clear()
+        self._diagnostic_bytes = 0
+        self._clear_wire_state()
+
+    def _abandon_recovery(
+        self, process: LspProcess, bootstrap_owner_nonce: str | None
+    ) -> None:
+        """A recovery that failed leaves the process to be cleaned up, not used."""
+        with self._lock:
+            if self._process is process:
+                self._process = None
+            if self._startup_process is None:
+                self._startup_process = process
+            if self._bootstrap_owner_nonce == bootstrap_owner_nonce:
+                self._bootstrap_owner_nonce = None
+            self._forget_recovery_state_locked()
+            self._sync_startup_atexit_locked()
+            self._condition.notify_all()
+
+    def _release_recovery_serialization(self) -> None:
+        with self._lock:
+            self._starting = False
+            self._condition.notify_all()
+
     def _recover_synchronize_snapshot(
         self,
         process: LspProcess,
@@ -3778,80 +3902,23 @@ class PyrightSession:
         *,
         deadline: float,
     ) -> None:
-        recovery_serialized = False
-        bootstrap_owner_nonce: str | None = None
-        with self._lock:
-            already_replayed = (
-                self._generation_nonce != failed_generation
-                and self._synchronize_snapshot_replayed_locked(process)
-            )
-            if already_replayed:
-                return
-            self._readiness = "not_ready"
-            self._readiness_evidence = ()
-            self._ready_uri_generations.clear()
-            self._diagnostics.clear()
-            self._diagnostic_bytes = 0
-            if self._process is not process:
-                raise RuntimeError(
-                    "Pyright synchronization process changed before recovery"
-                )
-            if (
-                self._startup_process is not None
-                and self._startup_process is not process
-            ):
-                raise RuntimeError(
-                    "Pyright synchronization cleanup owner is unavailable"
-                )
-            bootstrap_owner_nonce = self._bootstrap_owner_nonce
-            self._process = None
-            self._startup_process = process
-            self._starting = True
-            recovery_serialized = True
-            self._position_encoding = None
-            self._capabilities = {}
-            self._generation_nonce = None
-            self._clear_wire_state()
-            self._sync_startup_atexit_locked()
-            self._condition.notify_all()
+        claimed, bootstrap_owner_nonce = self._claim_recovery(
+            process, failed_generation
+        )
+        if not claimed:
+            return
         try:
             process.restart(deadline)
-            with self._lock:
-                if self._startup_process is process and self._process is None:
-                    self._process = process
-                    if self._synchronize_snapshot_replayed_locked(process):
-                        self._startup_process = None
-                        self._sync_startup_atexit_locked()
-                        return
-                    self._process = None
+            if self._replayed_after_restart(process):
+                return
             raise RuntimeError(
                 "Pyright synchronization recovery could not prove the prior snapshot"
             )
         except BaseException:
-            with self._lock:
-                if self._process is process:
-                    self._process = None
-                if self._startup_process is None:
-                    self._startup_process = process
-                if self._bootstrap_owner_nonce == bootstrap_owner_nonce:
-                    self._bootstrap_owner_nonce = None
-                self._readiness = "not_ready"
-                self._readiness_evidence = ()
-                self._position_encoding = None
-                self._capabilities = {}
-                self._generation_nonce = None
-                self._ready_uri_generations.clear()
-                self._diagnostics.clear()
-                self._diagnostic_bytes = 0
-                self._clear_wire_state()
-                self._sync_startup_atexit_locked()
-                self._condition.notify_all()
+            self._abandon_recovery(process, bootstrap_owner_nonce)
             raise
         finally:
-            if recovery_serialized:
-                with self._lock:
-                    self._starting = False
-                    self._condition.notify_all()
+            self._release_recovery_serialization()
 
     def _notify_or_fail(
         self,
