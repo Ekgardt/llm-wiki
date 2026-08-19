@@ -2099,10 +2099,15 @@ def test_the_read_wait_survives_a_budgetless_deadline():
     assert 0 < doctor._read_busy_ms(time.monotonic() + 0.1) <= doctor.READ_BUSY_MS
 
 
-def test_a_brief_commit_lock_does_not_make_a_healthy_index_look_busy(tmp_path):
+def test_a_brief_commit_lock_does_not_make_a_healthy_index_look_busy(
+    tmp_path, monkeypatch
+):
     """A millisecond commit is normal; only a stuck database is worth reporting."""
     import doctor
 
+    # The shipped wait is 250 ms; a loaded CI runner can hold a 50 ms lock for
+    # longer than that, so the wait itself is what this test exercises.
+    monkeypatch.setattr(doctor, "READ_BUSY_MS", 30_000)
     _, state_root, _ = _build_root(tmp_path)
     index = state_root / "cache" / "index.sqlite"
     _create_index(index)
@@ -2127,7 +2132,7 @@ def test_a_brief_commit_lock_does_not_make_a_healthy_index_look_busy(tmp_path):
         check = doctor._index_check(
             state_root,
             datetime.now(timezone.utc),
-            deadline=time.monotonic() + 5.0,
+            deadline=time.monotonic() + 120.0,
         )
     finally:
         worker.join()
