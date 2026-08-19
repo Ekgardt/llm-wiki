@@ -2487,6 +2487,116 @@ def _read_posix_lsp_record(
         os.close(descriptor)
 
 
+class _PosixOwnerReading(NamedTuple):
+    snapshot: tuple
+    unreadable: bool
+    stop: bool
+
+
+def _posix_owner_snapshot(
+    owner_name: str, present: frozenset[str], records: dict
+) -> tuple:
+    return (
+        owner_name,
+        present,
+        records["owner.json"],
+        records["lease.json"],
+        records["failure.json"],
+    )
+
+
+def _read_posix_child(
+    owner_fd: int, child_name: str, deadline: float, records: dict
+) -> bool:
+    """True when this child could not be read."""
+    if child_name not in _LSP_OWNER_ENTRY_NAMES:
+        return True
+    if child_name == "cancellation":
+        os.close(_open_posix_lsp_directory(owner_fd, child_name, deadline))
+        return False
+    try:
+        records[child_name] = _read_posix_lsp_record(owner_fd, child_name, deadline)
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        return True
+    return False
+
+
+def _read_posix_owner_children(
+    owner_fd: int, deadline: float, records: dict
+) -> tuple[frozenset[str], bool]:
+    child_names, truncated = _list_posix_lsp_names(
+        owner_fd,
+        observed_limit=len(_LSP_OWNER_ENTRY_NAMES) + 1,
+        deadline=deadline,
+    )
+    bounded_names = child_names[: len(_LSP_OWNER_ENTRY_NAMES)]
+    present = frozenset(bounded_names)
+    unreadable = truncated or "cancellation" not in present
+    for child_name in bounded_names:
+        unreadable = _read_posix_child(owner_fd, child_name, deadline, records) or unreadable
+    return present, unreadable
+
+
+def _read_posix_owner(
+    lsp_fd: int, owner_name: str, deadline: float
+) -> _PosixOwnerReading:
+    records: dict[str, dict[str, Any] | None] = {
+        name: None for name in _LSP_RECORD_NAMES
+    }
+    present: frozenset[str] = frozenset()
+    owner_fd: int | None = None
+    unreadable = False
+    stop = False
+    try:
+        owner_fd = _open_posix_lsp_directory(lsp_fd, owner_name, deadline)
+        present, unreadable = _read_posix_owner_children(owner_fd, deadline, records)
+    except TimeoutError:
+        unreadable = True
+        stop = True
+    except (OSError, ValueError):
+        unreadable = True
+    finally:
+        if owner_fd is not None:
+            os.close(owner_fd)
+    snapshot = _posix_owner_snapshot(owner_name, present, records)
+    return _PosixOwnerReading(snapshot, unreadable, stop)
+
+
+def _scan_posix_owners(
+    lsp_fd: int, owner_names: list[str], deadline: float
+) -> tuple[list, bool]:
+    snapshots: list = []
+    unreadable = False
+    for owner_name in sorted(owner_names[:MAX_LSP_OWNER_ROWS]):
+        if _LSP_OWNER_NONCE.fullmatch(owner_name) is None:
+            unreadable = True
+            continue
+        reading = _read_posix_owner(lsp_fd, owner_name, deadline)
+        unreadable = unreadable or reading.unreadable
+        snapshots.append(reading.snapshot)
+        if reading.stop:
+            return snapshots, True
+    return snapshots, unreadable
+
+
+def _posix_lsp_snapshots(lsp_fd: int, deadline: float) -> tuple[list, bool, bool]:
+    try:
+        owner_names, truncated = _list_posix_lsp_names(
+            lsp_fd,
+            observed_limit=MAX_LSP_OWNER_ROWS + 1,
+            deadline=deadline,
+        )
+    except (OSError, ValueError, TimeoutError):
+        return [], True, False
+    snapshots: list = []
+    try:
+        snapshots, unreadable = _scan_posix_owners(lsp_fd, owner_names, deadline)
+        _require_lsp_deadline(deadline)
+    except TimeoutError:
+        return snapshots, True, False
+    return snapshots, unreadable or truncated, False
+
+
 def _snapshot_posix_lsp(
     state_root: Path,
     deadline: float,
@@ -2499,79 +2609,8 @@ def _snapshot_posix_lsp(
         return [], False, True
     except (OSError, ValueError, TimeoutError):
         return [], True, False
-    snapshots: list[_LspOwnerSnapshot] = []
-    unreadable = False
     try:
-        try:
-            owner_names, truncated = _list_posix_lsp_names(
-                lsp_fd,
-                observed_limit=MAX_LSP_OWNER_ROWS + 1,
-                deadline=deadline,
-            )
-        except (OSError, ValueError, TimeoutError):
-            return [], True, False
-        unreadable |= truncated
-        for owner_name in sorted(owner_names[:MAX_LSP_OWNER_ROWS]):
-            if _LSP_OWNER_NONCE.fullmatch(owner_name) is None:
-                unreadable = True
-                continue
-            owner_fd: int | None = None
-            present: frozenset[str] = frozenset()
-            records: dict[str, dict[str, Any] | None] = {name: None for name in _LSP_RECORD_NAMES}
-            try:
-                owner_fd = _open_posix_lsp_directory(lsp_fd, owner_name, deadline)
-                child_names, child_truncated = _list_posix_lsp_names(
-                    owner_fd,
-                    observed_limit=len(_LSP_OWNER_ENTRY_NAMES) + 1,
-                    deadline=deadline,
-                )
-                unreadable |= child_truncated
-                bounded_names = child_names[: len(_LSP_OWNER_ENTRY_NAMES)]
-                present = frozenset(bounded_names)
-                if "cancellation" not in present:
-                    unreadable = True
-                for child_name in bounded_names:
-                    if child_name not in _LSP_OWNER_ENTRY_NAMES:
-                        unreadable = True
-                        continue
-                    if child_name == "cancellation":
-                        cancellation_fd = _open_posix_lsp_directory(owner_fd, child_name, deadline)
-                        os.close(cancellation_fd)
-                        continue
-                    try:
-                        records[child_name] = _read_posix_lsp_record(owner_fd, child_name, deadline)
-                    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
-                        unreadable = True
-            except TimeoutError:
-                unreadable = True
-                snapshots.append(
-                    (
-                        owner_name,
-                        present,
-                        records["owner.json"],
-                        records["lease.json"],
-                        records["failure.json"],
-                    )
-                )
-                break
-            except (OSError, ValueError):
-                unreadable = True
-            finally:
-                if owner_fd is not None:
-                    os.close(owner_fd)
-            snapshots.append(
-                (
-                    owner_name,
-                    present,
-                    records["owner.json"],
-                    records["lease.json"],
-                    records["failure.json"],
-                )
-            )
-        _require_lsp_deadline(deadline)
-        return snapshots, unreadable, False
-    except TimeoutError:
-        return snapshots, True, False
+        return _posix_lsp_snapshots(lsp_fd, deadline)
     finally:
         os.close(lsp_fd)
 
