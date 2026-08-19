@@ -1473,6 +1473,150 @@ def _windows_native_component_is_canceled(
     )
 
 
+_KEEP_SCANNING = object()
+
+
+def _windows_uri_terminator(character: str, encoded: bool, file_uri: bool) -> bool:
+    if not file_uri or encoded:
+        return False
+    return character == "#"
+
+
+def _windows_quote_terminator(character: str, encoded: bool, quoted: bool) -> bool:
+    if not quoted or encoded:
+        return False
+    return character == '"'
+
+
+def _windows_terminator(
+    character: str,
+    *,
+    encoded: bool,
+    quoted: bool,
+    file_uri: bool,
+    unquoted_space: bool,
+    space_allowed: bool,
+) -> bool:
+    if _is_control(character) or character in '<>:"|?*':
+        return True
+    if _windows_uri_terminator(character, encoded, file_uri):
+        return True
+    if _windows_quote_terminator(character, encoded, quoted):
+        return True
+    return unquoted_space and not space_allowed
+
+
+class _WindowsRootScanner:
+    """Walk one candidate Windows token and report where the vault root ends."""
+
+    def __init__(
+        self,
+        value: str,
+        start: int,
+        root: tuple[str, tuple[frozenset[str], ...]],
+        *,
+        file_uri: bool,
+        quoted: bool,
+    ) -> None:
+        self.value = value
+        self.start = start
+        self.root = root
+        self.file_uri = file_uri
+        self.quoted = quoted
+        self.limit = min(
+            len(value), start + _windows_candidate_inspection_characters(root)
+        )
+        self.index = start
+        self.drive = ""
+        self.components: list[str] = []
+        self.component: list[str] = []
+        self.component_source_end = start
+        self.disposable_component: bool | None = None
+
+    def run(self) -> int | None:
+        prefix = _windows_semantic_prefix(
+            self.value, self.start, self.limit, file_uri=self.file_uri
+        )
+        if prefix is None:
+            return None
+        self.drive, self.index = prefix
+        if self.drive != self.root[0]:
+            return None
+        self.component_source_end = self.index
+        if not self.root[1]:
+            return self.index
+        while self.index < self.limit:
+            outcome = self._step()
+            if outcome is not _KEEP_SCANNING:
+                return outcome
+        return self._finish()
+
+    def _decode(self) -> tuple | None:
+        if not self.file_uri:
+            return self.value[self.index], self.index + 1, False
+        return _uri_character(self.value, self.index, self.limit)
+
+    def _space_allowed(self, character: str, unquoted_space: bool) -> bool:
+        """A native log line may hold a space the component itself allows."""
+        if not unquoted_space or self.file_uri or character != " ":
+            return False
+        if _windows_component_accepts_space(
+            self.component, self.components, self.root
+        ):
+            return True
+        if self.disposable_component is None:
+            self.disposable_component = _windows_native_component_is_canceled(
+                self.value, self.index, self.limit
+            )
+        return self.disposable_component
+
+    def _close_component(self, source_end: int, terminator: bool) -> object:
+        valid, matched = _windows_add_semantic_component(
+            "".join(self.component), self.components, self.root, self.drive
+        )
+        if not valid:
+            return None
+        if matched:
+            return self.component_source_end
+        self.component.clear()
+        self.disposable_component = None
+        if terminator:
+            return None
+        self.index = source_end
+        self.component_source_end = source_end
+        return _KEEP_SCANNING
+
+    def _step(self) -> object:
+        decoded = self._decode()
+        if decoded is None:
+            return None
+        character, source_end, encoded = decoded
+        unquoted_space = not self.quoted and not encoded and character.isspace()
+        space_allowed = self._space_allowed(character, unquoted_space)
+        terminator = _windows_terminator(
+            character,
+            encoded=encoded,
+            quoted=self.quoted,
+            file_uri=self.file_uri,
+            unquoted_space=unquoted_space,
+            space_allowed=space_allowed,
+        )
+        if character in {"/", "\\"} or terminator:
+            return self._close_component(source_end, terminator)
+        self.component.append(character)
+        self.component_source_end = source_end
+        self.index = source_end
+        return _KEEP_SCANNING
+
+    def _finish(self) -> int | None:
+        valid, matched = _windows_add_semantic_component(
+            "".join(self.component), self.components, self.root, self.drive
+        )
+        if valid and matched:
+            return self.component_source_end
+        return None
+
+
 def _windows_semantic_root_match_end(
     value: str,
     start: int,
@@ -1481,85 +1625,9 @@ def _windows_semantic_root_match_end(
     file_uri: bool,
     quoted: bool,
 ) -> int | None:
-    limit = min(
-        len(value), start + _windows_candidate_inspection_characters(root)
-    )
-    prefix = _windows_semantic_prefix(
-        value, start, limit, file_uri=file_uri
-    )
-    if prefix is None:
-        return None
-    drive, index = prefix
-    if drive != root[0]:
-        return None
-    components: list[str] = []
-    if not root[1]:
-        return index
-
-    component: list[str] = []
-    component_source_end = index
-    disposable_component: bool | None = None
-    while index < limit:
-        if file_uri:
-            decoded = _uri_character(value, index, limit)
-            if decoded is None:
-                return None
-            character, source_end, encoded = decoded
-        else:
-            character = value[index]
-            source_end = index + 1
-            encoded = False
-
-        separator = character in {"/", "\\"}
-        unquoted_space = (
-            not quoted
-            and not encoded
-            and character.isspace()
-        )
-        space_allowed = False
-        if unquoted_space and not file_uri and character == " ":
-            space_allowed = _windows_component_accepts_space(
-                component, components, root
-            )
-            if not space_allowed:
-                if disposable_component is None:
-                    disposable_component = _windows_native_component_is_canceled(
-                        value, index, limit
-                    )
-                space_allowed = disposable_component
-        terminator = (
-            _is_control(character)
-            or (file_uri and character == "#" and not encoded)
-            or (quoted and character == '"' and not encoded)
-            or (unquoted_space and not space_allowed)
-            or character in '<>:"|?*'
-        )
-        if separator or terminator:
-            valid, matched = _windows_add_semantic_component(
-                "".join(component), components, root, drive
-            )
-            if not valid:
-                return None
-            if matched:
-                return component_source_end
-            component.clear()
-            disposable_component = None
-            if terminator:
-                return None
-            index = source_end
-            component_source_end = index
-            continue
-
-        component.append(character)
-        component_source_end = source_end
-        index = source_end
-
-    valid, matched = _windows_add_semantic_component(
-        "".join(component), components, root, drive
-    )
-    if valid and matched:
-        return component_source_end
-    return None
+    return _WindowsRootScanner(
+        value, start, root, file_uri=file_uri, quoted=quoted
+    ).run()
 
 
 def _windows_redaction_end(
@@ -1793,6 +1861,104 @@ def _posix_native_root_match_end(
     return None
 
 
+def _native_posix_prefix(value: str, start: int, limit: int) -> int | None:
+    if value[start : start + 1] != "/":
+        return None
+    index = start
+    while index < limit and value[index : index + 1] == "/":
+        index += 1
+    return index
+
+
+def _unsafe_authority_character(character: str, encoded: bool) -> bool:
+    if _is_control(character) or character.isspace() or character == "\\":
+        return True
+    return not encoded and character in "?#"
+
+
+def _collected_authority(
+    value: str, index: int, limit: int
+) -> tuple[str, int] | None:
+    authority: list[str] = []
+    while index < limit:
+        decoded = _uri_character(value, index, limit)
+        if decoded is None:
+            return None
+        character, source_end, encoded = decoded
+        if character == "/":
+            return "".join(authority), source_end
+        if _unsafe_authority_character(character, encoded):
+            return None
+        authority.append(character)
+        index = source_end
+    return None
+
+
+def _posix_authority_end(value: str, index: int, limit: int) -> int | None:
+    """The index after a `localhost` authority, or None for anything else."""
+    collected = _collected_authority(value, index, limit)
+    if collected is None:
+        return None
+    authority, end = collected
+    if authority.casefold() != "localhost":
+        return None
+    return end
+
+
+def _skip_posix_separators(value: str, index: int, limit: int) -> int:
+    while index < limit:
+        decoded = _uri_character(value, index, limit)
+        if decoded is None or decoded[0] != "/":
+            return index
+        index = decoded[1]
+    return index
+
+
+_NOT_ROOTED = object()
+
+
+def _rooted_uri_prefix(value: str, index: int, limit: int) -> object:
+    """The path start after `file:///`, None when a fourth slash makes it
+    unsafe, or `_NOT_ROOTED` when an authority follows instead."""
+    third = _uri_character(value, index, limit)
+    if third is None or third[0] != "/":
+        return _NOT_ROOTED
+    index = third[1]
+    fourth = _uri_character(value, index, limit)
+    if fourth is not None and fourth[0] == "/":
+        return None
+    return index
+
+
+def _double_slash_start(value: str, start: int, limit: int) -> tuple[int, bool]:
+    """(index after `file://`, whether both slashes were there)."""
+    index = start + 5
+    first = _uri_character(value, index, limit)
+    if first is None or first[0] != "/":
+        return index, False
+    index = first[1]
+    second = _uri_character(value, index, limit)
+    if second is None or second[0] != "/":
+        return index, False
+    return second[1], True
+
+
+def _uri_posix_prefix(value: str, start: int, limit: int) -> int | None:
+    first = _uri_character(value, start + 5, limit)
+    if first is None or first[0] != "/":
+        return None
+    index, doubled = _double_slash_start(value, start, limit)
+    if not doubled:
+        return index
+    rooted = _rooted_uri_prefix(value, index, limit)
+    if rooted is not _NOT_ROOTED:
+        return rooted
+    authority_end = _posix_authority_end(value, index, limit)
+    if authority_end is None:
+        return None
+    return _skip_posix_separators(value, authority_end, limit)
+
+
 def _posix_semantic_prefix(
     value: str,
     start: int,
@@ -1801,59 +1967,8 @@ def _posix_semantic_prefix(
     file_uri: bool,
 ) -> int | None:
     if not file_uri:
-        if value[start : start + 1] != "/":
-            return None
-        index = start
-        while index < limit and value[index : index + 1] == "/":
-            index += 1
-        return index
-
-    index = start + 5
-    first = _uri_character(value, index, limit)
-    if first is None or first[0] != "/":
-        return None
-    index = first[1]
-    second = _uri_character(value, index, limit)
-    if second is None or second[0] != "/":
-        return index
-
-    index = second[1]
-    third = _uri_character(value, index, limit)
-    if third is not None and third[0] == "/":
-        index = third[1]
-        fourth = _uri_character(value, index, limit)
-        if fourth is not None and fourth[0] == "/":
-            return None
-        return index
-
-    authority: list[str] = []
-    while index < limit:
-        decoded = _uri_character(value, index, limit)
-        if decoded is None:
-            return None
-        character, source_end, encoded = decoded
-        if character == "/":
-            index = source_end
-            break
-        if (
-            _is_control(character)
-            or character.isspace()
-            or character == "\\"
-            or (not encoded and character in "?#")
-        ):
-            return None
-        authority.append(character)
-        index = source_end
-    else:
-        return None
-    if "".join(authority).casefold() != "localhost":
-        return None
-    while index < limit:
-        decoded = _uri_character(value, index, limit)
-        if decoded is None or decoded[0] != "/":
-            break
-        index = decoded[1]
-    return index
+        return _native_posix_prefix(value, start, limit)
+    return _uri_posix_prefix(value, start, limit)
 
 
 def _posix_components_reach_root(
