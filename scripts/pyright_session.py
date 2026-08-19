@@ -1,6 +1,7 @@
 """Bounded, capability-honest Pyright language-server session."""
 
 import atexit
+import dataclasses
 import hashlib
 import math
 import os
@@ -579,6 +580,131 @@ def _launch_file_state(info: os.stat_result) -> tuple[int, int, int, int, int, i
         info.st_mtime_ns,
         0 if _WINDOWS_STAT_CREATION_TIME else info.st_ctime_ns,
     )
+
+
+def _diagnostic_severity(value: object) -> tuple[int | None, bool]:
+    """The severity, and whether the field was readable at all."""
+    if value is None:
+        return None, True
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None, False
+    if value not in {1, 2, 3, 4}:
+        return None, False
+    return value, True
+
+
+def _diagnostic_int_code(value: object) -> tuple[str | None, bool]:
+    """A numeric diagnostic code rendered as text, when it fits in 32 bits."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None, False
+    if not -(2**31) <= value <= 2**31 - 1:
+        return None, False
+    return str(value), True
+
+
+def _diagnostic_code(value: object) -> tuple[str | None, bool]:
+    """The code as text, and whether the field was readable at all."""
+    if value is None:
+        return None, True
+    if isinstance(value, str):
+        code = _bounded_text(value, 4096)
+        return code, code is not None
+    return _diagnostic_int_code(value)
+
+
+@dataclass
+class _SymbolWalk:
+    """A bounded depth-first pass over a document-symbol tree."""
+
+    stack: list[object]
+    partial: bool
+    visited: int = 0
+    seen_nodes: set[int] = dataclasses.field(default_factory=set)
+    seen_keys: set[tuple[object, ...]] = dataclasses.field(default_factory=set)
+    locations: list[LspLocation] = dataclasses.field(default_factory=list)
+
+    def drop(self) -> None:
+        """Record that something in the tree could not be used."""
+        self.partial = True
+
+    def add(self, location: LspLocation) -> None:
+        key = _location_key(location)
+        if key in self.seen_keys:
+            return
+        self.seen_keys.add(key)
+        self.locations.append(location)
+
+    def first_visit(self, value: object) -> bool:
+        """True the first time this exact node is seen."""
+        node_id = id(value)
+        if node_id in self.seen_nodes:
+            return False
+        self.seen_nodes.add(node_id)
+        return True
+
+
+def _push_symbol_children(walk: _SymbolWalk, value: Mapping[str, object]) -> None:
+    """Queue the node's children, dropping whatever exceeds the walk's bound."""
+    children = value.get("children")
+    if children is None:
+        return
+    if not isinstance(children, list):
+        walk.drop()
+        return
+    remaining = max(0, MAX_LOCATIONS - walk.visited - len(walk.stack))
+    if len(children) > remaining:
+        walk.drop()
+    walk.stack.extend(reversed(children[:remaining]))
+
+
+def _bounded_optional_text(value: object) -> bool:
+    """An absent field is fine; a present one has to fit the text bound."""
+    if value is None:
+        return True
+    return _bounded_text(value, _MAX_CALL_ITEM_TEXT_BYTES) is not None
+
+
+def _symbol_tags_ok(tags: object) -> bool:
+    if not isinstance(tags, list) or len(tags) > 32:
+        return False
+    return all(_lsp_coordinate(tag) is not None for tag in tags)
+
+
+def _symbol_flags_ok(value: Mapping[str, object]) -> bool:
+    """The deprecated flag and the tag list, when present, are well formed."""
+    deprecated = value.get("deprecated")
+    if deprecated is not None and not isinstance(deprecated, bool):
+        return False
+    tags = value.get("tags")
+    if tags is None:
+        return True
+    return _symbol_tags_ok(tags)
+
+
+def _symbol_fields_ok(value: Mapping[str, object]) -> bool:
+    """Every scalar field of the symbol is present and within bounds."""
+    name = _bounded_text(value.get("name"), _MAX_CALL_ITEM_TEXT_BYTES)
+    kind = _lsp_coordinate(value.get("kind"))
+    if name is None or kind in {None, 0}:
+        return False
+    if not _bounded_optional_text(value.get("detail")):
+        return False
+    if not _bounded_optional_text(value.get("containerName")):
+        return False
+    return _symbol_flags_ok(value)
+
+
+def _range_contains(outer: LspRange, inner: LspRange) -> bool:
+    """The inner range starts no earlier and ends no later than the outer one."""
+    starts_inside = (inner.start.line, inner.start.character) >= (
+        outer.start.line,
+        outer.start.character,
+    )
+    ends_inside = (inner.end.line, inner.end.character) <= (
+        outer.end.line,
+        outer.end.character,
+    )
+    return starts_inside and ends_inside
 
 
 class _LaunchServerGuard:
@@ -1275,6 +1401,57 @@ class PyrightSession:
             if text is not None:
                 self._retain_progress((method, text))
 
+    def _diagnostic_core(
+        self, value: Mapping[str, object]
+    ) -> tuple[LspRange, str, int | None, str | None] | None:
+        """Range, message, severity and code, or None when one is unreadable."""
+        range_ = _lsp_range(value.get("range"))
+        message = _bounded_text(value.get("message"), _MAX_DIAGNOSTIC_TEXT_BYTES)
+        if range_ is None or message is None:
+            return None
+        severity, severity_ok = _diagnostic_severity(value.get("severity"))
+        if not severity_ok:
+            return None
+        code, code_ok = _diagnostic_code(value.get("code"))
+        if not code_ok:
+            return None
+        return range_, message, severity, code
+
+    def _related_entry(
+        self, relation: object
+    ) -> tuple[LspLocation, str | None] | None:
+        """One related location, or None when it cannot be read."""
+        if not isinstance(relation, dict):
+            return None
+        location = self._normalize_location(relation.get("location"))
+        if location is None:
+            return None
+        raw_message = relation.get("message")
+        if raw_message is None:
+            return location, None
+        message = _bounded_text(raw_message, _MAX_DIAGNOSTIC_TEXT_BYTES)
+        if message is None:
+            return None
+        return location, message
+
+    def _related_information(
+        self, value: object
+    ) -> tuple[list[tuple[LspLocation, str | None]], bool]:
+        """The related locations, and whether anything had to be dropped."""
+        if value is None:
+            return [], False
+        if not isinstance(value, list):
+            return [], True
+        partial = len(value) > MAX_LOCATIONS
+        related: list[tuple[LspLocation, str | None]] = []
+        for relation in value[:MAX_LOCATIONS]:
+            entry = self._related_entry(relation)
+            if entry is None:
+                partial = True
+                continue
+            related.append(entry)
+        return related, partial
+
     def _parse_diagnostic(
         self,
         value: object,
@@ -1282,77 +1459,20 @@ class PyrightSession:
     ) -> tuple[LspDiagnostic | None, bool]:
         if not isinstance(value, dict):
             return None, True
-        range_ = _lsp_range(value.get("range"))
-        message = _bounded_text(value.get("message"), _MAX_DIAGNOSTIC_TEXT_BYTES)
-        if range_ is None or message is None:
+        core = self._diagnostic_core(value)
+        if core is None:
             return None, True
-        severity_value = value.get("severity")
-        if severity_value is None:
-            severity = None
-        elif (
-            isinstance(severity_value, bool)
-            or not isinstance(severity_value, int)
-            or severity_value not in {1, 2, 3, 4}
-        ):
-            return None, True
-        else:
-            severity = severity_value
-        code_value = value.get("code")
-        if code_value is None:
-            code = None
-        elif isinstance(code_value, str):
-            code = _bounded_text(code_value, 4096)
-            if code is None:
-                return None, True
-        elif (
-            isinstance(code_value, bool)
-            or not isinstance(code_value, int)
-            or not -(2**31) <= code_value <= 2**31 - 1
-        ):
-            return None, True
-        else:
-            code = str(code_value)
-
-        related: list[tuple[LspLocation, str | None]] = []
-        partial = False
-        related_value = value.get("relatedInformation")
-        if related_value is not None:
-            if not isinstance(related_value, list):
-                partial = True
-            else:
-                if len(related_value) > MAX_LOCATIONS:
-                    partial = True
-                for relation in related_value[:MAX_LOCATIONS]:
-                    if not isinstance(relation, dict):
-                        partial = True
-                        continue
-                    location = self._normalize_location(relation.get("location"))
-                    related_message_value = relation.get("message")
-                    related_message = (
-                        None
-                        if related_message_value is None
-                        else _bounded_text(
-                            related_message_value,
-                            _MAX_DIAGNOSTIC_TEXT_BYTES,
-                        )
-                    )
-                    if location is None or (
-                        related_message_value is not None and related_message is None
-                    ):
-                        partial = True
-                        continue
-                    related.append((location, related_message))
-        return (
-            LspDiagnostic(
-                uri,
-                range_,
-                severity,
-                code,
-                message,
-                tuple(related),
-            ),
-            partial,
+        range_, message, severity, code = core
+        related, partial = self._related_information(value.get("relatedInformation"))
+        diagnostic = LspDiagnostic(
+            uri,
+            range_,
+            severity,
+            code,
+            message,
+            tuple(related),
         )
+        return diagnostic, partial
 
     @staticmethod
     def _diagnostic_retained_bytes(diagnostic: LspDiagnostic) -> int:
@@ -2342,6 +2462,44 @@ class PyrightSession:
             deadline=deadline,
         )
 
+    def _symbol_location(
+        self, value: Mapping[str, object], uri: str
+    ) -> LspLocation | None:
+        """Where the symbol is: an explicit location, or its selection range."""
+        if "location" in value:
+            return self._normalize_location(value.get("location"))
+        range_ = _lsp_range(value.get("range"))
+        selection = _lsp_range(value.get("selectionRange"))
+        if range_ is None or selection is None:
+            return None
+        if not _range_contains(range_, selection):
+            return None
+        return LspLocation(uri, selection)
+
+    def _visit_symbol(self, walk: _SymbolWalk, uri: str) -> None:
+        """Take one node off the walk and collect the location it names."""
+        value = walk.stack.pop()
+        walk.visited += 1
+        if not isinstance(value, dict) or not walk.first_visit(value):
+            walk.drop()
+            return
+        _push_symbol_children(walk, value)
+        if not _symbol_fields_ok(value):
+            walk.drop()
+            return
+        location = self._symbol_location(value, uri)
+        if location is None:
+            walk.drop()
+            return
+        walk.add(location)
+
+    def _walk_document_symbols(self, walk: _SymbolWalk, uri: str) -> None:
+        """Visit up to the bound, then record whatever is left unvisited."""
+        while walk.stack and walk.visited < MAX_LOCATIONS:
+            self._visit_symbol(walk, uri)
+        if walk.stack:
+            walk.drop()
+
     def _normalize_document_symbols(
         self,
         result: object,
@@ -2351,92 +2509,12 @@ class PyrightSession:
             return (), False
         if not isinstance(result, list):
             return (), True
-        locations: list[LspLocation] = []
-        seen: set[tuple[object, ...]] = set()
-        seen_nodes: set[int] = set()
-        partial = len(result) > MAX_LOCATIONS
-        stack: list[object] = list(reversed(result[:MAX_LOCATIONS]))
-        visited = 0
-        while stack and visited < MAX_LOCATIONS:
-            value = stack.pop()
-            visited += 1
-            if not isinstance(value, dict):
-                partial = True
-                continue
-            node_id = id(value)
-            if node_id in seen_nodes:
-                partial = True
-                continue
-            seen_nodes.add(node_id)
-            children = value.get("children")
-            if children is not None:
-                if isinstance(children, list):
-                    remaining = max(0, MAX_LOCATIONS - visited - len(stack))
-                    if len(children) > remaining:
-                        partial = True
-                    stack.extend(reversed(children[:remaining]))
-                else:
-                    partial = True
-            name = _bounded_text(value.get("name"), _MAX_CALL_ITEM_TEXT_BYTES)
-            kind = _lsp_coordinate(value.get("kind"))
-            if name is None or kind in {None, 0}:
-                partial = True
-                continue
-            detail = value.get("detail")
-            if detail is not None and _bounded_text(
-                detail,
-                _MAX_CALL_ITEM_TEXT_BYTES,
-            ) is None:
-                partial = True
-                continue
-            container_name = value.get("containerName")
-            if container_name is not None and _bounded_text(
-                container_name,
-                _MAX_CALL_ITEM_TEXT_BYTES,
-            ) is None:
-                partial = True
-                continue
-            deprecated = value.get("deprecated")
-            if deprecated is not None and not isinstance(deprecated, bool):
-                partial = True
-                continue
-            tags = value.get("tags")
-            if tags is not None and (
-                not isinstance(tags, list)
-                or len(tags) > 32
-                or any(_lsp_coordinate(tag) is None for tag in tags)
-            ):
-                partial = True
-                continue
-            if "location" in value:
-                location = self._normalize_location(value.get("location"))
-            else:
-                range_ = _lsp_range(value.get("range"))
-                selection = _lsp_range(value.get("selectionRange"))
-                if (
-                    range_ is None
-                    or selection is None
-                    or (
-                        selection.start.line,
-                        selection.start.character,
-                    )
-                    < (range_.start.line, range_.start.character)
-                    or (selection.end.line, selection.end.character)
-                    > (range_.end.line, range_.end.character)
-                ):
-                    location = None
-                else:
-                    location = LspLocation(uri, selection)
-            if location is None:
-                partial = True
-                continue
-            key = _location_key(location)
-            if key not in seen:
-                seen.add(key)
-                locations.append(location)
-        if stack:
-            partial = True
-        return tuple(locations), partial
+        walk = _SymbolWalk(
+            stack=list(reversed(result[:MAX_LOCATIONS])),
+            partial=len(result) > MAX_LOCATIONS,
+        )
+        self._walk_document_symbols(walk, uri)
+        return tuple(walk.locations), walk.partial
 
     def document_symbols(self, path: str, *, deadline: float) -> ProviderLocations:
         deadline = _validated_deadline(deadline)
