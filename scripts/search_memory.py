@@ -3182,6 +3182,74 @@ def _legacy_lexical_hits(
     return hits[: max(limit * 3, limit)]
 
 
+def _document_terms(page: Path, title: str, summary: str, body: str) -> set[str]:
+    haystack = f"{page.stem.replace('-', ' ')} {title} {summary} {body}".casefold()
+    return set(re.findall(r"\w+", haystack))
+
+
+def _direct_match_score(
+    page: Path, title: str, authority: str, query_terms: set[str]
+) -> float:
+    """Literal matching has no BM25, so the term count carries the base score."""
+    score = float(len(query_terms))
+    if query_terms.issubset(set(re.findall(r"\w+", title.casefold()))):
+        score *= 3.0
+    if query_terms.issubset(set(re.findall(r"\w+", page.stem.casefold()))):
+        score *= 4.0
+    return score * authority_weight(authority)
+
+
+def _direct_page_hit(
+    page: Path,
+    *,
+    query_terms: set[str],
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+) -> dict | None:
+    """One literal Markdown match, or None when the page does not qualify."""
+    try:
+        relative_path = page.relative_to(ROOT).as_posix()
+        raw = read_stable_bytes(page, MAX_PAGE_BYTES, label="search page")
+        content = raw.decode("utf-8", errors="ignore")
+    except (OSError, ValueError):
+        return None
+    title, summary = _extract_title_and_summary(content, page.stem)
+    body = _strip_frontmatter(content)
+    if not query_terms.issubset(_document_terms(page, title, summary, body)):
+        return None
+    page_project = _extract_frontmatter_field(content, PROJECT_FIELD_RE) or ""
+    timestamp = (_extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or "")[:10]
+    if not _exact_page_eligible(
+        relative_path,
+        page_project=page_project,
+        timestamp=timestamp,
+        project=project,
+        since=since,
+        as_of=as_of,
+    ):
+        return None
+    authority = _extract_frontmatter_field(content, AUTHORITY_FIELD_RE) or ""
+    score = round(_direct_match_score(page, title, authority, query_terms), 2)
+    return {
+        "path": relative_path,
+        "title": title,
+        "summary": summary[:120],
+        "score": score,
+        "bm25_score": score,
+        "project": page_project,
+        "timestamp": timestamp,
+        "candidate_id": page.stem,
+        "source_sha256": hashlib.sha256(raw).hexdigest(),
+        "byte_start": 0,
+        "byte_end": len(raw),
+        "generation": "legacy",
+        "authority": authority,
+        "fallback_reason": "legacy_sqlite_unavailable",
+        "partial": True,
+    }
+
+
 def _direct_markdown_hits(
     query: str,
     pages: list[Path],
@@ -3194,64 +3262,23 @@ def _direct_markdown_hits(
     cancelled: Callable[[], bool] | None,
 ) -> list[dict]:
     """Return bounded literal matches from authoritative Markdown only."""
-    query_terms = tuple(dict.fromkeys(re.findall(r"\w+", query.casefold())))
-    query_term_set = set(query_terms)
+    query_terms = set(re.findall(r"\w+", query.casefold()))
+    if not query_terms:
+        raise LegacySearchUnavailable(
+            "legacy SQLite unavailable and direct Markdown search found no matching page"
+        )
     results: list[dict] = []
     for page in pages:
         _check_legacy_stop(deadline, cancelled)
-        try:
-            relative_path = page.relative_to(ROOT).as_posix()
-            raw = read_stable_bytes(page, MAX_PAGE_BYTES, label="search page")
-            content = raw.decode("utf-8", errors="ignore")
-        except (OSError, ValueError):
-            continue
-        title, summary = _extract_title_and_summary(content, page.stem)
-        body = _strip_frontmatter(content)
-        document_terms = set(
-            re.findall(
-                r"\w+",
-                f"{page.stem.replace('-', ' ')} {title} {summary} {body}".casefold(),
-            )
+        hit = _direct_page_hit(
+            page,
+            query_terms=query_terms,
+            project=project,
+            since=since,
+            as_of=as_of,
         )
-        if not query_terms or not query_term_set.issubset(document_terms):
-            continue
-        page_project = _extract_frontmatter_field(content, PROJECT_FIELD_RE) or ""
-        if project and page_project.casefold() != project.casefold():
-            continue
-        timestamp = _extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or ""
-        timestamp = timestamp[:10] if timestamp else ""
-        if since and timestamp and timestamp < since[:10]:
-            continue
-        if as_of and not _valid_as_of(relative_path, as_of):
-            continue
-        score = float(len(query_terms))
-        title_terms = set(re.findall(r"\w+", title.casefold()))
-        filename_terms = set(re.findall(r"\w+", page.stem.casefold()))
-        if query_term_set.issubset(title_terms):
-            score *= 3.0
-        if query_term_set.issubset(filename_terms):
-            score *= 4.0
-        authority = _extract_frontmatter_field(content, AUTHORITY_FIELD_RE) or ""
-        score *= authority_weight(authority)
-        results.append(
-            {
-                "path": relative_path,
-                "title": title,
-                "summary": summary[:120],
-                "score": round(score, 2),
-                "bm25_score": round(score, 2),
-                "project": page_project,
-                "timestamp": timestamp,
-                "candidate_id": page.stem,
-                "source_sha256": hashlib.sha256(raw).hexdigest(),
-                "byte_start": 0,
-                "byte_end": len(raw),
-                "generation": "legacy",
-                "authority": authority,
-                "fallback_reason": "legacy_sqlite_unavailable",
-                "partial": True,
-            }
-        )
+        if hit is not None:
+            results.append(hit)
     results.sort(key=lambda item: (-float(item["score"]), str(item["path"])))
     if not results:
         raise LegacySearchUnavailable(
