@@ -1637,58 +1637,73 @@ def candidates_to_legacy(
     return rows
 
 
-def _backend_hit_from_legacy(row: Mapping[str, Any], *, score_key: str = "score") -> dict[str, Any]:
-    path = str(row.get("path") or row.get("relative_path") or "")
-    candidate_id = str(
-        row.get("candidate_id")
-        or row.get("chunk_id")
-        or row.get("slug")
-        or Path(path).stem
-        or path
-    )
-    hit: dict[str, Any] = {
+# Fields a backend may supply that pass through untouched when present.
+_PASSTHROUGH_HIT_FIELDS = (
+    "bm25_score",
+    "vector_score",
+    "graph_boost",
+    "evidence_ids",
+    "authority",
+    "confidence",
+    "status",
+    "type",
+    "valid_from",
+    "valid_to",
+    "language",
+    "source_id",
+    "generation",
+    "content",
+    "lance_distance",
+    "seed_id",
+    "hop",
+    "direction",
+    "edge_type",
+    "assertion_path",
+    "retrieval_confidence",
+)
+
+
+def _first_present(row: Mapping[str, Any], keys: tuple[str, ...], fallback: Any) -> Any:
+    """First usable value among `keys`, else the fallback (empty counts as absent)."""
+    for key in keys:
+        value = row.get(key)
+        if value:
+            return value
+    return fallback
+
+
+def _legacy_candidate_id(row: Mapping[str, Any], path: str) -> str:
+    fallback = Path(path).stem or path
+    return str(_first_present(row, ("candidate_id", "chunk_id", "slug"), fallback))
+
+
+def _base_hit(row: Mapping[str, Any], path: str, score_key: str) -> dict[str, Any]:
+    candidate_id = _legacy_candidate_id(row, path)
+    return {
         "candidate_id": candidate_id,
-        "chunk_id": row.get("chunk_id") or candidate_id,
-        "parent_id": str(row.get("parent_id") or row.get("parent_page") or path),
+        "chunk_id": _first_present(row, ("chunk_id",), candidate_id),
+        "parent_id": str(_first_present(row, ("parent_id", "parent_page"), path)),
         "relative_path": path,
         "path": path,
-        "heading_path": row.get("heading_path") or row.get("heading_ancestry") or (),
-        "source_sha256": row.get("source_sha256") or ("0" * 64),
-        "byte_start": int(row.get("byte_start") or 0),
-        "byte_end": int(row.get("byte_end") or 0),
-        "score": float(row.get(score_key) or row.get("score") or 0.0),
-        "title": row.get("title") or Path(path).stem,
-        "summary": row.get("summary") or "",
-        "project": row.get("project") or "",
-        "timestamp": row.get("timestamp") or "",
+        "heading_path": _first_present(row, ("heading_path", "heading_ancestry"), ()),
+        "source_sha256": _first_present(row, ("source_sha256",), "0" * 64),
+        "byte_start": int(_first_present(row, ("byte_start",), 0)),
+        "byte_end": int(_first_present(row, ("byte_end",), 0)),
+        "score": float(_first_present(row, (score_key, "score"), 0.0)),
+        "title": _first_present(row, ("title",), Path(path).stem),
+        "summary": _first_present(row, ("summary",), ""),
+        "project": _first_present(row, ("project",), ""),
+        "timestamp": _first_present(row, ("timestamp",), ""),
     }
-    for key in (
-        "bm25_score",
-        "vector_score",
-        "graph_boost",
-        "evidence_ids",
-        "authority",
-        "confidence",
-        "status",
-        "type",
-        "valid_from",
-        "valid_to",
-        "language",
-        "source_id",
-        "generation",
-        "content",
-        "lance_distance",
-        "seed_id",
-        "hop",
-        "direction",
-        "edge_type",
-        "assertion_path",
-        "retrieval_confidence",
-    ):
-        if key in row:
-            hit[key] = row[key]
-    if "content" not in hit:
-        hit["content"] = hit.get("summary") or ""
+
+
+def _backend_hit_from_legacy(
+    row: Mapping[str, Any], *, score_key: str = "score"
+) -> dict[str, Any]:
+    path = str(_first_present(row, ("path", "relative_path"), ""))
+    hit = _base_hit(row, path, score_key)
+    hit.update({key: row[key] for key in _PASSTHROUGH_HIT_FIELDS if key in row})
+    hit.setdefault("content", hit.get("summary") or "")
     return hit
 
 
