@@ -267,23 +267,19 @@ def enrich_python_semantics(file_path: Path, calls: list[dict], workspace_root: 
     return enriched
 
 
-def analyze_co_changes(
-    directory: Path,
-    *,
-    min_shared_commits: int = 3,
-    max_commit_files: int = 50,
-    min_ochiai: float = 0.5,
-    timeout: float = 10,
-) -> list[dict]:
-    """Find statistically meaningful file-level logical coupling in git history."""
-    repo_root = _git_repo_root(directory, timeout) or directory.resolve()
+def _co_change_pathspec(directory: Path, repo_root: Path) -> str | None:
     try:
         pathspec = directory.resolve().relative_to(repo_root).as_posix()
     except ValueError:
-        return []
-    pathspec = pathspec or "."
+        return None
+    return pathspec or "."
+
+
+def _git_name_status_output(
+    repo_root: Path, pathspec: str, timeout: float
+) -> bytes | None:
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # noqa: S603, S607
             [
                 "git", "log", "--reverse", "--max-count=2000", "--no-merges",
                 "--name-status", "-z",
@@ -295,11 +291,82 @@ def analyze_co_changes(
             timeout=timeout,
         )
     except (OSError, subprocess.SubprocessError):
-        return []
+        return None
     if result.returncode != 0 or not result.stdout:
-        return []
+        return None
+    return result.stdout
 
-    commits, preferred = _parse_git_name_status(result.stdout)
+
+def _shared_commit_counts(normalized: list) -> Counter:
+    shared: Counter = Counter()
+    for files in normalized:
+        ordered = sorted(files)
+        for index, source in enumerate(ordered):
+            for target in ordered[index + 1:]:
+                shared[(source, target)] += 1
+    return shared
+
+
+def _co_change_measures(
+    together: int, source_count: int, target_count: int, total: int
+) -> tuple[float, float, float]:
+    """Ochiai, lift, and NPMI for one pair of files changed together."""
+    ochiai = together / math.sqrt(source_count * target_count)
+    support = together / total
+    lift = together * total / (source_count * target_count)
+    denominator = -math.log(support)
+    npmi = 0.0
+    if denominator:
+        npmi = math.log(lift) / denominator
+    return ochiai, lift, npmi
+
+
+def _co_change_edge(
+    source: str,
+    target: str,
+    together: int,
+    file_commits: Counter,
+    total: int,
+    preferred: dict,
+    min_ochiai: float,
+) -> dict | None:
+    source_count = file_commits[source]
+    target_count = file_commits[target]
+    ochiai, lift, npmi = _co_change_measures(
+        together, source_count, target_count, total
+    )
+    if ochiai < min_ochiai or lift <= 1 or npmi <= 0:
+        return None
+    return {
+        "source": preferred.get(source, source),
+        "target": preferred.get(target, target),
+        "type": CO_CHANGE_EDGE,
+        "weight": round(ochiai, 6),
+        "ochiai": round(ochiai, 6),
+        "npmi": round(npmi, 6),
+        "lift": round(lift, 6),
+        "support": round(together / total, 6),
+        "shared_commits": together,
+    }
+
+
+def analyze_co_changes(
+    directory: Path,
+    *,
+    min_shared_commits: int = 3,
+    max_commit_files: int = 50,
+    min_ochiai: float = 0.5,
+    timeout: float = 10,
+) -> list[dict]:
+    """Find statistically meaningful file-level logical coupling in git history."""
+    repo_root = _git_repo_root(directory, timeout) or directory.resolve()
+    pathspec = _co_change_pathspec(directory, repo_root)
+    if pathspec is None:
+        return []
+    stdout = _git_name_status_output(repo_root, pathspec, timeout)
+    if stdout is None:
+        return []
+    commits, preferred = _parse_git_name_status(stdout)
     normalized = [
         identities
         for identities in commits
@@ -307,41 +374,20 @@ def analyze_co_changes(
     ]
     if not normalized:
         return []
-
     file_commits = Counter(identity for files in normalized for identity in files)
-    shared = Counter()
-    for files in normalized:
-        ordered = sorted(files)
-        for index, source in enumerate(ordered):
-            for target in ordered[index + 1:]:
-                shared[(source, target)] += 1
-
     total = len(normalized)
     edges = []
-    for (source, target), together in shared.items():
+    for (source, target), together in _shared_commit_counts(normalized).items():
         if together < min_shared_commits:
             continue
-        source_count = file_commits[source]
-        target_count = file_commits[target]
-        ochiai = together / math.sqrt(source_count * target_count)
-        support = together / total
-        lift = together * total / (source_count * target_count)
-        denominator = -math.log(support)
-        npmi = math.log(lift) / denominator if denominator else 0.0
-        if ochiai < min_ochiai or lift <= 1 or npmi <= 0:
-            continue
-        edges.append({
-            "source": preferred.get(source, source),
-            "target": preferred.get(target, target),
-            "type": CO_CHANGE_EDGE,
-            "weight": round(ochiai, 6),
-            "ochiai": round(ochiai, 6),
-            "npmi": round(npmi, 6),
-            "lift": round(lift, 6),
-            "support": round(support, 6),
-            "shared_commits": together,
-        })
-    return sorted(edges, key=lambda edge: (-edge["weight"], edge["source"], edge["target"]))
+        edge = _co_change_edge(
+            source, target, together, file_commits, total, preferred, min_ochiai
+        )
+        if edge is not None:
+            edges.append(edge)
+    return sorted(
+        edges, key=lambda edge: (-edge["weight"], edge["source"], edge["target"])
+    )
 
 
 def _git_repo_root(directory: Path, timeout: float) -> Path | None:

@@ -2870,6 +2870,31 @@ def _exported_bytes_match(
     return sha256_bytes(current_history) == disposition["history_sha256"]
 
 
+def _require_repair_owner(owner: object, owner_type: type, message: str) -> None:
+    if not isinstance(owner, owner_type) or owner.role != "repair":
+        raise ValueError(message)
+
+
+def _require_task_identifier(task_id: object) -> None:
+    if not isinstance(task_id, str):
+        raise ValueError("task ID is invalid")
+    if not 1 <= len(task_id.encode("utf-8")) <= 256:
+        raise ValueError("task ID is invalid")
+
+
+def _require_matching_purge_operation(
+    existing_operation: sqlite3.Row, task: sqlite3.Row, operation_id: str
+) -> None:
+    if existing_operation["operation_id"] != operation_id:
+        raise QueueOperationError("corrupt_purge_conflict")
+    if task["state"] != "purge_pending":
+        raise QueueOperationError("corrupt_purge_conflict")
+
+
+def _blocked_purge(task_id: str, code: str) -> CorruptPurgeProgress:
+    return _purge_progress(task_id, "", 0, 0, state="blocked", code=code)
+
+
 def _redact_payload(value: object) -> object:
     if isinstance(value, str):
         return redact_secrets(value)
@@ -7750,6 +7775,181 @@ class _QueueV3CandidateReader:
                 raise QueueOperationError("corrupt_parent_delete_failed")
             self._clear_purge_authorization(database, task_id)
 
+    def _corrupt_purge_rows(
+        self, database: sqlite3.Connection, task_id: str
+    ) -> tuple[sqlite3.Row, sqlite3.Row, sqlite3.Row | None]:
+        task = database.execute(
+            "SELECT * FROM tasks WHERE id=?", (task_id,)
+        ).fetchone()
+        disposition = database.execute(
+            """SELECT disposition.*, operation.disposition_key,
+                      operation.rolling_root AS original_frozen_root,
+                      operation.lineage_generation
+               FROM corrupt_dispositions AS disposition
+               JOIN corrupt_export_operations AS operation
+                 ON operation.operation_id=disposition.operation_id
+               WHERE disposition.task_id=?""",
+            (task_id,),
+        ).fetchone()
+        if task is None or disposition is None:
+            raise QueueOperationError("corrupt_purge_state_invalid")
+        if task["state"] not in {"quarantined", "purge_pending"}:
+            raise QueueOperationError("corrupt_purge_state_invalid")
+        existing_operation = database.execute(
+            "SELECT * FROM corrupt_purge_operations WHERE task_id=?",
+            (task_id,),
+        ).fetchone()
+        return task, disposition, existing_operation
+
+    def _retention_blocker(
+        self,
+        disposition: sqlite3.Row,
+        existing_operation: sqlite3.Row | None,
+        now: datetime,
+    ) -> str | None:
+        """A disposed task is retained for thirty days before it may be purged."""
+        disposed_at = _parse_timestamp(str(disposition["disposed_at"]))
+        if disposed_at is None:
+            raise QueueOperationError("corrupt_disposition_invalid")
+        if existing_operation is not None:
+            return None
+        if disposed_at + timedelta(days=30) > now:
+            return "corrupt_retention_active"
+        return None
+
+    def _start_corrupt_purge(
+        self,
+        database: sqlite3.Connection,
+        task_id: str,
+        task: sqlite3.Row,
+        operation_id: str,
+        task_fence: TaskFence,
+        now: datetime,
+    ) -> str | None:
+        """None once the operation exists, or the code that blocks starting it."""
+        try:
+            binding = self.active_capture_binding(database, task_id)
+        except QueueOperationError:
+            return "capture_intent_unresolved"
+        terminal_code = self._capture_terminal_blocker(database, task_id, binding)
+        if terminal_code is not None:
+            return terminal_code
+        purge_token = sha256_bytes(
+            canonical_json_bytes(
+                {
+                    "operation_id": operation_id,
+                    "task_id": task_id,
+                    "task_fence_epoch": task_fence.epoch,
+                }
+            )
+        )
+        inserted = database.execute(
+            """INSERT INTO corrupt_purge_operations(
+                   operation_id,task_id,purge_token,expected_generation,
+                   cursor_task_id,page_count,rolling_root,state,created_at,updated_at
+               ) VALUES (?,?,?,?,'',0,?,'purging',?,?)""",
+            (
+                operation_id,
+                task_id,
+                purge_token,
+                int(task["lineage_generation"]),
+                sha256_bytes(b""),
+                _timestamp(now),
+                _timestamp(now),
+            ),
+        ).rowcount
+        changed = database.execute(
+            """UPDATE tasks SET state='purge_pending',updated_at=?
+               WHERE id=? AND state='quarantined'""",
+            (_timestamp(now), task_id),
+        ).rowcount
+        if (inserted, changed) != (1, 1):
+            raise QueueOperationError("corrupt_purge_start_failed")
+        return None
+
+    def _directed_corrupt_purge(
+        self, task_id: str, task_fence: TaskFence, now: datetime
+    ) -> tuple[str, Path, str | None]:
+        """(operation id, package, blocking code) for this purge attempt."""
+        with closing(self._connect()) as database, begin_immediate(database):
+            task, disposition, existing_operation = self._corrupt_purge_rows(
+                database, task_id
+            )
+            retention = self._retention_blocker(disposition, existing_operation, now)
+            if retention is not None:
+                return "", self.results_dir, retention
+            package_key = str(disposition["disposition_key"])
+            package = self.results_dir / f"corrupt-{package_key}"
+            package_code = self._corrupt_package_purge_blocker(package, disposition)
+            if package_code is not None:
+                return "", package, package_code
+            operation_key = sha256_bytes(
+                canonical_json_bytes(
+                    {
+                        "disposition_sha256": disposition["disposition_sha256"],
+                        "package_key": package_key,
+                        "task_id": task_id,
+                    }
+                )
+            )
+            operation_id = f"corrupt-purge:{operation_key}"
+            if existing_operation is None:
+                blocker = self._start_corrupt_purge(
+                    database, task_id, task, operation_id, task_fence, now
+                )
+                return operation_id, package, blocker
+            _require_matching_purge_operation(existing_operation, task, operation_id)
+            return operation_id, package, None
+
+    def _finish_corrupt_purge(
+        self,
+        task_id: str,
+        operation_id: str,
+        package: Path,
+        task_fence: TaskFence,
+        owner: OwnerLease,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> CorruptPurgeProgress:
+        page_progress = self._purge_corrupt_lineage_page(
+            task_id,
+            operation_id=operation_id,
+            package=package,
+            owner=owner,
+            task_fence=task_fence,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+        if page_progress.state == "blocked":
+            return page_progress
+        with closing(self._connect()) as database:
+            incoming = database.execute(
+                "SELECT 1 FROM tasks WHERE redrive_of=? LIMIT 1", (task_id,)
+            ).fetchone()
+        if incoming is not None:
+            return page_progress
+        self._publish_corrupt_purge_receipt(
+            task_id,
+            operation_id=operation_id,
+            package=package,
+            task_fence=task_fence,
+        )
+        self._delete_corrupt_parent(
+            task_id,
+            operation_id=operation_id,
+            package=package,
+            task_fence=task_fence,
+        )
+        return CorruptPurgeProgress(
+            task_id=task_id,
+            operation_id=operation_id,
+            state="purged",
+            pages_written=page_progress.pages_written,
+            links_deleted=page_progress.links_deleted,
+            complete=True,
+            code=None,
+        )
+
     def purge_quarantined(
         self,
         task_id: str,
@@ -7761,10 +7961,8 @@ class _QueueV3CandidateReader:
         from operational_ownership import OwnerLease
 
         _require_active(deadline, cancelled)
-        if not isinstance(owner, OwnerLease) or owner.role != "repair":
-            raise ValueError("corrupt purge requires a repair owner")
-        if not isinstance(task_id, str) or not 1 <= len(task_id.encode("utf-8")) <= 256:
-            raise ValueError("task ID is invalid")
+        _require_repair_owner(owner, OwnerLease, "corrupt purge requires a repair owner")
+        _require_task_identifier(task_id)
         registry = self.ownership_registry()
         with closing(registry._connect()) as coordinator_database:
             registry.require(coordinator_database, owner)
@@ -7776,170 +7974,13 @@ class _QueueV3CandidateReader:
             scope=f"task:{sha256_bytes(task_id.encode('utf-8'))}",
             parent=owner,
         ), self._corrupt_purge_task_fence(task_id, owner=owner) as task_fence:
-            now = _utc_now()
-            with closing(self._connect()) as database, begin_immediate(database):
-                task = database.execute(
-                    "SELECT * FROM tasks WHERE id=?", (task_id,)
-                ).fetchone()
-                disposition = database.execute(
-                    """SELECT disposition.*, operation.disposition_key,
-                              operation.rolling_root AS original_frozen_root,
-                              operation.lineage_generation
-                       FROM corrupt_dispositions AS disposition
-                       JOIN corrupt_export_operations AS operation
-                         ON operation.operation_id=disposition.operation_id
-                       WHERE disposition.task_id=?""",
-                    (task_id,),
-                ).fetchone()
-                if task is None or disposition is None or task["state"] not in {
-                    "quarantined",
-                    "purge_pending",
-                }:
-                    raise QueueOperationError("corrupt_purge_state_invalid")
-                existing_operation = database.execute(
-                    "SELECT * FROM corrupt_purge_operations WHERE task_id=?",
-                    (task_id,),
-                ).fetchone()
-                disposed_at = _parse_timestamp(str(disposition["disposed_at"]))
-                if disposed_at is None:
-                    raise QueueOperationError("corrupt_disposition_invalid")
-                if (
-                    existing_operation is None
-                    and disposed_at + timedelta(days=30) > now
-                ):
-                    return CorruptPurgeProgress(
-                        task_id=task_id,
-                        operation_id="",
-                        state="blocked",
-                        pages_written=0,
-                        links_deleted=0,
-                        complete=False,
-                        code="corrupt_retention_active",
-                    )
-                package_key = str(disposition["disposition_key"])
-                package = self.results_dir / f"corrupt-{package_key}"
-                package_code = self._corrupt_package_purge_blocker(
-                    package, disposition
-                )
-                if package_code is not None:
-                    return CorruptPurgeProgress(
-                        task_id=task_id,
-                        operation_id="",
-                        state="blocked",
-                        pages_written=0,
-                        links_deleted=0,
-                        complete=False,
-                        code=package_code,
-                    )
-                operation_key = sha256_bytes(
-                    canonical_json_bytes(
-                        {
-                            "disposition_sha256": disposition["disposition_sha256"],
-                            "package_key": package_key,
-                            "task_id": task_id,
-                        }
-                    )
-                )
-                operation_id = f"corrupt-purge:{operation_key}"
-                if existing_operation is None:
-                    try:
-                        binding = self.active_capture_binding(database, task_id)
-                    except QueueOperationError:
-                        return CorruptPurgeProgress(
-                            task_id=task_id,
-                            operation_id="",
-                            state="blocked",
-                            pages_written=0,
-                            links_deleted=0,
-                            complete=False,
-                            code="capture_intent_unresolved",
-                        )
-                    terminal_code = self._capture_terminal_blocker(
-                        database, task_id, binding
-                    )
-                    if terminal_code is not None:
-                        return CorruptPurgeProgress(
-                            task_id=task_id,
-                            operation_id="",
-                            state="blocked",
-                            pages_written=0,
-                            links_deleted=0,
-                            complete=False,
-                            code=terminal_code,
-                        )
-                    purge_token = sha256_bytes(
-                        canonical_json_bytes(
-                            {
-                                "operation_id": operation_id,
-                                "task_id": task_id,
-                                "task_fence_epoch": task_fence.epoch,
-                            }
-                        )
-                    )
-                    inserted = database.execute(
-                        """INSERT INTO corrupt_purge_operations(
-                               operation_id,task_id,purge_token,expected_generation,
-                               cursor_task_id,page_count,rolling_root,state,created_at,updated_at
-                           ) VALUES (?,?,?,?,'',0,?,'purging',?,?)""",
-                        (
-                            operation_id,
-                            task_id,
-                            purge_token,
-                            int(task["lineage_generation"]),
-                            sha256_bytes(b""),
-                            _timestamp(now),
-                            _timestamp(now),
-                        ),
-                    ).rowcount
-                    changed = database.execute(
-                        """UPDATE tasks SET state='purge_pending',updated_at=?
-                           WHERE id=? AND state='quarantined'""",
-                        (_timestamp(now), task_id),
-                    ).rowcount
-                    if (inserted, changed) != (1, 1):
-                        raise QueueOperationError("corrupt_purge_start_failed")
-                elif (
-                    existing_operation["operation_id"] != operation_id
-                    or task["state"] != "purge_pending"
-                ):
-                    raise QueueOperationError("corrupt_purge_conflict")
-            page_progress = self._purge_corrupt_lineage_page(
-                task_id,
-                operation_id=operation_id,
-                package=package,
-                owner=owner,
-                task_fence=task_fence,
-                deadline=deadline,
-                cancelled=cancelled,
+            operation_id, package, blocker = self._directed_corrupt_purge(
+                task_id, task_fence, _utc_now()
             )
-            if page_progress.state == "blocked":
-                return page_progress
-            with closing(self._connect()) as database:
-                incoming = database.execute(
-                    "SELECT 1 FROM tasks WHERE redrive_of=? LIMIT 1", (task_id,)
-                ).fetchone()
-            if incoming is not None:
-                return page_progress
-            self._publish_corrupt_purge_receipt(
-                task_id,
-                operation_id=operation_id,
-                package=package,
-                task_fence=task_fence,
-            )
-            self._delete_corrupt_parent(
-                task_id,
-                operation_id=operation_id,
-                package=package,
-                task_fence=task_fence,
-            )
-            return CorruptPurgeProgress(
-                task_id=task_id,
-                operation_id=operation_id,
-                state="purged",
-                pages_written=page_progress.pages_written,
-                links_deleted=page_progress.links_deleted,
-                complete=True,
-                code=None,
+            if blocker is not None:
+                return _blocked_purge(task_id, blocker)
+            return self._finish_corrupt_purge(
+                task_id, operation_id, package, task_fence, owner, deadline, cancelled
             )
 
     def _completed_corrupt_purge_progress(
