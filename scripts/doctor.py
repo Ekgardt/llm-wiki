@@ -2713,10 +2713,12 @@ def _index_check(
         timestamp = datetime.fromtimestamp(info.st_mtime, tz=timezone.utc)
     except sqlite3.OperationalError as exc:
         lowered = str(exc).lower()
-        if time.monotonic() >= deadline or "interrupted" in lowered:
-            return _index_deferred("FTS index check exceeded its time budget.", "budget_exhausted")
+        # A lock is a lock even when waiting for it used up the budget, and it
+        # is the more actionable of the two verdicts.
         if "locked" in lowered or "busy" in lowered:
             return _index_deferred("FTS index is busy.", "database_busy")
+        if time.monotonic() >= deadline or "interrupted" in lowered:
+            return _index_deferred("FTS index check exceeded its time budget.", "budget_exhausted")
         return _result(
             "index",
             "error",

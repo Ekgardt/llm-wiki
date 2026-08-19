@@ -2056,8 +2056,10 @@ def test_close_from_reader_handler_does_not_deadlock(fake_server: FakeLspServer)
         peer_handler,
         server_notification_handlers={"$/progress": notification_handler},
     )
-    assert handler_returned.wait(1)
-    protocol.reader_thread.join(1)
+    # This is a liveness test: a deadlock still fails it, just later. The wait
+    # has to outlast a loaded CI runner, not describe how fast the close is.
+    assert handler_returned.wait(60)
+    protocol.reader_thread.join(60)
     assert not protocol.reader_thread.is_alive()
     assert not protocol.writer_thread.is_alive()
 
