@@ -1120,10 +1120,13 @@ def _queue_v3_purge_authorizations_valid(database: sqlite3.Connection) -> bool:
     return all(_queue_v3_purge_authorization_valid(row) for row in rows)
 
 
-def _repair_partial_queue_v3_schema(
-    database: sqlite3.Connection, *, allow_populated_rebuild: bool
-) -> None:
-    expected = {
+_QUEUE_V3_DROP_ORDER = {"trigger": 0, "index": 1, "table": 2}
+_QUEUE_V3_DROP_KEYWORD = {"index": "INDEX", "table": "TABLE", "trigger": "TRIGGER"}
+
+
+def _expected_queue_v3_schema() -> dict[tuple[str, str], str]:
+    """Every schema object a complete queue v3 candidate is made of."""
+    return {
         (kind, name): sql
         for kind, definitions in (
             ("table", _QUEUE_V3_TABLE_SQL),
@@ -1132,40 +1135,83 @@ def _repair_partial_queue_v3_schema(
         )
         for name, sql in definitions
     }
-    existing = database.execute(
+
+
+def _queue_schema_rows(database: sqlite3.Connection) -> list[sqlite3.Row]:
+    return database.execute(
         """SELECT type, name, sql FROM sqlite_schema
            WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"""
     ).fetchall()
-    unexpected = [
-        (str(row["type"]), str(row["name"]))
-        for row in existing
-        if (str(row["type"]), str(row["name"])) not in expected
-    ]
-    if unexpected:
-        if not allow_populated_rebuild:
+
+
+def _drop_order_key(item: tuple[str, str]) -> tuple[int, str]:
+    """Triggers before indexes before tables, so a drop never dangles."""
+    return _QUEUE_V3_DROP_ORDER.get(item[0], 3), item[1]
+
+
+def _drop_schema_object(
+    database: sqlite3.Connection, kind: str, name: str
+) -> None:
+    """Drop one schema object, refusing a kind this migration never creates."""
+    keyword = _QUEUE_V3_DROP_KEYWORD.get(kind)
+    if keyword is None:
+        raise _migration_error(
+            "queue_v3_schema_conflict",
+            "queue v3 candidate has an unsupported schema object",
+        )
+    with begin_immediate(database):
+        database.execute(f'DROP {keyword} "{name}"')
+
+
+def _drop_unexpected_objects(
+    database: sqlite3.Connection,
+    unexpected: list[tuple[str, str]],
+    *,
+    allow_populated_rebuild: bool,
+) -> None:
+    """Objects we never create must go before the candidate can be trusted."""
+    if not allow_populated_rebuild:
+        raise _migration_error(
+            "queue_v3_schema_conflict",
+            "queue v3 candidate has unexpected schema objects",
+        )
+    for kind, name in sorted(unexpected, key=_drop_order_key):
+        _drop_schema_object(database, kind, name)
+
+
+def _table_is_populated(database: sqlite3.Connection, name: str) -> bool:
+    """An unreadable table counts as populated; we must not rebuild it blind."""
+    try:
+        row = database.execute(f'SELECT 1 FROM "{name}" LIMIT 1').fetchone()
+    except sqlite3.DatabaseError:
+        return True
+    return row is not None
+
+
+def _check_no_populated_rebuild(
+    database: sqlite3.Connection,
+    malformed: list[tuple[str, str]],
+    *,
+    allow_populated_rebuild: bool,
+) -> None:
+    """Refuse to rebuild a partial table that still holds rows."""
+    if allow_populated_rebuild:
+        return
+    for kind, name in malformed:
+        if kind == "table" and _table_is_populated(database, name):
             raise _migration_error(
                 "queue_v3_schema_conflict",
-                "queue v3 candidate has unexpected schema objects",
+                "queue v3 candidate has a populated partial table",
             )
-        for kind, name in sorted(
-            unexpected,
-            key=lambda item: ({"trigger": 0, "index": 1, "table": 2}.get(item[0], 3), item[1]),
-        ):
-            keyword = {"index": "INDEX", "table": "TABLE", "trigger": "TRIGGER"}.get(
-                kind
-            )
-            if keyword is None:
-                raise _migration_error(
-                    "queue_v3_schema_conflict",
-                    "queue v3 candidate has an unsupported schema object",
-                )
-            with begin_immediate(database):
-                database.execute(f'DROP {keyword} "{name}"')
-        existing = database.execute(
-            """SELECT type, name, sql FROM sqlite_schema
-               WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"""
-        ).fetchall()
-    malformed = [
+
+
+def _malformed_queue_v3_objects(
+    database: sqlite3.Connection,
+    existing: list[sqlite3.Row],
+    expected: Mapping[tuple[str, str], str],
+) -> list[tuple[str, str]]:
+    """Objects whose definition differs from the one this version creates."""
+    return [
         (str(row["type"]), str(row["name"]))
         for row in existing
         if not _queue_v3_object_matches(
@@ -1175,26 +1221,29 @@ def _repair_partial_queue_v3_schema(
             expected[(str(row["type"]), str(row["name"]))],
         )
     ]
-    for kind, name in malformed:
-        if kind == "table":
-            try:
-                populated = database.execute(
-                    f'SELECT 1 FROM "{name}" LIMIT 1'
-                ).fetchone()
-            except sqlite3.DatabaseError:
-                populated = True
-            if populated is not None and not allow_populated_rebuild:
-                raise _migration_error(
-                    "queue_v3_schema_conflict",
-                    "queue v3 candidate has a populated partial table",
-                )
-    for kind, name in sorted(
-        malformed,
-        key=lambda item: ({"trigger": 0, "index": 1, "table": 2}[item[0]], item[1]),
-    ):
-        keyword = {"index": "INDEX", "table": "TABLE", "trigger": "TRIGGER"}[kind]
-        with begin_immediate(database):
-            database.execute(f'DROP {keyword} "{name}"')
+
+
+def _repair_partial_queue_v3_schema(
+    database: sqlite3.Connection, *, allow_populated_rebuild: bool
+) -> None:
+    expected = _expected_queue_v3_schema()
+    existing = _queue_schema_rows(database)
+    unexpected = [
+        (str(row["type"]), str(row["name"]))
+        for row in existing
+        if (str(row["type"]), str(row["name"])) not in expected
+    ]
+    if unexpected:
+        _drop_unexpected_objects(
+            database, unexpected, allow_populated_rebuild=allow_populated_rebuild
+        )
+        existing = _queue_schema_rows(database)
+    malformed = _malformed_queue_v3_objects(database, existing, expected)
+    _check_no_populated_rebuild(
+        database, malformed, allow_populated_rebuild=allow_populated_rebuild
+    )
+    for kind, name in sorted(malformed, key=_drop_order_key):
+        _drop_schema_object(database, kind, name)
 
 
 def _queue_v2_tables(database: sqlite3.Connection) -> set[str]:
