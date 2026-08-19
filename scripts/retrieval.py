@@ -1817,6 +1817,175 @@ def _fusion_input(
     return hits
 
 
+def _require_known_edge_families(families: Mapping[str, bool] | None) -> None:
+    if families is None:
+        return
+    if not isinstance(families, Mapping):
+        raise ValueError("graph_edge_families must map known edge types to booleans")
+    if any(_is_unknown_edge_family(edge, enabled) for edge, enabled in families.items()):
+        raise ValueError("graph_edge_families must map known edge types to booleans")
+
+
+def _is_unknown_edge_family(edge: object, enabled: object) -> bool:
+    return edge not in GRAPH_EDGE_DECAY or not isinstance(enabled, bool)
+
+
+@dataclass
+class _BackendRun:
+    """What each backend produced, and what that means for the trace."""
+
+    lexical_hits: Sequence[Mapping[str, Any]] | None = None
+    dense_hits: Sequence[Mapping[str, Any]] | None = None
+    graph_hits: Sequence[Mapping[str, Any]] | None = None
+    ran_lexical: bool = False
+    ran_dense: bool = False
+    ran_graph: bool = False
+    dense_available: bool | None = None
+    graph_available: bool | None = None
+    graph_failure: str | None = None
+    optional_failure: str | None = None
+    partial: bool = False
+
+
+def _run_lexical_stage(
+    run: _BackendRun,
+    lexical_backend: BackendFn | None,
+    filters: Mapping[str, Any],
+    *,
+    wanted: Sequence[str],
+    deadline_monotonic: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    if lexical_backend is None or "lexical" not in wanted:
+        return
+    _check_stopped(deadline_monotonic, cancelled)
+    run.lexical_hits = lexical_backend(**filters) or ()
+    run.ran_lexical = True
+    _check_stopped(deadline_monotonic, cancelled)
+
+
+def _run_dense_stage(
+    run: _BackendRun,
+    dense_backend: BackendFn | None,
+    filters: Mapping[str, Any],
+    *,
+    wanted: Sequence[str],
+    deadline_monotonic: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    if dense_backend is None or "dense" not in wanted:
+        return
+    _check_stopped(deadline_monotonic, cancelled)
+    run.dense_hits, run.ran_dense, run.dense_available, timed_out = _run_dense_backend(
+        dense_backend,
+        filters,
+        deadline_monotonic=deadline_monotonic,
+        cancelled=cancelled,
+    )
+    if timed_out:
+        run.optional_failure = "optional_stage_timeout"
+        run.partial = True
+    _check_stopped(deadline_monotonic, cancelled)
+
+
+def _run_graph_stage(
+    run: _BackendRun,
+    graph_backend: BackendFn | None,
+    filters: Mapping[str, Any],
+    *,
+    analysis: QueryAnalysis,
+    requested: str,
+    wanted: Sequence[str],
+    graph_enabled: bool,
+    graph_edge_families: Mapping[str, bool] | None,
+    graph_per_seed_limit: int,
+    graph_global_limit: int,
+    corpus_generation: str,
+    deadline_monotonic: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    if "graph" not in wanted:
+        return
+    if not graph_enabled:
+        run.graph_available = False
+        return
+    if graph_backend is None:
+        return
+    _check_stopped(deadline_monotonic, cancelled)
+    (
+        run.graph_hits,
+        run.ran_graph,
+        run.graph_available,
+        run.graph_failure,
+    ) = _run_graph_backend(
+        graph_backend,
+        filters,
+        analysis=analysis,
+        requested=requested,
+        lexical_hits=run.lexical_hits,
+        dense_hits=run.dense_hits,
+        graph_edge_families=graph_edge_families,
+        per_seed_limit=graph_per_seed_limit,
+        global_limit=graph_global_limit,
+        corpus_generation=corpus_generation,
+        deadline_monotonic=deadline_monotonic,
+    )
+    _check_stopped(deadline_monotonic, cancelled)
+
+
+def _run_backends(
+    filters: Mapping[str, Any],
+    *,
+    analysis: QueryAnalysis,
+    requested: str,
+    wanted: Sequence[str],
+    lexical_backend: BackendFn | None,
+    dense_backend: BackendFn | None,
+    graph_backend: BackendFn | None,
+    graph_enabled: bool,
+    graph_edge_families: Mapping[str, bool] | None,
+    graph_per_seed_limit: int,
+    graph_global_limit: int,
+    corpus_generation: str,
+    deadline_monotonic: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> _BackendRun:
+    """Ask each wanted backend in turn; the graph one reads the earlier hits."""
+    run = _BackendRun()
+    _run_lexical_stage(
+        run,
+        lexical_backend,
+        filters,
+        wanted=wanted,
+        deadline_monotonic=deadline_monotonic,
+        cancelled=cancelled,
+    )
+    _run_dense_stage(
+        run,
+        dense_backend,
+        filters,
+        wanted=wanted,
+        deadline_monotonic=deadline_monotonic,
+        cancelled=cancelled,
+    )
+    _run_graph_stage(
+        run,
+        graph_backend,
+        filters,
+        analysis=analysis,
+        requested=requested,
+        wanted=wanted,
+        graph_enabled=graph_enabled,
+        graph_edge_families=graph_edge_families,
+        graph_per_seed_limit=graph_per_seed_limit,
+        graph_global_limit=graph_global_limit,
+        corpus_generation=corpus_generation,
+        deadline_monotonic=deadline_monotonic,
+        cancelled=cancelled,
+    )
+    return run
+
+
 def _backend_limit(limit: int, max_candidates: int | None) -> int:
     """How many rows each backend may return before fusion trims them."""
     if max_candidates is None or int(max_candidates) <= 0:
@@ -1876,77 +2045,41 @@ def retrieve(
     wanted = PROFILE_SIGNALS[requested]
     _require_bounded_int(graph_per_seed_limit, 1, 100, "graph_per_seed_limit")
     _require_bounded_int(graph_global_limit, 1, 1000, "graph_global_limit")
-    if graph_edge_families is not None:
-        if not isinstance(graph_edge_families, Mapping) or any(
-            edge not in GRAPH_EDGE_DECAY or not isinstance(enabled, bool)
-            for edge, enabled in graph_edge_families.items()
-        ):
-            raise ValueError("graph_edge_families must map known edge types to booleans")
-    lexical_hits: Sequence[Mapping[str, Any]] | None = None
-    dense_hits: Sequence[Mapping[str, Any]] | None = None
-    graph_hits: Sequence[Mapping[str, Any]] | None = None
-
-    ran_lexical = False
-    ran_dense = False
-    ran_graph = False
-    dense_available: bool | None = None
-    graph_available: bool | None = None
-    graph_failure: str | None = None
-    optional_failure: str | None = None
-
-    if lexical_backend is not None and "lexical" in wanted:
-        _check_stopped(deadline_monotonic, cancelled)
-        lexical_hits = lexical_backend(**filters) or ()
-        ran_lexical = True
-        _check_stopped(deadline_monotonic, cancelled)
-
-    if dense_backend is not None and "dense" in wanted:
-        _check_stopped(deadline_monotonic, cancelled)
-        dense_hits, ran_dense, dense_available, dense_timeout = _run_dense_backend(
-            dense_backend,
-            filters,
-            deadline_monotonic=deadline_monotonic,
-            cancelled=cancelled,
-        )
-        if dense_timeout:
-            optional_failure = "optional_stage_timeout"
-            partial = True
-        _check_stopped(deadline_monotonic, cancelled)
-
-    if graph_backend is not None and "graph" in wanted and graph_enabled:
-        _check_stopped(deadline_monotonic, cancelled)
-        graph_hits, ran_graph, graph_available, graph_failure = _run_graph_backend(
-            graph_backend,
-            filters,
-            analysis=analysis,
-            requested=requested,
-            lexical_hits=lexical_hits,
-            dense_hits=dense_hits,
-            graph_edge_families=graph_edge_families,
-            per_seed_limit=graph_per_seed_limit,
-            global_limit=graph_global_limit,
-            corpus_generation=corpus_generation,
-            deadline_monotonic=deadline_monotonic,
-        )
-        _check_stopped(deadline_monotonic, cancelled)
-    elif "graph" in wanted and not graph_enabled:
-        graph_available = False
+    _require_known_edge_families(graph_edge_families)
+    backends = _run_backends(
+        filters,
+        analysis=analysis,
+        requested=requested,
+        wanted=wanted,
+        lexical_backend=lexical_backend,
+        dense_backend=dense_backend,
+        graph_backend=graph_backend,
+        graph_enabled=graph_enabled,
+        graph_edge_families=graph_edge_families,
+        graph_per_seed_limit=graph_per_seed_limit,
+        graph_global_limit=graph_global_limit,
+        corpus_generation=corpus_generation,
+        deadline_monotonic=deadline_monotonic,
+        cancelled=cancelled,
+    )
+    optional_failure = backends.optional_failure
+    partial = partial or backends.partial
 
     effective, fallback, signals = _resolve_effective_mode(
         requested,
         wanted=wanted,
-        ran_lexical=ran_lexical,
-        ran_dense=ran_dense,
-        ran_graph=ran_graph,
-        dense_available=dense_available,
-        graph_available=graph_available,
+        ran_lexical=backends.ran_lexical,
+        ran_dense=backends.ran_dense,
+        ran_graph=backends.ran_graph,
+        dense_available=backends.dense_available,
+        graph_available=backends.graph_available,
         graph_enabled=graph_enabled,
     )
-    fallback = graph_failure or fallback
+    fallback = backends.graph_failure or fallback
 
-    fuse_lexical = _fusion_input(lexical_hits, "lexical", signals)
-    fuse_dense = _fusion_input(dense_hits, "dense", signals)
-    fuse_graph = _fusion_input(graph_hits, "graph", signals)
+    fuse_lexical = _fusion_input(backends.lexical_hits, "lexical", signals)
+    fuse_dense = _fusion_input(backends.dense_hits, "dense", signals)
+    fuse_graph = _fusion_input(backends.graph_hits, "graph", signals)
     candidates, display_meta = fuse_rrf(
         lexical=fuse_lexical, dense=fuse_dense, graph=fuse_graph
     )
