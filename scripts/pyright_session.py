@@ -1409,6 +1409,11 @@ def _expired_diagnostics(
     return ProviderDiagnostics((), None, True)
 
 
+_PROTOCOL_EVIDENCE = ("initialize", "initialized", "configuration")
+_DID_OPEN_EVIDENCE = (*_PROTOCOL_EVIDENCE, "didOpen")
+_QUERY_READY_EVIDENCE = (*_DID_OPEN_EVIDENCE, "documentSymbol")
+
+
 class _LaunchServerGuard:
     def __init__(
         self,
@@ -2950,65 +2955,68 @@ class PyrightSession:
         self._diagnostic_bytes = 0
         self._clear_wire_state()
 
-    def _refresh_readiness_locked(self, *, deadline: float) -> None:
-        if self._position_encoding is None:
-            self._readiness = "not_ready"
-            self._readiness_evidence = ()
-            return
-        target = self._readiness_target_uri
+    def _demote_target_locked(self, target: str) -> None:
+        """The target is open but could not be promoted to query-ready."""
+        self._ready_uri_generations.pop(target, None)
+        self._readiness = "protocol_initialized"
+        self._readiness_evidence = _DID_OPEN_EVIDENCE
+
+    def _promote_target_locked(
+        self,
+        target: str,
+        process: LspProcess,
+        generation: str,
+        deadline: float,
+    ) -> bool:
+        """Whether the server confirmed its workspace is ready."""
+        try:
+            return process.promote_workspace_ready(
+                generation_nonce=generation,
+                deadline=deadline,
+            )
+        except BaseException:
+            self._demote_target_locked(target)
+            raise
+
+    def _target_ready_locked(self, target: str, deadline: float) -> bool:
+        """Whether the ready target may be reported as query-ready."""
         process = self._process
         generation = self._generation_nonce
-        if target is not None and self._document_ready_locked(target):
-            if (
-                process is not None
-                and generation is not None
-                and process.generation_nonce == generation
-            ):
-                try:
-                    promoted = process.promote_workspace_ready(
-                        generation_nonce=generation,
-                        deadline=deadline,
-                    )
-                except BaseException:
-                    self._ready_uri_generations.pop(target, None)
-                    self._readiness = "protocol_initialized"
-                    self._readiness_evidence = (
-                        "initialize",
-                        "initialized",
-                        "configuration",
-                        "didOpen",
-                    )
-                    raise
-                if not promoted:
-                    self._ready_uri_generations.pop(target, None)
-                    self._readiness = "protocol_initialized"
-                    self._readiness_evidence = (
-                        "initialize",
-                        "initialized",
-                        "configuration",
-                        "didOpen",
-                    )
-                    return
-            self._readiness = "query_ready"
-            self._readiness_evidence = (
-                "initialize",
-                "initialized",
-                "configuration",
-                "didOpen",
-                "documentSymbol",
-            )
-            return
+        if process is None or generation is None:
+            return True
+        if process.generation_nonce != generation:
+            return True
+        if self._promote_target_locked(target, process, generation, deadline):
+            return True
+        self._demote_target_locked(target)
+        return False
+
+    def _initialized_readiness_locked(self) -> None:
+        """Without a ready target the session is initialized, not query-ready."""
+        generation = self._generation_nonce
         self._readiness = "protocol_initialized"
         did_open = any(
             self._wire_document_opened(document, generation)
             for document in self._documents.values()
         )
         self._readiness_evidence = (
-            "initialize",
-            "initialized",
-            "configuration",
+            *_PROTOCOL_EVIDENCE,
             *(("didOpen",) if did_open else ()),
         )
+
+    def _refresh_readiness_locked(self, *, deadline: float) -> None:
+        if self._position_encoding is None:
+            self._readiness = "not_ready"
+            self._readiness_evidence = ()
+            return
+        target = self._readiness_target_uri
+        if target is None or not self._document_ready_locked(target):
+            self._initialized_readiness_locked()
+            return
+        if not self._target_ready_locked(target, deadline):
+            return
+        self._readiness = "query_ready"
+        self._readiness_evidence = _QUERY_READY_EVIDENCE
 
     def _mark_protocol_initialized(self, *, did_open: bool, deadline: float) -> None:
         with self._lock:
