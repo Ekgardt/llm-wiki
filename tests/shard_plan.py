@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 TESTS_DIR = Path(__file__).resolve().parent
@@ -75,16 +77,22 @@ def _parse(argv: list[str] | None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the shard in a child `python -m pytest`, not in this process.
+
+    `multiprocessing` with the spawn start method re-imports the main module in
+    every child. Tests that spawn workers would therefore re-enter this module
+    instead of pytest's, which is not the shape the suite runs under anywhere
+    else. Handing the work to `python -m pytest` keeps that shape identical.
+    """
     args = _parse(argv)
     _require_selected(args.shard, args.of)
     files = plan(args.of)[args.shard - 1]
     if args.list:
         print("\n".join(files))
         return 0
-    import pytest
-
     paths = [str(TESTS_DIR / name) for name in files]
-    return pytest.main([*_pytest_arguments(args.pytest_args), *paths])
+    command = [sys.executable, "-m", "pytest", *_pytest_arguments(args.pytest_args), *paths]
+    return subprocess.call(command)
 
 
 if __name__ == "__main__":
