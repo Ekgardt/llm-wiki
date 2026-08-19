@@ -2888,3 +2888,27 @@ def test_orphan_scan_stops_before_sorting_oversized_input(tmp_path, monkeypatch)
     with pytest.raises(ValueError, match="child count"):
         catalog.recover_orphans()
     assert yielded == 3
+
+
+def test_a_writer_without_a_deadline_waits_out_contention(tmp_path, monkeypatch):
+    """Two compare-and-swaps must not surface `database is locked`.
+
+    A full local run produced exactly that: the loser's five-second busy window
+    expired while the winner held the write lock, and the raw SQLite error
+    reached the caller instead of a decided race.
+    """
+    import generation_catalog
+
+    catalog = _catalog(tmp_path)
+    seen: list[int] = []
+    real_open = generation_catalog.open_operational_db
+
+    def record(path, *, busy_ms, **options):
+        seen.append(busy_ms)
+        return real_open(path, busy_ms=busy_ms, **options)
+
+    monkeypatch.setattr(generation_catalog, "open_operational_db", record)
+    catalog._connect(deadline=None).close()
+
+    assert seen == [generation_catalog.UNBOUNDED_BUSY_MS]
+    assert generation_catalog.UNBOUNDED_BUSY_MS > generation_catalog.BUSY_MS

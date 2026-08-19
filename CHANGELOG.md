@@ -8,6 +8,11 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A generation-catalog writer without a caller deadline waits out contention
+  instead of surfacing `database is locked`. Two compare-and-swaps on a loaded
+  machine can hold the write lock for longer than the previous five-second
+  window, which turned a decided race into a raw SQLite error.
+
 - Windows cleanup verification reads the process tree from the kernel snapshot.
   It used to ask `wmic`, which current Windows no longer ships, and fall back to
   a PowerShell CIM enumeration that does not finish inside its budget on a

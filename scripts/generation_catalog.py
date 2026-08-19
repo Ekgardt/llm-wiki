@@ -162,7 +162,12 @@ MAX_CATALOG_BYTES = 256 * 1024 * 1024
 MAX_GENERATIONS = 1024
 MAX_ACTIVATION_HISTORY = 16384
 HASH_CHUNK_BYTES = 64 * 1024
+# A caller with a deadline gets whatever is left of it, capped here. A caller
+# without one waits out contention instead of surfacing `database is locked`:
+# two writers doing a compare-and-swap on a loaded machine can hold the write
+# lock for longer than five seconds.
 BUSY_MS = 5000
+UNBOUNDED_BUSY_MS = 30_000
 CLEANUP_CATALOG_FENCE_SECONDS = 1.0
 
 _GENERATION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
@@ -1271,7 +1276,7 @@ class GenerationCatalog:
                 self.state_root,
                 max_bytes=self.max_catalog_bytes,
             )
-        busy_ms = BUSY_MS
+        busy_ms = UNBOUNDED_BUSY_MS
         if deadline is not None:
             busy_ms = self._remaining_busy_ms(deadline)
         return open_operational_db(self.catalog_path, busy_ms=busy_ms)
