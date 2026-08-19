@@ -720,12 +720,11 @@ def _duplicate_top_level_names(source: str) -> list[str]:
 
 def _python_sources() -> list[Path]:
     """Every source we own; fixtures include a deliberately unparsable file."""
-    sources = []
-    for directory in ("scripts", "tests", "benchmark", "integrations"):
-        for path in sorted((ROOT / directory).rglob("*.py")):
-            if "fixtures" not in path.parts:
-                sources.append(path)
-    return sources
+    directories = ("scripts", "tests", "benchmark", "integrations")
+    found = (
+        path for name in directories for path in sorted((ROOT / name).rglob("*.py"))
+    )
+    return [path for path in found if "fixtures" not in path.parts]
 
 
 def test_the_duplicate_detector_sees_a_shadowed_definition() -> None:
