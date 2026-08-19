@@ -700,3 +700,46 @@ def test_docs_name_stage_two_runtime_artifacts():
             assert re.search(pattern, example) is None, (
                 f"privacy pattern {label!r} rejected safe public text: {example}"
             )
+
+
+def _duplicate_top_level_names(source: str) -> list[str]:
+    """Names a module binds twice at top level, where the second silently wins."""
+    import ast
+
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    definition = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    for node in ast.parse(source).body:
+        if not isinstance(node, definition):
+            continue
+        if node.name in seen:
+            duplicates.append(node.name)
+        seen.add(node.name)
+    return duplicates
+
+
+def _python_sources() -> list[Path]:
+    """Every source we own; fixtures include a deliberately unparsable file."""
+    sources = []
+    for directory in ("scripts", "tests", "benchmark", "integrations"):
+        for path in sorted((ROOT / directory).rglob("*.py")):
+            if "fixtures" not in path.parts:
+                sources.append(path)
+    return sources
+
+
+def test_the_duplicate_detector_sees_a_shadowed_definition() -> None:
+    shadowed = "def a():\n    pass\n\n\ndef a():\n    pass\n"
+    assert _duplicate_top_level_names(shadowed) == ["a"]
+    assert _duplicate_top_level_names("def a():\n    pass\n\n\ndef b():\n    pass\n") == []
+
+
+def test_no_module_defines_the_same_top_level_name_twice() -> None:
+    """A second definition silently replaces the first, so an edit can go unnoticed."""
+    offenders = {}
+    for path in _python_sources():
+        duplicates = _duplicate_top_level_names(path.read_text(encoding="utf-8"))
+        if duplicates:
+            offenders[str(path.relative_to(ROOT))] = duplicates
+
+    assert offenders == {}

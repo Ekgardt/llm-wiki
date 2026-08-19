@@ -844,57 +844,6 @@ def _check_legacy_stop(
         raise TimeoutError("legacy retrieval deadline reached")
 
 
-def _blank_query(query: str) -> bool:
-    return not query or not query.strip()
-
-
-def _no_stop_requested(
-    deadline: float | None, cancelled: Callable[[], bool] | None
-) -> bool:
-    return deadline is None and cancelled is None
-
-
-def _check_legacy_stop(
-    deadline: float | None, cancelled: Callable[[], bool] | None
-) -> None:
-    if cancelled is not None and cancelled():
-        raise TimeoutError("legacy retrieval cancelled")
-    if deadline is not None and time.monotonic() >= deadline:
-        raise TimeoutError("legacy retrieval deadline reached")
-
-
-@contextmanager
-def _legacy_sqlite_guard(
-    connection: sqlite3.Connection,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> Iterator[None]:
-    _check_legacy_stop(deadline, cancelled)
-    if deadline is None and cancelled is None:
-        yield
-        return
-    stopped = False
-
-    def progress() -> int:
-        nonlocal stopped
-        stopped = _stop_reached(deadline, cancelled)
-        return int(stopped)
-
-    connection.set_progress_handler(progress, 1000)
-    try:
-        yield
-    except sqlite3.DatabaseError as exc:
-        if stopped:
-            raise TimeoutError(
-                "legacy SQLite work cancelled or deadline exceeded"
-            ) from exc
-        _check_legacy_stop(deadline, cancelled)
-        raise
-    finally:
-        connection.set_progress_handler(None, 0)
-    _check_legacy_stop(deadline, cancelled)
-
-
 def _prefixed_for_query(texts: list[str], is_query: bool) -> list[str]:
     if not is_query or not QUERY_INSTRUCTION:
         return texts
@@ -3665,12 +3614,6 @@ def _project_matches(page_project: str, project: str | None) -> bool:
     return page_project.casefold() == project.casefold()
 
 
-def _before_since(timestamp: str, since: str | None) -> bool:
-    if not since or not timestamp:
-        return False
-    return timestamp < since[:10]
-
-
 def _exact_page_eligible(
     relative_path: str,
     *,
@@ -4306,17 +4249,6 @@ def _try_generation_search(
         return None
     finally:
         connection.close()
-
-
-def _stop_options(
-    deadline: float | None, cancelled: Callable[[], bool] | None
-) -> dict[str, object]:
-    options: dict[str, object] = {}
-    if deadline is not None:
-        options["deadline"] = deadline
-    if cancelled is not None:
-        options["cancelled"] = cancelled
-    return options
 
 
 def _generation_search_allowed(
