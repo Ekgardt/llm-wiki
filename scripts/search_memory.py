@@ -825,6 +825,35 @@ def _publish_generation(
         )
 
 
+def _blank_query(query: str) -> bool:
+    return not query or not query.strip()
+
+
+def _no_stop_requested(
+    deadline: float | None, cancelled: Callable[[], bool] | None
+) -> bool:
+    return deadline is None and cancelled is None
+
+
+def _check_legacy_stop(
+    deadline: float | None, cancelled: Callable[[], bool] | None
+) -> None:
+    if cancelled is not None and cancelled():
+        raise TimeoutError("legacy retrieval cancelled")
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("legacy retrieval deadline reached")
+
+
+def _blank_query(query: str) -> bool:
+    return not query or not query.strip()
+
+
+def _no_stop_requested(
+    deadline: float | None, cancelled: Callable[[], bool] | None
+) -> bool:
+    return deadline is None and cancelled is None
+
+
 def _check_legacy_stop(
     deadline: float | None, cancelled: Callable[[], bool] | None
 ) -> None:
@@ -1202,6 +1231,10 @@ def _any_page_newer_than(
     return False
 
 
+def _index_targets(root: Path | None, index_file: Path | None) -> tuple[Path, Path]:
+    return root or ROOT, index_file or INDEX_FILE
+
+
 def _needs_rebuild(
     pages: list[Path],
     *,
@@ -1213,8 +1246,7 @@ def _needs_rebuild(
 ) -> bool:
     """True when a page is newer than the index, or membership changed."""
     _check_legacy_stop(deadline, cancelled)
-    source_root = root or ROOT
-    current_index = index_file or INDEX_FILE
+    source_root, current_index = _index_targets(root, index_file)
     if not current_index.exists():
         return True
     if index_file is None and index_manifest is None:
@@ -1738,13 +1770,17 @@ def _check_generation_stop(
 
 
 @contextmanager
-def _generation_sqlite_guard(
+def _sqlite_stop_guard(
     connection: sqlite3.Connection,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
+    *,
+    check: Callable[[float | None, Callable[[], bool] | None], None],
+    message: str,
 ) -> Iterator[None]:
-    _check_generation_stop(deadline, cancelled)
-    if deadline is None and cancelled is None:
+    """Turn an interrupted SQLite statement into the stop that caused it."""
+    check(deadline, cancelled)
+    if _no_stop_requested(deadline, cancelled):
         yield
         return
     stopped = False
@@ -1759,14 +1795,44 @@ def _generation_sqlite_guard(
         yield
     except sqlite3.DatabaseError as exc:
         if stopped:
-            raise TimeoutError(
-                "generation SQLite work cancelled or deadline exceeded"
-            ) from exc
-        _check_generation_stop(deadline, cancelled)
+            raise TimeoutError(message) from exc
+        check(deadline, cancelled)
         raise
     finally:
         connection.set_progress_handler(None, 0)
-    _check_generation_stop(deadline, cancelled)
+    check(deadline, cancelled)
+
+
+@contextmanager
+def _legacy_sqlite_guard(
+    connection: sqlite3.Connection,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> Iterator[None]:
+    with _sqlite_stop_guard(
+        connection,
+        deadline,
+        cancelled,
+        check=_check_legacy_stop,
+        message="legacy SQLite work cancelled or deadline exceeded",
+    ):
+        yield
+
+
+@contextmanager
+def _generation_sqlite_guard(
+    connection: sqlite3.Connection,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> Iterator[None]:
+    with _sqlite_stop_guard(
+        connection,
+        deadline,
+        cancelled,
+        check=_check_generation_stop,
+        message="generation SQLite work cancelled or deadline exceeded",
+    ):
+        yield
 
 
 def _canonical_manifest_bytes(manifest: dict[str, object]) -> bytes:
@@ -3303,30 +3369,46 @@ def _finalize_generation_results(
 ) -> list[dict[str, object]]:
     if not results or not emit_telemetry:
         return results
+    _best_effort_record_generation_impressions(results, query, source_tool)
+    return results
+
+
+def _generation_impression_events(
+    results: list[dict[str, object]], query: str, source_tool: str, make_event
+) -> list:
+    events = []
+    for rank, result in enumerate(results, 1):
+        event = make_event(
+            event_kind="impression",
+            query=query,
+            retrieval_mode=str(result["effective_mode"]),
+            candidate_id=str(result["chunk_id"]),
+            rank=rank,
+            generation=str(result["generation"]),
+            source_tool=source_tool,
+        )
+        if event is not None:
+            events.append(event)
+    return events
+
+
+def _best_effort_record_generation_impressions(
+    results: list[dict[str, object]], query: str, source_tool: str
+) -> None:
+    """Telemetry never changes what a search returns, so it swallows failures."""
     try:
         from retrieval_telemetry import (
             best_effort_make_event,
             best_effort_record_events,
         )
 
-        events = []
-        for rank, result in enumerate(results, 1):
-            event = best_effort_make_event(
-                event_kind="impression",
-                query=query,
-                retrieval_mode=str(result["effective_mode"]),
-                candidate_id=str(result["chunk_id"]),
-                rank=rank,
-                generation=str(result["generation"]),
-                source_tool=source_tool,
-            )
-            if event is not None:
-                events.append(event)
+        events = _generation_impression_events(
+            results, query, source_tool, best_effort_make_event
+        )
         if events:
             best_effort_record_events(events)
     except Exception:
         pass
-    return results
 
 
 def search(
@@ -3355,7 +3437,7 @@ def search(
 ) -> list[dict]:
     """Public search API — always routes through retrieval.retrieve()."""
     limit = _validate_search_limit(limit)
-    if not query or not query.strip():
+    if _blank_query(query):
         return []
     from retrieval import retrieve_via_search_memory
 
@@ -3666,7 +3748,7 @@ def _legacy_lexical_hits(
 ) -> list[dict]:
     """Independent lexical backend used by retrieve() — no dense/graph fusion."""
     _check_legacy_stop(deadline, cancelled)
-    if not query or not query.strip():
+    if _blank_query(query):
         return []
     pages = _resolved_pages(page_paths, scope, deadline)
     if not pages:
@@ -3934,7 +4016,7 @@ def _numpy_dense_hits(
 
 
 def _dense_backend_ready(query: str) -> bool:
-    if not query or not query.strip():
+    if _blank_query(query):
         return False
     return _have_sentence_transformers()
 
@@ -4267,7 +4349,7 @@ def _search_backends(
 ) -> list[dict]:
     """Prefer a validated generation and otherwise preserve legacy search behavior."""
     limit = _validate_search_limit(limit)
-    if not query or not query.strip():
+    if _blank_query(query):
         return []
     selected_catalog = catalog if catalog is not None else _active_generation_catalog()
     stop_options = _stop_options(deadline, cancelled)
@@ -4514,7 +4596,7 @@ def _legacy_search(
     time, and `semantic` adds vector search fused with BM25 through RRF so
     related pages surface when the keywords do not match.
     """
-    if not query or not query.strip():
+    if _blank_query(query):
         return []
     pages = page_paths if page_paths is not None else _collect_pages(scope)
     if not pages:
