@@ -355,86 +355,114 @@ def _normalize_profile(value: str | None) -> str | None:
     return normalized
 
 
+_INTENT_PATTERNS = (
+    ("temporal", _TEMPORAL_RE),
+    ("graph_relation", _GRAPH_RE),
+    ("repo_map", _REPO_MAP_RE),
+    ("impact", _IMPACT_RE),
+    ("global_synthesis", _GLOBAL_RE),
+)
+
+# First match wins; the order is the priority the planner promises.
+_PROFILE_BY_INTENT = (
+    ("global_synthesis", "GLOBAL"),
+    ("impact", "IMPACT"),
+    ("repo_map", "REPO_MAP"),
+    ("graph_relation", "GRAPH"),
+    ("temporal", "TEMPORAL"),
+    ("quoted_phrase", "EXACT"),
+    ("exact_identifier", "EXACT"),
+    ("question", "HYBRID"),
+)
+
+
+def _quoted_phrases(stripped: str) -> tuple[str, ...]:
+    return tuple(
+        match.group(1).strip()
+        for match in _QUOTE_RE.finditer(stripped)
+        if match.group(1).strip()
+    )
+
+
+def _slug_is_redundant(slug: str, identifiers: list[str]) -> bool:
+    """A slug already covered by a path or a longer identifier adds nothing."""
+    if "/" in slug or slug in identifiers:
+        return True
+    return any(slug in item for item in identifiers)
+
+
+def _exact_identifiers(stripped: str) -> tuple[str, ...]:
+    identifiers: list[str] = []
+    for pattern, group in (
+        (_PATH_RE, "path"),
+        (_FILENAME_RE, "file"),
+        (_CAMEL_RE, "camel"),
+        (_SNAKE_RE, "snake"),
+    ):
+        identifiers.extend(match.group(group) for match in pattern.finditer(stripped))
+    for match in _SLUG_RE.finditer(stripped):
+        slug = match.group("slug")
+        if not _slug_is_redundant(slug, identifiers):
+            identifiers.append(slug)
+    return tuple(dict.fromkeys(identifiers))
+
+
+def _is_question(stripped: str, normalized: str) -> bool:
+    if _QUESTION_RE.search(normalized):
+        return True
+    return stripped.endswith("?") or stripped.endswith("？")
+
+
+def _shape_intents(
+    stripped: str, normalized: str, phrases: tuple[str, ...], identifiers: tuple[str, ...]
+) -> list[str]:
+    """Intents that come from the query's shape rather than its wording."""
+    intents: list[str] = []
+    if phrases:
+        intents.append("quoted_phrase")
+    if identifiers:
+        intents.append("exact_identifier")
+    if _is_question(stripped, normalized):
+        intents.append("question")
+    return intents
+
+
+def _query_intents(
+    stripped: str, normalized: str, phrases: tuple[str, ...], identifiers: tuple[str, ...]
+) -> tuple[str, ...]:
+    intents = _shape_intents(stripped, normalized, phrases, identifiers)
+    intents.extend(
+        name for name, pattern in _INTENT_PATTERNS if pattern.search(normalized)
+    )
+    if _CROSS_LANG_RE.search(stripped):
+        intents.append("cross_language")
+    return tuple(intents)
+
+
+def _recommended_profile(intents: tuple[str, ...]) -> str:
+    intent_set = set(intents)
+    for intent, profile in _PROFILE_BY_INTENT:
+        if intent in intent_set:
+            return profile
+    return "BASE"
+
+
 def analyze_query(query: str) -> QueryAnalysis:
     """Deterministic query analysis used by the retrieval planner."""
     if not isinstance(query, str):
         raise TypeError("query must be a string")
     stripped = query.strip()
     normalized = " ".join(stripped.split())
-    intents: list[str] = []
-    phrases = tuple(
-        match.group(1).strip()
-        for match in _QUOTE_RE.finditer(stripped)
-        if match.group(1).strip()
-    )
-    if phrases:
-        intents.append("quoted_phrase")
-
-    identifiers: list[str] = []
-    for match in _PATH_RE.finditer(stripped):
-        identifiers.append(match.group("path"))
-    for match in _FILENAME_RE.finditer(stripped):
-        identifiers.append(match.group("file"))
-    for match in _CAMEL_RE.finditer(stripped):
-        identifiers.append(match.group("camel"))
-    for match in _SNAKE_RE.finditer(stripped):
-        identifiers.append(match.group("snake"))
-    for match in _SLUG_RE.finditer(stripped):
-        slug = match.group("slug")
-        if "/" in slug or slug in identifiers:
-            continue
-        if any(slug in item for item in identifiers):
-            continue
-        identifiers.append(slug)
-    # Deduplicate while preserving order.
-    seen: set[str] = set()
-    exact_identifiers = []
-    for item in identifiers:
-        if item not in seen:
-            seen.add(item)
-            exact_identifiers.append(item)
-    if exact_identifiers:
-        intents.append("exact_identifier")
-
-    if _QUESTION_RE.search(normalized) or stripped.endswith("?") or stripped.endswith("？"):
-        intents.append("question")
-    if _TEMPORAL_RE.search(normalized):
-        intents.append("temporal")
-    if _GRAPH_RE.search(normalized):
-        intents.append("graph_relation")
-    if _REPO_MAP_RE.search(normalized):
-        intents.append("repo_map")
-    if _IMPACT_RE.search(normalized):
-        intents.append("impact")
-    if _GLOBAL_RE.search(normalized):
-        intents.append("global_synthesis")
-    if _CROSS_LANG_RE.search(stripped):
-        intents.append("cross_language")
-
-    profile = "BASE"
-    intent_set = set(intents)
-    if "global_synthesis" in intent_set:
-        profile = "GLOBAL"
-    elif "impact" in intent_set:
-        profile = "IMPACT"
-    elif "repo_map" in intent_set:
-        profile = "REPO_MAP"
-    elif "graph_relation" in intent_set:
-        profile = "GRAPH"
-    elif "temporal" in intent_set:
-        profile = "TEMPORAL"
-    elif "quoted_phrase" in intent_set or "exact_identifier" in intent_set:
-        profile = "EXACT"
-    elif "question" in intent_set:
-        profile = "HYBRID"
-
+    phrases = _quoted_phrases(stripped)
+    identifiers = _exact_identifiers(stripped)
+    intents = _query_intents(stripped, normalized, phrases, identifiers)
     return QueryAnalysis(
         query=stripped,
         normalized_query=normalized,
-        intents=tuple(intents),
-        exact_identifiers=tuple(exact_identifiers),
+        intents=intents,
+        exact_identifiers=identifiers,
         quoted_phrases=phrases,
-        recommended_profile=profile,
+        recommended_profile=_recommended_profile(intents),
     )
 
 
