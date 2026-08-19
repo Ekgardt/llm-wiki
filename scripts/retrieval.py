@@ -2028,6 +2028,51 @@ def _require_unchanged_generation(
         raise GenerationSealChanged
 
 
+_GENERATION_DENSE_BLOCKING_FALLBACKS = frozenset(
+    {"generation_seal_changed", "generation_corrupt", "generation_unavailable"}
+)
+
+
+def _generation_seal_holds(
+    catalog: Any, context: Mapping[str, Any], stop: Mapping[str, Any]
+) -> bool:
+    import search_memory
+
+    return bool(
+        search_memory._generation_consumption_unchanged(
+            catalog,
+            context["manifest"],
+            context["artifact_names"],
+            context["seal"],
+            **stop,
+        )
+    )
+
+
+def _generation_dense_unusable(
+    generation_fallback: str | None,
+    *,
+    embedder: object,
+    model_id: object,
+    model_revision: object,
+) -> str | None:
+    """Why the generation's vectors cannot be read, or None when they can."""
+    if generation_fallback in _GENERATION_DENSE_BLOCKING_FALLBACKS:
+        return generation_fallback
+    if embedder is None or model_id is None or model_revision is None:
+        return "generation_vectors_unavailable"
+    return None
+
+
+def _dense_filtered_hits(
+    rows: Sequence[Mapping[str, Any]], filters: Mapping[str, Any]
+) -> Sequence[Mapping[str, Any]]:
+    """Vector rows carry their distance in `score`; fusion reads vector_score."""
+    return _filtered_hits(
+        [{**row, "vector_score": row.get("score")} for row in rows], filters
+    )
+
+
 def _generation_lexical_hits(
     filters: Mapping[str, Any],
     *,
@@ -2643,38 +2688,33 @@ def retrieve_via_search_memory(
 
     def dense_backend(**filters: Any) -> Sequence[Mapping[str, Any]] | None:
         nonlocal generation_fallback
-        if "dense" not in wanted_tuple:
-            return None
-        if generation_ctx["legacy_dense_blocked"]:
+
+        def require_seal() -> None:
+            if _generation_seal_holds(
+                selected_catalog, generation_ctx, optional_generation_stop
+            ):
+                return
+            nonlocal generation_fallback
+            generation_ctx["dense_fallback"] = "generation_seal_changed"
+            generation_fallback = "generation_seal_changed"
+            raise _GenerationSealChanged
+
+        if "dense" not in wanted_tuple or generation_ctx["legacy_dense_blocked"]:
             return None
         if use_generation:
-            if generation_fallback in {
-                "generation_seal_changed",
-                "generation_corrupt",
-                "generation_unavailable",
-            }:
-                generation_ctx["dense_fallback"] = generation_fallback
-                return None
-            if (
-                generation_embedder is None
-                or generation_model_id is None
-                or generation_model_revision is None
-            ):
-                generation_ctx["dense_fallback"] = "generation_vectors_unavailable"
+            unusable = _generation_dense_unusable(
+                generation_fallback,
+                embedder=generation_embedder,
+                model_id=generation_model_id,
+                model_revision=generation_model_revision,
+            )
+            if unusable is not None:
+                generation_ctx["dense_fallback"] = unusable
                 return None
             dense_connection = generation_ctx["connection"]
             owns_dense_connection = False
             try:
-                if not search_memory._generation_consumption_unchanged(
-                    selected_catalog,
-                    generation_ctx["manifest"],
-                    generation_ctx["artifact_names"],
-                    generation_ctx["seal"],
-                    **optional_generation_stop,
-                ):
-                    generation_ctx["dense_fallback"] = "generation_seal_changed"
-                    generation_fallback = "generation_seal_changed"
-                    raise _GenerationSealChanged
+                require_seal()
                 if hard_deadline:
                     dense_connection = search_memory._generation_connection(
                         selected_catalog,
@@ -2700,61 +2740,20 @@ def retrieve_via_search_memory(
                     as_of=filters["as_of"],
                     **optional_generation_stop,
                 )
+                require_seal()
                 if rows is None:
-                    if not search_memory._generation_consumption_unchanged(
-                        selected_catalog,
-                        generation_ctx["manifest"],
-                        generation_ctx["artifact_names"],
-                        generation_ctx["seal"],
-                        **optional_generation_stop,
-                    ):
-                        generation_ctx["dense_fallback"] = "generation_seal_changed"
-                        generation_fallback = "generation_seal_changed"
-                        raise _GenerationSealChanged
                     generation_ctx["dense_fallback"] = "generation_vectors_unavailable"
                     return None
-                if not search_memory._generation_consumption_unchanged(
-                    selected_catalog,
-                    generation_ctx["manifest"],
-                    generation_ctx["artifact_names"],
-                    generation_ctx["seal"],
-                    **optional_generation_stop,
-                ):
-                    generation_ctx["dense_fallback"] = "generation_seal_changed"
-                    generation_fallback = "generation_seal_changed"
-                    raise _GenerationSealChanged
-                hits = [
-                    _backend_hit_from_legacy({**row, "vector_score": row.get("score")})
-                    for row in rows
-                ]
-                return search_memory.apply_hard_filters(
-                    hits,
-                    project=filters.get("project"),
-                    since=filters.get("since"),
-                    as_of=filters.get("as_of"),
-                    scope=filters.get("scope", "all"),
-                )
-            except _GenerationSealChanged:
-                raise
-            except TimeoutError:
+                return _dense_filtered_hits(rows, filters)
+            except (_GenerationSealChanged, TimeoutError):
                 raise
             except Exception:
-                if not search_memory._generation_consumption_unchanged(
-                    selected_catalog,
-                    generation_ctx["manifest"],
-                    generation_ctx["artifact_names"],
-                    generation_ctx["seal"],
-                    **optional_generation_stop,
-                ):
-                    generation_ctx["dense_fallback"] = "generation_seal_changed"
-                    generation_fallback = "generation_seal_changed"
-                    raise _GenerationSealChanged
+                require_seal()
                 generation_ctx["dense_fallback"] = "generation_vectors_unavailable"
                 return None
             finally:
                 if owns_dense_connection:
                     dense_connection.close()
-        # semantic=False / BASE: dense backend not requested via wanted_tuple.
         rows = search_memory._legacy_dense_hits(
             filters["query"],
             scope=filters["scope"],
@@ -2768,17 +2767,7 @@ def retrieve_via_search_memory(
         )
         if rows is None:
             return None
-        hits = [
-            _backend_hit_from_legacy({**row, "vector_score": row.get("score")})
-            for row in rows
-        ]
-        return search_memory.apply_hard_filters(
-            hits,
-            project=filters.get("project"),
-            since=filters.get("since"),
-            as_of=filters.get("as_of"),
-            scope=filters.get("scope", "all"),
-        )
+        return _dense_filtered_hits(rows, filters)
 
     def graph_backend(**filters: Any) -> Sequence[Mapping[str, Any]] | None:
         if not graph or "graph" not in wanted_tuple:
