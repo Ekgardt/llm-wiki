@@ -2428,6 +2428,15 @@ def _expected_source_chunks(
     )
 
 
+def _appended_chunk_rows(rows: list[tuple[object, ...]], chunks) -> bool:
+    """False once the stored-chunk ceiling is crossed."""
+    for chunk in chunks:
+        rows.append(_generation_chunk_row(chunk, len(rows)))
+        if len(rows) > MAX_GENERATION_FTS_CHUNKS:
+            return False
+    return True
+
+
 def _expected_chunk_rows(
     authoritative_sources: Mapping[str, Mapping[str, object]],
     *,
@@ -2451,11 +2460,9 @@ def _expected_chunk_rows(
                 deadline=deadline,
                 cancelled=cancelled,
             )
-            for chunk in chunks:
-                rows.append(_generation_chunk_row(chunk, len(rows)))
-                if len(rows) > MAX_GENERATION_FTS_CHUNKS:
-                    return None
         except _UnusableAuthoritativeSource:
+            return None
+        if not _appended_chunk_rows(rows, chunks):
             return None
     return rows
 
@@ -2563,6 +2570,16 @@ def _valid_stored_chunk(row: tuple[object, ...], order: int, seen: set[str]) -> 
     return _valid_chunk_text(row)
 
 
+def _chunk_row_mismatch(
+    row: tuple[object, ...],
+    order: int,
+    expected_chunks: list[tuple[object, ...]] | None,
+) -> bool:
+    if expected_chunks is None or order >= len(expected_chunks):
+        return False
+    return row != expected_chunks[order]
+
+
 def _stored_chunks_match(
     connection: sqlite3.Connection,
     expected_chunks: list[tuple[object, ...]] | None,
@@ -2576,9 +2593,8 @@ def _stored_chunks_match(
         _check_generation_stop(deadline, cancelled)
         if not _valid_stored_chunk(row, order, seen):
             return False
-        if expected_chunks is not None and order < len(expected_chunks):
-            if row != expected_chunks[order]:
-                return False
+        if _chunk_row_mismatch(row, order, expected_chunks):
+            return False
         seen.add(str(row[0]))
     return len(seen) == count
 
@@ -3054,6 +3070,10 @@ def _matrix_is_finite(
     return True
 
 
+def _column(ordered: list[sqlite3.Row], index: int) -> list[object]:
+    return [row[index] for row in ordered]
+
+
 def _vector_metadata_matches(
     metadata: Mapping[str, object],
     manifest: Mapping[str, object],
@@ -3072,10 +3092,10 @@ def _vector_metadata_matches(
         "model_id": model_id,
         "model_revision": model_revision,
         "dimensions": dimensions,
-        "chunk_ids": [row[0] for row in ordered],
-        "source_ids": [row[1] for row in ordered],
-        "source_paths": [row[2] for row in ordered],
-        "source_sha256": [row[3] for row in ordered],
+        "chunk_ids": _column(ordered, 0),
+        "source_ids": _column(ordered, 1),
+        "source_paths": _column(ordered, 2),
+        "source_sha256": _column(ordered, 3),
     }
     return all(metadata.get(key) == value for key, value in expected.items())
 
@@ -3960,6 +3980,20 @@ def _legacy_dense_hits(
     )
 
 
+def _vectors_wanted(
+    manifest: Mapping[str, object],
+    semantic: bool,
+    embedder: object | None,
+    model_id: str | None,
+    model_revision: str | None,
+) -> bool:
+    if not semantic or embedder is None:
+        return False
+    if model_id is None or model_revision is None:
+        return False
+    return manifest.get("vector_state") == "complete"
+
+
 def _generation_artifact_names(
     manifest: Mapping[str, object],
     *,
@@ -3969,14 +4003,7 @@ def _generation_artifact_names(
     model_revision: str | None,
 ) -> tuple[str, ...]:
     """Vectors join the sealed set only when they are complete and wanted."""
-    wanted_vectors = (
-        semantic
-        and embedder is not None
-        and model_id is not None
-        and model_revision is not None
-        and manifest.get("vector_state") == "complete"
-    )
-    if wanted_vectors:
+    if _vectors_wanted(manifest, semantic, embedder, model_id, model_revision):
         return (GENERATION_FTS_ARTIFACT, *GENERATION_VECTOR_ARTIFACTS)
     return (GENERATION_FTS_ARTIFACT,)
 
