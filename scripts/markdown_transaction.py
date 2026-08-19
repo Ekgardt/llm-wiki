@@ -1875,6 +1875,80 @@ def _operation_hashes_consistent(
     return _kind_transition_valid(kind, before_hash, after_hash)
 
 
+_RESERVED_DEVICE_NAMES = {"con", "prn", "aux", "nul"} | {
+    f"{prefix}{number}" for prefix in ("com", "lpt") for number in range(1, 10)
+}
+
+
+def _require_normalized_path(value: str) -> None:
+    if unicodedata.normalize("NFC", value) != value:
+        raise ValueError("path must use NFC Unicode normalization")
+
+
+def _require_bounded_path(value: str, relative: Path) -> None:
+    if len(value.encode("utf-8")) > MAX_KNOWLEDGE_PATH_BYTES:
+        raise ValueError("target path exceeds length limit")
+    if len(relative.parts) > MAX_KNOWLEDGE_DEPTH:
+        raise ValueError("target path depth exceeds limit")
+    if any(
+        len(part.encode("utf-8")) > MAX_KNOWLEDGE_COMPONENT_BYTES
+        for part in relative.parts
+    ):
+        raise ValueError("target path component exceeds length limit")
+
+
+def _non_portable_component(part: str) -> bool:
+    if part.endswith((" ", ".")):
+        return True
+    if any(character in '<>:"|?*' or ord(character) < 32 for character in part):
+        return True
+    return part.rstrip(" .").split(".", 1)[0].casefold() in _RESERVED_DEVICE_NAMES
+
+
+def _require_portable_components(relative: Path) -> None:
+    for part in relative.parts:
+        if _non_portable_component(part):
+            raise ValueError("path contains a non-portable or reserved component")
+
+
+def _require_allowed_root(normalized: str) -> None:
+    if normalized in _ALLOWED_FILES:
+        return
+    if any(normalized.startswith(f"{root}/") for root in _ALLOWED_DIRECTORIES):
+        return
+    raise ValueError("path is outside every allowed Markdown root")
+
+
+def _require_markdown_target(normalized: str) -> None:
+    if normalized.startswith("knowledge/feedback/"):
+        raise ValueError("feedback candidates must use JSON")
+
+
+def _require_feedback_target(normalized: str) -> None:
+    if _FEEDBACK_JSON_RE.fullmatch(normalized) is None:
+        raise ValueError("JSON targets must be feedback candidates")
+
+
+def _require_blackboard_target(normalized: str) -> None:
+    if _BLACKBOARD_JSONL_RE.fullmatch(normalized) is None:
+        raise ValueError("JSONL targets must be project blackboard streams")
+
+
+def _require_approved_suffix(relative: Path, normalized: str) -> None:
+    """Each approved file type belongs in exactly one place."""
+    suffix = relative.suffix.casefold()
+    if suffix == ".md":
+        _require_markdown_target(normalized)
+        return
+    if suffix == ".json":
+        _require_feedback_target(normalized)
+        return
+    if suffix == ".jsonl":
+        _require_blackboard_target(normalized)
+        return
+    raise ValueError("transaction targets must use an approved file type")
+
+
 def _is_target_boundary_error(error: BaseException) -> bool:
     if isinstance(error, (TargetBoundaryFailure, FileNotFoundError)):
         return True
@@ -5736,49 +5810,7 @@ class MarkdownCoordinator:
             )
         return change
 
-    def _target(self, value: str) -> Path:
-        relative = restricted_relative_path(
-            value, (*_ALLOWED_DIRECTORIES, *_ALLOWED_FILES)
-        )
-        if unicodedata.normalize("NFC", value) != value:
-            raise ValueError("path must use NFC Unicode normalization")
-        if len(value.encode("utf-8")) > MAX_KNOWLEDGE_PATH_BYTES:
-            raise ValueError("target path exceeds length limit")
-        if len(relative.parts) > MAX_KNOWLEDGE_DEPTH:
-            raise ValueError("target path depth exceeds limit")
-        if any(
-            len(part.encode("utf-8")) > MAX_KNOWLEDGE_COMPONENT_BYTES
-            for part in relative.parts
-        ):
-            raise ValueError("target path component exceeds length limit")
-        reserved = {"con", "prn", "aux", "nul"} | {
-            f"{prefix}{number}" for prefix in ("com", "lpt") for number in range(1, 10)
-        }
-        for part in relative.parts:
-            if (
-                part.endswith((" ", "."))
-                or any(character in '<>:"|?*' or ord(character) < 32 for character in part)
-                or part.rstrip(" .").split(".", 1)[0].casefold() in reserved
-            ):
-                raise ValueError("path contains a non-portable or reserved component")
-        normalized = relative.as_posix()
-        if normalized not in _ALLOWED_FILES and not any(
-            normalized.startswith(f"{root}/") for root in _ALLOWED_DIRECTORIES
-        ):
-            raise ValueError("path is outside every allowed Markdown root")
-        suffix = relative.suffix.casefold()
-        if suffix == ".md":
-            if normalized.startswith("knowledge/feedback/"):
-                raise ValueError("feedback candidates must use JSON")
-        elif suffix == ".json":
-            if _FEEDBACK_JSON_RE.fullmatch(normalized) is None:
-                raise ValueError("JSON targets must be feedback candidates")
-        elif suffix == ".jsonl":
-            if _BLACKBOARD_JSONL_RE.fullmatch(normalized) is None:
-                raise ValueError("JSONL targets must be project blackboard streams")
-        else:
-            raise ValueError("transaction targets must use an approved file type")
-        target = self.vault.joinpath(*relative.parts)
+    def _require_no_reparse_traversal(self, relative: Path, value: str) -> None:
         current = self.vault
         for part in relative.parts:
             current = current / part
@@ -5787,7 +5819,9 @@ class MarkdownCoordinator:
             if _is_reparse_point(current):
                 raise ValueError(f"target traverses a Windows reparse point: {value}")
             if not current.exists():
-                break
+                return
+
+    def _require_canonical_parent(self, target: Path, value: str) -> None:
         if target.parent.resolve(strict=False) != target.parent:
             raise ValueError(f"target has a non-canonical parent: {value}")
         try:
@@ -5796,6 +5830,20 @@ class MarkdownCoordinator:
             raise ValueError("target escapes the vault") from exc
         if not target.parent.is_dir():
             raise ValueError(f"target parent does not exist: {value}")
+
+    def _target(self, value: str) -> Path:
+        relative = restricted_relative_path(
+            value, (*_ALLOWED_DIRECTORIES, *_ALLOWED_FILES)
+        )
+        _require_normalized_path(value)
+        _require_bounded_path(value, relative)
+        _require_portable_components(relative)
+        normalized = relative.as_posix()
+        _require_allowed_root(normalized)
+        _require_approved_suffix(relative, normalized)
+        target = self.vault.joinpath(*relative.parts)
+        self._require_no_reparse_traversal(relative, value)
+        self._require_canonical_parent(target, value)
         return target
 
     def _require_claim_target_identity(self, item: object) -> None:
