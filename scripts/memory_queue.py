@@ -2533,6 +2533,89 @@ def _legacy_payload_bytes(row: sqlite3.Row) -> bytes:
         return b""
 
 
+def _require_capture_identity(
+    intent_id: object, intent_sha256: object, intent_path: object
+) -> None:
+    if re.fullmatch(r"[0-9a-f]{64}", str(intent_id)) is None:
+        raise ValueError("intent_id must be lowercase 64-hex")
+    if re.fullmatch(r"[0-9a-f]{64}", str(intent_sha256)) is None:
+        raise ValueError("intent_sha256 must be lowercase 64-hex")
+    if not isinstance(intent_path, str):
+        raise ValueError("intent_path is invalid")
+    if len(intent_path.encode("utf-8")) > 4096:
+        raise ValueError("intent_path is invalid")
+
+
+def _require_capture_fence(
+    capture_fence: object, intent_id: str, owner: object, fence_type: type
+) -> None:
+    if not isinstance(capture_fence, fence_type):
+        raise ValueError("capture fence does not match the intent and owner")
+    if capture_fence.intent_id != intent_id or capture_fence.mode != "capture":
+        raise ValueError("capture fence does not match the intent and owner")
+    if capture_fence.owner != owner:
+        raise ValueError("capture fence does not match the intent and owner")
+
+
+def _capture_link_record(
+    task_id: str, intent_id: str, intent_sha256: str, handler_version: int
+) -> dict[str, object]:
+    return {
+        "schema_version": "capture-task-link/v1",
+        "task_id": task_id,
+        "intent_id": intent_id,
+        "intent_sha256": intent_sha256,
+        "handler_version": handler_version,
+    }
+
+
+def _matching_capture_intent(
+    intent: sqlite3.Row | None, intent_path: str, intent_sha256: str
+) -> bool:
+    if intent is None:
+        return False
+    if intent["relative_path"] != intent_path:
+        return False
+    if intent["intent_sha256"] != intent_sha256:
+        return False
+    return intent["publication_state"] == "ready"
+
+
+def _validated_capture_payload(payload: Mapping[str, object]) -> tuple[bytes, str]:
+    payload_bytes = canonical_json_bytes(_redact_payload(dict(payload)))
+    input_hash = sha256_bytes(payload_bytes)
+    if validate_payload_blob(payload_bytes, input_hash, parse=True).code is not None:
+        raise ValueError("payload_hash_mismatch")
+    return payload_bytes, input_hash
+
+
+def _purge_states(include_dead: bool) -> tuple[str, ...]:
+    if include_dead:
+        return ("succeeded", "cancelled", "dead")
+    return ("succeeded", "cancelled")
+
+
+def _require_export_parent(parent: Path) -> None:
+    if not parent.exists():
+        parent.mkdir(parents=True)
+        _harden_owner_only(parent, 0o700)
+    if parent.is_symlink() or not parent.is_dir():
+        raise QueueOperationError("export_parent_permissions_invalid")
+    if not _is_owner_only(parent):
+        raise QueueOperationError("export_parent_permissions_invalid")
+
+
+def _purge_selection_changed(
+    current: list, task_ids: tuple[str, ...], states: tuple[str, ...], cutoff_stamp: str
+) -> bool:
+    if len(current) != len(task_ids):
+        return True
+    return any(
+        row["state"] not in states or row["updated_at"] >= cutoff_stamp
+        for row in current
+    )
+
+
 def _redact_payload(value: object) -> object:
     if isinstance(value, str):
         return redact_secrets(value)
@@ -4002,6 +4085,201 @@ class MemoryQueue:
         except OSError:
             return True
 
+    def _purge_selection(
+        self, states: tuple[str, ...], cutoff: datetime
+    ) -> tuple[list, dict[str, list]]:
+        with self._connect() as connection:
+            state_places = ",".join("?" for _ in states)
+            rows = connection.execute(
+                f"""SELECT * FROM tasks
+                    WHERE state IN ({state_places}) AND updated_at < ?
+                    ORDER BY created_at, rowid""",  # noqa: S608
+                (*states, _timestamp(cutoff)),
+            ).fetchall()
+            histories = {
+                str(row["id"]): connection.execute(
+                    "SELECT * FROM attempt_history WHERE task_id=? ORDER BY sequence",
+                    (row["id"],),
+                ).fetchall()
+                for row in rows
+            }
+        return rows, histories
+
+    def _export_results(
+        self,
+        rows: list,
+        results_export: Path,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> list[dict[str, str]]:
+        result_manifest: list[dict[str, str]] = []
+        for row in rows:
+            _require_active(deadline, cancelled)
+            reference = row["result_reference"]
+            if reference is None:
+                continue
+            digest = row["result_sha256"]
+            if not isinstance(digest, str):
+                raise QueueOperationError("result_verification_failed")
+            result = self._read_result_for_export(str(reference), digest)
+            _write_durable_file(results_export / f"{row['id']}.result", result)
+            result_manifest.append({"id": str(row["id"]), "sha256": digest})
+        return result_manifest
+
+    def _verify_export(
+        self,
+        staging: Path,
+        results_export: Path,
+        records_bytes: bytes,
+        manifest_bytes: bytes,
+        result_manifest: list[dict[str, str]],
+    ) -> None:
+        """Read every exported byte back before anything is deleted."""
+        records = _read_stable_owner_file(
+            staging / "records.json", _MAX_EXPORT_METADATA_BYTES
+        )
+        if records != records_bytes:
+            raise QueueOperationError("export_verification_failed")
+        for item in result_manifest:
+            exported = results_export / f"{item['id']}.result"
+            data = _read_stable_owner_file(exported, _MAX_RESULT_BYTES)
+            if sha256_bytes(data) != item["sha256"]:
+                raise QueueOperationError("export_verification_failed")
+        manifest = _read_stable_owner_file(
+            staging / "manifest.json", _MAX_EXPORT_METADATA_BYTES
+        )
+        if manifest != manifest_bytes:
+            raise QueueOperationError("export_verification_failed")
+
+    def _write_export_package(
+        self,
+        rows: list,
+        records_bytes: bytes,
+        task_ids: tuple[str, ...],
+        staging: Path,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> None:
+        results_export = staging / "results"
+        results_export.mkdir()
+        _harden_owner_only(results_export, 0o700)
+        result_manifest = self._export_results(
+            rows, results_export, deadline, cancelled
+        )
+        _write_durable_file(staging / "records.json", records_bytes)
+        manifest_bytes = canonical_json_bytes(
+            {
+                "records_sha256": sha256_bytes(records_bytes),
+                "results": result_manifest,
+                "task_ids": list(task_ids),
+            }
+        )
+        _write_durable_file(staging / "manifest.json", manifest_bytes)
+        fsync_directory(results_export)
+        fsync_directory(staging)
+        self._verify_export(
+            staging, results_export, records_bytes, manifest_bytes, result_manifest
+        )
+
+    def _publish_export(
+        self,
+        rows: list,
+        records_bytes: bytes,
+        task_ids: tuple[str, ...],
+        export: Path,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> None:
+        parent = export.parent
+        _require_export_parent(parent)
+        _cleanup_export_staging(parent, export.name)
+        staging = parent / f".{export.name}.staging-{uuid.uuid4().hex}"
+        staging.mkdir()
+        _harden_owner_only(staging, 0o700)
+        try:
+            self._write_export_package(
+                rows, records_bytes, task_ids, staging, deadline, cancelled
+            )
+            _require_active(deadline, cancelled)
+            staging.replace(export)
+            fsync_directory(parent)
+        except Exception:
+            _remove_export_staging(staging)
+            raise
+
+    def _delete_purged_tasks(
+        self,
+        task_ids: tuple[str, ...],
+        states: tuple[str, ...],
+        cutoff: datetime,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> None:
+        _require_active(deadline, cancelled)
+        placeholders = ",".join("?" for _ in task_ids)
+        with self._connect() as connection, begin_immediate(
+            connection,
+            before_commit=lambda: _require_active(deadline, cancelled),
+        ):
+            current = connection.execute(
+                f"""SELECT id, state, updated_at FROM tasks
+                    WHERE id IN ({placeholders})""",  # noqa: S608
+                task_ids,
+            ).fetchall()
+            if _purge_selection_changed(
+                current, task_ids, states, _timestamp(cutoff)
+            ):
+                raise QueueOperationError("purge_selection_changed")
+            _require_active(deadline, cancelled)
+            connection.execute("DROP TRIGGER attempt_history_immutable_delete")
+            connection.execute(
+                f"DELETE FROM attempt_history WHERE task_id IN ({placeholders})",  # noqa: S608
+                task_ids,
+            )
+            connection.execute(
+                f"DELETE FROM tasks WHERE id IN ({placeholders})",  # noqa: S608
+                task_ids,
+            )
+            connection.execute(
+                """CREATE TRIGGER attempt_history_immutable_delete
+                   BEFORE DELETE ON attempt_history BEGIN
+                   SELECT RAISE(ABORT, 'attempt history is immutable'); END"""
+            )
+
+    def _drop_unreferenced_results(
+        self, rows: list, deadline: float, cancelled: Callable[[], bool] | None
+    ) -> None:
+        for row in rows:
+            _require_active(deadline, cancelled)
+            reference = row["result_reference"]
+            if reference is None:
+                continue
+            with self._connect() as connection:
+                retained = connection.execute(
+                    "SELECT 1 FROM tasks WHERE result_reference=? LIMIT 1",
+                    (reference,),
+                ).fetchone()
+            if retained is None:
+                (self.state_root / str(reference)).unlink(missing_ok=True)
+        fsync_directory(self.results_dir)
+
+    def _retire_purged_tasks(
+        self,
+        rows: list,
+        task_ids: tuple[str, ...],
+        states: tuple[str, ...],
+        cutoff: datetime,
+        export: Path,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> None:
+        try:
+            self._delete_purged_tasks(task_ids, states, cutoff, deadline, cancelled)
+        except BaseException:
+            _remove_export_staging(export)
+            raise
+        self._drop_unreferenced_results(rows, deadline, cancelled)
+
     def purge(
         self,
         *,
@@ -4018,153 +4296,31 @@ class MemoryQueue:
         retiring it stays an explicit operator action.
         """
         _require_active(deadline, cancelled)
-        states = ("succeeded", "cancelled", "dead") if include_dead else (
-            "succeeded",
-            "cancelled",
-        )
-        requested_cutoff = _as_utc(terminal_before)
+        states = _purge_states(include_dead)
         retention_cutoff = _as_utc(self._clock()) - timedelta(
             days=DEFAULTS.queue_result_retention_days
         )
-        cutoff = min(requested_cutoff, retention_cutoff)
+        cutoff = min(_as_utc(terminal_before), retention_cutoff)
         export = Path(export_path).absolute()
         if export.exists():
             raise QueueOperationError("export_exists")
-        with self._connect() as connection:
-            state_places = ",".join("?" for _ in states)
-            rows = connection.execute(
-                f"""SELECT * FROM tasks
-                    WHERE state IN ({state_places}) AND updated_at < ?
-                    ORDER BY created_at, rowid""",  # noqa: S608
-                (*states, _timestamp(cutoff)),
-            ).fetchall()
-            histories = {
-                str(row["id"]): connection.execute(
-                    "SELECT * FROM attempt_history WHERE task_id=? ORDER BY sequence",
-                    (row["id"],),
-                ).fetchall()
-                for row in rows
-            }
+        rows, histories = self._purge_selection(states, cutoff)
         task_ids = tuple(str(row["id"]) for row in rows)
-        records = [
-            _export_task_record(self._task_from_row(row, histories[str(row["id"])]))
-            for row in rows
-        ]
-        records_bytes = canonical_json_bytes(records)
-        parent = export.parent
-        if not parent.exists():
-            parent.mkdir(parents=True)
-            _harden_owner_only(parent, 0o700)
-        if (
-            parent.is_symlink()
-            or not parent.is_dir()
-            or not _is_owner_only(parent)
-        ):
-            raise QueueOperationError("export_parent_permissions_invalid")
-        _cleanup_export_staging(parent, export.name)
-        staging = parent / f".{export.name}.staging-{uuid.uuid4().hex}"
-        staging.mkdir()
-        _harden_owner_only(staging, 0o700)
-        try:
-            results_export = staging / "results"
-            results_export.mkdir()
-            _harden_owner_only(results_export, 0o700)
-            result_manifest: list[dict[str, str]] = []
-            for row in rows:
-                _require_active(deadline, cancelled)
-                reference = row["result_reference"]
-                digest = row["result_sha256"]
-                if reference is None:
-                    continue
-                if not isinstance(digest, str):
-                    raise QueueOperationError("result_verification_failed")
-                result = self._read_result_for_export(str(reference), digest)
-                target = results_export / f"{row['id']}.result"
-                _write_durable_file(target, result)
-                result_manifest.append({"id": str(row["id"]), "sha256": digest})
-            records_path = staging / "records.json"
-            _write_durable_file(records_path, records_bytes)
-            manifest = {
-                "records_sha256": sha256_bytes(records_bytes),
-                "results": result_manifest,
-                "task_ids": list(task_ids),
-            }
-            manifest_path = staging / "manifest.json"
-            manifest_bytes = canonical_json_bytes(manifest)
-            _write_durable_file(manifest_path, manifest_bytes)
-            fsync_directory(results_export)
-            fsync_directory(staging)
-            if (
-                _read_stable_owner_file(records_path, _MAX_EXPORT_METADATA_BYTES)
-                != records_bytes
-            ):
-                raise QueueOperationError("export_verification_failed")
-            for item in result_manifest:
-                exported = results_export / f"{item['id']}.result"
-                data = _read_stable_owner_file(exported, _MAX_RESULT_BYTES)
-                if sha256_bytes(data) != item["sha256"]:
-                    raise QueueOperationError("export_verification_failed")
-            if (
-                _read_stable_owner_file(manifest_path, _MAX_EXPORT_METADATA_BYTES)
-                != manifest_bytes
-            ):
-                raise QueueOperationError("export_verification_failed")
-            _require_active(deadline, cancelled)
-            staging.replace(export)
-            fsync_directory(parent)
-        except Exception:
-            _remove_export_staging(staging)
-            raise
+        records_bytes = canonical_json_bytes(
+            [
+                _export_task_record(
+                    self._task_from_row(row, histories[str(row["id"])])
+                )
+                for row in rows
+            ]
+        )
+        self._publish_export(
+            rows, records_bytes, task_ids, export, deadline, cancelled
+        )
         if task_ids:
-            try:
-                _require_active(deadline, cancelled)
-                placeholders = ",".join("?" for _ in task_ids)
-                with self._connect() as connection, begin_immediate(
-                    connection,
-                    before_commit=lambda: _require_active(deadline, cancelled),
-                ):
-                    current = connection.execute(
-                        f"""SELECT id, state, updated_at FROM tasks
-                            WHERE id IN ({placeholders})""",  # noqa: S608
-                        task_ids,
-                    ).fetchall()
-                    if len(current) != len(task_ids) or any(
-                        row["state"] not in states
-                        or row["updated_at"] >= _timestamp(cutoff)
-                        for row in current
-                    ):
-                        raise QueueOperationError("purge_selection_changed")
-                    _require_active(deadline, cancelled)
-                    connection.execute("DROP TRIGGER attempt_history_immutable_delete")
-                    connection.execute(
-                        f"DELETE FROM attempt_history WHERE task_id IN ({placeholders})",  # noqa: S608
-                        task_ids,
-                    )
-                    connection.execute(
-                        f"DELETE FROM tasks WHERE id IN ({placeholders})",  # noqa: S608
-                        task_ids,
-                    )
-                    connection.execute(
-                        """CREATE TRIGGER attempt_history_immutable_delete
-                           BEFORE DELETE ON attempt_history BEGIN
-                           SELECT RAISE(ABORT, 'attempt history is immutable'); END"""
-                    )
-            except BaseException:
-                _remove_export_staging(export)
-                raise
-            for row in rows:
-                _require_active(deadline, cancelled)
-                reference = row["result_reference"]
-                if reference is None:
-                    continue
-                with self._connect() as connection:
-                    retained = connection.execute(
-                        "SELECT 1 FROM tasks WHERE result_reference=? LIMIT 1",
-                        (reference,),
-                    ).fetchone()
-                if retained is None:
-                    (self.state_root / str(reference)).unlink(missing_ok=True)
-            fsync_directory(self.results_dir)
+            self._retire_purged_tasks(
+                rows, task_ids, states, cutoff, export, deadline, cancelled
+            )
         return PurgeReceipt(len(task_ids), task_ids)
 
     def restore(
@@ -4700,39 +4856,10 @@ class _QueueV3CandidateReader:
         if inserted != 1:
             raise QueueOperationError("capture_link_insert_failed")
 
-    def enqueue_capture_task(
-        self,
-        kind: str,
-        handler_version: int,
-        payload: Mapping[str, object],
-        *,
-        intent_id: str,
-        intent_path: str,
-        intent_sha256: str,
-        capture_fence: object,
-        owner: OwnerLease,
-        priority: int = 0,
-        available_at: datetime | None = None,
-        dedupe_key: str | None = None,
-    ) -> CaptureTaskBinding:
-        if re.fullmatch(r"[0-9a-f]{64}", intent_id) is None:
-            raise ValueError("intent_id must be lowercase 64-hex")
-        if re.fullmatch(r"[0-9a-f]{64}", intent_sha256) is None:
-            raise ValueError("intent_sha256 must be lowercase 64-hex")
-        if not isinstance(intent_path, str) or len(intent_path.encode("utf-8")) > 4096:
-            raise ValueError("intent_path is invalid")
-        from markdown_transaction import IntentFence
-        from operational_ownership import OwnerLease
-
-        if not isinstance(owner, OwnerLease) or owner.role != "capture":
-            raise ValueError("capture enqueue requires a capture owner")
-        if (
-            not isinstance(capture_fence, IntentFence)
-            or capture_fence.intent_id != intent_id
-            or capture_fence.mode != "capture"
-            or capture_fence.owner != owner
-        ):
-            raise ValueError("capture fence does not match the intent and owner")
+    def _require_live_capture_fence(
+        self, intent_id: str, capture_fence: object, owner: OwnerLease
+    ) -> None:
+        """The capture fence must still be the one this owner holds."""
         registry = self.ownership_registry()
         with closing(registry._connect()) as coordinator_database:
             try:
@@ -4760,80 +4887,117 @@ class _QueueV3CandidateReader:
                     _timestamp(_utc_now()),
                 ),
             ).fetchone()
-            if fence_row is None:
-                raise QueueOperationError("intent_fence_lost")
-        if not isinstance(kind, str) or not kind or len(kind.encode("utf-8")) > 64:
-            raise ValueError("kind must be a non-empty bounded string")
-        if (
-            not isinstance(handler_version, int)
-            or isinstance(handler_version, bool)
-            or not 1 <= handler_version <= 2_147_483_647
-        ):
-            raise ValueError("handler_version must be a positive bounded integer")
-        if (
-            not isinstance(priority, int)
-            or isinstance(priority, bool)
-            or not -100 <= priority <= 100
-        ):
-            raise ValueError("priority must be an integer from -100 to 100")
-        payload_bytes = canonical_json_bytes(_redact_payload(dict(payload)))
-        input_hash = sha256_bytes(payload_bytes)
-        if validate_payload_blob(payload_bytes, input_hash, parse=True).code is not None:
-            raise ValueError("payload_hash_mismatch")
+        if fence_row is None:
+            raise QueueOperationError("intent_fence_lost")
+
+    def _insert_capture_task_row(
+        self,
+        database: sqlite3.Connection,
+        *,
+        task_id: str,
+        kind: str,
+        handler_version: int,
+        payload_bytes: bytes,
+        input_hash: str,
+        dedupe_key: str | None,
+        priority: int,
+        now: datetime,
+        ready_at: datetime,
+        intent_path: str,
+        intent_id: str,
+        intent_sha256: str,
+        link_digest: str,
+    ) -> None:
+        intent = database.execute(
+            "SELECT * FROM capture_intents WHERE intent_id=?", (intent_id,)
+        ).fetchone()
+        if not _matching_capture_intent(intent, intent_path, intent_sha256):
+            raise QueueOperationError("capture_intent_conflict")
+        if dedupe_key is not None and database.execute(
+            "SELECT 1 FROM tasks WHERE dedupe_key=?", (dedupe_key,)
+        ).fetchone() is not None:
+            raise QueueOperationError("dedupe_conflict")
+        inserted = database.execute(
+            """INSERT INTO tasks(
+                   id,kind,handler_version,payload_blob,input_hash,dedupe_key,
+                   state,priority,created_at,updated_at,available_at
+               ) VALUES (?,?,?,?,?,?,'ready',?,?,?,?)""",
+            (
+                task_id,
+                kind,
+                handler_version,
+                payload_bytes,
+                input_hash,
+                dedupe_key,
+                priority,
+                _timestamp(now),
+                _timestamp(now),
+                _timestamp(ready_at),
+            ),
+        ).rowcount
+        if inserted != 1:
+            raise QueueOperationError("enqueue_failed")
+        self._insert_capture_link(
+            database,
+            task_id=task_id,
+            intent_id=intent_id,
+            intent_sha256=intent_sha256,
+            handler_version=handler_version,
+            link_digest=link_digest,
+            created_at=_timestamp(now),
+        )
+
+    def enqueue_capture_task(
+        self,
+        kind: str,
+        handler_version: int,
+        payload: Mapping[str, object],
+        *,
+        intent_id: str,
+        intent_path: str,
+        intent_sha256: str,
+        capture_fence: object,
+        owner: OwnerLease,
+        priority: int = 0,
+        available_at: datetime | None = None,
+        dedupe_key: str | None = None,
+    ) -> CaptureTaskBinding:
+        from markdown_transaction import IntentFence
+        from operational_ownership import OwnerLease
+
+        _require_capture_identity(intent_id, intent_sha256, intent_path)
+        if not isinstance(owner, OwnerLease) or owner.role != "capture":
+            raise ValueError("capture enqueue requires a capture owner")
+        _require_capture_fence(capture_fence, intent_id, owner, IntentFence)
+        self._require_live_capture_fence(intent_id, capture_fence, owner)
+        _require_enqueue_arguments(kind, handler_version, priority, None)
+        payload_bytes, input_hash = _validated_capture_payload(payload)
         now = _utc_now()
         ready_at = _as_utc(available_at or now)
         task_id = uuid.uuid4().hex
-        link_record = {
-            "schema_version": "capture-task-link/v1",
-            "task_id": task_id,
-            "intent_id": intent_id,
-            "intent_sha256": intent_sha256,
-            "handler_version": handler_version,
-        }
-        link_digest = sha256_bytes(canonical_json_bytes(link_record))
+        link_digest = sha256_bytes(
+            canonical_json_bytes(
+                _capture_link_record(
+                    task_id, intent_id, intent_sha256, handler_version
+                )
+            )
+        )
         with closing(self._connect()) as database, begin_immediate(database):
-            intent = database.execute(
-                "SELECT * FROM capture_intents WHERE intent_id=?", (intent_id,)
-            ).fetchone()
-            if (
-                intent is None
-                or intent["relative_path"] != intent_path
-                or intent["intent_sha256"] != intent_sha256
-                or intent["publication_state"] != "ready"
-            ):
-                raise QueueOperationError("capture_intent_conflict")
-            if dedupe_key is not None and database.execute(
-                "SELECT 1 FROM tasks WHERE dedupe_key=?", (dedupe_key,)
-            ).fetchone() is not None:
-                raise QueueOperationError("dedupe_conflict")
-            inserted = database.execute(
-                """INSERT INTO tasks(
-                       id,kind,handler_version,payload_blob,input_hash,dedupe_key,
-                       state,priority,created_at,updated_at,available_at
-                   ) VALUES (?,?,?,?,?,?,'ready',?,?,?,?)""",
-                (
-                    task_id,
-                    kind,
-                    handler_version,
-                    payload_bytes,
-                    input_hash,
-                    dedupe_key,
-                    priority,
-                    _timestamp(now),
-                    _timestamp(now),
-                    _timestamp(ready_at),
-                ),
-            ).rowcount
-            if inserted != 1:
-                raise QueueOperationError("enqueue_failed")
-            self._insert_capture_link(
+            self._insert_capture_task_row(
                 database,
                 task_id=task_id,
+                kind=kind,
+                handler_version=handler_version,
+                payload_bytes=payload_bytes,
+                input_hash=input_hash,
+                dedupe_key=dedupe_key,
+                priority=priority,
+                now=now,
+                ready_at=ready_at,
+                intent_path=intent_path,
                 intent_id=intent_id,
                 intent_sha256=intent_sha256,
-                handler_version=handler_version,
                 link_digest=link_digest,
-                created_at=_timestamp(now),
             )
         return CaptureTaskBinding(
             task_id=task_id,
@@ -10699,6 +10863,139 @@ def _cleanup_confirmed(
 _DISCOVER_DESCENDANTS = object()
 
 
+def _require_windows_child_alive(
+    process: multiprocessing.Process,
+    platform_name: str,
+    discover_descendants: bool,
+    direct_was_alive: bool,
+) -> None:
+    """Windows cannot enumerate the descendants of a process that is already gone."""
+    if direct_was_alive or platform_name != "nt" or not discover_descendants:
+        return
+    raise QueueOperationError(
+        "process_cleanup_failed",
+        f"child exited {getattr(process, 'exitcode', None)} before cleanup",
+    )
+
+
+def _discovered_descendants(
+    process: multiprocessing.Process,
+    platform_name: str,
+    discover: bool,
+    tracked: set[int] | None | object,
+):
+    if not discover:
+        return tracked
+    return _tracked_descendant_pids(process.pid, platform_name)
+
+
+def _taskkill(pid: int) -> bool:
+    try:
+        result = subprocess.run(  # noqa: S603, S607
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def _kill_windows_tree(
+    process: multiprocessing.Process, descendants: set[int] | None
+) -> bool:
+    tree_verified = _taskkill(process.pid)
+    if descendants is None:
+        return tree_verified
+    for pid in descendants:
+        if _pid_is_alive(pid):
+            _taskkill(pid)
+    return tree_verified
+
+
+def _kill_posix_group(
+    process: multiprocessing.Process, descendants: set[int] | None
+) -> bool:
+    try:
+        _kill_process_group(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return os.name != "nt" and descendants == set()
+    except OSError:
+        return False
+    return True
+
+
+def _kill_process_tree(
+    process: multiprocessing.Process,
+    descendants: set[int] | None,
+    platform_name: str,
+) -> bool:
+    if platform_name == "nt":
+        return _kill_windows_tree(process, descendants)
+    return _kill_posix_group(process, descendants)
+
+
+def _hard_kill_group(
+    process: multiprocessing.Process, platform_name: str, tree_verified: bool
+) -> bool:
+    if not process.is_alive() or platform_name == "nt" or not tree_verified:
+        return tree_verified
+    try:
+        _kill_process_group(process.pid, signal.SIGKILL)
+    except OSError:
+        tree_verified = False
+    process.join(0.2)
+    return tree_verified
+
+
+def _stop_quietly(process: multiprocessing.Process, action) -> None:
+    if not process.is_alive():
+        return
+    try:
+        action()
+    except (OSError, ValueError):
+        pass
+    process.join(0.2)
+
+
+def _escalate_termination(
+    process: multiprocessing.Process, platform_name: str, tree_verified: bool
+) -> bool:
+    process.join(0.2)
+    tree_verified = _hard_kill_group(process, platform_name, tree_verified)
+    _stop_quietly(process, process.terminate)
+    _stop_quietly(process, process.kill)
+    return tree_verified
+
+
+def _await_cleanup(
+    process: multiprocessing.Process,
+    descendants: set[int] | None,
+    platform_name: str,
+    cleanup_timeout: float,
+) -> bool:
+    if descendants is None:
+        return False
+    deadline = time.monotonic() + max(0.0, cleanup_timeout)
+    while True:
+        if _cleanup_confirmed(process, descendants, platform_name=platform_name):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+
+
+def _cleanup_failed(
+    cleanup_verified: bool, platform_name: str, tree_verified: bool
+) -> bool:
+    if not cleanup_verified:
+        return True
+    return platform_name != "nt" and not tree_verified
+
+
 def _terminate_processor_child(
     process: multiprocessing.Process,
     *,
@@ -10712,90 +11009,22 @@ def _terminate_processor_child(
     platform_name = platform_name or os.name
     direct_was_alive = process.is_alive()
     discover_descendants = tracked_descendants is _DISCOVER_DESCENDANTS
-    if not direct_was_alive and platform_name == "nt" and discover_descendants:
-        # Windows cannot enumerate the descendants of a process that is already
-        # gone, so the refusal stands; naming the child's exit code is what
-        # separates "it finished" from "it never started".
-        raise QueueOperationError(
-            "process_cleanup_failed",
-            f"child exited {getattr(process, 'exitcode', None)} before cleanup",
-        )
-    descendants = (
-        _tracked_descendant_pids(process.pid, platform_name)
-        if discover_descendants
-        else tracked_descendants
+    _require_windows_child_alive(
+        process, platform_name, discover_descendants, direct_was_alive
+    )
+    descendants = _discovered_descendants(
+        process, platform_name, discover_descendants, tracked_descendants
     )
     if descendants is not None and _cleanup_confirmed(
         process, descendants, platform_name=platform_name
     ):
         return descendants
-    tree_verified = False
-    if platform_name == "nt":
-        try:
-            result = subprocess.run(
-                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                check=False,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=2,
-            )
-            tree_verified = result.returncode == 0
-        except (OSError, subprocess.SubprocessError):
-            tree_verified = False
-        if descendants is not None:
-            for pid in descendants:
-                if not _pid_is_alive(pid):
-                    continue
-                try:
-                    subprocess.run(
-                        ["taskkill", "/PID", str(pid), "/T", "/F"],
-                        check=False,
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=2,
-                    )
-                except (OSError, subprocess.SubprocessError):
-                    pass
-    else:
-        try:
-            _kill_process_group(process.pid, signal.SIGTERM)
-            tree_verified = True
-        except ProcessLookupError:
-            tree_verified = os.name != "nt" and descendants == set()
-        except OSError:
-            tree_verified = False
-    process.join(0.2)
-    if process.is_alive():
-        if platform_name != "nt" and tree_verified:
-            try:
-                _kill_process_group(process.pid, signal.SIGKILL)
-            except OSError:
-                tree_verified = False
-            process.join(0.2)
-    if process.is_alive():
-        try:
-            process.terminate()
-        except (OSError, ValueError):
-            pass
-        process.join(0.2)
-    if process.is_alive():
-        try:
-            process.kill()
-        except (OSError, ValueError):
-            pass
-        process.join(0.2)
-    deadline = time.monotonic() + max(0.0, cleanup_timeout)
-    cleanup_verified = descendants is not None and _cleanup_confirmed(
-        process, descendants, platform_name=platform_name
+    tree_verified = _kill_process_tree(process, descendants, platform_name)
+    tree_verified = _escalate_termination(process, platform_name, tree_verified)
+    cleanup_verified = _await_cleanup(
+        process, descendants, platform_name, cleanup_timeout
     )
-    while not cleanup_verified and descendants is not None and time.monotonic() < deadline:
-        time.sleep(0.02)
-        cleanup_verified = _cleanup_confirmed(
-            process, descendants, platform_name=platform_name
-        )
-    if not cleanup_verified or (platform_name != "nt" and not tree_verified):
+    if _cleanup_failed(cleanup_verified, platform_name, tree_verified):
         raise QueueOperationError("process_cleanup_failed")
     return descendants
 
