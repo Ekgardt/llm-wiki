@@ -1200,7 +1200,12 @@ def _create_owned_lock(parent: _Handle, deadline: float) -> _OwnedLock | None:
     owned = _OwnedLock(parent, _LOCK_NAME, handle, identity, nonce)
     try:
         if not _lock_handle_nonblocking(handle):
-            raise OSError("new Pyright install lock could not be retained")
+            # Another owner holds a lock on the file this call had just created,
+            # so the lock is theirs. Close ours and report the loss: the caller
+            # waits and retries until its deadline. Treating it as a failure
+            # deleted a lock this process does not own and aborted the install.
+            owned.close()
+            return None
         process_start = _process_start_identity(os.getpid())
         if process_start is None:
             raise OSError("current process identity was unavailable")

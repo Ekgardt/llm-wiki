@@ -1181,6 +1181,31 @@ def test_lock_write_failure_is_typed_and_cleans_owned_lock(
     _assert_no_owned_scratch(state_root)
 
 
+def test_lock_that_cannot_be_retained_is_left_to_its_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Losing the lock we just created is contention, not a broken install.
+
+    A hosted runner produced `new Pyright install lock could not be retained`,
+    and the old code answered by deleting the lock file — one somebody else was
+    holding — and failing the installation. Backing off leaves the file alone
+    and lets the caller wait for it.
+    """
+    parent_path = tmp_path / "pyright"
+    parent_path.mkdir()
+    parent = installer_module._open_absolute_directory(parent_path, writable=True)
+    monkeypatch.setattr(installer_module, "_lock_handle_nonblocking", lambda _handle: False)
+
+    try:
+        owned = installer_module._create_owned_lock(parent, time.monotonic() + 5)
+    finally:
+        parent.close()
+
+    assert owned is None
+    assert (parent_path / installer_module._LOCK_NAME).is_file()
+
+
 def test_lock_metadata_is_canonical_and_durable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

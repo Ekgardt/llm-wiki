@@ -1661,7 +1661,7 @@ def test_index_symlink_is_rejected_and_external_target_untouched(tmp_path):
 
     report = run_doctor(root=root, state_root=state_root, home=home, repair=True)
 
-    assert _check(report, "index")["status"] == "error"
+    assert _check(report, "index")["status"] == "error", _check(report, "index")
     assert external.read_bytes() == before
 
 
