@@ -8,6 +8,24 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A Markdown write no longer fails when the writer-gate heartbeat is starved by a
+  busy database. Ownership loss is now decided by the projection row, which a
+  reclaim deletes, and the error names its cause. A queue worker likewise waits
+  out a busy database instead of ending its run with `database is locked`, and a
+  concurrent Pyright installer waits for a lock it does not own instead of
+  deleting it.
+- `doctor` reports lost captures: a new `capture` check names the per-kind counts
+  from `state.json` and points at `logs/capture-failures.jsonl`. The two capture
+  wrappers now record that loss when they are invoked directly and their detached
+  flush cannot start. `doctor.py` also accepts `--time-budget` so a slow machine
+  can finish its checks instead of reporting an exhausted budget.
+- The installed OpenCode plugin carries the vault root it was installed from, so
+  an OpenCode started from a desktop launcher captures instead of silently
+  disabling itself. The environment still wins when it is set.
+- The structural lint no longer counts `knowledge/daily/README.md` as an
+  uncompiled daily log, and `docs/EXPORTING.md` no longer presents an export as a
+  way to migrate a vault: an export carries committed files only.
+
 - Made the v4 reliability platform fail closed: Windows path/handle identity no
   longer truncates IDs or compares incompatible creation/change times; SQLite
   readers close explicitly; MCP timeout tests drain late workers; metadata
