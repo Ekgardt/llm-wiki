@@ -2391,6 +2391,94 @@ def _require_bounded_int(value: object, low: int, high: int, name: str) -> None:
         raise ValueError(f"{name} must be between {low} and {high}")
 
 
+def _fused_candidates(
+    backends: _BackendRun, signals: Sequence[str]
+) -> tuple[tuple[RetrievalCandidate, ...], dict[str, dict[str, Any]]]:
+    return fuse_rrf(
+        lexical=_fusion_input(backends.lexical_hits, "lexical", signals),
+        dense=_fusion_input(backends.dense_hits, "dense", signals),
+        graph=_fusion_input(backends.graph_hits, "graph", signals),
+    )
+
+
+def _capped(
+    candidates: Sequence[RetrievalCandidate], cap: int | None
+) -> tuple[RetrievalCandidate, ...]:
+    """A non-positive or absent cap means every candidate stays."""
+    if cap is None or int(cap) <= 0:
+        return tuple(candidates)
+    return tuple(candidates[: int(cap)])
+
+
+def _rerank_signals(trace: _RerankTrace) -> tuple[str, ...]:
+    if trace.applied:
+        return ("reranker",)
+    return ()
+
+
+def _rerank_failure(trace: _RerankTrace, current: str | None) -> str | None:
+    if trace.optional_timeout:
+        return current or "optional_stage_timeout"
+    return current
+
+
+def _maybe_rerank(
+    candidates: tuple[RetrievalCandidate, ...],
+    display_meta: Mapping[str, Mapping[str, Any]],
+    *,
+    analysis: QueryAnalysis,
+    requested: str,
+    limit: int,
+    max_candidates: int | None,
+    rerank_enabled: bool,
+    deadline_monotonic: float | None,
+    cancelled: Callable[[], bool] | None,
+    trace: _RerankTrace,
+) -> tuple[RetrievalCandidate, ...]:
+    """Rerank only when there is something to rerank and it is switched on."""
+    if not candidates or not rerank_enabled:
+        return candidates
+    _check_stopped(deadline_monotonic, cancelled)
+    return _apply_reranking(
+        candidates,
+        display_meta,
+        analysis=analysis,
+        requested=requested,
+        limit=limit,
+        max_candidates=max_candidates,
+        rerank_enabled=rerank_enabled,
+        deadline_monotonic=deadline_monotonic,
+        cancelled=cancelled,
+        trace=trace,
+    )
+
+
+def _retrieval_trace(
+    *,
+    requested: str,
+    effective: str,
+    signals: Sequence[str],
+    fallback: str | None,
+    corpus_generation: str,
+    partial: bool,
+    rerank_trace: _RerankTrace,
+) -> RetrievalTrace:
+    return RetrievalTrace(
+        requested_mode=requested,
+        effective_mode=effective,
+        signals_used=tuple(dict.fromkeys(signals)),
+        fallback_reason=fallback,
+        corpus_generation=corpus_generation,
+        partial=partial,
+        reranker_applied=rerank_trace.applied,
+        reranker_model_id=_as_optional_str(rerank_trace.model_id),
+        reranker_model_revision=_as_optional_str(rerank_trace.model_revision),
+        reranker_depth=_as_optional_int(rerank_trace.depth),
+        reranker_duration_ms=_as_optional_int(rerank_trace.duration_ms),
+        reranker_fallback_reason=rerank_trace.fallback_reason,
+    )
+
+
 def retrieve(
     query: str,
     *,
@@ -2467,65 +2555,44 @@ def retrieve(
     )
     fallback = backends.graph_failure or fallback
 
-    fuse_lexical = _fusion_input(backends.lexical_hits, "lexical", signals)
-    fuse_dense = _fusion_input(backends.dense_hits, "dense", signals)
-    fuse_graph = _fusion_input(backends.graph_hits, "graph", signals)
-    candidates, display_meta = fuse_rrf(
-        lexical=fuse_lexical, dense=fuse_dense, graph=fuse_graph
-    )
-    candidates = _promote_exact_filename(
-        candidates, analysis.normalized_query or analysis.query
-    )
+    candidates, display_meta = _fused_candidates(backends, signals)
+    exact_query = analysis.normalized_query or analysis.query
+    candidates = _promote_exact_filename(candidates, exact_query)
     _check_stopped(deadline_monotonic, cancelled)
-    if max_candidates is not None and int(max_candidates) > 0:
-        candidates = candidates[: int(max_candidates)]
+    candidates = _capped(candidates, max_candidates)
 
-    signal_list = list(signals)
     rerank_trace = _RerankTrace()
-    if candidates and rerank_enabled:
-        _check_stopped(deadline_monotonic, cancelled)
-        candidates = _apply_reranking(
-            candidates,
-            display_meta,
-            analysis=analysis,
-            requested=requested,
-            limit=limit,
-            max_candidates=max_candidates,
-            rerank_enabled=rerank_enabled,
-            deadline_monotonic=deadline_monotonic,
-            cancelled=cancelled,
-            trace=rerank_trace,
-        )
-        if rerank_trace.applied:
-            signal_list.append("reranker")
-        if rerank_trace.optional_timeout:
-            optional_failure = optional_failure or "optional_stage_timeout"
-            partial = True
-
-    candidates = _promote_exact_filename(
-        candidates, analysis.normalized_query or analysis.query
+    candidates = _maybe_rerank(
+        candidates,
+        display_meta,
+        analysis=analysis,
+        requested=requested,
+        limit=limit,
+        max_candidates=max_candidates,
+        rerank_enabled=rerank_enabled,
+        deadline_monotonic=deadline_monotonic,
+        cancelled=cancelled,
+        trace=rerank_trace,
     )
+    signal_list = [*signals, *_rerank_signals(rerank_trace)]
+    optional_failure = _rerank_failure(rerank_trace, optional_failure)
+    partial = partial or rerank_trace.optional_timeout
+
+    candidates = _promote_exact_filename(candidates, exact_query)
     _check_stopped(deadline_monotonic, cancelled)
-    if limit > 0:
-        candidates = candidates[:limit]
+    candidates = _capped(candidates, limit)
 
-    trace = RetrievalTrace(
-        requested_mode=requested,
-        effective_mode=effective,
-        signals_used=tuple(dict.fromkeys(signal_list)),
-        fallback_reason=optional_failure or fallback,
-        corpus_generation=corpus_generation,
-        partial=partial,
-        reranker_applied=rerank_trace.applied,
-        reranker_model_id=_as_optional_str(rerank_trace.model_id),
-        reranker_model_revision=_as_optional_str(rerank_trace.model_revision),
-        reranker_depth=_as_optional_int(rerank_trace.depth),
-        reranker_duration_ms=_as_optional_int(rerank_trace.duration_ms),
-        reranker_fallback_reason=rerank_trace.fallback_reason,
-    )
     return RetrievalResult(
         candidates=candidates,
-        trace=trace,
+        trace=_retrieval_trace(
+            requested=requested,
+            effective=effective,
+            signals=signal_list,
+            fallback=optional_failure or fallback,
+            corpus_generation=corpus_generation,
+            partial=partial,
+            rerank_trace=rerank_trace,
+        ),
         analysis=analysis,
         display_meta=display_meta,
     )
