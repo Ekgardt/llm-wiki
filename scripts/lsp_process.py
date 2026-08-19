@@ -4050,6 +4050,129 @@ def _record_initial_evidence(run: _CleanupRun, start: _CleanupStart) -> None:
     _try_failure_evidence(run, start.code)
 
 
+class _TerminalCleanup(NamedTuple):
+    """What the terminal pass settled about recovery and the outcome."""
+
+    recovery_stopped: bool
+    outcome: str | None
+    outcome_ready: bool
+
+
+def _recovery_can_take_over(recovery: threading.Thread | None) -> bool:
+    """A live recovery thread other than the one asking."""
+    if recovery is None or recovery is threading.current_thread():
+        return False
+    return recovery.is_alive()
+
+
+def _autonomous_handoff(run: _CleanupRun, *, all_released: bool) -> bool:
+    """Work is still owed, and a live recovery thread can finish it alone."""
+    coordinator = run.coordinator
+    if not coordinator.recovery_request_pending.is_set():
+        return False
+    if not _recovery_can_take_over(coordinator.recovery_thread):
+        return False
+    return bool(run.errors) or not all_released
+
+
+def _record_recovery_join(result: _CleanupResult, stopped: bool) -> None:
+    if stopped:
+        result.succeeded("recovery_join")
+        return
+    result.recovery_join = "pending"
+
+
+def _stop_recovery_for_cleanup(run: _CleanupRun, *, all_released: bool) -> bool:
+    """Stop the recovery owner, or leave the rest to a live one."""
+    coordinator = run.coordinator
+    if _autonomous_handoff(run, all_released=all_released):
+        run.result.recovery_join = "pending"
+        coordinator.recovery_wake.set()
+        return False
+    try:
+        stopped = _stop_recovery_owner(coordinator, run.deadline, allow_expired=True)
+    except BaseException as error:
+        run.failed("recovery_join", error)
+        return False
+    _record_recovery_join(run.result, stopped)
+    return stopped
+
+
+def _drain_terminal_failures_for_cleanup(run: _CleanupRun) -> None:
+    try:
+        _drain_terminal_failures(run.instance, run.coordinator, run.deadline)
+    except BaseException as error:
+        run.failed("recovery_join", error)
+
+
+def _relinearize_outcome(
+    run: _CleanupRun, *, commit_success: bool, step: str
+) -> tuple[str | None, bool]:
+    """The outcome after another linearization, and whether it settled."""
+    try:
+        outcome = _linearize_terminal_outcome(
+            run.instance, run.coordinator, run.deadline, commit_success=commit_success
+        )
+    except BaseException as error:
+        run.failed(step, error)
+        return run.coordinator.terminal_outcome, False
+    return outcome, True
+
+
+def _required_failure_evidence(run: _CleanupRun, outcome: str | None) -> None:
+    """Write failure evidence when this outcome still demands it."""
+    if outcome != "failure" or not _failure_evidence_required(run.coordinator):
+        return
+    _try_failure_evidence(run, _cleanup_failure_code(run.coordinator, run.failure_code))
+
+
+def _cleanup_evidence_ready(run: _CleanupRun, outcome: str | None) -> bool:
+    """Nothing further is owed to failure evidence."""
+    if outcome != "failure":
+        return True
+    if not _failure_evidence_required(run.coordinator):
+        return True
+    return run.result.evidence == "success"
+
+
+def _stop_heartbeat_for_cleanup(run: _CleanupRun) -> None:
+    try:
+        _stop_heartbeat_owner(run.coordinator, run.deadline, allow_expired=True)
+        run.result.succeeded("heartbeat_join")
+    except BaseException as error:
+        run.failed("heartbeat_join", error)
+
+
+def _commit_terminal_success(
+    run: _CleanupRun, outcome: str | None
+) -> tuple[str | None, bool]:
+    """Commit the outcome, then release the heartbeat once evidence is in."""
+    committed, ready = _relinearize_outcome(
+        run, commit_success=True, step="heartbeat_join"
+    )
+    if not ready:
+        return outcome, False
+    _required_failure_evidence(run, committed)
+    if _cleanup_evidence_ready(run, committed):
+        _stop_heartbeat_for_cleanup(run)
+    return committed, True
+
+
+def _run_terminal_cleanup(run: _CleanupRun, *, all_released: bool) -> _TerminalCleanup:
+    """Stop recovery, settle the terminal outcome, and commit what is owed."""
+    recovery_stopped = _stop_recovery_for_cleanup(run, all_released=all_released)
+    if recovery_stopped:
+        _drain_terminal_failures_for_cleanup(run)
+    outcome, ready = _relinearize_outcome(
+        run, commit_success=False, step="recovery_join"
+    )
+    _required_failure_evidence(run, outcome)
+    committable = all_released and recovery_stopped
+    if committable and _cleanup_evidence_ready(run, outcome):
+        outcome, ready = _commit_terminal_success(run, outcome)
+    return _TerminalCleanup(recovery_stopped, outcome, ready)
+
+
 @dataclass
 class _GenerationCleanup:
     """Which cleanup steps still hold, and which are merely not finished yet."""
@@ -4423,108 +4546,10 @@ def _drive_cleanup_owned(
     _release_generations(generations, deadline, result, current_errors)
 
     all_generations_released = all(generation.released for generation in generations)
-    recovery_stopped = (
-        coordinator.recovery_thread is None
-        or not coordinator.recovery_thread.is_alive()
-    )
     if terminal:
-        recovery = coordinator.recovery_thread
-        autonomous_handoff = (
-            coordinator.recovery_request_pending.is_set()
-            and recovery is not None
-            and recovery is not threading.current_thread()
-            and recovery.is_alive()
-            and (current_errors or not all_generations_released)
-        )
-        if autonomous_handoff:
-            recovery_stopped = False
-            result.recovery_join = "pending"
-            coordinator.recovery_wake.set()
-        else:
-            try:
-                recovery_stopped = _stop_recovery_owner(
-                    coordinator, deadline, allow_expired=True
-                )
-                if recovery_stopped:
-                    result.succeeded("recovery_join")
-                else:
-                    result.recovery_join = "pending"
-            except BaseException as error:
-                recovery_stopped = False
-                _record_cleanup_error(result, current_errors, "recovery_join", error)
-        if recovery_stopped:
-            try:
-                _drain_terminal_failures(instance, coordinator, deadline)
-            except BaseException as error:
-                _record_cleanup_error(result, current_errors, "recovery_join", error)
-        try:
-            outcome = _linearize_terminal_outcome(
-                instance, coordinator, deadline, commit_success=False
-            )
-        except BaseException as error:
-            terminal_outcome_ready = False
-            _record_cleanup_error(result, current_errors, "recovery_join", error)
-            outcome = coordinator.terminal_outcome
-        else:
-            terminal_outcome_ready = True
-        if outcome == "failure" and _failure_evidence_required(coordinator):
-            try:
-                _ensure_failure_evidence(
-                    instance,
-                    coordinator,
-                    coordinator.terminal_code or failure_code or _PROCESS_EXITED,
-                    deadline,
-                )
-            except BaseException as error:
-                _record_cleanup_error(result, current_errors, "evidence", error)
-        evidence_ready = (
-            outcome != "failure"
-            or not _failure_evidence_required(coordinator)
-            or result.evidence == "success"
-        )
-        if all_generations_released and recovery_stopped and evidence_ready:
-            try:
-                outcome = _linearize_terminal_outcome(
-                    instance, coordinator, deadline, commit_success=True
-                )
-            except BaseException as error:
-                terminal_outcome_ready = False
-                _record_cleanup_error(result, current_errors, "heartbeat_join", error)
-            else:
-                terminal_outcome_ready = True
-                if (
-                    outcome == "failure"
-                    and result.evidence != "success"
-                    and _failure_evidence_required(coordinator)
-                ):
-                    try:
-                        _ensure_failure_evidence(
-                            instance,
-                            coordinator,
-                            coordinator.terminal_code
-                            or failure_code
-                            or _PROCESS_EXITED,
-                            deadline,
-                        )
-                    except BaseException as error:
-                        _record_cleanup_error(
-                            result, current_errors, "evidence", error
-                        )
-                evidence_ready = (
-                    outcome != "failure"
-                    or not _failure_evidence_required(coordinator)
-                    or result.evidence == "success"
-                )
-                if evidence_ready:
-                    try:
-                        _stop_heartbeat_owner(
-                            coordinator, deadline, allow_expired=True
-                        )
-                        result.succeeded("heartbeat_join")
-                    except BaseException as error:
-                        _record_cleanup_error(
-                            result, current_errors, "heartbeat_join", error
-                        )
+        settled = _run_terminal_cleanup(run, all_released=all_generations_released)
+        outcome = settled.outcome
+        terminal_outcome_ready = settled.outcome_ready
 
     heartbeat_stopped = (
         coordinator.heartbeat_thread is None
