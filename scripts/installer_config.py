@@ -466,10 +466,34 @@ def probe_effective_entry(
     return verify_effective_entry(document, expected)
 
 
-def _copy_plugin(source: Path, destination: Path) -> None:
+EMBEDDED_ROOT_MARKER = "// llm-wiki:embedded-root"
+
+
+def plugin_with_embedded_root(source_text: str, vault_root: Path) -> str:
+    """Bake the vault root into the plugin the installer publishes.
+
+    OpenCode started from a desktop launcher inherits no shell environment, so
+    a plugin that only reads `LLM_WIKI_ROOT` captured nothing and said so only
+    on a console nobody reads.
+    """
+    lines = source_text.splitlines(keepends=True)
+    marked = [
+        index
+        for index, line in enumerate(lines)
+        if line.rstrip("\r\n").endswith(EMBEDDED_ROOT_MARKER)
+    ]
+    if len(marked) != 1:
+        raise ValueError("OpenCode plugin source has no single embedded-root marker")
+    value = json.dumps(str(vault_root))
+    lines[marked[0]] = f"const _EMBEDDED_ROOT = {value}; {EMBEDDED_ROOT_MARKER}\n"
+    return "".join(lines)
+
+
+def _copy_plugin(source: Path, destination: Path, vault_root: Path) -> None:
     if source.is_symlink() or not source.is_file():
         raise ValueError("OpenCode plugin source is unavailable")
-    value = source.read_bytes()
+    published = plugin_with_embedded_root(source.read_text(encoding="utf-8"), vault_root)
+    value = published.encode("utf-8")
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists() and destination.read_bytes() == value:
         return
@@ -497,7 +521,7 @@ def configure_opencode(
     expected = expected_opencode_entry(root)
     merged = merge_opencode_user_config(config_dir, expected)
     plugin = config_dir / "plugins" / "llm-wiki-memory.js"
-    _copy_plugin(root / "scripts" / "llm-wiki-memory-opencode.js", plugin)
+    _copy_plugin(root / "scripts" / "llm-wiki-memory-opencode.js", plugin, root)
     if debug_command is None and executable is not None:
         debug_command = [executable, "debug", "config"]
     status = "configured_unverified"

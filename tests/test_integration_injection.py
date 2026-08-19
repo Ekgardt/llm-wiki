@@ -179,6 +179,62 @@ def test_opencode_roleless_user_message_is_forwarded_once(opencode_plugin_url: s
     }
 
 
+def test_installed_plugin_captures_without_an_inherited_environment(tmp_path: Path):
+    """OpenCode from a desktop launcher has no `LLM_WIKI_ROOT`; the copy carries it."""
+    import sys as _sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in _sys.path:
+        _sys.path.insert(0, str(scripts))
+    from installer_config import plugin_with_embedded_root
+
+    root = tmp_path / "vault"
+    published = tmp_path / "installed-plugin.mjs"
+    source = (ROOT / "scripts" / "llm-wiki-memory-opencode.js").read_text(encoding="utf-8")
+    published.write_text(plugin_with_embedded_root(source, root), encoding="utf-8")
+    script = textwrap.dedent(
+        f"""
+        delete process.env.LLM_WIKI_ROOT;
+        const calls = [];
+        globalThis.Bun = {{ spawn(args) {{
+          const record = {{ args, stdin: "" }};
+          calls.push(record);
+          let finish;
+          const exited = new Promise((resolve) => {{ finish = resolve; }});
+          return {{
+            stdin: {{
+              write(value) {{ record.stdin += value; }},
+              end() {{ finish(0); }},
+            }},
+            stdout: new ReadableStream({{ start(controller) {{ controller.close(); }} }}),
+            exited,
+            kill() {{ finish(143); }},
+          }};
+        }} }};
+        const {{ LlmWikiMemoryPlugin }} = await import({json.dumps(published.resolve().as_uri())});
+        const hooks = await LlmWikiMemoryPlugin({{ client: {{}}, directory: {json.dumps(str(tmp_path / "project"))} }});
+        await hooks["chat.message"](
+          {{ sessionID: "session-1" }},
+          {{ message: {{ id: "message-1" }}, parts: [{{ type: "text", text: "capture me" }}] }},
+        );
+        console.log(JSON.stringify(calls));
+        """
+    )
+
+    result = subprocess.run(
+        [require_tool("node"), "--input-type=module", "-e", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = json.loads(result.stdout)
+    assert len(calls) == 1
+    assert str(root / "scripts") in " ".join(calls[0]["args"])
+
+
 def test_user_prompt_ingestion_runs_prompt_and_feedback_capture_once(monkeypatch):
     scripts = ROOT / "scripts"
     if str(scripts) not in sys.path:

@@ -437,7 +437,11 @@ def test_configure_opencode_merges_global_source_and_copies_plugin(
     scripts = root / "scripts"
     scripts.mkdir(parents=True)
     plugin_source = scripts / "llm-wiki-memory-opencode.js"
-    plugin_source.write_bytes(b"export const plugin = true;\n")
+    plugin_source.write_text(
+        "const _EMBEDDED_ROOT = null; // llm-wiki:embedded-root\n"
+        "export const plugin = true;\n",
+        encoding="utf-8",
+    )
     state_root = tmp_path / "state"
     state_root.mkdir()
     caller = tmp_path / "caller"
@@ -466,5 +470,7 @@ def test_configure_opencode_merges_global_source_and_copies_plugin(
     assert parse_jsonc(config.read_text(encoding="utf-8"))["mcp"]["llm-wiki"] == (
         expected_opencode_entry(root)
     )
-    assert plugin.read_bytes() == plugin_source.read_bytes()
+    published = plugin.read_text(encoding="utf-8")
+    assert f'const _EMBEDDED_ROOT = "{root}";' in published
+    assert published.replace(f'"{root}"', "null") == plugin_source.read_text(encoding="utf-8")
     assert (caller / "debug.cwd").read_text(encoding="utf-8") == str(caller)
