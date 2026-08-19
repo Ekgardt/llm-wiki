@@ -956,6 +956,66 @@ def _strip_frontmatter(content: str) -> str:
     return FRONTMATTER_RE.sub("", content, count=1)
 
 
+_FTS5_TABLE_RE = re.compile(
+    r"\bCREATE\s+VIRTUAL\s+TABLE\b.*\bUSING\s+fts5\s*\(", re.IGNORECASE | re.DOTALL
+)
+_SEARCH_INDEX_MARKERS = (
+    "path unindexed",
+    "project unindexed",
+    "timestamp unindexed",
+    "tokenize = 'porter unicode61'",
+)
+
+
+def _index_schema_is_current(columns: tuple[str, ...], schema_sql: str) -> bool:
+    """The live index must have today's columns and today's FTS5 declaration."""
+    if columns != SEARCH_INDEX_COLUMNS:
+        return False
+    if _FTS5_TABLE_RE.search(schema_sql) is None:
+        return False
+    normalized = " ".join(schema_sql.casefold().split())
+    return all(marker in normalized for marker in _SEARCH_INDEX_MARKERS)
+
+
+def _index_state(
+    current_index: Path, deadline: float | None, cancelled: Callable[[], bool] | None
+) -> tuple[tuple[str, ...], str, list[str]] | None:
+    """(columns, schema SQL, manifest paths) read from the live index."""
+    connect_options: dict[str, object] = {}
+    if deadline is not None:
+        connect_options["timeout"] = max(0.0, min(5.0, deadline - time.monotonic()))
+    with closing(sqlite3.connect(str(current_index), **connect_options)) as conn:
+        with _legacy_sqlite_guard(conn, deadline, cancelled):
+            columns = tuple(row[1] for row in conn.execute("PRAGMA table_info(pages)"))
+            schema_row = conn.execute(
+                "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?",
+                ("pages",),
+            ).fetchone()
+            manifest_row = conn.execute(
+                "SELECT value FROM index_metadata WHERE key = 'paths'"
+            ).fetchone()
+    if manifest_row is None:
+        return None
+    schema_sql = schema_row[0] if schema_row and isinstance(schema_row[0], str) else ""
+    return columns, schema_sql, json.loads(manifest_row[0])
+
+
+def _any_page_newer_than(
+    pages: list[Path],
+    index_mtime: float,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    for page in pages:
+        _check_legacy_stop(deadline, cancelled)
+        try:
+            if page.stat().st_mtime > index_mtime:
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def _needs_rebuild(
     pages: list[Path],
     *,
@@ -965,7 +1025,7 @@ def _needs_rebuild(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> bool:
-    """Check if any page is newer than the index, or if pages were added/removed."""
+    """True when a page is newer than the index, or membership changed."""
     _check_legacy_stop(deadline, cancelled)
     source_root = root or ROOT
     current_index = index_file or INDEX_FILE
@@ -982,60 +1042,26 @@ def _needs_rebuild(
                 cancelled=cancelled,
             )
     try:
-        connect_options = {}
-        if deadline is not None:
-            connect_options["timeout"] = max(0.0, min(5.0, deadline - time.monotonic()))
-        with closing(sqlite3.connect(str(current_index), **connect_options)) as conn:
-            with _legacy_sqlite_guard(conn, deadline, cancelled):
-                columns = tuple(
-                    row[1] for row in conn.execute("PRAGMA table_info(pages)")
-                )
-                schema_row = conn.execute(
-                    "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?",
-                    ("pages",),
-                ).fetchone()
-                manifest_row = conn.execute(
-                    "SELECT value FROM index_metadata WHERE key = 'paths'"
-                ).fetchone()
-        schema_sql = schema_row[0] if schema_row and isinstance(schema_row[0], str) else ""
-        normalized_schema = " ".join(schema_sql.casefold().split())
-        if columns != SEARCH_INDEX_COLUMNS or re.search(
-            r"\bCREATE\s+VIRTUAL\s+TABLE\b.*\bUSING\s+fts5\s*\(",
-            schema_sql,
-            re.IGNORECASE | re.DOTALL,
-        ) is None or any(
-            marker not in normalized_schema
-            for marker in (
-                "path unindexed",
-                "project unindexed",
-                "timestamp unindexed",
-                "tokenize = 'porter unicode61'",
-            )
-        ):
-            return True
-        if manifest_row is None:
-            return True
-        manifest_paths = json.loads(manifest_row[0])
+        state = _index_state(current_index, deadline, cancelled)
     except sqlite3.Error:
         return True
     except (TypeError, ValueError, json.JSONDecodeError):
         return True
-    # The manifest is stored inside the SQLite candidate, so index and source
+    if state is None:
+        return True
+    columns, schema_sql, manifest_paths = state
+    if not _index_schema_is_current(columns, schema_sql):
+        return True
+    # The manifest lives inside the SQLite candidate, so index and source
     # membership become active through the same atomic file replacement.
     _check_legacy_stop(deadline, cancelled)
-    current_paths = sorted(p.relative_to(source_root).as_posix() for p in pages)
+    current_paths = sorted(page.relative_to(source_root).as_posix() for page in pages)
     if manifest_paths != current_paths:
         return True
     _check_legacy_stop(deadline, cancelled)
-    index_mtime = current_index.stat().st_mtime
-    for p in pages:
-        _check_legacy_stop(deadline, cancelled)
-        try:
-            if p.stat().st_mtime > index_mtime:
-                return True
-        except OSError:
-            continue
-    return False
+    return _any_page_newer_than(
+        pages, current_index.stat().st_mtime, deadline, cancelled
+    )
 
 
 def _is_transient_windows_access_error(error: OSError) -> bool:
