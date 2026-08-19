@@ -4173,6 +4173,250 @@ def _run_terminal_cleanup(run: _CleanupRun, *, all_released: bool) -> _TerminalC
     return _TerminalCleanup(recovery_stopped, outcome, ready)
 
 
+def _drain_and_commit(run: _CleanupRun) -> tuple[str | None, bool]:
+    """Drain terminal failures and commit the outcome as one step."""
+    try:
+        _drain_terminal_failures(run.instance, run.coordinator, run.deadline)
+        outcome = _linearize_terminal_outcome(
+            run.instance, run.coordinator, run.deadline, commit_success=True
+        )
+    except BaseException as error:
+        run.failed("recovery_join", error)
+        return run.coordinator.terminal_outcome, False
+    return outcome, True
+
+
+def _commit_stopped_ownership(run: _CleanupRun) -> tuple[str | None, bool]:
+    """Settle the outcome once nothing of ours is still running."""
+    outcome, ready = _drain_and_commit(run)
+    _required_failure_evidence(run, outcome)
+    return outcome, ready
+
+
+def _remove_owner_lease(run: _CleanupRun, owner: _OwnerDirectory) -> None:
+    coordinator = run.coordinator
+    try:
+        _acquire_lease(coordinator, run.deadline, allow_expired=True)
+        try:
+            owner.remove_lease()
+        finally:
+            _release_lease(coordinator)
+        run.result.succeeded("lease_removal")
+    except BaseException as error:
+        run.failed("lease_removal", error)
+
+
+def _remove_success_scratch(run: _CleanupRun, owner: _OwnerDirectory) -> None:
+    """Only a successful run's scratch goes; a failed run's scratch is evidence."""
+    if run.coordinator.terminal_outcome != "success":
+        run.result.succeeded("scratch_removal", "not_applicable")
+        return
+    try:
+        owner.remove_success_scratch()
+        run.result.succeeded("scratch_removal")
+    except BaseException as error:
+        run.failed("scratch_removal", error)
+
+
+def _close_owner_handles(run: _CleanupRun, owner: _OwnerDirectory) -> None:
+    try:
+        owner.close()
+        run.result.succeeded("owner_handles")
+    except BaseException as error:
+        run.failed("owner_handles", error)
+
+
+def _release_owner_directory(run: _CleanupRun, owner: _OwnerDirectory) -> None:
+    """Give up the owner directory: the lease, then the scratch, then the handles."""
+    if not _cleanup_evidence_ready(run, run.coordinator.terminal_outcome):
+        return
+    _remove_owner_lease(run, owner)
+    if run.result.lease_removal != "success":
+        return
+    _remove_success_scratch(run, owner)
+    if run.result.scratch_removal not in {"success", "not_applicable"}:
+        return
+    _close_owner_handles(run, owner)
+
+
+def _forget_released_generations_locked(coordinator: _LifecycleCoordinator) -> None:
+    """Drop retired and candidate generations with nothing left to release."""
+    coordinator.retired = [
+        generation for generation in coordinator.retired if not generation.released
+    ]
+    candidate = coordinator.candidate
+    if candidate is not None and candidate.released:
+        coordinator.candidate = None
+
+
+def _forget_closed_owner_locked(coordinator: _LifecycleCoordinator) -> None:
+    owner = coordinator.owner_directory
+    if owner is not None and owner._closed:
+        coordinator.owner_directory = None
+
+
+def _release_ownership_lease_locked(run: _CleanupRun) -> None:
+    """Hand the registry lease back once the owner directory is gone."""
+    coordinator = run.coordinator
+    if not run.terminal or coordinator.owner_directory is not None:
+        return
+    if coordinator.ownership_lease is None or coordinator.ownership_registry is None:
+        return
+    try:
+        coordinator.ownership_registry.release(coordinator.ownership_lease)
+        coordinator.ownership_lease = None
+    except BaseException as error:
+        run.failed("lease_removal", error)
+
+
+def _forget_lease_generation_locked(coordinator: _LifecycleCoordinator) -> None:
+    if coordinator.owner_directory is None:
+        coordinator.lease_generation = None
+
+
+def _forget_active_generation_locked(
+    coordinator: _LifecycleCoordinator, *, terminal: bool
+) -> None:
+    if not terminal or coordinator.owner_directory is not None:
+        return
+    active = coordinator.active
+    if active is not None and active.released:
+        coordinator.active = None
+
+
+def _terminal_outcome_settled(run: _CleanupRun, success_committed: bool) -> bool:
+    """The recorded outcome already has everything it needs on disk."""
+    outcome = run.coordinator.terminal_outcome
+    if outcome == "failure":
+        return run.result.evidence == "success"
+    if outcome == "success":
+        return success_committed
+    return True
+
+
+def _terminal_ownership_pending(run: _CleanupRun, *, outcome_ready: bool) -> bool:
+    """Whether terminal ownership still owes something before it can be let go."""
+    coordinator = run.coordinator
+    with coordinator.terminal_state_lock:
+        success_committed = coordinator.success_committed
+        mandatory_failure_pending = (
+            coordinator.mandatory_failure_intent is not None
+            and coordinator.terminal_outcome != "failure"
+        )
+    if _coordinator_has_ownership_locked(coordinator) or not outcome_ready:
+        return True
+    if mandatory_failure_pending:
+        return True
+    return not _terminal_outcome_settled(run, success_committed)
+
+
+def _settle_ownership_pending_locked(run: _CleanupRun, *, outcome_ready: bool) -> None:
+    """Record whether ownership is still owed, and clear a satisfied request."""
+    coordinator = run.coordinator
+    if not run.terminal:
+        run.result.ownership_pending = any(
+            not generation.released
+            for generation in _generations_locked(coordinator)
+        )
+        return
+    run.result.ownership_pending = _terminal_ownership_pending(
+        run, outcome_ready=outcome_ready
+    )
+    if run.result.ownership_pending:
+        return
+    coordinator.recovery_request_nonce = None
+    coordinator.recovery_request_pending.clear()
+
+
+def _terminal_phase(
+    coordinator: _LifecycleCoordinator, *, pending: bool
+) -> _LifecyclePhase:
+    if pending:
+        return _LifecyclePhase.CLEANUP_PENDING
+    if coordinator.terminal_outcome == "failure":
+        return _LifecyclePhase.STOPPED_FAILURE
+    return _LifecyclePhase.STOPPED_SUCCESS
+
+
+def _settle_phase_locked(run: _CleanupRun) -> None:
+    pending = run.result.ownership_pending
+    if run.terminal:
+        run.coordinator.phase = _terminal_phase(run.coordinator, pending=pending)
+        return
+    if pending:
+        run.coordinator.phase = _LifecyclePhase.CLEANUP_PENDING
+
+
+def _close_cleanup_locked(run: _CleanupRun, *, outcome_ready: bool) -> None:
+    """The locked closing pass: forget what is released, then record the phase."""
+    coordinator = run.coordinator
+    _forget_released_generations_locked(coordinator)
+    _forget_closed_owner_locked(coordinator)
+    _release_ownership_lease_locked(run)
+    _forget_lease_generation_locked(coordinator)
+    _forget_active_generation_locked(coordinator, terminal=run.terminal)
+    _settle_ownership_pending_locked(run, outcome_ready=outcome_ready)
+    _settle_phase_locked(run)
+    _notify_lifecycle_locked(coordinator)
+
+
+def _close_cleanup(run: _CleanupRun, *, outcome_ready: bool) -> bool:
+    """Run the closing pass; False when the lifecycle lock stayed out of reach."""
+    try:
+        _acquire_lifecycle(run.coordinator, run.deadline, allow_expired=True)
+    except BaseException as error:
+        run.failed("generation_joins", error)
+        run.result.ownership_pending = True
+        return False
+    try:
+        _close_cleanup_locked(run, outcome_ready=outcome_ready)
+    finally:
+        _release_lifecycle(run.coordinator)
+    return True
+
+
+def _finish_cleanup_registration(run: _CleanupRun) -> None:
+    """Stop holding the exit hooks once terminal ownership is fully released."""
+    if not run.terminal or run.result.ownership_pending:
+        return
+    if run.instance is not None:
+        atexit.unregister(run.instance._atexit_close)
+    _unregister_startup_cleanup(run.coordinator)
+
+
+def _ownership_stopped(
+    coordinator: _LifecycleCoordinator, *, all_released: bool
+) -> bool:
+    """Nothing of ours is still running on this owner's behalf."""
+    heartbeat = coordinator.heartbeat_thread
+    recovery = coordinator.recovery_thread
+    return (
+        all_released
+        and (heartbeat is None or not heartbeat.is_alive())
+        and (recovery is None or not recovery.is_alive())
+    )
+
+
+def _finish_stopped_ownership(run: _CleanupRun) -> bool:
+    """Commit the outcome and let the owner directory go; True when it settled."""
+    owner = run.coordinator.owner_directory
+    _, outcome_ready = _commit_stopped_ownership(run)
+    if outcome_ready and owner is not None:
+        _release_owner_directory(run, owner)
+    return outcome_ready
+
+
+def _settle_terminal_cleanup(run: _CleanupRun, start: _CleanupStart) -> bool:
+    """Settle the terminal outcome; True when it no longer owes anything."""
+    all_released = all(generation.released for generation in start.generations)
+    if not run.terminal:
+        return start.terminal_outcome_ready
+    outcome_ready = _run_terminal_cleanup(run, all_released=all_released).outcome_ready
+    if not _ownership_stopped(run.coordinator, all_released=all_released):
+        return outcome_ready
+    return _finish_stopped_ownership(run)
+
+
 @dataclass
 class _GenerationCleanup:
     """Which cleanup steps still hold, and which are merely not finished yet."""
@@ -4528,180 +4772,17 @@ def _drive_cleanup_owned(
         result=coordinator.cleanup_result,
         errors=[],
     )
-    result = run.result
-    current_errors = run.errors
     start = _open_cleanup(run)
     if start is None:
-        return current_errors
-    generations = start.generations
-    outcome = start.outcome
-    terminal_outcome_ready = start.terminal_outcome_ready
-
+        return run.errors
     _record_initial_evidence(run, start)
     if renew_deadline_after_evidence:
         run.deadline = _fresh_cleanup_deadline()
-    # One working deadline from here on; the renewal above is its last change.
-    deadline = run.deadline
-
-    _release_generations(generations, deadline, result, current_errors)
-
-    all_generations_released = all(generation.released for generation in generations)
-    if terminal:
-        settled = _run_terminal_cleanup(run, all_released=all_generations_released)
-        outcome = settled.outcome
-        terminal_outcome_ready = settled.outcome_ready
-
-    heartbeat_stopped = (
-        coordinator.heartbeat_thread is None
-        or not coordinator.heartbeat_thread.is_alive()
-    )
-    recovery_stopped = (
-        coordinator.recovery_thread is None
-        or not coordinator.recovery_thread.is_alive()
-    )
-    owner = coordinator.owner_directory
-    ownership_stopped = (
-        all_generations_released and heartbeat_stopped and recovery_stopped
-    )
-
-    if terminal and ownership_stopped:
-        try:
-            _drain_terminal_failures(instance, coordinator, deadline)
-            outcome = _linearize_terminal_outcome(
-                instance, coordinator, deadline, commit_success=True
-            )
-        except BaseException as error:
-            terminal_outcome_ready = False
-            _record_cleanup_error(result, current_errors, "recovery_join", error)
-            outcome = coordinator.terminal_outcome
-        else:
-            terminal_outcome_ready = True
-        if outcome == "failure" and _failure_evidence_required(coordinator):
-            try:
-                _ensure_failure_evidence(
-                    instance,
-                    coordinator,
-                    coordinator.terminal_code or failure_code or _PROCESS_EXITED,
-                    deadline,
-                )
-            except BaseException as error:
-                _record_cleanup_error(result, current_errors, "evidence", error)
-
-    if terminal and ownership_stopped and terminal_outcome_ready and owner is not None:
-        evidence_ready = (
-            coordinator.terminal_outcome != "failure"
-            or not _failure_evidence_required(coordinator)
-            or result.evidence == "success"
-        )
-        if evidence_ready:
-            try:
-                _acquire_lease(coordinator, deadline, allow_expired=True)
-                try:
-                    owner.remove_lease()
-                finally:
-                    _release_lease(coordinator)
-                result.succeeded("lease_removal")
-            except BaseException as error:
-                _record_cleanup_error(result, current_errors, "lease_removal", error)
-            if result.lease_removal == "success":
-                if coordinator.terminal_outcome == "success":
-                    try:
-                        owner.remove_success_scratch()
-                        result.succeeded("scratch_removal")
-                    except BaseException as error:
-                        _record_cleanup_error(
-                            result, current_errors, "scratch_removal", error
-                        )
-                else:
-                    result.succeeded("scratch_removal", "not_applicable")
-                if result.scratch_removal in {"success", "not_applicable"}:
-                    try:
-                        owner.close()
-                        result.succeeded("owner_handles")
-                    except BaseException as error:
-                        _record_cleanup_error(
-                            result, current_errors, "owner_handles", error
-                        )
-
-    try:
-        _acquire_lifecycle(coordinator, deadline, allow_expired=True)
-    except BaseException as error:
-        _record_cleanup_error(result, current_errors, "generation_joins", error)
-        result.ownership_pending = True
-        return current_errors
-    try:
-        coordinator.retired = [
-            generation for generation in coordinator.retired if not generation.released
-        ]
-        if coordinator.candidate is not None and coordinator.candidate.released:
-            coordinator.candidate = None
-        owner = coordinator.owner_directory
-        if owner is not None and owner._closed:
-            coordinator.owner_directory = None
-        if (
-            terminal
-            and coordinator.owner_directory is None
-            and coordinator.ownership_lease is not None
-            and coordinator.ownership_registry is not None
-        ):
-            try:
-                coordinator.ownership_registry.release(coordinator.ownership_lease)
-                coordinator.ownership_lease = None
-            except BaseException as error:
-                _record_cleanup_error(result, current_errors, "lease_removal", error)
-        if coordinator.owner_directory is None:
-            coordinator.lease_generation = None
-        if (
-            terminal
-            and coordinator.active is not None
-            and coordinator.active.released
-            and coordinator.owner_directory is None
-        ):
-            coordinator.active = None
-        if terminal:
-            with coordinator.terminal_state_lock:
-                success_committed = coordinator.success_committed
-                mandatory_failure_pending = (
-                    coordinator.mandatory_failure_intent is not None
-                    and coordinator.terminal_outcome != "failure"
-                )
-            result.ownership_pending = (
-                _coordinator_has_ownership_locked(coordinator)
-                or not terminal_outcome_ready
-                or mandatory_failure_pending
-                or (
-                    coordinator.terminal_outcome == "failure"
-                    and result.evidence != "success"
-                )
-                or (
-                    coordinator.terminal_outcome == "success"
-                    and not success_committed
-                )
-            )
-            if not result.ownership_pending:
-                coordinator.recovery_request_nonce = None
-                coordinator.recovery_request_pending.clear()
-        else:
-            result.ownership_pending = any(
-                not generation.released for generation in _generations_locked(coordinator)
-            )
-        if terminal:
-            if result.ownership_pending:
-                coordinator.phase = _LifecyclePhase.CLEANUP_PENDING
-            elif coordinator.terminal_outcome == "failure":
-                coordinator.phase = _LifecyclePhase.STOPPED_FAILURE
-            else:
-                coordinator.phase = _LifecyclePhase.STOPPED_SUCCESS
-        elif result.ownership_pending:
-            coordinator.phase = _LifecyclePhase.CLEANUP_PENDING
-        _notify_lifecycle_locked(coordinator)
-    finally:
-        _release_lifecycle(coordinator)
-    if terminal and instance is not None and not result.ownership_pending:
-        atexit.unregister(instance._atexit_close)
-    if terminal and not result.ownership_pending:
-        _unregister_startup_cleanup(coordinator)
-    return current_errors
+    _release_generations(start.generations, run.deadline, run.result, run.errors)
+    outcome_ready = _settle_terminal_cleanup(run, start)
+    if _close_cleanup(run, outcome_ready=outcome_ready):
+        _finish_cleanup_registration(run)
+    return run.errors
 
 
 def _coordinator_has_ownership_locked(coordinator: _LifecycleCoordinator) -> bool:
