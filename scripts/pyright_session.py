@@ -787,6 +787,148 @@ def _drop_superseded_diagnostics(
         diagnostics.pop(document.source.uri, None)
 
 
+@dataclass(frozen=True)
+class _SyncSnapshot:
+    """The session state one synchronize pass plans against."""
+
+    process: LspProcess
+    generation: str
+    prior: WorkspaceRevision | None
+    documents_snapshot: dict[str, OpenDocument]
+    open_by_path: dict[str, OpenDocument]
+
+
+def _first_sync_delta(
+    open_by_path: Mapping[str, OpenDocument],
+    entries: Mapping[str, object],
+) -> WorkspaceDelta:
+    """Without a prior revision, open documents are compared to this one."""
+    changed = tuple(
+        sorted(
+            path
+            for path, document in open_by_path.items()
+            if _entry_supersedes(entries.get(path), document)
+        )
+    )
+    deleted = tuple(
+        sorted(path for path in open_by_path if _entry_missing(entries.get(path)))
+    )
+    return WorkspaceDelta((), changed, (), deleted, False)
+
+
+def _entry_missing(entry: object) -> bool:
+    """The revision does not describe a usable file at this path."""
+    return entry is None or getattr(entry, "sha256", None) is None
+
+
+def _entry_supersedes(entry: object, document: OpenDocument) -> bool:
+    """The revision describes different bytes than the open document holds."""
+    if _entry_missing(entry):
+        return False
+    return entry.sha256 != document.source_sha256
+
+
+def _validated_entry_size(entry: object) -> int:
+    """The entry's byte count, refused when it is not a sane size."""
+    size = entry.size
+    if isinstance(size, bool) or not isinstance(size, int):
+        raise RuntimeError("Pyright source document byte limit exceeded")
+    if size < 0 or size > _MAX_DOCUMENT_BYTES:
+        raise RuntimeError("Pyright source document byte limit exceeded")
+    return size
+
+
+def _retained_document_bytes(entry: object, document: OpenDocument) -> int:
+    """The revision's size for a document that must stay open."""
+    if _entry_missing(entry):
+        raise RuntimeError(
+            "Pyright open document is absent from the workspace revision"
+        )
+    size = _validated_entry_size(entry)
+    if entry.sha256 == document.source_sha256 and size != len(document.content):
+        raise RuntimeError("Pyright source document size differs from the revision")
+    return size
+
+
+def _verified_document_content(
+    entry: object, document: OpenDocument, *, deadline: float
+) -> bytes:
+    """The document re-read from disk, checked against the revision's entry."""
+    content = read_stable_bytes(
+        document.source.absolute_path,
+        _MAX_DOCUMENT_BYTES,
+        label="Pyright retained source document",
+        deadline=deadline,
+    )
+    digest = hashlib.sha256(content).hexdigest()
+    if entry.sha256 != digest or entry.size != len(content):
+        raise RuntimeError(
+            "Pyright retained source document hash differs from the revision"
+        )
+    return content
+
+
+def _check_changed_entry(entry: object, digest: str, content: bytes) -> None:
+    """A changed document has to match what the revision says it became."""
+    if entry is None or entry.sha256 != digest or entry.size != len(content):
+        raise RuntimeError(
+            "Pyright changed source document hash differs from the revision"
+        )
+
+
+def _check_encodable(method: str, params: dict[str, object]) -> None:
+    """Refuse now what the wire would refuse later."""
+    encode_frame({"jsonrpc": "2.0", "method": method, "params": params})
+
+
+def _collect_closed(
+    document: OpenDocument | None,
+    closed: list[OpenDocument],
+    closed_uris: set[str],
+) -> None:
+    """Record a document to close, once per URI."""
+    if document is None or document.source.uri in closed_uris:
+        return
+    closed.append(document)
+    closed_uris.add(document.source.uri)
+
+
+def _close_notifications(
+    closed: list[OpenDocument],
+) -> list[tuple[OpenDocument, dict[str, object]]]:
+    """The didClose params for every document being closed."""
+    notifications = [
+        (document, {"textDocument": {"uri": document.source.uri}})
+        for document in closed
+    ]
+    for _document, params in notifications:
+        _check_encodable("textDocument/didClose", params)
+    return notifications
+
+
+def _watched_params(watched: list[dict[str, object]]) -> dict[str, object] | None:
+    """The watched-files params, or None when nothing was watched."""
+    if not watched:
+        return None
+    params: dict[str, object] = {"changes": list(watched)}
+    _check_encodable("workspace/didChangeWatchedFiles", params)
+    return params
+
+
+def _next_documents(
+    documents_snapshot: dict[str, OpenDocument],
+    closed: list[OpenDocument],
+    replacements: list[tuple[OpenDocument, OpenDocument, dict[str, object]]],
+) -> dict[str, OpenDocument]:
+    """The open-document map after the planned closes and replacements."""
+    next_documents = dict(documents_snapshot)
+    for document in closed:
+        next_documents.pop(document.source.uri, None)
+    for document, replacement, _params in replacements:
+        next_documents[document.source.uri] = replacement
+    return next_documents
+
+
 class _LaunchServerGuard:
     def __init__(
         self,
@@ -3464,6 +3606,185 @@ class PyrightSession:
             ) from recovery_error
         raise commit_error
 
+    def _synchronize_snapshot(self) -> _SyncSnapshot:
+        """The process, generation and open documents this pass plans against."""
+        with self._lock:
+            process = self._process
+            prior = self._workspace_revision
+            documents_snapshot = dict(self._documents)
+            generation = self._generation_nonce
+        if process is None or generation is None:
+            raise RuntimeError("Pyright session is not protocol initialized")
+        open_by_path = {
+            document.source.relative_path: document
+            for document in documents_snapshot.values()
+        }
+        return _SyncSnapshot(
+            process, generation, prior, documents_snapshot, open_by_path
+        )
+
+    def _synchronize_delta(
+        self,
+        snapshot: _SyncSnapshot,
+        revision: WorkspaceRevision,
+        entries: Mapping[str, object],
+    ) -> WorkspaceDelta:
+        if snapshot.prior is None:
+            return _first_sync_delta(snapshot.open_by_path, entries)
+        return diff_workspace_revisions(snapshot.prior, revision)
+
+    def _projected_document_bytes(
+        self,
+        snapshot: _SyncSnapshot,
+        entries: Mapping[str, object],
+        closing_paths: set[str],
+    ) -> int:
+        """Bytes the retained documents will occupy, refused when they overrun."""
+        total = 0
+        for path, document in snapshot.open_by_path.items():
+            if path in closing_paths:
+                continue
+            total += _retained_document_bytes(entries.get(path), document)
+            if total > _MAX_OPEN_DOCUMENT_BYTES:
+                raise RuntimeError("Pyright open document source bytes limit exceeded")
+        return total
+
+    def _verified_retained_contents(
+        self,
+        snapshot: _SyncSnapshot,
+        entries: Mapping[str, object],
+        closing_paths: set[str],
+        *,
+        deadline: float,
+    ) -> dict[str, bytes]:
+        """Re-read every retained document and check it against the revision."""
+        contents: dict[str, bytes] = {}
+        for path, document in snapshot.open_by_path.items():
+            if path in closing_paths:
+                continue
+            contents[path] = _verified_document_content(
+                entries[path], document, deadline=deadline
+            )
+        return contents
+
+    def _changed_replacement(
+        self,
+        document: OpenDocument,
+        entry: object,
+        verified: bytes | None,
+        *,
+        deadline: float,
+    ) -> tuple[OpenDocument, dict[str, object]]:
+        """The next version of a changed document and its didChange params."""
+        content = verified
+        if content is None:
+            content = read_stable_bytes(
+                document.source.absolute_path,
+                _MAX_DOCUMENT_BYTES,
+                label="Pyright changed source document",
+                deadline=deadline,
+            )
+        text = content.decode("utf-8", errors="strict")
+        digest = hashlib.sha256(content).hexdigest()
+        _check_changed_entry(entry, digest, content)
+        replacement = OpenDocument(
+            document.source,
+            content,
+            digest,
+            document.version + 1,
+        )
+        change_params: dict[str, object] = {
+            "textDocument": {
+                "uri": document.source.uri,
+                "version": replacement.version,
+            },
+            "contentChanges": [{"text": text}],
+        }
+        _check_encodable("textDocument/didChange", change_params)
+        return replacement, change_params
+
+    def _planned_changes(
+        self,
+        snapshot: _SyncSnapshot,
+        delta: WorkspaceDelta,
+        entries: Mapping[str, object],
+        verified: Mapping[str, bytes],
+        *,
+        deadline: float,
+    ) -> tuple[list[dict[str, object]], list[tuple[OpenDocument, OpenDocument, dict[str, object]]]]:
+        """Watched-file events and the replacements for open changed documents."""
+        watched = [
+            {"uri": self._watched_uri(path), "type": 1} for path in delta.created
+        ]
+        replacements: list[
+            tuple[OpenDocument, OpenDocument, dict[str, object]]
+        ] = []
+        for path in delta.changed:
+            document = snapshot.open_by_path.get(path)
+            if document is None:
+                watched.append({"uri": self._watched_uri(path), "type": 2})
+                continue
+            replacement, params = self._changed_replacement(
+                document, entries.get(path), verified.get(path), deadline=deadline
+            )
+            replacements.append((document, replacement, params))
+        return watched, replacements
+
+    def _planned_closes(
+        self,
+        snapshot: _SyncSnapshot,
+        delta: WorkspaceDelta,
+        watched: list[dict[str, object]],
+    ) -> list[OpenDocument]:
+        """Documents to close, adding the watched-file events they imply."""
+        closed: list[OpenDocument] = []
+        closed_uris: set[str] = set()
+        for path in delta.deleted:
+            _collect_closed(snapshot.open_by_path.get(path), closed, closed_uris)
+            watched.append({"uri": self._watched_uri(path), "type": 3})
+        for old_path, new_path in delta.renamed:
+            _collect_closed(snapshot.open_by_path.get(old_path), closed, closed_uris)
+            watched.append({"uri": self._watched_uri(old_path), "type": 3})
+            watched.append({"uri": self._watched_uri(new_path), "type": 1})
+        return closed
+
+    def _synchronize_plan(
+        self, revision: WorkspaceRevision, *, deadline: float
+    ) -> tuple[_SyncPlan, WorkspaceDelta]:
+        """Everything this pass will do, worked out before the server is told."""
+        snapshot = self._synchronize_snapshot()
+        entries = {entry.path: entry for entry in revision.entries}
+        delta = self._synchronize_delta(snapshot, revision, entries)
+        closing_paths = set(delta.deleted)
+        closing_paths.update(old_path for old_path, _new_path in delta.renamed)
+        projected_bytes = self._projected_document_bytes(
+            snapshot, entries, closing_paths
+        )
+        verified = self._verified_retained_contents(
+            snapshot, entries, closing_paths, deadline=deadline
+        )
+        watched, replacements = self._planned_changes(
+            snapshot, delta, entries, verified, deadline=deadline
+        )
+        closed = self._planned_closes(snapshot, delta, watched)
+        plan = _SyncPlan(
+            process=snapshot.process,
+            generation=snapshot.generation,
+            prior=snapshot.prior,
+            revision=revision,
+            deadline=deadline,
+            documents_snapshot=snapshot.documents_snapshot,
+            next_documents=_next_documents(
+                snapshot.documents_snapshot, closed, replacements
+            ),
+            projected_document_bytes=projected_bytes,
+            closed_documents=closed,
+            changed_replacements=replacements,
+            close_notifications=_close_notifications(closed),
+            watched_params=_watched_params(watched),
+        )
+        return plan, delta
+
     def synchronize(
         self,
         revision: WorkspaceRevision,
@@ -3471,6 +3792,23 @@ class PyrightSession:
         deadline: float,
     ) -> WorkspaceDelta:
         deadline = _validated_deadline(deadline)
+        self._check_synchronize_revision(revision, deadline)
+        with (
+            self._document_operation_lock(deadline),
+            self._operation(),
+            self._synchronize_semantic_fence(),
+        ):
+            self.start(deadline=deadline)
+            plan, delta = self._synchronize_plan(revision, deadline=deadline)
+            self._deliver_synchronize(plan)
+            commit_error = self._commit_synchronize(plan)
+            if commit_error is not None:
+                self._recover_after_commit_failure(plan, commit_error)
+            return delta
+
+    def _check_synchronize_revision(
+        self, revision: WorkspaceRevision, deadline: float
+    ) -> None:
         if not isinstance(revision, WorkspaceRevision):
             raise TypeError("revision must be a WorkspaceRevision")
         if (
@@ -3480,216 +3818,6 @@ class PyrightSession:
             raise ValueError("workspace revision must describe this checkout")
         if time.monotonic() >= deadline:
             raise TimeoutError("Pyright synchronize deadline expired")
-        with (
-            self._document_operation_lock(deadline),
-            self._operation(),
-            self._synchronize_semantic_fence(),
-        ):
-            self.start(deadline=deadline)
-            with self._lock:
-                process = self._process
-                prior = self._workspace_revision
-                documents_snapshot = dict(self._documents)
-                open_by_path: dict[str, OpenDocument] = {
-                    document.source.relative_path: document
-                    for document in documents_snapshot.values()
-                }
-                generation = self._generation_nonce
-            if process is None or generation is None:
-                raise RuntimeError("Pyright session is not protocol initialized")
-            entries = {entry.path: entry for entry in revision.entries}
-            if prior is None:
-                changed = tuple(
-                    sorted(
-                        path
-                        for path, document in open_by_path.items()
-                        if (entry := entries.get(path)) is not None
-                        and entry.sha256 is not None
-                        and entry.sha256 != document.source_sha256
-                    )
-                )
-                deleted = tuple(
-                    sorted(
-                        path
-                        for path in open_by_path
-                        if (entry := entries.get(path)) is None
-                        or entry.sha256 is None
-                    )
-                )
-                delta = WorkspaceDelta((), changed, (), deleted, False)
-            else:
-                delta = diff_workspace_revisions(prior, revision)
-            closing_paths = set(delta.deleted)
-            closing_paths.update(old_path for old_path, _new_path in delta.renamed)
-            projected_document_bytes = 0
-            for path, document in open_by_path.items():
-                if path in closing_paths:
-                    continue
-                entry = entries.get(path)
-                if entry is None or entry.sha256 is None:
-                    raise RuntimeError(
-                        "Pyright open document is absent from the workspace revision"
-                    )
-                if (
-                    isinstance(entry.size, bool)
-                    or not isinstance(entry.size, int)
-                    or entry.size < 0
-                    or entry.size > _MAX_DOCUMENT_BYTES
-                ):
-                    raise RuntimeError("Pyright source document byte limit exceeded")
-                if (
-                    entry.sha256 == document.source_sha256
-                    and entry.size != len(document.content)
-                ):
-                    raise RuntimeError(
-                        "Pyright source document size differs from the revision"
-                    )
-                projected_document_bytes += entry.size
-                if projected_document_bytes > _MAX_OPEN_DOCUMENT_BYTES:
-                    raise RuntimeError(
-                        "Pyright open document source bytes limit exceeded"
-                    )
-            verified_first_contents: dict[str, bytes] = {}
-            for path, document in open_by_path.items():
-                if path in closing_paths:
-                    continue
-                entry = entries[path]
-                content = read_stable_bytes(
-                    document.source.absolute_path,
-                    _MAX_DOCUMENT_BYTES,
-                    label="Pyright retained source document",
-                    deadline=deadline,
-                )
-                digest = hashlib.sha256(content).hexdigest()
-                if entry.sha256 != digest or entry.size != len(content):
-                    raise RuntimeError(
-                        "Pyright retained source document hash differs from the revision"
-                    )
-                verified_first_contents[path] = content
-            watched_changes: list[dict[str, object]] = []
-            for path in delta.created:
-                watched_changes.append({"uri": self._watched_uri(path), "type": 1})
-            changed_replacements: list[
-                tuple[OpenDocument, OpenDocument, dict[str, object]]
-            ] = []
-            for path in delta.changed:
-                document = open_by_path.get(path)
-                if document is None:
-                    watched_changes.append({"uri": self._watched_uri(path), "type": 2})
-                    continue
-                entry = entries.get(path)
-                content = verified_first_contents.get(path)
-                if content is None:
-                    content = read_stable_bytes(
-                        document.source.absolute_path,
-                        _MAX_DOCUMENT_BYTES,
-                        label="Pyright changed source document",
-                        deadline=deadline,
-                    )
-                text = content.decode("utf-8", errors="strict")
-                digest = hashlib.sha256(content).hexdigest()
-                if (
-                    entry is None
-                    or entry.sha256 != digest
-                    or entry.size != len(content)
-                ):
-                    raise RuntimeError(
-                        "Pyright changed source document hash differs from the revision"
-                    )
-                replacement = OpenDocument(
-                    document.source,
-                    content,
-                    digest,
-                    document.version + 1,
-                )
-                change_params: dict[str, object] = {
-                    "textDocument": {
-                        "uri": document.source.uri,
-                        "version": replacement.version,
-                    },
-                    "contentChanges": [{"text": text}],
-                }
-                encode_frame(
-                    {
-                        "jsonrpc": "2.0",
-                        "method": "textDocument/didChange",
-                        "params": change_params,
-                    }
-                )
-                changed_replacements.append(
-                    (document, replacement, change_params)
-                )
-            closed_documents: list[OpenDocument] = []
-            closed_uris: set[str] = set()
-            for path in delta.deleted:
-                document = open_by_path.get(path)
-                if document is not None and document.source.uri not in closed_uris:
-                    closed_documents.append(document)
-                    closed_uris.add(document.source.uri)
-                watched_changes.append({"uri": self._watched_uri(path), "type": 3})
-            for old_path, new_path in delta.renamed:
-                document = open_by_path.get(old_path)
-                if document is not None and document.source.uri not in closed_uris:
-                    closed_documents.append(document)
-                    closed_uris.add(document.source.uri)
-                watched_changes.append(
-                    {"uri": self._watched_uri(old_path), "type": 3}
-                )
-                watched_changes.append(
-                    {"uri": self._watched_uri(new_path), "type": 1}
-                )
-            close_notifications = [
-                (
-                    document,
-                    {"textDocument": {"uri": document.source.uri}},
-                )
-                for document in closed_documents
-            ]
-            for _document, params in close_notifications:
-                encode_frame(
-                    {
-                        "jsonrpc": "2.0",
-                        "method": "textDocument/didClose",
-                        "params": params,
-                    }
-                )
-
-            watched_params: dict[str, object] | None = None
-            if watched_changes:
-                watched_params = {"changes": list(watched_changes)}
-                encode_frame(
-                    {
-                        "jsonrpc": "2.0",
-                        "method": "workspace/didChangeWatchedFiles",
-                        "params": watched_params,
-                    }
-                )
-
-            next_documents = dict(documents_snapshot)
-            for document in closed_documents:
-                next_documents.pop(document.source.uri, None)
-            for document, replacement, _params in changed_replacements:
-                next_documents[document.source.uri] = replacement
-
-            plan = _SyncPlan(
-                process=process,
-                generation=generation,
-                prior=prior,
-                revision=revision,
-                deadline=deadline,
-                documents_snapshot=documents_snapshot,
-                next_documents=next_documents,
-                projected_document_bytes=projected_document_bytes,
-                closed_documents=closed_documents,
-                changed_replacements=changed_replacements,
-                close_notifications=close_notifications,
-                watched_params=watched_params,
-            )
-            self._deliver_synchronize(plan)
-            commit_error = self._commit_synchronize(plan)
-            if commit_error is not None:
-                self._recover_after_commit_failure(plan, commit_error)
-            return delta
 
     def close(self, *, deadline: float) -> None:
         deadline = _validated_deadline(deadline)
