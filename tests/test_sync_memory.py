@@ -1123,7 +1123,9 @@ $syncWarning = $false
         capture_output=True,
         text=True,
         errors="replace",
-        timeout=10,
+        # A hang guard, not a budget: pwsh startup alone exceeded ten seconds
+        # on a loaded hosted Linux runner.
+        timeout=120,
         check=False,
     )
 
@@ -1165,7 +1167,9 @@ $syncWarning = $false
         capture_output=True,
         text=True,
         errors="replace",
-        timeout=10,
+        # A hang guard, not a budget: pwsh startup alone exceeded ten seconds
+        # on a loaded hosted Linux runner.
+        timeout=120,
         check=False,
     )
 
@@ -1279,7 +1283,9 @@ $agents = @()
         capture_output=True,
         text=True,
         errors="replace",
-        timeout=10,
+        # A hang guard, not a budget: pwsh startup alone exceeded ten seconds
+        # on a loaded hosted Linux runner.
+        timeout=120,
         check=False,
     )
 

@@ -4117,7 +4117,8 @@ def test_install_scripts_generate_context(tmp_path):
         [require_tool("pwsh"), "-NoProfile", "-NonInteractive", "-Command", command],
         capture_output=True,
         text=True,
-        timeout=10,
+        # pwsh startup alone can take ten seconds on a loaded hosted runner.
+        timeout=120,
         check=False,
     )
 
@@ -4170,7 +4171,8 @@ def test_windows_scheduler_payload_carries_exact_roots_and_uv(tmp_path):
         [require_tool("pwsh"), "-NoProfile", "-NonInteractive", "-Command", command],
         capture_output=True,
         text=True,
-        timeout=10,
+        # pwsh startup alone can take ten seconds on a loaded hosted runner.
+        timeout=120,
         check=False,
     )
 
@@ -4272,7 +4274,8 @@ def test_windows_scheduler_status_accepts_only_the_registered_contract(tmp_path)
         [require_tool("pwsh"), "-NoProfile", "-NonInteractive", "-Command", command],
         capture_output=True,
         text=True,
-        timeout=10,
+        # pwsh startup alone can take ten seconds on a loaded hosted runner.
+        timeout=120,
         check=False,
     )
 
