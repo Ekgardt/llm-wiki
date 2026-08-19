@@ -281,6 +281,7 @@ uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> --expor
 uv run python scripts/memory_queue.py restore --export <path>
 uv run python scripts/archive_daily.py --commit --hot-days 90
 uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contradiction-v1.json
+uv run python benchmark/run_flush_classification.py --corpus benchmark/flush-classification-v1.json
 ```
 
 Доставка очереди выполняется как минимум один раз, поэтому handlers используют стабильные operation ID для идемпотентности. Архив переносит подходящие daily-логи старше 90-дневного hot window в проверенные несжатые BagIt-пакеты и сохраняет логическое разрешение evidence. Неуверенные или спорные для evaluators claims помещаются в quarantine; semantic supersession отключён до прохождения frozen benchmark gate. Процедуры recovery, retention и безопасного удаления описаны в [docs/USER-GUIDE.md](docs/USER-GUIDE.md).

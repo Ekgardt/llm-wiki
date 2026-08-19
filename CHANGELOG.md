@@ -61,6 +61,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `benchmark/run_flush_classification.py` measures what session classification
+  keeps and what it drops: tier accuracy, durable-content recall, and the
+  false-promotion rate against a labelled corpus, scored through the product's
+  own classification prompt. The shipped corpus is nine public synthetic cases;
+  a real answer needs an installed vault's own sessions via `--corpus`.
+
 - `memory_queue.py restore --export <path>` brings the work in one verified purge
   export back as new ready tasks, refusing the whole export if the manifest, the
   records digest, any result digest, or the id list fails to verify.

@@ -47,6 +47,8 @@
 
 - 2026-08-19 — Narrowed audit item OPEN-017: a cited span that shares no content token with the claim now fails the answer, covering unspaced scripts through character bigrams. Entailment is still not verified and is not claimed anywhere. Recorded in `citation-relevance-gate-decision.md`.
 
+- 2026-08-19 — Built the measurement stand audit item OPEN-034 asked for: `benchmark/run_flush_classification.py` scores tier accuracy, durable-content recall, and the false-promotion rate against a labelled corpus, using the product's own classification prompt. The shipped corpus is nine public synthetic cases; the real number still needs an installed vault's sessions. Recorded in `classification-measurement-stand-decision.md`.
+
 ## Editorial note
 This log is vault metadata — an append-only editorial changelog of compile passes and hygiene actions over `knowledge/`, not content derived from `knowledge/raw/` or `knowledge/inbox/`. New entries are appended at the bottom by compile passes and by hand; entries are never rewritten or removed.
 

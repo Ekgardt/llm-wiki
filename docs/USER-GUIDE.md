@@ -496,6 +496,7 @@ it refuses the whole export if anything fails to verify.
 ```bash
 uv run python scripts/archive_daily.py --commit --hot-days 90
 uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contradiction-v1.json
+uv run python benchmark/run_flush_classification.py --corpus benchmark/flush-classification-v1.json
 ```
 
 The archive moves, never deletes, eligible daily logs older than the 90-day hot
