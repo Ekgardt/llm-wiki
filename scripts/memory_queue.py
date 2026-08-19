@@ -2790,6 +2790,32 @@ def _semantic_decision_matches(
     return existing["active_link_digest"] == active_link_digest
 
 
+def _purge_progress(
+    task_id: str,
+    operation_id: str,
+    pages_written: int,
+    links_deleted: int,
+    *,
+    state: str,
+    code: str | None = None,
+) -> CorruptPurgeProgress:
+    return CorruptPurgeProgress(
+        task_id=task_id,
+        operation_id=operation_id,
+        state=state,
+        pages_written=pages_written,
+        links_deleted=links_deleted,
+        complete=False,
+        code=code,
+    )
+
+
+def _blocked_or_pending(blocker_code: str | None) -> str:
+    if blocker_code is None:
+        return "purge_pending"
+    return "blocked"
+
+
 def _redact_payload(value: object) -> object:
     if isinstance(value, str):
         return redact_secrets(value)
@@ -6708,6 +6734,258 @@ class _QueueV3CandidateReader:
         if not candidates:
             self._finish_corrupt_export(database, operation_id)
 
+    def _bounded_purge_children(
+        self,
+        database: sqlite3.Connection,
+        candidates: list,
+        operation: sqlite3.Row,
+        operation_id: str,
+        started: float,
+        now: datetime,
+    ) -> tuple[list[dict[str, object]], str | None]:
+        """As many children as one bounded page holds, and what stopped it."""
+        children: list[dict[str, object]] = []
+        for child in candidates[:1000]:
+            blocker = self._corrupt_child_purge_blocker(database, child, now=now)
+            if blocker is not None:
+                return children, blocker
+            descriptor = self._corrupt_purge_child_descriptor(database, child)
+            prospective = canonical_json_bytes(
+                {
+                    "operation_id": operation_id,
+                    "page_number": int(operation["page_count"]) + 1,
+                    "previous_root": str(operation["rolling_root"]),
+                    "before_generation": int(operation["expected_generation"]),
+                    "after_generation": int(operation["expected_generation"])
+                    + len(children)
+                    + 1,
+                    "children": [*children, descriptor],
+                }
+            )
+            if len(prospective) > 1024 * 1024 or time.monotonic() - started >= 5:
+                return children, None
+            children.append(descriptor)
+        return children, None
+
+    def _publish_purge_page(self, page_path: Path, page_bytes: bytes) -> bool:
+        """False when another owner already wrote a different page here."""
+        try:
+            _write_durable_file(page_path, page_bytes)
+        except QueueOperationError as exc:
+            if exc.code != "durable_file_conflict":
+                raise
+            return False
+        try:
+            observed_page = _read_stable_owner_file(page_path, 1024 * 1024)
+        except (OSError, PermissionError, ValueError) as exc:
+            raise QueueOperationError("corrupt_purge_page_invalid") from exc
+        if observed_page != page_bytes:
+            raise QueueOperationError("corrupt_purge_page_invalid")
+        return True
+
+    def _authorize_purge(
+        self,
+        database: sqlite3.Connection,
+        task_id: str,
+        operation: sqlite3.Row,
+        operation_id: str,
+        now: datetime,
+    ) -> None:
+        inserted = database.execute(
+            """INSERT INTO task_purge_authorizations(
+                   task_id,mode,operation_id,authorization_digest,created_at
+               ) VALUES (?,'corrupt-lineage',?,?,?)""",
+            (task_id, operation_id, operation["purge_token"], _timestamp(now)),
+        ).rowcount
+        if inserted != 1:
+            raise QueueOperationError("purge_authorization_failed")
+
+    def _clear_purge_authorization(
+        self, database: sqlite3.Connection, task_id: str
+    ) -> None:
+        cleared = database.execute(
+            "DELETE FROM task_purge_authorizations WHERE task_id=?",
+            (task_id,),
+        ).rowcount
+        if cleared != 1:
+            raise QueueOperationError("purge_authorization_failed")
+
+    def _delete_purged_child(
+        self,
+        database: sqlite3.Connection,
+        child_id: str,
+        task_id: str,
+        operation: sqlite3.Row,
+        operation_id: str,
+        now: datetime,
+    ) -> None:
+        self._authorize_purge(database, child_id, operation, operation_id, now)
+        self._delete_task_owned_evidence(database, child_id)
+        deleted = database.execute(
+            "DELETE FROM tasks WHERE id=? AND redrive_of=?",
+            (child_id, task_id),
+        ).rowcount
+        if deleted != 1:
+            raise QueueOperationError("corrupt_child_delete_failed")
+        self._clear_purge_authorization(database, child_id)
+
+    def _require_parent_generation(
+        self, database: sqlite3.Connection, task_id: str, after_generation: int
+    ) -> None:
+        parent_generation = database.execute(
+            "SELECT lineage_generation FROM tasks WHERE id=?", (task_id,)
+        ).fetchone()
+        if parent_generation is None:
+            raise QueueOperationError("corrupt_lineage_generation_changed")
+        if int(parent_generation[0]) != after_generation:
+            raise QueueOperationError("corrupt_lineage_generation_changed")
+
+    def _advance_purge_operation(
+        self,
+        database: sqlite3.Connection,
+        operation: sqlite3.Row,
+        operation_id: str,
+        children: list[dict[str, object]],
+        before_generation: int,
+        after_generation: int,
+        rolling_root: str,
+    ) -> None:
+        updated = database.execute(
+            """UPDATE corrupt_purge_operations
+               SET expected_generation=?,cursor_task_id=?,page_count=page_count+1,
+                   rolling_root=?,updated_at=?
+               WHERE operation_id=? AND state='purging'
+                 AND expected_generation=? AND cursor_task_id=? AND page_count=?""",
+            (
+                after_generation,
+                children[-1]["task_id"],
+                rolling_root,
+                _timestamp(_utc_now()),
+                operation_id,
+                before_generation,
+                operation["cursor_task_id"],
+                operation["page_count"],
+            ),
+        ).rowcount
+        if updated != 1:
+            raise QueueOperationError("corrupt_purge_page_fence_lost")
+
+    def _commit_purge_page(
+        self,
+        database: sqlite3.Connection,
+        task_id: str,
+        operation: sqlite3.Row,
+        operation_id: str,
+        children: list[dict[str, object]],
+        package: Path,
+        now: datetime,
+    ) -> tuple[int, str, bool]:
+        """(page number, rolling root, published) for one bounded purge page."""
+        page_number = int(operation["page_count"]) + 1
+        before_generation = int(operation["expected_generation"])
+        after_generation = before_generation + len(children)
+        page_bytes = canonical_json_bytes(
+            {
+                "operation_id": operation_id,
+                "page_number": page_number,
+                "previous_root": str(operation["rolling_root"]),
+                "before_generation": before_generation,
+                "after_generation": after_generation,
+                "children": children,
+            }
+        )
+        if len(page_bytes) > 1024 * 1024:
+            raise QueueOperationError("corrupt_purge_page_too_large")
+        page_sha256 = sha256_bytes(page_bytes)
+        rolling_root = sha256_bytes(
+            bytes.fromhex(str(operation["rolling_root"]))
+            + bytes.fromhex(page_sha256)
+        )
+        page_path = package / f"purge-page-{page_number:08d}.json"
+        if not self._publish_purge_page(page_path, page_bytes):
+            return page_number, rolling_root, False
+        self._insert_corrupt_purge_page(
+            database,
+            operation_id=operation_id,
+            page_number=page_number,
+            first_task_id=str(children[0]["task_id"]),
+            last_task_id=str(children[-1]["task_id"]),
+            deleted_link_count=len(children),
+            page_sha256=page_sha256,
+            rolling_root=rolling_root,
+            expected_generation=after_generation,
+        )
+        self._authorize_purge(database, task_id, operation, operation_id, now)
+        for child in children:
+            self._delete_purged_child(
+                database, str(child["task_id"]), task_id, operation, operation_id, now
+            )
+        self._clear_purge_authorization(database, task_id)
+        self._require_parent_generation(database, task_id, after_generation)
+        self._advance_purge_operation(
+            database,
+            operation,
+            operation_id,
+            children,
+            before_generation,
+            after_generation,
+            rolling_root,
+        )
+        return page_number, rolling_root, True
+
+    def _purge_page_preconditions(
+        self,
+        database: sqlite3.Connection,
+        task_id: str,
+        operation_id: str,
+        task_fence: TaskFence,
+    ) -> tuple[sqlite3.Row, int, CorruptPurgeProgress | None]:
+        """The operation row and prior link count, or the progress to return."""
+        operation = database.execute(
+            "SELECT * FROM corrupt_purge_operations WHERE operation_id=?",
+            (operation_id,),
+        ).fetchone()
+        parent = database.execute(
+            "SELECT * FROM tasks WHERE id=?", (task_id,)
+        ).fetchone()
+        if operation is None or parent is None:
+            raise QueueOperationError("corrupt_purge_lost")
+        prior_links_deleted = int(
+            database.execute(
+                """SELECT COALESCE(SUM(deleted_link_count),0)
+                   FROM corrupt_purge_pages WHERE operation_id=?""",
+                (operation_id,),
+            ).fetchone()[0]
+        )
+        pages = int(operation["page_count"])
+        if operation["state"] != "purging" or parent["state"] != "purge_pending":
+            return (
+                operation,
+                prior_links_deleted,
+                _purge_progress(
+                    task_id,
+                    operation_id,
+                    pages,
+                    prior_links_deleted,
+                    state="purge_pending",
+                ),
+            )
+        self._require_corrupt_task_fence(database, task_fence)
+        if int(parent["lineage_generation"]) != int(operation["expected_generation"]):
+            return (
+                operation,
+                prior_links_deleted,
+                _purge_progress(
+                    task_id,
+                    operation_id,
+                    pages,
+                    prior_links_deleted,
+                    state="blocked",
+                    code="corrupt_lineage_generation_changed",
+                ),
+            )
+        return operation, prior_links_deleted, None
+
     def _purge_corrupt_lineage_page(
         self,
         task_id: str,
@@ -6723,223 +7001,52 @@ class _QueueV3CandidateReader:
         _require_active(deadline, cancelled)
         started = time.monotonic()
         with closing(self._connect()) as database, begin_immediate(database):
-            operation = database.execute(
-                "SELECT * FROM corrupt_purge_operations WHERE operation_id=?",
-                (operation_id,),
-            ).fetchone()
-            parent = database.execute(
-                "SELECT * FROM tasks WHERE id=?", (task_id,)
-            ).fetchone()
-            if operation is None or parent is None:
-                raise QueueOperationError("corrupt_purge_lost")
-            prior_links_deleted = int(
-                database.execute(
-                    """SELECT COALESCE(SUM(deleted_link_count),0)
-                       FROM corrupt_purge_pages WHERE operation_id=?""",
-                    (operation_id,),
-                ).fetchone()[0]
+            operation, prior, early = self._purge_page_preconditions(
+                database, task_id, operation_id, task_fence
             )
-            if operation["state"] != "purging" or parent["state"] != "purge_pending":
-                return CorruptPurgeProgress(
-                    task_id=task_id,
-                    operation_id=operation_id,
-                    state="purge_pending",
-                    pages_written=int(operation["page_count"]),
-                    links_deleted=prior_links_deleted,
-                    complete=False,
-                    code=None,
-                )
-            self._require_corrupt_task_fence(database, task_fence)
-            if int(parent["lineage_generation"]) != int(
-                operation["expected_generation"]
-            ):
-                return CorruptPurgeProgress(
-                    task_id=task_id,
-                    operation_id=operation_id,
-                    state="blocked",
-                    pages_written=int(operation["page_count"]),
-                    links_deleted=prior_links_deleted,
-                    complete=False,
-                    code="corrupt_lineage_generation_changed",
-                )
+            if early is not None:
+                return early
+            pages = int(operation["page_count"])
             candidates = database.execute(
                 """SELECT * FROM tasks WHERE redrive_of=? AND id>?
                    ORDER BY id LIMIT 1001""",
                 (task_id, operation["cursor_task_id"]),
             ).fetchall()
             if not candidates:
-                return CorruptPurgeProgress(
-                    task_id=task_id,
-                    operation_id=operation_id,
-                    state="purge_pending",
-                    pages_written=int(operation["page_count"]),
-                    links_deleted=prior_links_deleted,
-                    complete=False,
-                    code=None,
+                return _purge_progress(
+                    task_id, operation_id, pages, prior, state="purge_pending"
                 )
             now = _utc_now()
-            children: list[dict[str, object]] = []
-            blocker_code: str | None = None
-            for child in candidates[:1000]:
-                blocker = self._corrupt_child_purge_blocker(database, child, now=now)
-                if blocker is not None:
-                    blocker_code = blocker
-                    break
-                descriptor = self._corrupt_purge_child_descriptor(database, child)
-                prospective = canonical_json_bytes(
-                    {
-                        "operation_id": operation_id,
-                        "page_number": int(operation["page_count"]) + 1,
-                        "previous_root": str(operation["rolling_root"]),
-                        "before_generation": int(operation["expected_generation"]),
-                        "after_generation": int(operation["expected_generation"])
-                        + len(children)
-                        + 1,
-                        "children": [*children, descriptor],
-                    }
-                )
-                if len(prospective) > 1024 * 1024 or time.monotonic() - started >= 5:
-                    break
-                children.append(descriptor)
+            children, blocker_code = self._bounded_purge_children(
+                database, candidates, operation, operation_id, started, now
+            )
             if not children:
-                return CorruptPurgeProgress(
-                    task_id=task_id,
-                    operation_id=operation_id,
-                    state="blocked" if blocker_code is not None else "purge_pending",
-                    pages_written=int(operation["page_count"]),
-                    links_deleted=prior_links_deleted,
-                    complete=False,
-                    code=blocker_code,
-                )
-            page_number = int(operation["page_count"]) + 1
-            before_generation = int(operation["expected_generation"])
-            after_generation = before_generation + len(children)
-            page = {
-                "operation_id": operation_id,
-                "page_number": page_number,
-                "previous_root": str(operation["rolling_root"]),
-                "before_generation": before_generation,
-                "after_generation": after_generation,
-                "children": children,
-            }
-            page_bytes = canonical_json_bytes(page)
-            if len(page_bytes) > 1024 * 1024:
-                raise QueueOperationError("corrupt_purge_page_too_large")
-            page_sha256 = sha256_bytes(page_bytes)
-            rolling_root = sha256_bytes(
-                bytes.fromhex(str(operation["rolling_root"]))
-                + bytes.fromhex(page_sha256)
-            )
-            page_path = package / f"purge-page-{page_number:08d}.json"
-            try:
-                _write_durable_file(page_path, page_bytes)
-            except QueueOperationError as exc:
-                if exc.code != "durable_file_conflict":
-                    raise
-                return CorruptPurgeProgress(
-                    task_id=task_id,
-                    operation_id=operation_id,
-                    state="blocked",
-                    pages_written=int(operation["page_count"]),
-                    links_deleted=prior_links_deleted,
-                    complete=False,
-                    code="orphan_corrupt_purge_page_conflict",
-                )
-            try:
-                observed_page = _read_stable_owner_file(page_path, 1024 * 1024)
-            except (OSError, PermissionError, ValueError) as exc:
-                raise QueueOperationError("corrupt_purge_page_invalid") from exc
-            if observed_page != page_bytes:
-                raise QueueOperationError("corrupt_purge_page_invalid")
-            self._insert_corrupt_purge_page(
-                database,
-                operation_id=operation_id,
-                page_number=page_number,
-                first_task_id=str(children[0]["task_id"]),
-                last_task_id=str(children[-1]["task_id"]),
-                deleted_link_count=len(children),
-                page_sha256=page_sha256,
-                rolling_root=rolling_root,
-                expected_generation=after_generation,
-            )
-            inserted = database.execute(
-                """INSERT INTO task_purge_authorizations(
-                       task_id,mode,operation_id,authorization_digest,created_at
-                   ) VALUES (?,'corrupt-lineage',?,?,?)""",
-                (
+                return _purge_progress(
                     task_id,
                     operation_id,
-                    operation["purge_token"],
-                    _timestamp(now),
-                ),
-            ).rowcount
-            if inserted != 1:
-                raise QueueOperationError("purge_authorization_failed")
-            for child in children:
-                child_id = str(child["task_id"])
-                inserted = database.execute(
-                    """INSERT INTO task_purge_authorizations(
-                           task_id,mode,operation_id,authorization_digest,created_at
-                       ) VALUES (?,'corrupt-lineage',?,?,?)""",
-                    (
-                        child_id,
-                        operation_id,
-                        operation["purge_token"],
-                        _timestamp(now),
-                    ),
-                ).rowcount
-                if inserted != 1:
-                    raise QueueOperationError("purge_authorization_failed")
-                self._delete_task_owned_evidence(database, child_id)
-                deleted = database.execute(
-                    "DELETE FROM tasks WHERE id=? AND redrive_of=?",
-                    (child_id, task_id),
-                ).rowcount
-                if deleted != 1:
-                    raise QueueOperationError("corrupt_child_delete_failed")
-                cleared = database.execute(
-                    "DELETE FROM task_purge_authorizations WHERE task_id=?",
-                    (child_id,),
-                ).rowcount
-                if cleared != 1:
-                    raise QueueOperationError("purge_authorization_failed")
-            cleared = database.execute(
-                "DELETE FROM task_purge_authorizations WHERE task_id=?",
-                (task_id,),
-            ).rowcount
-            if cleared != 1:
-                raise QueueOperationError("purge_authorization_failed")
-            parent_generation = database.execute(
-                "SELECT lineage_generation FROM tasks WHERE id=?", (task_id,)
-            ).fetchone()
-            if parent_generation is None or int(parent_generation[0]) != after_generation:
-                raise QueueOperationError("corrupt_lineage_generation_changed")
-            updated = database.execute(
-                """UPDATE corrupt_purge_operations
-                   SET expected_generation=?,cursor_task_id=?,page_count=page_count+1,
-                       rolling_root=?,updated_at=?
-                   WHERE operation_id=? AND state='purging'
-                     AND expected_generation=? AND cursor_task_id=? AND page_count=?""",
-                (
-                    after_generation,
-                    children[-1]["task_id"],
-                    rolling_root,
-                    _timestamp(_utc_now()),
+                    pages,
+                    prior,
+                    state=_blocked_or_pending(blocker_code),
+                    code=blocker_code,
+                )
+            page_number, _root, published = self._commit_purge_page(
+                database, task_id, operation, operation_id, children, package, now
+            )
+            if not published:
+                return _purge_progress(
+                    task_id,
                     operation_id,
-                    before_generation,
-                    operation["cursor_task_id"],
-                    operation["page_count"],
-                ),
-            ).rowcount
-            if updated != 1:
-                raise QueueOperationError("corrupt_purge_page_fence_lost")
-            return CorruptPurgeProgress(
-                task_id=task_id,
-                operation_id=operation_id,
-                state="blocked" if blocker_code is not None else "purge_pending",
-                pages_written=page_number,
-                links_deleted=prior_links_deleted + len(children),
-                complete=False,
+                    pages,
+                    prior,
+                    state="blocked",
+                    code="orphan_corrupt_purge_page_conflict",
+                )
+            return _purge_progress(
+                task_id,
+                operation_id,
+                page_number,
+                prior + len(children),
+                state=_blocked_or_pending(blocker_code),
                 code=blocker_code,
             )
 
