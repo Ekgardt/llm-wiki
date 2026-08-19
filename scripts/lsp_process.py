@@ -3489,59 +3489,112 @@ def _shutdown_lsp_process(instance: LspProcess, deadline: float) -> None:
         _release_driver(coordinator)
 
 
-def _shutdown_lsp_process_owned(instance: LspProcess, deadline: float) -> None:
-    coordinator = instance._coordinator
+def _raise_background_cleanup_error(coordinator: _LifecycleCoordinator) -> None:
+    """Surface an error a background cleanup recorded, when there is one."""
+    background_error = _take_background_cleanup_error(coordinator)
+    if background_error is not None:
+        raise background_error
+
+
+def _stopped_without_ownership_locked(coordinator: _LifecycleCoordinator) -> bool:
+    """A stopped lifecycle this caller no longer owns has nothing left to stop."""
+    stopped = {_LifecyclePhase.STOPPED_SUCCESS, _LifecyclePhase.STOPPED_FAILURE}
+    return coordinator.phase in stopped and not _coordinator_has_ownership_locked(
+        coordinator
+    )
+
+
+def _begin_shutdown_locked(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    deadline: float,
+) -> tuple[bool, _Generation | None]:
+    """Enter the stopping phase and report the failure flag and the generation."""
+    if coordinator.terminal_outcome is None:
+        coordinator.terminal_outcome = "success"
+    _linearize_terminal_outcome_locked(
+        instance, coordinator, deadline, commit_success=False
+    )
+    failure = coordinator.terminal_outcome == "failure"
+    coordinator.phase = (
+        _LifecyclePhase.STOPPING_FAILURE
+        if failure
+        else _LifecyclePhase.STOPPING_SUCCESS
+    )
+    generation = coordinator.active
+    if generation is not None:
+        _mark_generation_expected_exit(generation)
+    _notify_lifecycle_locked(coordinator)
+    return failure, generation
+
+
+def _enter_shutdown(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    deadline: float,
+) -> tuple[bool, _Generation | None] | None:
+    """What to shut down, or None when the lifecycle has already stopped."""
     _acquire_lifecycle(coordinator, deadline)
     try:
-        if coordinator.phase in {
-            _LifecyclePhase.STOPPED_SUCCESS,
-            _LifecyclePhase.STOPPED_FAILURE,
-        } and not _coordinator_has_ownership_locked(coordinator):
-            background_error = _take_background_cleanup_error(coordinator)
-            if background_error is not None:
-                raise background_error
-            return
-        if coordinator.terminal_outcome is None:
-            coordinator.terminal_outcome = "success"
-        _linearize_terminal_outcome_locked(
-            instance, coordinator, deadline, commit_success=False
-        )
-        failure = coordinator.terminal_outcome == "failure"
-        coordinator.phase = (
-            _LifecyclePhase.STOPPING_FAILURE
-            if failure
-            else _LifecyclePhase.STOPPING_SUCCESS
-        )
-        generation = coordinator.active
-        if generation is not None:
-            _mark_generation_expected_exit(generation)
-        _notify_lifecycle_locked(coordinator)
+        if _stopped_without_ownership_locked(coordinator):
+            _raise_background_cleanup_error(coordinator)
+            return None
+        return _begin_shutdown_locked(instance, coordinator, deadline)
     finally:
         _release_lifecycle(coordinator)
 
-    graceful_error: BaseException | None = None
-    if not failure and generation is not None:
-        process = generation.process
-        protocol = generation.protocol
-        graceful_deadline = min(
-            deadline, time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
-        )
-        try:
-            if (
-                process is not None
-                and protocol is not None
-                and process.poll() is None
-                and time.monotonic() < graceful_deadline
-            ):
-                protocol.request("shutdown", {}, deadline=graceful_deadline)
-                protocol.notify("exit", {}, deadline=graceful_deadline)
-                _wait_for_lsp_exit(instance, graceful_deadline)
-        except (OSError, RuntimeError, TimeoutError) as error:
-            if _interruption_in_chain(error) is not None:
-                graceful_error = error
-        except BaseException as error:
-            graceful_error = error
 
+def _request_graceful_exit(
+    instance: LspProcess, generation: _Generation, graceful_deadline: float
+) -> None:
+    """Ask a live server to shut itself down and wait for it to go."""
+    process = generation.process
+    protocol = generation.protocol
+    if process is None or protocol is None:
+        return
+    if process.poll() is not None or time.monotonic() >= graceful_deadline:
+        return
+    protocol.request("shutdown", {}, deadline=graceful_deadline)
+    protocol.notify("exit", {}, deadline=graceful_deadline)
+    _wait_for_lsp_exit(instance, graceful_deadline)
+
+
+def _graceful_exit_error(
+    instance: LspProcess, generation: _Generation, deadline: float
+) -> BaseException | None:
+    """The graceful-exit error worth reporting; an ordinary refusal is not one."""
+    graceful_deadline = min(deadline, time.monotonic() + _GRACEFUL_CLEANUP_SECONDS)
+    try:
+        _request_graceful_exit(instance, generation, graceful_deadline)
+    except (OSError, RuntimeError, TimeoutError) as error:
+        if _interruption_in_chain(error) is not None:
+            return error
+        return None
+    except BaseException as error:
+        return error
+    return None
+
+
+def _shutdown_graceful_error(
+    instance: LspProcess,
+    generation: _Generation | None,
+    deadline: float,
+    *,
+    failure: bool,
+) -> BaseException | None:
+    """Only a live generation ending well is asked to leave politely."""
+    if failure or generation is None:
+        return None
+    return _graceful_exit_error(instance, generation, deadline)
+
+
+def _finish_shutdown(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    deadline: float,
+    graceful_error: BaseException | None,
+) -> None:
+    """Run terminal cleanup and raise whatever it or the background left behind."""
     errors = _drive_cleanup(
         instance,
         deadline,
@@ -3550,9 +3603,19 @@ def _shutdown_lsp_process_owned(instance: LspProcess, deadline: float) -> None:
     )
     if errors or graceful_error is not None:
         _raise_cleanup_failures(errors, prior_error=graceful_error)
-    background_error = _take_background_cleanup_error(coordinator)
-    if background_error is not None:
-        raise background_error
+    _raise_background_cleanup_error(coordinator)
+
+
+def _shutdown_lsp_process_owned(instance: LspProcess, deadline: float) -> None:
+    coordinator = instance._coordinator
+    entered = _enter_shutdown(instance, coordinator, deadline)
+    if entered is None:
+        return
+    failure, generation = entered
+    graceful_error = _shutdown_graceful_error(
+        instance, generation, deadline, failure=failure
+    )
+    _finish_shutdown(instance, coordinator, deadline, graceful_error)
 
 
 def _cancel_all_lsp_process(instance: LspProcess, reason: str) -> None:
@@ -4428,36 +4491,58 @@ def _generation_launch(
     return arguments, pass_fds
 
 
-def _validated_command(command: Sequence[str], cwd: Path) -> list[str]:
-    if isinstance(command, (str, bytes)) or not isinstance(command, Sequence):
-        raise TypeError("command must be a sequence of strings")
-    if not command:
-        raise ValueError("command must not be empty")
-    arguments = list(command)
+def _check_argument_strings(arguments: Sequence[object]) -> None:
     for argument in arguments:
         if not isinstance(argument, str):
             raise TypeError("command arguments must be strings")
         if "\0" in argument:
             raise ValueError("command arguments must not contain NUL")
+
+
+def _validated_arguments(command: Sequence[str]) -> list[str]:
+    """The command as a non-empty list of NUL-free strings."""
+    if isinstance(command, (str, bytes)) or not isinstance(command, Sequence):
+        raise TypeError("command must be a sequence of strings")
+    if not command:
+        raise ValueError("command must not be empty")
+    arguments = list(command)
+    _check_argument_strings(arguments)
     if not arguments[0]:
         raise ValueError("command executable must not be empty")
+    return arguments
 
-    executable = Path(arguments[0])
+
+def _resolved_executable(name: str, cwd: Path) -> Path:
+    """The executable as an absolute path, however the caller wrote it."""
+    executable = Path(name)
     if executable.is_absolute():
-        resolved = executable.resolve()
-    elif executable.parent != Path("."):
-        resolved = (cwd / executable).resolve()
-    else:
-        found = shutil.which(arguments[0], path=lsp_environment().get("PATH"))
-        if found is None:
-            raise FileNotFoundError(arguments[0])
-        resolved = Path(found).resolve()
+        return executable.resolve()
+    if executable.parent != Path("."):
+        return (cwd / executable).resolve()
+    found = shutil.which(name, path=lsp_environment().get("PATH"))
+    if found is None:
+        raise FileNotFoundError(name)
+    return Path(found).resolve()
+
+
+def _check_executable_kind(resolved: Path, name: str) -> None:
+    """Refuse what the platform will not spawn as a program of its own."""
     if os.name == "nt" and resolved.suffix.casefold() in {".bat", ".cmd"}:
         raise ValueError("Windows shell scripts are not valid LSP executables")
     if not resolved.is_file():
-        raise FileNotFoundError(arguments[0])
+        raise FileNotFoundError(name)
+
+
+def _check_executable_permission(resolved: Path) -> None:
     if os.name == "posix" and not os.access(resolved, os.X_OK):
         raise ValueError("LSP executable is not executable")
+
+
+def _validated_command(command: Sequence[str], cwd: Path) -> list[str]:
+    arguments = _validated_arguments(command)
+    resolved = _resolved_executable(arguments[0], cwd)
+    _check_executable_kind(resolved, arguments[0])
+    _check_executable_permission(resolved)
     arguments[0] = str(resolved)
     return arguments
 
@@ -4817,6 +4902,96 @@ def _write_failure_record(
     owner_directory.write_record("failure.json", failure_record)
 
 
+_FAILURE_REQUIRED_FIELDS = frozenset(
+    {"code", "generation_nonce", "owner_nonce", "timestamp"}
+)
+_FAILURE_CODE_PATTERN = re.compile(r"[a-z0-9_]{1,64}")
+_FAILURE_NONCE_PATTERN = re.compile(r"[0-9a-f]{32}")
+_FAILURE_TIMESTAMP_PATTERN = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{6})?Z"
+)
+
+
+def _fully_matches(value: object, pattern: re.Pattern[str]) -> bool:
+    """A string the pattern accepts end to end; anything else is not one."""
+    return isinstance(value, str) and pattern.fullmatch(value) is not None
+
+
+def _is_server_pid(value: object) -> bool:
+    """A true integer above zero; a bool is not a process identifier."""
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _validate_failure_shape(record: Mapping[str, object]) -> None:
+    allowed = (_FAILURE_REQUIRED_FIELDS, _FAILURE_REQUIRED_FIELDS | {"server_pid"})
+    if frozenset(record) not in allowed:
+        raise ValueError("LSP failure evidence has an invalid shape")
+
+
+def _validate_failure_code(record: Mapping[str, object]) -> None:
+    if not _fully_matches(record["code"], _FAILURE_CODE_PATTERN):
+        raise ValueError("LSP failure evidence has an invalid code")
+
+
+def _validate_failure_nonces(record: Mapping[str, object]) -> None:
+    for name in ("generation_nonce", "owner_nonce"):
+        if not _fully_matches(record[name], _FAILURE_NONCE_PATTERN):
+            raise ValueError(f"LSP failure evidence has an invalid {name}")
+
+
+def _rendered_utc_timestamp(timestamp: str) -> str | None:
+    """The stamp as its writer would render it, or None when it is unreadable."""
+    try:
+        parsed = datetime.fromisoformat(timestamp[:-1] + "+00:00")
+    except ValueError:
+        return None
+    if parsed.tzinfo != timezone.utc:
+        return None
+    return parsed.isoformat().replace("+00:00", "Z")
+
+
+def _validate_failure_timestamp(record: Mapping[str, object]) -> None:
+    timestamp = record["timestamp"]
+    if not _fully_matches(timestamp, _FAILURE_TIMESTAMP_PATTERN):
+        raise ValueError("LSP failure evidence has an invalid timestamp")
+    if _rendered_utc_timestamp(str(timestamp)) != timestamp:
+        raise ValueError("LSP failure evidence has an invalid timestamp")
+
+
+def _validate_failure_pid(record: Mapping[str, object]) -> None:
+    if "server_pid" not in record:
+        return
+    if not _is_server_pid(record["server_pid"]):
+        raise ValueError("LSP failure evidence has an invalid server_pid")
+
+
+def _expected_failure_identity(
+    *,
+    code: str,
+    owner_nonce: str,
+    generation_nonce: str,
+    pid: int | None,
+) -> dict[str, object]:
+    """The exact field values this terminal record has to carry."""
+    identity: dict[str, object] = {
+        "code": code,
+        "owner_nonce": owner_nonce,
+        "generation_nonce": generation_nonce,
+    }
+    if pid is not None:
+        identity["server_pid"] = pid
+    return identity
+
+
+def _validate_failure_identity(
+    record: Mapping[str, object], expected: Mapping[str, object]
+) -> None:
+    observed = {name: record.get(name) for name in expected}
+    expected_fields = _FAILURE_REQUIRED_FIELDS | (frozenset(expected) & {"server_pid"})
+    if observed != dict(expected) or frozenset(record) != expected_fields:
+        raise ValueError("LSP failure evidence does not match expected terminal identity")
+
+
 def _validate_failure_record(
     record: Mapping[str, object],
     *,
@@ -4825,49 +5000,20 @@ def _validate_failure_record(
     generation_nonce: str,
     pid: int | None,
 ) -> None:
-    required = {"code", "generation_nonce", "owner_nonce", "timestamp"}
-    if set(record) not in (required, required | {"server_pid"}):
-        raise ValueError("LSP failure evidence has an invalid shape")
-    observed_code = record["code"]
-    if not isinstance(observed_code, str) or re.fullmatch(
-        r"[a-z0-9_]{1,64}", observed_code
-    ) is None:
-        raise ValueError("LSP failure evidence has an invalid code")
-    for name in ("generation_nonce", "owner_nonce"):
-        value = record[name]
-        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{32}", value) is None:
-            raise ValueError(f"LSP failure evidence has an invalid {name}")
-    timestamp = record["timestamp"]
-    if not isinstance(timestamp, str) or re.fullmatch(
-        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{6})?Z", timestamp
-    ) is None:
-        raise ValueError("LSP failure evidence has an invalid timestamp")
-    try:
-        parsed = datetime.fromisoformat(timestamp[:-1] + "+00:00")
-    except ValueError as error:
-        raise ValueError("LSP failure evidence has an invalid timestamp") from error
-    if (
-        parsed.tzinfo != timezone.utc
-        or parsed.isoformat().replace("+00:00", "Z") != timestamp
-    ):
-        raise ValueError("LSP failure evidence has an invalid timestamp")
-    if "server_pid" in record:
-        server_pid = record["server_pid"]
-        if (
-            isinstance(server_pid, bool)
-            or not isinstance(server_pid, int)
-            or server_pid <= 0
-        ):
-            raise ValueError("LSP failure evidence has an invalid server_pid")
-    expected_fields = required | ({"server_pid"} if pid is not None else set())
-    if (
-        set(record) != expected_fields
-        or observed_code != code
-        or record["owner_nonce"] != owner_nonce
-        or record["generation_nonce"] != generation_nonce
-        or (pid is not None and record.get("server_pid") != pid)
-    ):
-        raise ValueError("LSP failure evidence does not match expected terminal identity")
+    _validate_failure_shape(record)
+    _validate_failure_code(record)
+    _validate_failure_nonces(record)
+    _validate_failure_timestamp(record)
+    _validate_failure_pid(record)
+    _validate_failure_identity(
+        record,
+        _expected_failure_identity(
+            code=code,
+            owner_nonce=owner_nonce,
+            generation_nonce=generation_nonce,
+            pid=pid,
+        ),
+    )
 
 
 atexit.register(_atexit_cleanup_startups)
