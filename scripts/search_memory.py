@@ -3260,6 +3260,89 @@ def _direct_markdown_hits(
     return results[: max(limit * 3, limit)]
 
 
+def _as_legacy_dense_row(item: Mapping[str, object], score_key: str) -> dict:
+    row = dict(item)
+    row["vector_score"] = row.get("vector_score", row.get(score_key))
+    row.setdefault("candidate_id", Path(str(row.get("path") or "")).stem)
+    row["generation"] = "legacy"
+    return row
+
+
+def _lance_dense_hits(
+    query: str,
+    pages: list[Path],
+    *,
+    limit: int,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[dict] | None:
+    """LanceDB results bound to this model and this source membership."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from lance_store import have_lancedb
+        from lance_store import vector_search as _lance_search
+
+        if not have_lancedb():
+            return None
+        vectors = _embed_texts([query], is_query=True, deadline=deadline, cancelled=cancelled)
+        if not vectors:
+            return None
+        results = _lance_search(
+            vectors[0],
+            limit * 3,
+            project,
+            since=since,
+            as_of=as_of,
+            expected_model_id=EMBEDDING_MODEL,
+            expected_model_revision=EMBEDDING_MODEL_REVISION,
+            expected_sources=_legacy_vector_source_membership(
+                pages, deadline=deadline, cancelled=cancelled
+            ),
+        )
+        _check_legacy_stop(deadline, cancelled)
+    except TimeoutError:
+        raise
+    except Exception:  # noqa: BLE001 - an optional backend that cannot answer
+        return None
+    if not results:
+        return None
+    return [_as_legacy_dense_row(item, "score") for item in results]
+
+
+def _numpy_dense_hits(
+    query: str,
+    pages: list[Path],
+    *,
+    limit: int,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[dict] | None:
+    try:
+        results = _vector_search(
+            query,
+            pages,
+            limit * 3,
+            project,
+            since,
+            as_of,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+    except TimeoutError:
+        raise
+    except Exception:  # noqa: BLE001 - no usable vectors is not an error
+        return None
+    if results is None:
+        return None
+    return [_as_legacy_dense_row(row, "score") for row in results]
+
+
 def _legacy_dense_hits(
     query: str,
     *,
@@ -3276,9 +3359,7 @@ def _legacy_dense_hits(
     _check_legacy_stop(deadline, cancelled)
     if deadline is not None:
         return None
-    if not query or not query.strip():
-        return None
-    if not _have_sentence_transformers():
+    if not query or not query.strip() or not _have_sentence_transformers():
         return None
     pages = (
         page_paths
@@ -3287,64 +3368,28 @@ def _legacy_dense_hits(
     )
     if not pages:
         return None
-    vector_results = None
-    try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from lance_store import have_lancedb
-        from lance_store import vector_search as _lance_search
-
-        if have_lancedb():
-            qvecs = _embed_texts(
-                [query], is_query=True, deadline=deadline, cancelled=cancelled
-            )
-            if qvecs:
-                lance_results = _lance_search(
-                    qvecs[0],
-                    limit * 3,
-                    project,
-                    since=since,
-                    as_of=as_of,
-                    expected_model_id=EMBEDDING_MODEL,
-                    expected_model_revision=EMBEDDING_MODEL_REVISION,
-                    expected_sources=_legacy_vector_source_membership(
-                        pages, deadline=deadline, cancelled=cancelled
-                    ),
-                )
-                _check_legacy_stop(deadline, cancelled)
-                if lance_results:
-                    vector_results = []
-                    for item in lance_results:
-                        row = dict(item)
-                        row["vector_score"] = row.get("vector_score", row.get("score"))
-                        row["candidate_id"] = Path(str(row.get("path") or "")).stem
-                        row["generation"] = "legacy"
-                        vector_results.append(row)
-    except TimeoutError:
-        raise
-    except Exception:
-        vector_results = None
-    if vector_results is None:
-        try:
-            vector_results = _vector_search(
-                query,
-                pages,
-                limit * 3,
-                project,
-                since,
-                as_of,
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-            if vector_results is not None:
-                for row in vector_results:
-                    row["vector_score"] = row.get("score")
-                    row.setdefault("candidate_id", Path(str(row.get("path") or "")).stem)
-                    row["generation"] = "legacy"
-        except TimeoutError:
-            raise
-        except Exception:
-            return None
-    return vector_results
+    hits = _lance_dense_hits(
+        query,
+        pages,
+        limit=limit,
+        project=project,
+        since=since,
+        as_of=as_of,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    if hits is not None:
+        return hits
+    return _numpy_dense_hits(
+        query,
+        pages,
+        limit=limit,
+        project=project,
+        since=since,
+        as_of=as_of,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
 
 
 def _generation_artifact_names(
