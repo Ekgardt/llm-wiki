@@ -1,6 +1,6 @@
 # Exporting the vault
 
-How to package this repository for distribution, external audit, or migration to a new machine — **without** leaking local state or build artifacts.
+How to package this repository for distribution or external audit — **without** leaking local state or build artifacts. An export carries the committed files and nothing else, so it is not a way to move your memory to another machine; see [Moving to a new machine](#moving-to-a-new-machine) below.
 
 ## TL;DR — use the export script
 
@@ -65,15 +65,19 @@ unzip -l ../llm-wiki-export.zip | grep -E '\.venv|settings\.local|gitleaks|__pyc
 ```
 Should print nothing. If it does, the archive was not built with `git archive`.
 
-## Migrating to a new machine
+## Moving to a new machine
 
-Don't export-then-unzip; just clone:
+An export is not a migration. The archive packages committed files, so it carries the code and the public examples and leaves out everything the running system wrote: notes you never committed, `knowledge/daily/`, and `cache/`, `logs/`, `run/`.
+
+Move the harness by cloning it:
 
 ```bash
 git clone git@github.com:Ekgardt/llm-wiki.git $LLM_WIKI_ROOT
 ```
 
 Then run `install.ps1` / `install.sh` (or follow [[docs/USER-GUIDE|User guide]]) to set up the machine-local pieces (`$LLM_WIKI_ROOT` env var, hooks, agent wiring).
+
+Move the memory itself with the encrypted backup, not with an export. `scripts/private_vault_backup.py backup` writes one verified Restic snapshot and returns a `snapshot_id` plus `manifest_sha256` receipt; `restore` requires both and unpacks validated `vault/` and `state/` directories into a pre-existing empty directory. Restore stops there: it never publishes into an installed vault, so putting the restored content in place stays a deliberate step you take after reviewing it. The full procedure and its refusals are in [[docs/USER-GUIDE|User guide]].
 
 ## Sharing a subset for discussion
 
