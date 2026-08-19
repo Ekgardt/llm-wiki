@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import BinaryIO, TypeVar
+from typing import BinaryIO, NamedTuple, TypeVar
 
 import lsp_process_tree as _lsp_process_tree
 import windows_workspace as _windows_workspace
@@ -3006,6 +3006,91 @@ def _notify_lsp_process(
         raise
 
 
+def _require_generation_nonce(generation_nonce: object) -> None:
+    if not isinstance(generation_nonce, str):
+        raise TypeError("generation_nonce must be a string")
+    if re.fullmatch(r"[0-9a-f]{32}", generation_nonce) is None:
+        raise ValueError(
+            "generation_nonce must be 32 lowercase hexadecimal characters"
+        )
+
+
+def _generation_still_current(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    generation: object,
+    generation_nonce: str,
+) -> bool:
+    if coordinator.phase is not _LifecyclePhase.RUNNING:
+        return False
+    if coordinator.terminal_outcome is not None:
+        return False
+    if coordinator.active is not generation:
+        return False
+    return instance.generation_nonce == generation_nonce
+
+
+def _generation_unavailable(generation: object) -> bool:
+    with generation.failure_lock:
+        if generation._exit_observed or generation.failure_queued:
+            return True
+        return generation.expected_exit.is_set()
+
+
+def _terminal_pending(coordinator: _LifecycleCoordinator) -> bool:
+    with coordinator.terminal_state_lock:
+        if coordinator.success_committed:
+            return True
+        if coordinator.mandatory_failure_intent is not None:
+            return True
+        return coordinator.pending_failure_intents > 0
+
+
+class _NotifyOutcome(NamedTuple):
+    sent: bool
+    queue_reason: str | None
+    protocol_error: ProtocolViolation | None
+
+
+def _notify_under_lifecycle(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    generation: object,
+    generation_nonce: str,
+    method: str,
+    params: object,
+    deadline: float,
+) -> _NotifyOutcome:
+    if not _generation_still_current(
+        instance, coordinator, generation, generation_nonce
+    ):
+        return _NotifyOutcome(False, None, None)
+    protocol = generation.protocol
+    process = generation.process
+    if protocol is None or process is None:
+        return _NotifyOutcome(False, None, None)
+    if _generation_unavailable(generation) or _terminal_pending(coordinator):
+        return _NotifyOutcome(False, None, None)
+    expired = protocol.expired_drain_keys(time.monotonic())
+    if expired:
+        return _NotifyOutcome(False, "expired drain", None)
+    if process.poll() is not None or protocol.fatal:
+        return _NotifyOutcome(False, _PROCESS_EXITED, None)
+    try:
+        protocol.notify(method, params, deadline=deadline)
+    except ProtocolViolation as error:
+        return _NotifyOutcome(False, None, error)
+    return _NotifyOutcome(True, None, None)
+
+
+def _generation_died_after_violation(generation: object) -> bool:
+    protocol = generation.protocol
+    process = generation.process
+    if protocol is None or process is None:
+        return False
+    return protocol.fatal or process.poll() is not None
+
+
 def _notify_lsp_process_generation(
     instance: LspProcess,
     method: str,
@@ -3015,74 +3100,31 @@ def _notify_lsp_process_generation(
     deadline: float,
 ) -> bool:
     deadline = _validated_deadline(deadline)
-    if not isinstance(generation_nonce, str):
-        raise TypeError("generation_nonce must be a string")
-    if re.fullmatch(r"[0-9a-f]{32}", generation_nonce) is None:
-        raise ValueError("generation_nonce must be 32 lowercase hexadecimal characters")
+    _require_generation_nonce(generation_nonce)
     generation = _request_generation(instance, deadline)
     if generation.nonce != generation_nonce:
         return False
     coordinator = instance._coordinator
-    queue_reason: str | None = None
-    protocol_error: ProtocolViolation | None = None
-    sent = False
     _acquire_lifecycle(coordinator, deadline)
     try:
-        if (
-            coordinator.phase is not _LifecyclePhase.RUNNING
-            or coordinator.terminal_outcome is not None
-            or coordinator.active is not generation
-            or instance.generation_nonce != generation_nonce
-        ):
-            return False
-        protocol = generation.protocol
-        process = generation.process
-        if protocol is None or process is None:
-            return False
-        with generation.failure_lock:
-            unavailable = (
-                generation._exit_observed
-                or generation.failure_queued
-                or generation.expected_exit.is_set()
-            )
-        with coordinator.terminal_state_lock:
-            terminal_pending = (
-                coordinator.success_committed
-                or coordinator.mandatory_failure_intent is not None
-                or coordinator.pending_failure_intents > 0
-            )
-        expired = protocol.expired_drain_keys(time.monotonic())
-        exited = process.poll() is not None
-        if unavailable or terminal_pending:
-            return False
-        if expired or exited or protocol.fatal:
-            queue_reason = "expired drain" if expired else _PROCESS_EXITED
-        else:
-            try:
-                protocol.notify(method, params, deadline=deadline)
-            except ProtocolViolation as error:
-                protocol_error = error
-            else:
-                sent = True
+        outcome = _notify_under_lifecycle(
+            instance,
+            coordinator,
+            generation,
+            generation_nonce,
+            method,
+            params,
+            deadline,
+        )
     finally:
         _release_lifecycle(coordinator)
-    if queue_reason is not None:
-        _queue_generation_failure(coordinator, generation, queue_reason)
-    if protocol_error is not None:
-        protocol = generation.protocol
-        process = generation.process
-        if (
-            protocol is not None
-            and process is not None
-            and (protocol.fatal or process.poll() is not None)
-        ):
-            _queue_generation_failure(
-                coordinator,
-                generation,
-                _PROCESS_EXITED,
-            )
-        raise protocol_error
-    return sent
+    if outcome.queue_reason is not None:
+        _queue_generation_failure(coordinator, generation, outcome.queue_reason)
+    if outcome.protocol_error is None:
+        return outcome.sent
+    if _generation_died_after_violation(generation):
+        _queue_generation_failure(coordinator, generation, _PROCESS_EXITED)
+    raise outcome.protocol_error
 
 
 def _failure_identity(
