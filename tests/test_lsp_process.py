@@ -9327,7 +9327,7 @@ def test_startup_terminal_intent_timeout_returns_retryable_cleanup_error(
             coordinator.terminal_intent_lock.acquire()
             try:
                 held.set()
-                release.wait(10)
+                release.wait(120)
             finally:
                 coordinator.terminal_intent_lock.release()
 
@@ -9345,6 +9345,9 @@ def test_startup_terminal_intent_timeout_returns_retryable_cleanup_error(
     monkeypatch.setattr(
         lsp_process, "_start_lifecycle_workers", fail_with_terminal_intent_lock
     )
+    # This test is about a cleanup lock held past the startup deadline, not
+    # about how long that deadline is, so it sets its own short one.
+    monkeypatch.setattr(lsp_process, "_STARTUP_WAIT_SECONDS", 5.0)
     owner_root = tmp_path / OWNER_NONCE
     coordinator: lsp_process._LifecycleCoordinator | None = None
     cleanup_error: lsp_process.StartupCleanupError | None = None

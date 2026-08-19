@@ -2792,7 +2792,7 @@ def test_run_deadline_never_renews_and_cleanup_gets_a_fresh_budget(
 
         def query(self, request: object, *, deadline: float) -> NavigationResult:
             query_deadlines.append(deadline)
-            clock.advance(3.0)
+            clock.advance(30.0)
             return _empty_navigation_result(request)
 
         def close(self, *, deadline: float) -> int:
@@ -2803,7 +2803,11 @@ def test_run_deadline_never_renews_and_cleanup_gets_a_fresh_budget(
         discovery_deadlines.append(deadline)
         return _qualified_identity()
 
-    monkeypatch.setattr(benchmark_runner, "RUN_TIMEOUT_SECONDS", 5.0)
+    # The fake clock also sizes the real timeout given to the fixture's git
+    # commands, so a five-second run budget gave git five real seconds and a
+    # loaded Windows runner could not finish inside it. The budget is spent by
+    # advancing the clock per query instead.
+    monkeypatch.setattr(benchmark_runner, "RUN_TIMEOUT_SECONDS", 50.0)
     monkeypatch.setattr(benchmark_runner, "CLEANUP_TIMEOUT_SECONDS", 2.0)
     with pytest.raises(benchmark_runner.BenchmarkTimeoutError):
         run_fixture_benchmark(
@@ -2817,11 +2821,11 @@ def test_run_deadline_never_renews_and_cleanup_gets_a_fresh_budget(
             ),
         )
 
-    assert discovery_deadlines == [105.0]
+    assert discovery_deadlines == [150.0]
     assert 1 <= len(query_deadlines) <= 2
-    assert max(query_deadlines) <= 105.0
+    assert max(query_deadlines) <= 150.0
     assert cleanup_deadlines
-    assert min(cleanup_deadlines) > 105.0
+    assert min(cleanup_deadlines) > 150.0
 
 
 def test_every_benchmark_operation_receives_a_run_capped_deadline(

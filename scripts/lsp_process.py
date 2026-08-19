@@ -67,7 +67,11 @@ LSP_ENV_ALLOWLIST = frozenset(
 )
 
 _STDERR_CHUNK_BYTES = 65_537
-_STARTUP_WAIT_SECONDS = 2.0
+# Spawning the server and publishing its first lease took longer than two
+# seconds on a loaded four-core Windows machine, which turned a healthy
+# start into `LSP startup deadline expired`. Readiness keeps its own much
+# larger budget; this one only covers process start and lease publication.
+_STARTUP_WAIT_SECONDS = 10.0
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 _STARTUP_FAILED = "startup_failed"
 _PROCESS_EXITED = "process_exited"
