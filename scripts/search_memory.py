@@ -1296,114 +1296,159 @@ def _replace_live_index(
             attempt += 1
 
 
+_SEARCH_INDEX_DDL = """
+    CREATE VIRTUAL TABLE pages USING fts5(
+        path UNINDEXED,
+        title,
+        summary,
+        body,
+        project UNINDEXED,
+        timestamp UNINDEXED,
+        slug,
+        tokenize = 'porter unicode61'
+    )
+    """
+
+
+def _create_index_schema(conn: sqlite3.Connection, manifest_paths: list[str]) -> None:
+    conn.execute(_SEARCH_INDEX_DDL)
+    conn.execute(
+        "CREATE TABLE index_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL) "
+        "WITHOUT ROWID"
+    )
+    conn.execute(
+        "INSERT INTO index_metadata (key, value) VALUES ('paths', ?)",
+        (json.dumps(manifest_paths, separators=(",", ":")),),
+    )
+
+
+def _index_one_page(conn: sqlite3.Connection, page: Path) -> str | None:
+    """Insert one page and return the digest of the bytes that were indexed."""
+    try:
+        source = read_stable_bytes(page, MAX_PAGE_BYTES, label="search page")
+    except (OSError, ValueError):
+        return None
+    content = source.decode("utf-8", errors="ignore")
+    title, summary = _extract_title_and_summary(content, page.stem)
+    timestamp = (_extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or "")[:10]
+    conn.execute(
+        "INSERT INTO pages (path, title, summary, body, project, timestamp, slug) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            page.relative_to(ROOT).as_posix(),
+            title,
+            summary,
+            _strip_frontmatter(content),
+            (_extract_frontmatter_field(content, PROJECT_FIELD_RE) or "").lower(),
+            timestamp,
+            page.stem.replace("-", " ").replace("_", " "),
+        ),
+    )
+    return hashlib.sha256(source).hexdigest()
+
+
+def _sources_unchanged(
+    source_digests: Mapping[Path, str],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    """A page edited while the index was building invalidates this build."""
+    for path, expected_digest in source_digests.items():
+        _check_legacy_stop(deadline, cancelled)
+        try:
+            current = read_stable_bytes(
+                path, MAX_PAGE_BYTES, label="search page publication"
+            )
+        except (OSError, ValueError):
+            return False
+        if hashlib.sha256(current).hexdigest() != expected_digest:
+            return False
+    return True
+
+
+def _build_index_candidate(
+    tmp_file: Path,
+    pages: list[Path],
+    manifest_paths: list[str],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> dict[Path, str]:
+    """Fill a fresh index file and report the digests it was built from."""
+    source_digests: dict[Path, str] = {}
+    conn = sqlite3.connect(str(tmp_file))
+    try:
+        _create_index_schema(conn, manifest_paths)
+        for page in pages:
+            _check_legacy_stop(deadline, cancelled)
+            digest = _index_one_page(conn, page)
+            if digest is not None:
+                source_digests[page] = digest
+        conn.commit()
+        _check_legacy_stop(deadline, cancelled)
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001 - a close failure must not mask the build
+            pass
+    return source_digests
+
+
+def _publish_index_candidate(
+    tmp_file: Path,
+    source_digests: Mapping[Path, str],
+    manifest_paths: list[str],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    """Builders work independently, then briefly serialise the atomic swap."""
+    with _index_swap_lock(deadline=deadline, cancelled=cancelled):
+        if not _sources_unchanged(source_digests, deadline, cancelled):
+            return
+        _replace_live_index(tmp_file, deadline=deadline, cancelled=cancelled)
+        try:
+            atomic_write(INDEX_MANIFEST, json.dumps(manifest_paths))
+        except OSError:
+            pass  # best-effort: the manifest inside the index is authoritative
+
+
 def _build_index(
     pages: list[Path],
     *,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> None:
-    """Build the FTS5 index from scratch (atomically).
+    """Build the FTS5 index from scratch into a temporary file, then swap it in.
 
-    Builds into a temporary database file, then atomically replaces the
-    live index via ``os.replace``. This ensures concurrent searches never
-    see a partially-built index or a missing-index window.
+    Concurrent searches never see a partially built index or a window with no
+    index at all.
     """
     _check_legacy_stop(deadline, cancelled)
     INDEX_DIR.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
+    descriptor, tmp_name = tempfile.mkstemp(
         prefix=f".{INDEX_FILE.name}.", suffix=".tmp", dir=INDEX_DIR
     )
-    os.close(fd)
+    os.close(descriptor)
     tmp_file = Path(tmp_name)
-    conn = None
-    source_digests: dict[Path, str] = {}
-    manifest_paths = sorted(p.relative_to(ROOT).as_posix() for p in pages)
+    manifest_paths = sorted(page.relative_to(ROOT).as_posix() for page in pages)
     try:
-        conn = sqlite3.connect(str(tmp_file))
-        conn.execute(
-            """
-            CREATE VIRTUAL TABLE pages USING fts5(
-                path UNINDEXED,
-                title,
-                summary,
-                body,
-                project UNINDEXED,
-                timestamp UNINDEXED,
-                slug,
-                tokenize = 'porter unicode61'
-            )
-            """
+        source_digests = _build_index_candidate(
+            tmp_file, pages, manifest_paths, deadline=deadline, cancelled=cancelled
         )
-        conn.execute(
-            "CREATE TABLE index_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL) "
-            "WITHOUT ROWID"
+        _publish_index_candidate(
+            tmp_file,
+            source_digests,
+            manifest_paths,
+            deadline=deadline,
+            cancelled=cancelled,
         )
-        conn.execute(
-            "INSERT INTO index_metadata (key, value) VALUES ('paths', ?)",
-            (json.dumps(manifest_paths, separators=(",", ":")),),
-        )
-
-        for p in pages:
-            _check_legacy_stop(deadline, cancelled)
-            try:
-                source = read_stable_bytes(p, MAX_PAGE_BYTES, label="search page")
-            except (OSError, ValueError):
-                continue
-            source_digests[p] = hashlib.sha256(source).hexdigest()
-            content = source.decode("utf-8", errors="ignore")
-            title, summary = _extract_title_and_summary(content, p.stem)
-            body = _strip_frontmatter(content)
-            rel_path = p.relative_to(ROOT).as_posix()
-            project = _extract_frontmatter_field(content, PROJECT_FIELD_RE) or ""
-            timestamp = _extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or ""
-            # Truncate timestamp to date only for filtering
-            timestamp = timestamp[:10] if timestamp else ""
-            slug = p.stem.replace("-", " ").replace("_", " ")
-            conn.execute(
-                "INSERT INTO pages (path, title, summary, body, project, timestamp, slug) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (rel_path, title, summary, body, project.lower(), timestamp, slug),
-            )
-
-        conn.commit()
-        _check_legacy_stop(deadline, cancelled)
-        conn.close()
-        conn = None
-
-        # Builders do the expensive work independently, then briefly serialize
-        # the atomic live-index swap. Windows readers may transiently deny it.
-        with _index_swap_lock(deadline=deadline, cancelled=cancelled):
-            for path, expected_digest in source_digests.items():
-                _check_legacy_stop(deadline, cancelled)
-                try:
-                    current = read_stable_bytes(
-                        path, MAX_PAGE_BYTES, label="search page publication"
-                    )
-                except (OSError, ValueError):
-                    return
-                if hashlib.sha256(current).hexdigest() != expected_digest:
-                    return
-            _replace_live_index(
-                tmp_file, deadline=deadline, cancelled=cancelled
-            )
-
-            # Keep the manifest paired with the winning index build.
-            try:
-                atomic_write(
-                    INDEX_MANIFEST,
-                    json.dumps(manifest_paths),
-                )
-            except OSError:
-                pass  # best-effort
     finally:
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:
-                pass
         try:
             tmp_file.unlink()
         except FileNotFoundError:
             pass
+
 
 def _authority_weight(path: str) -> float:
     """Read source_authority from page frontmatter; default 1.0."""
