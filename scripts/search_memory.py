@@ -1556,6 +1556,52 @@ def _maybe_rerank(query: str, results: list[dict], limit: int) -> list[dict]:
     return results[:limit]
 
 
+def _stamp_retrieval_mode(results: list[dict], mode: str) -> None:
+    for result in results:
+        result.setdefault("generation", "legacy")
+        result["requested_mode"] = mode
+        result["effective_mode"] = mode
+        result.setdefault("fallback_reason", None)
+
+
+def _impression_events(
+    query: str, results: list[dict], mode: str, source_tool: str, make_event
+) -> list:
+    events = []
+    for rank, result in enumerate(results, start=1):
+        event = make_event(
+            event_kind="impression",
+            query=query,
+            retrieval_mode=mode,
+            candidate_id=result.get("slug") or Path(result.get("path", "")).stem,
+            rank=rank,
+            generation=str(result.get("generation") or "legacy"),
+            source_tool=source_tool,
+        )
+        if event is not None:
+            events.append(event)
+    return events
+
+
+def _best_effort_record_impressions(
+    query: str, results: list[dict], mode: str, source_tool: str
+) -> None:
+    """Telemetry never changes what a search returns, so it swallows failures."""
+    try:
+        from retrieval_telemetry import (
+            best_effort_make_event,
+            best_effort_record_events,
+        )
+
+        events = _impression_events(
+            query, results, mode, source_tool, best_effort_make_event
+        )
+        if events:
+            best_effort_record_events(events)
+    except Exception:
+        pass
+
+
 def _finalize_results(
     query: str,
     results: list[dict],
@@ -1568,37 +1614,10 @@ def _finalize_results(
     """Finalize one returned list and best-effort record its impressions once."""
     final = _deduplicate_by_slug(results)[:limit]
     mode = str(retrieval_mode or "bm25").lower()
-    for result in final:
-        result.setdefault("generation", "legacy")
-        result["requested_mode"] = mode
-        result["effective_mode"] = mode
-        result.setdefault("fallback_reason", None)
+    _stamp_retrieval_mode(final, mode)
     if not final or not emit_telemetry:
         return final
-    try:
-        from retrieval_telemetry import (
-            best_effort_make_event,
-            best_effort_record_events,
-        )
-
-        events = []
-        for rank, result in enumerate(final, start=1):
-            candidate_id = result.get("slug") or Path(result.get("path", "")).stem
-            event = best_effort_make_event(
-                event_kind="impression",
-                query=query,
-                retrieval_mode=mode,
-                candidate_id=candidate_id,
-                rank=rank,
-                generation=str(result.get("generation") or "legacy"),
-                source_tool=source_tool,
-            )
-            if event is not None:
-                events.append(event)
-        if events:
-            best_effort_record_events(events)
-    except Exception:
-        pass
+    _best_effort_record_impressions(query, final, mode, source_tool)
     return final
 
 
@@ -1672,6 +1691,52 @@ def _canonical_manifest_bytes(manifest: dict[str, object]) -> bytes:
     ).encode("utf-8")
 
 
+def _require_regular_file(path: Path):
+    before = path.lstat()
+    if path.is_symlink() or not stat.S_ISREG(before.st_mode):
+        raise PermissionError("generation artifact must be a regular file")
+    return before
+
+
+def _hashed_open_file(
+    source,
+    before,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> tuple[int, str, object, object]:
+    """Hash an open file while proving it stays the same file throughout."""
+    opened = os.fstat(source.fileno())
+    if not os.path.samestat(before, opened):
+        raise PermissionError("generation artifact changed while opening")
+    digest = hashlib.sha256()
+    size = 0
+    while chunk := source.read(64 * 1024):
+        _check_generation_stop(deadline, cancelled)
+        size += len(chunk)
+        digest.update(chunk)
+    _check_generation_stop(deadline, cancelled)
+    return size, digest.hexdigest(), opened, os.fstat(source.fileno())
+
+
+def _require_stable_identity(opened, after_open, after) -> None:
+    if (
+        not os.path.samestat(opened, after_open)
+        or not os.path.samestat(after_open, after)
+        or (opened.st_size, opened.st_mtime_ns)
+        != (after_open.st_size, after_open.st_mtime_ns)
+    ):
+        raise PermissionError("generation artifact changed while hashing")
+
+
+def _require_expected_seal(
+    expected: dict[str, object] | None, size: int, checksum: str
+) -> None:
+    if expected is None:
+        return
+    if expected.get("size") != size or expected.get("sha256") != checksum:
+        raise ValueError("generation artifact does not match active manifest")
+
+
 def _sealed_file(
     path: Path,
     expected: dict[str, object] | None = None,
@@ -1680,34 +1745,14 @@ def _sealed_file(
     cancelled: Callable[[], bool] | None = None,
 ) -> tuple:
     _check_generation_stop(deadline, cancelled)
-    before = path.lstat()
-    if path.is_symlink() or not stat.S_ISREG(before.st_mode):
-        raise PermissionError("generation artifact must be a regular file")
-    digest = hashlib.sha256()
-    size = 0
+    before = _require_regular_file(path)
     with path.open("rb") as source:
-        opened = os.fstat(source.fileno())
-        if not os.path.samestat(before, opened):
-            raise PermissionError("generation artifact changed while opening")
-        while chunk := source.read(64 * 1024):
-            _check_generation_stop(deadline, cancelled)
-            size += len(chunk)
-            digest.update(chunk)
-        _check_generation_stop(deadline, cancelled)
-        after_open = os.fstat(source.fileno())
+        size, checksum, opened, after_open = _hashed_open_file(
+            source, before, deadline, cancelled
+        )
     after = path.lstat()
-    if (
-        not os.path.samestat(opened, after_open)
-        or not os.path.samestat(after_open, after)
-        or (opened.st_size, opened.st_mtime_ns)
-        != (after_open.st_size, after_open.st_mtime_ns)
-    ):
-        raise PermissionError("generation artifact changed while hashing")
-    checksum = digest.hexdigest()
-    if expected is not None and (
-        expected.get("size") != size or expected.get("sha256") != checksum
-    ):
-        raise ValueError("generation artifact does not match active manifest")
+    _require_stable_identity(opened, after_open, after)
+    _require_expected_seal(expected, size, checksum)
     return (
         after.st_dev,
         after.st_ino,
