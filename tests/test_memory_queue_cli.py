@@ -28,6 +28,36 @@ def _sleep_processor(task: dict) -> bool:
     return True
 
 
+def _report_alive(sender) -> None:
+    """Report and stay alive; the parent decides when this child ends."""
+    sender.send_bytes(b"R")
+    time.sleep(120)
+
+
+def test_a_spawned_child_of_this_module_starts_and_reports_back() -> None:
+    """Windows hides a spawn child's bootstrap failure: it dies with no output.
+
+    Several worker tests failed there with `child exited 1 before cleanup`,
+    which is what the parent sees when the child never ran. This isolates that
+    question from the worker logic around it.
+    """
+    import multiprocessing
+
+    context = multiprocessing.get_context("spawn")
+    receiver, sender = context.Pipe(duplex=True)
+    process = context.Process(target=_report_alive, args=(sender,), daemon=False)
+    process.start()
+    sender.close()
+    try:
+        reported = receiver.poll(60)
+        assert reported, f"child exited {process.exitcode} without reporting"
+        assert receiver.recv_bytes(1) == b"R"
+    finally:
+        process.terminate()
+        process.join(30)
+        receiver.close()
+
+
 def _result_processor(task: dict) -> memory_queue.DeferredResult:
     return memory_queue.DeferredResult(b"x" * task["payload"]["size"])
 

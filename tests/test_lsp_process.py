@@ -7052,7 +7052,9 @@ def test_parallel_real_startup_failures_stay_bounded_secure_and_leak_free(
     with ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(fail_start, range(20)))
 
-    assert max(elapsed for elapsed, _owner in results) <= 2.75
+    assert max(elapsed for elapsed, _owner in results) <= (
+        lsp_process._STARTUP_WAIT_SECONDS + 0.75
+    )
     assert len(children) == 20
     assert all(child.poll() is not None for child in children)
     for _elapsed, owner in results:
@@ -7090,7 +7092,9 @@ def test_four_delayed_owner_acl_starts_share_deadline_and_leave_no_leaks(
     with ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(fail_start, range(4)))
 
-    assert max(elapsed for elapsed, _owner in results) <= 2.75
+    assert max(elapsed for elapsed, _owner in results) <= (
+        lsp_process._STARTUP_WAIT_SECONDS + 0.75
+    )
     assert all(owner.is_dir() and not any(owner.iterdir()) for _elapsed, owner in results)
     for _elapsed, owner in results:
         owner.rmdir()
