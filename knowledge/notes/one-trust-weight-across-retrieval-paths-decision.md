@@ -75,3 +75,5 @@ contract applied everywhere rather than a new tuning exercise.
 
 - [[baseline-environment-binding-decision]]
 - [[warm-navigation-overhead-threshold-decision]]
+- [[citation-relevance-gate-decision]]
+- [[classification-measurement-stand-decision]]

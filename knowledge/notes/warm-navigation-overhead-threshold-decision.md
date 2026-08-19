@@ -65,3 +65,4 @@ have removed the only automated evidence that the overhead is bounded at all.
 
 - [[read-only-lsp-navigation-engine-decision]]
 - [[baseline-environment-binding-decision]]
+- [[one-trust-weight-across-retrieval-paths-decision]]

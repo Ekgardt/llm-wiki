@@ -49,3 +49,5 @@ Routine low-risk recovery remains automatic and agent-readable.
 - [[knowledge/notes/reliability-v3-runtime-adoption-implementation-decision]]
 - [[knowledge/notes/observable-capture-and-bounded-maintenance-decision]]
 - [[knowledge/notes/system-symlink-ancestor-decision]]
+- [[knowledge/notes/citation-relevance-gate-decision]]
+- [[knowledge/notes/dead-task-retirement-and-restore-decision]]

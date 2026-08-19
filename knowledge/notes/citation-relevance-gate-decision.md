@@ -64,3 +64,4 @@ sharing not one content word with its evidence.
 
 - [[one-trust-weight-across-retrieval-paths-decision]]
 - [[reliable-memory-stage-2]]
+- [[classification-measurement-stand-decision]]
