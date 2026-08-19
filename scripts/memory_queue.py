@@ -2816,6 +2816,60 @@ def _blocked_or_pending(blocker_code: str | None) -> str:
     return "blocked"
 
 
+def _receipt_matches_disposition(
+    receipt: dict,
+    disposition: sqlite3.Row,
+    operation: sqlite3.Row,
+    operation_id: str,
+    task_id: str,
+) -> bool:
+    if receipt["operation_id"] != operation_id or receipt["task_id"] != task_id:
+        return False
+    if receipt["package_key"] != disposition["disposition_key"]:
+        return False
+    if receipt["manifest_sha256"] != disposition["manifest_sha256"]:
+        return False
+    if receipt["disposition_sha256"] != disposition["disposition_sha256"]:
+        return False
+    if receipt["original_frozen_root"] != disposition["original_frozen_root"]:
+        return False
+    return _receipt_matches_operation(receipt, operation)
+
+
+def _receipt_matches_operation(receipt: dict, operation: sqlite3.Row) -> bool:
+    if receipt["purge_page_count"] != operation["page_count"]:
+        return False
+    if receipt["final_rolling_root"] != operation["rolling_root"]:
+        return False
+    return receipt["final_generation"] == operation["expected_generation"]
+
+
+def _parent_state_ready_for_delete(
+    operation: sqlite3.Row, task: sqlite3.Row
+) -> bool:
+    if operation["state"] != "receipt-published":
+        return False
+    if task["state"] != "purge_pending":
+        return False
+    return int(task["lineage_generation"]) == int(operation["expected_generation"])
+
+
+def _exported_bytes_match(
+    raw: bytes,
+    history: bytes,
+    current_history: bytes,
+    task: sqlite3.Row,
+    disposition: sqlite3.Row,
+) -> bool:
+    if sha256_bytes(raw) != disposition["raw_sha256"]:
+        return False
+    if sha256_bytes(bytes(task["payload_blob"])) != disposition["raw_sha256"]:
+        return False
+    if sha256_bytes(history) != disposition["history_sha256"]:
+        return False
+    return sha256_bytes(current_history) == disposition["history_sha256"]
+
+
 def _redact_payload(value: object) -> object:
     if isinstance(value, str):
         return redact_secrets(value)
@@ -7563,6 +7617,89 @@ class _QueueV3CandidateReader:
                     raise QueueOperationError("corrupt_purge_receipt_fence_lost")
             return receipt_bytes
 
+    def _corrupt_parent_rows(
+        self, database: sqlite3.Connection, task_id: str, operation_id: str
+    ) -> tuple[sqlite3.Row, sqlite3.Row, sqlite3.Row]:
+        operation = database.execute(
+            "SELECT * FROM corrupt_purge_operations WHERE operation_id=?",
+            (operation_id,),
+        ).fetchone()
+        task = database.execute(
+            "SELECT * FROM tasks WHERE id=?", (task_id,)
+        ).fetchone()
+        disposition = database.execute(
+            """SELECT disposition.*,export.raw_sha256,export.history_sha256,
+                      export.metadata_sha256,export.disposition_key,
+                      export.rolling_root AS original_frozen_root
+               FROM corrupt_dispositions AS disposition
+               JOIN corrupt_export_operations AS export
+                 ON export.operation_id=disposition.operation_id
+               WHERE disposition.task_id=?""",
+            (task_id,),
+        ).fetchone()
+        if operation is None or task is None or disposition is None:
+            raise QueueOperationError("corrupt_purge_lost")
+        return operation, task, disposition
+
+    def _current_attempt_history(
+        self, database: sqlite3.Connection, task_id: str
+    ) -> bytes:
+        return canonical_json_bytes(
+            [
+                {
+                    "attempt": int(row["attempt"]),
+                    "started_at": str(row["started_at"]),
+                    "finished_at": str(row["finished_at"]),
+                    "outcome": str(row["outcome"]),
+                    "error_code": row["error_code"],
+                }
+                for row in database.execute(
+                    """SELECT attempt,started_at,finished_at,outcome,error_code
+                       FROM attempt_history WHERE task_id=? ORDER BY sequence""",
+                    (task_id,),
+                )
+            ]
+        )
+
+    def _require_parent_delete_preconditions(
+        self,
+        database: sqlite3.Connection,
+        task_id: str,
+        operation_id: str,
+        operation: sqlite3.Row,
+        task: sqlite3.Row,
+        disposition: sqlite3.Row,
+        package: Path,
+    ) -> None:
+        """Nothing is deleted until the package still proves what was exported."""
+        receipt_bytes = _read_stable_owner_file(
+            package / "purge-receipt.json", 64 * 1024
+        )
+        receipt = json.loads(receipt_bytes.decode("utf-8", errors="strict"))
+        validate_schema(
+            receipt, Path(__file__).with_name("schemas") / "corrupt-purge-v1.json"
+        )
+        raw = _read_stable_owner_file(
+            package / "payload.bin", _MAX_QUEUE_PAYLOAD_BYTES
+        )
+        history = _read_stable_owner_file(
+            package / "attempt-history.json", _MAX_EXPORT_METADATA_BYTES
+        )
+        current_history = self._current_attempt_history(database, task_id)
+        children = database.execute(
+            "SELECT 1 FROM tasks WHERE redrive_of=? LIMIT 1", (task_id,)
+        ).fetchone()
+        if not _parent_state_ready_for_delete(operation, task) or children is not None:
+            raise QueueOperationError("corrupt_parent_delete_precondition_failed")
+        if not _exported_bytes_match(
+            raw, history, current_history, task, disposition
+        ):
+            raise QueueOperationError("corrupt_parent_delete_precondition_failed")
+        if not _receipt_matches_disposition(
+            receipt, disposition, operation, operation_id, task_id
+        ):
+            raise QueueOperationError("corrupt_parent_delete_precondition_failed")
+
     def _delete_corrupt_parent(
         self,
         task_id: str,
@@ -7572,83 +7709,19 @@ class _QueueV3CandidateReader:
         task_fence: TaskFence,
     ) -> None:
         with closing(self._connect()) as database, begin_immediate(database):
-            operation = database.execute(
-                "SELECT * FROM corrupt_purge_operations WHERE operation_id=?",
-                (operation_id,),
-            ).fetchone()
-            task = database.execute(
-                "SELECT * FROM tasks WHERE id=?", (task_id,)
-            ).fetchone()
-            disposition = database.execute(
-                """SELECT disposition.*,export.raw_sha256,export.history_sha256,
-                          export.metadata_sha256,export.disposition_key,
-                          export.rolling_root AS original_frozen_root
-                   FROM corrupt_dispositions AS disposition
-                   JOIN corrupt_export_operations AS export
-                     ON export.operation_id=disposition.operation_id
-                   WHERE disposition.task_id=?""",
-                (task_id,),
-            ).fetchone()
-            if operation is None or task is None or disposition is None:
-                raise QueueOperationError("corrupt_purge_lost")
+            operation, task, disposition = self._corrupt_parent_rows(
+                database, task_id, operation_id
+            )
             self._require_corrupt_task_fence(database, task_fence)
-            receipt_bytes = _read_stable_owner_file(
-                package / "purge-receipt.json", 64 * 1024
+            self._require_parent_delete_preconditions(
+                database,
+                task_id,
+                operation_id,
+                operation,
+                task,
+                disposition,
+                package,
             )
-            receipt = json.loads(receipt_bytes.decode("utf-8", errors="strict"))
-            validate_schema(
-                receipt,
-                Path(__file__).with_name("schemas") / "corrupt-purge-v1.json",
-            )
-            raw = _read_stable_owner_file(
-                package / "payload.bin", _MAX_QUEUE_PAYLOAD_BYTES
-            )
-            history = _read_stable_owner_file(
-                package / "attempt-history.json", _MAX_EXPORT_METADATA_BYTES
-            )
-            current_history = canonical_json_bytes(
-                [
-                    {
-                        "attempt": int(row["attempt"]),
-                        "started_at": str(row["started_at"]),
-                        "finished_at": str(row["finished_at"]),
-                        "outcome": str(row["outcome"]),
-                        "error_code": row["error_code"],
-                    }
-                    for row in database.execute(
-                        """SELECT attempt,started_at,finished_at,outcome,error_code
-                           FROM attempt_history WHERE task_id=? ORDER BY sequence""",
-                        (task_id,),
-                    )
-                ]
-            )
-            if (
-                operation["state"] != "receipt-published"
-                or task["state"] != "purge_pending"
-                or int(task["lineage_generation"])
-                != int(operation["expected_generation"])
-                or database.execute(
-                    "SELECT 1 FROM tasks WHERE redrive_of=? LIMIT 1", (task_id,)
-                ).fetchone()
-                is not None
-                or sha256_bytes(raw) != disposition["raw_sha256"]
-                or sha256_bytes(bytes(task["payload_blob"]))
-                != disposition["raw_sha256"]
-                or sha256_bytes(history) != disposition["history_sha256"]
-                or sha256_bytes(current_history) != disposition["history_sha256"]
-                or receipt["operation_id"] != operation_id
-                or receipt["task_id"] != task_id
-                or receipt["package_key"] != disposition["disposition_key"]
-                or receipt["manifest_sha256"] != disposition["manifest_sha256"]
-                or receipt["disposition_sha256"]
-                != disposition["disposition_sha256"]
-                or receipt["original_frozen_root"]
-                != disposition["original_frozen_root"]
-                or receipt["purge_page_count"] != operation["page_count"]
-                or receipt["final_rolling_root"] != operation["rolling_root"]
-                or receipt["final_generation"] != operation["expected_generation"]
-            ):
-                raise QueueOperationError("corrupt_parent_delete_precondition_failed")
             inserted = database.execute(
                 """INSERT INTO task_purge_authorizations(
                        task_id,mode,operation_id,authorization_digest,created_at
@@ -7675,11 +7748,7 @@ class _QueueV3CandidateReader:
             ).rowcount
             if deleted_task != 1:
                 raise QueueOperationError("corrupt_parent_delete_failed")
-            cleared = database.execute(
-                "DELETE FROM task_purge_authorizations WHERE task_id=?", (task_id,)
-            ).rowcount
-            if cleared != 1:
-                raise QueueOperationError("purge_authorization_failed")
+            self._clear_purge_authorization(database, task_id)
 
     def purge_quarantined(
         self,
