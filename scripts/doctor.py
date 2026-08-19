@@ -3991,6 +3991,32 @@ def _parse_toml_document(text: str) -> tuple[dict[str, Any] | None, str | None]:
     return (document, None) if isinstance(document, dict) else (None, "toml_invalid")
 
 
+_CODEX_SERVER_ARG_PREFIX = ["run", "--locked", "--no-sync", "--directory"]
+_CODEX_SERVER_ARG_SUFFIX = ["python", "scripts/mcp_server.py"]
+
+
+def _codex_server_arg_shape(args: object) -> bool:
+    if not isinstance(args, list) or len(args) != 8:
+        return False
+    return all(isinstance(item, str) for item in args)
+
+
+def _codex_server_args_match(args: object) -> bool:
+    if not _codex_server_arg_shape(args):
+        return False
+    if args[:4] != _CODEX_SERVER_ARG_PREFIX:
+        return False
+    return args[5:] == _CODEX_SERVER_ARG_SUFFIX
+
+
+def _codex_server_configured(table: dict) -> bool:
+    if table.get("command") != "uv":
+        return False
+    if table.get("enabled", True) is not True:
+        return False
+    return _codex_server_args_match(table.get("args"))
+
+
 def _codex_config_state(path: Path) -> tuple[bool | None, str]:
     kind, info = _safe_kind(path, path.parent)
     if kind != "regular" or info is None or info.st_size > MAX_CONFIG_BYTES:
@@ -4008,19 +4034,10 @@ def _codex_config_state(path: Path) -> tuple[bool | None, str]:
     table = servers.get("llm-wiki") if isinstance(servers, dict) else None
     if not isinstance(table, dict):
         return False, "target_missing_or_invalid"
-    command = table.get("command")
-    args = table.get("args")
-    enabled = table.get("enabled", True)
-    configured = (
-        command == "uv"
-        and isinstance(args, list)
-        and all(isinstance(item, str) for item in args)
-        and len(args) == 8
-        and args[:4] == ["run", "--locked", "--no-sync", "--directory"]
-        and args[5:] == ["python", "scripts/mcp_server.py"]
-        and enabled is True
-    )
-    return configured, "configured" if configured else "target_missing_or_invalid"
+    configured = _codex_server_configured(table)
+    if configured:
+        return True, "configured"
+    return False, "target_missing_or_invalid"
 
 
 def _codex_app_server_command(*, platform: str = os.name) -> list[str] | None:
@@ -4223,34 +4240,60 @@ def _probe_codex_hooks_list(
     return _codex_hooks_result(raw)
 
 
-def _expected_codex_runtime_hooks(template_path: Path) -> list[dict[str, Any]]:
+def _single_template_group(groups: object) -> dict:
+    if not isinstance(groups, list) or len(groups) != 1:
+        raise ValueError("invalid Codex hook template")
+    group = groups[0]
+    if not isinstance(group, dict):
+        raise ValueError("invalid Codex hook template")
+    return group
+
+
+def _single_template_handler(groups: object) -> tuple[dict, dict]:
+    """The one group and its one handler, or a template error."""
+    group = _single_template_group(groups)
+    handlers = group.get("hooks")
+    if not isinstance(handlers, list) or len(handlers) != 1:
+        raise ValueError("invalid Codex hook template")
+    handler = handlers[0]
+    if not isinstance(handler, dict):
+        raise ValueError("invalid Codex hook template")
+    return group, handler
+
+
+def _template_hook_command(handler: dict) -> str:
+    command_key = "commandWindows" if os.name == "nt" else "command"
+    command = handler.get(command_key)
+    if not isinstance(command, str):
+        raise ValueError("invalid Codex hook template")
+    return command
+
+
+def _template_hooks_table(template_path: Path) -> dict:
     value, problem = _read_bounded_json(
         template_path,
         template_path.parent,
         max_bytes=MAX_CONFIG_BYTES,
     )
-    if problem or not isinstance(value, dict) or not isinstance(value.get("hooks"), dict):
+    if problem or not isinstance(value, dict):
         raise ValueError("invalid Codex hook template")
+    hooks = value.get("hooks")
+    if not isinstance(hooks, dict):
+        raise ValueError("invalid Codex hook template")
+    return hooks
+
+
+def _expected_codex_runtime_hooks(template_path: Path) -> list[dict[str, Any]]:
     expected = []
-    for event_name, groups in value["hooks"].items():
-        if not isinstance(event_name, str) or not isinstance(groups, list) or len(groups) != 1:
+    for event_name, groups in _template_hooks_table(template_path).items():
+        if not isinstance(event_name, str):
             raise ValueError("invalid Codex hook template")
-        group = groups[0]
-        handlers = group.get("hooks") if isinstance(group, dict) else None
-        if not isinstance(handlers, list) or len(handlers) != 1:
-            raise ValueError("invalid Codex hook template")
-        handler = handlers[0]
-        if not isinstance(handler, dict):
-            raise ValueError("invalid Codex hook template")
-        command_key = "commandWindows" if os.name == "nt" else "command"
-        command = handler.get(command_key)
-        if not isinstance(command, str):
-            raise ValueError("invalid Codex hook template")
+        group, handler = _single_template_handler(groups)
         expected.append(
             {
                 "eventName": event_name,
                 "matcher": group.get("matcher"),
-                "command": command,
+                "command": _template_hook_command(handler),
             }
         )
     return expected
@@ -4607,36 +4650,55 @@ def _repair_runtime(state_root: Path, repaired: list[dict]) -> None:
             repaired.append({"action": "create_runtime_directory", "directory": relative})
 
 
-def _lsp_pid_state(pid: int) -> str:
-    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
-        return "unknown"
-    if sys.platform == "win32":
-        try:
-            import ctypes
-            from ctypes import wintypes
+def _windows_process_state(pid: int) -> str:
+    """Ask the kernel directly; a missing process is dead, anything else unknown."""
+    try:
+        import ctypes
+        from ctypes import wintypes
 
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            open_process = kernel32.OpenProcess
-            open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-            open_process.restype = wintypes.HANDLE
-            get_exit_code = kernel32.GetExitCodeProcess
-            get_exit_code.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
-            get_exit_code.restype = wintypes.BOOL
-            close_handle = kernel32.CloseHandle
-            close_handle.argtypes = [wintypes.HANDLE]
-            close_handle.restype = wintypes.BOOL
-            handle = open_process(0x1000, False, pid)
-            if not handle:
-                return "dead" if ctypes.get_last_error() in {87, 1168} else "unknown"
-            try:
-                exit_code = wintypes.DWORD()
-                if not get_exit_code(handle, ctypes.byref(exit_code)):
-                    return "unknown"
-                return "alive" if exit_code.value == 259 else "dead"
-            finally:
-                close_handle(handle)
-        except (AttributeError, OSError, OverflowError, ValueError):
-            return "unknown"
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        open_process.restype = wintypes.HANDLE
+        get_exit_code = kernel32.GetExitCodeProcess
+        get_exit_code.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        get_exit_code.restype = wintypes.BOOL
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+        handle = open_process(0x1000, False, pid)
+        if not handle:
+            return _windows_open_failure_state(ctypes.get_last_error())
+        try:
+            return _windows_exit_code_state(ctypes, wintypes, get_exit_code, handle)
+        finally:
+            close_handle(handle)
+    except (AttributeError, OSError, OverflowError, ValueError):
+        return "unknown"
+
+
+def _windows_open_failure_state(last_error: int) -> str:
+    if last_error in {87, 1168}:
+        return "dead"
+    return "unknown"
+
+
+def _windows_exit_code_state(ctypes, wintypes, get_exit_code, handle) -> str:
+    exit_code = wintypes.DWORD()
+    if not get_exit_code(handle, ctypes.byref(exit_code)):
+        return "unknown"
+    if exit_code.value == 259:
+        return "alive"
+    return "dead"
+
+
+def _os_error_process_state(exc: OSError) -> str:
+    if exc.errno == errno.ESRCH:
+        return "dead"
+    return "unknown"
+
+
+def _posix_process_state(pid: int) -> str:
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -4644,10 +4706,18 @@ def _lsp_pid_state(pid: int) -> str:
     except PermissionError:
         return "unknown"
     except OSError as exc:
-        return "dead" if exc.errno == errno.ESRCH else "unknown"
+        return _os_error_process_state(exc)
     except (OverflowError, ValueError):
         return "unknown"
     return "alive"
+
+
+def _lsp_pid_state(pid: int) -> str:
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return "unknown"
+    if sys.platform == "win32":
+        return _windows_process_state(pid)
+    return _posix_process_state(pid)
 
 
 def _pid_alive(pid: int) -> bool:
