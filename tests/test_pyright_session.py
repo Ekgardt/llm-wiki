@@ -7364,8 +7364,11 @@ def test_manager_reference_gate_deadline_stays_bounded_across_sequential_waiters
 
     def keep_reference() -> None:
         try:
+            # The keeper only has to outlive the hundred contenders below; ten
+            # seconds was shorter than that loop on a hosted macOS runner, so
+            # the fixture expired instead of the subject under test.
             keeper_results.append(
-                manager.get(scope, deadline=time.monotonic() + 10)
+                manager.get(scope, deadline=time.monotonic() + 180)
             )
         except BaseException as error:
             keeper_errors.append(error)
