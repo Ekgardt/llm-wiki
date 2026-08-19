@@ -549,13 +549,28 @@ def _no_lsp_lifecycle_owner_leaks(
     )
     existing = _lsp_thread_ids()
     yield
-    owned = [
-        process.owner_nonce
-        for process in started
-        if lsp_process._coordinator_has_ownership(process._coordinator)
-    ]
-    assert owned == []
+    assert _still_owned(started) == []
     assert _leaked_lsp_threads(existing) == []
+
+
+def _still_owned(started: list[LspProcess], seconds: float = 60) -> list[str]:
+    """Owners that are still held after cleanup has had time to finish.
+
+    `_coordinator_has_ownership` answers True when it cannot take the
+    coordinator lock inside its own bound, which a loaded runner can cause
+    while cleanup is still in flight. Retrying keeps this a leak check rather
+    than a race against the machine.
+    """
+    deadline = time.monotonic() + seconds
+    while True:
+        owned = [
+            process.owner_nonce
+            for process in started
+            if lsp_process._coordinator_has_ownership(process._coordinator)
+        ]
+        if not owned or time.monotonic() >= deadline:
+            return owned
+        time.sleep(0.05)
 
 
 def _command(*arguments: str) -> list[str]:
