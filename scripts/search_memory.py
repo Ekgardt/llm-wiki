@@ -354,7 +354,7 @@ def _write_generation_fts(
         raise ValueError("generation FTS integrity check failed")
 
 
-def _generation_stop_reached(
+def _stop_reached(
     deadline: float | None, cancelled: Callable[[], bool] | None
 ) -> bool:
     if cancelled is not None and cancelled():
@@ -393,7 +393,7 @@ def _built_fts_artifact(
     state = {"stopped": False, "complete": False}
 
     def progress() -> int:
-        state["stopped"] = _generation_stop_reached(deadline, cancelled)
+        state["stopped"] = _stop_reached(deadline, cancelled)
         return int(state["stopped"])
 
     try:
@@ -729,6 +729,19 @@ def _stop_options(
     return options
 
 
+def _validation_options(
+    remaining: Callable[[], float | None],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> dict[str, object]:
+    options: dict[str, object] = {"coordinator": None}
+    if cancelled is not None:
+        options["cancelled"] = cancelled
+    if deadline is not None:
+        options["deadline_seconds"] = remaining()
+    return options
+
+
 def _publish_under_gate(
     snapshot: CorpusSnapshot,
     vault: Path,
@@ -750,12 +763,9 @@ def _publish_under_gate(
         _require_matching_repository(
             vault, expected_repository_scope, deadline=deadline, cancelled=cancelled
         )
-        validation_options: dict[str, object] = {"coordinator": None}
-        if cancelled is not None:
-            validation_options["cancelled"] = cancelled
-        if deadline is not None:
-            validation_options["deadline_seconds"] = remaining()
-        validate_live_snapshot(snapshot, vault, **validation_options)
+        validate_live_snapshot(
+            snapshot, vault, **_validation_options(remaining, deadline, cancelled)
+        )
         remaining()
         _register_generation(catalog, generation_id, candidate, catalog_options)
         registered = True
@@ -838,9 +848,7 @@ def _legacy_sqlite_guard(
 
     def progress() -> int:
         nonlocal stopped
-        stopped = bool(cancelled and cancelled()) or bool(
-            deadline is not None and time.monotonic() >= deadline
-        )
+        stopped = _stop_reached(deadline, cancelled)
         return int(stopped)
 
     connection.set_progress_handler(progress, 1000)
@@ -1264,6 +1272,13 @@ def _is_transient_windows_access_error(error: OSError) -> bool:
     )
 
 
+def _unlink_quietly(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
 def _write_lock_claim(lock_file: Path, payload: bytes) -> bool:
     """Create the lock exclusively and write the claim, or report it is taken."""
     try:
@@ -1278,10 +1293,7 @@ def _write_lock_claim(lock_file: Path, payload: bytes) -> bool:
         os.write(descriptor, payload)
     except BaseException:
         os.close(descriptor)
-        try:
-            lock_file.unlink()
-        except OSError:
-            pass
+        _unlink_quietly(lock_file)
         raise
     os.close(descriptor)
     return True
@@ -1376,17 +1388,19 @@ def _index_swap_lock(
         _release_index_swap_lock(lock_file, token)
 
 
+def _replace_deadline(deadline: float | None) -> float:
+    if deadline is None:
+        return time.monotonic() + _INDEX_REPLACE_WAIT_SECONDS
+    return deadline
+
+
 def _replace_live_index(
     tmp_file: Path,
     *,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> None:
-    end = (
-        time.monotonic() + _INDEX_REPLACE_WAIT_SECONDS
-        if deadline is None
-        else deadline
-    )
+    end = _replace_deadline(deadline)
     attempt = 0
     while True:
         _check_legacy_stop(end, cancelled)
@@ -1737,9 +1751,7 @@ def _generation_sqlite_guard(
 
     def progress() -> int:
         nonlocal stopped
-        stopped = bool(cancelled and cancelled()) or bool(
-            deadline is not None and time.monotonic() >= deadline
-        )
+        stopped = _stop_reached(deadline, cancelled)
         return int(stopped)
 
     connection.set_progress_handler(progress, 1000)
