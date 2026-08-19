@@ -5281,17 +5281,16 @@ def _repair_generation_catalog(
         repaired.append({"action": "cleanup_generation_orphans", "count": removed})
 
 
-def _partition_code_extraction(
-    result,
-    code_sources,
-    *,
-    deadline: float | None = None,
-    cancelled=None,
-):
-    """Partition one multi-source extraction by the source proving each record."""
-    from evidence_graph_builder import SourceExtraction
+class _PartitionState(NamedTuple):
+    grouped: dict
+    occurrence_sources: dict
+    record_sources: dict
+    node_references: dict
+    dependencies: dict
+    workspace_sensitive: set
 
-    source_ids = tuple(source.record.logical_id for source in code_sources)
+
+def _new_partition_state(source_ids: tuple[str, ...]) -> _PartitionState:
     grouped = {
         source_id: {
             "nodes": [],
@@ -5303,6 +5302,160 @@ def _partition_code_extraction(
         }
         for source_id in source_ids
     }
+    return _PartitionState(
+        grouped=grouped,
+        occurrence_sources={},
+        record_sources={},
+        node_references={},
+        dependencies={source_id: set() for source_id in source_ids},
+        workspace_sensitive=set(),
+    )
+
+
+def _record_owner(state: _PartitionState, record_id: object, source_id: str) -> None:
+    if record_id is None:
+        return
+    state.record_sources[str(record_id)] = source_id
+
+
+def _reference_node(state: _PartitionState, node_id: object, owner: str) -> None:
+    if node_id is None:
+        return
+    state.node_references.setdefault(str(node_id), set()).add(owner)
+
+
+def _partition_occurrences(result, state: _PartitionState, check_stop) -> None:
+    for occurrence in result.occurrences:
+        check_stop()
+        source_id = str(occurrence["source_id"])
+        node_id = str(occurrence["node_id"])
+        state.occurrence_sources.setdefault(node_id, set()).add(source_id)
+        state.node_references.setdefault(node_id, set()).add(source_id)
+        state.grouped[source_id]["occurrences"].append(occurrence)
+
+
+def _partition_evidence(result, state: _PartitionState, check_stop) -> None:
+    for evidence in result.evidence:
+        check_stop()
+        source_id = str(evidence["source_id"])
+        state.grouped[source_id]["evidence"].append(evidence)
+        _record_owner(state, evidence.get("assertion_id"), source_id)
+        _record_owner(state, evidence.get("observation_id"), source_id)
+
+
+def _partition_assertions(result, state: _PartitionState, check_stop) -> None:
+    for assertion in result.assertions:
+        check_stop()
+        owner = state.record_sources[str(assertion["assertion_id"])]
+        state.grouped[owner]["assertions"].append(assertion)
+        _reference_node(state, assertion["source_node_id"], owner)
+        target = assertion.get("target_node_id")
+        if target is None:
+            continue
+        _reference_node(state, target, owner)
+        state.dependencies[owner].update(
+            state.occurrence_sources.get(str(target), ())
+        )
+
+
+def _workspace_sensitive_observation(
+    observation: dict, observation_dependencies: dict
+) -> bool:
+    if observation["reason"] not in {"missing_dependency", "unresolved_reference"}:
+        return False
+    return str(observation["observation_id"]) not in observation_dependencies
+
+
+def _partition_observations(result, state: _PartitionState, check_stop) -> None:
+    observation_dependencies = getattr(result, "observation_source_dependencies", {})
+    for observation in result.observations:
+        check_stop()
+        owner = state.record_sources[str(observation["observation_id"])]
+        state.grouped[owner]["observations"].append(observation)
+        _reference_node(state, observation.get("source_node_id"), owner)
+        if _workspace_sensitive_observation(observation, observation_dependencies):
+            state.workspace_sensitive.add(owner)
+
+
+def _partition_source_dependencies(result, state: _PartitionState, check_stop) -> None:
+    declared = getattr(result, "observation_source_dependencies", {})
+    for observation_id, candidate_sources in declared.items():
+        check_stop()
+        owner = state.record_sources[str(observation_id)]
+        state.dependencies[owner].update(candidate_sources)
+
+
+def _dependency_owners(dependency: dict, state: _PartitionState) -> tuple[str, ...]:
+    owner = dependency.get("source_id")
+    if owner is not None:
+        return (str(owner),)
+    node_id = str(dependency["dependent_node_id"])
+    return tuple(sorted(state.occurrence_sources.get(node_id, ())))
+
+
+def _partition_dependencies(result, state: _PartitionState, check_stop) -> None:
+    for dependency in getattr(result, "dependencies", ()):
+        check_stop()
+        for source_id in _dependency_owners(dependency, state):
+            state.grouped[source_id]["dependencies"].append(dependency)
+
+
+def _partition_nodes(
+    result, state: _PartitionState, check_stop, fallback_owner: str
+) -> None:
+    for node in result.nodes:
+        check_stop()
+        node_id = str(node["node_id"])
+        owners = state.occurrence_sources.get(node_id)
+        if not owners:
+            owners = state.node_references.get(node_id, {fallback_owner})
+        for source_id in sorted(owners):
+            state.grouped[source_id]["nodes"].append(node)
+
+
+def _drop_self_dependencies(
+    source_ids: tuple[str, ...], state: _PartitionState, check_stop
+) -> None:
+    for source_id in source_ids:
+        check_stop()
+        state.dependencies[source_id].discard(source_id)
+
+
+def _source_partitions(
+    source_ids: tuple[str, ...],
+    state: _PartitionState,
+    check_stop,
+    source_extraction,
+) -> dict:
+    partitions = {}
+    for source_id in source_ids:
+        check_stop()
+        records = state.grouped[source_id]
+        partitions[source_id] = source_extraction(
+            nodes=tuple(records["nodes"]),
+            occurrences=tuple(records["occurrences"]),
+            assertions=tuple(records["assertions"]),
+            evidence=tuple(records["evidence"]),
+            observations=tuple(records["observations"]),
+            dependencies=tuple(records["dependencies"]),
+            source_dependencies=tuple(sorted(state.dependencies[source_id])),
+            workspace_sensitive=source_id in state.workspace_sensitive,
+        )
+    return partitions
+
+
+def _partition_code_extraction(
+    result,
+    code_sources,
+    *,
+    deadline: float | None = None,
+    cancelled=None,
+):
+    """Partition one multi-source extraction by the source proving each record."""
+    from evidence_graph_builder import SourceExtraction
+
+    source_ids = tuple(source.record.logical_id for source in code_sources)
+    state = _new_partition_state(source_ids)
 
     def check_stop() -> None:
         if cancelled is not None and cancelled():
@@ -5311,95 +5464,15 @@ def _partition_code_extraction(
             raise TimeoutError("workspace extraction partition deadline reached")
 
     check_stop()
-    occurrence_sources: dict[str, set[str]] = {}
-    record_sources: dict[str, str] = {}
-    node_references: dict[str, set[str]] = {}
-    dependencies = {source_id: set() for source_id in source_ids}
-    workspace_sensitive = set()
-    for occurrence in result.occurrences:
-        check_stop()
-        source_id = str(occurrence["source_id"])
-        node_id = str(occurrence["node_id"])
-        occurrence_sources.setdefault(node_id, set()).add(source_id)
-        node_references.setdefault(node_id, set()).add(source_id)
-        grouped[source_id]["occurrences"].append(occurrence)
-    for evidence in result.evidence:
-        check_stop()
-        source_id = str(evidence["source_id"])
-        grouped[source_id]["evidence"].append(evidence)
-        assertion_id = evidence.get("assertion_id")
-        observation_id = evidence.get("observation_id")
-        if assertion_id is not None:
-            record_sources[str(assertion_id)] = source_id
-        if observation_id is not None:
-            record_sources[str(observation_id)] = source_id
-    for assertion in result.assertions:
-        check_stop()
-        owner = record_sources[str(assertion["assertion_id"])]
-        grouped[owner]["assertions"].append(assertion)
-        node_references.setdefault(str(assertion["source_node_id"]), set()).add(owner)
-        target = assertion.get("target_node_id")
-        if target is not None:
-            node_references.setdefault(str(target), set()).add(owner)
-            dependencies[owner].update(occurrence_sources.get(str(target), ()))
-    for observation in result.observations:
-        check_stop()
-        owner = record_sources[str(observation["observation_id"])]
-        grouped[owner]["observations"].append(observation)
-        source_node = observation.get("source_node_id")
-        if source_node is not None:
-            node_references.setdefault(str(source_node), set()).add(owner)
-        observation_dependencies = getattr(result, "observation_source_dependencies", {})
-        if (
-            observation["reason"] in {"missing_dependency", "unresolved_reference"}
-            and str(observation["observation_id"]) not in observation_dependencies
-        ):
-            workspace_sensitive.add(owner)
-
-    for observation_id, candidate_sources in getattr(
-        result, "observation_source_dependencies", {}
-    ).items():
-        check_stop()
-        dependencies[record_sources[str(observation_id)]].update(candidate_sources)
-    for dependency in getattr(result, "dependencies", ()):
-        check_stop()
-        owner = dependency.get("source_id")
-        owners = (
-            (str(owner),)
-            if owner is not None
-            else tuple(sorted(occurrence_sources.get(str(dependency["dependent_node_id"]), ())))
-        )
-        for source_id in owners:
-            grouped[source_id]["dependencies"].append(dependency)
-
-    fallback_owner = min(source_ids)
-    for node in result.nodes:
-        check_stop()
-        node_id = str(node["node_id"])
-        owners = occurrence_sources.get(node_id)
-        if not owners:
-            owners = node_references.get(node_id, {fallback_owner})
-        for source_id in sorted(owners):
-            grouped[source_id]["nodes"].append(node)
-    for source_id in source_ids:
-        check_stop()
-        dependencies[source_id].discard(source_id)
-
-    partitions = {}
-    for source_id in source_ids:
-        check_stop()
-        records = grouped[source_id]
-        partitions[source_id] = SourceExtraction(
-            nodes=tuple(records["nodes"]),
-            occurrences=tuple(records["occurrences"]),
-            assertions=tuple(records["assertions"]),
-            evidence=tuple(records["evidence"]),
-            observations=tuple(records["observations"]),
-            dependencies=tuple(records["dependencies"]),
-            source_dependencies=tuple(sorted(dependencies[source_id])),
-            workspace_sensitive=source_id in workspace_sensitive,
-        )
-    return partitions
+    _partition_occurrences(result, state, check_stop)
+    _partition_evidence(result, state, check_stop)
+    _partition_assertions(result, state, check_stop)
+    _partition_observations(result, state, check_stop)
+    _partition_source_dependencies(result, state, check_stop)
+    _partition_dependencies(result, state, check_stop)
+    _partition_nodes(result, state, check_stop, min(source_ids))
+    _drop_self_dependencies(source_ids, state, check_stop)
+    return _source_partitions(source_ids, state, check_stop, SourceExtraction)
 
 
 def _generation_source_extractor(snapshot, repository_id: str):
