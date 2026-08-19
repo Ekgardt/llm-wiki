@@ -240,6 +240,110 @@ def _publish_new_file(temporary: Path, destination: Path) -> None:
             pass
 
 
+_GENERATION_FTS_DDL = """
+            CREATE TABLE generation_metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE VIRTUAL TABLE chunks USING fts5(
+                chunk_id UNINDEXED,
+                chunk_order UNINDEXED,
+                source_id UNINDEXED,
+                source_path UNINDEXED,
+                source_sha256 UNINDEXED,
+                parent_page UNINDEXED,
+                heading_ancestry UNINDEXED,
+                byte_start UNINDEXED,
+                byte_end UNINDEXED,
+                line_start UNINDEXED,
+                line_end UNINDEXED,
+                span_sha256 UNINDEXED,
+                type UNINDEXED,
+                project UNINDEXED,
+                authority UNINDEXED,
+                confidence UNINDEXED,
+                status UNINDEXED,
+                valid_from UNINDEXED,
+                valid_to UNINDEXED,
+                language UNINDEXED,
+                title,
+                content,
+                tokenize = 'porter unicode61'
+            );
+            """
+
+
+def _generation_fts_metadata(snapshot: CorpusSnapshot) -> dict[str, str]:
+    return {
+        "schema_version": GENERATION_SEARCH_SCHEMA_VERSION,
+        "collector_version": snapshot.collector_version,
+        "extractor_version": snapshot.extractor_version,
+        "tokenizer_version": GENERATION_TOKENIZER_VERSION,
+        "tokenizer_config_sha256": GENERATION_TOKENIZER_CONFIG_SHA256,
+        "source_manifest_sha256": snapshot.corpus_sha256,
+        "chunk_count": str(len(snapshot.chunks)),
+    }
+
+
+def _generation_chunk_row(chunk: object, order: int) -> tuple[object, ...]:
+    title = (
+        chunk.heading_ancestry[-1]
+        if chunk.heading_ancestry
+        else Path(chunk.source_path).stem
+    )
+    return (
+        chunk.id,
+        order,
+        chunk.source_id,
+        chunk.source_path,
+        chunk.source_sha256,
+        chunk.parent_page,
+        json.dumps(chunk.heading_ancestry, ensure_ascii=False, separators=(",", ":")),
+        chunk.byte_start,
+        chunk.byte_end,
+        chunk.line_start,
+        chunk.line_end,
+        chunk.span_sha256,
+        chunk.type,
+        chunk.project,
+        chunk.authority,
+        chunk.confidence,
+        chunk.status,
+        chunk.valid_from,
+        chunk.valid_to,
+        chunk.language,
+        title,
+        chunk.text,
+    )
+
+
+def _write_generation_fts(
+    database: sqlite3.Connection,
+    snapshot: CorpusSnapshot,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    """Schema, metadata and every chunk, verified before the caller publishes."""
+    database.execute("PRAGMA journal_mode=DELETE")
+    database.execute("PRAGMA synchronous=FULL")
+    database.executescript(_GENERATION_FTS_DDL)
+    database.executemany(
+        "INSERT INTO generation_metadata(key, value) VALUES (?, ?)",
+        sorted(_generation_fts_metadata(snapshot).items()),
+    )
+
+    def rows():
+        for order, chunk in enumerate(snapshot.chunks):
+            _check_generation_stop(deadline, cancelled)
+            yield _generation_chunk_row(chunk, order)
+
+    database.executemany(
+        "INSERT INTO chunks VALUES (" + ",".join("?" for _ in range(22)) + ")",
+        rows(),
+    )
+    database.commit()
+    if database.execute("PRAGMA integrity_check").fetchone() != ("ok",):
+        raise ValueError("generation FTS integrity check failed")
+
+
 def build_generation_fts(
     snapshot: CorpusSnapshot,
     generation_directory: Path,
@@ -272,94 +376,9 @@ def build_generation_fts(
     try:
         database = sqlite3.connect(temporary)
         database.set_progress_handler(progress, GENERATION_FTS_PROGRESS_OPCODES)
-        database.execute("PRAGMA journal_mode=DELETE")
-        database.execute("PRAGMA synchronous=FULL")
-        database.executescript(
-            """
-            CREATE TABLE generation_metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            CREATE VIRTUAL TABLE chunks USING fts5(
-                chunk_id UNINDEXED,
-                chunk_order UNINDEXED,
-                source_id UNINDEXED,
-                source_path UNINDEXED,
-                source_sha256 UNINDEXED,
-                parent_page UNINDEXED,
-                heading_ancestry UNINDEXED,
-                byte_start UNINDEXED,
-                byte_end UNINDEXED,
-                line_start UNINDEXED,
-                line_end UNINDEXED,
-                span_sha256 UNINDEXED,
-                type UNINDEXED,
-                project UNINDEXED,
-                authority UNINDEXED,
-                confidence UNINDEXED,
-                status UNINDEXED,
-                valid_from UNINDEXED,
-                valid_to UNINDEXED,
-                language UNINDEXED,
-                title,
-                content,
-                tokenize = 'porter unicode61'
-            );
-            """
+        _write_generation_fts(
+            database, snapshot, deadline=deadline, cancelled=cancelled
         )
-        metadata = {
-            "schema_version": GENERATION_SEARCH_SCHEMA_VERSION,
-            "collector_version": snapshot.collector_version,
-            "extractor_version": snapshot.extractor_version,
-            "tokenizer_version": GENERATION_TOKENIZER_VERSION,
-            "tokenizer_config_sha256": GENERATION_TOKENIZER_CONFIG_SHA256,
-            "source_manifest_sha256": snapshot.corpus_sha256,
-            "chunk_count": str(len(snapshot.chunks)),
-        }
-        database.executemany(
-            "INSERT INTO generation_metadata(key, value) VALUES (?, ?)",
-            sorted(metadata.items()),
-        )
-        def rows():
-            for order, chunk in enumerate(snapshot.chunks):
-                _check_generation_stop(deadline, cancelled)
-                title = chunk.heading_ancestry[-1] if chunk.heading_ancestry else Path(
-                    chunk.source_path
-                ).stem
-                yield (
-                    chunk.id,
-                    order,
-                    chunk.source_id,
-                    chunk.source_path,
-                    chunk.source_sha256,
-                    chunk.parent_page,
-                    json.dumps(
-                        chunk.heading_ancestry,
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ),
-                    chunk.byte_start,
-                    chunk.byte_end,
-                    chunk.line_start,
-                    chunk.line_end,
-                    chunk.span_sha256,
-                    chunk.type,
-                    chunk.project,
-                    chunk.authority,
-                    chunk.confidence,
-                    chunk.status,
-                    chunk.valid_from,
-                    chunk.valid_to,
-                    chunk.language,
-                    title,
-                    chunk.text,
-                )
-        database.executemany(
-            "INSERT INTO chunks VALUES ("
-            + ",".join("?" for _ in range(22))
-            + ")",
-            rows(),
-        )
-        database.commit()
-        if database.execute("PRAGMA integrity_check").fetchone() != ("ok",):
-            raise ValueError("generation FTS integrity check failed")
         database.close()
         database = None
         fsync_file(temporary)
@@ -382,15 +401,8 @@ def build_generation_fts(
         if database is not None:
             database.close()
         if not complete:
-            try:
-                destination.unlink()
-            except FileNotFoundError:
-                pass
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
-
+            _remove_quietly((destination,))
+        _remove_quietly((temporary,))
 
 def _call_generation_embedder(embedder: object, texts: list[str]):
     if callable(embedder):
