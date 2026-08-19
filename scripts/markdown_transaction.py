@@ -2150,6 +2150,36 @@ class _AbortDirection(NamedTuple):
     chosen_at: str
 
 
+def _require_gate_wait(wait_seconds: object) -> None:
+    if wait_seconds is None:
+        return
+    if isinstance(wait_seconds, bool) or not isinstance(wait_seconds, (int, float)):
+        raise ValueError("writer gate wait_seconds must be non-negative or None")
+    if wait_seconds < 0:
+        raise ValueError("writer gate wait_seconds must be non-negative or None")
+
+
+def _gate_wait_seconds(wait_seconds: float | None) -> float:
+    if wait_seconds is None:
+        return _WRITER_WAIT_SECONDS
+    return wait_seconds
+
+
+def _retry_gate_or_fail(
+    exc: BaseException, attempt: int, deadline: float
+) -> int:
+    """The next attempt number, or the timeout that ends the wait."""
+    if not _is_transient_writer_contention(exc):
+        raise exc
+    delay = _writer_retry_delay(attempt, deadline)
+    if delay <= 0:
+        raise TimeoutError(
+            "timed out waiting for the global Markdown writer gate"
+        ) from exc
+    time.sleep(delay)
+    return attempt + 1
+
+
 def _is_target_boundary_error(error: BaseException) -> bool:
     if isinstance(error, (TargetBoundaryFailure, FileNotFoundError)):
         return True
@@ -5877,95 +5907,102 @@ class MarkdownCoordinator:
                 (state, error_code, _now(), transaction_id),
             )
 
-    @contextlib.contextmanager
-    def writer_gate(
-        self,
-        *,
-        owner: OwnerLease | None = None,
-        wait_seconds: float | None = None,
-    ) -> Iterator[OwnerLease]:
-        if owner is not None:
-            yield from self._nested_writer_gate(owner)
-            return
-        depth = getattr(self._local, "gate_depth", 0)
-        if depth:
-            self._local.gate_depth = depth + 1
-            try:
-                yield getattr(self._local, "gate_owner", None)
-            finally:
-                self._local.gate_depth -= 1
-            return
-        if getattr(self, "_database_contract", None) == _COORDINATOR_V3_CONTRACT:
-            yield from self._canonical_writer_gate(wait_seconds)
-            return
+    def _reentrant_writer_gate(self, depth: int) -> Iterator[OwnerLease]:
+        self._local.gate_depth = depth + 1
+        try:
+            yield getattr(self._local, "gate_owner", None)
+        finally:
+            self._local.gate_depth -= 1
 
-        if wait_seconds is not None and (
-            isinstance(wait_seconds, bool) or not isinstance(wait_seconds, (int, float))
-            or wait_seconds < 0
-        ):
-            raise ValueError("writer gate wait_seconds must be non-negative or None")
-        owner_token = uuid.uuid4().hex
-        deadline = time.monotonic() + (
-            _WRITER_WAIT_SECONDS if wait_seconds is None else wait_seconds
+    def _install_legacy_owner(
+        self, database: sqlite3.Connection, owner_token: str
+    ) -> int:
+        fence = database.execute(
+            "SELECT last_epoch FROM writer_fences WHERE gate_name = 'global'"
+        ).fetchone()
+        fencing_epoch = 1 if fence is None else fence["last_epoch"] + 1
+        database.execute(
+            "INSERT INTO writer_fences (gate_name, last_epoch) VALUES ('global', ?) "
+            "ON CONFLICT(gate_name) DO UPDATE SET last_epoch = excluded.last_epoch",
+            (fencing_epoch,),
         )
-        fencing_epoch = 0
+        heartbeat = _now()
+        expires = _future_timestamp(_WRITER_LEASE_SECONDS)
+        database.execute("DELETE FROM writer_owners WHERE gate_name = 'global'")
+        database.execute(
+            "INSERT INTO writer_owners "
+            "(gate_name, owner_token, process_id, thread_id, acquired_at, "
+            "heartbeat_at, expires_at, fencing_epoch) "
+            "VALUES ('global', ?, ?, ?, ?, ?, ?, ?)",
+            (
+                owner_token,
+                os.getpid(),
+                threading.get_ident(),
+                heartbeat,
+                heartbeat,
+                expires,
+                fencing_epoch,
+            ),
+        )
+        return fencing_epoch
+
+    def _try_claim_legacy_gate(
+        self, owner_token: str, deadline: float
+    ) -> int | None:
+        """The fencing epoch once claimed, or None while another owner holds it."""
+        remaining_ms = max(1, int((deadline - time.monotonic()) * 1_000))
+        with self._connect(busy_ms=remaining_ms) as database, begin_immediate(database):
+            row = database.execute(
+                "SELECT * FROM writer_owners WHERE gate_name = 'global'"
+            ).fetchone()
+            if row is not None and not self._writer_owner_reclaimable(row):
+                return None
+            return self._install_legacy_owner(database, owner_token)
+
+    def _acquire_legacy_gate(self, owner_token: str, deadline: float) -> int:
         acquisition_attempt = 0
         while True:
-            acquired = False
             try:
-                remaining_ms = max(1, int((deadline - time.monotonic()) * 1_000))
-                with self._connect(busy_ms=remaining_ms) as database, begin_immediate(
-                    database
-                ):
-                    row = database.execute(
-                        "SELECT * FROM writer_owners WHERE gate_name = 'global'"
-                    ).fetchone()
-                    if row is None or self._writer_owner_reclaimable(row):
-                        fence = database.execute(
-                            "SELECT last_epoch FROM writer_fences WHERE gate_name = 'global'"
-                        ).fetchone()
-                        fencing_epoch = 1 if fence is None else fence["last_epoch"] + 1
-                        database.execute(
-                            "INSERT INTO writer_fences (gate_name, last_epoch) VALUES ('global', ?) "
-                            "ON CONFLICT(gate_name) DO UPDATE SET last_epoch = excluded.last_epoch",
-                            (fencing_epoch,),
-                        )
-                        heartbeat = _now()
-                        expires = _future_timestamp(_WRITER_LEASE_SECONDS)
-                        database.execute("DELETE FROM writer_owners WHERE gate_name = 'global'")
-                        database.execute(
-                            "INSERT INTO writer_owners "
-                            "(gate_name, owner_token, process_id, thread_id, acquired_at, "
-                            "heartbeat_at, expires_at, fencing_epoch) "
-                            "VALUES ('global', ?, ?, ?, ?, ?, ?, ?)",
-                            (
-                                owner_token,
-                                os.getpid(),
-                                threading.get_ident(),
-                                heartbeat,
-                                heartbeat,
-                                expires,
-                                fencing_epoch,
-                            ),
-                        )
-                        acquired = True
+                fencing_epoch = self._try_claim_legacy_gate(owner_token, deadline)
             except (OSError, sqlite3.Error) as exc:
-                if not _is_transient_writer_contention(exc):
-                    raise
-                delay = _writer_retry_delay(acquisition_attempt, deadline)
-                if delay <= 0:
-                    raise TimeoutError(
-                        "timed out waiting for the global Markdown writer gate"
-                    ) from exc
-                time.sleep(delay)
-                acquisition_attempt += 1
+                acquisition_attempt = _retry_gate_or_fail(
+                    exc, acquisition_attempt, deadline
+                )
                 continue
-            if acquired:
-                break
+            if fencing_epoch is not None:
+                return fencing_epoch
             if time.monotonic() >= deadline:
-                raise TimeoutError("timed out waiting for the global Markdown writer gate")
+                raise TimeoutError(
+                    "timed out waiting for the global Markdown writer gate"
+                )
             time.sleep(0.01)
 
+    def _stop_legacy_gate(
+        self,
+        owner_token: str,
+        fencing_epoch: int,
+        heartbeat_stop: threading.Event,
+        heartbeat_thread: threading.Thread,
+        heartbeat_lost: threading.Event,
+    ) -> None:
+        heartbeat_stop.set()
+        heartbeat_thread.join(timeout=_WRITER_HEARTBEAT_SECONDS * 2)
+        try:
+            self._release_writer_gate(
+                owner_token, fencing_epoch, heartbeat_lost.is_set()
+            )
+        finally:
+            self._local.gate_depth = 0
+            self._local.gate_token = None
+            self._local.gate_fence = None
+
+    def _legacy_writer_gate(
+        self, wait_seconds: float | None
+    ) -> Iterator[OwnerLease]:
+        _require_gate_wait(wait_seconds)
+        owner_token = uuid.uuid4().hex
+        deadline = time.monotonic() + _gate_wait_seconds(wait_seconds)
+        fencing_epoch = self._acquire_legacy_gate(owner_token, deadline)
         self._local.gate_depth = 1
         self._local.gate_token = owner_token
         self._local.gate_fence = fencing_epoch
@@ -5981,16 +6018,32 @@ class MarkdownCoordinator:
         try:
             yield None
         finally:
-            heartbeat_stop.set()
-            heartbeat_thread.join(timeout=_WRITER_HEARTBEAT_SECONDS * 2)
-            try:
-                self._release_writer_gate(
-                    owner_token, fencing_epoch, heartbeat_lost.is_set()
-                )
-            finally:
-                self._local.gate_depth = 0
-                self._local.gate_token = None
-                self._local.gate_fence = None
+            self._stop_legacy_gate(
+                owner_token,
+                fencing_epoch,
+                heartbeat_stop,
+                heartbeat_thread,
+                heartbeat_lost,
+            )
+
+    @contextlib.contextmanager
+    def writer_gate(
+        self,
+        *,
+        owner: OwnerLease | None = None,
+        wait_seconds: float | None = None,
+    ) -> Iterator[OwnerLease]:
+        if owner is not None:
+            yield from self._nested_writer_gate(owner)
+            return
+        depth = getattr(self._local, "gate_depth", 0)
+        if depth:
+            yield from self._reentrant_writer_gate(depth)
+            return
+        if getattr(self, "_database_contract", None) == _COORDINATOR_V3_CONTRACT:
+            yield from self._canonical_writer_gate(wait_seconds)
+            return
+        yield from self._legacy_writer_gate(wait_seconds)
 
     def _canonical_writer_gate(
         self, wait_seconds: float | None
