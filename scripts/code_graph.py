@@ -605,61 +605,88 @@ def _parse_file(file_path: Path, registry: SymbolRegistry, workspace_root: Path)
     }
 
 
-def _extract_symbols(tree, language, lang: str, source: bytes) -> tuple | None:
-    """Execute the language query and return functions, classes, calls, imports."""
+def _query_matches(tree, language, lang: str):
+    """The query matches for this language, or None when it cannot run."""
     try:
         import tree_sitter as ts
 
         query_source = (QUERY_DIR / f"{lang}.scm").read_text(encoding="utf-8")
-        matches = ts.QueryCursor(ts.Query(language, query_source)).matches(tree.root_node)
+        return ts.QueryCursor(ts.Query(language, query_source)).matches(tree.root_node)
     except (OSError, UnicodeError, Exception):
         return None
 
-    groups = {name: [] for name in ("function", "class", "call", "import")}
-    seen = {name: set() for name in groups}
+
+def _as_node_list(value) -> list:
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _unquoted_import(text: str) -> str:
+    """An import path may arrive quoted or angle-bracketed; the name is inside."""
+    if len(text) < 2:
+        return text
+    if text[0] == text[-1] and text[0] in {"'", '"'}:
+        return text[1:-1]
+    if text[0] == "<" and text[-1] == ">":
+        return text[1:-1]
+    return text
+
+
+def _symbol_signature(kind: str, owner, source: bytes, text: str) -> dict:
+    if kind != "function":
+        return {}
+    declaration = source[owner.start_byte:owner.end_byte].decode(
+        "utf-8", errors="ignore"
+    )
+    signature = _declaration_signature(declaration, text)
+    if not signature:
+        return {}
+    return {"signature": signature}
+
+
+def _symbol_record(kind: str, node, owner, source: bytes) -> dict:
+    text = source[node.start_byte:node.end_byte].decode("utf-8", errors="ignore")
+    if kind == "import":
+        text = _unquoted_import(text)
+    return {
+        "name": text,
+        "line": owner.start_point[0] + 1,
+        "end_line": owner.end_point[0] + 1,
+        "column": owner.start_point[1],
+        "end_column": owner.end_point[1],
+        **_symbol_signature(kind, owner, source, text),
+    }
+
+
+def _collect_symbol_kind(
+    kind: str, captures: dict, source: bytes, group: list, seen: set
+) -> None:
+    nodes = _as_node_list(captures.get(f"{kind}.name", []))
+    owners = _as_node_list(captures.get(f"{kind}.node", nodes))
+    for index, node in enumerate(nodes):
+        owner = node
+        if owners:
+            owner = owners[min(index, len(owners) - 1)]
+        key = (node.start_byte, node.end_byte, kind)
+        if key in seen:
+            continue
+        seen.add(key)
+        group.append(_symbol_record(kind, node, owner, source))
+
+
+def _extract_symbols(tree, language, lang: str, source: bytes) -> tuple | None:
+    """Execute the language query and return functions, classes, calls, imports."""
+    matches = _query_matches(tree, language, lang)
+    if matches is None:
+        return None
+    kinds = ("function", "class", "call", "import")
+    groups = {name: [] for name in kinds}
+    seen = {name: set() for name in kinds}
     for _, captures in matches:
-        for kind in groups:
-            nodes = captures.get(f"{kind}.name", [])
-            owners = captures.get(f"{kind}.node", nodes)
-            if not isinstance(nodes, list):
-                nodes = [nodes]
-            if not isinstance(owners, list):
-                owners = [owners]
-            for index, node in enumerate(nodes):
-                owner = owners[min(index, len(owners) - 1)] if owners else node
-                key = (node.start_byte, node.end_byte, kind)
-                if key in seen[kind]:
-                    continue
-                seen[kind].add(key)
-                text = source[node.start_byte:node.end_byte].decode(
-                    "utf-8", errors="ignore"
-                )
-                if kind == "import" and len(text) >= 2 and (
-                    text[0] == text[-1] and text[0] in {"'", '"'}
-                    or text[0] == "<" and text[-1] == ">"
-                ):
-                    text = text[1:-1]
-                groups[kind].append({
-                    "name": text,
-                    "line": owner.start_point[0] + 1,
-                    "end_line": owner.end_point[0] + 1,
-                    "column": owner.start_point[1],
-                    "end_column": owner.end_point[1],
-                    **(
-                        {"signature": signature}
-                        if kind == "function"
-                        and (
-                            signature := _declaration_signature(
-                                source[owner.start_byte:owner.end_byte].decode(
-                                    "utf-8", errors="ignore"
-                                ),
-                                text,
-                            )
-                        )
-                        else {}
-                    ),
-                })
-    return tuple(groups[name] for name in ("function", "class", "call", "import"))
+        for kind in kinds:
+            _collect_symbol_kind(kind, captures, source, groups[kind], seen[kind])
+    return tuple(groups[name] for name in kinds)
 
 
 def _regex_parse(
@@ -1679,6 +1706,76 @@ def _find_live_paths(
     return paths
 
 
+_WORKSPACE_SKIP_PARTS = {".git", "node_modules", "__pycache__", ".venv", "venv"}
+
+
+def _parsable_workspace_file(path: Path) -> bool:
+    if not path.is_file() or path.suffix.lower() not in LANGUAGE_MAP:
+        return False
+    return not any(skip in path.parts for skip in _WORKSPACE_SKIP_PARTS)
+
+
+def _index_workspace_definitions(
+    path: Path,
+    result: dict,
+    directory: Path,
+    definitions: dict[str, dict],
+    by_name: dict[str, list[dict]],
+    by_qualified: dict[str, dict],
+) -> None:
+    for function in result["functions"]:
+        definition = {**function, "file": str(path), "language": result["language"]}
+        definitions[function["symbol_id"]] = definition
+        by_name.setdefault(function["name"], []).append(definition)
+        if result["language"] == "python":
+            qualified = _python_qualified_name(path, function, directory)
+            by_qualified[qualified] = definition
+
+
+def _resolved_call_target(
+    call: dict,
+    path: Path,
+    language: str,
+    by_name: dict[str, list[dict]],
+    by_qualified: dict[str, dict],
+) -> dict | None:
+    """The one definition this call can name, or None when it stays ambiguous."""
+    if language == "python":
+        if call.get("confidence") != "confirmed":
+            return None
+        confirmed = by_qualified.get(call.get("qualified_name"))
+        if confirmed is not None:
+            return confirmed
+    candidates = by_name.get(call["name"], [])
+    same_file = [item for item in candidates if item["file"] == str(path)]
+    if len(same_file) == 1:
+        return same_file[0]
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
+def _workspace_call_edges(
+    parsed: list[tuple[Path, dict]],
+    by_name: dict[str, list[dict]],
+    by_qualified: dict[str, dict],
+) -> list[dict]:
+    edges = []
+    for path, result in parsed:
+        for call in result["calls"]:
+            caller = _containing_function(result["functions"], call)
+            if caller is None:
+                continue
+            target = _resolved_call_target(
+                call, path, result["language"], by_name, by_qualified
+            )
+            if target is not None:
+                edges.append(
+                    {"source": caller["symbol_id"], "target": target["symbol_id"]}
+                )
+    return edges
+
+
 def _workspace_call_graph(
     directory: Path,
 ) -> tuple[list[tuple[Path, dict]], dict[str, dict], list[dict]]:
@@ -1690,43 +1787,15 @@ def _workspace_call_graph(
     by_name: dict[str, list[dict]] = {}
     by_qualified: dict[str, dict] = {}
     for path in sorted(directory.rglob("*")):
-        if (
-            not path.is_file()
-            or path.suffix.lower() not in LANGUAGE_MAP
-            or any(skip in path.parts for skip in {".git", "node_modules", "__pycache__", ".venv", "venv"})
-        ):
+        if not _parsable_workspace_file(path):
             continue
         result = _parse_file(path, registry, directory)
         _annotate_function_ids(path, result, directory)
         parsed.append((path, result))
-        for function in result["functions"]:
-            definition = {**function, "file": str(path), "language": result["language"]}
-            definitions[function["symbol_id"]] = definition
-            by_name.setdefault(function["name"], []).append(definition)
-            if result["language"] == "python":
-                by_qualified[_python_qualified_name(path, function, directory)] = definition
-
-    edges = []
-    for path, result in parsed:
-        for call in result["calls"]:
-            caller = _containing_function(result["functions"], call)
-            if caller is None:
-                continue
-            target = None
-            if result["language"] == "python":
-                if call.get("confidence") != "confirmed":
-                    continue
-                target = by_qualified.get(call.get("qualified_name"))
-            same_file = [
-                item for item in by_name.get(call["name"], []) if item["file"] == str(path)
-            ]
-            if target is None and len(same_file) == 1:
-                target = same_file[0]
-            if target is None and len(by_name.get(call["name"], [])) == 1:
-                target = by_name[call["name"]][0]
-            if target is not None:
-                edges.append({"source": caller["symbol_id"], "target": target["symbol_id"]})
-    return parsed, definitions, edges
+        _index_workspace_definitions(
+            path, result, directory, definitions, by_name, by_qualified
+        )
+    return parsed, definitions, _workspace_call_edges(parsed, by_name, by_qualified)
 
 
 def _annotate_function_ids(path: Path, result: dict, root: Path) -> None:
@@ -1781,6 +1850,76 @@ def _containing_function(functions: list[dict], call: dict) -> dict | None:
     return min(matches, key=_symbol_span) if matches else None
 
 
+def _best_louvain_target(
+    node: object,
+    weights: dict[object, float],
+    totals: dict[object, float],
+    degree: dict[object, float],
+    old: object,
+    m2: float,
+) -> object:
+    best = old
+    best_gain = 0.0
+    for target in sorted(weights, key=str):
+        gain = weights[target] - totals[target] * degree[node] / m2
+        if gain > best_gain + 1e-12:
+            best, best_gain = target, gain
+    return best
+
+
+def _neighbor_community_weights(
+    neighbors: dict[object, float], community: dict[object, object]
+) -> dict[object, float]:
+    weights: dict[object, float] = {}
+    for neighbor, weight in neighbors.items():
+        target = community[neighbor]
+        weights[target] = weights.get(target, 0.0) + weight
+    return weights
+
+
+def _move_one_node(
+    node: object,
+    current: dict,
+    community: dict[object, object],
+    totals: dict[object, float],
+    degree: dict[object, float],
+    m2: float,
+) -> bool:
+    """Move one node to its best community; True when it actually moved."""
+    old = community[node]
+    totals[old] -= degree[node]
+    weights = _neighbor_community_weights(current[node], community)
+    best = _best_louvain_target(node, weights, totals, degree, old, m2)
+    community[node] = best
+    totals[best] += degree[node]
+    return best != old
+
+
+def _local_louvain_pass(
+    nodes: list,
+    current: dict,
+    community: dict[object, object],
+    totals: dict[object, float],
+    degree: dict[object, float],
+    m2: float,
+) -> None:
+    moved = True
+    while moved:
+        moved = False
+        for node in nodes:
+            moved |= _move_one_node(node, current, community, totals, degree, m2)
+
+
+def _grouped_communities(nodes: list, community: dict[object, object]) -> list[list]:
+    groups: dict[object, list[object]] = {}
+    for node in nodes:
+        groups.setdefault(community[node], []).append(node)
+    return sorted(
+        (sorted(group, key=str) for group in groups.values()),
+        key=lambda group: str(group[0]),
+    )
+
+
 def _louvain_communities(graph: dict[str, dict[str, float]]) -> list[list[str]]:
     """Optimize modularity on a weighted undirected graph without dependencies."""
     current = {node: dict(neighbors) for node, neighbors in graph.items()}
@@ -1793,48 +1932,18 @@ def _louvain_communities(graph: dict[str, dict[str, float]]) -> list[list[str]]:
         m2 = sum(degree.values())
         if not m2:
             break
-
-        moved = True
-        while moved:
-            moved = False
-            for node in nodes:
-                old = community[node]
-                totals[old] -= degree[node]
-                weights: dict[object, float] = {}
-                for neighbor, weight in current[node].items():
-                    target = community[neighbor]
-                    weights[target] = weights.get(target, 0.0) + weight
-                choices = sorted(weights, key=str)
-                best = old
-                best_gain = 0.0
-                for target in choices:
-                    gain = weights[target] - totals[target] * degree[node] / m2
-                    if gain > best_gain + 1e-12:
-                        best, best_gain = target, gain
-                community[node] = best
-                totals[best] += degree[node]
-                moved |= best != old
-
-        groups: dict[object, list[object]] = {}
-        for node in nodes:
-            groups.setdefault(community[node], []).append(node)
-        ordered_groups = sorted(
-            (sorted(group, key=str) for group in groups.values()),
-            key=lambda group: str(group[0]),
-        )
+        _local_louvain_pass(nodes, current, community, totals, degree, m2)
+        ordered_groups = _grouped_communities(nodes, community)
         if len(ordered_groups) == len(nodes):
             break
-
         group_of = {
             node: index for index, group in enumerate(ordered_groups) for node in group
         }
-        next_members = {
+        members = {
             index: set().union(*(members[node] for node in group))
             for index, group in enumerate(ordered_groups)
         }
-        reduced = _aggregate_louvain_graph(current, group_of)
-        current, members = reduced, next_members
-
+        current = _aggregate_louvain_graph(current, group_of)
     communities = [sorted(group) for group in members.values() if len(group) >= 2]
     return sorted(communities, key=lambda group: group[0])
 
