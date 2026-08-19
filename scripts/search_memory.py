@@ -1146,12 +1146,27 @@ def _needs_rebuild(
                 deadline=deadline,
                 cancelled=cancelled,
             )
+    return _index_is_stale(pages, source_root, current_index, deadline, cancelled)
+
+
+def _readable_index_state(
+    current_index: Path, deadline: float | None, cancelled: Callable[[], bool] | None
+) -> tuple | None:
+    """An unreadable or malformed index is just another reason to rebuild."""
     try:
-        state = _index_state(current_index, deadline, cancelled)
-    except sqlite3.Error:
-        return True
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return True
+        return _index_state(current_index, deadline, cancelled)
+    except (sqlite3.Error, TypeError, ValueError):
+        return None
+
+
+def _index_is_stale(
+    pages: list[Path],
+    source_root: Path,
+    current_index: Path,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    state = _readable_index_state(current_index, deadline, cancelled)
     if state is None:
         return True
     columns, schema_sql, manifest_paths = state
@@ -4154,16 +4169,87 @@ def _legacy_search(
     pages = page_paths if page_paths is not None else _collect_pages(scope)
     if not pages:
         return []
+    ranked, retrieval_mode = _legacy_ranked(
+        query,
+        pages,
+        limit,
+        force_rebuild=force_rebuild,
+        project=project,
+        since=since,
+        as_of=as_of,
+        semantic=semantic,
+        graph=graph,
+        rerank=rerank,
+    )
+    return _finalize_results(
+        query,
+        ranked,
+        limit,
+        retrieval_mode=retrieval_mode,
+        source_tool=source_tool,
+        emit_telemetry=emit_telemetry,
+    )
+
+
+def _legacy_ranked(
+    query: str,
+    pages: list[Path],
+    limit: int,
+    *,
+    force_rebuild: bool,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+    semantic: bool,
+    graph: bool,
+    rerank: bool,
+) -> tuple[list[dict], str]:
+    """Order the legacy index and report which path produced that order."""
+    bm25_results = _legacy_bm25_results(
+        query,
+        pages,
+        limit,
+        force_rebuild=force_rebuild,
+        project=project,
+        since=since,
+        as_of=as_of,
+    )
+    exact = _exact_filename_answer(bm25_results, query, limit)
+    if exact is not None:
+        return exact, "exact"
+
+    vector_results = _optional_vector_results(
+        query, pages, limit, project, since, as_of, semantic=semantic
+    )
+    graph_boosts = _legacy_graph_boosts(graph, bm25_results, vector_results)
+    if not vector_results and not graph_boosts:
+        return _reranked_or_capped(query, bm25_results, limit, rerank), "bm25"
+
+    fused = _project_boosted_fusion(
+        _rrf_fuse_triple(bm25_results, vector_results, graph_boosts), project
+    )
+    return _reranked_or_capped(query, fused, limit, rerank), "hybrid"
+
+
+def _legacy_bm25_results(
+    query: str,
+    pages: list[Path],
+    limit: int,
+    *,
+    force_rebuild: bool,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+) -> list[dict]:
     if force_rebuild or _needs_rebuild(pages):
         _build_index(pages)
-
-    query_lower = query.lower().strip()
     conn = sqlite3.connect(str(INDEX_FILE))
     try:
         raw_rows = _legacy_bm25_rows(conn, query, limit)
     finally:
         conn.close()
-    bm25_results = _legacy_scored_rows(
+    query_lower = query.lower().strip()
+    return _legacy_scored_rows(
         raw_rows,
         query_lower=query_lower,
         query_words=set(query_lower.split()),
@@ -4172,43 +4258,29 @@ def _legacy_search(
         as_of=as_of,
     )
 
-    exact = _exact_filename_answer(bm25_results, query, limit)
-    if exact is not None:
-        return _finalize_results(
-            query,
-            exact,
-            limit,
-            retrieval_mode="exact",
-            source_tool=source_tool,
-            emit_telemetry=emit_telemetry,
-        )
 
-    vector_results = None
-    if semantic and _have_sentence_transformers():
-        vector_results = _legacy_vector_results(query, pages, limit, project, since, as_of)
-    graph_boosts = _legacy_graph_boosts(graph, bm25_results, vector_results)
+def _optional_vector_results(
+    query: str,
+    pages: list[Path],
+    limit: int,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+    *,
+    semantic: bool,
+) -> list[dict] | None:
+    """Vectors are opt-in and need the optional dependency to be installed."""
+    if not semantic or not _have_sentence_transformers():
+        return None
+    return _legacy_vector_results(query, pages, limit, project, since, as_of)
 
-    if vector_results or graph_boosts:
-        fused = _project_boosted_fusion(
-            _rrf_fuse_triple(bm25_results, vector_results, graph_boosts), project
-        )
-        return _finalize_results(
-            query,
-            _maybe_rerank(query, fused, limit) if rerank else fused[:limit],
-            limit,
-            retrieval_mode="hybrid",
-            source_tool=source_tool,
-            emit_telemetry=emit_telemetry,
-        )
 
-    return _finalize_results(
-        query,
-        _maybe_rerank(query, bm25_results, limit) if rerank else bm25_results[:limit],
-        limit,
-        retrieval_mode="bm25",
-        source_tool=source_tool,
-        emit_telemetry=emit_telemetry,
-    )
+def _reranked_or_capped(
+    query: str, results: list[dict], limit: int, rerank: bool
+) -> list[dict]:
+    if not rerank:
+        return results[:limit]
+    return _maybe_rerank(query, results, limit)
 
 
 def _rrf_fuse_triple(
@@ -4504,67 +4576,104 @@ def _build_vectors(
         return None
 
     INDEX_DIR.mkdir(parents=True, exist_ok=True)
+    documents = _live_documents_and_texts(pages, deadline, cancelled)
+    if documents is None:
+        return None
+    live, texts_list = documents
 
+    vectors = _encoded_page_vectors(embedder, texts_list, deadline, cancelled)
+    if vectors is None:
+        return None
+    metadata = _persisted_vector_metadata(vectors, live)
+    if metadata is None:
+        return None
+    return {**live, **metadata, "paths": live["source_paths"], "vectors": vectors}
+
+
+def _live_documents_and_texts(
+    pages: list[Path], deadline: float | None, cancelled: Callable[[], bool] | None
+) -> tuple[dict, list[str]] | None:
+    """The live page set plus the texts to embed, or None when there is none."""
     try:
-        live = _legacy_vector_documents(
-            pages, deadline=deadline, cancelled=cancelled
-        )
+        live = _legacy_vector_documents(pages, deadline=deadline, cancelled=cancelled)
     except (OSError, ValueError):
         return None
     texts_list = live.pop("texts")
-
     if not texts_list:
         return None
+    return live, texts_list
 
-    # Embed all texts
+
+def _usable_vector_block(vectors, count: int) -> bool:
+    import numpy as np
+
+    return (
+        vectors.ndim == 2
+        and vectors.shape == (count, EMBEDDING_DIM)
+        and vectors.dtype.kind in "fiu"
+        and bool(np.isfinite(vectors).all())
+    )
+
+
+def _encoded_page_vectors(
+    embedder,
+    texts: list[str],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+):
+    """Encode the page texts, or None when the model output is unusable."""
     try:
         import numpy as np
 
         vectors = np.asarray(
-            embedder.encode(texts_list, show_progress_bar=False, convert_to_numpy=True)
+            embedder.encode(texts, show_progress_bar=False, convert_to_numpy=True)
         )
         _check_legacy_stop(deadline, cancelled)
     except TimeoutError:
         raise
     except Exception:
         return None
-    if (
-        vectors.ndim != 2
-        or vectors.shape != (len(texts_list), EMBEDDING_DIM)
-        or vectors.dtype.kind not in "fiu"
-        or not np.isfinite(vectors).all()
-    ):
+    if not _usable_vector_block(vectors, len(texts)):
         return None
-    vectors = np.ascontiguousarray(vectors, dtype=np.float32)
+    return np.ascontiguousarray(vectors, dtype=np.float32)
 
-    # v4.0: Save vectors as binary .npy (memory-mapped, fast load).
-    # Save metadata as small JSON (no vectors → small file).
+
+def _legacy_vector_metadata(vectors, live: dict) -> dict:
+    """Describes the .npy that was just written, so a reader can verify it."""
+    import numpy as np
+
+    return {
+        "schema_version": "legacy-vectors/v1",
+        "model_id": EMBEDDING_MODEL,
+        "model_revision": EMBEDDING_MODEL_REVISION,
+        "dimensions": EMBEDDING_DIM,
+        **live,
+        "dtype": str(vectors.dtype),
+        "shape": list(vectors.shape),
+        "finite": bool(np.isfinite(vectors).all()),
+        "artifact_sha256": _artifact_descriptor(VECTOR_NPY, "vectors.npy")["sha256"],
+    }
+
+
+def _persisted_vector_metadata(vectors, live: dict) -> dict | None:
+    """Save vectors as binary .npy (memory-mapped, fast load) plus small JSON."""
     try:
+        import numpy as np
+
         INDEX_DIR.mkdir(parents=True, exist_ok=True)
         np.save(str(VECTOR_NPY), vectors, allow_pickle=False)
-        metadata = {
-            "schema_version": "legacy-vectors/v1",
-            "model_id": EMBEDDING_MODEL,
-            "model_revision": EMBEDDING_MODEL_REVISION,
-            "dimensions": EMBEDDING_DIM,
-            **live,
-            "dtype": str(vectors.dtype),
-            "shape": list(vectors.shape),
-            "finite": bool(np.isfinite(vectors).all()),
-            "artifact_sha256": _artifact_descriptor(VECTOR_NPY, "vectors.npy")[
-                "sha256"
-            ],
-        }
+        metadata = _legacy_vector_metadata(vectors, live)
         atomic_write(
             VECTOR_META,
-            json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            json.dumps(
+                metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ),
         )
     except TimeoutError:
         raise
     except Exception:
         return None
-
-    return {**live, **metadata, "paths": live["source_paths"], "vectors": vectors}
+    return metadata
 
 
 def main() -> int:
