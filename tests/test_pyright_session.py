@@ -2707,14 +2707,22 @@ def test_open_document_propagates_deadline_to_stable_source_read(
         session.close(deadline=time.monotonic() + 5)
 
 
+# The subject must return on its own deadline while the lock is still held, so
+# the holder keeps holding until the test says otherwise. A fixed sleep raced
+# the assertions on a loaded macOS runner and the hold ended first.
+CONTENTION_HOLD_SECONDS = 60.0
+CONTENTION_RETURN_SECONDS = 5.0
+
+
 def _hold_document_lock_for_contention(
     session: PyrightSession,
     held: threading.Event,
     released: threading.Event,
+    release_request: threading.Event,
 ) -> None:
     with session._document_lock:
         held.set()
-        time.sleep(0.25)
+        release_request.wait(CONTENTION_HOLD_SECONDS)
     released.set()
 
 
@@ -2726,9 +2734,10 @@ def test_open_document_lock_contention_obeys_deadline_without_mutation(
     session = _session(repository, state_root, semantic_pyright)
     held = threading.Event()
     released = threading.Event()
+    release_request = threading.Event()
     holder = threading.Thread(
         target=_hold_document_lock_for_contention,
-        args=(session, held, released),
+        args=(session, held, released, release_request),
     )
     holder.start()
     assert held.wait(1)
@@ -2755,7 +2764,7 @@ def test_open_document_lock_contention_obeys_deadline_without_mutation(
                 "pkg/service.py",
                 deadline=started + 0.05,
             )
-        assert time.monotonic() - started < 0.2
+        assert time.monotonic() - started < CONTENTION_RETURN_SECONDS
         assert released.is_set() is False
         assert (
             session._readiness,
@@ -2775,8 +2784,9 @@ def test_open_document_lock_contention_obeys_deadline_without_mutation(
         assert tuple(semantic_pyright.events()) == before_events
         assert not (state_root / "run/lsp").exists()
     finally:
-        holder.join(1)
-        session.close(deadline=time.monotonic() + 1)
+        release_request.set()
+        holder.join(30)
+        session.close(deadline=time.monotonic() + 30)
     assert not holder.is_alive()
 
 
@@ -2792,9 +2802,10 @@ def test_synchronize_lock_contention_obeys_deadline_without_mutation(
     )
     held = threading.Event()
     released = threading.Event()
+    release_request = threading.Event()
     holder = threading.Thread(
         target=_hold_document_lock_for_contention,
-        args=(session, held, released),
+        args=(session, held, released, release_request),
     )
     holder.start()
     assert held.wait(1)
@@ -2818,7 +2829,7 @@ def test_synchronize_lock_contention_obeys_deadline_without_mutation(
     try:
         with pytest.raises(TimeoutError, match="document lock"):
             session.synchronize(revision, deadline=started + 0.05)
-        assert time.monotonic() - started < 0.2
+        assert time.monotonic() - started < CONTENTION_RETURN_SECONDS
         assert released.is_set() is False
         assert (
             session._readiness,
@@ -2838,8 +2849,9 @@ def test_synchronize_lock_contention_obeys_deadline_without_mutation(
         assert tuple(semantic_pyright.events()) == before_events
         assert not (state_root / "run/lsp").exists()
     finally:
-        holder.join(1)
-        session.close(deadline=time.monotonic() + 1)
+        release_request.set()
+        holder.join(30)
+        session.close(deadline=time.monotonic() + 30)
     assert not holder.is_alive()
 
 
@@ -6802,11 +6814,13 @@ def test_session_close_state_lock_wait_obeys_absolute_deadline(
     )
     held = threading.Event()
 
+    release_request = threading.Event()
+
     def hold_state_lock() -> None:
         session._lock.acquire()
         try:
             held.set()
-            time.sleep(0.25)
+            release_request.wait(CONTENTION_HOLD_SECONDS)
         finally:
             session._lock.release()
 
@@ -6817,11 +6831,12 @@ def test_session_close_state_lock_wait_obeys_absolute_deadline(
     try:
         with pytest.raises(TimeoutError, match="state lock"):
             session.close(deadline=started + 0.05)
-        assert time.monotonic() - started < 0.2
+        assert time.monotonic() - started < CONTENTION_RETURN_SECONDS
         assert session._closed is False
     finally:
-        holder.join(1)
-        session.close(deadline=time.monotonic() + 1)
+        release_request.set()
+        holder.join(30)
+        session.close(deadline=time.monotonic() + 30)
     assert not holder.is_alive()
     assert session._closed is True
 
