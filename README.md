@@ -101,7 +101,7 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 - **Agent timeline** — attribution: which agent decided what and when
 
 ### Maintenance
-- **14 lint checks (13 structural + 1 LLM-judged contradiction)** — broken wikilinks, orphans, missing frontmatter, invalid supersede chains, temporal validity, gaps, sparse pages, missing sources, contradictions
+- **16 lint checks (15 structural + 1 LLM-judged contradiction)** — broken wikilinks, orphans, stale compiles, missing backlinks, sparse pages, missing frontmatter, missing or invalid type, missing sources, invalid supersede chains, orphan gaps, temporal validity, unresolvable evidence, invalid claim schema, contradictions
 - **Type-aware archive** — debugging 60d, patterns 180d, decisions never
 - **Nightly + weekly schedules** — compile, lint, archive, OKF migration (Task Scheduler on Windows, LaunchAgent on macOS, user systemd on Linux; cron is an explicit degraded fallback)
 - **OKF v0.1 frontmatter** — `type`, `confidence`, `source_authority`, `supersede` fields; auto-migration from legacy pages

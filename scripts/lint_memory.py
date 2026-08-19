@@ -65,14 +65,11 @@ from vault_editorial import (  # noqa: E402
     EDITORIAL_NAMES,
 )
 
-MEMORY = ROOT / "knowledge"
-KNOWLEDGE = MEMORY / "notes"
-DAILY_DIR = MEMORY / "daily"
-MEMORY_INDEX = MEMORY / "index.md"
-
-# Post three-zone: notes live under knowledge/notes; vault index is knowledge/index.md.
-WIKI = ROOT / "knowledge" / "notes"
-WIKI_INDEX = MEMORY / "index.md"
+# Three-zone layout: one knowledge tree, notes under it, one vault index.
+VAULT = ROOT / "knowledge"
+NOTES = VAULT / "notes"
+DAILY_DIR = VAULT / "daily"
+VAULT_INDEX = VAULT / "index.md"
 
 REPORTS = REPORTS_DIR
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+?)(?:\|[^\]]+)?\]\]")
@@ -585,7 +582,7 @@ def _page_label(page: Path) -> str:
         return Path(page).as_posix()
 
 
-def _validate_claim_schemas(pages: list[Path]) -> list[str]:
+def check_claim_schemas(pages: list[Path]) -> list[str]:
     """Validate canonical claim ledgers and quarantined inbox candidates."""
     resolver = EvidenceResolver(ROOT, state_root=STATE_ROOT)
     findings: list[str] = []
@@ -597,7 +594,6 @@ def _validate_claim_schemas(pages: list[Path]) -> list[str]:
     return findings
 
 
-check_claim_schemas = _validate_claim_schemas
 
 
 def _project_claim_pages(projects_root: Path) -> list[Path]:
@@ -667,7 +663,7 @@ def check_invalid_supersede_chain(pages: list[Path]) -> list[str]:
     out: list[str] = []
     for md in pages:
         target = _supersede_target(md)
-        if target and _resolve_link(target, [MEMORY, WIKI]) is None:
+        if target and _resolve_link(target, [VAULT, NOTES]) is None:
             out.append(f"{_rel(md)} -> superseded_by [[{target}]] (target not found)")
     return out
 
@@ -899,19 +895,13 @@ def _unique_by_resolved_path(pages: list[Path]) -> list[Path]:
     return unique
 
 
-def _notes_index() -> Path:
-    if WIKI_INDEX.exists():
-        return WIKI_INDEX
-    return MEMORY_INDEX
-
-
 def _notes_scope(scope: str) -> list[tuple[str, list[Path], Path]]:
     """Notes are one tree; the legacy scope labels stay as aliases."""
     if scope not in ("memory", "wiki", "all"):
         return []
-    pages = [p for p in _iter_tree_md(KNOWLEDGE) if p.name not in EDITORIAL_NAMES]
+    pages = [p for p in _iter_tree_md(NOTES) if p.name not in EDITORIAL_NAMES]
     label = "notes" if scope == "all" else scope
-    return [(label, pages, _notes_index())]
+    return [(label, pages, VAULT_INDEX)]
 
 
 def _state_findings(findings: dict[str, list[str]]) -> None:
@@ -931,8 +921,8 @@ def _page_checks(
     sparse_words: int,
 ) -> dict[str, list[str]]:
     """Every per-page check for one scope, already labelled."""
-    tree = _unique_by_resolved_path(list(_iter_tree_md(KNOWLEDGE)))
-    search_roots = [MEMORY, WIKI]
+    tree = _unique_by_resolved_path(list(_iter_tree_md(NOTES)))
+    search_roots = [VAULT, NOTES]
     results = {
         "broken_wikilinks": check_broken_links(tree, search_roots),
         "orphan_pages": check_orphans_against_index(pages, index),

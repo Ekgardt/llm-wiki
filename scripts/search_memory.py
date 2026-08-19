@@ -49,7 +49,6 @@ from corpus_snapshot import (  # noqa: E402
 )
 from generation_catalog import GenerationCatalog  # noqa: E402
 from memory_state import ROOT, STATE_ROOT, _is_pid_alive, atomic_write  # noqa: E402
-from provenance import AUTHORITY_WEIGHTS as _AUTHORITY_WEIGHTS  # noqa: E402
 from provenance import authority_weight  # noqa: E402
 from reliable_memory import (  # noqa: E402
     canonical_json_bytes,
@@ -833,8 +832,6 @@ AUTHORITY_FIELD_RE = re.compile(
 )
 VALID_TO_FIELD_RE = re.compile(r"^valid_to:\s*(.+?)\s*$", re.MULTILINE)
 
-# The one trust table, shared with the hybrid path (see scripts/provenance.py).
-AUTHORITY_WEIGHTS = _AUTHORITY_WEIGHTS
 
 
 def _extract_title_and_summary(content: str, fallback_stem: str) -> tuple[str, str]:
@@ -2022,7 +2019,7 @@ def apply_hard_filters(
 def _generation_result(row: sqlite3.Row, generation_id: str) -> dict[str, object]:
     score = -float(row["rank"])
     authority = row["authority"] or ""
-    score *= AUTHORITY_WEIGHTS.get(authority.casefold(), 1.0)
+    score *= authority_weight(authority)
     content = row["content"] or ""
     return {
         "path": row["source_path"],
@@ -2554,7 +2551,7 @@ def _legacy_lexical_hits(
                         "title": title,
                         "summary": summary[:120],
                         "score": round(
-                            10.0 * AUTHORITY_WEIGHTS.get(authority.casefold(), 1.0),
+                            10.0 * authority_weight(authority),
                             2,
                         ),
                         "bm25_score": 0.0,
@@ -2642,7 +2639,7 @@ def _direct_markdown_hits(
         if query_term_set.issubset(filename_terms):
             score *= 4.0
         authority = _extract_frontmatter_field(content, AUTHORITY_FIELD_RE) or ""
-        score *= AUTHORITY_WEIGHTS.get(authority.casefold(), 1.0)
+        score *= authority_weight(authority)
         results.append(
             {
                 "path": relative_path,

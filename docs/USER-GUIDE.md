@@ -317,7 +317,7 @@ the LLM cannot fabricate citations.
 ### Linting and maintenance
 
 ```bash
-uv run python scripts/lint_memory.py --scope all           # 13 structural checks
+uv run python scripts/lint_memory.py --scope all           # 15 structural checks
 uv run python scripts/lint_memory.py --contradictions      # + LLM-judged contradictions
 uv run python scripts/archive_stale.py --apply           # archive old pages by type
 uv run python scripts/lookup_mode.py                       # show direct/base/hybrid mode

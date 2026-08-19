@@ -102,7 +102,7 @@ LLM Wiki даёт каждому AI-агенту, которым вы польз
 - **Agent timeline** — атрибуция: какой агент какое решение принял и когда
 
 ### Обслуживание
-- **14 lint-проверок (13 структурных + 1 LLM-оцениваемое противоречие)** — битые wikilinks, orphan'ы, missing frontmatter, невалидные supersede-цепочки, temporal validity, gap'ы, sparse pages, missing sources, противоречия
+- **16 lint-проверок (15 структурных + 1 LLM-оцениваемое противоречие)** — битые wikilinks, orphan'ы, несобранные дневники, отсутствующие обратные ссылки, sparse pages, missing frontmatter, отсутствующий или неверный type, missing sources, невалидные supersede-цепочки, orphan gap'ы, temporal validity, неразрешимые доказательства, невалидная схема claim, противоречия
 - **Type-aware архивация** — debugging 60 дн, patterns 180 дн, decisions никогда
 - **Nightly + weekly расписания** — компиляция, lint, архивация, OKF-миграция (Task Scheduler на Windows, LaunchAgent на macOS, пользовательский systemd на Linux; cron доступен только как явный degraded fallback)
 - **OKF v0.1 frontmatter** — поля `type`, `confidence`, `source_authority`, `supersede`; авто-миграция с legacy-страниц

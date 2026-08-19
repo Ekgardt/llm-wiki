@@ -532,7 +532,8 @@ def test_typed_provenance_weighs_on_every_path_from_one_table():
     import search_memory
     from retrieval import fuse_rrf
 
-    assert search_memory.AUTHORITY_WEIGHTS is provenance.AUTHORITY_WEIGHTS
+    # One table, imported by both paths: the lexical scorer and the fusion.
+    assert search_memory.authority_weight is provenance.authority_weight
 
     lexical = [
         {"path": "knowledge/notes/guess.md", "authority": "inferred", "score": 9.0},

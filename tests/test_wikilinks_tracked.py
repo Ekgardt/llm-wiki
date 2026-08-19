@@ -34,7 +34,7 @@ def test_no_broken_wikilinks_in_tracked_knowledge():
     pages = _tracked_knowledge_pages()
     assert pages, "expected tracked knowledge pages"
     broken = lint_memory.check_broken_links(
-        pages, [lint_memory.MEMORY, lint_memory.WIKI]
+        pages, [lint_memory.VAULT, lint_memory.NOTES]
     )
     assert broken == [], (
         "broken wikilinks (or links to untracked/gitignored files):\n"
@@ -54,9 +54,8 @@ def test_untracked_target_is_reported(tmp_path, monkeypatch):
     secret.write_text("# secret\n", encoding="utf-8")
 
     monkeypatch.setattr(lint_memory, "ROOT", vault)
-    monkeypatch.setattr(lint_memory, "MEMORY", vault / "knowledge")
-    monkeypatch.setattr(lint_memory, "KNOWLEDGE", notes)
-    monkeypatch.setattr(lint_memory, "WIKI", notes)
+    monkeypatch.setattr(lint_memory, "VAULT", vault / "knowledge")
+    monkeypatch.setattr(lint_memory, "NOTES", notes)
     monkeypatch.setattr(lint_memory, "DAILY_DIR", vault / "knowledge" / "daily")
     monkeypatch.setattr(
         lint_memory, "_git_tracked_paths", lambda: {"knowledge/notes/alpha.md"}

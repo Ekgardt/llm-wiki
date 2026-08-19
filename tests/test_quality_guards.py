@@ -586,13 +586,11 @@ def test_readme_recall_at_10_agentmemory():
 
 def test_lint_check_count_matches_code():
     """The lint check count in README/docs must match lint_memory.py source."""
-    lint_src = (ROOT / "scripts" / "lint_memory.py").read_text(encoding="utf-8")
-    # Count registered check categories in run_checks()
-    checks = re.findall(r'checks\.append\(', lint_src)
-    if not checks:
-        # Alternative: count check_ function definitions
-        checks = re.findall(r'^def check_', lint_src, re.MULTILINE)
-    actual = len(checks)
+    import lint_memory
+
+    # The registry is the count; counting `def check_` lines drifted whenever a
+    # helper was renamed and said nothing about which categories exist.
+    actual = len(lint_memory.CHECK_NAMES)
     assert actual > 0, "Could not count lint checks in lint_memory.py"
 
     for doc_name in ("README.md", "README.ru.md", "README.zh-CN.md",

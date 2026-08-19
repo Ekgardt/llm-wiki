@@ -101,7 +101,7 @@ provider：OpenCode、Codex、Claude 和 OpenAI 可能使用云服务；Ollama �
 - **智能体时间线**——归因：哪个智能体何时做了什么决策
 
 ### 维护
-- **14 项 lint 检查（13 项结构性 + 1 项 LLM 判定矛盾）**——损坏的 wikilinks、孤儿页面、缺失 frontmatter、无效 supersede 链、时间有效性、gap、稀疏页面、缺失来源、矛盾
+- **16 项 lint 检查（15 项结构性 + 1 项 LLM 判定矛盾）**——损坏的 wikilinks、孤儿页面、未编译日志、缺失反向链接、稀疏页面、缺失 frontmatter、缺失或无效 type、缺失来源、无效 supersede 链、孤立 gap、时间有效性、无法解析的证据、无效 claim 模式、矛盾
 - **类型感知归档**——debugging 60 天、patterns 180 天、decisions 永不
 - **Nightly + weekly 计划**——编译、lint、归档、OKF 迁移（Windows 使用 Task Scheduler，macOS 使用 LaunchAgent，Linux 使用用户级 systemd；cron 仅作为显式降级回退）
 - **OKF v0.1 frontmatter**——`type`、`confidence`、`source_authority`、`supersede` 字段；从遗留页面自动迁移
