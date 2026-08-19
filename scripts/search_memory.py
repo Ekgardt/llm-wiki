@@ -32,7 +32,7 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import closing, contextmanager, nullcontext
 from pathlib import Path
 
@@ -1714,60 +1714,99 @@ def validate_generation_fts_artifact(
     _check_generation_stop(deadline, cancelled)
 
 
-def _valid_generation_fts_contents(
-    connection: sqlite3.Connection,
-    manifest: dict[str, object],
-    *,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-    authoritative_sources: dict[str, dict[str, object]] | None = None,
-) -> bool:
-    if connection.execute("PRAGMA integrity_check").fetchone() != ("ok",):
-        return False
+class _UnusableAuthoritativeSource(Exception):
+    """An authoritative source that cannot produce chunks at all."""
+
+
+_FTS_METADATA_SCHEMA = (
+    ("key", "TEXT", 0, 1),
+    ("value", "TEXT", 1, 0),
+)
+_FTS_TABLE_PREFIX = "create virtual table chunks using fts5("
+_FTS_CHUNK_SELECT = (
+    "SELECT chunk_id, chunk_order, source_id, source_path, source_sha256, "
+    "parent_page, heading_ancestry, byte_start, byte_end, line_start, line_end, "
+    "span_sha256, type, project, authority, confidence, status, valid_from, "
+    "valid_to, language, title, content FROM chunks ORDER BY chunk_order"
+)
+
+
+def _valid_table_shapes(connection: sqlite3.Connection) -> bool:
     metadata_schema = tuple(
         (row[1], row[2].upper(), row[3], row[5])
         for row in connection.execute("PRAGMA table_info(generation_metadata)")
     )
     chunk_columns = tuple(row[1] for row in connection.execute("PRAGMA table_info(chunks)"))
-    if metadata_schema != (
-        ("key", "TEXT", 0, 1),
-        ("value", "TEXT", 1, 0),
-    ) or chunk_columns != GENERATION_FTS_COLUMNS:
+    return metadata_schema == _FTS_METADATA_SCHEMA and chunk_columns == GENERATION_FTS_COLUMNS
+
+
+def _valid_fts_schema(connection: sqlite3.Connection) -> bool:
+    """Integrity, table shapes, and the exact FTS5 declaration."""
+    if connection.execute("PRAGMA integrity_check").fetchone() != ("ok",):
         return False
-    schema_row = connection.execute(
-        "SELECT sql FROM sqlite_schema WHERE type='table' AND name='chunks'"
-    ).fetchone()
-    if not schema_row or not isinstance(schema_row[0], str):
+    if not _valid_table_shapes(connection):
         return False
-    normalized_schema = " ".join(schema_row[0].casefold().split())
-    prefix = "create virtual table chunks using fts5("
-    if not normalized_schema.startswith(prefix) or not normalized_schema.endswith(")"):
-        return False
-    arguments = [
-        argument.strip()
-        for argument in normalized_schema[len(prefix) : -1].split(",")
-    ]
-    expected_arguments = [
+    return _valid_fts_declaration(connection)
+
+
+def _expected_fts_arguments() -> list[str]:
+    return [
         *(f"{column} unindexed" for column in GENERATION_FTS_COLUMNS[:-2]),
         "title",
         "content",
         "tokenize = 'porter unicode61'",
     ]
-    if arguments != expected_arguments:
+
+
+def _chunks_table_sql(connection: sqlite3.Connection) -> str | None:
+    row = connection.execute(
+        "SELECT sql FROM sqlite_schema WHERE type='table' AND name='chunks'"
+    ).fetchone()
+    if not row or not isinstance(row[0], str):
+        return None
+    return " ".join(row[0].casefold().split())
+
+
+def _declared_fts_arguments(connection: sqlite3.Connection) -> list[str] | None:
+    normalized = _chunks_table_sql(connection)
+    if normalized is None:
+        return None
+    if not normalized.startswith(_FTS_TABLE_PREFIX) or not normalized.endswith(")"):
+        return None
+    return [
+        argument.strip()
+        for argument in normalized[len(_FTS_TABLE_PREFIX) : -1].split(",")
+    ]
+
+
+def _valid_fts_declaration(connection: sqlite3.Connection) -> bool:
+    return _declared_fts_arguments(connection) == _expected_fts_arguments()
+
+
+def _valid_metadata_rows(rows: list[tuple[object, object]]) -> bool:
+    if len(rows) != len(GENERATION_METADATA_KEYS):
         return False
-    metadata_rows = list(
+    if {row[0] for row in rows} != GENERATION_METADATA_KEYS:
+        return False
+    return all(isinstance(row[1], str) for row in rows)
+
+
+def _generation_metadata(connection: sqlite3.Connection) -> dict[str, str] | None:
+    """Exactly the expected keys, all strings, or None."""
+    rows = list(
         connection.execute(
             "SELECT key, value FROM generation_metadata LIMIT ?",
             (len(GENERATION_METADATA_KEYS) + 1,),
         )
     )
-    if (
-        len(metadata_rows) != len(GENERATION_METADATA_KEYS)
-        or {row[0] for row in metadata_rows} != GENERATION_METADATA_KEYS
-        or any(not isinstance(row[1], str) for row in metadata_rows)
-    ):
-        return False
-    metadata = dict(metadata_rows)
+    if not _valid_metadata_rows(rows):
+        return None
+    return dict(rows)
+
+
+def _metadata_matches_manifest(
+    metadata: Mapping[str, str], manifest: Mapping[str, object]
+) -> bool:
     expected = {
         "schema_version": GENERATION_SEARCH_SCHEMA_VERSION,
         "collector_version": manifest.get("collector_version"),
@@ -1776,159 +1815,222 @@ def _valid_generation_fts_contents(
         "tokenizer_config_sha256": GENERATION_TOKENIZER_CONFIG_SHA256,
         "source_manifest_sha256": manifest.get("source_manifest_sha256"),
     }
-    if any(metadata.get(key) != value for key, value in expected.items()):
-        return False
-    expected_chunks: list[tuple[object, ...]] = []
-    if authoritative_sources is not None:
-        ordered_sources = sorted(
-            authoritative_sources.items(),
-            key=lambda item: (str(item[1]["relative_path"]), item[0]),
-        )
-        for source_id, source in ordered_sources:
-            _check_generation_stop(deadline, cancelled)
-            source_path = str(source["relative_path"])
-            source_sha256 = str(source["sha256"])
-            source_content = source["content"]
-            if not isinstance(source_content, bytes):
-                return False
-            for chunk in canonical_retrieval_chunks(
-                source_id=source_id,
-                source_path=source_path,
-                source_sha256=source_sha256,
-                content=source_content,
-                extractor_version=str(manifest.get("extractor_version")),
+    return all(metadata.get(key) == value for key, value in expected.items())
+
+
+def _expected_chunk_row(chunk: object, order: int) -> tuple[object, ...]:
+    title = (
+        chunk.heading_ancestry[-1]
+        if chunk.heading_ancestry
+        else Path(chunk.source_path).stem
+    )
+    return (
+        chunk.id,
+        order,
+        chunk.source_id,
+        chunk.source_path,
+        chunk.source_sha256,
+        chunk.parent_page,
+        json.dumps(chunk.heading_ancestry, ensure_ascii=False, separators=(",", ":")),
+        chunk.byte_start,
+        chunk.byte_end,
+        chunk.line_start,
+        chunk.line_end,
+        chunk.span_sha256,
+        chunk.type,
+        chunk.project,
+        chunk.authority,
+        chunk.confidence,
+        chunk.status,
+        chunk.valid_from,
+        chunk.valid_to,
+        chunk.language,
+        title,
+        chunk.text,
+    )
+
+
+def _expected_source_chunks(
+    source_id: str,
+    source: Mapping[str, object],
+    *,
+    manifest: Mapping[str, object],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> Iterator[object]:
+    content = source["content"]
+    if not isinstance(content, bytes):
+        raise _UnusableAuthoritativeSource
+    yield from canonical_retrieval_chunks(
+        source_id=source_id,
+        source_path=str(source["relative_path"]),
+        source_sha256=str(source["sha256"]),
+        content=content,
+        extractor_version=str(manifest.get("extractor_version")),
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+
+
+def _expected_chunk_rows(
+    authoritative_sources: Mapping[str, Mapping[str, object]],
+    *,
+    manifest: Mapping[str, object],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[tuple[object, ...]] | None:
+    """Every chunk the authoritative sources must produce, in stored order."""
+    ordered = sorted(
+        authoritative_sources.items(),
+        key=lambda item: (str(item[1]["relative_path"]), item[0]),
+    )
+    rows: list[tuple[object, ...]] = []
+    for source_id, source in ordered:
+        _check_generation_stop(deadline, cancelled)
+        try:
+            chunks = _expected_source_chunks(
+                source_id,
+                source,
+                manifest=manifest,
                 deadline=deadline,
                 cancelled=cancelled,
-            ):
-                title = chunk.heading_ancestry[-1] if chunk.heading_ancestry else Path(
-                    chunk.source_path
-                ).stem
-                expected_chunks.append(
-                    (
-                        chunk.id,
-                        len(expected_chunks),
-                        chunk.source_id,
-                        chunk.source_path,
-                        chunk.source_sha256,
-                        chunk.parent_page,
-                        json.dumps(
-                            chunk.heading_ancestry,
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        ),
-                        chunk.byte_start,
-                        chunk.byte_end,
-                        chunk.line_start,
-                        chunk.line_end,
-                        chunk.span_sha256,
-                        chunk.type,
-                        chunk.project,
-                        chunk.authority,
-                        chunk.confidence,
-                        chunk.status,
-                        chunk.valid_from,
-                        chunk.valid_to,
-                        chunk.language,
-                        title,
-                        chunk.text,
-                    )
-                )
-                if len(expected_chunks) > MAX_GENERATION_FTS_CHUNKS:
-                    return False
-    counted_rows = list(
-        connection.execute(
-            "SELECT 1 FROM chunks LIMIT ?", (MAX_GENERATION_FTS_CHUNKS + 1,)
+            )
+            for chunk in chunks:
+                rows.append(_expected_chunk_row(chunk, len(rows)))
+                if len(rows) > MAX_GENERATION_FTS_CHUNKS:
+                    return None
+        except _UnusableAuthoritativeSource:
+            return None
+    return rows
+
+
+def _stored_chunk_count(connection: sqlite3.Connection) -> int:
+    return len(
+        list(
+            connection.execute(
+                "SELECT 1 FROM chunks LIMIT ?", (MAX_GENERATION_FTS_CHUNKS + 1,)
+            )
         )
     )
-    count = len(counted_rows)
-    if (
-        count > MAX_GENERATION_FTS_CHUNKS
-        or metadata.get("chunk_count") != str(count)
-        or (
-            authoritative_sources is not None
-            and count != len(expected_chunks)
-        )
-    ):
+
+
+def _chunk_count_agrees(
+    count: int, metadata: Mapping[str, str], expected_chunks: list[tuple[object, ...]] | None
+) -> bool:
+    if count > MAX_GENERATION_FTS_CHUNKS:
         return False
-    seen_chunk_ids: set[str] = set()
-    rows = connection.execute(
-        "SELECT chunk_id, chunk_order, source_id, source_path, source_sha256, "
-        "parent_page, heading_ancestry, byte_start, byte_end, line_start, line_end, "
-        "span_sha256, type, project, authority, confidence, status, valid_from, "
-        "valid_to, language, title, content FROM chunks ORDER BY chunk_order"
-    )
-    for expected_order, row in enumerate(rows):
+    if metadata.get("chunk_count") != str(count):
+        return False
+    return expected_chunks is None or count == len(expected_chunks)
+
+
+def _valid_chunk_identity(row: tuple[object, ...], order: int, seen: set[str]) -> bool:
+    chunk_id, chunk_order, source_id, source_path, source_sha256, parent_page = row[:6]
+    if not isinstance(chunk_id, str) or _SHA256_RE.fullmatch(chunk_id) is None:
+        return False
+    if chunk_id in seen or chunk_order != order:
+        return False
+    if not isinstance(source_path, str) or not source_path:
+        return False
+    if source_id != f"source:{source_path}" or parent_page != source_path:
+        return False
+    return isinstance(source_sha256, str) and _SHA256_RE.fullmatch(source_sha256) is not None
+
+
+def _valid_chunk_span(row: tuple[object, ...], ancestry: object) -> bool:
+    _, _, _, _, _, _, _, byte_start, byte_end, line_start, line_end, span_sha256 = row[:12]
+    if not isinstance(ancestry, list) or any(not isinstance(item, str) for item in ancestry):
+        return False
+    if not isinstance(byte_start, int) or not isinstance(byte_end, int):
+        return False
+    if not 0 <= byte_start <= byte_end:
+        return False
+    if not isinstance(line_start, int) or not isinstance(line_end, int):
+        return False
+    if not 1 <= line_start <= line_end:
+        return False
+    return isinstance(span_sha256, str) and _SHA256_RE.fullmatch(span_sha256) is not None
+
+
+def _valid_chunk_text(row: tuple[object, ...]) -> bool:
+    type_value = row[12]
+    optional_text = (row[13], row[14], row[15], row[17], row[18], row[19])
+    status_value, title, content = row[16], row[20], row[21]
+    if not isinstance(type_value, str) or not type_value:
+        return False
+    if any(value is not None and not isinstance(value, str) for value in optional_text):
+        return False
+    if not isinstance(status_value, str) or not isinstance(title, str):
+        return False
+    return isinstance(content, str) and bool(content.strip())
+
+
+def _valid_stored_chunk(row: tuple[object, ...], order: int, seen: set[str]) -> bool:
+    try:
+        ancestry = json.loads(row[6])
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if not _valid_chunk_identity(row, order, seen):
+        return False
+    if not _valid_chunk_span(row, ancestry):
+        return False
+    return _valid_chunk_text(row)
+
+
+def _stored_chunks_match(
+    connection: sqlite3.Connection,
+    expected_chunks: list[tuple[object, ...]] | None,
+    *,
+    count: int,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    seen: set[str] = set()
+    for order, row in enumerate(connection.execute(_FTS_CHUNK_SELECT)):
         _check_generation_stop(deadline, cancelled)
-        (
-            chunk_id,
-            chunk_order,
-            source_id,
-            source_path,
-            source_sha256,
-            parent_page,
-            ancestry_json,
-            byte_start,
-            byte_end,
-            line_start,
-            line_end,
-            span_sha256,
-            type_value,
-            project,
-            authority,
-            confidence,
-            status_value,
-            valid_from,
-            valid_to,
-            language,
-            title,
-            content,
-        ) = row
-        try:
-            ancestry = json.loads(ancestry_json)
-        except (TypeError, json.JSONDecodeError):
+        if not _valid_stored_chunk(row, order, seen):
             return False
-        optional_text = (project, authority, confidence, valid_from, valid_to, language)
-        expected_chunk = (
-            expected_chunks[expected_order]
-            if authoritative_sources is not None and expected_order < len(expected_chunks)
-            else None
-        )
-        if (
-            not isinstance(chunk_id, str)
-            or _SHA256_RE.fullmatch(chunk_id) is None
-            or chunk_id in seen_chunk_ids
-            or chunk_order != expected_order
-            or not isinstance(source_id, str)
-            or source_id != f"source:{source_path}"
-            or not isinstance(source_path, str)
-            or not source_path
-            or parent_page != source_path
-            or not isinstance(source_sha256, str)
-            or _SHA256_RE.fullmatch(source_sha256) is None
-            or not isinstance(ancestry, list)
-            or any(not isinstance(item, str) for item in ancestry)
-            or not isinstance(byte_start, int)
-            or not isinstance(byte_end, int)
-            or not 0 <= byte_start <= byte_end
-            or not isinstance(line_start, int)
-            or not isinstance(line_end, int)
-            or not 1 <= line_start <= line_end
-            or not isinstance(span_sha256, str)
-            or _SHA256_RE.fullmatch(span_sha256) is None
-            or not isinstance(type_value, str)
-            or not type_value
-            or any(value is not None and not isinstance(value, str) for value in optional_text)
-            or not isinstance(status_value, str)
-            or not isinstance(title, str)
-            or not isinstance(content, str)
-            or not content.strip()
-        ):
-            return False
-        if expected_chunk is not None:
-            if row != expected_chunk:
+        if expected_chunks is not None and order < len(expected_chunks):
+            if row != expected_chunks[order]:
                 return False
-        seen_chunk_ids.add(chunk_id)
-    return len(seen_chunk_ids) == count
+        seen.add(str(row[0]))
+    return len(seen) == count
+
+
+def _valid_generation_fts_contents(
+    connection: sqlite3.Connection,
+    manifest: dict[str, object],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+    authoritative_sources: dict[str, dict[str, object]] | None = None,
+) -> bool:
+    """Every structural claim the FTS artifact makes about itself must hold."""
+    if not _valid_fts_schema(connection):
+        return False
+    metadata = _generation_metadata(connection)
+    if metadata is None or not _metadata_matches_manifest(metadata, manifest):
+        return False
+    expected_chunks = None
+    if authoritative_sources is not None:
+        expected_chunks = _expected_chunk_rows(
+            authoritative_sources,
+            manifest=manifest,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+        if expected_chunks is None:
+            return False
+    count = _stored_chunk_count(connection)
+    if not _chunk_count_agrees(count, metadata, expected_chunks):
+        return False
+    return _stored_chunks_match(
+        connection,
+        expected_chunks,
+        count=count,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
 
 
 def _fts_query(query: str) -> str:
@@ -1967,6 +2069,88 @@ def _generation_filters(
     return (" AND " + " AND ".join(clauses) if clauses else ""), values
 
 
+_NOTES_SCOPES = frozenset({"wiki", "memory", "knowledge"})
+_OPEN_ENDED_VALID_TO = frozenset({"", "null", "none"})
+
+
+def _row_path(row: Mapping[str, object]) -> str:
+    return str(row.get("path") or row.get("relative_path") or "")
+
+
+def _out_of_scope(row: Mapping[str, object], scope: str) -> bool:
+    """Notes-only scopes keep pages under knowledge/notes."""
+    if scope not in _NOTES_SCOPES:
+        return False
+    path = _row_path(row)
+    if not path:
+        return False
+    return "knowledge/notes/" not in path.replace("\\", "/")
+
+
+def _field_mismatch(row: Mapping[str, object], field: str, wanted: str | None) -> bool:
+    if not wanted:
+        return False
+    return str(row.get(field) or "").casefold() != wanted.casefold()
+
+
+def _before_since(timestamp: str, since: str | None) -> bool:
+    if not since or not timestamp:
+        return False
+    return timestamp[:10] < since[:10]
+
+
+def _after(day: str, value: str) -> bool:
+    return bool(value) and value[:10] > day
+
+
+def _expired_by(row: Mapping[str, object], day: str) -> bool:
+    valid_to = str(row.get("valid_to") or "")[:10]
+    if not valid_to or valid_to in _OPEN_ENDED_VALID_TO:
+        return False
+    return valid_to <= day
+
+
+def _outside_as_of(row: Mapping[str, object], timestamp: str, as_of: str) -> bool:
+    """A page is out of scope when it started later or stopped being true."""
+    day = as_of[:10]
+    if _after(day, timestamp) or _after(day, str(row.get("valid_from") or "")):
+        return True
+    return _expired_by(row, day)
+
+
+def _superseded_now(row: Mapping[str, object]) -> bool:
+    """Without an as-of date only currently active pages answer."""
+    status = str(row.get("status") or "").casefold()
+    return bool(status) and status != "active"
+
+
+def _temporally_excluded(row: Mapping[str, object], since: str | None, as_of: str | None) -> bool:
+    timestamp = str(row.get("timestamp") or row.get("valid_from") or "")
+    if _before_since(timestamp, since):
+        return True
+    if as_of:
+        return _outside_as_of(row, timestamp, as_of)
+    return _superseded_now(row)
+
+
+def _passes_hard_filters(
+    row: Mapping[str, object],
+    *,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+    scope: str,
+    authority: str | None,
+) -> bool:
+    if _out_of_scope(row, scope):
+        return False
+    if _field_mismatch(row, "project", project):
+        return False
+    if _field_mismatch(row, "authority", authority):
+        return False
+    return not _temporally_excluded(row, since, as_of)
+
+
 def apply_hard_filters(
     rows: list[dict],
     *,
@@ -1978,42 +2162,18 @@ def apply_hard_filters(
     **_ignored: object,
 ) -> list[dict]:
     """Single hard-filter contract shared by lexical / NumPy / Lance paths."""
-    filtered: list[dict] = []
-    for row in rows:
-        path = str(row.get("path") or row.get("relative_path") or "")
-        if scope in {"wiki", "memory", "knowledge"} and path and "knowledge/notes/" not in path.replace("\\", "/"):
-            continue
-        proj = str(row.get("project") or "")
-        if project and proj.casefold() != project.casefold():
-            continue
-        auth = str(row.get("authority") or "")
-        if authority and auth.casefold() != authority.casefold():
-            continue
-        ts = str(row.get("timestamp") or row.get("valid_from") or "")
-        status = str(row.get("status") or "").casefold()
-        valid_from = str(row.get("valid_from") or "")[:10]
-        valid_to = str(row.get("valid_to") or "")[:10]
-        if since and ts:
-            try:
-                if ts[:10] < since[:10]:
-                    continue
-            except (IndexError, TypeError):
-                pass
-        if as_of:
-            if ts:
-                try:
-                    if ts[:10] > as_of[:10]:
-                        continue
-                except (IndexError, TypeError):
-                    pass
-            if valid_from and valid_from > as_of[:10]:
-                continue
-            if valid_to and valid_to not in {"", "null", "none"} and valid_to <= as_of[:10]:
-                continue
-        elif status and status not in {"", "active"}:
-            continue
-        filtered.append(row)
-    return filtered
+    return [
+        row
+        for row in rows
+        if _passes_hard_filters(
+            row,
+            project=project,
+            since=since,
+            as_of=as_of,
+            scope=scope,
+            authority=authority,
+        )
+    ]
 
 
 def _generation_result(row: sqlite3.Row, generation_id: str) -> dict[str, object]:
