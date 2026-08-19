@@ -2151,6 +2151,60 @@ def _passes_hard_filters(
     return not _temporally_excluded(row, since, as_of)
 
 
+def _title_boost(title: str, query_lower: str, query_words: set[str]) -> float:
+    """A title that is the query is the strongest lexical signal there is."""
+    title_lower = (title or "").lower().strip()
+    title_words = set(title_lower.split())
+    if title_lower == query_lower:
+        return 5.0
+    if query_words and query_words.issubset(title_words):
+        return 3.0
+    if title_words and title_words.issubset(query_words):
+        return 2.0
+    return 1.0
+
+
+def _filename_boost(path: str, query_lower: str, query_words: set[str]) -> float:
+    slug = Path(path).stem.lower().replace("-", " ")
+    if slug == query_lower:
+        return 10.0
+    if query_words and query_words.issubset(set(slug.split())):
+        return 4.0
+    return 1.0
+
+
+def _project_boost(row_project: str, project: str | None) -> float:
+    if project and row_project and row_project.lower() == project.lower():
+        return 2.0
+    return 1.0
+
+
+def _notes_boost(path: str) -> float:
+    """knowledge/notes/ is the canonical durable tree; ties break toward it."""
+    if "knowledge/notes/" in path:
+        return 1.3
+    return 1.0
+
+
+def _boosted_lexical_score(
+    rank: float,
+    *,
+    path: str,
+    title: str,
+    row_project: str,
+    query_lower: str,
+    query_words: set[str],
+    project: str | None,
+) -> float:
+    """One lexical scoring ladder, shared by the generation and legacy paths."""
+    score = -rank
+    score *= _project_boost(row_project, project)
+    score *= _title_boost(title, query_lower, query_words)
+    score *= _filename_boost(path, query_lower, query_words)
+    score *= _notes_boost(path)
+    return score * _authority_weight(path)
+
+
 def apply_hard_filters(
     rows: list[dict],
     *,
@@ -2649,25 +2703,15 @@ def _legacy_lexical_hits(
                 pass
         if as_of and not _valid_as_of(path, as_of):
             continue
-        score = -rank
-        if project and proj and proj.lower() == project.lower():
-            score *= 2.0
-        title_lower = (title or "").lower().strip()
-        title_words = set(title_lower.split())
-        if title_lower == query_lower:
-            score *= 5.0
-        elif query_words and query_words.issubset(title_words):
-            score *= 3.0
-        elif title_words and title_words.issubset(query_words):
-            score *= 2.0
-        filename_slug = Path(path).stem.lower().replace("-", " ")
-        if filename_slug == query_lower:
-            score *= 10.0
-        elif query_words and query_words.issubset(set(filename_slug.split())):
-            score *= 4.0
-        if "knowledge/notes/" in path:
-            score *= 1.3
-        score *= _authority_weight(path)
+        score = _boosted_lexical_score(
+            rank,
+            path=path,
+            title=title,
+            row_project=proj or "",
+            query_lower=query_lower,
+            query_words=query_words,
+            project=project,
+        )
         bm25_results.append(
             {
                 "path": path,
@@ -3160,41 +3204,15 @@ def _legacy_search(
                 pass
         if as_of and not _valid_as_of(path, as_of):
             continue
-        score = -rank
-        if project and proj and proj.lower() == project.lower():
-            score *= 2.0
-
-        # Title boost (highest impact on Recall@1)
-        title_lower = (title or "").lower().strip()
-        title_words = set(title_lower.split())
-        if title_lower == query_lower:
-            # Exact title match → massive boost
-            score *= 5.0
-        elif query_words and query_words.issubset(title_words):
-            # All query words are in the title → strong boost
-            score *= 3.0
-        elif title_words and title_words.issubset(query_words):
-            # Title is a subset of query → moderate boost
-            score *= 2.0
-
-        # FILENAME MATCH BOOST: if the query matches the filename slug,
-        # this is almost certainly the right page. Strongest precision signal.
-        # "hook scripts defense-in-depth" → filename "hook-scripts-defense-in-depth"
-        filename_slug = Path(path).stem.lower().replace("-", " ")
-        if filename_slug == query_lower:
-            score *= 10.0  # near-guaranteed correct match
-        elif query_words and query_words.issubset(set(filename_slug.split())):
-            score *= 4.0
-
-        # Path preference: knowledge/notes/ is the canonical durable-pages
-        # tree. (Pre-three-zone this distinguished wiki/ from memory/; both
-        # now resolve to the same knowledge/notes path, so the boost is a
-        # no-op kept for forward-compat if a second tree is reintroduced.)
-        if "knowledge/notes/" in path:
-            score *= 1.3  # increased from 1.2 to break ties more decisively
-
-        # Typed provenance: user-said outranks inferred/ai-derived.
-        score *= _authority_weight(path)
+        score = _boosted_lexical_score(
+            rank,
+            path=path,
+            title=title,
+            row_project=proj or "",
+            query_lower=query_lower,
+            query_words=query_words,
+            project=project,
+        )
 
         bm25_results.append({
             "path": path,
