@@ -275,26 +275,32 @@ def check_orphans_against_index(pages: list[Path], index: Path) -> list[str]:
     return out
 
 
+DAILY_LOG_NAME_RE = re.compile(r"\d{4}-\d{2}-\d{2}\.md")
+
+
+def _daily_logs() -> list[Path]:
+    """Only `YYYY-MM-DD.md` is a daily log; `README.md` next to them is not."""
+    if not DAILY_DIR.exists():
+        return []
+    return sorted(
+        path
+        for path in DAILY_DIR.glob("*.md")
+        if DAILY_LOG_NAME_RE.fullmatch(path.name) is not None
+    )
+
+
 def check_orphan_daily_logs(state: dict) -> list[str]:
     compiled = state.get("compiled_daily_hashes", {})
-    out: list[str] = []
-    if not DAILY_DIR.exists():
-        return out
-    for d in sorted(DAILY_DIR.glob("*.md")):
-        if d.name not in compiled:
-            out.append(_rel(d))
-    return out
+    return [_rel(path) for path in _daily_logs() if path.name not in compiled]
 
 
 def check_stale_compiled(state: dict) -> list[str]:
     compiled = state.get("compiled_daily_hashes", {})
     out: list[str] = []
-    if not DAILY_DIR.exists():
-        return out
-    for d in sorted(DAILY_DIR.glob("*.md")):
-        h = compiled.get(d.name)
-        if h and h != file_hash(d):
-            out.append(_rel(d))
+    for path in _daily_logs():
+        recorded = compiled.get(path.name)
+        if recorded and recorded != file_hash(path):
+            out.append(_rel(path))
     return out
 
 

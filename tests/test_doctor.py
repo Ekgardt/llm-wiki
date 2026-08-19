@@ -323,6 +323,7 @@ def test_report_schema_and_all_check_classes_are_json_safe(tmp_path, monkeypatch
         "generation",
         "index",
         "scheduler",
+        "capture",
         "mcp",
         "integrations",
         "pyright",
@@ -4022,3 +4023,42 @@ def test_doctor_repair_preserves_lsp_runtime_bytes(tmp_path, monkeypatch) -> Non
     )
 
     assert _snapshot(lsp_root) == before
+
+
+def test_lost_captures_are_reported_as_a_degraded_capture_check(tmp_path):
+    """A capture the hooks lost must show up in health, not only at session start."""
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    (state_root / "run").mkdir(parents=True, exist_ok=True)
+    (state_root / "run" / "state.json").write_text(
+        json.dumps(
+            {
+                "capture_failures": {
+                    "session_end": {"count": 2, "last_reason": "spawn_failed"},
+                    "pre_compact": {"count": 1, "last_reason": "spawn_failed"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "capture")
+
+    assert check["status"] == "degraded"
+    assert check["details"]["lost"] == 3
+    assert check["details"]["kinds"] == {"session_end": 2, "pre_compact": 1}
+    assert "capture-failures.jsonl" in check["details"]["trail"]
+    del home
+
+
+def test_a_vault_without_lost_captures_reports_the_capture_check_as_ok(tmp_path):
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+
+    check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "capture")
+
+    assert check["status"] == "ok"
+    assert check["details"]["lost"] == 0
+    del home

@@ -2789,6 +2789,31 @@ def _read_state(state_root: Path, deadline: float) -> tuple[dict, str | None]:
     return (value or {}, problem)
 
 
+def _capture_check(state_root: Path, deadline: float) -> dict:
+    """Report captures the hooks lost, so a silent loss is visible in health."""
+    from capture_diagnostics import capture_failure_totals
+
+    state, state_error = _read_state(state_root, deadline)
+    totals = capture_failure_totals(state)
+    lost = sum(totals.values())
+    details: dict[str, Any] = {
+        "lost": lost,
+        "kinds": totals,
+        "trail": "logs/capture-failures.jsonl",
+        "state_error": state_error,
+    }
+    if state_error:
+        return _result(
+            "capture",
+            "degraded",
+            "Capture diagnostics could not be read within safety bounds.",
+            details,
+        )
+    if lost:
+        return _result("capture", "degraded", f"{lost} capture(s) were lost.", details)
+    return _result("capture", "ok", "No lost capture is recorded.", details)
+
+
 def _scheduler_check(root: Path, state_root: Path, now: datetime, deadline: float) -> dict:
     scripts = {
         "scheduled_nightly": (root / "scripts" / "scheduled_nightly.py").is_file(),
@@ -4832,6 +4857,7 @@ def run_doctor(
             "scheduler",
             lambda: _scheduler_check(root_path, state_path, generated_at, deadline),
         ),
+        ("capture", lambda: _capture_check(state_path, deadline)),
         ("mcp", lambda: _mcp_check(root_path)),
         (
             "integrations",

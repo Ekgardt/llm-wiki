@@ -72,3 +72,23 @@ def test_lint_evidence_read_does_not_follow_symlink(tmp_path: Path, monkeypatch)
 
     assert len(findings) == 1
     assert "non-symlink" in findings[0]
+
+
+def test_only_dated_files_count_as_daily_logs(tmp_path: Path, monkeypatch) -> None:
+    """`knowledge/daily/README.md` explains the directory; it is not a log.
+
+    The orphan check reported it as an uncompiled daily log on every run, which
+    is a finding nobody can ever clear.
+    """
+    import lint_memory
+
+    daily = tmp_path / "knowledge/daily"
+    daily.mkdir(parents=True)
+    (daily / "2026-01-01.md").write_text("# 2026-01-01\n", encoding="utf-8")
+    (daily / "README.md").write_text("# How this directory works\n", encoding="utf-8")
+    monkeypatch.setattr(lint_memory, "ROOT", tmp_path)
+    monkeypatch.setattr(lint_memory, "DAILY_DIR", daily)
+
+    assert lint_memory.check_orphan_daily_logs({}) == ["knowledge/daily/2026-01-01.md"]
+    stale = {"compiled_daily_hashes": {"README.md": "0" * 64, "2026-01-01.md": "0" * 64}}
+    assert lint_memory.check_stale_compiled(stale) == ["knowledge/daily/2026-01-01.md"]
