@@ -3103,6 +3103,233 @@ def _legacy_dense_hits(
     return vector_results
 
 
+def _generation_artifact_names(
+    manifest: Mapping[str, object],
+    *,
+    semantic: bool,
+    embedder: object | None,
+    model_id: str | None,
+    model_revision: str | None,
+) -> tuple[str, ...]:
+    """Vectors join the sealed set only when they are complete and wanted."""
+    wanted_vectors = (
+        semantic
+        and embedder is not None
+        and model_id is not None
+        and model_revision is not None
+        and manifest.get("vector_state") == "complete"
+    )
+    if wanted_vectors:
+        return (GENERATION_FTS_ARTIFACT, *GENERATION_VECTOR_ARTIFACTS)
+    return (GENERATION_FTS_ARTIFACT,)
+
+
+def _active_manifest(
+    catalog: GenerationCatalog, stop_options: Mapping[str, object]
+) -> dict | None:
+    try:
+        manifest = catalog.get_active(**stop_options)
+    except TimeoutError:
+        raise
+    except (OSError, PermissionError, sqlite3.Error, TypeError, ValueError):
+        return None
+    return manifest if isinstance(manifest, dict) else None
+
+
+def _generation_vector_hits(
+    query: str,
+    catalog: GenerationCatalog,
+    manifest: Mapping[str, object],
+    connection: sqlite3.Connection,
+    *,
+    embedder: object | None,
+    model_id: str | None,
+    model_revision: str | None,
+    scope: str,
+    limit: int,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+    stop_options: Mapping[str, object],
+) -> list[dict] | None:
+    if embedder is None or model_id is None or model_revision is None:
+        return None
+    return _generation_vectors_search(
+        query,
+        catalog,
+        manifest,
+        connection,
+        embedder=embedder,
+        model_id=model_id,
+        model_revision=model_revision,
+        scope=scope,
+        limit=limit,
+        project=project,
+        since=since,
+        as_of=as_of,
+        **stop_options,
+    )
+
+
+def _mark_vectors_unavailable(
+    lexical: list[dict], deadline: float | None, cancelled: Callable[[], bool] | None
+) -> None:
+    for result in lexical:
+        _check_generation_stop(deadline, cancelled)
+        result["requested_mode"] = "hybrid"
+        result["fallback_reason"] = "generation_vectors_unavailable"
+
+
+def _generation_search_results(
+    query: str,
+    catalog: GenerationCatalog,
+    manifest: Mapping[str, object],
+    connection: sqlite3.Connection,
+    *,
+    artifact_names: tuple[str, ...],
+    consumption_seal: object,
+    scope: str,
+    limit: int,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+    semantic: bool,
+    embedder: object | None,
+    model_id: str | None,
+    model_revision: str | None,
+    source_tool: str,
+    emit_telemetry: bool,
+    stop_options: Mapping[str, object],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[dict] | None:
+    """Results from the sealed generation, or None when the seal no longer holds."""
+    lexical = _generation_fts_search(
+        query,
+        manifest,
+        connection,
+        scope=scope,
+        limit=limit,
+        project=project,
+        since=since,
+        as_of=as_of,
+        **stop_options,
+    )
+
+    def sealed() -> bool:
+        return bool(
+            _generation_consumption_unchanged(
+                catalog, manifest, artifact_names, consumption_seal, **stop_options
+            )
+        )
+
+    if semantic:
+        vectors = _generation_vector_hits(
+            query,
+            catalog,
+            manifest,
+            connection,
+            embedder=embedder,
+            model_id=model_id,
+            model_revision=model_revision,
+            scope=scope,
+            limit=limit,
+            project=project,
+            since=since,
+            as_of=as_of,
+            stop_options=stop_options,
+        )
+        if vectors is not None and sealed():
+            return _finalize_generation_results(
+                _fuse_generation_results(lexical, vectors, limit),
+                query=query,
+                source_tool=source_tool,
+                emit_telemetry=emit_telemetry,
+            )
+        _mark_vectors_unavailable(lexical, deadline, cancelled)
+    if not sealed():
+        return None
+    return _finalize_generation_results(
+        lexical, query=query, source_tool=source_tool, emit_telemetry=emit_telemetry
+    )
+
+
+def _try_generation_search(
+    query: str,
+    catalog: GenerationCatalog,
+    *,
+    scope: str,
+    limit: int,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+    semantic: bool,
+    embedder: object | None,
+    model_id: str | None,
+    model_revision: str | None,
+    source_tool: str,
+    emit_telemetry: bool,
+    stop_options: Mapping[str, object],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[dict] | None:
+    """One attempt through the active generation; None means fall back."""
+    manifest = _active_manifest(catalog, stop_options)
+    if manifest is None:
+        return None
+    artifact_names = _generation_artifact_names(
+        manifest,
+        semantic=semantic,
+        embedder=embedder,
+        model_id=model_id,
+        model_revision=model_revision,
+    )
+    consumption_seal = _generation_consumption_seal(
+        catalog, manifest, artifact_names, **stop_options
+    )
+    if consumption_seal is None:
+        return None
+    connection = _generation_connection(catalog, manifest, **stop_options)
+    if connection is None:
+        return None
+    try:
+        return _generation_search_results(
+            query,
+            catalog,
+            manifest,
+            connection,
+            artifact_names=artifact_names,
+            consumption_seal=consumption_seal,
+            scope=scope,
+            limit=limit,
+            project=project,
+            since=since,
+            as_of=as_of,
+            semantic=semantic,
+            embedder=embedder,
+            model_id=model_id,
+            model_revision=model_revision,
+            source_tool=source_tool,
+            emit_telemetry=emit_telemetry,
+            stop_options=stop_options,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+    except TimeoutError:
+        raise
+    except (
+        OSError,
+        PermissionError,
+        sqlite3.Error,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+    ):
+        return None
+    finally:
+        connection.close()
+
+
 def _search_backends(
     query: str,
     scope: str = "all",
@@ -3130,118 +3357,33 @@ def _search_backends(
     if not query or not query.strip():
         return []
     selected_catalog = catalog if catalog is not None else _active_generation_catalog()
-    stop_options = {}
+    stop_options: dict[str, object] = {}
     if deadline is not None:
         stop_options["deadline"] = deadline
     if cancelled is not None:
         stop_options["cancelled"] = cancelled
     _check_generation_stop(deadline, cancelled)
     if selected_catalog is not None and not force_rebuild and page_paths is None:
-        try:
-            manifest = selected_catalog.get_active(**stop_options)
-        except TimeoutError:
-            raise
-        except (OSError, PermissionError, sqlite3.Error, TypeError, ValueError):
-            manifest = None
-        if isinstance(manifest, dict):
-            artifact_names = (GENERATION_FTS_ARTIFACT,)
-            vector_requested = (
-                semantic
-                and generation_embedder is not None
-                and generation_model_id is not None
-                and generation_model_revision is not None
-                and manifest.get("vector_state") == "complete"
-            )
-            if vector_requested:
-                artifact_names += GENERATION_VECTOR_ARTIFACTS
-            consumption_seal = _generation_consumption_seal(
-                selected_catalog, manifest, artifact_names, **stop_options
-            )
-            connection = (
-                _generation_connection(selected_catalog, manifest, **stop_options)
-                if consumption_seal is not None
-                else None
-            )
-            if connection is not None:
-                try:
-                    lexical = _generation_fts_search(
-                        query,
-                        manifest,
-                        connection,
-                        scope=scope,
-                        limit=limit,
-                        project=project,
-                        since=since,
-                        as_of=as_of,
-                        **stop_options,
-                    )
-                    if semantic:
-                        vectors = None
-                        if (
-                            generation_embedder is not None
-                            and generation_model_id is not None
-                            and generation_model_revision is not None
-                        ):
-                            vectors = _generation_vectors_search(
-                                query,
-                                selected_catalog,
-                                manifest,
-                                connection,
-                                embedder=generation_embedder,
-                                model_id=generation_model_id,
-                                model_revision=generation_model_revision,
-                                scope=scope,
-                                limit=limit,
-                                project=project,
-                                since=since,
-                                as_of=as_of,
-                                **stop_options,
-                            )
-                        if vectors is not None:
-                            if _generation_consumption_unchanged(
-                                selected_catalog,
-                                manifest,
-                                artifact_names,
-                                consumption_seal,
-                                **stop_options,
-                            ):
-                                return _finalize_generation_results(
-                                    _fuse_generation_results(lexical, vectors, limit),
-                                    query=query,
-                                    source_tool=source_tool,
-                                    emit_telemetry=emit_telemetry,
-                                )
-                            vectors = None
-                        for result in lexical:
-                            _check_generation_stop(deadline, cancelled)
-                            result["requested_mode"] = "hybrid"
-                            result["fallback_reason"] = "generation_vectors_unavailable"
-                    if _generation_consumption_unchanged(
-                        selected_catalog,
-                        manifest,
-                        artifact_names,
-                        consumption_seal,
-                        **stop_options,
-                    ):
-                        return _finalize_generation_results(
-                            lexical,
-                            query=query,
-                            source_tool=source_tool,
-                            emit_telemetry=emit_telemetry,
-                        )
-                except TimeoutError:
-                    raise
-                except (
-                    OSError,
-                    PermissionError,
-                    sqlite3.Error,
-                    TypeError,
-                    ValueError,
-                    json.JSONDecodeError,
-                ):
-                    pass
-                finally:
-                    connection.close()
+        results = _try_generation_search(
+            query,
+            selected_catalog,
+            scope=scope,
+            limit=limit,
+            project=project,
+            since=since,
+            as_of=as_of,
+            semantic=semantic,
+            embedder=generation_embedder,
+            model_id=generation_model_id,
+            model_revision=generation_model_revision,
+            source_tool=source_tool,
+            emit_telemetry=emit_telemetry,
+            stop_options=stop_options,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+        if results is not None:
+            return results
     _check_generation_stop(deadline, cancelled)
     return _legacy_search(
         query,
