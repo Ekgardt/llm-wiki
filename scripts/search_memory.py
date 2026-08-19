@@ -457,6 +457,11 @@ def _call_generation_embedder(embedder: object, texts: list[str]):
     return encode(texts, show_progress_bar=False, convert_to_numpy=True)
 
 
+def _require_positive_int(value: object, message: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(message)
+
+
 def _require_vector_build_inputs(
     snapshot: object, model_id: str, model_revision: str, dimensions: int
 ) -> None:
@@ -464,8 +469,7 @@ def _require_vector_build_inputs(
         raise TypeError("snapshot must be a CorpusSnapshot")
     if not model_id or not model_revision:
         raise ValueError("model ID and revision must be non-empty")
-    if isinstance(dimensions, bool) or not isinstance(dimensions, int) or dimensions < 1:
-        raise ValueError("dimensions must be a positive integer")
+    _require_positive_int(dimensions, "dimensions must be a positive integer")
 
 
 def _require_absent_artifacts(destinations: list[Path]) -> None:
@@ -474,13 +478,19 @@ def _require_absent_artifacts(destinations: list[Path]) -> None:
             raise FileExistsError(destination)
 
 
+def _chunk_texts(snapshot: CorpusSnapshot) -> list[str]:
+    return [chunk.text for chunk in snapshot.chunks]
+
+
 def _embedded_matrix(
     snapshot: CorpusSnapshot, embedder: object, dimensions: int
 ) -> object:
     """The embedder's output, refused unless it is finite and the right shape."""
     import numpy as np
 
-    matrix = np.asarray(_call_generation_embedder(embedder, [c.text for c in snapshot.chunks]))
+    matrix = np.asarray(
+        _call_generation_embedder(embedder, _chunk_texts(snapshot))
+    )
     if matrix.ndim != 2 or matrix.shape != (len(snapshot.chunks), dimensions):
         raise ValueError("embedder returned a matrix with incompatible shape")
     if matrix.dtype.kind not in "fiu" or not np.isfinite(matrix).all():
@@ -848,6 +858,12 @@ def _legacy_sqlite_guard(
     _check_legacy_stop(deadline, cancelled)
 
 
+def _prefixed_for_query(texts: list[str], is_query: bool) -> list[str]:
+    if not is_query or not QUERY_INSTRUCTION:
+        return texts
+    return [f"{QUERY_INSTRUCTION} {text}" for text in texts]
+
+
 def _embed_texts(
     texts: list[str],
     is_query: bool = False,
@@ -865,8 +881,7 @@ def _embed_texts(
     if not embedder:
         return None
     try:
-        if is_query and QUERY_INSTRUCTION:
-            texts = [f"{QUERY_INSTRUCTION} {t}" for t in texts]
+        texts = _prefixed_for_query(texts, is_query)
         vectors = embedder.encode(texts, show_progress_bar=False, convert_to_numpy=True)
         _check_legacy_stop(deadline, cancelled)
         return vectors.tolist()
@@ -2722,15 +2737,26 @@ def _passes_hard_filters(
     return not _temporally_excluded(row, since, as_of)
 
 
+def _subset_or_empty(inner: set[str], outer: set[str]) -> bool:
+    """An empty side is never a subset match, however the sets compare."""
+    return bool(inner) and inner.issubset(outer)
+
+
+def _same_project(row_project: str, project: str | None) -> bool:
+    if not project:
+        return False
+    return row_project.casefold() == project.casefold()
+
+
 def _title_boost(title: str, query_lower: str, query_words: set[str]) -> float:
     """A title that is the query is the strongest lexical signal there is."""
     title_lower = (title or "").lower().strip()
     title_words = set(title_lower.split())
     if title_lower == query_lower:
         return 5.0
-    if query_words and query_words.issubset(title_words):
+    if _subset_or_empty(query_words, title_words):
         return 3.0
-    if title_words and title_words.issubset(query_words):
+    if _subset_or_empty(title_words, query_words):
         return 2.0
     return 1.0
 
@@ -2914,6 +2940,18 @@ def _deduplicated_results(
     return results
 
 
+def _boosted_generation_score(
+    result: dict[str, object], query_words: set[str], project: str | None
+) -> float:
+    score = float(result["score"])
+    if _same_project(str(result["project"]), project):
+        score *= 2.0
+    title_words = set(str(result["title"]).casefold().split())
+    if _subset_or_empty(query_words, title_words):
+        score *= 3.0
+    return score
+
+
 def _boost_generation_results(
     results: list[dict[str, object]],
     query: str,
@@ -2926,13 +2964,7 @@ def _boost_generation_results(
     query_words = set(query.casefold().split())
     for result in results:
         _check_generation_stop(deadline, cancelled)
-        score = float(result["score"])
-        if project and str(result["project"]).casefold() == project.casefold():
-            score *= 2.0
-        title_words = set(str(result["title"]).casefold().split())
-        if query_words and query_words.issubset(title_words):
-            score *= 3.0
-        result["score"] = score
+        result["score"] = _boosted_generation_score(result, query_words, project)
 
 
 def _generation_fts_search(
@@ -4259,12 +4291,24 @@ def _legacy_bm25_rows(
     ).fetchall()
 
 
+def _older_than_since(timestamp: str, since: str | None) -> bool:
+    if not since or not timestamp:
+        return False
+    return timestamp[:10] < since
+
+
+def _newer_than_as_of(timestamp: str, as_of: str) -> bool:
+    if not timestamp:
+        return False
+    return timestamp[:10] > as_of[:10]
+
+
 def _legacy_row_excluded(path: str, timestamp: str, since: str | None, as_of: str | None) -> bool:
-    if since and timestamp and timestamp[:10] < since:
+    if _older_than_since(timestamp, since):
         return True
     if not as_of:
         return False
-    if timestamp and timestamp[:10] > as_of[:10]:
+    if _newer_than_as_of(timestamp, as_of):
         return True
     return not _valid_as_of(path, as_of)
 
