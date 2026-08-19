@@ -2309,7 +2309,8 @@ def _write_blocking_fake_uv(directory: Path) -> None:
         "stop_child() { : > child.stopped; exit 0; }\n"
         "trap stop_child HUP INT TERM\n"
         "i=0\n"
-        'while [ "$i" -lt 30 ]; do sleep 0.1; i=$((i + 1)); done\n'
+        # Long enough that the installer's own timer, not the loop, ends it.
+        'while [ "$i" -lt 300 ]; do sleep 0.1; i=$((i + 1)); done\n'
         ": > child.completed\n",
         encoding="utf-8",
     )
@@ -2449,7 +2450,10 @@ def test_unix_installer_timeout_stops_tests_and_aborts(tmp_path):
         textwrap.dedent(
             f"""
             set -euo pipefail
-            export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS=1
+            # One second raced the child's own startup on a loaded runner: the
+            # timer fired before the fake `uv` had installed its signal trap, so
+            # it died without leaving the marker the assertions read.
+            export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS=5
             PATH="$(dirname "$0")/bin:$PATH"
             export PATH
             info() {{ :; }}
@@ -2471,13 +2475,13 @@ def test_unix_installer_timeout_stops_tests_and_aborts(tmp_path):
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=10,
+        timeout=60,
         check=False,
     )
 
     assert result.returncode == 1, result.stderr
     assert (tmp_path / "failed.message").read_text() == (
-        "Production smoke timed out after 1s; installation aborted"
+        "Production smoke timed out after 5s; installation aborted"
     )
     assert (tmp_path / "child.stopped").exists()
     assert not (tmp_path / "child.completed").exists()

@@ -106,6 +106,7 @@ class _FakeProcess:
         self.stubborn = stubborn
         self.terminated = 0
         self.killed = 0
+        self.exitcode = None
 
     def is_alive(self) -> bool:
         return self.alive
@@ -262,16 +263,23 @@ def test_worker_policy_overrides_claim_heartbeat_attempts_and_backoff(
 
 
 def test_worker_child_process_is_terminated_at_deadline() -> None:
+    # The deadline has to outlast process creation. Spawning a Python child on
+    # a hosted Windows runner takes about a second, and a 0.2 s deadline landed
+    # while the child was still starting: the call then reported the wreckage
+    # of a child that never ran (`process_cleanup_failed`) instead of the
+    # deadline this case is about.
+    deadline_seconds = 5.0
     started = time.monotonic()
 
     with pytest.raises(TimeoutError):
         memory_queue._run_processor_child(
             _sleep_processor,
-            {"payload": {"seconds": 5}},
-            0.2,
+            {"payload": {"seconds": 120}},
+            deadline_seconds,
         )
 
-    assert time.monotonic() - started < 2
+    elapsed = time.monotonic() - started
+    assert deadline_seconds <= elapsed < deadline_seconds + 15
 
 
 def test_worker_timeout_kills_spawned_grandchild_tree(tmp_path: Path) -> None:

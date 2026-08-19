@@ -1867,9 +1867,10 @@ class ResultConflictError(RuntimeError):
 class QueueOperationError(RuntimeError):
     """Operator-visible queue failure with a stable, non-sensitive code."""
 
-    def __init__(self, code: str) -> None:
-        super().__init__(code)
+    def __init__(self, code: str, detail: str = "") -> None:
+        super().__init__(f"{code}: {detail}" if detail else code)
         self.code = code
+        self.detail = detail
 
 
 @dataclass(frozen=True)
@@ -10297,7 +10298,13 @@ def _terminate_processor_child(
     direct_was_alive = process.is_alive()
     discover_descendants = tracked_descendants is _DISCOVER_DESCENDANTS
     if not direct_was_alive and platform_name == "nt" and discover_descendants:
-        raise QueueOperationError("process_cleanup_failed")
+        # Windows cannot enumerate the descendants of a process that is already
+        # gone, so the refusal stands; naming the child's exit code is what
+        # separates "it finished" from "it never started".
+        raise QueueOperationError(
+            "process_cleanup_failed",
+            f"child exited {getattr(process, 'exitcode', None)} before cleanup",
+        )
     descendants = (
         _tracked_descendant_pids(process.pid, platform_name)
         if discover_descendants
