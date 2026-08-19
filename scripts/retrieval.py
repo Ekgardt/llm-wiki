@@ -1351,6 +1351,436 @@ def _check_stopped(
         raise TimeoutError("retrieval cancelled")
 
 
+def _call_dense(
+    dense_backend: BackendFn,
+    filters: Mapping[str, Any],
+    *,
+    deadline_monotonic: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> Sequence[Mapping[str, Any]] | None:
+    if deadline_monotonic is None:
+        return dense_backend(**filters)
+    return _run_optional_bounded(
+        lambda: dense_backend(**filters),
+        deadline=deadline_monotonic,
+        cancelled=cancelled,
+    )
+
+
+def _run_dense_backend(
+    dense_backend: BackendFn,
+    filters: Mapping[str, Any],
+    *,
+    deadline_monotonic: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> tuple[Sequence[Mapping[str, Any]] | None, bool, bool | None, bool]:
+    """(hits, ran, available, timed out).
+
+    None hits mean the backend is unavailable; an empty sequence means it
+    answered and found nothing.
+    """
+    try:
+        hits = _call_dense(
+            dense_backend,
+            filters,
+            deadline_monotonic=deadline_monotonic,
+            cancelled=cancelled,
+        )
+    except OptionalStageTimeout:
+        return None, False, False, True
+    return hits, True, hits is not None, False
+
+
+def _profile_edge_types(
+    requested: str, graph_edge_families: Mapping[str, bool] | None
+) -> tuple[str, ...]:
+    """Edge types this profile reads, minus any family the caller switched off."""
+    edge_types = GRAPH_PROFILE_EDGE_TYPES.get(requested, tuple(GRAPH_EDGE_DECAY))
+    if not graph_edge_families:
+        return tuple(edge_types)
+    return tuple(
+        edge_type
+        for edge_type in edge_types
+        if graph_edge_families.get(edge_type, True)
+    )
+
+
+def _run_graph_backend(
+    graph_backend: BackendFn,
+    filters: Mapping[str, Any],
+    *,
+    analysis: QueryAnalysis,
+    requested: str,
+    lexical_hits: Sequence[Mapping[str, Any]] | None,
+    dense_hits: Sequence[Mapping[str, Any]] | None,
+    graph_edge_families: Mapping[str, bool] | None,
+    per_seed_limit: int,
+    global_limit: int,
+    corpus_generation: str,
+    deadline_monotonic: float | None,
+) -> tuple[Sequence[Mapping[str, Any]] | None, bool, bool | None, str | None]:
+    """(hits, ran, available, failure reason).
+
+    A deadline or a changed generation seal is the caller's problem and is
+    re-raised; any other backend error degrades the graph signal instead of
+    failing the whole retrieval.
+    """
+    directions = GRAPH_PROFILE_DIRECTIONS.get(requested, ("out",))
+    edge_types = _profile_edge_types(requested, graph_edge_families)
+    seeds = _graph_seeds(lexical_hits, dense_hits)
+    try:
+        raw_hits = graph_backend(
+            **filters,
+            seeds=seeds,
+            max_hops=GRAPH_MAX_HOPS,
+            directions=directions,
+            edge_types=edge_types,
+            edge_decay={edge: GRAPH_EDGE_DECAY[edge] for edge in edge_types},
+            per_seed_limit=per_seed_limit,
+            global_limit=global_limit,
+            deadline_monotonic=deadline_monotonic,
+            corpus_generation=corpus_generation,
+        )
+    except (TimeoutError, GenerationSealChanged):
+        raise
+    except Exception:  # noqa: BLE001 - a broken graph degrades one signal only
+        return None, False, False, "graph_error"
+    return _prepared_graph_outcome(
+        raw_hits,
+        analysis=analysis,
+        requested=requested,
+        seeds=seeds,
+        directions=directions,
+        edge_types=edge_types,
+        per_seed_limit=per_seed_limit,
+        global_limit=global_limit,
+    )
+
+
+def _prepared_graph_outcome(
+    raw_hits: Sequence[Mapping[str, Any]] | None,
+    *,
+    analysis: QueryAnalysis,
+    requested: str,
+    seeds: Sequence[Mapping[str, Any]],
+    directions: Sequence[str],
+    edge_types: Sequence[str],
+    per_seed_limit: int,
+    global_limit: int,
+) -> tuple[Sequence[Mapping[str, Any]] | None, bool, bool | None, str | None]:
+    if raw_hits is None:
+        return None, True, False, None
+    hits = _prepare_graph_hits(
+        raw_hits,
+        query=analysis.normalized_query or analysis.query,
+        requested_profile=requested,
+        seeds=seeds,
+        directions=directions,
+        edge_types=edge_types,
+        per_seed_limit=per_seed_limit,
+        global_limit=global_limit,
+    )
+    return hits, True, True, None
+
+
+@dataclass
+class _RerankTrace:
+    """What the reranking stage did, for the truthful retrieval trace."""
+
+    applied: bool = False
+    model_id: object = None
+    model_revision: object = None
+    depth: object = None
+    duration_ms: object = None
+    fallback_reason: str | None = None
+    optional_timeout: bool = False
+
+
+def _as_optional_str(value: object) -> str | None:
+    if not value:
+        return None
+    return str(value)
+
+
+def _as_optional_int(value: object) -> int | None:
+    if not isinstance(value, int) or isinstance(value, bool):
+        return None
+    return value
+
+
+def _rerank_row(
+    candidate: RetrievalCandidate, info: Mapping[str, Any]
+) -> dict[str, Any]:
+    summary = str(info.get("summary") or "")
+    return {
+        "candidate_id": candidate.candidate_id,
+        "path": candidate.relative_path,
+        "relative_path": candidate.relative_path,
+        "summary": summary,
+        "content": str(info.get("content") or summary or ""),
+        "title": str(info.get("title") or Path(candidate.relative_path).stem),
+        "rrf_score": candidate.rrf_score,
+        "score": candidate.rrf_score,
+        "bm25_rank": candidate.bm25_rank,
+        "vector_rank": candidate.vector_rank,
+        "bm25_score": candidate.bm25_score,
+        "vector_score": candidate.vector_score,
+        "graph_rank": candidate.graph_rank,
+        "graph_score": candidate.graph_score,
+        "source_sha256": candidate.source_sha256,
+        "heading_path": candidate.heading_path,
+        "parent_id": candidate.parent_id,
+        "byte_start": candidate.byte_start,
+        "byte_end": candidate.byte_end,
+        "evidence_ids": candidate.evidence_ids,
+        "lance_distance": info.get("lance_distance"),
+        "authority": info.get("authority"),
+        "authority_weight": candidate.authority_weight,
+    }
+
+
+def _rerank_rows(
+    candidates: Sequence[RetrievalCandidate],
+    display_meta: Mapping[str, Mapping[str, Any]],
+    query_norm: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Rows the reranker reads, and whether one title matches the query exactly."""
+    rows = [
+        _rerank_row(candidate, display_meta.get(candidate.candidate_id, {}))
+        for candidate in candidates
+    ]
+    exact_title_hit = any(
+        str(row["title"]).casefold().strip() == query_norm for row in rows
+    )
+    return rows, exact_title_hit
+
+
+def _promote_exact_title(
+    candidates: Sequence[RetrievalCandidate],
+    rows: list[dict[str, Any]],
+    query_norm: str,
+) -> tuple[RetrievalCandidate, ...]:
+    """A title equal to the query goes first, before any reranking."""
+    rows.sort(
+        key=lambda row: (
+            0 if str(row.get("title", "")).casefold().strip() == query_norm else 1,
+            -float(row.get("rrf_score") or 0.0),
+            str(row.get("candidate_id") or ""),
+        )
+    )
+    by_id = {candidate.candidate_id: candidate for candidate in candidates}
+    promoted = [
+        by_id[str(row["candidate_id"])]
+        for row in rows
+        if str(row["candidate_id"]) in by_id
+    ]
+    return tuple(promoted) or tuple(candidates)
+
+
+def _candidate_from_rerank_row(row: Mapping[str, Any]) -> RetrievalCandidate:
+    return RetrievalCandidate(
+        candidate_id=str(row.get("candidate_id") or row.get("path")),
+        parent_id=str(row.get("parent_id") or row.get("path") or ""),
+        relative_path=str(row.get("relative_path") or row.get("path") or ""),
+        heading_path=_heading_path(row.get("heading_path")),
+        source_sha256=str(row.get("source_sha256") or ("0" * 64)),
+        byte_start=_as_int(row.get("byte_start"), 0),
+        byte_end=_as_int(row.get("byte_end"), 0),
+        bm25_rank=_as_optional_int(row.get("bm25_rank")),
+        bm25_score=_as_float(row.get("bm25_score")),
+        vector_rank=_as_optional_int(row.get("vector_rank")),
+        vector_score=_as_float(row.get("vector_score")),
+        graph_rank=_as_optional_int(row.get("graph_rank")),
+        graph_score=_as_float(row.get("graph_score")),
+        rrf_score=float(row.get("rrf_score") or 0.0),
+        rerank_score=_as_float(row.get("rerank_score")),
+        authority_weight=float(row.get("authority_weight") or 1.0),
+        final_score=float(row.get("final_score") or row.get("rrf_score") or 0.0),
+        evidence_ids=tuple(
+            str(item) for item in (row.get("evidence_ids") or ()) if isinstance(item, str)
+        ),
+    )
+
+
+def _rerank_pool_limit(limit: int, max_candidates: int | None) -> int:
+    pool_limit = max(limit, 20) if limit > 0 else 20
+    if max_candidates is not None and int(max_candidates) > 0:
+        return min(pool_limit, int(max_candidates))
+    return pool_limit
+
+
+def _record_reranked(
+    reranked: Sequence[Mapping[str, Any]], trace: _RerankTrace
+) -> None:
+    head = reranked[0]
+    trace.model_id = head.get("reranker_model_id")
+    trace.model_revision = head.get("reranker_model_revision")
+    trace.depth = head.get("reranker_depth")
+    trace.duration_ms = head.get("reranker_duration_ms")
+    if head.get("reranker_applied"):
+        trace.applied = True
+        trace.fallback_reason = None
+        return
+    trace.fallback_reason = str(
+        head.get("reranker_fallback_reason") or "reranker_unavailable"
+    )
+
+
+def _run_reranker(
+    rows: list[dict[str, Any]],
+    *,
+    query: str,
+    pool_limit: int,
+    deadline_monotonic: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> Sequence[Mapping[str, Any]]:
+    from reranker import rerank as _rerank
+
+    def call() -> Sequence[Mapping[str, Any]]:
+        return _rerank(query, rows[:pool_limit], limit=pool_limit, text_field="content")
+
+    if deadline_monotonic is None:
+        return call()
+    return _run_optional_bounded(
+        call, deadline=deadline_monotonic, cancelled=cancelled
+    )
+
+
+def _reranked_candidates(
+    candidates: Sequence[RetrievalCandidate],
+    rows: list[dict[str, Any]],
+    *,
+    analysis: QueryAnalysis,
+    requested: str,
+    limit: int,
+    max_candidates: int | None,
+    rerank_enabled: bool,
+    deadline_monotonic: float | None,
+    cancelled: Callable[[], bool] | None,
+    trace: _RerankTrace,
+) -> tuple[RetrievalCandidate, ...]:
+    from reranker import should_rerank
+
+    apply, skip_reason = should_rerank(
+        profile=requested,
+        candidates=rows,
+        analysis_intents=analysis.intents,
+        rerank_enabled=rerank_enabled,
+    )
+    if not apply:
+        trace.fallback_reason = skip_reason
+        return tuple(candidates)
+    reranked = _run_reranker(
+        rows,
+        query=analysis.normalized_query or analysis.query,
+        pool_limit=_rerank_pool_limit(limit, max_candidates),
+        deadline_monotonic=deadline_monotonic,
+        cancelled=cancelled,
+    )
+    _check_stopped(deadline_monotonic, cancelled)
+    return _candidates_after_rerank(candidates, reranked, trace)
+
+
+def _candidates_after_rerank(
+    candidates: Sequence[RetrievalCandidate],
+    reranked: Sequence[Mapping[str, Any]],
+    trace: _RerankTrace,
+) -> tuple[RetrievalCandidate, ...]:
+    """The reranked order when the reranker ran; the fused order otherwise."""
+    if not reranked:
+        return tuple(candidates)
+    _record_reranked(reranked, trace)
+    if not trace.applied:
+        return tuple(candidates)
+    return tuple(_candidate_from_rerank_row(row) for row in reranked)
+
+
+def _apply_reranking(
+    candidates: Sequence[RetrievalCandidate],
+    display_meta: Mapping[str, Mapping[str, Any]],
+    *,
+    analysis: QueryAnalysis,
+    requested: str,
+    limit: int,
+    max_candidates: int | None,
+    rerank_enabled: bool,
+    deadline_monotonic: float | None,
+    cancelled: Callable[[], bool] | None,
+    trace: _RerankTrace,
+) -> tuple[RetrievalCandidate, ...]:
+    """Reorder by cross-encoder when it is worth it; degrade without failing."""
+    query_norm = (analysis.normalized_query or analysis.query).casefold().strip()
+    try:
+        return _rerank_or_promote(
+            candidates,
+            display_meta,
+            query_norm,
+            analysis=analysis,
+            requested=requested,
+            limit=limit,
+            max_candidates=max_candidates,
+            rerank_enabled=rerank_enabled,
+            deadline_monotonic=deadline_monotonic,
+            cancelled=cancelled,
+            trace=trace,
+        )
+    except OptionalStageTimeout:
+        trace.fallback_reason = "optional_stage_timeout"
+        trace.optional_timeout = True
+    except TimeoutError:
+        raise
+    except Exception:  # noqa: BLE001 - a failed reranker keeps the fused order
+        trace.fallback_reason = "reranker_error"
+    return tuple(candidates)
+
+
+def _rerank_or_promote(
+    candidates: Sequence[RetrievalCandidate],
+    display_meta: Mapping[str, Mapping[str, Any]],
+    query_norm: str,
+    *,
+    analysis: QueryAnalysis,
+    requested: str,
+    limit: int,
+    max_candidates: int | None,
+    rerank_enabled: bool,
+    deadline_monotonic: float | None,
+    cancelled: Callable[[], bool] | None,
+    trace: _RerankTrace,
+) -> tuple[RetrievalCandidate, ...]:
+    rows, exact_title_hit = _rerank_rows(candidates, display_meta, query_norm)
+    if exact_title_hit:
+        trace.fallback_reason = "exact_title_bypass"
+        return _promote_exact_title(candidates, rows, query_norm)
+    return _reranked_candidates(
+            candidates,
+            rows,
+            analysis=analysis,
+            requested=requested,
+            limit=limit,
+            max_candidates=max_candidates,
+            rerank_enabled=rerank_enabled,
+            deadline_monotonic=deadline_monotonic,
+            cancelled=cancelled,
+            trace=trace,
+        )
+
+
+def _backend_limit(limit: int, max_candidates: int | None) -> int:
+    """How many rows each backend may return before fusion trims them."""
+    if max_candidates is None or int(max_candidates) <= 0:
+        return limit
+    wanted = limit if limit > 0 else int(max_candidates)
+    return min(wanted, int(max_candidates))
+
+
+def _require_bounded_int(value: object, low: int, high: int, name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be between {low} and {high}")
+    if not low <= value <= high:
+        raise ValueError(f"{name} must be between {low} and {high}")
+
+
 def retrieve(
     query: str,
     *,
@@ -1382,10 +1812,7 @@ def retrieve(
     _check_stopped(deadline_monotonic, cancelled)
     analysis = analyze_query(query)
     requested = _normalize_profile(requested_profile) or analysis.recommended_profile
-    if max_candidates is not None and int(max_candidates) > 0:
-        backend_limit = min(limit if limit > 0 else int(max_candidates), int(max_candidates))
-    else:
-        backend_limit = limit
+    backend_limit = _backend_limit(limit, max_candidates)
     filters = {
         "query": analysis.normalized_query or analysis.query,
         "scope": scope,
@@ -1396,18 +1823,8 @@ def retrieve(
     }
 
     wanted = PROFILE_SIGNALS[requested]
-    if (
-        isinstance(graph_per_seed_limit, bool)
-        or not isinstance(graph_per_seed_limit, int)
-        or not 1 <= graph_per_seed_limit <= 100
-    ):
-        raise ValueError("graph_per_seed_limit must be between 1 and 100")
-    if (
-        isinstance(graph_global_limit, bool)
-        or not isinstance(graph_global_limit, int)
-        or not 1 <= graph_global_limit <= 1000
-    ):
-        raise ValueError("graph_global_limit must be between 1 and 1000")
+    _require_bounded_int(graph_per_seed_limit, 1, 100, "graph_per_seed_limit")
+    _require_bounded_int(graph_global_limit, 1, 1000, "graph_global_limit")
     if graph_edge_families is not None:
         if not isinstance(graph_edge_families, Mapping) or any(
             edge not in GRAPH_EDGE_DECAY or not isinstance(enabled, bool)
@@ -1434,74 +1851,32 @@ def retrieve(
 
     if dense_backend is not None and "dense" in wanted:
         _check_stopped(deadline_monotonic, cancelled)
-        try:
-            dense_hits = (
-                _run_optional_bounded(
-                    lambda: dense_backend(**filters),
-                    deadline=deadline_monotonic,
-                    cancelled=cancelled,
-                )
-                if deadline_monotonic is not None
-                else dense_backend(**filters)
-            )
-            ran_dense = True
-            # None ⇒ backend unavailable; empty sequence ⇒ available but no hits.
-            dense_available = dense_hits is not None
-        except OptionalStageTimeout:
-            dense_hits = None
-            dense_available = False
+        dense_hits, ran_dense, dense_available, dense_timeout = _run_dense_backend(
+            dense_backend,
+            filters,
+            deadline_monotonic=deadline_monotonic,
+            cancelled=cancelled,
+        )
+        if dense_timeout:
             optional_failure = "optional_stage_timeout"
             partial = True
         _check_stopped(deadline_monotonic, cancelled)
 
     if graph_backend is not None and "graph" in wanted and graph_enabled:
         _check_stopped(deadline_monotonic, cancelled)
-        directions = GRAPH_PROFILE_DIRECTIONS.get(requested, ("out",))
-        edge_types = GRAPH_PROFILE_EDGE_TYPES.get(requested, tuple(GRAPH_EDGE_DECAY))
-        if graph_edge_families:
-            edge_types = tuple(
-                edge_type
-                for edge_type in edge_types
-                if graph_edge_families.get(edge_type, True)
-            )
-        seeds = _graph_seeds(lexical_hits, dense_hits)
-        try:
-            raw_graph_hits = graph_backend(
-                **filters,
-                seeds=seeds,
-                max_hops=GRAPH_MAX_HOPS,
-                directions=directions,
-                edge_types=edge_types,
-                edge_decay={edge: GRAPH_EDGE_DECAY[edge] for edge in edge_types},
-                per_seed_limit=graph_per_seed_limit,
-                global_limit=graph_global_limit,
-                deadline_monotonic=deadline_monotonic,
-                corpus_generation=corpus_generation,
-            )
-            graph_hits = (
-                None
-                if raw_graph_hits is None
-                else _prepare_graph_hits(
-                    raw_graph_hits,
-                    query=analysis.normalized_query or analysis.query,
-                    requested_profile=requested,
-                    seeds=seeds,
-                    directions=directions,
-                    edge_types=edge_types,
-                    per_seed_limit=graph_per_seed_limit,
-                    global_limit=graph_global_limit,
-                )
-            )
-            ran_graph = True
-            graph_available = graph_hits is not None
-        except TimeoutError:
-            raise
-        except GenerationSealChanged:
-            raise
-        except Exception:
-            graph_hits = None
-            graph_available = False
-            graph_failure = "graph_error"
+        graph_hits, ran_graph, graph_available, graph_failure = _run_graph_backend(
+            graph_backend,
+            filters,
+            analysis=analysis,
+            requested=requested,
+            lexical_hits=lexical_hits,
+            dense_hits=dense_hits,
+            graph_edge_families=graph_edge_families,
+            per_seed_limit=graph_per_seed_limit,
+            global_limit=graph_global_limit,
+            corpus_generation=corpus_generation,
+            deadline_monotonic=deadline_monotonic,
+        )
         _check_stopped(deadline_monotonic, cancelled)
     elif "graph" in wanted and not graph_enabled:
         graph_available = False
@@ -1531,174 +1906,27 @@ def retrieve(
     if max_candidates is not None and int(max_candidates) > 0:
         candidates = candidates[: int(max_candidates)]
 
-    # Conditional reranking (Task 13).
     signal_list = list(signals)
-    reranker_applied = False
-    reranker_model_id: str | None = None
-    reranker_model_revision: str | None = None
-    reranker_depth: int | None = None
-    reranker_duration_ms: int | None = None
-    reranker_fallback_reason: str | None = None
+    rerank_trace = _RerankTrace()
     if candidates and rerank_enabled:
         _check_stopped(deadline_monotonic, cancelled)
-        try:
-            from reranker import rerank as _rerank
-            from reranker import should_rerank
-
-            legacy_rows = []
-            query_norm = (analysis.normalized_query or analysis.query).casefold().strip()
-            exact_title_hit = False
-            for c in candidates:
-                info = display_meta.get(c.candidate_id, {})
-                title = str(info.get("title") or Path(c.relative_path).stem)
-                summary = str(info.get("summary") or "")
-                content = str(info.get("content") or summary or "")
-                if title.casefold().strip() == query_norm:
-                    exact_title_hit = True
-                legacy_rows.append(
-                    {
-                        "candidate_id": c.candidate_id,
-                        "path": c.relative_path,
-                        "relative_path": c.relative_path,
-                        "summary": summary,
-                        "content": content,
-                        "title": title,
-                        "rrf_score": c.rrf_score,
-                        "score": c.rrf_score,
-                        "bm25_rank": c.bm25_rank,
-                        "vector_rank": c.vector_rank,
-                        "bm25_score": c.bm25_score,
-                        "vector_score": c.vector_score,
-                        "graph_rank": c.graph_rank,
-                        "graph_score": c.graph_score,
-                        "source_sha256": c.source_sha256,
-                        "heading_path": c.heading_path,
-                        "parent_id": c.parent_id,
-                        "byte_start": c.byte_start,
-                        "byte_end": c.byte_end,
-                        "evidence_ids": c.evidence_ids,
-                        "lance_distance": info.get("lance_distance"),
-                        "authority": info.get("authority"),
-                        "authority_weight": c.authority_weight,
-                    }
-                )
-            if exact_title_hit:
-                apply, skip_reason = False, "exact_title_bypass"
-                # Promote exact title match to rank 1 before any rerank.
-                legacy_rows.sort(
-                    key=lambda row: (
-                        0 if str(row.get("title", "")).casefold().strip() == query_norm else 1,
-                        -float(row.get("rrf_score") or 0.0),
-                        str(row.get("candidate_id") or ""),
-                    )
-                )
-                rebuilt_exact: list[RetrievalCandidate] = []
-                id_map = {c.candidate_id: c for c in candidates}
-                for row in legacy_rows:
-                    base = id_map.get(str(row["candidate_id"]))
-                    if base is None:
-                        continue
-                    rebuilt_exact.append(base)
-                if rebuilt_exact:
-                    candidates = tuple(rebuilt_exact)
-            else:
-                apply, skip_reason = should_rerank(
-                    profile=requested,
-                    candidates=legacy_rows,
-                    analysis_intents=analysis.intents,
-                    rerank_enabled=rerank_enabled,
-                )
-            if not apply:
-                reranker_fallback_reason = skip_reason
-            else:
-                pool_limit = max(limit, 20) if limit > 0 else 20
-                if max_candidates is not None and int(max_candidates) > 0:
-                    pool_limit = min(pool_limit, int(max_candidates))
-                def rerank_call():
-                    return _rerank(
-                        analysis.normalized_query or analysis.query,
-                        legacy_rows[:pool_limit],
-                        limit=pool_limit,
-                        text_field="content",
-                    )
-                reranked = (
-                    _run_optional_bounded(
-                        rerank_call,
-                        deadline=deadline_monotonic,
-                        cancelled=cancelled,
-                    )
-                    if deadline_monotonic is not None
-                    else rerank_call()
-                )
-                _check_stopped(deadline_monotonic, cancelled)
-                if reranked and reranked[0].get("reranker_applied"):
-                    signal_list.append("reranker")
-                    reranker_applied = True
-                    reranker_model_id = reranked[0].get("reranker_model_id")
-                    reranker_model_revision = reranked[0].get("reranker_model_revision")
-                    reranker_depth = reranked[0].get("reranker_depth")
-                    reranker_duration_ms = reranked[0].get("reranker_duration_ms")
-                    reranker_fallback_reason = None
-                    rebuilt: list[RetrievalCandidate] = []
-                    for row in reranked:
-                        rebuilt.append(
-                            RetrievalCandidate(
-                                candidate_id=str(row.get("candidate_id") or row.get("path")),
-                                parent_id=str(row.get("parent_id") or row.get("path") or ""),
-                                relative_path=str(
-                                    row.get("relative_path") or row.get("path") or ""
-                                ),
-                                heading_path=_heading_path(row.get("heading_path")),
-                                source_sha256=str(row.get("source_sha256") or ("0" * 64)),
-                                byte_start=_as_int(row.get("byte_start"), 0),
-                                byte_end=_as_int(row.get("byte_end"), 0),
-                                bm25_rank=row.get("bm25_rank")
-                                if isinstance(row.get("bm25_rank"), int)
-                                else None,
-                                bm25_score=_as_float(row.get("bm25_score")),
-                                vector_rank=row.get("vector_rank")
-                                if isinstance(row.get("vector_rank"), int)
-                                else None,
-                                vector_score=_as_float(row.get("vector_score")),
-                                graph_rank=row.get("graph_rank")
-                                if isinstance(row.get("graph_rank"), int)
-                                else None,
-                                graph_score=_as_float(row.get("graph_score")),
-                                rrf_score=float(row.get("rrf_score") or 0.0),
-                                rerank_score=_as_float(row.get("rerank_score")),
-                                authority_weight=float(
-                                    row.get("authority_weight") or 1.0
-                                ),
-                                final_score=float(
-                                    row.get("final_score")
-                                    or row.get("rrf_score")
-                                    or 0.0
-                                ),
-                                evidence_ids=tuple(
-                                    str(x)
-                                    for x in (row.get("evidence_ids") or ())
-                                    if isinstance(x, str)
-                                ),
-                            )
-                        )
-                    candidates = tuple(rebuilt)
-                elif reranked:
-                    reranker_fallback_reason = str(
-                        reranked[0].get("reranker_fallback_reason")
-                        or "reranker_unavailable"
-                    )
-                    reranker_model_id = reranked[0].get("reranker_model_id")
-                    reranker_model_revision = reranked[0].get("reranker_model_revision")
-                    reranker_depth = reranked[0].get("reranker_depth")
-                    reranker_duration_ms = reranked[0].get("reranker_duration_ms")
-        except OptionalStageTimeout:
-            reranker_fallback_reason = "optional_stage_timeout"
+        candidates = _apply_reranking(
+            candidates,
+            display_meta,
+            analysis=analysis,
+            requested=requested,
+            limit=limit,
+            max_candidates=max_candidates,
+            rerank_enabled=rerank_enabled,
+            deadline_monotonic=deadline_monotonic,
+            cancelled=cancelled,
+            trace=rerank_trace,
+        )
+        if rerank_trace.applied:
+            signal_list.append("reranker")
+        if rerank_trace.optional_timeout:
             optional_failure = optional_failure or "optional_stage_timeout"
             partial = True
-        except TimeoutError:
-            raise
-        except Exception:
-            reranker_fallback_reason = "reranker_error"
 
     candidates = _promote_exact_filename(
         candidates, analysis.normalized_query or analysis.query
@@ -1714,16 +1942,12 @@ def retrieve(
         fallback_reason=optional_failure or fallback,
         corpus_generation=corpus_generation,
         partial=partial,
-        reranker_applied=reranker_applied,
-        reranker_model_id=str(reranker_model_id) if reranker_model_id else None,
-        reranker_model_revision=(
-            str(reranker_model_revision) if reranker_model_revision else None
-        ),
-        reranker_depth=int(reranker_depth) if isinstance(reranker_depth, int) else None,
-        reranker_duration_ms=(
-            int(reranker_duration_ms) if isinstance(reranker_duration_ms, int) else None
-        ),
-        reranker_fallback_reason=reranker_fallback_reason,
+        reranker_applied=rerank_trace.applied,
+        reranker_model_id=_as_optional_str(rerank_trace.model_id),
+        reranker_model_revision=_as_optional_str(rerank_trace.model_revision),
+        reranker_depth=_as_optional_int(rerank_trace.depth),
+        reranker_duration_ms=_as_optional_int(rerank_trace.duration_ms),
+        reranker_fallback_reason=rerank_trace.fallback_reason,
     )
     return RetrievalResult(
         candidates=candidates,
