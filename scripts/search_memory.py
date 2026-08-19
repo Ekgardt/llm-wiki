@@ -35,6 +35,7 @@ import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, closing, contextmanager, nullcontext
 from pathlib import Path
+from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import read_stable_bytes  # noqa: E402
@@ -3511,6 +3512,31 @@ def _legacy_fetch_rows(
         conn.close()
 
 
+def _rebuilt_if_needed(
+    pages: list[Path],
+    needs_rebuild: bool,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    if not needs_rebuild:
+        return True
+    return _rebuild_legacy_index(pages, deadline=deadline, cancelled=cancelled)
+
+
+def _fetched_rows_or_none(
+    query: str,
+    limit: int,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[tuple] | None:
+    try:
+        return _legacy_fetch_rows(
+            query, limit=limit, deadline=deadline, cancelled=cancelled
+        )
+    except sqlite3.DatabaseError:
+        return None
+
+
 def _legacy_rows_or_rebuild(
     query: str,
     pages: list[Path],
@@ -3525,23 +3551,18 @@ def _legacy_rows_or_rebuild(
     None means the index could not be read at all, and the caller reads
     Markdown directly instead.
     """
-    rebuilt = False
+    if not _rebuilt_if_needed(pages, needs_rebuild, deadline, cancelled):
+        return None
+    rows = _fetched_rows_or_none(query, limit, deadline, cancelled)
+    if rows is not None:
+        return rows
+    # One rebuild per call: if the index was already rebuilt above, a broken
+    # read now means the index cannot be read at all.
     if needs_rebuild:
-        if not _rebuild_legacy_index(pages, deadline=deadline, cancelled=cancelled):
-            return None
-        rebuilt = True
-    try:
-        return _legacy_fetch_rows(query, limit=limit, deadline=deadline, cancelled=cancelled)
-    except sqlite3.DatabaseError:
-        pass
-    if not rebuilt and not _rebuild_legacy_index(
-        pages, deadline=deadline, cancelled=cancelled
-    ):
         return None
-    try:
-        return _legacy_fetch_rows(query, limit=limit, deadline=deadline, cancelled=cancelled)
-    except sqlite3.DatabaseError:
+    if not _rebuild_legacy_index(pages, deadline=deadline, cancelled=cancelled):
         return None
+    return _fetched_rows_or_none(query, limit, deadline, cancelled)
 
 
 def _rebuild_legacy_index(
@@ -3635,6 +3656,72 @@ def _legacy_hit_rows(
     return hits
 
 
+class _PageRead(NamedTuple):
+    """What one Markdown page says about itself, read once."""
+
+    stem: str
+    relative_path: str
+    raw: bytes
+    content: str
+    title: str
+    summary: str
+    project: str
+    timestamp: str
+    authority: str
+
+
+def _read_page(page: Path, label: str) -> _PageRead | None:
+    try:
+        relative_path = page.relative_to(ROOT).as_posix()
+        raw = read_stable_bytes(page, MAX_PAGE_BYTES, label=label)
+        content = raw.decode("utf-8", errors="ignore")
+    except (OSError, ValueError):
+        return None
+    title, summary = _extract_title_and_summary(content, page.stem)
+    return _PageRead(
+        stem=page.stem,
+        relative_path=relative_path,
+        raw=raw,
+        content=content,
+        title=title,
+        summary=summary,
+        project=_extract_frontmatter_field(content, PROJECT_FIELD_RE) or "",
+        timestamp=(_extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or "")[:10],
+        authority=_extract_frontmatter_field(content, AUTHORITY_FIELD_RE) or "",
+    )
+
+
+def _page_read_eligible(
+    read: _PageRead, *, project: str | None, since: str | None, as_of: str | None
+) -> bool:
+    return _exact_page_eligible(
+        read.relative_path,
+        page_project=read.project,
+        timestamp=read.timestamp,
+        project=project,
+        since=since,
+        as_of=as_of,
+    )
+
+
+def _page_hit(read: _PageRead, *, score: float, bm25_score: float) -> dict:
+    return {
+        "path": read.relative_path,
+        "title": read.title,
+        "summary": read.summary[:120],
+        "score": score,
+        "bm25_score": bm25_score,
+        "project": read.project,
+        "timestamp": read.timestamp,
+        "candidate_id": read.stem,
+        "source_sha256": hashlib.sha256(read.raw).hexdigest(),
+        "byte_start": 0,
+        "byte_end": len(read.raw),
+        "generation": "legacy",
+        "authority": read.authority,
+    }
+
+
 def _exact_page_hit(
     page: Path,
     *,
@@ -3647,40 +3734,13 @@ def _exact_page_hit(
     The index may not contain it yet; a filename match is too strong a signal
     to lose to a stale index.
     """
-    try:
-        relative_path = page.relative_to(ROOT).as_posix()
-        raw = read_stable_bytes(page, MAX_PAGE_BYTES, label="exact filename search page")
-        content = raw.decode("utf-8", errors="ignore")
-    except (OSError, ValueError):
+    read = _read_page(page, "exact filename search page")
+    if read is None:
         return None
-    title, summary = _extract_title_and_summary(content, page.stem)
-    page_project = _extract_frontmatter_field(content, PROJECT_FIELD_RE) or ""
-    timestamp = (_extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or "")[:10]
-    if not _exact_page_eligible(
-        relative_path,
-        page_project=page_project,
-        timestamp=timestamp,
-        project=project,
-        since=since,
-        as_of=as_of,
-    ):
+    if not _page_read_eligible(read, project=project, since=since, as_of=as_of):
         return None
-    authority = _extract_frontmatter_field(content, AUTHORITY_FIELD_RE) or ""
-    return {
-        "path": relative_path,
-        "title": title,
-        "summary": summary[:120],
-        "score": round(10.0 * authority_weight(authority), 2),
-        "bm25_score": 0.0,
-        "project": page_project,
-        "timestamp": timestamp,
-        "candidate_id": page.stem,
-        "source_sha256": hashlib.sha256(raw).hexdigest(),
-        "byte_start": 0,
-        "byte_end": len(raw),
-        "generation": "legacy",
-        "authority": authority,
-    }
+    score = round(10.0 * authority_weight(read.authority), 2)
+    return _page_hit(read, score=score, bm25_score=0.0)
 
 
 def _project_matches(page_project: str, project: str | None) -> bool:
@@ -3871,43 +3931,18 @@ def _direct_page_hit(
     as_of: str | None,
 ) -> dict | None:
     """One literal Markdown match, or None when the page does not qualify."""
-    try:
-        relative_path = page.relative_to(ROOT).as_posix()
-        raw = read_stable_bytes(page, MAX_PAGE_BYTES, label="search page")
-        content = raw.decode("utf-8", errors="ignore")
-    except (OSError, ValueError):
+    read = _read_page(page, "search page")
+    if read is None:
         return None
-    title, summary = _extract_title_and_summary(content, page.stem)
-    body = _strip_frontmatter(content)
-    if not query_terms.issubset(_document_terms(page, title, summary, body)):
+    body = _strip_frontmatter(read.content)
+    terms = _document_terms(page, read.title, read.summary, body)
+    if not query_terms.issubset(terms):
         return None
-    page_project = _extract_frontmatter_field(content, PROJECT_FIELD_RE) or ""
-    timestamp = (_extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or "")[:10]
-    if not _exact_page_eligible(
-        relative_path,
-        page_project=page_project,
-        timestamp=timestamp,
-        project=project,
-        since=since,
-        as_of=as_of,
-    ):
+    if not _page_read_eligible(read, project=project, since=since, as_of=as_of):
         return None
-    authority = _extract_frontmatter_field(content, AUTHORITY_FIELD_RE) or ""
-    score = round(_direct_match_score(page, title, authority, query_terms), 2)
+    score = round(_direct_match_score(page, read.title, read.authority, query_terms), 2)
     return {
-        "path": relative_path,
-        "title": title,
-        "summary": summary[:120],
-        "score": score,
-        "bm25_score": score,
-        "project": page_project,
-        "timestamp": timestamp,
-        "candidate_id": page.stem,
-        "source_sha256": hashlib.sha256(raw).hexdigest(),
-        "byte_start": 0,
-        "byte_end": len(raw),
-        "generation": "legacy",
-        "authority": authority,
+        **_page_hit(read, score=score, bm25_score=score),
         "fallback_reason": "legacy_sqlite_unavailable",
         "partial": True,
     }
