@@ -1071,6 +1071,96 @@ def _is_transient_windows_access_error(error: OSError) -> bool:
     )
 
 
+def _write_lock_claim(lock_file: Path, payload: bytes) -> bool:
+    """Create the lock exclusively and write the claim, or report it is taken."""
+    try:
+        descriptor = os.open(str(lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        return False
+    except PermissionError as error:
+        if not _is_transient_windows_access_error(error):
+            raise
+        return False
+    try:
+        os.write(descriptor, payload)
+    except BaseException:
+        os.close(descriptor)
+        try:
+            lock_file.unlink()
+        except OSError:
+            pass
+        raise
+    os.close(descriptor)
+    return True
+
+
+def _lock_owner_alive(lock_file: Path) -> bool:
+    """A malformed or unreadable claim counts as abandoned."""
+    try:
+        owner = json.loads(lock_file.read_text(encoding="utf-8"))
+        owner_pid = owner.get("pid")
+        owner_token = owner.get("token")
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return False
+    if not isinstance(owner_pid, int) or not isinstance(owner_token, str) or not owner_token:
+        return False
+    return bool(_is_pid_alive(owner_pid))
+
+
+def _lock_age_seconds(lock_file: Path) -> float:
+    try:
+        return time.time() - lock_file.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _clear_stale_lock(lock_file: Path) -> bool:
+    """Remove a lock whose owner is gone; report whether it is now free."""
+    if _lock_age_seconds(lock_file) < _INDEX_SWAP_STALE_SECONDS:
+        return False
+    if _lock_owner_alive(lock_file):
+        return False
+    try:
+        lock_file.unlink()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _acquire_index_swap_lock(
+    lock_file: Path,
+    payload: bytes,
+    *,
+    end: float,
+    poll: float,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    while True:
+        _check_legacy_stop(end, cancelled)
+        if _write_lock_claim(lock_file, payload):
+            return
+        if _clear_stale_lock(lock_file):
+            continue
+        _check_legacy_stop(end, cancelled)
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"Could not acquire index swap lock: {lock_file}")
+        time.sleep(min(poll, remaining))
+        _check_legacy_stop(end, cancelled)
+
+
+def _release_index_swap_lock(lock_file: Path, token: str) -> None:
+    """Release only our own claim; another owner's lock is not ours to remove."""
+    try:
+        owner = json.loads(lock_file.read_text(encoding="utf-8"))
+        if owner.get("token") == token:
+            lock_file.unlink()
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+
+
 @contextmanager
 def _index_swap_lock(
     timeout: float = _INDEX_SWAP_WAIT_SECONDS,
@@ -1084,73 +1174,13 @@ def _index_swap_lock(
     token = uuid.uuid4().hex
     payload = json.dumps({"pid": os.getpid(), "token": token}).encode("utf-8")
     end = time.monotonic() + timeout if deadline is None else deadline
-
-    while True:
-        _check_legacy_stop(end, cancelled)
-        try:
-            descriptor = os.open(
-                str(lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
-            )
-        except FileExistsError:
-            pass
-        except PermissionError as error:
-            if not _is_transient_windows_access_error(error):
-                raise
-        else:
-            try:
-                os.write(descriptor, payload)
-            except BaseException:
-                os.close(descriptor)
-                try:
-                    lock_file.unlink()
-                except OSError:
-                    pass
-                raise
-            else:
-                os.close(descriptor)
-            break
-
-        try:
-            age = time.time() - lock_file.stat().st_mtime
-        except OSError:
-            age = 0.0
-        if age >= _INDEX_SWAP_STALE_SECONDS:
-            try:
-                owner = json.loads(lock_file.read_text(encoding="utf-8"))
-                owner_pid = owner.get("pid")
-                owner_token = owner.get("token")
-                valid_owner = (
-                    isinstance(owner_pid, int)
-                    and isinstance(owner_token, str)
-                    and bool(owner_token)
-                )
-            except (OSError, json.JSONDecodeError, AttributeError):
-                valid_owner = False
-                owner_pid = 0
-            if not valid_owner or not _is_pid_alive(owner_pid):
-                try:
-                    lock_file.unlink()
-                    continue
-                except FileNotFoundError:
-                    continue
-                except OSError:
-                    pass
-        _check_legacy_stop(end, cancelled)
-        remaining = end - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError(f"Could not acquire index swap lock: {lock_file}")
-        time.sleep(min(poll, remaining))
-        _check_legacy_stop(end, cancelled)
-
+    _acquire_index_swap_lock(
+        lock_file, payload, end=end, poll=poll, cancelled=cancelled
+    )
     try:
         yield
     finally:
-        try:
-            owner = json.loads(lock_file.read_text(encoding="utf-8"))
-            if owner.get("token") == token:
-                lock_file.unlink()
-        except (OSError, json.JSONDecodeError, AttributeError):
-            pass
+        _release_index_swap_lock(lock_file, token)
 
 
 def _replace_live_index(
