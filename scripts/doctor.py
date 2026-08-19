@@ -4039,17 +4039,16 @@ def _codex_app_server_command(*, platform: str = os.name) -> list[str] | None:
     return [executable, *arguments] if executable else None
 
 
-def _probe_codex_hooks_list(
-    root: Path, home: Path, *, deadline: float = float("inf")
-) -> dict[str, Any] | object | None:
-    started_at = time.monotonic()
-    probe_deadline = min(deadline, started_at + CODEX_HOOK_PROBE_SECONDS)
+_PROBE_INCOMPLETE = object()
 
-    def deadline_result() -> object | None:
-        return _CODEX_PROBE_NOT_COMPLETED if _deadline_reached(deadline) else None
 
-    if probe_deadline - started_at < CODEX_HOOK_PROBE_STARTUP_SECONDS:
-        return None
+class _CodexProbeStreams(NamedTuple):
+    readers: list
+    captured: dict
+    overflow: threading.Event
+
+
+def _codex_probe_payload(root: Path) -> bytes:
     requests = (
         {
             "id": 1,
@@ -4066,14 +4065,99 @@ def _probe_codex_hooks_list(
         {"method": "initialized", "params": {}},
         {"id": 2, "method": "hooks/list", "params": {"cwds": [str(root)]}},
     )
-    payload = "".join(json.dumps(item, separators=(",", ":")) + "\n" for item in requests).encode(
-        "utf-8"
+    return "".join(
+        json.dumps(item, separators=(",", ":")) + "\n" for item in requests
+    ).encode("utf-8")
+
+
+def _kill_and_reap(process: Any, probe_deadline: float) -> None:
+    process.kill()
+    try:
+        process.wait(timeout=max(0.0, probe_deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _codex_pipes_missing(process: Any) -> bool:
+    return (
+        process.stdin is None or process.stdout is None or process.stderr is None
     )
-    command = _codex_app_server_command()
-    if command is None:
+
+
+def _start_codex_readers(process: Any) -> _CodexProbeStreams:
+    """Drain both pipes into bounded buffers so the child cannot block on us."""
+    overflow = threading.Event()
+    captured = {"stdout": bytearray(), "stderr": bytearray()}
+
+    def drain(name: str, stream: Any) -> None:
+        try:
+            while chunk := stream.read(8192):
+                remaining = MAX_CODEX_HOOK_PROBE_BYTES - len(captured[name])
+                if len(chunk) > remaining:
+                    captured[name].extend(chunk[: max(0, remaining)])
+                    overflow.set()
+                    process.kill()
+                    return
+                captured[name].extend(chunk)
+        except OSError:
+            overflow.set()
+            process.kill()
+
+    readers = [
+        threading.Thread(target=drain, args=("stdout", process.stdout), daemon=True),
+        threading.Thread(target=drain, args=("stderr", process.stderr), daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
+    return _CodexProbeStreams(readers, captured, overflow)
+
+
+def _await_codex_process(
+    process: Any, payload: bytes, probe_deadline: float
+) -> bool:
+    """True when the probe process finished within its own deadline."""
+    if _deadline_reached(probe_deadline):
+        _kill_and_reap(process, probe_deadline)
+        return False
+    process.stdin.write(payload)
+    process.stdin.flush()
+    process.stdin.close()
+    try:
+        process.wait(timeout=max(0.0, probe_deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        _kill_and_reap(process, probe_deadline)
+        return False
+    return True
+
+
+def _readers_still_running(readers: list) -> bool:
+    return any(reader.is_alive() for reader in readers)
+
+
+def _clean_codex_exit(process: Any, streams: _CodexProbeStreams) -> bool:
+    return process.returncode == 0 and not streams.overflow.is_set()
+
+
+def _drained_codex_output(
+    process: Any, streams: _CodexProbeStreams, probe_deadline: float
+) -> bytes | object | None:
+    for reader in streams.readers:
+        reader.join(timeout=max(0.0, probe_deadline - time.monotonic()))
+    if _readers_still_running(streams.readers):
+        if process.returncode is None:
+            process.kill()
+        return _PROBE_INCOMPLETE
+    if not _clean_codex_exit(process, streams):
         return None
+    return bytes(streams.captured["stdout"])
+
+
+def _run_codex_probe(
+    command: list[str], root: Path, home: Path, probe_deadline: float
+) -> bytes | object | None:
     env = os.environ.copy()
     env["CODEX_HOME"] = str(home / ".codex")
+    payload = _codex_probe_payload(root)
     try:
         process = subprocess.Popen(  # noqa: S603
             command,
@@ -4083,76 +4167,60 @@ def _probe_codex_hooks_list(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        if process.stdin is None or process.stdout is None or process.stderr is None:
-            process.kill()
-            try:
-                process.wait(timeout=max(0.0, probe_deadline - time.monotonic()))
-            except subprocess.TimeoutExpired:
-                pass
-            return deadline_result()
-        overflow = threading.Event()
-        captured = {"stdout": bytearray(), "stderr": bytearray()}
-
-        def drain(name: str, stream: Any) -> None:
-            try:
-                while chunk := stream.read(8192):
-                    remaining = MAX_CODEX_HOOK_PROBE_BYTES - len(captured[name])
-                    if len(chunk) > remaining:
-                        captured[name].extend(chunk[: max(0, remaining)])
-                        overflow.set()
-                        process.kill()
-                        return
-                    captured[name].extend(chunk)
-            except OSError:
-                overflow.set()
-                process.kill()
-
-        readers = [
-            threading.Thread(target=drain, args=("stdout", process.stdout), daemon=True),
-            threading.Thread(target=drain, args=("stderr", process.stderr), daemon=True),
-        ]
-        for reader in readers:
-            reader.start()
-        if _deadline_reached(probe_deadline):
-            process.kill()
-            try:
-                process.wait(timeout=0)
-            except subprocess.TimeoutExpired:
-                pass
-            return deadline_result()
-        process.stdin.write(payload)
-        process.stdin.flush()
-        process.stdin.close()
-        try:
-            process.wait(timeout=max(0.0, probe_deadline - time.monotonic()))
-        except subprocess.TimeoutExpired:
-            process.kill()
-            try:
-                process.wait(timeout=max(0.0, probe_deadline - time.monotonic()))
-            except subprocess.TimeoutExpired:
-                pass
-            return deadline_result()
-        for reader in readers:
-            reader.join(timeout=max(0.0, probe_deadline - time.monotonic()))
-        if any(reader.is_alive() for reader in readers):
-            if process.returncode is None:
-                process.kill()
-            return deadline_result()
-        if process.returncode != 0 or overflow.is_set():
-            return None
-        raw = bytes(captured["stdout"])
+        if _codex_pipes_missing(process):
+            _kill_and_reap(process, probe_deadline)
+            return _PROBE_INCOMPLETE
+        streams = _start_codex_readers(process)
+        if not _await_codex_process(process, payload, probe_deadline):
+            return _PROBE_INCOMPLETE
+        return _drained_codex_output(process, streams, probe_deadline)
     except (OSError, PermissionError, subprocess.SubprocessError, ValueError):
-        return deadline_result()
+        return _PROBE_INCOMPLETE
+
+
+def _codex_hooks_message(line: str) -> tuple[bool, dict | None]:
+    message = json.loads(line)
+    if not isinstance(message, dict) or message.get("id") != 2:
+        return False, None
+    result = message.get("result")
+    if isinstance(result, dict):
+        return True, result
+    return True, None
+
+
+def _codex_hooks_result(raw: bytes) -> dict | None:
     try:
-        text = raw.decode("utf-8")
-        for line in text.splitlines():
-            message = json.loads(line)
-            if isinstance(message, dict) and message.get("id") == 2:
-                result = message.get("result")
-                return result if isinstance(result, dict) else None
+        for line in raw.decode("utf-8").splitlines():
+            found, result = _codex_hooks_message(line)
+            if found:
+                return result
     except (UnicodeDecodeError, json.JSONDecodeError):
         return None
     return None
+
+
+def _codex_deadline_result(deadline: float) -> object | None:
+    if _deadline_reached(deadline):
+        return _CODEX_PROBE_NOT_COMPLETED
+    return None
+
+
+def _probe_codex_hooks_list(
+    root: Path, home: Path, *, deadline: float = float("inf")
+) -> dict[str, Any] | object | None:
+    started_at = time.monotonic()
+    probe_deadline = min(deadline, started_at + CODEX_HOOK_PROBE_SECONDS)
+    if probe_deadline - started_at < CODEX_HOOK_PROBE_STARTUP_SECONDS:
+        return None
+    command = _codex_app_server_command()
+    if command is None:
+        return None
+    raw = _run_codex_probe(command, root, home, probe_deadline)
+    if raw is _PROBE_INCOMPLETE:
+        return _codex_deadline_result(deadline)
+    if raw is None:
+        return None
+    return _codex_hooks_result(raw)
 
 
 def _expected_codex_runtime_hooks(template_path: Path) -> list[dict[str, Any]]:
