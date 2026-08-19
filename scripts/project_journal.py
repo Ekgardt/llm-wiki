@@ -82,6 +82,9 @@ class ProjectJournalRebuildRequired(RuntimeError):
         self.sequence = sequence
         self.journal_head = journal_head
 
+    def __reduce__(self):
+        return (self.__class__, (self.project, self.sequence, self.journal_head))
+
 
 class ProjectJournalReadError(RuntimeError):
     """A project file cannot be safely read as a bounded regular file."""
@@ -90,6 +93,9 @@ class ProjectJournalReadError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.status = code
+
+    def __reduce__(self):
+        return (self.__class__, (self.code, str(self)))
 
 
 @dataclass(frozen=True)

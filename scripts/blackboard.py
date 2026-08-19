@@ -92,6 +92,15 @@ class BlackboardConflictError(RuntimeError):
         self.conflict_id = conflict_id
         super().__init__("blackboard resources are already claimed")
 
+    def __reduce__(self):
+        """Rebuild from the arguments, not from the message.
+
+        Without this the default reduction calls `__init__` with the message
+        alone, and crossing a process boundary raises a TypeError about a
+        missing argument instead of delivering the failure.
+        """
+        return (self.__class__, (self.resources, self.conflict_id))
+
 
 class _ResourceBusy(RuntimeError):
     def __init__(self, rows: Sequence[sqlite3.Row]) -> None:

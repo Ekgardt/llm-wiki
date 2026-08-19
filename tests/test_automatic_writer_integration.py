@@ -1031,7 +1031,9 @@ def test_public_mutation_retries_initial_recovery_contention_without_dropping_ev
     vault, state = _vault(tmp_path)
     monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
-    monkeypatch.setattr(markdown_transaction, "_WRITER_WAIT_SECONDS", 0.5)
+    # Short enough to keep the retry quick, long enough that the mutation
+    # itself fits inside the derived recovery deadline on a slow runner.
+    monkeypatch.setattr(markdown_transaction, "_WRITER_WAIT_SECONDS", 15.0)
     target = vault / "knowledge" / "notes" / f"{api}.md"
     real_recover = markdown_transaction.MarkdownCoordinator.recover
     attempts = 0

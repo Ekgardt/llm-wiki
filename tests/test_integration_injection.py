@@ -232,7 +232,8 @@ def test_installed_plugin_captures_without_an_inherited_environment(tmp_path: Pa
     assert result.returncode == 0, result.stderr
     calls = json.loads(result.stdout)
     assert len(calls) == 1
-    assert str(root / "scripts") in " ".join(calls[0]["args"])
+    # The plugin joins with a forward slash, which Windows accepts in a path.
+    assert f"{root}/scripts" in " ".join(calls[0]["args"])
 
 
 def test_user_prompt_ingestion_runs_prompt_and_feedback_capture_once(monkeypatch):

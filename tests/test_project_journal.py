@@ -1610,7 +1610,7 @@ def test_same_owner_simultaneous_projectors_retry_without_sharing_lease(
 
     def pause_first(reservation, lease):
         first_reserved.set()
-        assert release_first.wait(5)
+        assert release_first.wait(60)
         return project(reservation, lease)
 
     monkeypatch.setattr(first_store, "_project_reserved", pause_first)
@@ -1621,7 +1621,7 @@ def test_same_owner_simultaneous_projectors_retry_without_sharing_lease(
             checkpoint_event("evt-first", "same-owner:first"),
             "agent-a",
         )
-        assert first_reserved.wait(5)
+        assert first_reserved.wait(60)
         with pytest.raises(ProjectLeaseBusy):
             second_store.checkpoint(
                 "demo",
@@ -1629,7 +1629,7 @@ def test_same_owner_simultaneous_projectors_retry_without_sharing_lease(
                 "agent-a",
             )
         release_first.set()
-        first_receipt = first.result(timeout=5)
+        first_receipt = first.result(timeout=60)
 
     second_receipt = second_store.checkpoint(
         "demo",

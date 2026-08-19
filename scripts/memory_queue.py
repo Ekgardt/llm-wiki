@@ -1872,6 +1872,10 @@ class QueueOperationError(RuntimeError):
         self.code = code
         self.detail = detail
 
+    def __reduce__(self):
+        """Keep the code and detail apart when the error crosses a process."""
+        return (self.__class__, (self.code, self.detail))
+
 
 @dataclass(frozen=True)
 class PayloadValidation:

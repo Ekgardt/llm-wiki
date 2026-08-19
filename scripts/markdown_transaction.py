@@ -1606,6 +1606,10 @@ class TransactionFailure(RuntimeError):
         self.code = code
         self.state = state
 
+    def __reduce__(self):
+        """Carry the disposition across a process boundary, not just the text."""
+        return (self.__class__, (str(self), self.code, self.state))
+
 
 class TransactionDriftError(RuntimeError):
     """A committed operation no longer matches its persisted after-state."""
@@ -1617,6 +1621,9 @@ class TransactionDriftError(RuntimeError):
             "committed transaction target drift detected; use a new operation_id: "
             + ", ".join(paths)
         )
+
+    def __reduce__(self):
+        return (self.__class__, (self.transaction_id, self.paths))
 
 
 class ProjectPendingPriorError(TransactionFailure):
@@ -1633,6 +1640,10 @@ class ProjectPendingPriorError(TransactionFailure):
         self.project = project
         self.sequence = sequence
         self.prior_sequence = prior_sequence
+
+    def __reduce__(self):
+        """This subclass takes its own arguments, not the base three."""
+        return (self.__class__, (self.project, self.sequence, self.prior_sequence))
 
 
 class TargetBoundaryFailure(RuntimeError):

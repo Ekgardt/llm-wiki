@@ -1573,6 +1573,9 @@ def test_constructor_accepts_live_sub_half_second_owner_start_deadline(
             protocol.close(real_monotonic() + 1)
 
 
+_MONOTONIC_TICK = 0.0156
+
+
 def test_constructor_rechecks_budget_before_each_owner_thread_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1585,8 +1588,11 @@ def test_constructor_rechecks_budget_before_each_owner_thread_start(
         starts.append(thread.name)
         if thread.name.startswith("lsp-stdin-"):
             remaining = startup_deadline - time.monotonic()
-            if remaining > 0:
-                time.sleep(remaining + 0.01)
+            if remaining > -_MONOTONIC_TICK:
+                # `time.monotonic()` advances in 15.6 ms steps on Windows, so
+                # overshoot the deadline by several ticks or the recheck still
+                # reads a time inside the budget.
+                time.sleep(remaining + _MONOTONIC_TICK * 4)
         real_start(thread)
 
     reader = _BlockingReader()

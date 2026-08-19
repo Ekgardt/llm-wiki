@@ -1294,3 +1294,40 @@ def test_a_failed_direct_spawn_leaves_a_capture_failure_trace(monkeypatch, capsy
     assert [item[0] for item in recorded] == ["session_end", "pre_compact"]
     assert {item[1] for item in recorded} == {"flush_spawn_failed"}
     assert {item[2]["session_id"] for item in recorded} == {"session-7"}
+
+
+def test_operational_errors_survive_a_process_boundary():
+    """These cross the queue worker's process boundary; they must arrive intact.
+
+    A `BlackboardConflictError` in a worker child used to reach the parent as
+    `TypeError: __init__() missing 1 required positional argument`, hiding the
+    real failure.
+    """
+    import pickle
+
+    from blackboard import BlackboardConflictError
+    from markdown_transaction import (
+        ProjectPendingPriorError,
+        TransactionDriftError,
+        TransactionFailure,
+    )
+    from memory_queue import QueueOperationError
+    from operational_ownership import OperationalOwnershipError
+    from project_journal import ProjectJournalReadError, ProjectJournalRebuildRequired
+
+    errors = [
+        BlackboardConflictError(("resource-a",), "conflict-1"),
+        TransactionFailure("boom", "target_drift", "committed"),
+        TransactionDriftError("tx-1", ("knowledge/notes/a.md",)),
+        ProjectPendingPriorError("demo", 4, 3),
+        ProjectJournalRebuildRequired("demo", 4, 2),
+        ProjectJournalReadError("unreadable", "file is not regular"),
+        QueueOperationError("process_cleanup_failed", "child exited 1"),
+        OperationalOwnershipError("owner_busy", "another owner holds the lease"),
+    ]
+
+    for error in errors:
+        restored = pickle.loads(pickle.dumps(error))
+        assert type(restored) is type(error)
+        assert str(restored) == str(error)
+        assert vars(restored) == vars(error)
