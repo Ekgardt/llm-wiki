@@ -25,20 +25,22 @@ def _normalized_filename_stem(value: str) -> str:
     return "-".join(part for part in re.split(r"[\s_-]+", name) if part)
 
 
+def _first_exact_filename(
+    candidates: Sequence[RetrievalCandidate], normalized: str
+) -> RetrievalCandidate | None:
+    for candidate in candidates:
+        if _normalized_filename_stem(candidate.relative_path) == normalized:
+            return candidate
+    return None
+
+
 def _promote_exact_filename(
     candidates: Sequence[RetrievalCandidate], query: str
 ) -> tuple[RetrievalCandidate, ...]:
     normalized = _normalized_filename_stem(query)
     if not normalized:
         return tuple(candidates)
-    exact = next(
-        (
-            candidate
-            for candidate in candidates
-            if _normalized_filename_stem(candidate.relative_path) == normalized
-        ),
-        None,
-    )
+    exact = _first_exact_filename(candidates, normalized)
     if exact is None:
         return tuple(candidates)
     return (exact, *(candidate for candidate in candidates if candidate is not exact))
@@ -48,6 +50,15 @@ class OptionalStageTimeout(TimeoutError):
     """An optional uninterruptible stage exceeded its isolated budget."""
 
 
+def _require_optional_stage_time(
+    deadline: float, cancelled: Callable[[], bool] | None
+) -> None:
+    if deadline - time.monotonic() <= 0:
+        raise OptionalStageTimeout("optional stage deadline reached")
+    if cancelled is not None and cancelled():
+        raise OptionalStageTimeout("optional stage deadline reached")
+
+
 def _run_optional_bounded(
     operation: Callable[[], Any],
     *,
@@ -55,15 +66,26 @@ def _run_optional_bounded(
     cancelled: Callable[[], bool] | None,
 ) -> Any:
     """Run optional work with a hard wait bound and capped daemon stragglers."""
-    remaining = deadline - time.monotonic()
-    if remaining <= 0 or (cancelled is not None and cancelled()):
-        raise OptionalStageTimeout("optional stage deadline reached")
+    _require_optional_stage_time(deadline, cancelled)
     slots = _OPTIONAL_STAGE_SLOTS
     if not slots.acquire(blocking=False):
         raise OptionalStageTimeout("optional stage capacity exhausted")
     completed = threading.Event()
     result: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+    _start_optional_worker(operation, result, completed, slots)
+    _await_optional_stage(completed, deadline, cancelled)
+    ok, value = result.get_nowait()
+    if ok:
+        return value
+    raise value
 
+
+def _start_optional_worker(
+    operation: Callable[[], Any],
+    result: queue.Queue[tuple[bool, Any]],
+    completed: threading.Event,
+    slots: threading.BoundedSemaphore,
+) -> None:
     def run() -> None:
         try:
             result.put((True, operation()))
@@ -73,16 +95,20 @@ def _run_optional_bounded(
             completed.set()
             slots.release()
 
-    worker = threading.Thread(
-        target=run,
-        name="llm-wiki-optional-retrieval",
-        daemon=True,
-    )
+    worker = threading.Thread(target=run, name="llm-wiki-optional-retrieval", daemon=True)
     try:
         worker.start()
     except BaseException:
         slots.release()
         raise
+
+
+def _await_optional_stage(
+    completed: threading.Event,
+    deadline: float,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    """Wait out one optional stage; a straggler keeps running as a daemon."""
     stage_deadline = min(deadline, time.monotonic() + OPTIONAL_STAGE_MAX_SECONDS)
     while not completed.is_set():
         if cancelled is not None and cancelled():
@@ -91,10 +117,6 @@ def _run_optional_bounded(
         if wait <= 0:
             raise OptionalStageTimeout("optional stage deadline reached")
         completed.wait(min(wait, 0.01))
-    ok, value = result.get_nowait()
-    if ok:
-        return value
-    raise value
 
 PROFILES = (
     "DIRECT",
@@ -431,11 +453,7 @@ def _as_int(value: object, default: int = 0) -> int:
 
 
 def _heading_path(value: object) -> tuple[str, ...]:
-    if value is None:
-        return ()
-    if isinstance(value, tuple):
-        return tuple(str(item) for item in value)
-    if isinstance(value, list):
+    if isinstance(value, (tuple, list)):
         return tuple(str(item) for item in value)
     if isinstance(value, str) and value:
         return (value,)
@@ -466,13 +484,17 @@ def _graph_seeds(
     selected: dict[str, Mapping[str, Any]] = {}
     for rows in (lexical or (), dense or ()):
         for rank, row in enumerate(rows, start=1):
-            confidence = row.get("retrieval_confidence")
-            if confidence is not None and str(confidence).casefold() != "high":
-                continue
-            if confidence is None and rank > GRAPH_SEED_LIMIT:
-                continue
-            selected.setdefault(_candidate_key(row), row)
+            if _seed_qualifies(row, rank):
+                selected.setdefault(_candidate_key(row), row)
     return tuple(selected.values())[:GRAPH_SEED_LIMIT]
+
+
+def _seed_qualifies(row: Mapping[str, Any], rank: int) -> bool:
+    """A stated high confidence qualifies; otherwise the rank has to."""
+    confidence = row.get("retrieval_confidence")
+    if confidence is None:
+        return rank <= GRAPH_SEED_LIMIT
+    return str(confidence).casefold() == "high"
 
 
 def _query_terms(text: str) -> frozenset[str]:
@@ -495,23 +517,32 @@ def _assertion_path(row: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
         return ()
     path: list[dict[str, Any]] = []
     for raw_step in raw_path:
-        if not isinstance(raw_step, Mapping):
+        step = _assertion_step(raw_step)
+        if step is None:
             return ()
-        assertion_id = raw_step.get("assertion_id")
-        raw_evidence = raw_step.get("evidence_ids")
-        if not isinstance(assertion_id, str) or not assertion_id:
-            return ()
-        if not isinstance(raw_evidence, (list, tuple)) or not raw_evidence:
-            return ()
-        evidence_ids = tuple(
-            str(item) for item in raw_evidence if isinstance(item, str) and item
-        )
-        if not evidence_ids:
-            return ()
-        step = dict(raw_step)
-        step["evidence_ids"] = evidence_ids
         path.append(step)
     return tuple(path)
+
+
+def _assertion_step(raw_step: object) -> dict[str, Any] | None:
+    """One path step, or None when its identity or evidence is unusable."""
+    if not isinstance(raw_step, Mapping):
+        return None
+    assertion_id = raw_step.get("assertion_id")
+    if not isinstance(assertion_id, str) or not assertion_id:
+        return None
+    evidence_ids = _evidence_id_tuple(raw_step.get("evidence_ids"))
+    if not evidence_ids:
+        return None
+    step = dict(raw_step)
+    step["evidence_ids"] = evidence_ids
+    return step
+
+
+def _evidence_id_tuple(raw_evidence: object) -> tuple[str, ...]:
+    if not isinstance(raw_evidence, (list, tuple)):
+        return ()
+    return tuple(item for item in raw_evidence if isinstance(item, str) and item)
 
 
 def _prepare_graph_hits(
@@ -946,6 +977,90 @@ def fuse_rrf(
     return tuple(candidates), meta
 
 
+def _dense_is_missing(ran_dense: bool, dense_available: bool | None) -> bool:
+    if dense_available is False:
+        return True
+    return dense_available is None and not ran_dense
+
+
+def _dense_signal(
+    wanted: Sequence[str], ran_dense: bool, dense_available: bool | None
+) -> tuple[str | None, str | None]:
+    """(signal, fallback reason) for the dense backend."""
+    if "dense" not in wanted:
+        return None, None
+    if dense_available is True and ran_dense:
+        return "dense", None
+    if _dense_is_missing(ran_dense, dense_available):
+        return None, "dense_unavailable"
+    return None, None
+
+
+def _graph_signal(
+    wanted: Sequence[str],
+    ran_graph: bool,
+    graph_available: bool | None,
+    graph_enabled: bool,
+) -> tuple[str | None, str | None]:
+    """(signal, fallback reason) for the graph backend."""
+    if "graph" not in wanted:
+        return None, None
+    if not graph_enabled:
+        return None, "graph_disabled"
+    if graph_available is True and ran_graph:
+        return "graph", None
+    return None, "graph_unavailable"
+
+
+def _effective_for_hybrid(signals: set[str], requested: str) -> str:
+    if "dense" in signals:
+        return "HYBRID"
+    return _lexical_or_requested(signals, requested)
+
+
+def _effective_for_graph(signals: set[str], requested: str) -> str:
+    if "graph" in signals:
+        return "GRAPH"
+    return _lexical_or_requested(signals, requested)
+
+
+def _effective_for_global(signals: set[str], requested: str) -> str:
+    if "dense" in signals and "graph" in signals:
+        return "GLOBAL"
+    if "dense" in signals:
+        return "HYBRID"
+    return _effective_for_graph(signals, requested)
+
+
+def _effective_for_graph_profile(signals: set[str], requested: str) -> str:
+    """REPO_MAP and IMPACT keep their name only while the graph answered."""
+    if "graph" in signals:
+        return requested
+    return _lexical_or_requested(signals, requested)
+
+
+def _lexical_or_requested(signals: set[str], requested: str) -> str:
+    if "lexical" in signals:
+        return "BASE"
+    return requested
+
+
+def _effective_mode(requested: str, signals: set[str]) -> str:
+    resolvers = {
+        "HYBRID": _effective_for_hybrid,
+        "GRAPH": _effective_for_graph,
+        "GLOBAL": _effective_for_global,
+        "REPO_MAP": _effective_for_graph_profile,
+        "IMPACT": _effective_for_graph_profile,
+    }
+    resolver = resolvers.get(requested)
+    if resolver is not None:
+        return resolver(signals, requested)
+    if signals:
+        return requested
+    return "BASE"
+
+
 def _resolve_effective_mode(
     requested: str,
     *,
@@ -958,52 +1073,34 @@ def _resolve_effective_mode(
     graph_enabled: bool,
 ) -> tuple[str, str | None, tuple[str, ...]]:
     """Compute truthful effective mode, signals, and a single fallback reason."""
-    signals: list[str] = []
-    fallback: str | None = None
+    dense_signal, fallback = _dense_signal(wanted, ran_dense, dense_available)
+    graph_signal, graph_fallback = _graph_signal(
+        wanted, ran_graph, graph_available, graph_enabled
+    )
+    signals = _collected_signals(
+        _lexical_signal(wanted, ran_lexical), dense_signal, graph_signal, ran_lexical
+    )
+    return (
+        _effective_mode(requested, set(signals)),
+        fallback or graph_fallback,
+        tuple(signals),
+    )
 
-    if "lexical" in wanted and ran_lexical:
-        signals.append("lexical")
 
-    if "dense" in wanted:
-        if dense_available is True and ran_dense:
-            signals.append("dense")
-        elif dense_available is False or (dense_available is None and not ran_dense):
-            fallback = fallback or "dense_unavailable"
-
-    if "graph" in wanted:
-        if not graph_enabled:
-            fallback = fallback or "graph_disabled"
-        elif graph_available is True and ran_graph:
-            signals.append("graph")
-        else:
-            fallback = fallback or "graph_unavailable"
-
+def _collected_signals(
+    lexical: list[str], dense: str | None, graph: str | None, ran_lexical: bool
+) -> list[str]:
+    """Signals that actually answered; a lexical-only run still says so."""
+    signals = [*lexical, *(item for item in (dense, graph) if item is not None)]
     if not signals and ran_lexical:
-        signals.append("lexical")
+        return ["lexical"]
+    return signals
 
-    signal_set = set(signals)
-    if requested == "HYBRID":
-        effective = "HYBRID" if "dense" in signal_set else ("BASE" if "lexical" in signal_set else requested)
-    elif requested == "GRAPH":
-        effective = "GRAPH" if "graph" in signal_set else ("BASE" if "lexical" in signal_set else requested)
-    elif requested == "GLOBAL":
-        if "dense" in signal_set and "graph" in signal_set:
-            effective = "GLOBAL"
-        elif "dense" in signal_set:
-            effective = "HYBRID"
-        elif "graph" in signal_set:
-            effective = "GRAPH"
-        else:
-            effective = "BASE" if "lexical" in signal_set else requested
-    elif requested in {"REPO_MAP", "IMPACT"}:
-        if "graph" in signal_set:
-            effective = requested
-        else:
-            effective = "BASE" if "lexical" in signal_set else requested
-    else:
-        effective = requested if signals else "BASE"
 
-    return effective, fallback, tuple(signals)
+def _lexical_signal(wanted: Sequence[str], ran_lexical: bool) -> list[str]:
+    if "lexical" in wanted and ran_lexical:
+        return ["lexical"]
+    return []
 
 
 def _check_deadline(deadline_monotonic: float | None) -> None:
