@@ -2106,13 +2106,21 @@ def _validated_source_manifest(
     return source_manifest
 
 
+def _all_ints(values: tuple[object, ...]) -> bool:
+    return all(isinstance(value, int) for value in values)
+
+
+def _valid_source_shape(
+    relative_path: object, digest: object, size: object, content_size: object
+) -> bool:
+    return _all_strings((relative_path, digest)) and _all_ints((size, content_size))
+
+
 def _valid_source_row(row: tuple[object, ...], seen: set[str]) -> bool:
     source_id, relative_path, digest, size, content_size = row
     if not isinstance(source_id, str) or source_id in seen:
         return False
-    if not isinstance(relative_path, str) or not isinstance(digest, str):
-        return False
-    if not isinstance(size, int) or not isinstance(content_size, int):
+    if not _valid_source_shape(relative_path, digest, size, content_size):
         return False
     return content_size <= MAX_CORPUS_FILE_BYTES and size == content_size
 
@@ -3373,6 +3381,33 @@ def _legacy_index_needs_rebuild(
     return _needs_rebuild(pages, deadline=deadline, cancelled=cancelled)
 
 
+def _clipped_summary(summary: object) -> str:
+    if not summary:
+        return ""
+    return summary[:120]
+
+
+def _legacy_hit(
+    path: object,
+    title: object,
+    summary: object,
+    project: str,
+    timestamp: str,
+    score: float,
+) -> dict:
+    return {
+        "path": path,
+        "title": title,
+        "summary": _clipped_summary(summary),
+        "score": score,
+        "bm25_score": score,
+        "project": project,
+        "timestamp": timestamp,
+        "candidate_id": Path(path).stem,
+        "generation": "legacy",
+    }
+
+
 def _legacy_hit_rows(
     rows: list[tuple],
     *,
@@ -3388,29 +3423,21 @@ def _legacy_hit_rows(
     for row in rows:
         _check_legacy_stop(deadline, cancelled)
         path, title, summary, proj, timestamp, rank = row
-        if _legacy_row_excluded(str(path), str(timestamp or ""), since, as_of):
+        row_project = proj or ""
+        row_timestamp = timestamp or ""
+        if _legacy_row_excluded(str(path), str(row_timestamp), since, as_of):
             continue
         score = _boosted_lexical_score(
             rank,
             path=path,
             title=title,
-            row_project=proj or "",
+            row_project=row_project,
             query_lower=query_lower,
             query_words=query_words,
             project=project,
         )
         hits.append(
-            {
-                "path": path,
-                "title": title,
-                "summary": summary[:120] if summary else "",
-                "score": score,
-                "bm25_score": score,
-                "project": proj or "",
-                "timestamp": timestamp or "",
-                "candidate_id": Path(path).stem,
-                "generation": "legacy",
-            }
+            _legacy_hit(path, title, summary, row_project, row_timestamp, score)
         )
     return hits
 
