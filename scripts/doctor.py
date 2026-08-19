@@ -358,102 +358,171 @@ def _queue_artifact_state(state_root: Path, deadline: float) -> dict[str, Any]:
     return details
 
 
+def _unreadable_queue_result(state_root: Path, deadline: float, message: str) -> dict:
+    details = _queue_artifact_state(state_root, deadline)
+    details.update(read_error=True, states={state: 0 for state in QUEUE_STATES})
+    details["deletion_codes"].append("queue_state_unreadable")
+    return _result("queue", "error", message, details)
+
+
+def _new_queue_counts() -> dict:
+    return {
+        "pending": 0,
+        "permanently_failed": 0,
+        "stale_leases": 0,
+        "ownerless_leases": 0,
+        "unsafe_entries": 0,
+        "oversized_entries": 0,
+        "scanned": 0,
+        "truncated": False,
+    }
+
+
+def _count_stale_processing(entry: os.DirEntry, now: datetime, counts: dict) -> None:
+    try:
+        modified = entry.stat(follow_symlinks=False).st_mtime
+    except OSError:
+        counts["unsafe_entries"] += 1
+        return
+    if now.timestamp() - modified <= STALE_LEASE_SECONDS:
+        return
+    counts["stale_leases"] += 1
+    counts["ownerless_leases"] += 1
+
+
+def _count_problem_entry(
+    entry: os.DirEntry, problem: str, now: datetime, counts: dict
+) -> None:
+    counts["unsafe_entries"] += problem == "unsafe"
+    counts["oversized_entries"] += problem == "oversized"
+    counts["truncated"] = counts["truncated"] or problem == "oversized"
+    if problem == "invalid" and entry.name.endswith(".json"):
+        counts["permanently_failed"] += 1
+        return
+    if entry.name.endswith(".processing"):
+        _count_stale_processing(entry, now, counts)
+
+
+def _count_pending_task(task: dict, counts: dict) -> None:
+    counts["pending"] += 1
+    try:
+        attempts = int(task.get("attempts", 0))
+    except (ValueError, TypeError):
+        counts["permanently_failed"] += 1
+        return
+    counts["permanently_failed"] += attempts >= PERMANENT_FAILURE_ATTEMPTS
+
+
+def _scan_queue_entry(
+    entry: os.DirEntry, queue: Path, now: datetime, counts: dict
+) -> None:
+    task, problem = _read_bounded_json(Path(entry.path), queue)
+    if problem:
+        _count_problem_entry(entry, problem, now, counts)
+        return
+    if entry.name.endswith(".json"):
+        _count_pending_task(task, counts)
+        return
+    stale, owned = _lease_state(task, now)
+    counts["stale_leases"] += stale
+    counts["ownerless_leases"] += stale and not owned
+
+
+def _queue_entry_of_interest(entry: os.DirEntry) -> bool:
+    return entry.name.endswith(".json") or entry.name.endswith(".processing")
+
+
+def _scan_queue_entries(
+    entries, queue: Path, now: datetime, deadline: float, counts: dict
+) -> None:
+    for entry in entries:
+        if counts["scanned"] >= MAX_QUEUE_FILES or time.monotonic() >= deadline:
+            counts["truncated"] = True
+            return
+        counts["scanned"] += 1
+        if _queue_entry_of_interest(entry):
+            _scan_queue_entry(entry, queue, now, counts)
+
+
+def _scan_legacy_queue(
+    state_root: Path, now: datetime, deadline: float, counts: dict
+) -> None:
+    queue = state_root / "run" / "queue"
+    kind, _ = _safe_kind(queue, state_root)
+    if kind == "missing":
+        return
+    if kind != "directory":
+        counts["unsafe_entries"] += 1
+        return
+    try:
+        with os.scandir(queue) as entries:
+            _scan_queue_entries(entries, queue, now, deadline, counts)
+    except OSError:
+        counts["unsafe_entries"] += 1
+
+
+def _legacy_queue_degraded(counts: dict) -> bool:
+    return any(
+        counts[key]
+        for key in (
+            "pending",
+            "stale_leases",
+            "unsafe_entries",
+            "oversized_entries",
+            "truncated",
+        )
+    )
+
+
+def _legacy_queue_status(counts: dict) -> tuple[str, str]:
+    if counts["permanently_failed"]:
+        return (
+            "error",
+            f"Queue has {counts['permanently_failed']} permanently failed task(s).",
+        )
+    if _legacy_queue_degraded(counts):
+        return (
+            "degraded",
+            f"Queue has {counts['pending']} pending task(s) and "
+            f"{counts['stale_leases']} stale lease(s).",
+        )
+    return "ok", "Queue has no pending or stale work."
+
+
+def _adjusted_queue_status(status: str, artifacts: dict) -> str:
+    if not artifacts["deletion_codes"]:
+        return status
+    if artifacts["artifact_error"]:
+        return "error"
+    if status == "ok":
+        return "degraded"
+    return status
+
+
+def _legacy_queue_result(state_root: Path, now: datetime, deadline: float) -> dict:
+    counts = _new_queue_counts()
+    _scan_legacy_queue(state_root, now, deadline, counts)
+    details = dict(counts, read_error=False)
+    artifacts = _queue_artifact_state(state_root, deadline)
+    details.update(artifacts)
+    status, message = _legacy_queue_status(counts)
+    return _result("queue", _adjusted_queue_status(status, artifacts), message, details)
+
+
 def _queue_check(state_root: Path, now: datetime, deadline: float) -> dict:
     database_path = state_root / "run" / "queue.sqlite3"
     database_kind = _safe_kind(database_path, state_root)[0]
     if database_kind == "regular":
         return _queue_v2_check(state_root, now, deadline)
-    if database_kind == "missing" and _database_sidecar_present(database_path, state_root):
-        details = _queue_artifact_state(state_root, deadline)
-        details.update(read_error=True, states={state: 0 for state in QUEUE_STATES})
-        details["deletion_codes"].append("queue_state_unreadable")
-        return _result("queue", "error", "Queue sidecars lack a database.", details)
     if database_kind != "missing":
-        details = _queue_artifact_state(state_root, deadline)
-        details.update(read_error=True, states={state: 0 for state in QUEUE_STATES})
-        details["deletion_codes"].append("queue_state_unreadable")
-        return _result("queue", "error", "Queue database is unsafe.", details)
-    queue = state_root / "run" / "queue"
-    pending = 0
-    permanently_failed = 0
-    stale_leases = 0
-    ownerless_leases = 0
-    unsafe_entries = 0
-    oversized_entries = 0
-    scanned = 0
-    truncated = False
-    kind, _ = _safe_kind(queue, state_root)
-    if kind == "directory":
-        try:
-            entries = os.scandir(queue)
-            with entries:
-                for entry in entries:
-                    if scanned >= MAX_QUEUE_FILES or time.monotonic() >= deadline:
-                        truncated = True
-                        break
-                    scanned += 1
-                    if not (entry.name.endswith(".json") or entry.name.endswith(".processing")):
-                        continue
-                    task, problem = _read_bounded_json(Path(entry.path), queue)
-                    if problem:
-                        unsafe_entries += problem == "unsafe"
-                        oversized_entries += problem == "oversized"
-                        truncated = truncated or problem == "oversized"
-                        if problem == "invalid" and entry.name.endswith(".json"):
-                            permanently_failed += 1
-                        elif entry.name.endswith(".processing"):
-                            try:
-                                old = entry.stat(follow_symlinks=False).st_mtime
-                                if now.timestamp() - old > STALE_LEASE_SECONDS:
-                                    stale_leases += 1
-                                    ownerless_leases += 1
-                            except OSError:
-                                unsafe_entries += 1
-                        continue
-                    if entry.name.endswith(".json"):
-                        pending += 1
-                        try:
-                            permanently_failed += (
-                                int(task.get("attempts", 0)) >= PERMANENT_FAILURE_ATTEMPTS
-                            )
-                        except (ValueError, TypeError):
-                            permanently_failed += 1
-                    else:
-                        stale, owned = _lease_state(task, now)
-                        stale_leases += stale
-                        ownerless_leases += stale and not owned
-        except OSError:
-            unsafe_entries += 1
-    elif kind not in {"missing"}:
-        unsafe_entries += 1
-    details = {
-        "pending": pending,
-        "permanently_failed": permanently_failed,
-        "stale_leases": stale_leases,
-        "ownerless_leases": ownerless_leases,
-        "unsafe_entries": unsafe_entries,
-        "oversized_entries": oversized_entries,
-        "scanned": scanned,
-        "truncated": truncated,
-        "read_error": False,
-    }
-    artifacts = _queue_artifact_state(state_root, deadline)
-    details.update(artifacts)
-    if permanently_failed:
-        status, message = "error", f"Queue has {permanently_failed} permanently failed task(s)."
-    elif pending or stale_leases or unsafe_entries or oversized_entries or truncated:
-        status, message = (
-            "degraded",
-            f"Queue has {pending} pending task(s) and {stale_leases} stale lease(s).",
+        return _unreadable_queue_result(
+            state_root, deadline, "Queue database is unsafe."
         )
-    else:
-        status, message = "ok", "Queue has no pending or stale work."
-    if artifacts["deletion_codes"]:
-        if artifacts["artifact_error"]:
-            status = "error"
-        elif status == "ok":
-            status = "degraded"
-    return _result("queue", status, message, details)
+    if _database_sidecar_present(database_path, state_root):
+        return _unreadable_queue_result(
+            state_root, deadline, "Queue sidecars lack a database."
+        )
+    return _legacy_queue_result(state_root, now, deadline)
 
 
 def _read_busy_ms(deadline: float | None) -> int:
