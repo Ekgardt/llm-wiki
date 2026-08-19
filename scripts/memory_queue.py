@@ -2714,6 +2714,82 @@ def _purge_selection_changed(
     )
 
 
+def _require_semantic_decision_fences(
+    task_id: str,
+    intent_id: str,
+    stage: str,
+    decision_sha256: str,
+    task_fence: object,
+    intent_fence: object,
+    owner: object,
+    fence_type: type,
+    owner_type: type,
+) -> None:
+    if stage not in {"flush", "feedback", "feedback-verify"}:
+        raise ValueError("semantic decision stage is invalid")
+    if re.fullmatch(r"[0-9a-f]{64}", str(decision_sha256)) is None:
+        raise ValueError("decision_sha256 must be lowercase 64-hex")
+    if not isinstance(task_fence, TaskFence) or task_fence.task_id != task_id:
+        raise ValueError("task fence does not match")
+    _require_worker_intent_fence(intent_fence, intent_id, fence_type)
+    _require_matching_decision_owner(owner, task_fence, intent_fence, owner_type)
+
+
+def _require_worker_intent_fence(
+    intent_fence: object, intent_id: str, fence_type: type
+) -> None:
+    if not isinstance(intent_fence, fence_type):
+        raise ValueError("intent fence does not match")
+    if intent_fence.intent_id != intent_id or intent_fence.mode != "worker":
+        raise ValueError("intent fence does not match")
+
+
+def _require_matching_decision_owner(
+    owner: object, task_fence: object, intent_fence: object, owner_type: type
+) -> None:
+    if not isinstance(owner, owner_type):
+        raise ValueError("semantic decision owner does not match fences")
+    if task_fence.owner != owner or intent_fence.owner != owner:
+        raise ValueError("semantic decision owner does not match fences")
+
+
+def _semantic_seal_digest(
+    task_id: str, intent_id: str, stage: str, active_link_digest: str
+) -> str:
+    return sha256_bytes(
+        canonical_json_bytes(
+            {
+                "active_digest": active_link_digest,
+                "consumer_id": f"{intent_id}:{stage}",
+                "consumer_kind": "semantic-decision",
+                "task_id": task_id,
+            }
+        )
+    )
+
+
+def _semantic_decision_matches(
+    existing: sqlite3.Row,
+    intent_id: str,
+    stage: str,
+    seal_digest: str,
+    decision_path: str,
+    decision_sha256: str,
+    active_link_digest: str,
+) -> bool:
+    if existing["consumer_kind"] != "semantic-decision":
+        return False
+    if existing["consumer_id"] != f"{intent_id}:{stage}":
+        return False
+    if existing["seal_digest"] != seal_digest:
+        return False
+    if existing["decision_path"] != decision_path:
+        return False
+    if existing["decision_sha256"] != decision_sha256:
+        return False
+    return existing["active_link_digest"] == active_link_digest
+
+
 def _redact_payload(value: object) -> object:
     if isinstance(value, str):
         return redact_secrets(value)
@@ -5563,6 +5639,159 @@ class _QueueV3CandidateReader:
             published_at=published_at,
         )
 
+    def _read_semantic_decision_bytes(
+        self, decision_path: str, decision_sha256: str, intent_id: str, stage: str
+    ) -> None:
+        _require_capture_decision_path(decision_path, intent_id, stage)
+        data = read_runtime_bytes(
+            self.state_root / decision_path,
+            self.state_root,
+            max_bytes=64 * 1024,
+            owner_only=True,
+        )
+        if sha256_bytes(data) != decision_sha256:
+            raise QueueOperationError("semantic_decision_conflict")
+
+    def _require_live_worker_intent(
+        self, intent_id: str, intent_fence: object, owner: OwnerLease, now: datetime
+    ) -> None:
+        registry = self.ownership_registry()
+        with closing(registry._connect()) as coordinator_database:
+            registry.require(coordinator_database, owner)
+            intent_row = coordinator_database.execute(
+                """SELECT 1 FROM intent_fences WHERE intent_id=? AND mode='worker'
+                   AND token=? AND fencing_epoch=? AND canonical_owner_token=?
+                   AND canonical_fencing_epoch=? AND expires_at>?""",
+                (
+                    intent_id,
+                    intent_fence.token,
+                    intent_fence.epoch,
+                    owner.token,
+                    owner.epoch,
+                    _timestamp(now),
+                ),
+            ).fetchone()
+        if intent_row is None:
+            raise QueueOperationError("intent_fence_lost")
+
+    def _require_live_task_fence(
+        self,
+        database: sqlite3.Connection,
+        task_id: str,
+        task_fence: TaskFence,
+        owner: OwnerLease,
+        now: datetime,
+    ) -> None:
+        projection = database.execute(
+            """SELECT 1 FROM queue_ownership WHERE owner_token=?
+               AND fencing_epoch=? AND expires_at>?""",
+            (owner.token, owner.epoch, _timestamp(now)),
+        ).fetchone()
+        fence_row = database.execute(
+            """SELECT 1 FROM task_fences WHERE task_id=? AND token=?
+               AND fencing_epoch=? AND canonical_owner_token=?
+               AND canonical_fencing_epoch=? AND expires_at>?""",
+            (
+                task_id,
+                task_fence.token,
+                task_fence.epoch,
+                owner.token,
+                owner.epoch,
+                _timestamp(now),
+            ),
+        ).fetchone()
+        if projection is None or fence_row is None:
+            raise QueueOperationError("task_fence_lost")
+
+    def _require_unsealed_capture_link(
+        self,
+        database: sqlite3.Connection,
+        task_id: str,
+        intent_id: str,
+        active_link_digest: str,
+    ) -> None:
+        active = self.active_capture_binding(database, task_id)
+        if active.intent_id != intent_id:
+            raise QueueOperationError("capture_link_conflicted")
+        if active.active_digest != active_link_digest:
+            raise QueueOperationError("capture_link_conflicted")
+        if active.seal_digest is not None:
+            raise QueueOperationError("capture_link_conflicted")
+
+    def _seal_semantic_decision(
+        self,
+        database: sqlite3.Connection,
+        *,
+        task_id: str,
+        intent_id: str,
+        stage: str,
+        decision_path: str,
+        decision_sha256: str,
+        active_link_digest: str,
+        seal_digest: str,
+        now: datetime,
+    ) -> None:
+        existing = database.execute(
+            """SELECT seal.*, decision.decision_path,
+                      decision.decision_sha256,decision.active_link_digest
+               FROM capture_task_link_seals AS seal
+               LEFT JOIN semantic_decisions AS decision
+                 ON decision.intent_id=? AND decision.stage=?
+               WHERE seal.task_id=?""",
+            (intent_id, stage, task_id),
+        ).fetchone()
+        if existing is not None:
+            if not _semantic_decision_matches(
+                existing,
+                intent_id,
+                stage,
+                seal_digest,
+                decision_path,
+                decision_sha256,
+                active_link_digest,
+            ):
+                raise QueueOperationError("semantic_decision_conflict")
+            return
+        inserted = database.execute(
+            """INSERT INTO capture_task_link_seals(
+                   task_id,active_digest,consumer_kind,consumer_id,
+                   seal_digest,sealed_at
+               ) VALUES (?,?,'semantic-decision',?,?,?)""",
+            (
+                task_id,
+                active_link_digest,
+                f"{intent_id}:{stage}",
+                seal_digest,
+                _timestamp(now),
+            ),
+        ).rowcount
+        if inserted != 1:
+            raise QueueOperationError("capture_link_seal_failed")
+        self._insert_semantic_decision(
+            database,
+            intent_id=intent_id,
+            stage=stage,
+            decision_path=decision_path,
+            decision_sha256=decision_sha256,
+            active_link_digest=active_link_digest,
+            published_at=_timestamp(now),
+        )
+
+    def _published_decision_time(
+        self, database: sqlite3.Connection, intent_id: str, stage: str
+    ) -> datetime:
+        published = database.execute(
+            """SELECT published_at FROM semantic_decisions
+               WHERE intent_id=? AND stage=?""",
+            (intent_id, stage),
+        ).fetchone()
+        if published is None:
+            raise QueueOperationError("semantic_decision_conflict")
+        published_at = _parse_timestamp(str(published["published_at"]))
+        if published_at is None:
+            raise QueueOperationError("semantic_decision_conflict")
+        return published_at
+
     def publish_semantic_decision(
         self,
         coordinator: object,
@@ -5580,144 +5809,42 @@ class _QueueV3CandidateReader:
         from markdown_transaction import IntentFence
         from operational_ownership import OwnerLease
 
-        if stage not in {"flush", "feedback", "feedback-verify"}:
-            raise ValueError("semantic decision stage is invalid")
-        if re.fullmatch(r"[0-9a-f]{64}", decision_sha256) is None:
-            raise ValueError("decision_sha256 must be lowercase 64-hex")
-        if not isinstance(task_fence, TaskFence) or task_fence.task_id != task_id:
-            raise ValueError("task fence does not match")
-        if (
-            not isinstance(intent_fence, IntentFence)
-            or intent_fence.intent_id != intent_id
-            or intent_fence.mode != "worker"
-        ):
-            raise ValueError("intent fence does not match")
-        if (
-            not isinstance(owner, OwnerLease)
-            or task_fence.owner != owner
-            or intent_fence.owner != owner
-        ):
-            raise ValueError("semantic decision owner does not match fences")
-        _require_capture_decision_path(decision_path, intent_id, stage)
-        candidate = self.state_root / decision_path
-        data = read_runtime_bytes(
-            candidate,
-            self.state_root,
-            max_bytes=64 * 1024,
-            owner_only=True,
+        _require_semantic_decision_fences(
+            task_id,
+            intent_id,
+            stage,
+            decision_sha256,
+            task_fence,
+            intent_fence,
+            owner,
+            IntentFence,
+            OwnerLease,
         )
-        if sha256_bytes(data) != decision_sha256:
-            raise QueueOperationError("semantic_decision_conflict")
-        registry = self.ownership_registry()
+        self._read_semantic_decision_bytes(
+            decision_path, decision_sha256, intent_id, stage
+        )
         now = _utc_now()
-        with closing(registry._connect()) as coordinator_database:
-            registry.require(coordinator_database, owner)
-            intent_row = coordinator_database.execute(
-                """SELECT 1 FROM intent_fences WHERE intent_id=? AND mode='worker'
-                   AND token=? AND fencing_epoch=? AND canonical_owner_token=?
-                   AND canonical_fencing_epoch=? AND expires_at>?""",
-                (
-                    intent_id,
-                    intent_fence.token,
-                    intent_fence.epoch,
-                    owner.token,
-                    owner.epoch,
-                    _timestamp(now),
-                ),
-            ).fetchone()
-            if intent_row is None:
-                raise QueueOperationError("intent_fence_lost")
-        seal_digest = sha256_bytes(
-            canonical_json_bytes(
-                {
-                    "active_digest": active_link_digest,
-                    "consumer_id": f"{intent_id}:{stage}",
-                    "consumer_kind": "semantic-decision",
-                    "task_id": task_id,
-                }
-            )
+        self._require_live_worker_intent(intent_id, intent_fence, owner, now)
+        seal_digest = _semantic_seal_digest(
+            task_id, intent_id, stage, active_link_digest
         )
         with closing(self._connect()) as database, begin_immediate(database):
-            projection = database.execute(
-                """SELECT 1 FROM queue_ownership WHERE owner_token=?
-                   AND fencing_epoch=? AND expires_at>?""",
-                (owner.token, owner.epoch, _timestamp(now)),
-            ).fetchone()
-            fence_row = database.execute(
-                """SELECT 1 FROM task_fences WHERE task_id=? AND token=?
-                   AND fencing_epoch=? AND canonical_owner_token=?
-                   AND canonical_fencing_epoch=? AND expires_at>?""",
-                (
-                    task_id,
-                    task_fence.token,
-                    task_fence.epoch,
-                    owner.token,
-                    owner.epoch,
-                    _timestamp(now),
-                ),
-            ).fetchone()
-            if projection is None or fence_row is None:
-                raise QueueOperationError("task_fence_lost")
-            active = self.active_capture_binding(database, task_id)
-            if (
-                active.intent_id != intent_id
-                or active.active_digest != active_link_digest
-                or active.seal_digest is not None
-            ):
-                raise QueueOperationError("capture_link_conflicted")
-            existing = database.execute(
-                """SELECT seal.*, decision.decision_path,
-                          decision.decision_sha256,decision.active_link_digest
-                   FROM capture_task_link_seals AS seal
-                   LEFT JOIN semantic_decisions AS decision
-                     ON decision.intent_id=? AND decision.stage=?
-                   WHERE seal.task_id=?""",
-                (intent_id, stage, task_id),
-            ).fetchone()
-            if existing is None:
-                inserted = database.execute(
-                    """INSERT INTO capture_task_link_seals(
-                           task_id,active_digest,consumer_kind,consumer_id,
-                           seal_digest,sealed_at
-                       ) VALUES (?,?,'semantic-decision',?,?,?)""",
-                    (
-                        task_id,
-                        active_link_digest,
-                        f"{intent_id}:{stage}",
-                        seal_digest,
-                        _timestamp(now),
-                    ),
-                ).rowcount
-                if inserted != 1:
-                    raise QueueOperationError("capture_link_seal_failed")
-                self._insert_semantic_decision(
-                    database,
-                    intent_id=intent_id,
-                    stage=stage,
-                    decision_path=decision_path,
-                    decision_sha256=decision_sha256,
-                    active_link_digest=active_link_digest,
-                    published_at=_timestamp(now),
-                )
-            elif (
-                existing["consumer_kind"] != "semantic-decision"
-                or existing["consumer_id"] != f"{intent_id}:{stage}"
-                or existing["seal_digest"] != seal_digest
-                or existing["decision_path"] != decision_path
-                or existing["decision_sha256"] != decision_sha256
-                or existing["active_link_digest"] != active_link_digest
-            ):
-                raise QueueOperationError("semantic_decision_conflict")
-            published = database.execute(
-                """SELECT published_at FROM semantic_decisions
-                   WHERE intent_id=? AND stage=?""",
-                (intent_id, stage),
-            ).fetchone()
-            if published is None:
-                raise QueueOperationError("semantic_decision_conflict")
-            published_at = _parse_timestamp(str(published["published_at"]))
-            if published_at is None:
-                raise QueueOperationError("semantic_decision_conflict")
+            self._require_live_task_fence(database, task_id, task_fence, owner, now)
+            self._require_unsealed_capture_link(
+                database, task_id, intent_id, active_link_digest
+            )
+            self._seal_semantic_decision(
+                database,
+                task_id=task_id,
+                intent_id=intent_id,
+                stage=stage,
+                decision_path=decision_path,
+                decision_sha256=decision_sha256,
+                active_link_digest=active_link_digest,
+                seal_digest=seal_digest,
+                now=now,
+            )
+            published_at = self._published_decision_time(database, intent_id, stage)
         return SemanticDecision(
             task_id=task_id,
             intent_id=intent_id,
