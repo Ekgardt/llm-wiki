@@ -886,6 +886,21 @@ def _client_message_payloads(events) -> list[dict]:
     return [event["message"] for event in events if event["kind"] == "client-message"]
 
 
+def _client_messages_once_logged(semantic_pyright, expected: int, timeout: float = 30.0):
+    """Wait for the fake server to log what it has already answered.
+
+    The server appends to its event log after replying, so a hosted macOS
+    runner could observe two of the three startup messages even though the
+    session had recorded all three as readiness evidence.
+    """
+    deadline = time.monotonic() + timeout
+    messages = _client_message_payloads(semantic_pyright.events())
+    while len(messages) < expected and time.monotonic() < deadline:
+        time.sleep(0.02)
+        messages = _client_message_payloads(semantic_pyright.events())
+    return messages
+
+
 def _assert_start_command(command, semantic_pyright, owner_root: Path) -> None:
     assert command == (
         str(semantic_pyright.identity.node_executable),
@@ -970,8 +985,7 @@ def test_start_uses_exact_command_initialize_and_configuration_contract(
         _assert_start_options(options, scope)
         _assert_owner_root_is_private(owner_root, state_root)
 
-        events = semantic_pyright.events()
-        client_messages = _client_message_payloads(events)
+        client_messages = _client_messages_once_logged(semantic_pyright, 3)
         assert [message["method"] for message in client_messages] == [
             "initialize",
             "initialized",
@@ -1038,7 +1052,9 @@ def test_start_uses_exact_command_initialize_and_configuration_contract(
         settings = thaw_pyright_profile_value(PYRIGHT_CONFIGURATION)
         assert client_messages[2]["params"] == {"settings": settings}
         configuration = next(
-            event for event in events if event["kind"] == "configuration"
+            event
+            for event in semantic_pyright.events()
+            if event["kind"] == "configuration"
         )
         assert configuration["values"] == [
             settings["python"],
