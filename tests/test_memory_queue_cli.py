@@ -58,6 +58,32 @@ def test_a_spawned_child_of_this_module_starts_and_reports_back() -> None:
         receiver.close()
 
 
+def _silent_sleeper() -> None:
+    """Sleep without reporting: the shape the worker's own child has."""
+    time.sleep(120)
+
+
+def test_a_spawned_child_that_only_sleeps_is_still_alive_five_seconds_later() -> None:
+    """The worker's child dies with exit code 1 on Windows before its deadline.
+
+    Its sibling probe, which reports first and then sleeps, survives — so this
+    one isolates the case where the child produces nothing before it is killed.
+    """
+    import multiprocessing
+
+    context = multiprocessing.get_context("spawn")
+    process = context.Process(target=_silent_sleeper, daemon=False)
+    process.start()
+    try:
+        time.sleep(5)
+        alive = process.is_alive()
+        exitcode = process.exitcode
+        assert alive, f"sleeping child exited {exitcode} on its own"
+    finally:
+        process.terminate()
+        process.join(30)
+
+
 def _result_processor(task: dict) -> memory_queue.DeferredResult:
     return memory_queue.DeferredResult(b"x" * task["payload"]["size"])
 

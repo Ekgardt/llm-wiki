@@ -2158,7 +2158,10 @@ def test_concurrent_installers_converge_on_one_valid_publication(
             executor.submit(install_pyright, state_root=state_root, artifact=artifact.path)
             for _ in range(2)
         ]
-        results = [future.result(timeout=10) for future in futures]
+        # Convergence is the claim, not speed: the loser waits for the winner's
+        # publication, and both together took longer than ten seconds on a
+        # loaded runner.
+        results = [future.result(timeout=120) for future in futures]
 
     assert results[0] == results[1]
     assert results[0].root == _root(state_root)
