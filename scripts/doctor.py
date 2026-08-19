@@ -593,259 +593,526 @@ def _transaction_artifacts(state_root: Path, deadline: float) -> tuple[set[str],
     return identifiers, unsafe
 
 
-def _transaction_check(state_root: Path, now: datetime, deadline: float = float("inf")) -> dict:
-    path = state_root / "run" / "markdown-transactions.sqlite3"
-    states = {state: 0 for state in TRANSACTION_STATES}
-    details: dict[str, Any] = {
-        "states": states,
-        "codes": [],
-        "undo_retained": 0,
-        "live_project_leases": 0,
-        "live_writers": 0,
-        "live_maintenance_owners": 0,
-        "read_error": False,
-        "deletion_codes": [],
+_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
+_TRANSACTION_ID_RE = re.compile(r"[0-9a-z_-]{1,128}")
+_TRANSACTION_QUERY = (
+    "SELECT id, operation_id, request_hash, state, preconditions_json, "
+    "plan_hash, created_at, updated_at, artifacts_pruned_at "
+    'FROM "transaction"'
+)
+_OPERATION_QUERY = (
+    "SELECT transaction_id, position, kind, path, before_hash, "
+    'after_hash, parent_device, parent_inode, applied FROM "operation"'
+)
+_OWNER_TABLE_QUERIES = {
+    "writer_owners": "SELECT * FROM writer_owners LIMIT ?",
+    "maintenance_owners": "SELECT * FROM maintenance_owners LIMIT ?",
+}
+
+
+def _is_digest(value: object) -> bool:
+    return isinstance(value, str) and _DIGEST_RE.fullmatch(value) is not None
+
+
+def _valid_operation_hash(value: object) -> bool:
+    """An operation names either a digest or the absence of content."""
+    return value == "absent" or _is_digest(value)
+
+
+# Which side of an operation is allowed to be absent, per kind.
+_OPERATION_ABSENCE = {
+    "create": (True, False),
+    "replace": (False, False),
+    "delete": (False, True),
+}
+
+
+def _valid_operation_transition(kind: object, before: object, after: object) -> bool:
+    expected = _OPERATION_ABSENCE.get(kind)
+    if expected is None:
+        return False
+    return (before == "absent", after == "absent") == expected
+
+
+def _valid_operation_position(position: object) -> bool:
+    if isinstance(position, bool) or not isinstance(position, int):
+        return False
+    return position >= 0
+
+
+def _valid_operation_identity(operation: sqlite3.Row, known_ids: set[str]) -> bool:
+    transaction_id = operation["transaction_id"]
+    if not isinstance(transaction_id, str) or transaction_id not in known_ids:
+        return False
+    if not _valid_operation_position(operation["position"]):
+        return False
+    return isinstance(operation["path"], str) and bool(operation["path"])
+
+
+def _valid_operation_change(operation: sqlite3.Row) -> bool:
+    before = operation["before_hash"]
+    after = operation["after_hash"]
+    if not _valid_operation_hash(before) or not _valid_operation_hash(after):
+        return False
+    return _valid_operation_transition(operation["kind"], before, after)
+
+
+def _valid_operation_parent(operation: sqlite3.Row) -> bool:
+    return (
+        isinstance(operation["parent_device"], int)
+        and isinstance(operation["parent_inode"], int)
+        and operation["applied"] in {0, 1}
+    )
+
+
+def _valid_operation_row(operation: sqlite3.Row, known_ids: set[str]) -> bool:
+    if not _valid_operation_identity(operation, known_ids):
+        return False
+    if not _valid_operation_change(operation):
+        return False
+    return _valid_operation_parent(operation)
+
+
+def _operation_positions(
+    operation_rows: list[sqlite3.Row], known_ids: set[str]
+) -> tuple[dict[str, list[int]], bool]:
+    """Positions recorded per transaction, and whether any row was malformed."""
+    positions: dict[str, list[int]] = {
+        transaction_id: [] for transaction_id in known_ids
     }
-    kind, _ = _safe_kind(path, state_root)
-    if kind == "missing":
-        artifacts, unsafe = _transaction_artifacts(state_root, deadline)
-        if artifacts or unsafe or _database_sidecar_present(path, state_root):
-            details["read_error"] = True
-            details["deletion_codes"].append("transaction_state_unreadable")
+    corrupt = False
+    for operation in operation_rows:
+        if not _valid_operation_row(operation, known_ids):
+            corrupt = True
+            continue
+        positions[operation["transaction_id"]].append(operation["position"])
+    return positions, corrupt
+
+
+def _valid_plan_hash(row: sqlite3.Row, state: str) -> bool:
+    if state == "preparing" and row["plan_hash"] == "":
+        return True
+    return _is_digest(row["plan_hash"])
+
+
+def _loaded_preconditions(row: sqlite3.Row) -> object:
+    try:
+        return json.loads(row["preconditions_json"])
+    except (TypeError, ValueError):
+        return None
+
+
+def _valid_transaction_identity(row: sqlite3.Row) -> bool:
+    transaction_id = row["id"]
+    if not isinstance(transaction_id, str) or not _TRANSACTION_ID_RE.fullmatch(
+        transaction_id
+    ):
+        return False
+    if not isinstance(row["operation_id"], str) or not row["operation_id"]:
+        return False
+    return _is_digest(row["request_hash"])
+
+
+def _valid_transaction_payload(row: sqlite3.Row, state: str) -> bool:
+    if not _valid_plan_hash(row, state):
+        return False
+    return isinstance(_loaded_preconditions(row), dict)
+
+
+def _valid_transaction_timestamps(row: sqlite3.Row) -> bool:
+    created = _parse_utc(row["created_at"])
+    updated = _parse_utc(row["updated_at"])
+    if created is None or updated is None or created > updated:
+        return False
+    if row["artifacts_pruned_at"] is None:
+        return True
+    return _parse_utc(row["artifacts_pruned_at"]) is not None
+
+
+def _valid_transaction_row(row: sqlite3.Row, state: str) -> bool:
+    return (
+        _valid_transaction_identity(row)
+        and _valid_transaction_payload(row, state)
+        and _valid_transaction_timestamps(row)
+    )
+
+
+def _transaction_row_corrupt(
+    row: sqlite3.Row, state: str, operation_positions: dict[str, list[int]]
+) -> bool:
+    if not _valid_transaction_row(row, state):
+        return True
+    positions = operation_positions.get(row["id"], [])
+    if positions != list(range(len(positions))):
+        return True
+    return state not in {"preparing", "discarded"} and not positions
+
+
+def _committed_within_undo_window(
+    row: sqlite3.Row, state: str, cutoff: datetime
+) -> bool:
+    if state != "committed" or row["artifacts_pruned_at"] is not None:
+        return False
+    updated = _parse_utc(row["updated_at"])
+    return updated is not None and updated >= cutoff
+
+
+def _undo_artifact_retained(
+    row: sqlite3.Row, state: str, cutoff: datetime, state_root: Path
+) -> bool:
+    if not _committed_within_undo_window(row, state, cutoff):
+        return False
+    transaction_id = row["id"]
+    if _TRANSACTION_ID_RE.fullmatch(transaction_id) is None:
+        return False
+    artifact = state_root / "run" / "transactions" / transaction_id
+    return _safe_kind(artifact, state_root)[0] == "directory"
+
+
+def _collect_error_code(
+    database: sqlite3.Connection,
+    row: sqlite3.Row,
+    state: str,
+    transaction_columns: set[str],
+    codes: set[str],
+) -> None:
+    if state not in {"conflicted", "quarantined"}:
+        return
+    if "error_code" not in transaction_columns:
+        return
+    code_row = database.execute(
+        'SELECT error_code FROM "transaction" WHERE id=?', (row["id"],)
+    ).fetchone()
+    if code_row is not None and code_row[0]:
+        codes.add(str(code_row[0]))
+
+
+def _scan_one_transaction_row(
+    database: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    states: dict[str, int],
+    details: dict,
+    codes: set[str],
+    operation_positions: dict[str, list[int]],
+    transaction_columns: set[str],
+    cutoff: datetime,
+    state_root: Path,
+) -> bool:
+    """Count one row and report whether it is corrupt."""
+    state = row["state"]
+    if not isinstance(state, str) or state not in TRANSACTION_STATES:
+        details["deletion_codes"].append("transaction_state_unknown")
+        return False
+    states[state] += 1
+    _collect_error_code(database, row, state, transaction_columns, codes)
+    if _undo_artifact_retained(row, state, cutoff, state_root):
+        details["undo_retained"] += 1
+    return _transaction_row_corrupt(row, state, operation_positions)
+
+
+def _scan_transaction_rows(
+    database: sqlite3.Connection,
+    transaction_rows: list[sqlite3.Row],
+    operation_positions: dict[str, list[int]],
+    transaction_columns: set[str],
+    *,
+    state_root: Path,
+    now: datetime,
+    deadline: float,
+    details: dict,
+    states: dict[str, int],
+) -> tuple[set[str], bool]:
+    codes: set[str] = set()
+    corrupt = False
+    cutoff = now - timedelta(days=UNDO_RETENTION_DAYS)
+    for row in transaction_rows:
+        if _deadline_reached(deadline):
+            raise TimeoutError("transaction check deadline")
+        corrupt = _scan_one_transaction_row(
+            database,
+            row,
+            states=states,
+            details=details,
+            codes=codes,
+            operation_positions=operation_positions,
+            transaction_columns=transaction_columns,
+            cutoff=cutoff,
+            state_root=state_root,
+        ) or corrupt
+    return codes, corrupt
+
+
+def _bounded_operational_rows(
+    database: sqlite3.Connection, query: str, details: dict, truncation_code: str
+) -> list[sqlite3.Row]:
+    rows = database.execute(
+        query + " LIMIT ?", (MAX_OPERATIONAL_ROWS + 1,)
+    ).fetchall()
+    if len(rows) <= MAX_OPERATIONAL_ROWS:
+        return rows
+    details["codes"].append(truncation_code)
+    details["deletion_codes"].append("transaction_state_unknown")
+    return rows[:MAX_OPERATIONAL_ROWS]
+
+
+def _lease_live(value: object, now: datetime) -> bool:
+    return (_parse_utc(value) or datetime.max.replace(tzinfo=timezone.utc)) > now
+
+
+def _count_project_leases(
+    database: sqlite3.Connection, tables: set[str], details: dict, now: datetime
+) -> None:
+    if "project_leases" not in tables:
+        return
+    rows = database.execute(
+        "SELECT expires_at FROM project_leases LIMIT ?", (MAX_OPERATIONAL_ROWS + 1,)
+    ).fetchall()
+    if len(rows) > MAX_OPERATIONAL_ROWS:
+        details["deletion_codes"].append("project_lease_state_unknown")
+    details["live_project_leases"] = sum(
+        _lease_live(row[0], now) for row in rows[:MAX_OPERATIONAL_ROWS]
+    )
+
+
+def _owner_token_present(row: sqlite3.Row) -> bool:
+    if "owner_token" not in row.keys():
+        return True
+    return bool(row["owner_token"])
+
+
+def _owner_row_unknown(row: sqlite3.Row, *, require_token: bool) -> bool:
+    if require_token and not _owner_token_present(row):
+        return False
+    return not _owner_row_known(row, pid_column="process_id")
+
+
+def _any_owner_row_unknown(rows: list[sqlite3.Row], require_token: bool) -> bool:
+    return any(_owner_row_unknown(row, require_token=require_token) for row in rows)
+
+
+def _count_owner_table(
+    database: sqlite3.Connection,
+    tables: set[str],
+    details: dict,
+    now: datetime,
+    *,
+    table: str,
+    unknown_code: str,
+    count_key: str,
+    require_token: bool,
+) -> None:
+    if table not in tables:
+        return
+    rows = database.execute(
+        _OWNER_TABLE_QUERIES[table], (MAX_OPERATIONAL_ROWS + 1,)
+    ).fetchall()
+    if len(rows) > MAX_OPERATIONAL_ROWS:
+        details["deletion_codes"].append(unknown_code)
+    bounded = rows[:MAX_OPERATIONAL_ROWS]
+    if _any_owner_row_unknown(bounded, require_token):
+        details["deletion_codes"].append(unknown_code)
+    details[count_key] = sum(
+        _live_owner(row, now, pid_column="process_id") for row in bounded
+    )
+
+
+def _count_owner_tables(
+    database: sqlite3.Connection, tables: set[str], details: dict, now: datetime
+) -> None:
+    _count_project_leases(database, tables, details, now)
+    _count_owner_table(
+        database,
+        tables,
+        details,
+        now,
+        table="writer_owners",
+        unknown_code="writer_state_unknown",
+        count_key="live_writers",
+        require_token=False,
+    )
+    _count_owner_table(
+        database,
+        tables,
+        details,
+        now,
+        table="maintenance_owners",
+        unknown_code="maintenance_state_unknown",
+        count_key="live_maintenance_owners",
+        require_token=True,
+    )
+
+
+def _artifact_mismatch(
+    row: sqlite3.Row, artifacts: set[str], known_ids: set[str]
+) -> bool:
+    transaction_id = row["id"]
+    if not isinstance(transaction_id, str) or transaction_id not in known_ids:
+        return True
+    expected = row["state"] != "discarded" and row["artifacts_pruned_at"] is None
+    return (transaction_id in artifacts) != expected
+
+
+def _artifacts_inconsistent(
+    state_root: Path,
+    transaction_rows: list[sqlite3.Row],
+    known_ids: set[str],
+    details: dict,
+    deadline: float,
+) -> bool:
+    artifacts, unsafe_artifacts = _transaction_artifacts(state_root, deadline)
+    if unsafe_artifacts or artifacts - known_ids:
+        details["deletion_codes"].append("transaction_artifact_state_unknown")
+    return any(
+        _artifact_mismatch(row, artifacts, known_ids) for row in transaction_rows
+    )
+
+
+def _known_transaction_ids(rows: list[sqlite3.Row]) -> set[str]:
+    return {row["id"] for row in rows if isinstance(row["id"], str)}
+
+
+def _scan_transaction_tables(
+    database: sqlite3.Connection,
+    tables: set[str],
+    transaction_columns: set[str],
+    *,
+    state_root: Path,
+    now: datetime,
+    deadline: float,
+    details: dict,
+    states: dict[str, int],
+) -> None:
+    transaction_rows = _bounded_operational_rows(
+        database, _TRANSACTION_QUERY, details, "transaction_scan_truncated"
+    )
+    operation_rows = _bounded_operational_rows(
+        database, _OPERATION_QUERY, details, "transaction_operation_scan_truncated"
+    )
+    known_ids = _known_transaction_ids(transaction_rows)
+    operation_positions, corrupt = _operation_positions(operation_rows, known_ids)
+    codes, rows_corrupt = _scan_transaction_rows(
+        database,
+        transaction_rows,
+        operation_positions,
+        transaction_columns,
+        state_root=state_root,
+        now=now,
+        deadline=deadline,
+        details=details,
+        states=states,
+    )
+    details["codes"] = sorted(set(details["codes"]) | codes)
+    _count_owner_tables(database, tables, details, now)
+    inconsistent = _artifacts_inconsistent(
+        state_root, transaction_rows, known_ids, details, deadline
+    )
+    if corrupt or rows_corrupt or inconsistent:
+        details["codes"].append("transaction_metadata_corrupt")
+        details["deletion_codes"].append("transaction_state_corrupt")
+
+
+def _operation_columns(
+    database: sqlite3.Connection, tables: set[str], deadline: float
+) -> set[str]:
+    if "operation" not in tables:
+        return set()
+    return _columns(database, "operation", deadline)
+
+
+def _transaction_schema_complete(
+    transaction_columns: set[str], operation_columns: set[str]
+) -> bool:
+    return TRANSACTION_REQUIRED_COLUMNS.issubset(
+        transaction_columns
+    ) and OPERATION_REQUIRED_COLUMNS.issubset(operation_columns)
+
+
+def _scan_transaction_database(
+    path: Path,
+    state_root: Path,
+    now: datetime,
+    deadline: float,
+    details: dict,
+    states: dict[str, int],
+) -> dict | None:
+    """Fill in the counters; return a result only when the schema is incomplete."""
+    with _readonly_database(path, state_root, deadline=deadline) as database:
+        if _deadline_reached(deadline):
+            raise TimeoutError("transaction check deadline")
+        tables = _tables(database, deadline)
+        if "transaction" not in tables:
+            raise sqlite3.DatabaseError("transaction table missing")
+        transaction_columns = _columns(database, "transaction", deadline)
+        operation_columns = _operation_columns(database, tables, deadline)
+        if not _transaction_schema_complete(transaction_columns, operation_columns):
+            details["codes"].append("transaction_metadata_missing")
+            details["deletion_codes"].append("transaction_state_corrupt")
             return _result(
                 "transactions",
                 "error",
-                "Transaction artifacts lack readable state.",
+                "Transaction metadata is incomplete.",
                 details,
             )
-        return _result("transactions", "ok", "No transaction database exists.", details)
-    if kind != "regular":
-        details["read_error"] = True
-        details["deletion_codes"].append("transaction_state_unreadable")
-        return _result("transactions", "error", "Transaction database is unsafe.", details)
-    try:
-        with _readonly_database(path, state_root, deadline=deadline) as database:
-            if _deadline_reached(deadline):
-                raise TimeoutError("transaction check deadline")
-            tables = _tables(database, deadline)
-            if "transaction" not in tables:
-                raise sqlite3.DatabaseError("transaction table missing")
-            transaction_columns = _columns(database, "transaction", deadline)
-            operation_columns = (
-                _columns(database, "operation", deadline) if "operation" in tables else set()
-            )
-            if not TRANSACTION_REQUIRED_COLUMNS.issubset(
-                transaction_columns
-            ) or not OPERATION_REQUIRED_COLUMNS.issubset(operation_columns):
-                details["codes"].append("transaction_metadata_missing")
-                details["deletion_codes"].append("transaction_state_corrupt")
-                return _result(
-                    "transactions",
-                    "error",
-                    "Transaction metadata is incomplete.",
-                    details,
-                )
-            transaction_query = (
-                "SELECT id, operation_id, request_hash, state, preconditions_json, "
-                "plan_hash, created_at, updated_at, artifacts_pruned_at "
-                'FROM "transaction"'
-            )
-            transaction_rows = database.execute(
-                transaction_query + " LIMIT ?", (MAX_OPERATIONAL_ROWS + 1,)
-            ).fetchall()
-            if len(transaction_rows) > MAX_OPERATIONAL_ROWS:
-                details["codes"].append("transaction_scan_truncated")
-                details["deletion_codes"].append("transaction_state_unknown")
-                transaction_rows = transaction_rows[:MAX_OPERATIONAL_ROWS]
-            codes: set[str] = set()
-            operation_rows = database.execute(
-                "SELECT transaction_id, position, kind, path, before_hash, "
-                'after_hash, parent_device, parent_inode, applied FROM "operation" '
-                "LIMIT ?",
-                (MAX_OPERATIONAL_ROWS + 1,),
-            ).fetchall()
-            corrupt = False
-            if len(operation_rows) > MAX_OPERATIONAL_ROWS:
-                details["codes"].append("transaction_operation_scan_truncated")
-                details["deletion_codes"].append("transaction_state_unknown")
-                operation_rows = operation_rows[:MAX_OPERATIONAL_ROWS]
-            known_ids = {row["id"] for row in transaction_rows if isinstance(row["id"], str)}
-            operation_positions: dict[str, list[int]] = {
-                transaction_id: [] for transaction_id in known_ids
-            }
-            digest = re.compile(r"[0-9a-f]{64}")
-            for operation in operation_rows:
-                transaction_id = operation["transaction_id"]
-                position = operation["position"]
-                before_hash = operation["before_hash"]
-                after_hash = operation["after_hash"]
-                valid_hashes = all(
-                    value == "absent"
-                    or isinstance(value, str)
-                    and digest.fullmatch(value) is not None
-                    for value in (before_hash, after_hash)
-                )
-                kind = operation["kind"]
-                valid_transition = (
-                    kind == "create"
-                    and before_hash == "absent"
-                    and after_hash != "absent"
-                    or kind == "replace"
-                    and before_hash != "absent"
-                    and after_hash != "absent"
-                    or kind == "delete"
-                    and before_hash != "absent"
-                    and after_hash == "absent"
-                )
-                valid_shape = (
-                    isinstance(transaction_id, str)
-                    and transaction_id in known_ids
-                    and isinstance(position, int)
-                    and not isinstance(position, bool)
-                    and position >= 0
-                    and kind in {"create", "replace", "delete"}
-                    and isinstance(operation["path"], str)
-                    and bool(operation["path"])
-                    and valid_hashes
-                    and valid_transition
-                    and isinstance(operation["parent_device"], int)
-                    and isinstance(operation["parent_inode"], int)
-                    and operation["applied"] in {0, 1}
-                )
-                if not valid_shape:
-                    corrupt = True
-                    continue
-                operation_positions[transaction_id].append(position)
-            cutoff = now - timedelta(days=UNDO_RETENTION_DAYS)
-            for row in transaction_rows:
-                if _deadline_reached(deadline):
-                    raise TimeoutError("transaction check deadline")
-                state = row["state"]
-                transaction_id = row["id"]
-                if not isinstance(state, str) or state not in TRANSACTION_STATES:
-                    details["deletion_codes"].append("transaction_state_unknown")
-                    continue
-                states[state] += 1
-                if state in {"conflicted", "quarantined"}:
-                    code_row = (
-                        database.execute(
-                            'SELECT error_code FROM "transaction" WHERE id=?', (row["id"],)
-                        ).fetchone()
-                        if "error_code" in transaction_columns
-                        else None
-                    )
-                    if code_row is not None and code_row[0]:
-                        codes.add(str(code_row[0]))
-                created = _parse_utc(row["created_at"])
-                updated = _parse_utc(row["updated_at"])
-                pruned = (
-                    _parse_utc(row["artifacts_pruned_at"])
-                    if row["artifacts_pruned_at"] is not None
-                    else None
-                )
-                try:
-                    preconditions = json.loads(row["preconditions_json"])
-                except (TypeError, ValueError):
-                    preconditions = None
-                valid_plan_hash = (state == "preparing" and row["plan_hash"] == "") or (
-                    isinstance(row["plan_hash"], str)
-                    and digest.fullmatch(row["plan_hash"]) is not None
-                )
-                row_corrupt = not (
-                    isinstance(transaction_id, str)
-                    and re.fullmatch(r"[0-9a-z_-]{1,128}", transaction_id)
-                    and isinstance(row["operation_id"], str)
-                    and bool(row["operation_id"])
-                    and isinstance(row["request_hash"], str)
-                    and digest.fullmatch(row["request_hash"])
-                    and isinstance(preconditions, dict)
-                    and valid_plan_hash
-                    and created is not None
-                    and updated is not None
-                    and created <= updated
-                    and (row["artifacts_pruned_at"] is None or pruned is not None)
-                )
-                positions = operation_positions.get(transaction_id, [])
-                if positions != list(range(len(positions))):
-                    row_corrupt = True
-                if state not in {"preparing", "discarded"} and not positions:
-                    row_corrupt = True
-                corrupt = corrupt or row_corrupt
-                artifact = state_root / "run" / "transactions" / transaction_id
-                if (
-                    state == "committed"
-                    and updated is not None
-                    and updated >= cutoff
-                    and row["artifacts_pruned_at"] is None
-                    and re.fullmatch(r"[0-9a-z_-]{1,128}", transaction_id) is not None
-                    and _safe_kind(artifact, state_root)[0] == "directory"
-                ):
-                    details["undo_retained"] += 1
-            details["codes"] = sorted(set(details["codes"]) | codes)
-            if "project_leases" in tables:
-                rows = database.execute(
-                    "SELECT expires_at FROM project_leases LIMIT ?",
-                    (MAX_OPERATIONAL_ROWS + 1,),
-                ).fetchall()
-                if len(rows) > MAX_OPERATIONAL_ROWS:
-                    details["deletion_codes"].append("project_lease_state_unknown")
-                details["live_project_leases"] = sum(
-                    (_parse_utc(row[0]) or datetime.max.replace(tzinfo=timezone.utc)) > now
-                    for row in rows[:MAX_OPERATIONAL_ROWS]
-                )
-            if "writer_owners" in tables:
-                rows = database.execute(
-                    "SELECT * FROM writer_owners LIMIT ?", (MAX_OPERATIONAL_ROWS + 1,)
-                ).fetchall()
-                if len(rows) > MAX_OPERATIONAL_ROWS:
-                    details["deletion_codes"].append("writer_state_unknown")
-                if any(
-                    not _owner_row_known(row, pid_column="process_id")
-                    for row in rows[:MAX_OPERATIONAL_ROWS]
-                ):
-                    details["deletion_codes"].append("writer_state_unknown")
-                details["live_writers"] = sum(
-                    _live_owner(row, now, pid_column="process_id")
-                    for row in rows[:MAX_OPERATIONAL_ROWS]
-                )
-            if "maintenance_owners" in tables:
-                rows = database.execute(
-                    "SELECT * FROM maintenance_owners LIMIT ?",
-                    (MAX_OPERATIONAL_ROWS + 1,),
-                ).fetchall()
-                if len(rows) > MAX_OPERATIONAL_ROWS:
-                    details["deletion_codes"].append("maintenance_state_unknown")
-                if any(
-                    (row["owner_token"] if "owner_token" in row.keys() else True)
-                    and not _owner_row_known(row, pid_column="process_id")
-                    for row in rows[:MAX_OPERATIONAL_ROWS]
-                ):
-                    details["deletion_codes"].append("maintenance_state_unknown")
-                details["live_maintenance_owners"] = sum(
-                    _live_owner(row, now, pid_column="process_id")
-                    for row in rows[:MAX_OPERATIONAL_ROWS]
-                )
-            artifacts, unsafe_artifacts = _transaction_artifacts(state_root, deadline)
-            if unsafe_artifacts or artifacts - known_ids:
-                details["deletion_codes"].append("transaction_artifact_state_unknown")
-            for row in transaction_rows:
-                transaction_id = row["id"]
-                if not isinstance(transaction_id, str) or transaction_id not in known_ids:
-                    corrupt = True
-                    continue
-                artifact_present = transaction_id in artifacts
-                expects_artifacts = (
-                    row["state"] != "discarded" and row["artifacts_pruned_at"] is None
-                )
-                if artifact_present != expects_artifacts:
-                    corrupt = True
-            if corrupt:
-                details["codes"].append("transaction_metadata_corrupt")
-                details["deletion_codes"].append("transaction_state_corrupt")
-    except (OSError, sqlite3.Error, TimeoutError, ValueError):
-        details["read_error"] = True
-        details["deletion_codes"].append("transaction_state_unreadable")
-        return _result("transactions", "error", "Transaction state is unreadable.", details)
+        _scan_transaction_tables(
+            database,
+            tables,
+            transaction_columns,
+            state_root=state_root,
+            now=now,
+            deadline=deadline,
+            details=details,
+            states=states,
+        )
+        return None
+
+
+def _unreadable_transactions(details: dict, message: str) -> dict:
+    details["read_error"] = True
+    details["deletion_codes"].append("transaction_state_unreadable")
+    return _result("transactions", "error", message, details)
+
+
+def _missing_transaction_database(
+    path: Path, state_root: Path, details: dict, deadline: float
+) -> dict:
+    artifacts, unsafe = _transaction_artifacts(state_root, deadline)
+    if artifacts or unsafe or _database_sidecar_present(path, state_root):
+        return _unreadable_transactions(
+            details, "Transaction artifacts lack readable state."
+        )
+    return _result("transactions", "ok", "No transaction database exists.", details)
+
+
+def _transaction_status(states: dict[str, int], problem: int, invalid: bool) -> str:
+    if states["conflicted"] or states["quarantined"] or invalid:
+        return "error"
+    if problem:
+        return "degraded"
+    return "ok"
+
+
+def _append_state_deletion_codes(details: dict, states: dict[str, int]) -> None:
+    if any(states.get(state, 0) for state in ("preparing", "prepared", "applying")):
+        details["deletion_codes"].append("transaction_nonterminal")
+    if states["conflicted"]:
+        details["deletion_codes"].append("transaction_conflicted")
+    if states["quarantined"]:
+        details["deletion_codes"].append("transaction_quarantined")
+
+
+def _append_live_deletion_codes(details: dict) -> None:
+    for key, code in (
+        ("undo_retained", "transaction_undo_retained"),
+        ("live_project_leases", "project_lease_live"),
+        ("live_writers", "writer_live"),
+        ("live_maintenance_owners", "maintenance_owner_live"),
+    ):
+        if details[key]:
+            details["deletion_codes"].append(code)
+
+
+def _transaction_result(details: dict, states: dict[str, int]) -> dict:
     details["codes"] = sorted(set(details["codes"]))
     details["deletion_codes"] = list(dict.fromkeys(details["deletion_codes"]))
     problem = (
@@ -857,35 +1124,51 @@ def _transaction_check(state_root: Path, now: datetime, deadline: float = float(
         code in details["deletion_codes"]
         for code in ("transaction_state_unknown", "transaction_state_corrupt")
     )
-    status = (
-        "error"
-        if states["conflicted"] or states["quarantined"] or invalid_state
-        else "degraded"
-        if problem
-        else "ok"
-    )
-    if any(states.get(state, 0) for state in ("preparing", "prepared", "applying")):
-        details["deletion_codes"].append("transaction_nonterminal")
-    if states["conflicted"]:
-        details["deletion_codes"].append("transaction_conflicted")
-    if states["quarantined"]:
-        details["deletion_codes"].append("transaction_quarantined")
-    if details["undo_retained"]:
-        details["deletion_codes"].append("transaction_undo_retained")
-    if details["live_project_leases"]:
-        details["deletion_codes"].append("project_lease_live")
-    if details["live_writers"]:
-        details["deletion_codes"].append("writer_live")
-    if details["live_maintenance_owners"]:
-        details["deletion_codes"].append("maintenance_owner_live")
+    _append_state_deletion_codes(details, states)
+    _append_live_deletion_codes(details)
+    message = "Transaction state is healthy."
+    if problem or invalid_state:
+        message = "Transaction state requires operator attention."
     return _result(
         "transactions",
-        status,
-        "Transaction state requires operator attention."
-        if problem or invalid_state
-        else "Transaction state is healthy.",
+        _transaction_status(states, problem, invalid_state),
+        message,
         details,
     )
+
+
+def _empty_transaction_details() -> tuple[dict, dict[str, int]]:
+    states = {state: 0 for state in TRANSACTION_STATES}
+    details: dict[str, Any] = {
+        "states": states,
+        "codes": [],
+        "undo_retained": 0,
+        "live_project_leases": 0,
+        "live_writers": 0,
+        "live_maintenance_owners": 0,
+        "read_error": False,
+        "deletion_codes": [],
+    }
+    return details, states
+
+
+def _transaction_check(state_root: Path, now: datetime, deadline: float = float("inf")) -> dict:
+    path = state_root / "run" / "markdown-transactions.sqlite3"
+    details, states = _empty_transaction_details()
+    kind, _ = _safe_kind(path, state_root)
+    if kind == "missing":
+        return _missing_transaction_database(path, state_root, details, deadline)
+    if kind != "regular":
+        return _unreadable_transactions(details, "Transaction database is unsafe.")
+    try:
+        incomplete = _scan_transaction_database(
+            path, state_root, now, deadline, details, states
+        )
+    except (OSError, sqlite3.Error, TimeoutError, ValueError):
+        return _unreadable_transactions(details, "Transaction state is unreadable.")
+    if incomplete is not None:
+        return incomplete
+    return _transaction_result(details, states)
 
 
 def _queue_v2_check(state_root: Path, now: datetime, deadline: float) -> dict:
