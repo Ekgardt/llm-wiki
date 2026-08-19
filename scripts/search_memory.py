@@ -354,43 +354,54 @@ def _write_generation_fts(
         raise ValueError("generation FTS integrity check failed")
 
 
-def build_generation_fts(
-    snapshot: CorpusSnapshot,
-    generation_directory: Path,
-    *,
-    deadline: float | None = None,
-    cancelled: Callable[[], bool] | None = None,
-) -> dict[str, object]:
-    """Build one immutable generation-local FTS5 artifact from captured chunks."""
+def _generation_stop_reached(
+    deadline: float | None, cancelled: Callable[[], bool] | None
+) -> bool:
+    if cancelled is not None and cancelled():
+        return True
+    return deadline is not None and time.monotonic() >= deadline
+
+
+def _require_buildable_snapshot(
+    snapshot: object,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> None:
     if not isinstance(snapshot, CorpusSnapshot):
         raise TypeError("snapshot must be a CorpusSnapshot")
     _check_generation_stop(deadline, cancelled)
     if len(snapshot.chunks) > MAX_GENERATION_FTS_CHUNKS:
         raise ValueError("generation FTS chunk row ceiling exceeded")
-    directory = _generation_directory(generation_directory)
-    destination = directory / GENERATION_FTS_ARTIFACT
-    if destination.exists() or destination.is_symlink():
-        raise FileExistsError(destination)
-    temporary = directory / f".{GENERATION_FTS_ARTIFACT}.{uuid.uuid4().hex}.tmp"
-    database = None
-    stopped = False
-    complete = False
+
+
+def _discard_unfinished_fts(destination: Path, temporary: Path, *, complete: bool) -> None:
+    if not complete:
+        _remove_quietly((destination,))
+    _remove_quietly((temporary,))
+
+
+def _built_fts_artifact(
+    snapshot: CorpusSnapshot,
+    directory: Path,
+    destination: Path,
+    temporary: Path,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> dict[str, object]:
+    """Write the artifact under a temporary name, then publish it atomically."""
+    state = {"stopped": False, "complete": False}
 
     def progress() -> int:
-        nonlocal stopped
-        stopped = bool(cancelled and cancelled()) or bool(
-            deadline is not None and time.monotonic() >= deadline
-        )
-        return int(stopped)
+        state["stopped"] = _generation_stop_reached(deadline, cancelled)
+        return int(state["stopped"])
 
     try:
-        database = sqlite3.connect(temporary)
-        database.set_progress_handler(progress, GENERATION_FTS_PROGRESS_OPCODES)
-        _write_generation_fts(
-            database, snapshot, deadline=deadline, cancelled=cancelled
-        )
-        database.close()
-        database = None
+        with closing(sqlite3.connect(temporary)) as database:
+            database.set_progress_handler(progress, GENERATION_FTS_PROGRESS_OPCODES)
+            _write_generation_fts(
+                database, snapshot, deadline=deadline, cancelled=cancelled
+            )
         fsync_file(temporary)
         _check_generation_stop(deadline, cancelled)
         _publish_new_file(temporary, destination)
@@ -401,18 +412,41 @@ def build_generation_fts(
             deadline=deadline,
             cancelled=cancelled,
         )
-        complete = True
+        state["complete"] = True
         return descriptor
     except sqlite3.DatabaseError as exc:
-        if stopped:
-            raise TimeoutError("generation FTS build cancelled or deadline reached") from exc
+        if state["stopped"]:
+            raise TimeoutError(
+                "generation FTS build cancelled or deadline reached"
+            ) from exc
         raise
     finally:
-        if database is not None:
-            database.close()
-        if not complete:
-            _remove_quietly((destination,))
-        _remove_quietly((temporary,))
+        _discard_unfinished_fts(destination, temporary, complete=state["complete"])
+
+
+def build_generation_fts(
+    snapshot: CorpusSnapshot,
+    generation_directory: Path,
+    *,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> dict[str, object]:
+    """Build one immutable generation-local FTS5 artifact from captured chunks."""
+    _require_buildable_snapshot(snapshot, deadline, cancelled)
+    directory = _generation_directory(generation_directory)
+    destination = directory / GENERATION_FTS_ARTIFACT
+    if destination.exists() or destination.is_symlink():
+        raise FileExistsError(destination)
+    temporary = directory / f".{GENERATION_FTS_ARTIFACT}.{uuid.uuid4().hex}.tmp"
+    return _built_fts_artifact(
+        snapshot,
+        directory,
+        destination,
+        temporary,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+
 
 def _call_generation_embedder(embedder: object, texts: list[str]):
     if callable(embedder):
@@ -3985,6 +4019,23 @@ def _try_generation_search(
         connection.close()
 
 
+def _stop_options(
+    deadline: float | None, cancelled: Callable[[], bool] | None
+) -> dict[str, object]:
+    options: dict[str, object] = {}
+    if deadline is not None:
+        options["deadline"] = deadline
+    if cancelled is not None:
+        options["cancelled"] = cancelled
+    return options
+
+
+def _generation_search_allowed(
+    catalog: object, force_rebuild: bool, page_paths: list[Path] | None
+) -> bool:
+    return catalog is not None and not force_rebuild and page_paths is None
+
+
 def _search_backends(
     query: str,
     scope: str = "all",
@@ -4012,13 +4063,9 @@ def _search_backends(
     if not query or not query.strip():
         return []
     selected_catalog = catalog if catalog is not None else _active_generation_catalog()
-    stop_options: dict[str, object] = {}
-    if deadline is not None:
-        stop_options["deadline"] = deadline
-    if cancelled is not None:
-        stop_options["cancelled"] = cancelled
+    stop_options = _stop_options(deadline, cancelled)
     _check_generation_stop(deadline, cancelled)
-    if selected_catalog is not None and not force_rebuild and page_paths is None:
+    if _generation_search_allowed(selected_catalog, force_rebuild, page_paths):
         results = _try_generation_search(
             query,
             selected_catalog,
