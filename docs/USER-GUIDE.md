@@ -473,6 +473,8 @@ uv run python scripts/memory_queue.py migrate
 uv run python scripts/memory_queue.py work --max-tasks 20 --max-seconds 600 --idle-seconds 2 --lease-seconds 120 --heartbeat-seconds 40 --max-attempts 8 --retry-base-seconds 30 --retry-cap-seconds 3600
 uv run python scripts/memory_queue.py redrive <task-id>
 uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> --export <path>
+uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> --export <path> --include-dead
+uv run python scripts/memory_queue.py restore --export <path>
 ```
 
 Run migration once to import legacy `run/queue/*.json` and `.processing` files.
@@ -483,7 +485,11 @@ handlers rely on stable operation IDs. Defaults are priority 0 in `-100..100`, a
 retry base/cap, and worker bounds of 20 tasks, 600 seconds, or 2 idle seconds.
 `redrive` creates a linked new task without resetting dead history. `purge` requires
 a terminal cutoff and verified export path before deleting terminal rows/results.
-Dead tasks are retained indefinitely; succeeded/cancelled results default to 30 days.
+Succeeded and cancelled results default to 30 days. A dead task — one whose attempts
+are exhausted — is kept until you ask for it by name with `--include-dead`, because it
+is evidence that work never happened. `restore --export <path>` reads one export back,
+verifies its manifest and every digest, and re-enqueues the work as new ready tasks;
+it refuses the whole export if anything fails to verify.
 
 ### Daily archive and claims
 

@@ -2347,6 +2347,12 @@ class PurgeReceipt:
 
 
 @dataclass(frozen=True)
+class RestoreReceipt:
+    restored: int
+    task_ids: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
 class _CapturePurgeArtifact:
     source_path: str
     archive_path: str
@@ -3845,10 +3851,21 @@ class MemoryQueue:
         *,
         terminal_before: datetime,
         export_path: Path,
+        include_dead: bool = False,
         deadline: float = float("inf"),
         cancelled: Callable[[], bool] | None = None,
     ) -> PurgeReceipt:
+        """Export, verify, then delete terminal tasks older than the cutoff.
+
+        `include_dead` extends the selection to attempts-exhausted tasks. It is
+        off by default: a dead task is evidence that work never happened, so
+        retiring it stays an explicit operator action.
+        """
         _require_active(deadline, cancelled)
+        states = ("succeeded", "cancelled", "dead") if include_dead else (
+            "succeeded",
+            "cancelled",
+        )
         requested_cutoff = _as_utc(terminal_before)
         retention_cutoff = _as_utc(self._clock()) - timedelta(
             days=DEFAULTS.queue_result_retention_days
@@ -3858,11 +3875,12 @@ class MemoryQueue:
         if export.exists():
             raise QueueOperationError("export_exists")
         with self._connect() as connection:
+            state_places = ",".join("?" for _ in states)
             rows = connection.execute(
-                """SELECT * FROM tasks
-                   WHERE state IN ('succeeded','cancelled') AND updated_at < ?
-                   ORDER BY created_at, rowid""",
-                (_timestamp(cutoff),),
+                f"""SELECT * FROM tasks
+                    WHERE state IN ({state_places}) AND updated_at < ?
+                    ORDER BY created_at, rowid""",  # noqa: S608
+                (*states, _timestamp(cutoff)),
             ).fetchall()
             histories = {
                 str(row["id"]): connection.execute(
@@ -3955,7 +3973,7 @@ class MemoryQueue:
                         task_ids,
                     ).fetchall()
                     if len(current) != len(task_ids) or any(
-                        row["state"] not in ("succeeded", "cancelled")
+                        row["state"] not in states
                         or row["updated_at"] >= _timestamp(cutoff)
                         for row in current
                     ):
@@ -3992,6 +4010,39 @@ class MemoryQueue:
                     (self.state_root / str(reference)).unlink(missing_ok=True)
             fsync_directory(self.results_dir)
         return PurgeReceipt(len(task_ids), task_ids)
+
+    def restore(
+        self,
+        *,
+        export_path: Path,
+        deadline: float = float("inf"),
+        cancelled: Callable[[], bool] | None = None,
+    ) -> RestoreReceipt:
+        """Re-enqueue the work in one verified purge export.
+
+        A purged task leaves the queue with its history, so restoring it means
+        the work runs again: each record returns as a new ready task and the
+        receipt maps the exported id to the new one. Nothing is restored unless
+        the manifest and every digest verify first.
+        """
+        _require_active(deadline, cancelled)
+        records = _verified_export_records(Path(export_path).absolute())
+        restored: list[tuple[str, str]] = []
+        for record in records:
+            _require_active(deadline, cancelled)
+            restored.append((str(record["id"]), self._restore_one(record)))
+        return RestoreReceipt(len(restored), tuple(restored))
+
+    def _restore_one(self, record: Mapping[str, object]) -> str:
+        payload = record.get("payload")
+        if not isinstance(payload, Mapping):
+            raise QueueOperationError("restore_record_invalid", "payload is not an object")
+        return self.enqueue(
+            str(record.get("kind") or ""),
+            _as_positive_int(record.get("handler_version"), "handler_version"),
+            payload,
+            priority=_as_priority(record.get("priority")),
+        )
 
     def recover_expired_leases(self) -> int:
         now = _as_utc(self._clock())
@@ -9884,6 +9935,80 @@ def _compat_task(task: QueueTask | QueueLease) -> dict[str, Any]:
     }
 
 
+def _as_positive_int(value: object, field: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise QueueOperationError(
+            "restore_record_invalid", f"{field} is not a positive integer"
+        )
+    return value
+
+
+def _as_priority(value: object) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        return 0
+    return max(-100, min(100, value))
+
+
+def _restore_json_object(raw: bytes) -> dict[str, object]:
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise QueueOperationError("restore_manifest_invalid", "manifest is not JSON") from None
+    if not isinstance(value, dict):
+        raise QueueOperationError("restore_manifest_invalid", "manifest is not an object")
+    return value
+
+
+def _verified_export_records(export: Path) -> list[dict[str, object]]:
+    """Read one purge export only when its manifest and digests all verify."""
+    manifest = _restore_json_object(
+        _read_stable_owner_file(export / "manifest.json", _MAX_EXPORT_METADATA_BYTES)
+    )
+    records_bytes = _read_stable_owner_file(
+        export / "records.json", _MAX_EXPORT_METADATA_BYTES
+    )
+    if sha256_bytes(records_bytes) != manifest.get("records_sha256"):
+        raise QueueOperationError("restore_verification_failed", "records digest mismatch")
+    _verify_exported_results(export, manifest)
+    records = json.loads(records_bytes.decode("utf-8"))
+    _require_record_list(records, manifest)
+    return records
+
+
+def _is_object_list(records: object) -> bool:
+    if not isinstance(records, list):
+        return False
+    return all(isinstance(item, dict) for item in records)
+
+
+def _manifest_task_ids(manifest: Mapping[str, object]) -> list[str]:
+    declared = manifest.get("task_ids") or []
+    return [str(item) for item in declared]
+
+
+def _require_record_list(records: object, manifest: Mapping[str, object]) -> None:
+    if not _is_object_list(records):
+        raise QueueOperationError(
+            "restore_manifest_invalid", "records are not a list of objects"
+        )
+    exported = [str(item.get("id")) for item in records]
+    if exported != _manifest_task_ids(manifest):
+        raise QueueOperationError("restore_verification_failed", "task ids do not match")
+
+
+def _verify_exported_results(export: Path, manifest: Mapping[str, object]) -> None:
+    for item in manifest.get("results") or []:
+        if not isinstance(item, Mapping):
+            raise QueueOperationError(
+                "restore_manifest_invalid", "result entry is not an object"
+            )
+        data = _read_stable_owner_file(
+            export / "results" / f"{item.get('id')}.result", _MAX_RESULT_BYTES
+        )
+        if sha256_bytes(data) != item.get("sha256"):
+            raise QueueOperationError("restore_verification_failed", "result digest mismatch")
+
+
 def _export_task_record(task: QueueTask) -> dict[str, object]:
     return {
         "attempt_history": [
@@ -9972,11 +10097,26 @@ def purge(
     *,
     terminal_before: datetime,
     export_path: Path,
+    include_dead: bool = False,
     deadline: float = float("inf"),
     cancelled: Callable[[], bool] | None = None,
 ) -> PurgeReceipt:
     return _queue().purge(
         terminal_before=terminal_before,
+        export_path=export_path,
+        include_dead=include_dead,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+
+
+def restore(
+    *,
+    export_path: Path,
+    deadline: float = float("inf"),
+    cancelled: Callable[[], bool] | None = None,
+) -> RestoreReceipt:
+    return _queue().restore(
         export_path=export_path,
         deadline=deadline,
         cancelled=cancelled,
@@ -10899,6 +11039,7 @@ def _cli() -> int:
             "redrive",
             "migrate",
             "purge",
+            "restore",
             "quarantine-corrupt",
             "purge-corrupt",
         ],
@@ -10920,6 +11061,11 @@ def _cli() -> int:
     )
     parser.add_argument("--terminal-before")
     parser.add_argument("--export", type=Path)
+    parser.add_argument(
+        "--include-dead",
+        action="store_true",
+        help="Also purge attempts-exhausted tasks; they are retained by default.",
+    )
     parser.add_argument("--reason")
     try:
         args = parser.parse_args()
@@ -11050,10 +11196,28 @@ def _cli() -> int:
             receipt = purge(
                 terminal_before=terminal_before,
                 export_path=args.export,
+                include_dead=args.include_dead,
             )
             print(
                 json.dumps(
                     {"counts": {"purged": receipt.purged}, "ids": list(receipt.task_ids)},
+                    sort_keys=True,
+                )
+            )
+            return 0
+        if args.command == "restore":
+            if args.export is None:
+                raise QueueOperationError("export_required")
+            restored = restore(export_path=args.export)
+            print(
+                json.dumps(
+                    {
+                        "counts": {"restored": restored.restored},
+                        "ids": [
+                            {"exported": exported, "restored": current}
+                            for exported, current in restored.task_ids
+                        ],
+                    },
                     sort_keys=True,
                 )
             )

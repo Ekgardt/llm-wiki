@@ -19,7 +19,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import memory_queue  # noqa: E402
-from memory_queue import MemoryQueue, MigrationBusy, QueueFailure  # noqa: E402
+from memory_queue import DEFAULTS, MemoryQueue, MigrationBusy, QueueFailure  # noqa: E402
 from reliable_memory import (  # noqa: E402
     OperationalDatabaseContractError,
     canonical_json_bytes,
@@ -968,3 +968,88 @@ def test_default_retention_excludes_recent_terminal_and_all_dead(tmp_path: Path)
     assert queue.get(succeeded).state == "succeeded"
     assert queue.get(dead).state == "dead"
     assert queue.retains_run_directory() is True
+
+
+def _dead_task(queue: MemoryQueue, now: datetime, prompt: str) -> str:
+    """Exhaust one task's attempts so it reaches the dead state."""
+    task_id = queue.enqueue("query", 1, {"prompt": prompt})
+    for _ in range(DEFAULTS.queue_max_attempts):
+        lease = queue.claim("worker")
+        if lease is None:
+            break
+        queue.fail(lease, QueueFailure("processor_failed"))
+    with sqlite3.connect(queue.db_path) as connection:
+        connection.execute(
+            "UPDATE tasks SET state='dead', error_code='attempts_exhausted', updated_at=? "
+            "WHERE id=?",
+            ((now - timedelta(days=31)).isoformat(timespec="microseconds"), task_id),
+        )
+    return task_id
+
+
+def test_a_dead_task_is_retained_by_default_and_purged_only_when_asked(
+    tmp_path: Path,
+) -> None:
+    """Attempts-exhausted work is evidence; retiring it is an explicit action."""
+    now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    queue = MemoryQueue(tmp_path, clock=lambda: now)
+    task_id = _dead_task(queue, now, "never finished")
+    cutoff = now - timedelta(days=30)
+
+    default_receipt = queue.purge(
+        terminal_before=cutoff, export_path=tmp_path / "exports" / "default"
+    )
+
+    assert default_receipt.purged == 0
+    assert queue.get(task_id).state == "dead"
+
+    export = tmp_path / "exports" / "with-dead"
+    receipt = queue.purge(
+        terminal_before=cutoff, export_path=export, include_dead=True
+    )
+
+    assert receipt.task_ids == (task_id,)
+    records = json.loads((export / "records.json").read_bytes())
+    assert [item["state"] for item in records] == ["dead"]
+    with pytest.raises(KeyError):
+        queue.get(task_id)
+
+
+def test_a_purged_task_can_be_restored_from_its_verified_export(tmp_path: Path) -> None:
+    """Deletion without a way back would lose the work, not just its record."""
+    now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    queue = MemoryQueue(tmp_path, clock=lambda: now)
+    task_id = _dead_task(queue, now, "restore me")
+    export = tmp_path / "exports" / "restorable"
+    queue.purge(
+        terminal_before=now - timedelta(days=30), export_path=export, include_dead=True
+    )
+
+    receipt = queue.restore(export_path=export)
+
+    assert receipt.restored == 1
+    exported_id, restored_id = receipt.task_ids[0]
+    assert exported_id == task_id
+    restored = queue.get(restored_id)
+    assert restored.state == "ready"
+    assert restored.kind == "query"
+    assert restored.payload == {"prompt": "restore me"}
+
+
+def test_a_tampered_export_restores_nothing(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    queue = MemoryQueue(tmp_path, clock=lambda: now)
+    _dead_task(queue, now, "tampered")
+    export = tmp_path / "exports" / "tampered"
+    queue.purge(
+        terminal_before=now - timedelta(days=30), export_path=export, include_dead=True
+    )
+    records = json.loads((export / "records.json").read_bytes())
+    records[0]["payload"] = {"prompt": "rewritten"}
+    (export / "records.json").write_bytes(canonical_json_bytes(records))
+
+    with pytest.raises(memory_queue.QueueOperationError) as raised:
+        queue.restore(export_path=export)
+
+    assert raised.value.code == "restore_verification_failed"
+    assert queue.list_tasks() == []
