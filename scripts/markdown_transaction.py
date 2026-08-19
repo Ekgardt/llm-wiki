@@ -2135,6 +2135,140 @@ def _relative_target(coordinator: MarkdownCoordinator, path: Path) -> str:
     return relative
 
 
+def _relative_changes(
+    coordinator: MarkdownCoordinator, changes: Mapping[Path, bytes | None]
+) -> dict[str, bytes | None]:
+    relative_changes = {
+        _relative_target(coordinator, Path(path)): content
+        for path, content in changes.items()
+    }
+    for content in relative_changes.values():
+        if content is None:
+            continue
+        if len(_require_bytes(content)) > MAX_KNOWLEDGE_TARGET_BYTES:
+            raise ValueError("knowledge target size exceeds limit")
+    return relative_changes
+
+
+def _desired_hashes(relative_changes: Mapping[str, bytes | None]) -> dict[str, str]:
+    return {
+        path: ABSENT if content is None else sha256_bytes(content)
+        for path, content in relative_changes.items()
+    }
+
+
+def _persisted_hashes(record: TransactionRecord) -> dict[str, str]:
+    return {operation.path: operation.after_hash for operation in record.operations}
+
+
+def _existing_committed_record(
+    coordinator: MarkdownCoordinator,
+    operation_id: str,
+    relative_changes: Mapping[str, bytes | None],
+) -> TransactionRecord | None:
+    """The committed record already bound to this operation id, if there is one."""
+    if coordinator._record_for_operation_id(operation_id) is None:
+        return None
+    existing = _settle_operation(coordinator, operation_id)
+    if existing is None:
+        return None
+    if _desired_hashes(relative_changes) != _persisted_hashes(existing):
+        raise ValueError("operation_id is already bound to a different request")
+    if existing.state != "committed":
+        raise RuntimeError(
+            f"duplicate mutation ended in noncommitted state {existing.state}"
+        )
+    _verify_committed_targets(coordinator, existing)
+    return existing
+
+
+def _captured_targets(
+    coordinator: MarkdownCoordinator, relative_changes: Mapping[str, bytes | None]
+) -> dict[str, bytes | None]:
+    with coordinator.writer_gate():
+        return {
+            relative: coordinator._read_bounded_target(
+                coordinator._target(relative), MAX_KNOWLEDGE_TARGET_BYTES
+            )
+            for relative in relative_changes
+        }
+
+
+def _prepared_change(
+    relative: str, content: bytes | None, before: bytes | None
+) -> MarkdownChange:
+    if content is None:
+        if before is None:
+            raise FileNotFoundError(relative)
+        return MarkdownChange.delete(relative)
+    if before is None:
+        return MarkdownChange.create(relative, _require_bytes(content))
+    return MarkdownChange.replace(relative, _require_bytes(content))
+
+
+def _prepared_changes(
+    relative_changes: Mapping[str, bytes | None],
+    captured: Mapping[str, bytes | None],
+    preconditions: Mapping[str, object] | None,
+) -> tuple[list[MarkdownChange], dict[str, object]]:
+    """The changes to prepare, plus the preconditions they were captured under."""
+    expected = dict(preconditions or {})
+    prepared: list[MarkdownChange] = []
+    for relative, content in relative_changes.items():
+        before = captured[relative]
+        captured_hash = ABSENT if before is None else sha256_bytes(before)
+        caller_expected = expected.get(relative)
+        if caller_expected is not None and caller_expected != captured_hash:
+            raise ValueError(f"caller precondition does not match target: {relative}")
+        expected[relative] = captured_hash
+        prepared.append(_prepared_change(relative, content, before))
+    return prepared, expected
+
+
+def _recovered_duplicate(
+    coordinator: MarkdownCoordinator,
+    operation_id: str,
+    relative_changes: Mapping[str, bytes | None],
+    exc: ValueError,
+) -> TransactionRecord:
+    record = _settle_operation(coordinator, operation_id)
+    if record is None:
+        raise RuntimeError(
+            "winning transaction disappeared during duplicate recovery"
+        ) from exc
+    if _desired_hashes(relative_changes) != _persisted_hashes(record):
+        raise exc
+    if record.state != "committed":
+        raise RuntimeError(
+            f"duplicate mutation ended in noncommitted state {record.state}"
+        )
+    _verify_committed_targets(coordinator, record)
+    return record
+
+
+def _prepare_or_recover(
+    coordinator: MarkdownCoordinator,
+    prepared: list[MarkdownChange],
+    operation_id: str,
+    validators: Sequence[Validator],
+    expected: Mapping[str, object],
+    relative_changes: Mapping[str, bytes | None],
+) -> TransactionRecord | None:
+    """None when preparation won the race, else the record that already won."""
+    try:
+        coordinator.prepare(
+            prepared,
+            operation_id=operation_id,
+            validators=validators,
+            preconditions=expected,
+        )
+    except ValueError as exc:
+        if "operation_id is already bound" not in str(exc):
+            raise
+        return _recovered_duplicate(coordinator, operation_id, relative_changes, exc)
+    return None
+
+
 def mutate_knowledge(
     operation_id: str,
     changes: Mapping[Path, bytes | None],
@@ -2146,81 +2280,18 @@ def mutate_knowledge(
     if not changes:
         raise ValueError("a knowledge mutation requires at least one change")
     coordinator = _default_coordinator()
-    relative_changes = {
-        _relative_target(coordinator, Path(path)): content
-        for path, content in changes.items()
-    }
-    for content in relative_changes.values():
-        if content is not None and len(_require_bytes(content)) > MAX_KNOWLEDGE_TARGET_BYTES:
-            raise ValueError("knowledge target size exceeds limit")
+    relative_changes = _relative_changes(coordinator, changes)
     _recover_initial_contention(coordinator)
-    existing = coordinator._record_for_operation_id(operation_id)
+    existing = _existing_committed_record(coordinator, operation_id, relative_changes)
     if existing is not None:
-        existing = _settle_operation(coordinator, operation_id)
-    if existing is not None:
-        desired = {
-            path: ABSENT if content is None else sha256_bytes(content)
-            for path, content in relative_changes.items()
-        }
-        persisted = {operation.path: operation.after_hash for operation in existing.operations}
-        if desired != persisted:
-            raise ValueError("operation_id is already bound to a different request")
-        if existing.state == "committed":
-            _verify_committed_targets(coordinator, existing)
-            return existing
-        raise RuntimeError(
-            f"duplicate mutation ended in noncommitted state {existing.state}"
-        )
-    with coordinator.writer_gate():
-        captured = {
-            relative: coordinator._read_bounded_target(
-                coordinator._target(relative), MAX_KNOWLEDGE_TARGET_BYTES
-            )
-            for relative in relative_changes
-        }
-    expected = dict(preconditions or {})
-    prepared: list[MarkdownChange] = []
-    for relative, content in relative_changes.items():
-        before = captured[relative]
-        captured_hash = ABSENT if before is None else sha256_bytes(before)
-        caller_expected = expected.get(relative)
-        if caller_expected is not None and caller_expected != captured_hash:
-            raise ValueError(f"caller precondition does not match target: {relative}")
-        expected[relative] = captured_hash
-        if content is None:
-            if before is None:
-                raise FileNotFoundError(relative)
-            prepared.append(MarkdownChange.delete(relative))
-        elif before is None:
-            prepared.append(MarkdownChange.create(relative, _require_bytes(content)))
-        else:
-            prepared.append(MarkdownChange.replace(relative, _require_bytes(content)))
-    try:
-        record = coordinator.prepare(
-            prepared,
-            operation_id=operation_id,
-            validators=validators,
-            preconditions=expected,
-        )
-    except ValueError as exc:
-        if "operation_id is already bound" not in str(exc):
-            raise
-        record = _settle_operation(coordinator, operation_id)
-        if record is None:
-            raise RuntimeError("winning transaction disappeared during duplicate recovery") from exc
-        desired = {
-            path: ABSENT if content is None else sha256_bytes(content)
-            for path, content in relative_changes.items()
-        }
-        persisted = {operation.path: operation.after_hash for operation in record.operations}
-        if desired != persisted:
-            raise
-        if record.state != "committed":
-            raise RuntimeError(
-                f"duplicate mutation ended in noncommitted state {record.state}"
-            )
-        _verify_committed_targets(coordinator, record)
-        return record
+        return existing
+    captured = _captured_targets(coordinator, relative_changes)
+    prepared, expected = _prepared_changes(relative_changes, captured, preconditions)
+    recovered = _prepare_or_recover(
+        coordinator, prepared, operation_id, validators, expected, relative_changes
+    )
+    if recovered is not None:
+        return recovered
     settled = _settle_operation(coordinator, operation_id)
     if settled is None:
         raise RuntimeError("prepared transaction disappeared before apply")
