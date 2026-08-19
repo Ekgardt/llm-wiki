@@ -283,6 +283,16 @@ def _generation_fts_metadata(snapshot: CorpusSnapshot) -> dict[str, str]:
 
 
 def _generation_chunk_row(chunk: object, order: int) -> tuple[object, ...]:
+    """The exact stored row for one chunk.
+
+    The builder writes these and the validator rebuilds them from the
+    authoritative sources to compare, so this shape is stated once.
+    """
+    """The exact stored row for one chunk.
+
+    The builder writes these and the validator rebuilds them from the
+    authoritative sources to compare; two copies of this shape would drift.
+    """
     title = (
         chunk.heading_ancestry[-1]
         if chunk.heading_ancestry
@@ -2190,38 +2200,6 @@ def _metadata_matches_manifest(
     return all(metadata.get(key) == value for key, value in expected.items())
 
 
-def _expected_chunk_row(chunk: object, order: int) -> tuple[object, ...]:
-    title = (
-        chunk.heading_ancestry[-1]
-        if chunk.heading_ancestry
-        else Path(chunk.source_path).stem
-    )
-    return (
-        chunk.id,
-        order,
-        chunk.source_id,
-        chunk.source_path,
-        chunk.source_sha256,
-        chunk.parent_page,
-        json.dumps(chunk.heading_ancestry, ensure_ascii=False, separators=(",", ":")),
-        chunk.byte_start,
-        chunk.byte_end,
-        chunk.line_start,
-        chunk.line_end,
-        chunk.span_sha256,
-        chunk.type,
-        chunk.project,
-        chunk.authority,
-        chunk.confidence,
-        chunk.status,
-        chunk.valid_from,
-        chunk.valid_to,
-        chunk.language,
-        title,
-        chunk.text,
-    )
-
-
 def _expected_source_chunks(
     source_id: str,
     source: Mapping[str, object],
@@ -2268,7 +2246,7 @@ def _expected_chunk_rows(
                 cancelled=cancelled,
             )
             for chunk in chunks:
-                rows.append(_expected_chunk_row(chunk, len(rows)))
+                rows.append(_generation_chunk_row(chunk, len(rows)))
                 if len(rows) > MAX_GENERATION_FTS_CHUNKS:
                     return None
         except _UnusableAuthoritativeSource:
