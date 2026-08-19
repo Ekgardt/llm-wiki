@@ -1986,6 +1986,73 @@ def _run_backends(
     return run
 
 
+def _first_fallback_reason(
+    rows: Sequence[Mapping[str, Any]], current: str | None
+) -> str | None:
+    for row in rows:
+        reason = row.get("fallback_reason")
+        if reason:
+            return str(reason)
+    return current
+
+
+def _filtered_hits(
+    rows: Sequence[Mapping[str, Any]], filters: Mapping[str, Any]
+) -> Sequence[Mapping[str, Any]]:
+    """Backend rows as candidate hits, with the caller's hard filters applied."""
+    import search_memory
+
+    hits = [_backend_hit_from_legacy(row) for row in rows]
+    return search_memory.apply_hard_filters(
+        hits,
+        project=filters.get("project"),
+        since=filters.get("since"),
+        as_of=filters.get("as_of"),
+        scope=filters.get("scope", "all"),
+    )
+
+
+def _require_unchanged_generation(
+    catalog: Any, context: Mapping[str, Any], stop: Mapping[str, Any]
+) -> None:
+    """The seal must hold before the read and still hold after it."""
+    import search_memory
+
+    if not search_memory._generation_consumption_unchanged(
+        catalog,
+        context["manifest"],
+        context["artifact_names"],
+        context["seal"],
+        **stop,
+    ):
+        raise GenerationSealChanged
+
+
+def _generation_lexical_hits(
+    filters: Mapping[str, Any],
+    *,
+    catalog: Any,
+    context: Mapping[str, Any],
+    stop: Mapping[str, Any],
+) -> Sequence[Mapping[str, Any]]:
+    import search_memory
+
+    _require_unchanged_generation(catalog, context, stop)
+    rows = search_memory._generation_fts_search(
+        filters["query"],
+        context["manifest"],
+        context["connection"],
+        scope=filters["scope"],
+        limit=filters["limit"],
+        project=filters["project"],
+        since=filters["since"],
+        as_of=filters["as_of"],
+        **stop,
+    )
+    _require_unchanged_generation(catalog, context, stop)
+    return _filtered_hits(rows, filters)
+
+
 def _backend_limit(limit: int, max_candidates: int | None) -> int:
     """How many rows each backend may return before fusion trims them."""
     if max_candidates is None or int(max_candidates) <= 0:
@@ -2545,48 +2612,14 @@ def retrieve_via_search_memory(
         nonlocal generation_fallback, legacy_fallback, use_generation
         if use_generation:
             try:
-                if not search_memory._generation_consumption_unchanged(
-                    selected_catalog,
-                    generation_ctx["manifest"],
-                    generation_ctx["artifact_names"],
-                    generation_ctx["seal"],
-                    **generation_stop,
-                ):
-                    generation_fallback = "generation_seal_changed"
-                    raise _GenerationSealChanged
-                else:
-                    use = True
-                if use:
-                    rows = search_memory._generation_fts_search(
-                        filters["query"],
-                        generation_ctx["manifest"],
-                        generation_ctx["connection"],
-                        scope=filters["scope"],
-                        limit=filters["limit"],
-                        project=filters["project"],
-                        since=filters["since"],
-                        as_of=filters["as_of"],
-                        **generation_stop,
-                    )
-                    if not search_memory._generation_consumption_unchanged(
-                        selected_catalog,
-                        generation_ctx["manifest"],
-                        generation_ctx["artifact_names"],
-                        generation_ctx["seal"],
-                        **generation_stop,
-                    ):
-                        generation_fallback = "generation_seal_changed"
-                        raise _GenerationSealChanged
-                    else:
-                        hits = [_backend_hit_from_legacy(row) for row in rows]
-                        return search_memory.apply_hard_filters(
-                            hits,
-                            project=filters.get("project"),
-                            since=filters.get("since"),
-                            as_of=filters.get("as_of"),
-                            scope=filters.get("scope", "all"),
-                        )
+                return _generation_lexical_hits(
+                    filters,
+                    catalog=selected_catalog,
+                    context=generation_ctx,
+                    stop=generation_stop,
+                )
             except _GenerationSealChanged:
+                generation_fallback = generation_fallback or "generation_seal_changed"
                 raise
             except TimeoutError:
                 raise
@@ -2605,22 +2638,8 @@ def retrieve_via_search_memory(
             deadline=deadline_monotonic,
             cancelled=cancelled,
         )
-        legacy_fallback = next(
-            (
-                str(row["fallback_reason"])
-                for row in rows
-                if row.get("fallback_reason")
-            ),
-            legacy_fallback,
-        )
-        hits = [_backend_hit_from_legacy(row) for row in rows]
-        return search_memory.apply_hard_filters(
-            hits,
-            project=filters.get("project"),
-            since=filters.get("since"),
-            as_of=filters.get("as_of"),
-            scope=filters.get("scope", "all"),
-        )
+        legacy_fallback = _first_fallback_reason(rows, legacy_fallback)
+        return _filtered_hits(rows, filters)
 
     def dense_backend(**filters: Any) -> Sequence[Mapping[str, Any]] | None:
         nonlocal generation_fallback
