@@ -507,7 +507,10 @@ def test_prompt_counter_is_durable_and_concurrency_safe(tmp_path, monkeypatch):
     monkeypatch.setattr(memory_state, "STATE_DIR", tmp_path / "run")
     monkeypatch.setattr(memory_state, "STATE_FILE", tmp_path / "run" / "state.json")
     monkeypatch.setattr(memory_state, "LOCK_FILE", tmp_path / "run" / "state.json.lock")
-    monkeypatch.setattr(user_prompt_capture, "HOOK_STATE_LOCK_TIMEOUT", 10.0)
+    # Twenty threads contending for one file lock: the claim is that no update
+    # is lost, not that each waits under ten seconds, and ten was not enough on
+    # a loaded Windows runner.
+    monkeypatch.setattr(user_prompt_capture, "HOOK_STATE_LOCK_TIMEOUT", 120.0)
     errors = []
 
     def observed_update(mutator, **kwargs):
@@ -541,7 +544,7 @@ def test_prompt_counters_are_isolated_across_parallel_sessions(tmp_path, monkeyp
     monkeypatch.setattr(memory_state, "STATE_FILE", tmp_path / "run" / "state.json")
     monkeypatch.setattr(memory_state, "LOCK_FILE", tmp_path / "run" / "state.json.lock")
     monkeypatch.setattr(user_prompt_capture, "update_state", memory_state.update_state)
-    monkeypatch.setattr(user_prompt_capture, "HOOK_STATE_LOCK_TIMEOUT", 10.0)
+    monkeypatch.setattr(user_prompt_capture, "HOOK_STATE_LOCK_TIMEOUT", 120.0)
 
     work = [(session, project) for session, project in (("s-a", "p-a"), ("s-b", "p-b")) for _ in range(20)]
     with ThreadPoolExecutor(max_workers=20) as pool:
@@ -1246,7 +1249,7 @@ def test_prompt_capture_dedupe_claim_is_atomic_under_concurrency(tmp_path, monke
     monkeypatch.setattr(memory_state, "LOCK_FILE", state_dir / "state.json.lock")
     monkeypatch.setattr(memory_state, "REPORTS_DIR", tmp_path / "logs")
     monkeypatch.setattr(user_prompt_capture, "STATE_ROOT", tmp_path)
-    monkeypatch.setattr(user_prompt_capture, "HOOK_STATE_LOCK_TIMEOUT", 10.0)
+    monkeypatch.setattr(user_prompt_capture, "HOOK_STATE_LOCK_TIMEOUT", 120.0)
 
     with ThreadPoolExecutor(max_workers=16) as pool:
         claims = list(

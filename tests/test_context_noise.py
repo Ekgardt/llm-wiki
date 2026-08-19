@@ -121,7 +121,7 @@ def test_nightly_catchup_claim_is_atomic_and_once_per_date(tmp_path, monkeypatch
     monkeypatch.setattr(memory_state, "STATE_FILE", tmp_path / "run" / "state.json")
     monkeypatch.setattr(memory_state, "LOCK_FILE", tmp_path / "run" / "state.json.lock")
     monkeypatch.setattr(session_start_context, "update_state", memory_state.update_state)
-    monkeypatch.setattr(session_start_context, "HOOK_STATE_LOCK_TIMEOUT", 10.0)
+    monkeypatch.setattr(session_start_context, "HOOK_STATE_LOCK_TIMEOUT", 120.0)
 
     with ThreadPoolExecutor(max_workers=16) as pool:
         claims = list(
@@ -148,7 +148,7 @@ def test_expired_nightly_claim_can_be_retried(tmp_path, monkeypatch):
     monkeypatch.setattr(memory_state, "STATE_FILE", tmp_path / "run" / "state.json")
     monkeypatch.setattr(memory_state, "LOCK_FILE", tmp_path / "run" / "state.json.lock")
     monkeypatch.setattr(session_start_context, "update_state", memory_state.update_state)
-    monkeypatch.setattr(session_start_context, "HOOK_STATE_LOCK_TIMEOUT", 10.0)
+    monkeypatch.setattr(session_start_context, "HOOK_STATE_LOCK_TIMEOUT", 120.0)
     memory_state.save_state({
         "nightly_catchup_claim": {
             "date": "2026-07-12",
