@@ -4188,62 +4188,125 @@ def _expected_codex_runtime_hooks(template_path: Path) -> list[dict[str, Any]]:
     return expected
 
 
+def _single_probe_entry(data: object) -> dict | None:
+    if not isinstance(data, list) or len(data) != 1:
+        return None
+    if not isinstance(data[0], dict):
+        return None
+    return data[0]
+
+
+def _codex_probe_entry(response: object) -> tuple[dict | None, str]:
+    """The one probe entry, or the code explaining why there is none."""
+    if response is _CODEX_PROBE_NOT_COMPLETED:
+        return None, "runtime_hooks_not_completed"
+    if response is None:
+        return None, "runtime_hooks_unverified"
+    assert isinstance(response, dict)
+    entry = _single_probe_entry(response.get("data"))
+    if entry is None:
+        return None, "runtime_hooks_invalid"
+    return entry, ""
+
+
+def _codex_entry_problem(entry: dict, root: Path) -> str:
+    """The failure code for this entry, or an empty string when it is usable."""
+    try:
+        if Path(entry.get("cwd", "")).resolve() != root.resolve():
+            return "runtime_hooks_wrong_cwd"
+    except (OSError, TypeError, ValueError):
+        return "runtime_hooks_invalid"
+    if entry.get("warnings") or entry.get("errors"):
+        return "runtime_hooks_warning_or_error"
+    return ""
+
+
+def _codex_hook_list(entry: dict) -> list | None:
+    hooks = entry.get("hooks")
+    if not isinstance(hooks, list) or any(
+        not isinstance(item, dict) for item in hooks
+    ):
+        return None
+    return hooks
+
+
+def _codex_owned_hook(hook: dict) -> bool:
+    command = hook.get("command")
+    if not isinstance(command, str) or "codex_memory.py" not in command:
+        return False
+    return command.rstrip().endswith(" hook")
+
+
+def _codex_owned_hooks(hooks: list) -> list:
+    return [hook for hook in hooks if _codex_owned_hook(hook)]
+
+
+def _expected_codex_hooks(root: Path, ours: list) -> tuple[list | None, str]:
+    try:
+        expected = _expected_codex_runtime_hooks(
+            root / "integrations" / "codex" / "hooks.json"
+        )
+    except ValueError:
+        return None, "runtime_hooks_template_invalid"
+    if len(ours) != len(expected):
+        return None, "runtime_hooks_mismatch"
+    return expected, ""
+
+
+def _matching_hooks(wanted: dict, ours: list) -> list:
+    return [
+        hook
+        for hook in ours
+        if all(hook.get(field) == value for field, value in wanted.items())
+    ]
+
+
+def _codex_hook_trust_code(trust: object) -> str:
+    if trust in {"untrusted", "modified"}:
+        return f"runtime_hooks_{trust}"
+    return "runtime_hooks_trust_unknown"
+
+
+def _codex_hook_problem(wanted: dict, ours: list) -> str:
+    matches = _matching_hooks(wanted, ours)
+    if len(matches) != 1:
+        return "runtime_hooks_mismatch"
+    hook = matches[0]
+    if hook.get("enabled") is not True:
+        return "runtime_hooks_disabled"
+    trust = hook.get("trustStatus")
+    if trust in {"trusted", "managed"}:
+        return ""
+    return _codex_hook_trust_code(trust)
+
+
+def _codex_hooks_verdict(root: Path, ours: list) -> tuple[bool, str]:
+    expected, problem = _expected_codex_hooks(root, ours)
+    if expected is None:
+        return False, problem
+    for wanted in expected:
+        problem = _codex_hook_problem(wanted, ours)
+        if problem:
+            return False, problem
+    return True, "runtime_hooks_active"
+
+
 def _codex_runtime_hooks_state(
     root: Path, home: Path, *, deadline: float = float("inf")
 ) -> tuple[bool, str]:
     if deadline - time.monotonic() < CODEX_HOOK_PROBE_STARTUP_SECONDS:
         return False, "runtime_hooks_not_completed"
     response = _probe_codex_hooks_list(root, home, deadline=deadline)
-    if response is _CODEX_PROBE_NOT_COMPLETED:
-        return False, "runtime_hooks_not_completed"
-    if response is None:
-        return False, "runtime_hooks_unverified"
-    assert isinstance(response, dict)
-    data = response.get("data")
-    if not isinstance(data, list) or len(data) != 1 or not isinstance(data[0], dict):
+    entry, problem = _codex_probe_entry(response)
+    if entry is None:
+        return False, problem
+    problem = _codex_entry_problem(entry, root)
+    if problem:
+        return False, problem
+    hooks = _codex_hook_list(entry)
+    if hooks is None:
         return False, "runtime_hooks_invalid"
-    entry = data[0]
-    try:
-        if Path(entry.get("cwd", "")).resolve() != root.resolve():
-            return False, "runtime_hooks_wrong_cwd"
-    except (OSError, TypeError, ValueError):
-        return False, "runtime_hooks_invalid"
-    if entry.get("warnings") or entry.get("errors"):
-        return False, "runtime_hooks_warning_or_error"
-    hooks = entry.get("hooks")
-    if not isinstance(hooks, list) or any(not isinstance(item, dict) for item in hooks):
-        return False, "runtime_hooks_invalid"
-    try:
-        expected = _expected_codex_runtime_hooks(root / "integrations" / "codex" / "hooks.json")
-    except ValueError:
-        return False, "runtime_hooks_template_invalid"
-    ours = [
-        hook
-        for hook in hooks
-        if isinstance(hook.get("command"), str)
-        and "codex_memory.py" in hook["command"]
-        and hook["command"].rstrip().endswith(" hook")
-    ]
-    if len(ours) != len(expected):
-        return False, "runtime_hooks_mismatch"
-    for wanted in expected:
-        matches = [
-            hook
-            for hook in ours
-            if all(hook.get(field) == value for field, value in wanted.items())
-        ]
-        if len(matches) != 1:
-            return False, "runtime_hooks_mismatch"
-        hook = matches[0]
-        if hook.get("enabled") is not True:
-            return False, "runtime_hooks_disabled"
-        trust = hook.get("trustStatus")
-        if trust not in {"trusted", "managed"}:
-            return False, f"runtime_hooks_{trust}" if trust in {
-                "untrusted",
-                "modified",
-            } else "runtime_hooks_trust_unknown"
-    return True, "runtime_hooks_active"
+    return _codex_hooks_verdict(root, _codex_owned_hooks(hooks))
 
 
 def _codex_wrapper_configured(root: Path, home: Path) -> bool:
