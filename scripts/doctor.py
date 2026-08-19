@@ -3584,15 +3584,53 @@ def _generation_check(
         )
 
 
-def _index_check(
-    state_root: Path,
-    now: datetime,
-    deadline: float = float("inf"),
-    *,
-    root: Path | None = None,
-) -> dict:
-    index = state_root / "cache" / "index.sqlite"
-    kind, info = _safe_kind(index, state_root)
+class _ManifestState(NamedTuple):
+    state: str
+    matches: bool
+    deferred: dict | None
+
+
+class _IndexInspection(NamedTuple):
+    early: dict | None
+    manifest_state: str
+    manifest_matches: bool
+
+
+def _corrupt_index_result() -> dict:
+    return _result(
+        "index",
+        "error",
+        "FTS index is corrupt or unsafe.",
+        {
+            "exists": True,
+            "freshness": "corrupt",
+            "age_seconds": None,
+            "repairable": False,
+        },
+    )
+
+
+def _index_path_limit_result() -> dict:
+    return _result(
+        "index",
+        "degraded",
+        "FTS index path validation reached its safety limit.",
+        {
+            "exists": True,
+            "freshness": "unknown",
+            "age_seconds": None,
+            "repairable": False,
+            "path_limit_exceeded": True,
+        },
+    )
+
+
+def _unusable_index(kind: str, info) -> bool:
+    return kind != "regular" or info is None or info.st_size == 0
+
+
+def _index_artifact_state(kind: str, info, deadline: float) -> dict | None:
+    """The result to return when the index cannot be inspected at all."""
     if kind == "missing":
         return _result(
             "index",
@@ -3605,126 +3643,123 @@ def _index_check(
                 "repairable": True,
             },
         )
-    if kind != "regular" or info is None or info.st_size == 0:
-        return _result(
-            "index",
-            "error",
-            "FTS index is corrupt or unsafe.",
-            {
-                "exists": True,
-                "freshness": "corrupt",
-                "age_seconds": None,
-                "repairable": False,
-            },
-        )
+    if _unusable_index(kind, info):
+        return _corrupt_index_result()
     if time.monotonic() >= deadline:
-        return _index_deferred("FTS index check exceeded its time budget.", "budget_exhausted")
+        return _index_deferred(
+            "FTS index check exceeded its time budget.", "budget_exhausted"
+        )
+    return None
+
+
+def _require_index_schema(connection: sqlite3.Connection) -> None:
+    quick_check = connection.execute("PRAGMA quick_check(1)").fetchone()
+    if not quick_check or quick_check[0] != "ok":
+        raise sqlite3.DatabaseError("quick_check failed")
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(pages)")}
+    if not INDEX_COLUMNS.issubset(columns):
+        raise sqlite3.DatabaseError("unexpected index schema")
+
+
+def _index_probe(index: Path, state_root: Path, deadline: float) -> list:
+    """The indexed paths, after proving the artifact answers a real query."""
+    connection = _readonly_database(
+        index,
+        state_root,
+        max_bytes=MAX_INDEX_DB_BYTES,
+        deadline=deadline,
+    )
     try:
-        connection = _readonly_database(
-            index,
-            state_root,
-            max_bytes=MAX_INDEX_DB_BYTES,
-            deadline=deadline,
+        connection.set_progress_handler(
+            lambda: int(time.monotonic() >= deadline), 1000
         )
-        try:
-            connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
-            quick_check = connection.execute("PRAGMA quick_check(1)").fetchone()
-            if not quick_check or quick_check[0] != "ok":
-                raise sqlite3.DatabaseError("quick_check failed")
-            columns = {row[1] for row in connection.execute("PRAGMA table_info(pages)")}
-            if not INDEX_COLUMNS.issubset(columns):
-                raise sqlite3.DatabaseError("unexpected index schema")
-            connection.execute(
-                "SELECT rowid FROM pages WHERE pages MATCH ? LIMIT 1",
-                ("__doctor_integrity_probe__",),
-            ).fetchone()
-            cursor = connection.execute("SELECT path FROM pages")
-            indexed_rows = cursor.fetchmany(MAX_INDEX_PATHS + 1)
-        finally:
-            connection.close()
-        if len(indexed_rows) > MAX_INDEX_PATHS:
-            return _result(
-                "index",
-                "degraded",
-                "FTS index path validation reached its safety limit.",
-                {
-                    "exists": True,
-                    "freshness": "unknown",
-                    "age_seconds": None,
-                    "repairable": False,
-                    "path_limit_exceeded": True,
-                },
-            )
-        indexed_paths = [row[0] for row in indexed_rows]
-        if any(not isinstance(item, str) for item in indexed_paths):
-            raise ValueError("invalid indexed path")
-        manifest = state_root / "cache" / ".paths-manifest"
-        manifest_kind, _ = _safe_kind(manifest, state_root)
-        manifest_state = "missing"
-        manifest_matches_index = False
-        if manifest_kind != "missing":
-            manifest_paths, manifest_error = _read_bounded_json(
-                manifest,
-                state_root,
-                max_bytes=MAX_MANIFEST_BYTES,
-                expected_type=list,
-                deadline=deadline,
-            )
-            if manifest_error == "budget":
-                return _index_deferred(
-                    "FTS manifest check exceeded its time budget.",
-                    "budget_exhausted",
-                )
-            if manifest_error or any(not isinstance(item, str) for item in (manifest_paths or [])):
-                manifest_state = "invalid"
-            else:
-                manifest_state = "current"
-                manifest_matches_index = sorted(manifest_paths) == sorted(indexed_paths)
-                if not manifest_matches_index:
-                    manifest_state = "mismatch"
-        timestamp = datetime.fromtimestamp(info.st_mtime, tz=timezone.utc)
-    except sqlite3.OperationalError as exc:
-        lowered = str(exc).lower()
-        # A lock is a lock even when waiting for it used up the budget, and it
-        # is the more actionable of the two verdicts.
-        if "locked" in lowered or "busy" in lowered:
-            return _index_deferred("FTS index is busy.", "database_busy")
-        if time.monotonic() >= deadline or "interrupted" in lowered:
-            return _index_deferred("FTS index check exceeded its time budget.", "budget_exhausted")
-        return _result(
-            "index",
-            "error",
-            "FTS index is corrupt or unsafe.",
-            {
-                "exists": True,
-                "freshness": "corrupt",
-                "age_seconds": None,
-                "repairable": False,
-            },
+        _require_index_schema(connection)
+        connection.execute(
+            "SELECT rowid FROM pages WHERE pages MATCH ? LIMIT 1",
+            ("__doctor_integrity_probe__",),
+        ).fetchone()
+        cursor = connection.execute("SELECT path FROM pages")
+        return cursor.fetchmany(MAX_INDEX_PATHS + 1)
+    finally:
+        connection.close()
+
+
+def _valid_manifest_paths(manifest_error: object, manifest_paths: object) -> bool:
+    if manifest_error:
+        return False
+    return all(isinstance(item, str) for item in (manifest_paths or []))
+
+
+def _index_manifest_state(
+    manifest: Path, state_root: Path, indexed_paths: list[str], deadline: float
+) -> _ManifestState:
+    manifest_kind, _ = _safe_kind(manifest, state_root)
+    if manifest_kind == "missing":
+        return _ManifestState("missing", False, None)
+    manifest_paths, manifest_error = _read_bounded_json(
+        manifest,
+        state_root,
+        max_bytes=MAX_MANIFEST_BYTES,
+        expected_type=list,
+        deadline=deadline,
+    )
+    if manifest_error == "budget":
+        deferred = _index_deferred(
+            "FTS manifest check exceeded its time budget.", "budget_exhausted"
         )
-    except (OSError, OverflowError, TypeError, ValueError, json.JSONDecodeError, sqlite3.Error):
-        return _result(
-            "index",
-            "error",
-            "FTS index is corrupt or unsafe.",
-            {
-                "exists": True,
-                "freshness": "corrupt",
-                "age_seconds": None,
-                "repairable": False,
-            },
+        return _ManifestState("missing", False, deferred)
+    if not _valid_manifest_paths(manifest_error, manifest_paths):
+        return _ManifestState("invalid", False, None)
+    if sorted(manifest_paths) != sorted(indexed_paths):
+        return _ManifestState("mismatch", False, None)
+    return _ManifestState("current", True, None)
+
+
+def _inspect_index(
+    index: Path, state_root: Path, manifest: Path, deadline: float
+) -> _IndexInspection:
+    indexed_rows = _index_probe(index, state_root, deadline)
+    if len(indexed_rows) > MAX_INDEX_PATHS:
+        return _IndexInspection(_index_path_limit_result(), "missing", False)
+    indexed_paths = [row[0] for row in indexed_rows]
+    if any(not isinstance(item, str) for item in indexed_paths):
+        raise ValueError("invalid indexed path")
+    manifest_state = _index_manifest_state(
+        manifest, state_root, indexed_paths, deadline
+    )
+    return _IndexInspection(
+        manifest_state.deferred, manifest_state.state, manifest_state.matches
+    )
+
+
+def _operational_index_result(exc: sqlite3.OperationalError, deadline: float) -> dict:
+    lowered = str(exc).lower()
+    # A lock is a lock even when waiting for it used up the budget, and it
+    # is the more actionable of the two verdicts.
+    if "locked" in lowered or "busy" in lowered:
+        return _index_deferred("FTS index is busy.", "database_busy")
+    if time.monotonic() >= deadline or "interrupted" in lowered:
+        return _index_deferred(
+            "FTS index check exceeded its time budget.", "budget_exhausted"
         )
+    return _corrupt_index_result()
+
+
+def _source_rebuild_required(
+    index: Path, state_root: Path, manifest: Path, root: Path | None, deadline: float
+) -> bool | None:
+    """None when the source freshness cannot be determined at all."""
     source_root = Path(root or state_root)
     try:
         import search_memory
 
-        pages = search_memory._collect_pages(
+        pages = search_memory._collect_pages(  # noqa: SLF001
             "all",
             knowledge_dir=source_root / "knowledge" / "notes",
             root=source_root,
             deadline=deadline,
         )
-        source_rebuild_required = search_memory._needs_rebuild(
+        return search_memory._needs_rebuild(  # noqa: SLF001
             pages,
             root=source_root,
             index_file=index,
@@ -3732,42 +3767,109 @@ def _index_check(
             deadline=deadline,
         )
     except (OSError, ValueError, sqlite3.Error):
-        return _index_deferred(
-            "FTS source freshness could not be determined.",
-            "source_freshness_unknown",
-        )
-    age = max(0, int((now - timestamp).total_seconds()))
-    if source_rebuild_required or not manifest_matches_index:
-        return _result(
-            "index",
-            "degraded",
-            "FTS index is stale relative to searchable knowledge sources.",
-            {
-                "exists": True,
-                "freshness": "stale",
-                "age_seconds": age,
-                "repairable": True,
-                "source_rebuild_required": True,
-                "source_contract": "path-manifest+mtime",
-                "manifest": manifest_state,
-            },
-        )
-    freshness = "fresh" if age <= INDEX_FRESH_SECONDS else "stale"
-    status = "ok" if freshness == "fresh" else "degraded"
-    message = "FTS index is fresh." if status == "ok" else "FTS index is stale."
+        return None
+
+
+def _index_timestamp(info) -> datetime | None:
+    try:
+        return datetime.fromtimestamp(info.st_mtime, tz=timezone.utc)
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def _stale_source_index_result(age: int, manifest_state: str) -> dict:
     return _result(
         "index",
-        status,
-        message,
+        "degraded",
+        "FTS index is stale relative to searchable knowledge sources.",
+        {
+            "exists": True,
+            "freshness": "stale",
+            "age_seconds": age,
+            "repairable": True,
+            "source_rebuild_required": True,
+            "source_contract": "path-manifest+mtime",
+            "manifest": manifest_state,
+        },
+    )
+
+
+def _aged_index_result(age: int, manifest_state: str) -> dict:
+    fresh = age <= INDEX_FRESH_SECONDS
+    freshness = "fresh" if fresh else "stale"
+    return _result(
+        "index",
+        "ok" if fresh else "degraded",
+        "FTS index is fresh." if fresh else "FTS index is stale.",
         {
             "exists": True,
             "freshness": freshness,
             "age_seconds": age,
-            "repairable": freshness == "stale",
+            "repairable": not fresh,
             "source_rebuild_required": False,
             "source_contract": "path-manifest+mtime",
             "manifest": manifest_state,
         },
+    )
+
+
+def _index_freshness_result(
+    index: Path,
+    state_root: Path,
+    manifest: Path,
+    info,
+    now: datetime,
+    deadline: float,
+    inspection: _IndexInspection,
+    root: Path | None,
+) -> dict:
+    rebuild_required = _source_rebuild_required(
+        index, state_root, manifest, root, deadline
+    )
+    if rebuild_required is None:
+        return _index_deferred(
+            "FTS source freshness could not be determined.",
+            "source_freshness_unknown",
+        )
+    timestamp = _index_timestamp(info)
+    if timestamp is None:
+        return _corrupt_index_result()
+    age = max(0, int((now - timestamp).total_seconds()))
+    if rebuild_required or not inspection.manifest_matches:
+        return _stale_source_index_result(age, inspection.manifest_state)
+    return _aged_index_result(age, inspection.manifest_state)
+
+
+def _index_check(
+    state_root: Path,
+    now: datetime,
+    deadline: float = float("inf"),
+    *,
+    root: Path | None = None,
+) -> dict:
+    index = state_root / "cache" / "index.sqlite"
+    kind, info = _safe_kind(index, state_root)
+    unusable = _index_artifact_state(kind, info, deadline)
+    if unusable is not None:
+        return unusable
+    manifest = state_root / "cache" / ".paths-manifest"
+    try:
+        inspection = _inspect_index(index, state_root, manifest, deadline)
+    except sqlite3.OperationalError as exc:
+        return _operational_index_result(exc, deadline)
+    except (
+        OSError,
+        OverflowError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+        sqlite3.Error,
+    ):
+        return _corrupt_index_result()
+    if inspection.early is not None:
+        return inspection.early
+    return _index_freshness_result(
+        index, state_root, manifest, info, now, deadline, inspection, root
     )
 
 
