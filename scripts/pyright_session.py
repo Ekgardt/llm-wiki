@@ -244,25 +244,34 @@ def _path_identity(path: Path) -> os.stat_result:
     return info
 
 
+def _check_parent_directories(path: Path, message: str, *, deadline: float) -> None:
+    """Every ancestor below the anchor has to be a real directory."""
+    for parent in path.parents:
+        if parent == Path(parent.anchor):
+            return
+        _require_startup_deadline(deadline)
+        info = _path_identity(parent)
+        if not stat.S_ISDIR(info.st_mode):
+            raise ValueError(message)
+
+
+def _check_local_path_shape(value: Path, label: str) -> None:
+    """An absolute local path: no UNC prefix, no NUL, no parent traversal."""
+    raw = os.fspath(value)
+    if not value.is_absolute() or "\0" in raw:
+        raise ValueError(f"{label} must be an absolute local path")
+    if raw.startswith(("\\\\", "//")) or ".." in value.parts:
+        raise ValueError(f"{label} must be an absolute local path")
+
+
 def _validated_local_file(value: object, label: str, *, deadline: float) -> Path:
     _require_startup_deadline(deadline)
     if not isinstance(value, Path):
         raise TypeError(f"{label} must be a Path")
-    raw = os.fspath(value)
-    if (
-        not value.is_absolute()
-        or raw.startswith(("\\\\", "//"))
-        or "\0" in raw
-        or ".." in value.parts
-    ):
-        raise ValueError(f"{label} must be an absolute local path")
-    for parent in value.parents:
-        if parent == Path(parent.anchor):
-            break
-        _require_startup_deadline(deadline)
-        info = _path_identity(parent)
-        if not stat.S_ISDIR(info.st_mode):
-            raise ValueError(f"{label} parent must be a directory")
+    _check_local_path_shape(value, label)
+    _check_parent_directories(
+        value, f"{label} parent must be a directory", deadline=deadline
+    )
     _require_startup_deadline(deadline)
     info = _path_identity(value)
     if not stat.S_ISREG(info.st_mode) or _known_network_path(value):
@@ -271,41 +280,40 @@ def _validated_local_file(value: object, label: str, *, deadline: float) -> Path
     return value
 
 
+def _ensure_owned_directory(
+    parent: Path, name: str, message: str, *, deadline: float
+) -> Path:
+    """The named child directory, created owner-only when it is missing."""
+    child = parent / name
+    _require_startup_deadline(deadline)
+    try:
+        child.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    _require_startup_deadline(deadline)
+    info = _path_identity(child)
+    if not stat.S_ISDIR(info.st_mode):
+        raise PermissionError(message)
+    return child
+
+
 def _ensure_lsp_parent(state_root: Path, *, deadline: float) -> Path:
     _require_startup_deadline(deadline)
     if not state_root.is_absolute() or _known_network_path(state_root):
         raise ValueError("state_root must be an absolute local path")
-    for ancestor in state_root.parents:
-        if ancestor == Path(ancestor.anchor):
-            break
-        _require_startup_deadline(deadline)
-        ancestor_info = _path_identity(ancestor)
-        if not stat.S_ISDIR(ancestor_info.st_mode):
-            raise ValueError("state_root parent must be a directory")
+    _check_parent_directories(
+        state_root, "state_root parent must be a directory", deadline=deadline
+    )
     _require_startup_deadline(deadline)
     root_info = _path_identity(state_root)
     if not stat.S_ISDIR(root_info.st_mode):
         raise NotADirectoryError(state_root)
-    run_root = state_root / "run"
-    _require_startup_deadline(deadline)
-    try:
-        run_root.mkdir(mode=0o700)
-    except FileExistsError:
-        pass
-    _require_startup_deadline(deadline)
-    run_info = _path_identity(run_root)
-    if not stat.S_ISDIR(run_info.st_mode):
-        raise PermissionError("LSP run parent must be a directory")
-    parent = run_root / "lsp"
-    _require_startup_deadline(deadline)
-    try:
-        parent.mkdir(mode=0o700)
-    except FileExistsError:
-        pass
-    _require_startup_deadline(deadline)
-    parent_info = _path_identity(parent)
-    if not stat.S_ISDIR(parent_info.st_mode):
-        raise PermissionError("LSP owner parent must be a directory")
+    run_root = _ensure_owned_directory(
+        state_root, "run", "LSP run parent must be a directory", deadline=deadline
+    )
+    parent = _ensure_owned_directory(
+        run_root, "lsp", "LSP owner parent must be a directory", deadline=deadline
+    )
     _require_startup_deadline(deadline)
     _restrict_owner_only(parent, 0o700)
     _require_startup_deadline(deadline)
