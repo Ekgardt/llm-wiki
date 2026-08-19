@@ -707,6 +707,41 @@ def _range_contains(outer: LspRange, inner: LspRange) -> bool:
     return starts_inside and ends_inside
 
 
+_CALL_METHODS = MappingProxyType(
+    {
+        "incoming": "callHierarchy/incomingCalls",
+        "outgoing": "callHierarchy/outgoingCalls",
+    }
+)
+_CALL_RESULT_KEYS = MappingProxyType({"incoming": "from", "outgoing": "to"})
+
+
+@dataclass
+class _BoundedLocations:
+    """Distinct locations, up to the shared MAX_LOCATIONS bound."""
+
+    locations: list[LspLocation] = dataclasses.field(default_factory=list)
+    seen: set[tuple[object, ...]] = dataclasses.field(default_factory=set)
+
+    def add(self, location: LspLocation) -> None:
+        key = _location_key(location)
+        if key in self.seen or len(self.locations) >= MAX_LOCATIONS:
+            return
+        self.seen.add(key)
+        self.locations.append(location)
+
+
+@dataclass(frozen=True)
+class _CallQuery:
+    """The process, generation, document and encoding one query is bound to."""
+
+    process: LspProcess
+    generation: str
+    document: OpenDocument
+    epoch: int
+    encoding: PositionEncoding
+
+
 class _LaunchServerGuard:
     def __init__(
         self,
@@ -2797,6 +2832,180 @@ class PyrightSession:
             return None
         return LspLocation(source.uri, range_)
 
+    def _semantic_query_epoch(self) -> int | None:
+        with self._lock:
+            return self._semantic_query_epoch_locked()
+
+    def _query_ready_locked(
+        self,
+        process: LspProcess | None,
+        generation: str | None,
+        document: OpenDocument,
+        epoch: int,
+    ) -> bool:
+        if process is None or generation is None:
+            return False
+        return self._document_query_current_locked(
+            process, generation, document, epoch
+        )
+
+    def _query_still_current(self, query: _CallQuery) -> bool:
+        """Whether the query still refers to the workspace it started on."""
+        with self._lock:
+            return self._document_query_current_locked(
+                query.process, query.generation, query.document, query.epoch
+            )
+
+    def _call_support_status(self, epoch: int) -> str | None:
+        """A refusal status for call hierarchy, or None when it may proceed."""
+        with self._lock:
+            process = self._process
+            encoding = self._position_encoding
+            supported = self._capabilities.get("calls", False)
+            current = self._semantic_query_epoch_current_locked(epoch)
+        if process is None or encoding is None or not current:
+            return "not_ready"
+        if not supported:
+            return "unsupported"
+        return None
+
+    def _call_query(self, document: OpenDocument, epoch: int) -> _CallQuery | None:
+        """The bound query, or None when the workspace moved under it."""
+        with self._lock:
+            encoding = self._position_encoding
+            process = self._process
+            generation = self._generation_nonce
+            ready = self._query_ready_locked(process, generation, document, epoch)
+        if not ready or encoding is None or process is None or generation is None:
+            return None
+        return _CallQuery(process, generation, document, epoch, encoding)
+
+    def _prepare_call_hierarchy(
+        self, anchor: SourceAnchor, query: _CallQuery, *, deadline: float
+    ) -> tuple[bool, object]:
+        """Whether the query held, and what the server prepared for the anchor."""
+        source_document = SourceDocument.from_bytes(
+            query.document.source.relative_path,
+            query.document.content,
+        )
+        position = source_document.to_lsp(anchor, query.encoding)
+        if not self._query_still_current(query):
+            return False, None
+        prepared = query.process.request(
+            "textDocument/prepareCallHierarchy",
+            {
+                "textDocument": {"uri": query.document.source.uri},
+                "position": {
+                    "line": position.line,
+                    "character": position.character,
+                },
+            },
+            deadline=deadline,
+        )
+        if not self._query_still_current(query):
+            return False, None
+        return True, prepared
+
+    def _sanitized_call_items(self, prepared: list[object]) -> list[object]:
+        items: list[object] = []
+        for value in prepared[:_MAX_PREPARED_CALL_ITEMS]:
+            item = self._sanitize_call_item(value)
+            if item is not None:
+                items.append(item)
+        return items
+
+    def _call_result(
+        self, item: object, query: _CallQuery, *, method: str, deadline: float
+    ) -> tuple[bool, object]:
+        """Whether the query held across the request, and what came back."""
+        if not self._query_still_current(query):
+            return False, None
+        result = query.process.request(method, {"item": item}, deadline=deadline)
+        if not self._query_still_current(query):
+            return False, None
+        return True, result
+
+    def _call_entry_location(
+        self, call: object, result_key: str
+    ) -> LspLocation | None:
+        if not isinstance(call, dict):
+            return None
+        return self._call_location(call.get(result_key))
+
+    def _collect_call_locations(
+        self, result: object, result_key: str, collected: _BoundedLocations
+    ) -> None:
+        if not isinstance(result, list):
+            return
+        for call in result[:MAX_LOCATIONS]:
+            location = self._call_entry_location(call, result_key)
+            if location is not None:
+                collected.add(location)
+
+    def _call_locations(
+        self,
+        items: list[object],
+        query: _CallQuery,
+        *,
+        direction: str,
+        deadline: float,
+    ) -> list[LspLocation] | None:
+        """Every location the calls name, or None when the query went stale."""
+        method = _CALL_METHODS[direction]
+        result_key = _CALL_RESULT_KEYS[direction]
+        collected = _BoundedLocations()
+        for item in items:
+            current, result = self._call_result(
+                item, query, method=method, deadline=deadline
+            )
+            if not current:
+                return None
+            self._collect_call_locations(result, result_key, collected)
+        if not self._query_still_current(query):
+            return None
+        return collected.locations
+
+    def _collect_calls(
+        self,
+        anchor: SourceAnchor,
+        query: _CallQuery,
+        *,
+        direction: str,
+        deadline: float,
+    ) -> ProviderCalls:
+        current, prepared = self._prepare_call_hierarchy(
+            anchor, query, deadline=deadline
+        )
+        if not current:
+            return ProviderCalls(direction, (), "not_ready", True)
+        if prepared is None or not isinstance(prepared, list):
+            return ProviderCalls(direction, (), "provider_reported", True)
+        items = self._sanitized_call_items(prepared)
+        locations = self._call_locations(
+            items, query, direction=direction, deadline=deadline
+        )
+        if locations is None:
+            return ProviderCalls(direction, (), "not_ready", True)
+        return ProviderCalls(direction, tuple(locations), "provider_reported", True)
+
+    def _calls_within_operation(
+        self, anchor: SourceAnchor, *, direction: str, deadline: float
+    ) -> ProviderCalls:
+        epoch = self._semantic_query_epoch()
+        if epoch is None:
+            return ProviderCalls(direction, (), "not_ready", True)
+        self.start(deadline=deadline)
+        status = self._call_support_status(epoch)
+        if status is not None:
+            return ProviderCalls(direction, (), status, True)
+        document = self.open_document(anchor.path, deadline=deadline)
+        query = self._call_query(document, epoch)
+        if query is None:
+            return ProviderCalls(direction, (), "not_ready", True)
+        return self._collect_calls(
+            anchor, query, direction=direction, deadline=deadline
+        )
+
     def _calls(
         self,
         anchor: SourceAnchor,
@@ -2808,137 +3017,9 @@ class PyrightSession:
             raise TypeError("anchor must be a SourceAnchor")
         deadline = _validated_deadline(deadline)
         with self._operation():
-            with self._lock:
-                synchronize_epoch = self._semantic_query_epoch_locked()
-            if synchronize_epoch is None:
-                return ProviderCalls(direction, (), "not_ready", True)
-            self.start(deadline=deadline)
-            with self._lock:
-                process = self._process
-                encoding = self._position_encoding
-                supported = self._capabilities.get("calls", False)
-                if (
-                    process is None
-                    or encoding is None
-                    or not self._semantic_query_epoch_current_locked(
-                        synchronize_epoch
-                    )
-                ):
-                    return ProviderCalls(direction, (), "not_ready", True)
-            if not supported:
-                return ProviderCalls(direction, (), "unsupported", True)
-            document = self.open_document(anchor.path, deadline=deadline)
-            with self._lock:
-                encoding = self._position_encoding
-                process = self._process
-                generation = self._generation_nonce
-                ready = (
-                    process is not None
-                    and generation is not None
-                    and self._document_query_current_locked(
-                        process,
-                        generation,
-                        document,
-                        synchronize_epoch,
-                    )
-                )
-            if not ready or encoding is None or process is None or generation is None:
-                return ProviderCalls(direction, (), "not_ready", True)
-            source_document = SourceDocument.from_bytes(
-                document.source.relative_path,
-                document.content,
+            return self._calls_within_operation(
+                anchor, direction=direction, deadline=deadline
             )
-            position = source_document.to_lsp(anchor, encoding)
-            with self._lock:
-                if not self._document_query_current_locked(
-                    process,
-                    generation,
-                    document,
-                    synchronize_epoch,
-                ):
-                    return ProviderCalls(direction, (), "not_ready", True)
-            prepared = process.request(
-                "textDocument/prepareCallHierarchy",
-                {
-                    "textDocument": {"uri": document.source.uri},
-                    "position": {
-                        "line": position.line,
-                        "character": position.character,
-                    },
-                },
-                deadline=deadline,
-            )
-            with self._lock:
-                if not self._document_query_current_locked(
-                    process,
-                    generation,
-                    document,
-                    synchronize_epoch,
-                ):
-                    return ProviderCalls(direction, (), "not_ready", True)
-                if prepared is None or not isinstance(prepared, list):
-                    return ProviderCalls(direction, (), "provider_reported", True)
-            items = [
-                item
-                for value in prepared[:_MAX_PREPARED_CALL_ITEMS]
-                if (item := self._sanitize_call_item(value)) is not None
-            ]
-            method = (
-                "callHierarchy/incomingCalls"
-                if direction == "incoming"
-                else "callHierarchy/outgoingCalls"
-            )
-            result_key = "from" if direction == "incoming" else "to"
-            locations: list[LspLocation] = []
-            seen: set[tuple[object, ...]] = set()
-            for item in items:
-                with self._lock:
-                    if not self._document_query_current_locked(
-                        process,
-                        generation,
-                        document,
-                        synchronize_epoch,
-                    ):
-                        return ProviderCalls(direction, (), "not_ready", True)
-                result = process.request(
-                    method,
-                    {"item": item},
-                    deadline=deadline,
-                )
-                with self._lock:
-                    if not self._document_query_current_locked(
-                        process,
-                        generation,
-                        document,
-                        synchronize_epoch,
-                    ):
-                        return ProviderCalls(direction, (), "not_ready", True)
-                if not isinstance(result, list):
-                    continue
-                for call in result[:MAX_LOCATIONS]:
-                    if not isinstance(call, dict):
-                        continue
-                    location = self._call_location(call.get(result_key))
-                    if location is None:
-                        continue
-                    key = _location_key(location)
-                    if key not in seen and len(locations) < MAX_LOCATIONS:
-                        seen.add(key)
-                        locations.append(location)
-            with self._lock:
-                if not self._document_query_current_locked(
-                    process,
-                    generation,
-                    document,
-                    synchronize_epoch,
-                ):
-                    return ProviderCalls(direction, (), "not_ready", True)
-                return ProviderCalls(
-                    direction,
-                    tuple(locations),
-                    "provider_reported",
-                    True,
-                )
 
     def incoming_calls(
         self,
