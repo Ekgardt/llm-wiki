@@ -4250,6 +4250,15 @@ class _KeyLockState:
         self.references = 0
 
 
+@dataclass(frozen=True)
+class _SessionLookup:
+    """What one locked attempt at getting a session decided."""
+
+    session: PyrightSession | None = None
+    wait_for: PyrightSession | None = None
+    reserved: tuple[object, PyrightSession] | None = None
+
+
 class PyrightSessionManager:
     """Bound live Pyright sessions to four processes per owning MCP process."""
 
@@ -4452,6 +4461,166 @@ class PyrightSessionManager:
                 raise TimeoutError("Pyright session close wait deadline expired")
             time.sleep(min(_LOCK_POLL_SECONDS, remaining))
 
+    def _admit_manager_locked(self) -> None:
+        if self._closed:
+            raise RuntimeError("Pyright session manager is closed")
+
+    def _forget_session_locked(self, key: object, session: PyrightSession) -> None:
+        if self._sessions.get(key) is session:
+            self._sessions.pop(key, None)
+
+    def _new_session_locked(
+        self, key: object, repository: RepositoryScope, identity: PyrightIdentity
+    ) -> PyrightSession:
+        session = PyrightSession(repository, identity, state_root=self._state_root)
+        self._sessions[key] = session
+        self._register_atexit_locked()
+        return session
+
+    def _capacity_denied_session(
+        self, repository: RepositoryScope, identity: PyrightIdentity
+    ) -> PyrightSession:
+        """A session that refuses to start because the manager is at capacity."""
+        denied = PyrightSession(repository, identity, state_root=self._state_root)
+        denied._capacity_locked = True
+        return denied
+
+    def _existing_session_locked(
+        self, key: object, deadline: float
+    ) -> _SessionLookup | None:
+        """What to do about a session already registered under this key."""
+        existing = self._sessions.get(key)
+        if existing is None:
+            return None
+        closed, closing, _starting, _active, _last_used = self._session_state(
+            existing, deadline
+        )
+        if closed:
+            self._forget_session_locked(key, existing)
+            return None
+        if closing:
+            return _SessionLookup(wait_for=existing)
+        return _SessionLookup(session=existing)
+
+    def _lookup_session_locked(
+        self,
+        key: object,
+        repository: RepositoryScope,
+        identity: PyrightIdentity,
+        deadline: float,
+    ) -> _SessionLookup:
+        """One locked attempt: a session, one to wait for, or one to evict."""
+        self._admit_manager_locked()
+        existing = self._existing_session_locked(key, deadline)
+        if existing is not None:
+            return existing
+        live = self._live_entries_locked(deadline)
+        if len(live) < MAX_LSP_PROCESSES:
+            return _SessionLookup(
+                session=self._new_session_locked(key, repository, identity)
+            )
+        reserved = self._reserve_lru_idle_locked(live, deadline)
+        if reserved is None:
+            return _SessionLookup(
+                session=self._capacity_denied_session(repository, identity)
+            )
+        return _SessionLookup(reserved=reserved)
+
+    def _lookup_session(
+        self,
+        key: object,
+        repository: RepositoryScope,
+        identity: PyrightIdentity,
+        deadline: float,
+    ) -> _SessionLookup:
+        self._acquire_manager(deadline)
+        try:
+            return self._lookup_session_locked(key, repository, identity, deadline)
+        finally:
+            self._lock.release()
+
+    def _adopt_after_eviction_locked(
+        self,
+        evicted_key: object,
+        evicted: PyrightSession,
+        key: object,
+        repository: RepositoryScope,
+        identity: PyrightIdentity,
+        deadline: float,
+    ) -> PyrightSession | None:
+        """The session replacing the evicted one, or None to look again."""
+        closed, _closing, _starting, _active, _last_used = self._session_state(
+            evicted, deadline
+        )
+        if not closed:
+            raise RuntimeError("Pyright eviction close did not release the session")
+        self._forget_session_locked(evicted_key, evicted)
+        self._admit_manager_locked()
+        live = self._live_entries_locked(deadline)
+        if len(live) >= MAX_LSP_PROCESSES:
+            return None
+        return self._new_session_locked(key, repository, identity)
+
+    def _evict_and_adopt(
+        self,
+        reserved: tuple[object, PyrightSession],
+        key: object,
+        repository: RepositoryScope,
+        identity: PyrightIdentity,
+        deadline: float,
+    ) -> PyrightSession | None:
+        """Close the reserved session, then take its place if one is free."""
+        evicted_key, evicted = reserved
+        evicted.close(deadline=deadline)
+        self._acquire_manager(deadline)
+        try:
+            return self._adopt_after_eviction_locked(
+                evicted_key, evicted, key, repository, identity, deadline
+            )
+        finally:
+            self._lock.release()
+
+    def _session_for_key(
+        self,
+        key: object,
+        repository: RepositoryScope,
+        identity: PyrightIdentity,
+        deadline: float,
+    ) -> PyrightSession:
+        """The session for this key, waiting or evicting until there is one."""
+        while True:
+            lookup = self._lookup_session(key, repository, identity, deadline)
+            if lookup.session is not None:
+                return lookup.session
+            if lookup.wait_for is not None:
+                self._wait_for_session_close(lookup.wait_for, deadline)
+                continue
+            assert lookup.reserved is not None
+            adopted = self._evict_and_adopt(
+                lookup.reserved, key, repository, identity, deadline
+            )
+            if adopted is not None:
+                return adopted
+
+    def _admit_get(
+        self,
+        repository: RepositoryScope,
+        identity: PyrightIdentity,
+        deadline: float,
+    ) -> PyrightSession | tuple[object, object]:
+        """The key and its lock, or an unqualified session that needs neither."""
+        self._acquire_manager(deadline)
+        try:
+            self._admit_manager_locked()
+            if not identity.qualified:
+                return PyrightSession(
+                    repository, identity, state_root=self._state_root
+                )
+            key = self._profile_key(repository, identity)
+            return key, self._retain_key_lock_locked(key, deadline)
+        finally:
+            self._lock.release()
+
     def get(
         self,
         repository: RepositoryScope,
@@ -4468,103 +4637,15 @@ class PyrightSessionManager:
             state_root=self._state_root,
             deadline=deadline,
         )
-        self._acquire_manager(deadline)
-        try:
-            if self._closed:
-                raise RuntimeError("Pyright session manager is closed")
-            if not identity.qualified:
-                return PyrightSession(
-                    repository,
-                    identity,
-                    state_root=self._state_root,
-                )
-            key = self._profile_key(repository, identity)
-            key_lock_state = self._retain_key_lock_locked(key, deadline)
-        finally:
-            self._lock.release()
-
+        admitted = self._admit_get(repository, identity, deadline)
+        if isinstance(admitted, PyrightSession):
+            return admitted
+        key, key_lock_state = admitted
         key_lock_acquired = False
         try:
             self._acquire_key_lock(key_lock_state.lock, deadline)
             key_lock_acquired = True
-            while True:
-                wait_for: PyrightSession | None = None
-                reserved: tuple[
-                    tuple[str, PyrightIdentity], PyrightSession
-                ] | None = None
-                self._acquire_manager(deadline)
-                try:
-                    if self._closed:
-                        raise RuntimeError("Pyright session manager is closed")
-                    existing = self._sessions.get(key)
-                    if existing is not None:
-                        closed, closing, _starting, _active, _last_used = (
-                            self._session_state(existing, deadline)
-                        )
-                        if closed:
-                            if self._sessions.get(key) is existing:
-                                self._sessions.pop(key, None)
-                        elif closing:
-                            wait_for = existing
-                        else:
-                            return existing
-                    if wait_for is None:
-                        live = self._live_entries_locked(deadline)
-                        if len(live) < MAX_LSP_PROCESSES:
-                            session = PyrightSession(
-                                repository,
-                                identity,
-                                state_root=self._state_root,
-                            )
-                            self._sessions[key] = session
-                            self._register_atexit_locked()
-                            return session
-                        reserved = self._reserve_lru_idle_locked(live, deadline)
-                        if reserved is None:
-                            denied = PyrightSession(
-                                repository,
-                                identity,
-                                state_root=self._state_root,
-                            )
-                            denied._capacity_locked = True
-                            return denied
-                finally:
-                    self._lock.release()
-
-                if wait_for is not None:
-                    self._wait_for_session_close(wait_for, deadline)
-                    continue
-
-                assert reserved is not None
-                evicted_key, evicted = reserved
-                evicted.close(deadline=deadline)
-
-                self._acquire_manager(deadline)
-                try:
-                    closed, _closing, _starting, _active, _last_used = (
-                        self._session_state(evicted, deadline)
-                    )
-                    if not closed:
-                        raise RuntimeError(
-                            "Pyright eviction close did not release the session"
-                        )
-                    if self._sessions.get(evicted_key) is evicted:
-                        self._sessions.pop(evicted_key, None)
-                    if self._closed:
-                        raise RuntimeError("Pyright session manager is closed")
-                    live = self._live_entries_locked(deadline)
-                    if len(live) >= MAX_LSP_PROCESSES:
-                        continue
-                    session = PyrightSession(
-                        repository,
-                        identity,
-                        state_root=self._state_root,
-                    )
-                    self._sessions[key] = session
-                    self._register_atexit_locked()
-                    return session
-                finally:
-                    self._lock.release()
+            return self._session_for_key(key, repository, identity, deadline)
         finally:
             if key_lock_acquired:
                 key_lock_state.lock.release()
