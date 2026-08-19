@@ -333,3 +333,32 @@ def test_drain_reports_failure_when_heartbeat_loses_fence(
         thread.name == f"memory-queue-heartbeat-{task_id}" and thread.is_alive()
         for thread in threading.enumerate()
     )
+
+
+def test_a_busy_database_makes_the_worker_wait_instead_of_dying(tmp_path, monkeypatch):
+    """Another worker holding the write lock must not end this worker's run."""
+    queue = MemoryQueue(tmp_path)
+    task_id = queue.enqueue("query", 1, {"n": 1})
+    real_claim = queue.claim
+    attempts = []
+
+    def busy_once(owner, **options):
+        attempts.append(owner)
+        if len(attempts) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real_claim(owner, **options)
+
+    monkeypatch.setattr(queue, "claim", busy_once)
+    monkeypatch.setattr(memory_queue, "_queue", lambda **options: queue)
+
+    summary = memory_queue.run_worker(
+        lambda payload: True,
+        max_tasks=1,
+        max_seconds=30,
+        idle_seconds=0,
+        processor_runner=lambda processor, task, timeout: processor(task),
+    )
+
+    assert len(attempts) >= 2
+    assert summary.succeeded == 1
+    assert queue.get(task_id).state == "succeeded"

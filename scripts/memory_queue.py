@@ -10479,6 +10479,40 @@ def _run_processor_child(
             )
 
 
+_CLAIM_BUSY_RETRY_SECONDS = 0.05
+
+
+def _is_busy_database(error: sqlite3.OperationalError) -> bool:
+    code = getattr(error, "sqlite_errorcode", None)
+    if isinstance(code, int) and code & 0xFF in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+        return True
+    message = str(error).casefold()
+    return "busy" in message or "locked" in message
+
+
+def _claim_when_reachable(
+    queue: MemoryQueue,
+    *,
+    owner: str,
+    lease_seconds: int,
+    max_attempts: int,
+    deadline: float,
+    monotonic: Callable[[], float],
+) -> QueueLease | None:
+    """A busy database means "try again shortly", not a dead worker.
+
+    Another worker holding the write lock used to surface as an unhandled
+    `database is locked` out of the worker loop, which ended the run.
+    """
+    while True:
+        try:
+            return queue.claim(owner, lease_seconds=lease_seconds, max_attempts=max_attempts)
+        except sqlite3.OperationalError as error:
+            if not _is_busy_database(error) or monotonic() >= deadline:
+                return None
+            time.sleep(_CLAIM_BUSY_RETRY_SECONDS)
+
+
 def _work_one(
     queue: MemoryQueue,
     processor: Callable[[dict], bool | DeferredResult],
@@ -10497,8 +10531,13 @@ def _work_one(
     retry_cap_seconds: int,
 ) -> dict[str, int]:
     counts = {"ok": 0, "failed": 0, "dead": 0, "skipped": 0, "halted": 0}
-    lease = queue.claim(
-        owner, lease_seconds=lease_seconds, max_attempts=max_attempts
+    lease = _claim_when_reachable(
+        queue,
+        owner=owner,
+        lease_seconds=lease_seconds,
+        max_attempts=max_attempts,
+        deadline=deadline,
+        monotonic=monotonic,
     )
     if lease is None:
         return counts
