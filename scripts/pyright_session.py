@@ -2779,6 +2779,40 @@ class PyrightSession:
             locations.append(location)
         return tuple(locations), partial
 
+    def _location_params(
+        self, query: _DocumentQuery, anchor: SourceAnchor, *, references: bool
+    ) -> dict[str, object]:
+        params = _position_params(query, self._anchor_position(query, anchor))
+        if references:
+            params["context"] = {"includeDeclaration": True}
+        return params
+
+    def _location_feature_within_operation(
+        self,
+        anchor: SourceAnchor,
+        *,
+        capability: str,
+        method: str,
+        deadline: float,
+        references: bool,
+    ) -> ProviderLocations:
+        query, status = self._begin_document_query(
+            capability, anchor.path, deadline=deadline
+        )
+        if query is None:
+            return ProviderLocations((), status, True)
+        params = self._location_params(query, anchor, references=references)
+        if not self._query_still_current(query):
+            return ProviderLocations((), "not_ready", True)
+        result = query.process.request(method, params, deadline=deadline)
+        locations, filtered = self._normalize_locations(result)
+        response = ProviderLocations(
+            locations, "provider_reported", references or filtered
+        )
+        if not self._query_still_current(query):
+            return ProviderLocations((), "not_ready", True)
+        return response
+
     def _location_feature(
         self,
         anchor: SourceAnchor,
@@ -2794,80 +2828,13 @@ class PyrightSession:
         if time.monotonic() >= deadline:
             raise TimeoutError("Pyright semantic request deadline expired")
         with self._operation():
-            with self._lock:
-                synchronize_epoch = self._semantic_query_epoch_locked()
-            if synchronize_epoch is None:
-                return ProviderLocations((), "not_ready", True)
-            self.start(deadline=deadline)
-            with self._lock:
-                process = self._process
-                encoding = self._position_encoding
-                supported = self._capabilities.get(capability, False)
-                if (
-                    process is None
-                    or encoding is None
-                    or not self._semantic_query_epoch_current_locked(
-                        synchronize_epoch
-                    )
-                ):
-                    return ProviderLocations((), "not_ready", True)
-            if not supported:
-                return ProviderLocations((), "unsupported", True)
-            document = self.open_document(anchor.path, deadline=deadline)
-            with self._lock:
-                encoding = self._position_encoding
-                process = self._process
-                generation = self._generation_nonce
-                ready = (
-                    process is not None
-                    and generation is not None
-                    and self._document_query_current_locked(
-                        process,
-                        generation,
-                        document,
-                        synchronize_epoch,
-                    )
-                )
-            if not ready or encoding is None or process is None or generation is None:
-                return ProviderLocations((), "not_ready", True)
-            source_document = SourceDocument.from_bytes(
-                document.source.relative_path,
-                document.content,
+            return self._location_feature_within_operation(
+                anchor,
+                capability=capability,
+                method=method,
+                deadline=deadline,
+                references=references,
             )
-            position = source_document.to_lsp(anchor, encoding)
-            params: dict[str, object] = {
-                "textDocument": {"uri": document.source.uri},
-                "position": {
-                    "line": position.line,
-                    "character": position.character,
-                },
-            }
-            if references:
-                params["context"] = {"includeDeclaration": True}
-            with self._lock:
-                if not self._document_query_current_locked(
-                    process,
-                    generation,
-                    document,
-                    synchronize_epoch,
-                ):
-                    return ProviderLocations((), "not_ready", True)
-            result = process.request(method, params, deadline=deadline)
-            locations, filtered = self._normalize_locations(result)
-            response = ProviderLocations(
-                locations,
-                "provider_reported",
-                True if references else filtered,
-            )
-            with self._lock:
-                if not self._document_query_current_locked(
-                    process,
-                    generation,
-                    document,
-                    synchronize_epoch,
-                ):
-                    return ProviderLocations((), "not_ready", True)
-                return response
 
     def definition(
         self,
@@ -2976,63 +2943,31 @@ class PyrightSession:
         self._walk_document_symbols(walk, uri)
         return tuple(walk.locations), walk.partial
 
+    def _document_symbols_within_operation(
+        self, path: str, *, deadline: float
+    ) -> ProviderLocations:
+        query, status = self._begin_document_query(
+            "document_symbols", path, deadline=deadline
+        )
+        if query is None:
+            return ProviderLocations((), status, True)
+        result = query.process.request(
+            "textDocument/documentSymbol",
+            {"textDocument": {"uri": query.document.source.uri}},
+            deadline=deadline,
+        )
+        locations, partial = self._normalize_document_symbols(
+            result, query.document.source.uri
+        )
+        response = ProviderLocations(locations, "provider_reported", partial)
+        if not self._query_still_current(query):
+            return ProviderLocations((), "not_ready", True)
+        return response
+
     def document_symbols(self, path: str, *, deadline: float) -> ProviderLocations:
         deadline = _validated_deadline(deadline)
         with self._operation():
-            with self._lock:
-                synchronize_epoch = self._semantic_query_epoch_locked()
-            if synchronize_epoch is None:
-                return ProviderLocations((), "not_ready", True)
-            self.start(deadline=deadline)
-            with self._lock:
-                process = self._process
-                initialized = self._position_encoding is not None
-                supported = self._capabilities.get("document_symbols", False)
-                if (
-                    process is None
-                    or not initialized
-                    or not self._semantic_query_epoch_current_locked(
-                        synchronize_epoch
-                    )
-                ):
-                    return ProviderLocations((), "not_ready", True)
-            if not supported:
-                return ProviderLocations((), "unsupported", True)
-            document = self.open_document(path, deadline=deadline)
-            with self._lock:
-                process = self._process
-                generation = self._generation_nonce
-                ready = (
-                    process is not None
-                    and generation is not None
-                    and self._document_query_current_locked(
-                        process,
-                        generation,
-                        document,
-                        synchronize_epoch,
-                    )
-                )
-            if not ready or process is None or generation is None:
-                return ProviderLocations((), "not_ready", True)
-            result = process.request(
-                "textDocument/documentSymbol",
-                {"textDocument": {"uri": document.source.uri}},
-                deadline=deadline,
-            )
-            locations, partial = self._normalize_document_symbols(
-                result,
-                document.source.uri,
-            )
-            response = ProviderLocations(locations, "provider_reported", partial)
-            with self._lock:
-                if not self._document_query_current_locked(
-                    process,
-                    generation,
-                    document,
-                    synchronize_epoch,
-                ):
-                    return ProviderLocations((), "not_ready", True)
-                return response
+            return self._document_symbols_within_operation(path, deadline=deadline)
 
 
     def _anchor_position(
@@ -3045,23 +2980,26 @@ class PyrightSession:
         )
         return source_document.to_lsp(anchor, query.encoding)
 
-    def _begin_anchor_query(
-        self, capability: str, anchor: SourceAnchor, *, deadline: float
-    ) -> _DocumentQuery | None:
-        """The bound query for this anchor, or None when it cannot be served."""
+    def _begin_document_query(
+        self, capability: str, path: str, *, deadline: float
+    ) -> tuple[_DocumentQuery | None, str]:
+        """The bound query for this path; the status matters only when it is None."""
         epoch = self._semantic_query_epoch()
         if epoch is None:
-            return None
+            return None, "not_ready"
         self.start(deadline=deadline)
-        if self._capability_status(capability, epoch) is not None:
-            return None
-        document = self.open_document(anchor.path, deadline=deadline)
-        return self._document_query(document, epoch)
+        status = self._capability_status(capability, epoch)
+        if status is not None:
+            return None, status
+        document = self.open_document(path, deadline=deadline)
+        return self._document_query(document, epoch), "not_ready"
 
     def _hover_within_operation(
         self, anchor: SourceAnchor, *, deadline: float
     ) -> ProviderHover:
-        query = self._begin_anchor_query("hover", anchor, deadline=deadline)
+        query, _status = self._begin_document_query(
+            "hover", anchor.path, deadline=deadline
+        )
         if query is None:
             return ProviderHover(None, None, True)
         position = self._anchor_position(query, anchor)
