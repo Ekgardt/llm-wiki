@@ -742,6 +742,51 @@ class _CallQuery:
     encoding: PositionEncoding
 
 
+@dataclass(frozen=True)
+class _SyncPlan:
+    """Everything one synchronize pass settled before touching the server."""
+
+    process: LspProcess
+    generation: str
+    prior: WorkspaceRevision | None
+    revision: WorkspaceRevision
+    deadline: float
+    documents_snapshot: dict[str, OpenDocument]
+    next_documents: dict[str, OpenDocument]
+    projected_document_bytes: int
+    closed_documents: list[OpenDocument]
+    changed_replacements: list[tuple[OpenDocument, OpenDocument, dict[str, object]]]
+    close_notifications: list[tuple[OpenDocument, dict[str, object]]]
+    watched_params: dict[str, object] | None
+
+
+@dataclass
+class _WireAttempt:
+    """Whether any notification of this pass has already reached the wire."""
+
+    started: bool = False
+
+
+def _without_wire_uri(
+    keys: set[tuple[object, ...]], generation: str, uri: str
+) -> set[tuple[object, ...]]:
+    """The wire keys with every entry for this generation's URI removed."""
+    return {key for key in keys if not (key[0] == generation and key[1] == uri)}
+
+
+def _drop_superseded_diagnostics(
+    diagnostics: dict[str, _DiagnosticSnapshot],
+    document: OpenDocument,
+    replacement: OpenDocument,
+) -> None:
+    """A snapshot older than the replacement no longer describes the document."""
+    snapshot = diagnostics.get(document.source.uri)
+    if snapshot is None or snapshot.document_version is None:
+        return
+    if snapshot.document_version < replacement.version:
+        diagnostics.pop(document.source.uri, None)
+
+
 class _LaunchServerGuard:
     def __init__(
         self,
@@ -3194,6 +3239,231 @@ class PyrightSession:
                     self._starting = False
                     self._condition.notify_all()
 
+    def _notify_or_fail(
+        self,
+        plan: _SyncPlan,
+        method: str,
+        params: dict[str, object],
+        message: str,
+    ) -> None:
+        """Send one notification; an explicit refusal fails the synchronize."""
+        delivered = plan.process.notify_generation(
+            method,
+            params,
+            generation_nonce=plan.generation,
+            deadline=plan.deadline,
+        )
+        if delivered is False:
+            raise RuntimeError(message)
+
+    def _send_change(
+        self, plan: _SyncPlan, document: OpenDocument, params: dict[str, object]
+    ) -> None:
+        """A changed document is opened once, then sent its change."""
+        opened = self._send_did_open_once(
+            document,
+            plan.generation,
+            deadline=plan.deadline,
+            notify=lambda: plan.process.notify_generation(
+                "textDocument/didOpen",
+                self._did_open_params(document),
+                generation_nonce=plan.generation,
+                deadline=plan.deadline,
+            ),
+        )
+        if not opened:
+            raise RuntimeError("Pyright didOpen notification was not delivered")
+        self._notify_or_fail(
+            plan,
+            "textDocument/didChange",
+            params,
+            "Pyright didChange notification was not delivered",
+        )
+
+    def _send_synchronize_notifications(
+        self, plan: _SyncPlan, attempt: _WireAttempt
+    ) -> None:
+        for _document, params in plan.close_notifications:
+            attempt.started = True
+            self._notify_or_fail(
+                plan,
+                "textDocument/didClose",
+                params,
+                "Pyright didClose notification was not delivered",
+            )
+        for document, _replacement, params in plan.changed_replacements:
+            attempt.started = True
+            self._send_change(plan, document, params)
+        if plan.watched_params is not None:
+            attempt.started = True
+            self._notify_or_fail(
+                plan,
+                "workspace/didChangeWatchedFiles",
+                plan.watched_params,
+                "Pyright watched-files notification was not delivered",
+            )
+
+    def _recover_after_wire_failure(
+        self, plan: _SyncPlan, notification_error: BaseException
+    ) -> None:
+        """Put the server back to the snapshot it had before this pass."""
+        try:
+            self._recover_synchronize_snapshot(
+                plan.process,
+                plan.generation,
+                deadline=plan.deadline,
+            )
+        except BaseException as recovery_error:
+            if (
+                _startup_interruption(notification_error) is not None
+                or _startup_interruption(recovery_error) is not None
+            ):
+                _raise_collected_errors(
+                    [recovery_error],
+                    prior_error=notification_error,
+                )
+            raise RuntimeError(
+                "Pyright synchronization notification recovery failed"
+            ) from recovery_error
+
+    def _deliver_synchronize(self, plan: _SyncPlan) -> None:
+        """Send the planned notifications, restoring the snapshot if one fails."""
+        attempt = _WireAttempt()
+        try:
+            self._send_synchronize_notifications(plan, attempt)
+        except BaseException as notification_error:
+            if attempt.started:
+                self._recover_after_wire_failure(plan, notification_error)
+            raise
+
+    def _documents_unchanged_locked(
+        self, snapshot: dict[str, OpenDocument]
+    ) -> bool:
+        """No document was opened, closed or replaced while the plan was built."""
+        if len(self._documents) != len(snapshot):
+            return False
+        return all(
+            self._documents.get(uri) is document
+            for uri, document in snapshot.items()
+        )
+
+    def _commit_identity_changed_locked(self, plan: _SyncPlan) -> bool:
+        """The process, generation or revision the plan was built on has moved."""
+        if self._process is not plan.process:
+            return True
+        if self._workspace_revision is not plan.prior:
+            return True
+        if self._generation_nonce != plan.generation:
+            return True
+        return plan.process.generation_nonce != plan.generation
+
+    def _commit_state_changed_locked(self, plan: _SyncPlan) -> bool:
+        if self._closed or self._closing:
+            return True
+        if self._commit_identity_changed_locked(plan):
+            return True
+        return not self._documents_unchanged_locked(plan.documents_snapshot)
+
+    def _projected_readiness(
+        self, plan: _SyncPlan
+    ) -> tuple[dict[str, _DiagnosticSnapshot], dict[str, str], str | None]:
+        """Diagnostics, readiness and target after the planned closes and changes."""
+        next_diagnostics = dict(self._diagnostics)
+        next_ready = dict(self._ready_uri_generations)
+        next_target = self._readiness_target_uri
+        for document in plan.closed_documents:
+            next_ready.pop(document.source.uri, None)
+            next_diagnostics.pop(document.source.uri, None)
+            if next_target == document.source.uri:
+                next_target = None
+        for document, replacement, _params in plan.changed_replacements:
+            _drop_superseded_diagnostics(next_diagnostics, document, replacement)
+        return next_diagnostics, next_ready, next_target
+
+    def _projected_wire_state(
+        self, plan: _SyncPlan
+    ) -> tuple[set[tuple[object, ...]], set[tuple[object, ...]]]:
+        """The wire bookkeeping after the planned closes and version bumps."""
+        opened = set(self._wire_opened)
+        failed = set(self._wire_failed)
+        for document in plan.closed_documents:
+            uri = document.source.uri
+            opened = _without_wire_uri(opened, plan.generation, uri)
+            failed = _without_wire_uri(failed, plan.generation, uri)
+        for document, replacement, _params in plan.changed_replacements:
+            opened.discard((plan.generation, document.source.uri, document.version))
+            opened.add(
+                (plan.generation, replacement.source.uri, replacement.version)
+            )
+        return opened, failed
+
+    def _relax_readiness_locked(
+        self, next_documents: dict[str, OpenDocument], next_target: str | None
+    ) -> None:
+        """With no readiness target left, the session falls back to initialized."""
+        if next_target is not None or self._readiness != "query_ready":
+            return
+        self._readiness = "protocol_initialized"
+        self._readiness_evidence = (
+            "initialize",
+            "initialized",
+            "configuration",
+            *(("didOpen",) if next_documents else ()),
+        )
+
+    def _apply_synchronize_commit_locked(self, plan: _SyncPlan) -> None:
+        """Publish the planned state; the caller holds the session and wire locks."""
+        next_diagnostics, next_ready, next_target = self._projected_readiness(plan)
+        self._wire_opened, self._wire_failed = self._projected_wire_state(plan)
+        self._wire_condition.notify_all()
+        self._documents = plan.next_documents
+        self._document_bytes = plan.projected_document_bytes
+        self._ready_uri_generations = next_ready
+        self._diagnostics = next_diagnostics
+        self._diagnostic_bytes = sum(
+            snapshot.retained_bytes for snapshot in next_diagnostics.values()
+        )
+        self._readiness_target_uri = next_target
+        self._relax_readiness_locked(plan.next_documents, next_target)
+        self._workspace_revision = plan.revision
+        self._condition.notify_all()
+
+    def _commit_synchronize(self, plan: _SyncPlan) -> RuntimeError | None:
+        """Publish the planned state, or say why it could not be published."""
+        with self._lock:
+            if self._commit_state_changed_locked(plan):
+                return RuntimeError(
+                    "Pyright synchronization state changed before commit"
+                )
+            with self._wire_condition:
+                if self._wire_generation != plan.generation:
+                    return RuntimeError(
+                        "Pyright synchronization generation changed before commit"
+                    )
+                self._apply_synchronize_commit_locked(plan)
+        return None
+
+    def _recover_after_commit_failure(
+        self, plan: _SyncPlan, commit_error: RuntimeError
+    ) -> None:
+        """Restore the server's snapshot, then report why the commit failed."""
+        try:
+            self._recover_synchronize_snapshot(
+                plan.process,
+                plan.generation,
+                deadline=plan.deadline,
+            )
+        except BaseException as recovery_error:
+            if _startup_interruption(recovery_error) is not None:
+                _raise_collected_errors(
+                    [recovery_error],
+                    prior_error=commit_error,
+                )
+            raise RuntimeError(
+                "Pyright synchronization commit recovery failed"
+            ) from recovery_error
+        raise commit_error
+
     def synchronize(
         self,
         revision: WorkspaceRevision,
@@ -3401,195 +3671,24 @@ class PyrightSession:
             for document, replacement, _params in changed_replacements:
                 next_documents[document.source.uri] = replacement
 
-            wire_attempted = False
-            try:
-                for _document, params in close_notifications:
-                    wire_attempted = True
-                    delivered = process.notify_generation(
-                        "textDocument/didClose",
-                        params,
-                        generation_nonce=generation,
-                        deadline=deadline,
-                    )
-                    if delivered is False:
-                        raise RuntimeError(
-                            "Pyright didClose notification was not delivered"
-                        )
-                for document, _replacement, params in changed_replacements:
-                    wire_attempted = True
-                    opened = self._send_did_open_once(
-                        document,
-                        generation,
-                        deadline=deadline,
-                        notify=lambda document=document: process.notify_generation(
-                            "textDocument/didOpen",
-                            self._did_open_params(document),
-                            generation_nonce=generation,
-                            deadline=deadline,
-                        ),
-                    )
-                    if not opened:
-                        raise RuntimeError(
-                            "Pyright didOpen notification was not delivered"
-                        )
-                    delivered = process.notify_generation(
-                        "textDocument/didChange",
-                        params,
-                        generation_nonce=generation,
-                        deadline=deadline,
-                    )
-                    if delivered is False:
-                        raise RuntimeError(
-                            "Pyright didChange notification was not delivered"
-                        )
-                if watched_params is not None:
-                    wire_attempted = True
-                    delivered = process.notify_generation(
-                        "workspace/didChangeWatchedFiles",
-                        watched_params,
-                        generation_nonce=generation,
-                        deadline=deadline,
-                    )
-                    if delivered is False:
-                        raise RuntimeError(
-                            "Pyright watched-files notification was not delivered"
-                        )
-            except BaseException as notification_error:
-                if wire_attempted:
-                    try:
-                        self._recover_synchronize_snapshot(
-                            process,
-                            generation,
-                            deadline=deadline,
-                        )
-                    except BaseException as recovery_error:
-                        if (
-                            _startup_interruption(notification_error) is not None
-                            or _startup_interruption(recovery_error) is not None
-                        ):
-                            _raise_collected_errors(
-                                [recovery_error],
-                                prior_error=notification_error,
-                            )
-                        raise RuntimeError(
-                            "Pyright synchronization notification recovery failed"
-                        ) from recovery_error
-                raise
-
-            commit_error: RuntimeError | None = None
-            with self._lock:
-                unchanged_documents = (
-                    len(self._documents) == len(documents_snapshot)
-                    and all(
-                        self._documents.get(uri) is document
-                        for uri, document in documents_snapshot.items()
-                    )
-                )
-                if (
-                    self._closed
-                    or self._closing
-                    or self._process is not process
-                    or self._workspace_revision is not prior
-                    or self._generation_nonce != generation
-                    or process.generation_nonce != generation
-                    or not unchanged_documents
-                ):
-                    commit_error = RuntimeError(
-                        "Pyright synchronization state changed before commit"
-                    )
-                else:
-                    with self._wire_condition:
-                        if self._wire_generation != generation:
-                            commit_error = RuntimeError(
-                                "Pyright synchronization generation changed before commit"
-                            )
-                        else:
-                            next_diagnostics = dict(self._diagnostics)
-                            next_ready = dict(self._ready_uri_generations)
-                            next_target = self._readiness_target_uri
-                            for document in closed_documents:
-                                next_ready.pop(document.source.uri, None)
-                                next_diagnostics.pop(document.source.uri, None)
-                                if next_target == document.source.uri:
-                                    next_target = None
-                            for document, replacement, _params in changed_replacements:
-                                snapshot = next_diagnostics.get(document.source.uri)
-                                if (
-                                    snapshot is not None
-                                    and snapshot.document_version is not None
-                                    and snapshot.document_version < replacement.version
-                                ):
-                                    next_diagnostics.pop(document.source.uri, None)
-                            next_diagnostic_bytes = sum(
-                                snapshot.retained_bytes
-                                for snapshot in next_diagnostics.values()
-                            )
-                            next_wire_opened = set(self._wire_opened)
-                            next_wire_failed = set(self._wire_failed)
-                            for document in closed_documents:
-                                next_wire_opened = {
-                                    key
-                                    for key in next_wire_opened
-                                    if not (
-                                        key[0] == generation
-                                        and key[1] == document.source.uri
-                                    )
-                                }
-                                next_wire_failed = {
-                                    key
-                                    for key in next_wire_failed
-                                    if not (
-                                        key[0] == generation
-                                        and key[1] == document.source.uri
-                                    )
-                                }
-                            for document, replacement, _params in changed_replacements:
-                                next_wire_opened.discard(
-                                    (generation, document.source.uri, document.version)
-                                )
-                                next_wire_opened.add(
-                                    (
-                                        generation,
-                                        replacement.source.uri,
-                                        replacement.version,
-                                    )
-                                )
-                            self._wire_opened = next_wire_opened
-                            self._wire_failed = next_wire_failed
-                            self._wire_condition.notify_all()
-                            self._documents = next_documents
-                            self._document_bytes = projected_document_bytes
-                            self._ready_uri_generations = next_ready
-                            self._diagnostics = next_diagnostics
-                            self._diagnostic_bytes = next_diagnostic_bytes
-                            self._readiness_target_uri = next_target
-                            if next_target is None and self._readiness == "query_ready":
-                                self._readiness = "protocol_initialized"
-                                self._readiness_evidence = (
-                                    "initialize",
-                                    "initialized",
-                                    "configuration",
-                                    *(("didOpen",) if next_documents else ()),
-                                )
-                            self._workspace_revision = revision
-                            self._condition.notify_all()
+            plan = _SyncPlan(
+                process=process,
+                generation=generation,
+                prior=prior,
+                revision=revision,
+                deadline=deadline,
+                documents_snapshot=documents_snapshot,
+                next_documents=next_documents,
+                projected_document_bytes=projected_document_bytes,
+                closed_documents=closed_documents,
+                changed_replacements=changed_replacements,
+                close_notifications=close_notifications,
+                watched_params=watched_params,
+            )
+            self._deliver_synchronize(plan)
+            commit_error = self._commit_synchronize(plan)
             if commit_error is not None:
-                try:
-                    self._recover_synchronize_snapshot(
-                        process,
-                        generation,
-                        deadline=deadline,
-                    )
-                except BaseException as recovery_error:
-                    if _startup_interruption(recovery_error) is not None:
-                        _raise_collected_errors(
-                            [recovery_error],
-                            prior_error=commit_error,
-                        )
-                    raise RuntimeError(
-                        "Pyright synchronization commit recovery failed"
-                    ) from recovery_error
-                raise commit_error
+                self._recover_after_commit_failure(plan, commit_error)
             return delta
 
     def close(self, *, deadline: float) -> None:
