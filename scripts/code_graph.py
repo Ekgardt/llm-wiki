@@ -689,60 +689,129 @@ def _extract_symbols(tree, language, lang: str, source: bytes) -> tuple | None:
     return tuple(groups[name] for name in kinds)
 
 
+_PYTHON_CALL_KEYWORDS = {"if", "for", "while", "def", "class", "print"}
+_SCRIPT_CALL_KEYWORDS = {"if", "for", "while", "switch", "catch"}
+
+
+def _regex_parse_python_line(
+    line: str, number: int, functions: list, classes: list, calls: list, imports: list
+) -> None:
+    match = re.match(r"\s*def\s+(\w+)", line)
+    if match:
+        functions.append(_regex_function(match.group(1), line, number))
+    match = re.match(r"\s*class\s+(\w+)", line)
+    if match:
+        classes.append({"name": match.group(1), "line": number, "end_line": number})
+    match = re.match(r"\s*(\w+)\s*\(", line)
+    if match and match.group(1) not in _PYTHON_CALL_KEYWORDS:
+        calls.append({"name": match.group(1), "line": number})
+    match = re.match(r"\s*(?:from\s+\S+\s+)?import\s+(\w+)", line)
+    if match:
+        imports.append({"name": match.group(1), "line": number})
+
+
+def _regex_parse_python(
+    content: str,
+    file_path: Path,
+    registry: SymbolRegistry,
+    workspace_root: Path,
+    functions: list,
+    classes: list,
+) -> tuple[list, list]:
+    """Python calls and imports come from the resolver, not from the regex pass."""
+    calls: list = []
+    imports: list = []
+    for number, line in enumerate(content.splitlines(), 1):
+        _regex_parse_python_line(
+            line, number, functions, classes, calls, imports
+        )
+    imports, calls = resolve_python_imports_and_calls(
+        file_path, registry, workspace_root
+    )
+    return imports, enrich_python_semantics(file_path, calls, workspace_root)
+
+
+def _script_declared_names(line: str) -> set[str]:
+    return {
+        match.group(1)
+        for match in [
+            re.match(r"\s*(?:export\s+)?function\s+(\w+)", line),
+            re.match(r"\s*(?:async\s+)?(\w+)\s*\([^)]*\)\s*(?::[^{}]+)?\{", line),
+        ]
+        if match
+    }
+
+
+def _regex_parse_script_line(
+    line: str, number: int, functions: list, classes: list, calls: list
+) -> None:
+    match = re.match(r"\s*(?:export\s+)?function\s+(\w+)", line)
+    if match:
+        functions.append(_regex_function(match.group(1), line, number))
+    match = re.match(r"\s*(?:export\s+)?class\s+(\w+)", line)
+    if match:
+        classes.append({"name": match.group(1), "line": number, "end_line": number})
+    match = re.match(r"\s*(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?\(", line)
+    if match:
+        functions.append(_regex_function(match.group(1), line, number))
+    declared = _script_declared_names(line)
+    for call in re.finditer(r"\b(\w+)\s*\(", line):
+        name = call.group(1)
+        if name not in declared and name not in _SCRIPT_CALL_KEYWORDS:
+            calls.append({"name": name, "line": number})
+
+
+def _regex_parse_script(
+    content: str, functions: list, classes: list, calls: list
+) -> None:
+    for number, line in enumerate(content.splitlines(), 1):
+        _regex_parse_script_line(line, number, functions, classes, calls)
+
+
+def _regex_parse_by_language(
+    content: str,
+    file_path: Path,
+    lang: str,
+    registry: SymbolRegistry,
+    workspace_root: Path,
+    functions: list,
+    classes: list,
+    calls: list,
+    imports: list,
+) -> tuple[list, list]:
+    if lang == "python":
+        return _regex_parse_python(
+            content, file_path, registry, workspace_root, functions, classes
+        )
+    if lang in ("javascript", "typescript"):
+        _regex_parse_script(content, functions, classes, calls)
+        return imports, calls
+    _regex_parse_additional_languages(
+        content, lang, functions, classes, calls, imports
+    )
+    return imports, calls
+
+
 def _regex_parse(
     file_path: Path, lang: str, registry: SymbolRegistry, workspace_root: Path
 ) -> dict:
     """Fallback: regex-based symbol extraction (no tree-sitter required)."""
     content = file_path.read_text(encoding="utf-8", errors="ignore")
-    functions = []
-    classes = []
-    calls = []
-    imports = []
-
-    if lang == "python":
-        for i, line in enumerate(content.splitlines(), 1):
-            m = re.match(r"\s*def\s+(\w+)", line)
-            if m:
-                functions.append(_regex_function(m.group(1), line, i))
-            m = re.match(r"\s*class\s+(\w+)", line)
-            if m:
-                classes.append({"name": m.group(1), "line": i, "end_line": i})
-            m = re.match(r"\s*(\w+)\s*\(", line)
-            if m and m.group(1) not in {"if", "for", "while", "def", "class", "print"}:
-                calls.append({"name": m.group(1), "line": i})
-            m = re.match(r"\s*(?:from\s+\S+\s+)?import\s+(\w+)", line)
-            if m:
-                imports.append({"name": m.group(1), "line": i})
-        imports, calls = resolve_python_imports_and_calls(file_path, registry, workspace_root)
-        calls = enrich_python_semantics(file_path, calls, workspace_root)
-    elif lang in ("javascript", "typescript"):
-        for i, line in enumerate(content.splitlines(), 1):
-            m = re.match(r"\s*(?:export\s+)?function\s+(\w+)", line)
-            if m:
-                functions.append(_regex_function(m.group(1), line, i))
-            m = re.match(r"\s*(?:export\s+)?class\s+(\w+)", line)
-            if m:
-                classes.append({"name": m.group(1), "line": i, "end_line": i})
-            m = re.match(r"\s*(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?\(", line)
-            if m:
-                functions.append(_regex_function(m.group(1), line, i))
-            declared = {
-                match.group(1)
-                for match in [
-                    re.match(r"\s*(?:export\s+)?function\s+(\w+)", line),
-                    re.match(r"\s*(?:async\s+)?(\w+)\s*\([^)]*\)\s*(?::[^{}]+)?\{", line),
-                ]
-                if match
-            }
-            for call in re.finditer(r"\b(\w+)\s*\(", line):
-                name = call.group(1)
-                if name not in declared and name not in {"if", "for", "while", "switch", "catch"}:
-                    calls.append({"name": name, "line": i})
-    else:
-        _regex_parse_additional_languages(
-            content, lang, functions, classes, calls, imports
-        )
-
+    functions: list = []
+    classes: list = []
+    calls: list = []
+    imports: list = []
+    imports, calls = _regex_parse_by_language(
+        content,
+        file_path,
+        lang,
+        registry,
+        workspace_root,
+        functions,
+        classes,
+        calls,
+        imports,
+    )
     git_info = _get_git_info(file_path)
     return {
         "file": str(file_path),
@@ -1106,6 +1175,58 @@ def _with_report(key: str, value, report: dict[str, object], enabled: bool):
     return {key: value, **report} if enabled else value
 
 
+def _stored_callers(
+    function_name: str, directory: Path, with_report: bool
+) -> list[dict] | dict | None:
+    if with_report:
+        return _store_find_callers(function_name, directory, with_report=True)
+    return _store_find_callers(function_name, directory)
+
+
+_SEARCH_SKIP_PARTS = {".git", "node_modules", "__pycache__", ".venv"}
+
+
+def _searchable_source(path: Path) -> bool:
+    if not path.is_file() or path.suffix.lower() not in set(LANGUAGE_MAP.keys()):
+        return False
+    return not any(skip in path.parts for skip in _SEARCH_SKIP_PARTS)
+
+
+def _named_function(result: dict, function_name: str) -> dict | None:
+    return next(
+        (item for item in result["functions"] if item["name"] == function_name), None
+    )
+
+
+def _callees_in_function(path: Path, result: dict, func_def: dict) -> list[dict]:
+    callees = []
+    for call in result["calls"]:
+        end_line = func_def.get("end_line", call["line"])
+        if func_def["line"] <= call["line"] <= end_line:
+            callees.append(
+                {"file": str(path), "line": call["line"], "callee": call["name"]}
+            )
+    return callees
+
+
+def _caller_edge(path: Path, call: dict, function_name: str) -> dict:
+    return {
+        "file": str(path),
+        "line": call["line"],
+        "function": function_name,
+        "qualified_name": call.get("qualified_name"),
+        "confidence": call.get("confidence", "heuristic"),
+    }
+
+
+def _call_names_target(call: dict, function_name: str, language: str) -> bool:
+    """Unknown Python calls are excluded; other languages fall back to the name."""
+    resolved = (call.get("qualified_name") or call["name"]).rsplit(".", 1)[-1]
+    if resolved != function_name:
+        return False
+    return call.get("confidence") == "confirmed" or language != "python"
+
+
 def find_callers(
     function_name: str,
     directory: Path,
@@ -1118,38 +1239,18 @@ def find_callers(
     Unknown Python calls are excluded. Returns caller edge dictionaries.
     """
     if not live:
-        stored = (
-            _store_find_callers(function_name, directory, with_report=True)
-            if with_report
-            else _store_find_callers(function_name, directory)
-        )
+        stored = _stored_callers(function_name, directory, with_report)
         if stored is not None:
             return stored
-    callers = []
-    extensions = set(LANGUAGE_MAP.keys())
+    callers: list[dict] = []
     registry = build_python_symbol_registry(directory)
-
     for path in sorted(directory.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in extensions:
+        if not _searchable_source(path):
             continue
-        if any(skip in path.parts for skip in {".git", "node_modules", "__pycache__", ".venv"}):
-            continue
-
         result = _parse_file(path, registry, directory)
         for call in result["calls"]:
-            resolved_name = (call.get("qualified_name") or call["name"]).rsplit(".", 1)[-1]
-            is_python = result["language"] == "python"
-            if resolved_name == function_name and (
-                call.get("confidence") == "confirmed" or not is_python
-            ):
-                callers.append({
-                    "file": str(path),
-                    "line": call["line"],
-                    "function": function_name,
-                    "qualified_name": call.get("qualified_name"),
-                    "confidence": call.get("confidence", "heuristic"),
-                })
-
+            if _call_names_target(call, function_name, result["language"]):
+                callers.append(_caller_edge(path, call, function_name))
     return _with_report("callers", callers, _live_report(directory), with_report)
 
 
@@ -1187,6 +1288,14 @@ def _store_find_callers(
         graph.close()
 
 
+def _stored_callees(
+    function_name: str, directory: Path, with_report: bool
+) -> list[dict] | dict | None:
+    if with_report:
+        return _store_find_callees(function_name, directory, with_report=True)
+    return _store_find_callees(function_name, directory)
+
+
 def find_callees(
     function_name: str,
     directory: Path,
@@ -1199,47 +1308,19 @@ def find_callees(
     Returns list of {file, line, callee}.
     """
     if not live:
-        stored = (
-            _store_find_callees(function_name, directory, with_report=True)
-            if with_report
-            else _store_find_callees(function_name, directory)
-        )
+        stored = _stored_callees(function_name, directory, with_report)
         if stored is not None:
             return stored
-    callees = []
-    extensions = set(LANGUAGE_MAP.keys())
+    callees: list[dict] = []
     registry = build_python_symbol_registry(directory)
-
     for path in sorted(directory.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in extensions:
+        if not _searchable_source(path):
             continue
-        if any(skip in path.parts for skip in {".git", "node_modules", "__pycache__", ".venv"}):
-            continue
-
         result = _parse_file(path, registry, directory)
-        # Find the function definition.
-        in_function = False
-        for func in result["functions"]:
-            if func["name"] == function_name:
-                in_function = True
-                break
-
-        if not in_function:
+        func_def = _named_function(result, function_name)
+        if func_def is None:
             continue
-
-        # Find calls within the function's line range.
-        func_def = next((f for f in result["functions"] if f["name"] == function_name), None)
-        if not func_def:
-            continue
-
-        for call in result["calls"]:
-            if func_def["line"] <= call["line"] <= func_def.get("end_line", call["line"]):
-                callees.append({
-                    "file": str(path),
-                    "line": call["line"],
-                    "callee": call["name"],
-                })
-
+        callees.extend(_callees_in_function(path, result, func_def))
     return _with_report("callees", callees, _live_report(directory), with_report)
 
 
