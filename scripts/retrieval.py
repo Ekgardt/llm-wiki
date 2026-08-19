@@ -7,7 +7,7 @@ import re
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -2148,6 +2148,118 @@ def _generation_connection_for(
     return search_memory._generation_connection(catalog, manifest, **stop)
 
 
+def _close_generation_handles(context: Mapping[str, Any]) -> None:
+    """Close the graph and the database of the generation this call opened."""
+    for key in ("graph", "connection"):
+        handle = context.get(key)
+        if handle is None:
+            continue
+        try:
+            handle.close()
+        except Exception:  # noqa: BLE001 - a close failure must not mask the result
+            pass
+
+
+def _reported_fallback(
+    trace_reason: str | None,
+    *,
+    dense_fallback: str | None,
+    generation_fallback: str | None,
+    legacy_fallback: str | None,
+) -> str | None:
+    """One reason, in the order the operator needs to hear it."""
+    if legacy_fallback:
+        return legacy_fallback
+    if dense_fallback and trace_reason in {None, "dense_unavailable"}:
+        return str(dense_fallback)
+    if generation_fallback and trace_reason is None:
+        return generation_fallback
+    return trace_reason
+
+
+def _is_exact_filename_answer(result: RetrievalResult, query: str) -> bool:
+    """An exact filename stays the answer after fusion and reranking."""
+    if not result.candidates:
+        return False
+    first = _normalized_filename_stem(result.candidates[0].relative_path)
+    return first == _normalized_filename_stem(query)
+
+
+def _with_reported_trace(
+    result: RetrievalResult,
+    *,
+    query: str,
+    dense_fallback: str | None,
+    generation_fallback: str | None,
+    legacy_fallback: str | None,
+) -> RetrievalResult:
+    trace = result.trace
+    effective_mode = "EXACT" if _is_exact_filename_answer(result, query) else trace.effective_mode
+    fallback_reason = _reported_fallback(
+        trace.fallback_reason,
+        dense_fallback=dense_fallback,
+        generation_fallback=generation_fallback,
+        legacy_fallback=legacy_fallback,
+    )
+    partial = trace.partial or legacy_fallback is not None
+    if (
+        effective_mode == trace.effective_mode
+        and fallback_reason == trace.fallback_reason
+        and partial == trace.partial
+    ):
+        return result
+    return RetrievalResult(
+        candidates=result.candidates,
+        trace=replace(
+            trace,
+            effective_mode=effective_mode,
+            fallback_reason=fallback_reason,
+            partial=partial,
+        ),
+        analysis=result.analysis,
+        display_meta=result.display_meta,
+    )
+
+
+def _impression_candidate_id(item: Mapping[str, Any]) -> str:
+    identity = _first_present(item, ("chunk_id", "slug", "candidate_id"), None)
+    if identity is not None:
+        return str(identity)
+    return Path(str(item.get("path", ""))).stem
+
+
+def _record_impressions(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    query: str,
+    corpus_generation: str,
+    source_tool: str,
+) -> None:
+    """Best-effort telemetry: never let it affect the answer."""
+    if not rows:
+        return
+    try:
+        from retrieval_telemetry import best_effort_make_event, best_effort_record_events
+
+        events = [
+            best_effort_make_event(
+                event_kind="impression",
+                query=query,
+                retrieval_mode=str(item.get("effective_mode") or "base").lower(),
+                candidate_id=_impression_candidate_id(item),
+                rank=rank,
+                generation=str(item.get("generation") or corpus_generation),
+                source_tool=source_tool,
+            )
+            for rank, item in enumerate(rows, start=1)
+        ]
+        recorded = [event for event in events if event is not None]
+        if recorded:
+            best_effort_record_events(recorded)
+    except Exception:  # noqa: BLE001 - telemetry is never load-bearing
+        pass
+
+
 def _generation_lexical_hits(
     filters: Mapping[str, Any],
     *,
@@ -2913,92 +3025,18 @@ def retrieve_via_search_memory(
             corpus_generation = "legacy"
             result = run_retrieval()
     finally:
-        connection = generation_ctx.get("connection")
-        active_graph = generation_ctx.get("graph")
-        if active_graph is not None:
-            try:
-                active_graph.close()
-            except Exception:
-                pass
-        if connection is not None:
-            try:
-                connection.close()
-            except Exception:
-                pass
+        _close_generation_handles(generation_ctx)
 
-    # Prefer generation-specific dense fallback wording when applicable.
-    dense_fallback = generation_ctx.get("dense_fallback") or generation_fallback
-    effective_mode = result.trace.effective_mode
-    fallback_reason = result.trace.fallback_reason
-    if legacy_fallback:
-        fallback_reason = legacy_fallback
-    elif dense_fallback and fallback_reason in {None, "dense_unavailable"}:
-        fallback_reason = str(dense_fallback)
-    if generation_fallback and fallback_reason is None:
-        fallback_reason = generation_fallback
-    partial = result.trace.partial or legacy_fallback is not None
-
-    # Exact filename remains authoritative after optional fusion and reranking.
-    if result.candidates and _normalized_filename_stem(
-        result.candidates[0].relative_path
-    ) == _normalized_filename_stem(query):
-        effective_mode = "EXACT"
-
-    if (
-        effective_mode != result.trace.effective_mode
-        or fallback_reason != result.trace.fallback_reason
-        or partial != result.trace.partial
-    ):
-        result = RetrievalResult(
-            candidates=result.candidates,
-            trace=RetrievalTrace(
-                requested_mode=result.trace.requested_mode,
-                effective_mode=effective_mode,
-                signals_used=result.trace.signals_used,
-                fallback_reason=fallback_reason,
-                corpus_generation=result.trace.corpus_generation,
-                partial=partial,
-                reranker_applied=result.trace.reranker_applied,
-                reranker_model_id=result.trace.reranker_model_id,
-                reranker_model_revision=result.trace.reranker_model_revision,
-                reranker_depth=result.trace.reranker_depth,
-                reranker_duration_ms=result.trace.reranker_duration_ms,
-                reranker_fallback_reason=result.trace.reranker_fallback_reason,
-            ),
-            analysis=result.analysis,
-            display_meta=result.display_meta,
-        )
-
+    result = _with_reported_trace(
+        result,
+        query=query,
+        dense_fallback=generation_ctx.get("dense_fallback") or generation_fallback,
+        generation_fallback=generation_fallback,
+        legacy_fallback=legacy_fallback,
+    )
     rows = candidates_to_legacy(result, display_meta=result.display_meta)
-    # Reranking is owned by retrieve(); do not double-apply here.
-
-    if emit_telemetry and rows:
-        try:
-            from retrieval_telemetry import (
-                best_effort_make_event,
-                best_effort_record_events,
-            )
-
-            events = []
-            for rank, item in enumerate(rows, start=1):
-                event = best_effort_make_event(
-                    event_kind="impression",
-                    query=query,
-                    retrieval_mode=str(item.get("effective_mode") or "base").lower(),
-                    candidate_id=str(
-                        item.get("chunk_id")
-                        or item.get("slug")
-                        or item.get("candidate_id")
-                        or Path(str(item.get("path", ""))).stem
-                    ),
-                    rank=rank,
-                    generation=str(item.get("generation") or corpus_generation),
-                    source_tool=source_tool,
-                )
-                if event is not None:
-                    events.append(event)
-            if events:
-                best_effort_record_events(events)
-        except Exception:
-            pass
+    if emit_telemetry:
+        _record_impressions(
+            rows, query=query, corpus_generation=corpus_generation, source_tool=source_tool
+        )
     return rows
