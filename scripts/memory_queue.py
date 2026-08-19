@@ -2993,6 +2993,57 @@ def _validate_worker_policy(
         raise ValueError("heartbeat_seconds must be less than lease_seconds")
 
 
+def _check_result_request(operation_id: str, result: bytes) -> None:
+    """What a caller has to hand over before anything is written."""
+    if not operation_id:
+        raise ValueError("operation_id must be non-empty")
+    if not isinstance(result, bytes):
+        raise TypeError("result must be bytes")
+    if len(result) > _MAX_RESULT_BYTES:
+        raise ValueError("result exceeds maximum queue result size")
+
+
+def _check_result_operation(row: Mapping[str, object], operation_id: str) -> None:
+    """A lease publishes for exactly one operation."""
+    existing = row["result_operation_id"]
+    if existing is not None and existing != operation_id:
+        raise ResultConflictError("lease already published a different operation")
+
+
+def _write_result_file(path: Path, payload: bytes) -> None:
+    """Write the result to a fresh owner-only temporary file, durably."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        _harden_owner_only(path, 0o600)
+        handle = os.fdopen(descriptor, "wb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    with handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _link_result(temporary: Path, target: Path) -> bool:
+    """Link the staged bytes into place; False when a result was already there."""
+    if target.exists() or target.is_symlink():
+        return False
+    try:
+        os.link(temporary, target)
+    except FileExistsError:
+        return False
+    return True
+
+
+def _discard_temporary(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
 class MemoryQueue:
     """Durable priority queue with lease-token fencing and at-least-once delivery."""
 
@@ -3581,87 +3632,117 @@ class MemoryQueue:
             )
         return replace(lease, expires_at=expires)
 
+    def _fail_corrupt_result(
+        self,
+        connection: sqlite3.Connection,
+        row: Mapping[str, object],
+        lease: QueueLease,
+        now: datetime,
+    ) -> None:
+        """A result we cannot read again kills the lease that published it."""
+        self._record_attempt(connection, row, now, "failed", "result_corrupt")
+        self._finish_lease(
+            connection,
+            lease.id,
+            now,
+            "dead",
+            "result_corrupt",
+            None,
+            last_attempt_at=now,
+        )
+
+    def _existing_result_conflict(
+        self,
+        connection: sqlite3.Connection,
+        row: Mapping[str, object],
+        lease: QueueLease,
+        now: datetime,
+        relative: str,
+        digest: str,
+    ) -> ResultConflictError | None:
+        """Why the result already in place cannot stand for this publication."""
+        existing_digest = self._validated_result_digest(relative)
+        if existing_digest is None:
+            self._fail_corrupt_result(connection, row, lease, now)
+            return ResultConflictError("result_corrupt")
+        if existing_digest != digest:
+            return ResultConflictError(
+                "operation ID already has different result bytes"
+            )
+        return None
+
+    def _record_published_result(
+        self,
+        connection: sqlite3.Connection,
+        lease: QueueLease,
+        now: datetime,
+        relative: str,
+        digest: str,
+        operation_id: str,
+        target: Path,
+        linked: bool,
+    ) -> None:
+        """Make the published bytes, and the row that names them, durable."""
+        if linked:
+            _harden_owner_only(target, 0o600)
+            fsync_file(target)
+        fsync_directory(self.results_dir)
+        connection.execute(
+            """UPDATE tasks SET result_reference=?, result_sha256=?,
+                   result_operation_id=?, updated_at=?
+               WHERE id=?""",
+            (relative, digest, operation_id, _timestamp(now), lease.id),
+        )
+
+    def _commit_result(
+        self,
+        lease: QueueLease,
+        operation_id: str,
+        digest: str,
+        relative: str,
+        target: Path,
+        temporary: Path,
+    ) -> ResultConflictError | None:
+        """Publish the staged bytes under the lease, or say why it cannot be."""
+        now = _as_utc(self._clock())
+        with self._connect() as connection, begin_immediate(connection):
+            row = self._require_lease(connection, lease, now)
+            _check_result_operation(row, operation_id)
+            linked = _link_result(temporary, target)
+            if not linked:
+                conflict = self._existing_result_conflict(
+                    connection, row, lease, now, relative, digest
+                )
+                if conflict is not None:
+                    return conflict
+            self._record_published_result(
+                connection, lease, now, relative, digest, operation_id, target, linked
+            )
+        return None
+
     def publish_result(
         self, lease: QueueLease, *, operation_id: str, result: bytes
     ) -> str:
-        if not operation_id:
-            raise ValueError("operation_id must be non-empty")
-        if not isinstance(result, bytes):
-            raise TypeError("result must be bytes")
-        if len(result) > _MAX_RESULT_BYTES:
-            raise ValueError("result exceeds maximum queue result size")
-        digest = sha256_bytes(result)
+        _check_result_request(operation_id, result)
         result_name = f"{sha256_bytes(operation_id.encode('utf-8'))}.result"
         relative = f"run/queue-results/{result_name}"
         target = self.results_dir / result_name
         temporary = self.results_dir / f".{result_name}.{uuid.uuid4().hex}.tmp"
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        descriptor = os.open(temporary, flags, 0o600)
-        descriptor_open = True
         try:
-            _harden_owner_only(temporary, 0o600)
-            with os.fdopen(descriptor, "wb") as handle:
-                descriptor_open = False
-                handle.write(result)
-                handle.flush()
-                os.fsync(handle.fileno())
-            now = _as_utc(self._clock())
-            publication_error: ResultConflictError | None = None
-            with self._connect() as connection, begin_immediate(connection):
-                row = self._require_lease(connection, lease, now)
-                existing_operation = row["result_operation_id"]
-                if existing_operation is not None and existing_operation != operation_id:
-                    raise ResultConflictError("lease already published a different operation")
-                existing = target.exists() or target.is_symlink()
-                linked = False
-                if not existing:
-                    try:
-                        os.link(temporary, target)
-                    except FileExistsError:
-                        existing = True
-                    else:
-                        linked = True
-                if existing:
-                    existing_digest = self._validated_result_digest(relative)
-                    if existing_digest is None:
-                        self._record_attempt(
-                            connection, row, now, "failed", "result_corrupt"
-                        )
-                        self._finish_lease(
-                            connection,
-                            lease.id,
-                            now,
-                            "dead",
-                            "result_corrupt",
-                            None,
-                            last_attempt_at=now,
-                        )
-                        publication_error = ResultConflictError("result_corrupt")
-                    elif existing_digest != digest:
-                        publication_error = ResultConflictError(
-                            "operation ID already has different result bytes"
-                        )
-                if publication_error is None:
-                    if linked:
-                        _harden_owner_only(target, 0o600)
-                        fsync_file(target)
-                    fsync_directory(self.results_dir)
-                    connection.execute(
-                        """UPDATE tasks SET result_reference=?, result_sha256=?,
-                               result_operation_id=?, updated_at=?
-                           WHERE id=?""",
-                        (relative, digest, operation_id, _timestamp(now), lease.id),
-                    )
-            if publication_error is not None:
-                raise publication_error
-            return relative
+            _write_result_file(temporary, result)
+            conflict = self._commit_result(
+                lease,
+                operation_id,
+                sha256_bytes(result),
+                relative,
+                target,
+                temporary,
+            )
         finally:
-            if descriptor_open:
-                os.close(descriptor)
-            try:
-                temporary.unlink()
-            except OSError:
-                pass
+            _discard_temporary(temporary)
+        if conflict is not None:
+            raise conflict
+        return relative
 
     def acknowledge(self, lease: QueueLease) -> QueueTask:
         now = _as_utc(self._clock())
