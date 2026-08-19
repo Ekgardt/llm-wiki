@@ -11944,6 +11944,89 @@ def _decode_processor_frame(frame: bytes) -> bool | DeferredResult:
     raise QueueOperationError("processor_result_malformed")
 
 
+@dataclass
+class _ChildRun:
+    """One processor child: its process, its pipe, and its deadline."""
+
+    process: multiprocessing.Process
+    receiver: object
+    deadline: float
+    tracked_descendants: set[int] | None = None
+
+    def remaining(self) -> float:
+        return self.deadline - time.monotonic()
+
+    def stop(self) -> None:
+        """Terminate the child, discovering its tree when we never tracked it.
+
+        Passing an explicit None means "there are no descendants"; only the
+        default sentinel asks for discovery, and before the handshake that is
+        what we want.
+        """
+        tracked = self.tracked_descendants
+        if tracked is None:
+            self.tracked_descendants = _terminate_processor_child(self.process)
+            return
+        self.tracked_descendants = _terminate_processor_child(
+            self.process, tracked_descendants=tracked
+        )
+
+
+def _await_child_message(run: _ChildRun) -> None:
+    """Wait for the child to say something before its deadline runs out."""
+    remaining = run.remaining()
+    if remaining <= 0 or not run.receiver.poll(remaining):
+        run.stop()
+        raise TimeoutError
+
+
+def _child_ready_handshake(run: _ChildRun) -> None:
+    """The child announces it is up, and only then do we track its tree."""
+    _await_child_message(run)
+    try:
+        ready = run.receiver.recv_bytes(1)
+    except (OSError, EOFError):
+        raise QueueOperationError("processor_result_malformed") from None
+    if ready != b"R":
+        raise QueueOperationError("processor_result_malformed")
+    run.tracked_descendants = _tracked_descendant_pids(run.process.pid, os.name)
+    run.receiver.send_bytes(b"A")
+
+
+def _abandon_oversize_child(run: _ChildRun) -> None:
+    """A child that sent more than we accept is stopped, not waited out."""
+    run.receiver.close()
+    run.process.join(0.5)
+    if run.process.is_alive():
+        run.stop()
+
+
+def _child_result_frame(run: _ChildRun) -> bytes:
+    """The result frame the child sent, or why it could not be read."""
+    _await_child_message(run)
+    try:
+        return run.receiver.recv_bytes(_MAX_RESULT_BYTES + 1)
+    except OSError:
+        _abandon_oversize_child(run)
+        raise QueueOperationError("processor_result_oversize") from None
+    except EOFError:
+        raise QueueOperationError("processor_result_malformed") from None
+
+
+def _join_child(run: _ChildRun) -> None:
+    """Wait out the child's exit within the deadline, and check how it left."""
+    remaining = run.remaining()
+    if remaining <= 0:
+        run.stop()
+        raise TimeoutError
+    run.process.join(remaining)
+    if run.process.is_alive():
+        run.stop()
+        raise TimeoutError
+    if run.process.exitcode != 0:
+        raise QueueOperationError("processor_child_failed")
+
+
 def _run_processor_child(
     processor: Callable[[dict], bool | DeferredResult],
     task: dict[str, Any],
@@ -11958,65 +12041,21 @@ def _run_processor_child(
         args=(sender, processor, task),
         daemon=False,
     )
-    deadline = time.monotonic() + timeout
-    tracked_descendants: set[int] | None = None
+    run = _ChildRun(process, receiver, time.monotonic() + timeout)
     started = False
     try:
         process.start()
         started = True
         sender.close()
-        remaining = deadline - time.monotonic()
-        if remaining <= 0 or not receiver.poll(remaining):
-            tracked_descendants = _terminate_processor_child(process)
-            raise TimeoutError
-        try:
-            ready = receiver.recv_bytes(1)
-        except OSError:
-            raise QueueOperationError("processor_result_malformed") from None
-        except EOFError:
-            raise QueueOperationError("processor_result_malformed") from None
-        if ready != b"R":
-            raise QueueOperationError("processor_result_malformed")
-        tracked_descendants = _tracked_descendant_pids(process.pid, os.name)
-        receiver.send_bytes(b"A")
-        remaining = deadline - time.monotonic()
-        if remaining <= 0 or not receiver.poll(remaining):
-            tracked_descendants = _terminate_processor_child(
-                process, tracked_descendants=tracked_descendants
-            )
-            raise TimeoutError
-        try:
-            frame = receiver.recv_bytes(_MAX_RESULT_BYTES + 1)
-        except OSError:
-            receiver.close()
-            process.join(0.5)
-            if process.is_alive():
-                tracked_descendants = _terminate_processor_child(
-                    process, tracked_descendants=tracked_descendants
-                )
-            raise QueueOperationError("processor_result_oversize") from None
-        except EOFError:
-            raise QueueOperationError("processor_result_malformed") from None
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            tracked_descendants = _terminate_processor_child(
-                process, tracked_descendants=tracked_descendants
-            )
-            raise TimeoutError
-        process.join(remaining)
-        if process.is_alive():
-            tracked_descendants = _terminate_processor_child(
-                process, tracked_descendants=tracked_descendants
-            )
-            raise TimeoutError
-        if process.exitcode != 0:
-            raise QueueOperationError("processor_child_failed")
+        _child_ready_handshake(run)
+        frame = _child_result_frame(run)
+        _join_child(run)
         return _decode_processor_frame(frame)
     finally:
         receiver.close()
         if started:
             _terminate_processor_child(
-                process, tracked_descendants=tracked_descendants
+                process, tracked_descendants=run.tracked_descendants
             )
 
 
