@@ -9,12 +9,24 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import blackboard
+import markdown_transaction
 import pytest
 
 from tests.test_reliability_v3_adoption import (
     _vault,
     build_adopted_reliability_v3,
 )
+
+
+def _child_writer_budget() -> None:
+    """Give a child the gate budget a hosted Windows image actually needs.
+
+    `claim_task` is not retry-safe: the SQLite claim is durable before the
+    journal line is appended, so a caller that retries after losing the gate
+    conflicts with its own live claim. Waiting long enough for the gate is the
+    honest way to keep these processes from retrying at all.
+    """
+    markdown_transaction._WRITER_WAIT_SECONDS = 120.0
 
 
 def _is_contention(error: BaseException) -> bool:
@@ -49,6 +61,7 @@ def _write_blackboard_batch(vault: str, state_root: str, worker: int, count: int
     os.environ["LLM_WIKI_ROOT"] = vault
     os.environ["LLM_WIKI_STATE_ROOT"] = state_root
     blackboard.PROJECTS_DIR = Path(vault) / "knowledge/projects"
+    _child_writer_budget()
     completed = 0
     for index in range(count):
         claim = _under_contention(
@@ -72,6 +85,7 @@ def _read_blackboard_status(vault: str, state_root: str, count: int) -> int:
     os.environ["LLM_WIKI_ROOT"] = vault
     os.environ["LLM_WIKI_STATE_ROOT"] = state_root
     blackboard.PROJECTS_DIR = Path(vault) / "knowledge/projects"
+    _child_writer_budget()
     largest = 0
     for _ in range(count):
         status = _under_contention(blackboard.get_status, "demo")
@@ -91,6 +105,7 @@ def _compete_for_blackboard_resource(
     os.environ["LLM_WIKI_ROOT"] = vault
     os.environ["LLM_WIKI_STATE_ROOT"] = state_root
     blackboard.PROJECTS_DIR = Path(vault) / "knowledge/projects"
+    _child_writer_budget()
     time.sleep(max(0.0, start_at - time.monotonic()))
     try:
         claim = blackboard.claim_task(

@@ -4975,6 +4975,47 @@ def _release_lock(path: Path, root: Path, token: str) -> None:
             pass
 
 
+def _abandoned_lease(task: dict, now: datetime) -> bool:
+    """A lease is recoverable only when it expired and its owner is gone."""
+    stale, owned = _lease_state(task, now)
+    if not stale or not owned:
+        return False
+    return not _pid_alive(task.get("lease_pid"))
+
+
+def _restore_lease_as_task(lease: Path) -> bool:
+    try:
+        os.link(lease, lease.with_suffix(".json"), follow_symlinks=False)
+        lease.unlink()
+    except (FileExistsError, OSError):
+        return False
+    return True
+
+
+def _recoverable_lease(entry: os.DirEntry, queue: Path, now: datetime) -> Path | None:
+    if not entry.name.endswith(".processing"):
+        return None
+    lease = Path(entry.path)
+    task, problem = _read_bounded_json(lease, queue)
+    if problem or task is None:
+        return None
+    if not _abandoned_lease(task, now):
+        return None
+    return lease
+
+
+def _recover_stale_leases(queue: Path, now: datetime) -> int:
+    recovered = 0
+    with os.scandir(queue) as entries:
+        for number, entry in enumerate(entries):
+            if number >= MAX_QUEUE_FILES:
+                return recovered
+            lease = _recoverable_lease(entry, queue, now)
+            if lease is not None and _restore_lease_as_task(lease):
+                recovered += 1
+    return recovered
+
+
 def _repair_leases(state_root: Path, now: datetime, repaired: list[dict]) -> bool:
     queue = state_root / "run" / "queue"
     kind = _safe_kind(queue, state_root)[0]
@@ -4986,34 +5027,52 @@ def _repair_leases(state_root: Path, now: datetime, repaired: list[dict]) -> boo
     lock_token = _acquire_lock(lock, queue, now)
     if lock_token is None:
         return False
-    recovered = 0
     try:
-        with os.scandir(queue) as entries:
-            for number, entry in enumerate(entries):
-                if number >= MAX_QUEUE_FILES:
-                    break
-                if not entry.name.endswith(".processing"):
-                    continue
-                lease = Path(entry.path)
-                task, problem = _read_bounded_json(lease, queue)
-                if problem or task is None:
-                    continue
-                stale, owned = _lease_state(task, now)
-                pid = task.get("lease_pid")
-                if not stale or not owned or _pid_alive(pid):
-                    continue
-                target = lease.with_suffix(".json")
-                try:
-                    os.link(lease, target, follow_symlinks=False)
-                    lease.unlink()
-                    recovered += 1
-                except (FileExistsError, OSError):
-                    continue
+        recovered = _recover_stale_leases(queue, now)
     finally:
         _release_lock(lock, queue, lock_token)
     if recovered:
         repaired.append({"action": "recover_stale_lease", "count": recovered})
     return True
+
+
+def _require_real_directory(component: Path) -> None:
+    try:
+        component_info = component.lstat()
+    except OSError as exc:
+        raise OSError("unsafe knowledge path") from exc
+    if stat.S_ISLNK(component_info.st_mode):
+        raise OSError("unsafe knowledge path")
+    if not stat.S_ISDIR(component_info.st_mode):
+        raise OSError("unsafe knowledge path")
+
+
+def _contained_notes_directory(root: Path) -> Path:
+    """The notes directory, proven to be a real directory inside the vault."""
+    knowledge_path = root / "knowledge"
+    notes_path = knowledge_path / "notes"
+    _require_real_directory(knowledge_path)
+    _require_real_directory(notes_path)
+    notes = notes_path.resolve()
+    try:
+        notes.relative_to(root.resolve())
+    except ValueError as exc:
+        raise OSError("unsafe knowledge path") from exc
+    return notes
+
+
+def _require_rebuild_continues(deadline: float, cancelled) -> None:
+    if _deadline_reached(deadline) or bool(cancelled and cancelled()):
+        raise TimeoutError("index rebuild cancelled or deadline reached")
+
+
+def _rebuildable_pages(notes: Path, deadline: float, cancelled) -> list[Path]:
+    pages = []
+    for page in sorted(notes.rglob("*.md")):
+        _require_rebuild_continues(deadline, cancelled)
+        if _safe_kind(page, notes)[0] == "regular":
+            pages.append(page)
+    return pages
 
 
 def _rebuild_index(
@@ -5042,31 +5101,10 @@ def _rebuild_index(
         search_memory.INDEX_MANIFEST = search_memory.INDEX_DIR / ".paths-manifest"
         search_memory.KNOWLEDGE_DIR = root / "knowledge" / "notes"
         search_memory.WIKI_DIR = search_memory.KNOWLEDGE_DIR
-        root_resolved = root.resolve()
-        knowledge_path = root / "knowledge"
-        notes_path = knowledge_path / "notes"
-        for component in (knowledge_path, notes_path):
-            try:
-                component_info = component.lstat()
-            except OSError as exc:
-                raise OSError("unsafe knowledge path") from exc
-            if stat.S_ISLNK(component_info.st_mode) or not stat.S_ISDIR(component_info.st_mode):
-                raise OSError("unsafe knowledge path")
-        notes = notes_path.resolve()
-        try:
-            notes.relative_to(root_resolved)
-        except ValueError as exc:
-            raise OSError("unsafe knowledge path") from exc
-        pages = []
-        for page in sorted(notes.rglob("*.md")):
-            if _deadline_reached(deadline) or bool(cancelled and cancelled()):
-                raise TimeoutError("index rebuild cancelled or deadline reached")
-            kind, _ = _safe_kind(page, notes)
-            if kind == "regular":
-                pages.append(page)
-        if _deadline_reached(deadline) or bool(cancelled and cancelled()):
-            raise TimeoutError("index rebuild cancelled or deadline reached")
-        search_memory._build_index(pages)
+        notes = _contained_notes_directory(root)
+        pages = _rebuildable_pages(notes, deadline, cancelled)
+        _require_rebuild_continues(deadline, cancelled)
+        search_memory._build_index(pages)  # noqa: SLF001
     finally:
         (
             search_memory.ROOT,
