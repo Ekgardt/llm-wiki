@@ -1276,10 +1276,13 @@ class GenerationCatalog:
                 self.state_root,
                 max_bytes=self.max_catalog_bytes,
             )
-        busy_ms = UNBOUNDED_BUSY_MS
-        if deadline is not None:
-            busy_ms = self._remaining_busy_ms(deadline)
-        return open_operational_db(self.catalog_path, busy_ms=busy_ms)
+        return open_operational_db(self.catalog_path, busy_ms=self._busy_ms(deadline))
+
+    def _busy_ms(self, deadline: float | None) -> int:
+        """Readers wait for a lock exactly as writers do; busy is not an error."""
+        if deadline is None:
+            return UNBOUNDED_BUSY_MS
+        return self._remaining_busy_ms(deadline)
 
     def _check_deadline(self, deadline: float | None) -> None:
         if deadline is not None and (
@@ -1320,11 +1323,12 @@ class GenerationCatalog:
                 database.rollback()
                 raise
 
-    def _readonly(self) -> sqlite3.Connection:
+    def _readonly(self, *, deadline: float | None = None) -> sqlite3.Connection:
         return open_readonly_operational_db(
             self.catalog_path,
             self.state_root,
             max_bytes=self.max_catalog_bytes,
+            busy_ms=self._busy_ms(deadline),
         )
 
     @staticmethod
@@ -1595,7 +1599,7 @@ class GenerationCatalog:
             generation_id, deadline=deadline, cancelled=cancelled
         )
         self._check_deadline(deadline)
-        with closing(self._readonly()) as database:
+        with closing(self._readonly(deadline=deadline)) as database:
             row = database.execute(
                 "SELECT manifest_json, manifest_sha256 FROM generations WHERE generation_id = ?",
                 (generation_id,),
@@ -1999,7 +2003,7 @@ class GenerationCatalog:
     ) -> tuple[str | None, list[str], dict[str, str | None]]:
         _check_cancelled(cancelled)
         self._check_deadline(deadline)
-        with closing(self._readonly()) as database:
+        with closing(self._readonly(deadline=deadline)) as database:
             state = database.execute(
                 "SELECT active_generation_id FROM catalog_state WHERE singleton = 1"
             ).fetchone()
@@ -2063,7 +2067,7 @@ class GenerationCatalog:
         """Read repository eligibility from the catalog without validating artifacts."""
         _check_cancelled(cancelled)
         self._check_deadline(deadline)
-        with closing(self._readonly()) as database:
+        with closing(self._readonly(deadline=deadline)) as database:
             row = database.execute(
                 "SELECT manifest_json, manifest_sha256 FROM generations "
                 "WHERE generation_id = ?",
@@ -2228,7 +2232,7 @@ class GenerationCatalog:
     def recover_orphans(self, *, deadline: float | None = None) -> list[str]:
         """Register complete immediate-child generations without activating them."""
         self._check_deadline(deadline)
-        with closing(self._readonly()) as database:
+        with closing(self._readonly(deadline=deadline)) as database:
             rows = self._bounded_rows(
                 database,
                 "SELECT generation_id FROM generations LIMIT ?",

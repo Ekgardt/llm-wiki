@@ -2089,6 +2089,43 @@ def test_locked_index_returns_immediately_as_degraded(tmp_path):
     assert check["details"]["database_busy"] is True
 
 
+def test_a_brief_commit_lock_does_not_make_a_healthy_index_look_busy(tmp_path):
+    """A millisecond commit is normal; only a stuck database is worth reporting."""
+    import doctor
+
+    _, state_root, _ = _build_root(tmp_path)
+    index = state_root / "cache" / "index.sqlite"
+    _create_index(index)
+    locked = threading.Event()
+    released = threading.Event()
+
+    def hold_briefly() -> None:
+        writer = sqlite3.connect(index, isolation_level=None)
+        try:
+            writer.execute("BEGIN EXCLUSIVE")
+            locked.set()
+            time.sleep(0.05)
+            writer.execute("ROLLBACK")
+        finally:
+            writer.close()
+        released.set()
+
+    worker = threading.Thread(target=hold_briefly)
+    worker.start()
+    try:
+        assert locked.wait(10)
+        check = doctor._index_check(
+            state_root,
+            datetime.now(timezone.utc),
+            deadline=time.monotonic() + 5.0,
+        )
+    finally:
+        worker.join()
+
+    assert released.is_set()
+    assert check["details"].get("database_busy") is not True
+
+
 def test_indexed_path_scan_detects_bounded_overflow(tmp_path, monkeypatch):
     import doctor
 

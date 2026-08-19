@@ -52,6 +52,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from bounded_io import read_stable_bytes  # noqa: E402
 
+# A queue commit locks readers out for milliseconds; wait it out instead of
+# reporting a live queue as unreadable.
+QUEUE_READ_BUSY_MS = 1_000
 MAX_MCP_PAGE_BYTES = 4 * 1024 * 1024
 MAX_MCP_EVIDENCE_BYTES = 64 * 1024
 MAX_MCP_TOTAL_EVIDENCE_BYTES = 256 * 1024
@@ -2192,6 +2195,7 @@ def _doctor(
                 path,
                 STATE_ROOT,
                 max_bytes=256 * 1024 * 1024,
+                busy_ms=QUEUE_READ_BUSY_MS,
             )
             try:
                 if action == "queue-inspect":

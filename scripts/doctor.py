@@ -66,6 +66,10 @@ MAX_OPERATIONAL_ROWS = 10_000
 MAX_RUNTIME_ENTRIES = 10_000
 LOCK_STALE_SECONDS = 10 * 60
 DEFAULT_TIME_BUDGET_SECONDS = 5.0
+# A commit on a rollback-journal database locks readers out for milliseconds.
+# Wait that out rather than reporting a healthy database as unreadable, but
+# stay far below the default time budget above.
+READ_BUSY_MS = 250
 DEFAULT_GENERATION_TIME_BUDGET_SECONDS = 60.0
 DEFAULT_GENERATION_SOURCE_LIMIT = 10_000
 GENERATION_FRESH_SECONDS = 24 * 60 * 60
@@ -452,17 +456,31 @@ def _queue_check(state_root: Path, now: datetime, deadline: float) -> dict:
     return _result("queue", status, message, details)
 
 
+def _read_busy_ms(deadline: float | None) -> int:
+    """Wait out a brief commit lock, keeping budget left to report what happened.
+
+    Spending the whole remaining budget on the wait would turn every busy
+    database into an indistinguishable "budget exhausted" verdict.
+    """
+    if deadline is None:
+        return READ_BUSY_MS
+    remaining_ms = (deadline - time.monotonic()) * 1000
+    return max(0, min(READ_BUSY_MS, int(remaining_ms / 2)))
+
+
 def _readonly_database(
     path: Path,
     state_root: Path,
     *,
     max_bytes: int = MAX_OPERATIONAL_DB_BYTES,
+    deadline: float | None = None,
 ) -> sqlite3.Connection:
     return open_readonly_operational_db(
         path,
         state_root,
         max_bytes=max_bytes,
         owner_only=False,
+        busy_ms=_read_busy_ms(deadline),
     )
 
 
@@ -606,7 +624,7 @@ def _transaction_check(state_root: Path, now: datetime, deadline: float = float(
         details["deletion_codes"].append("transaction_state_unreadable")
         return _result("transactions", "error", "Transaction database is unsafe.", details)
     try:
-        with _readonly_database(path, state_root) as database:
+        with _readonly_database(path, state_root, deadline=deadline) as database:
             if _deadline_reached(deadline):
                 raise TimeoutError("transaction check deadline")
             tables = _tables(database, deadline)
@@ -897,7 +915,7 @@ def _queue_v2_check(state_root: Path, now: datetime, deadline: float) -> dict:
     if marker_kind == "regular" and details["legacy_retained"]:
         details["migration"] = "conflict"
     try:
-        with _readonly_database(path, state_root) as database:
+        with _readonly_database(path, state_root, deadline=deadline) as database:
             if _deadline_reached(deadline):
                 raise TimeoutError("queue check deadline")
             tables = _tables(database, deadline)
@@ -1246,7 +1264,7 @@ def _claim_check(root: Path, state_root: Path, deadline: float = float("inf")) -
     try:
         from claims import ClaimIndex
 
-        with _readonly_database(path, state_root) as database:
+        with _readonly_database(path, state_root, deadline=deadline) as database:
             if _deadline_reached(deadline):
                 raise TimeoutError("claim check deadline")
             compatible = ClaimIndex._schema_compatible(database)
@@ -2377,7 +2395,7 @@ def _generation_check(
             repairable=False,
         )
     try:
-        with _readonly_database(catalog_path, state_root) as database:
+        with _readonly_database(catalog_path, state_root, deadline=deadline) as database:
             database.set_progress_handler(lambda: int(_deadline_reached(deadline)), 1000)
             integrity = database.execute("PRAGMA integrity_check(1)").fetchone()
             tables = _tables(database, deadline)
@@ -2484,7 +2502,9 @@ def _generation_check(
             indexed.get(path) != current.get(path) for path in indexed.keys() | current.keys()
         )
         graph = generation_path / "evidence.sqlite3"
-        with _readonly_database(graph, state_root, max_bytes=16 * 1024 * 1024 * 1024) as database:
+        with _readonly_database(
+            graph, state_root, max_bytes=16 * 1024 * 1024 * 1024, deadline=deadline
+        ) as database:
             database.set_progress_handler(lambda: int(_deadline_reached(deadline)), 1000)
             unresolved = database.execute(
                 "SELECT COUNT(*) FROM (SELECT 1 FROM observation LIMIT ?)",
@@ -2632,6 +2652,7 @@ def _index_check(
             index,
             state_root,
             max_bytes=MAX_INDEX_DB_BYTES,
+            deadline=deadline,
         )
         try:
             connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)

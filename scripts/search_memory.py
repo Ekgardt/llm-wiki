@@ -2331,43 +2331,73 @@ def _chunk_count_agrees(
     return expected_chunks is None or count == len(expected_chunks)
 
 
+def _is_sha256(value: object) -> bool:
+    return isinstance(value, str) and _SHA256_RE.fullmatch(value) is not None
+
+
+def _is_filled_str(value: object) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _fresh_chunk_id(
+    chunk_id: object, order: int, chunk_order: object, seen: set[str]
+) -> bool:
+    return _is_sha256(chunk_id) and chunk_id not in seen and chunk_order == order
+
+
+def _valid_source_reference(
+    source_id: object, source_path: object, parent_page: object
+) -> bool:
+    if not _is_filled_str(source_path):
+        return False
+    return source_id == f"source:{source_path}" and parent_page == source_path
+
+
 def _valid_chunk_identity(row: tuple[object, ...], order: int, seen: set[str]) -> bool:
     chunk_id, chunk_order, source_id, source_path, source_sha256, parent_page = row[:6]
-    if not isinstance(chunk_id, str) or _SHA256_RE.fullmatch(chunk_id) is None:
+    if not _fresh_chunk_id(chunk_id, order, chunk_order, seen):
         return False
-    if chunk_id in seen or chunk_order != order:
+    if not _valid_source_reference(source_id, source_path, parent_page):
         return False
-    if not isinstance(source_path, str) or not source_path:
+    return _is_sha256(source_sha256)
+
+
+def _is_string_list(value: object) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _ordered_bounds(start: object, end: object, *, floor: int) -> bool:
+    """Both offsets are integers and the span runs forward from `floor`."""
+    if not isinstance(start, int) or not isinstance(end, int):
         return False
-    if source_id != f"source:{source_path}" or parent_page != source_path:
-        return False
-    return isinstance(source_sha256, str) and _SHA256_RE.fullmatch(source_sha256) is not None
+    return floor <= start <= end
 
 
 def _valid_chunk_span(row: tuple[object, ...], ancestry: object) -> bool:
-    _, _, _, _, _, _, _, byte_start, byte_end, line_start, line_end, span_sha256 = row[:12]
-    if not isinstance(ancestry, list) or any(not isinstance(item, str) for item in ancestry):
+    byte_start, byte_end, line_start, line_end, span_sha256 = row[7:12]
+    if not _is_string_list(ancestry):
         return False
-    if not isinstance(byte_start, int) or not isinstance(byte_end, int):
+    if not _ordered_bounds(byte_start, byte_end, floor=0):
         return False
-    if not 0 <= byte_start <= byte_end:
+    if not _ordered_bounds(line_start, line_end, floor=1):
         return False
-    if not isinstance(line_start, int) or not isinstance(line_end, int):
-        return False
-    if not 1 <= line_start <= line_end:
-        return False
-    return isinstance(span_sha256, str) and _SHA256_RE.fullmatch(span_sha256) is not None
+    return _is_sha256(span_sha256)
+
+
+def _all_optional_strings(values: tuple[object, ...]) -> bool:
+    return all(value is None or isinstance(value, str) for value in values)
+
+
+def _all_strings(values: tuple[object, ...]) -> bool:
+    return all(isinstance(value, str) for value in values)
 
 
 def _valid_chunk_text(row: tuple[object, ...]) -> bool:
-    type_value = row[12]
     optional_text = (row[13], row[14], row[15], row[17], row[18], row[19])
     status_value, title, content = row[16], row[20], row[21]
-    if not isinstance(type_value, str) or not type_value:
+    if not _is_filled_str(row[12]) or not _all_optional_strings(optional_text):
         return False
-    if any(value is not None and not isinstance(value, str) for value in optional_text):
-        return False
-    if not isinstance(status_value, str) or not isinstance(title, str):
+    if not _all_strings((status_value, title)):
         return False
     return isinstance(content, str) and bool(content.strip())
 
@@ -4713,32 +4743,44 @@ def main() -> int:
         args.query = sys.stdin.read().strip()
 
     if args.status:
-        pages = _collect_pages("all")
-        if INDEX_FILE.exists():
-            conn = sqlite3.connect(str(INDEX_FILE))
-            count = conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
-            conn.close()
-            print(f"Index: {INDEX_FILE}")
-            print(f"  Pages indexed: {count}")
-            print(f"  Pages on disk: {len(pages)}")
-            print(f"  Index size: {INDEX_FILE.stat().st_size} bytes")
-            print(f"  Needs rebuild: {_needs_rebuild(pages)}")
-        else:
-            print(f"Index: not built ({len(pages)} pages would be indexed)")
-        return 0
+        return _print_index_status()
 
     if args.rebuild:
-        pages = _collect_pages(args.scope)
-        print(f"Rebuilding index with {len(pages)} pages...")
-        t0 = time.time()
-        _build_index(pages)
-        print(f"Done in {time.time() - t0:.2f}s")
-        return 0
+        return _rebuild_index_cli(args.scope)
 
     if not args.query:
         print("Usage: python search_memory.py \"<query>\"", file=sys.stderr)
         return 1
 
+    return _run_cli_search(args)
+
+
+def _print_index_status() -> int:
+    pages = _collect_pages("all")
+    if not INDEX_FILE.exists():
+        print(f"Index: not built ({len(pages)} pages would be indexed)")
+        return 0
+    conn = sqlite3.connect(str(INDEX_FILE))
+    count = conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
+    conn.close()
+    print(f"Index: {INDEX_FILE}")
+    print(f"  Pages indexed: {count}")
+    print(f"  Pages on disk: {len(pages)}")
+    print(f"  Index size: {INDEX_FILE.stat().st_size} bytes")
+    print(f"  Needs rebuild: {_needs_rebuild(pages)}")
+    return 0
+
+
+def _rebuild_index_cli(scope: str) -> int:
+    pages = _collect_pages(scope)
+    print(f"Rebuilding index with {len(pages)} pages...")
+    t0 = time.time()
+    _build_index(pages)
+    print(f"Done in {time.time() - t0:.2f}s")
+    return 0
+
+
+def _run_cli_search(args: argparse.Namespace) -> int:
     t0 = time.time()
     try:
         results = search(
@@ -4761,7 +4803,12 @@ def main() -> int:
         print(f"No results for '{args.query}' ({elapsed:.3f}s)")
         return 0
 
-    print(f"Found {len(results)} result(s) for '{args.query}' ({elapsed:.3f}s):\n")
+    _print_search_results(args.query, results, elapsed)
+    return 0
+
+
+def _print_search_results(query: str, results: list[dict], elapsed: float) -> None:
+    print(f"Found {len(results)} result(s) for '{query}' ({elapsed:.3f}s):\n")
     for i, r in enumerate(results, 1):
         proj_tag = f" [{r['project']}]" if r["project"] else ""
         ts_tag = f" ({r['timestamp']})" if r["timestamp"] else ""
@@ -4770,8 +4817,6 @@ def main() -> int:
         if r["summary"]:
             print(f"   {r['summary']}")
         print()
-
-    return 0
 
 
 if __name__ == "__main__":
