@@ -249,7 +249,10 @@ def create_python_repository(destination: Path) -> Path:
             shell=False,
             stdin=subprocess.DEVNULL,
             capture_output=True,
-            timeout=10,
+            # A guard against a hung git, not a performance budget: `git add .`
+            # over a fixture tree took longer than ten seconds on a loaded
+            # hosted Windows runner and failed the tests that used it.
+            timeout=120,
         )
 
     run_git("init", "--initial-branch=main", f"--template={template.resolve()}")

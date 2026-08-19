@@ -31,6 +31,13 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
+# Session start must answer from the projection instead of recomputing the
+# handoff or waiting for the Markdown writer gate. A four-core hosted Windows
+# runner needed seven seconds for that projected read, so a sub-second ceiling
+# measured the runner. The proof that survives load is the contrast with the
+# writer hold below: blocking on the gate would cost WRITER_HOLD_SECONDS.
+SESSION_START_BUDGET_SECONDS = 5.0
+WRITER_HOLD_SECONDS = 30.0
 
 
 def require_tool(name: str) -> str:
@@ -1482,7 +1489,7 @@ def test_opencode_node_injects_shared_bounded_legacy_handoff_for_unicode_slug(
     elapsed = time.perf_counter() - started
     shared = recover_project_handoff(ProjectStore(vault, state_root), slug, project_root=project)
 
-    assert elapsed < 0.75
+    assert elapsed < SESSION_START_BUDGET_SECONDS
     assert result["context"] == shared.context
     assert len(result["context"]) <= 2400
     assert "Preserve older handoff" in result["context"]
@@ -1589,10 +1596,12 @@ def test_opencode_session_start_writer_contention_is_bounded_and_degraded(monkey
     store = ProjectStore(vault, state_root)
     held = threading.Event()
 
+    release = threading.Event()
+
     def hold_writer():
         with store.coordinator.writer_gate():
             held.set()
-            time.sleep(1)
+            release.wait(WRITER_HOLD_SECONDS)
 
     monkeypatch.setattr(integration_adapter, "ROOT", vault)
     monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
@@ -1615,9 +1624,10 @@ def test_opencode_session_start_writer_contention_is_bounded_and_degraded(monkey
         started = time.perf_counter()
         result = integration_adapter.ingest_event(envelope)
         elapsed = time.perf_counter() - started
-        holder.result(timeout=5)
+        release.set()
+        holder.result(timeout=WRITER_HOLD_SECONDS)
 
-    assert elapsed < 0.75
+    assert elapsed < SESSION_START_BUDGET_SECONDS
     assert "# General memory" in result["context"]
     assert "Degraded" in result["context"]
     assert "project:demo" in result["context"]

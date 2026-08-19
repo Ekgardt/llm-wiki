@@ -401,7 +401,7 @@ def test_deferred_compile_timeout_kills_compiler_tree(
         "import os, time\n"
         "from pathlib import Path\n"
         "Path(os.environ['TEST_COMPILE_PID']).write_text(str(os.getpid()), encoding='ascii')\n"
-        "time.sleep(30)\n",
+        "time.sleep(300)\n",
         encoding="ascii",
     )
     queue = MemoryQueue(tmp_path)
@@ -410,10 +410,12 @@ def test_deferred_compile_timeout_kills_compiler_tree(
     monkeypatch.setenv("TEST_COMPILE_PID", str(pid_path))
     monkeypatch.setattr(memory_queue, "_queue", lambda **kwargs: queue)
 
+    # The budget has to outlast process spawn on the slowest supported runner,
+    # or the compiler is killed before it records the PID this test kills.
     summary = memory_queue.run_worker(
         memory_queue._manual_processor,
         max_tasks=1,
-        max_seconds=1,
+        max_seconds=8,
         idle_seconds=0,
     )
 
