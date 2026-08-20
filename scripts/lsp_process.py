@@ -2119,6 +2119,236 @@ def _fail_startup(
     raise startup_error
 
 
+@dataclass
+class _StartupSlot:
+    """The instance a startup has built so far, for its failure path."""
+
+    instance: LspProcess | None = None
+
+
+@dataclass
+class _StartedGeneration:
+    """What a successful launch produced inside the generation guard."""
+
+    instance: LspProcess
+    generation: _Generation
+    process: object
+    protocol: LspProtocol
+    state: ProcessState
+
+
+def _validated_cwd(cwd: Path) -> Path:
+    cwd = Path(cwd)
+    if not cwd.exists() or not cwd.is_dir():
+        raise ValueError("cwd must be an existing directory")
+    return cwd.resolve()
+
+
+def _claim_startup_ownership(
+    coordinator: _LifecycleCoordinator,
+    owner_root: Path,
+    ownership_state_root: Path | None,
+    owner_nonce: str,
+) -> _OwnerDirectory:
+    """Take the registry lease, if there is a registry, and open the owner."""
+    if ownership_state_root is not None:
+        registry = OwnershipRegistry(ownership_state_root)
+        coordinator.ownership_registry = registry
+        coordinator.ownership_lease = registry.acquire(
+            "lsp", scope=f"lsp:{owner_nonce}"
+        )
+    owner = _OwnerDirectory.open(owner_root)
+    coordinator.owner_directory = owner
+    return owner
+
+
+def _startup_owner_record(
+    arguments: Sequence[str],
+    coordinator: _LifecycleCoordinator,
+    *,
+    generation_nonce: str,
+    owner_nonce: str,
+    started_at: str,
+) -> dict[str, object]:
+    record: dict[str, object] = {
+        "command_basename": Path(arguments[0]).name,
+        "generation_nonce": generation_nonce,
+        "owner_nonce": owner_nonce,
+        "owner_pid": None,
+        "started_at": started_at,
+        "state": ProcessState.PROCESS_RUNNING.value,
+    }
+    if coordinator.ownership_lease is not None:
+        record.update(_canonical_lsp_fields(coordinator.ownership_lease))
+    return record
+
+
+def _require_generation_owners(
+    generation: _Generation,
+) -> tuple[object, LspProtocol]:
+    process = generation.process
+    protocol = generation.protocol
+    if process is None or protocol is None:
+        raise RuntimeError(
+            "LSP generation did not acquire process and protocol owners"
+        )
+    return process, protocol
+
+
+def _build_lsp_instance(
+    cls: type[LspProcess],
+    coordinator: _LifecycleCoordinator,
+    generation: _Generation,
+    process: object,
+    protocol: LspProtocol,
+    *,
+    owner_root: Path,
+    owner_nonce: str,
+    generation_nonce: str,
+    started_monotonic: float,
+    arguments: Sequence[str],
+    cwd: Path,
+    environment: Mapping[str, str],
+) -> LspProcess:
+    instance = cls(
+        process=process,
+        protocol=protocol,
+        owner_root=owner_root,
+        owner_nonce=owner_nonce,
+        generation_nonce=generation_nonce,
+        state=ProcessState.PROCESS_RUNNING,
+        started_monotonic=started_monotonic,
+        last_used_monotonic=started_monotonic,
+    )
+    instance._coordinator = coordinator
+    instance._command = tuple(arguments)
+    instance._cwd = cwd
+    instance._environment = dict(environment)
+    instance._stderr_projection = generation.stderr
+    instance._stderr_projection_lock = generation.stderr_lock
+    return instance
+
+
+def _bootstrapped_state(
+    generation_configuration: _GenerationConfiguration,
+    generation: _Generation,
+    startup_deadline: float,
+) -> ProcessState:
+    if generation_configuration.generation_bootstrap is None:
+        return ProcessState.PROCESS_RUNNING
+    return _run_generation_bootstrap(
+        generation_configuration, generation, startup_deadline
+    )
+
+
+def _launch_first_generation(
+    cls: type[LspProcess],
+    coordinator: _LifecycleCoordinator,
+    arguments: Sequence[str],
+    slot: _StartupSlot,
+    *,
+    cwd: Path,
+    environment: Mapping[str, str],
+    owner_root: Path,
+    owner_nonce: str,
+    generation_nonce: str,
+    owner_record: Mapping[str, object],
+    started_monotonic: float,
+    startup_deadline: float,
+    generation_configuration: _GenerationConfiguration,
+) -> _StartedGeneration:
+    """Start the first generation and the instance that owns it."""
+    with _generation_guard_context(
+        generation_configuration, generation_nonce, startup_deadline
+    ) as guarded_launch:
+        generation_command, pass_fds = _generation_launch(
+            arguments,
+            guarded_launch,
+            cwd=cwd,
+        )
+        generation = _prepare_generation(
+            coordinator,
+            generation_command,
+            cwd=cwd,
+            environment=environment,
+            deadline=startup_deadline,
+            generation_nonce=generation_nonce,
+            owner_record=owner_record,
+            pass_fds=pass_fds,
+        )
+        _require_startup_deadline(startup_deadline, "generation preparation")
+        process, protocol = _require_generation_owners(generation)
+        instance = _build_lsp_instance(
+            cls,
+            coordinator,
+            generation,
+            process,
+            protocol,
+            owner_root=owner_root,
+            owner_nonce=owner_nonce,
+            generation_nonce=generation_nonce,
+            started_monotonic=started_monotonic,
+            arguments=arguments,
+            cwd=cwd,
+            environment=environment,
+        )
+        slot.instance = instance
+        _publish_generation_lease(instance, generation, startup_deadline)
+        _require_startup_deadline(startup_deadline, "initial lease publication")
+        _start_heartbeat_worker(instance, startup_deadline)
+        _require_startup_deadline(startup_deadline, "heartbeat worker start")
+        state = _bootstrapped_state(
+            generation_configuration, generation, startup_deadline
+        )
+    return _StartedGeneration(instance, generation, process, protocol, state)
+
+
+def _finish_started_process(
+    started: _StartedGeneration,
+    coordinator: _LifecycleCoordinator,
+    owner: _OwnerDirectory,
+    startup_deadline: float,
+) -> LspProcess:
+    """Publish the generation, start the workers, and prove the server is alive."""
+    _promote_started_generation(
+        started.instance,
+        coordinator,
+        started.generation,
+        started.process,
+        started.protocol,
+        started.state,
+        startup_deadline,
+    )
+    _start_lifecycle_workers(started.instance, startup_deadline)
+    _require_startup_deadline(startup_deadline, "lifecycle worker start")
+    owner.verify_lexical_identity()
+    if started.process.poll() is not None or started.protocol.fatal:
+        raise RuntimeError("LSP process exited during startup")
+    _require_startup_deadline(startup_deadline, "final startup fence")
+    atexit.register(started.instance._atexit_close)
+    _unregister_startup_cleanup(coordinator)
+    return started.instance
+
+
+def _resolved_startup_deadline(configured_deadline: float | None) -> float:
+    """The caller's deadline, or the default startup budget from now."""
+    if configured_deadline is None:
+        return time.monotonic() + _STARTUP_WAIT_SECONDS
+    return configured_deadline
+
+
+def _release_startup_driver(
+    coordinator: _LifecycleCoordinator, driver_acquired: bool
+) -> None:
+    """Release the driver, then drop the registration if nothing is held."""
+    try:
+        if driver_acquired:
+            _release_driver(coordinator)
+    finally:
+        if not _coordinator_has_ownership(coordinator):
+            _unregister_startup_cleanup(coordinator)
+
+
 def _start_lsp_process_impl(
     cls: type[LspProcess],
     command: Sequence[str],
@@ -2129,11 +2359,8 @@ def _start_lsp_process_impl(
     generation_configuration: _GenerationConfiguration,
     ownership_state_root: Path | None = None,
 ) -> LspProcess:
-    cwd = Path(cwd)
+    cwd = _validated_cwd(cwd)
     owner_root = Path(owner_root)
-    if not cwd.exists() or not cwd.is_dir():
-        raise ValueError("cwd must be an existing directory")
-    cwd = cwd.resolve()
     arguments = _validated_command(command, cwd)
     environment = lsp_environment()
     owner_nonce = _validated_owner_root(owner_root)
@@ -2146,118 +2373,45 @@ def _start_lsp_process_impl(
         startup_generation_nonce=generation_nonce,
     )
     _register_startup_cleanup(coordinator)
-    startup_deadline = configured_deadline
-    instance: LspProcess | None = None
+    slot = _StartupSlot()
     driver_acquired = False
 
     try:
-        if ownership_state_root is not None:
-            registry = OwnershipRegistry(ownership_state_root)
-            coordinator.ownership_registry = registry
-            coordinator.ownership_lease = registry.acquire(
-                "lsp", scope=f"lsp:{owner_nonce}"
-            )
-        owner = _OwnerDirectory.open(owner_root)
-        coordinator.owner_directory = owner
-        if startup_deadline is None:
-            startup_deadline = time.monotonic() + _STARTUP_WAIT_SECONDS
+        owner = _claim_startup_ownership(
+            coordinator, owner_root, ownership_state_root, owner_nonce
+        )
+        startup_deadline = _resolved_startup_deadline(configured_deadline)
         _acquire_driver(coordinator, startup_deadline)
         driver_acquired = True
         owner.create(startup_deadline)
         _require_startup_deadline(startup_deadline, "owner creation")
-        owner_record: dict[str, object] = {
-            "command_basename": Path(arguments[0]).name,
-            "generation_nonce": generation_nonce,
-            "owner_nonce": owner_nonce,
-            "owner_pid": None,
-            "started_at": started_at,
-            "state": ProcessState.PROCESS_RUNNING.value,
-        }
-        if coordinator.ownership_lease is not None:
-            owner_record.update(_canonical_lsp_fields(coordinator.ownership_lease))
-        generation_state = ProcessState.PROCESS_RUNNING
-        with _generation_guard_context(
-            generation_configuration, generation_nonce, startup_deadline
-        ) as guarded_launch:
-            generation_command, pass_fds = _generation_launch(
-                arguments,
-                guarded_launch,
-                cwd=cwd,
-            )
-            generation = _prepare_generation(
-                coordinator,
-                generation_command,
-                cwd=cwd,
-                environment=environment,
-                deadline=startup_deadline,
-                generation_nonce=generation_nonce,
-                owner_record=owner_record,
-                pass_fds=pass_fds,
-            )
-            _require_startup_deadline(startup_deadline, "generation preparation")
-            process = generation.process
-            protocol = generation.protocol
-            if process is None or protocol is None:
-                raise RuntimeError(
-                    "LSP generation did not acquire process and protocol owners"
-                )
-            instance = cls(
-                process=process,
-                protocol=protocol,
-                owner_root=owner_root,
-                owner_nonce=owner_nonce,
-                generation_nonce=generation_nonce,
-                state=ProcessState.PROCESS_RUNNING,
-                started_monotonic=started_monotonic,
-                last_used_monotonic=started_monotonic,
-            )
-            instance._coordinator = coordinator
-            instance._command = tuple(arguments)
-            instance._cwd = cwd
-            instance._environment = dict(environment)
-            instance._stderr_projection = generation.stderr
-            instance._stderr_projection_lock = generation.stderr_lock
-            _publish_generation_lease(instance, generation, startup_deadline)
-            _require_startup_deadline(startup_deadline, "initial lease publication")
-            _start_heartbeat_worker(instance, startup_deadline)
-            _require_startup_deadline(startup_deadline, "heartbeat worker start")
-            if generation_configuration.generation_bootstrap is not None:
-                generation_state = _run_generation_bootstrap(
-                    generation_configuration,
-                    generation,
-                    startup_deadline,
-                )
-        _require_startup_deadline(startup_deadline, "generation guard completion")
-        assert instance is not None
-
-        _promote_started_generation(
-            instance,
+        started = _launch_first_generation(
+            cls,
             coordinator,
-            generation,
-            process,
-            protocol,
-            generation_state,
-            startup_deadline,
+            arguments,
+            slot,
+            cwd=cwd,
+            environment=environment,
+            owner_root=owner_root,
+            owner_nonce=owner_nonce,
+            generation_nonce=generation_nonce,
+            owner_record=_startup_owner_record(
+                arguments,
+                coordinator,
+                generation_nonce=generation_nonce,
+                owner_nonce=owner_nonce,
+                started_at=started_at,
+            ),
+            started_monotonic=started_monotonic,
+            startup_deadline=startup_deadline,
+            generation_configuration=generation_configuration,
         )
-
-        _start_lifecycle_workers(instance, startup_deadline)
-        _require_startup_deadline(startup_deadline, "lifecycle worker start")
-        owner.verify_lexical_identity()
-        if process.poll() is not None or protocol.fatal:
-            raise RuntimeError("LSP process exited during startup")
-        _require_startup_deadline(startup_deadline, "final startup fence")
-        atexit.register(instance._atexit_close)
-        _unregister_startup_cleanup(coordinator)
-        return instance
+        _require_startup_deadline(startup_deadline, "generation guard completion")
+        return _finish_started_process(started, coordinator, owner, startup_deadline)
     except BaseException as startup_error:
-        _fail_startup(instance, coordinator, startup_error)
+        _fail_startup(slot.instance, coordinator, startup_error)
     finally:
-        try:
-            if driver_acquired:
-                _release_driver(coordinator)
-        finally:
-            if not _coordinator_has_ownership(coordinator):
-                _unregister_startup_cleanup(coordinator)
+        _release_startup_driver(coordinator, driver_acquired)
 
 
 def _start_lifecycle_workers(instance: LspProcess, deadline: float | None = None) -> None:
