@@ -2508,39 +2508,51 @@ def _start_lsp_process_impl(
         _release_startup_driver(coordinator, driver_acquired)
 
 
-def _start_lifecycle_workers(instance: LspProcess, deadline: float | None = None) -> None:
+def _adopt_lifecycle_workers_locked(
+    instance: LspProcess, coordinator: _LifecycleCoordinator
+) -> tuple[threading.Thread, threading.Thread]:
+    """The recovery and heartbeat threads, created if they do not exist yet."""
+    if coordinator.recovery_thread is None:
+        coordinator.recovery_thread = threading.Thread(
+            target=_recovery_loop,
+            args=(instance,),
+            name=f"lsp-recovery-{instance.owner_nonce}",
+            daemon=True,
+        )
+    if coordinator.heartbeat_thread is None:
+        coordinator.heartbeat_thread = threading.Thread(
+            target=_heartbeat_loop,
+            args=(instance,),
+            name=f"lsp-heartbeat-{instance.owner_nonce}",
+            daemon=True,
+        )
+    return coordinator.recovery_thread, coordinator.heartbeat_thread
+
+
+def _start_unstarted_worker(
+    worker: threading.Thread, label: str, deadline: float
+) -> None:
+    """Start a worker that has not run yet, checking the deadline either side."""
+    if worker.ident is not None or worker in threading.enumerate():
+        return
+    _require_startup_deadline(deadline, f"{label} thread preparation")
+    worker.start()
+    _require_startup_deadline(deadline, f"{label} thread start")
+
+
+def _start_lifecycle_workers(
+    instance: LspProcess, deadline: float | None = None
+) -> None:
     coordinator = instance._coordinator
     if deadline is None:
         deadline = time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
     _acquire_lifecycle(coordinator, deadline)
     try:
-        if coordinator.recovery_thread is None:
-            coordinator.recovery_thread = threading.Thread(
-                target=_recovery_loop,
-                args=(instance,),
-                name=f"lsp-recovery-{instance.owner_nonce}",
-                daemon=True,
-            )
-        if coordinator.heartbeat_thread is None:
-            coordinator.heartbeat_thread = threading.Thread(
-                target=_heartbeat_loop,
-                args=(instance,),
-                name=f"lsp-heartbeat-{instance.owner_nonce}",
-                daemon=True,
-            )
-        recovery = coordinator.recovery_thread
-        heartbeat = coordinator.heartbeat_thread
+        recovery, heartbeat = _adopt_lifecycle_workers_locked(instance, coordinator)
     finally:
         _release_lifecycle(coordinator)
-    assert recovery is not None and heartbeat is not None
-    if recovery.ident is None and recovery not in threading.enumerate():
-        _require_startup_deadline(deadline, "recovery thread preparation")
-        recovery.start()
-        _require_startup_deadline(deadline, "recovery thread start")
-    if heartbeat.ident is None and heartbeat not in threading.enumerate():
-        _require_startup_deadline(deadline, "heartbeat thread preparation")
-        heartbeat.start()
-        _require_startup_deadline(deadline, "heartbeat thread start")
+    _start_unstarted_worker(recovery, "recovery", deadline)
+    _start_unstarted_worker(heartbeat, "heartbeat", deadline)
 
 
 def _start_heartbeat_worker(instance: LspProcess, deadline: float) -> None:
@@ -2658,36 +2670,59 @@ def _schedule_autonomous_recovery(instance: LspProcess) -> None:
     coordinator.recovery_wake.set()
 
 
+def _commit_heartbeat_failure_locked(
+    instance: LspProcess, coordinator: _LifecycleCoordinator
+) -> None:
+    if not _select_terminal_failure_locked(
+        instance, coordinator, "heartbeat_failed"
+    ):
+        return
+    coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
+    for generation in _generations_locked(coordinator):
+        _mark_generation_expected_exit(generation)
+    _notify_lifecycle_locked(coordinator)
+
+
+def _record_heartbeat_failure(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    error: BaseException,
+    deadline: float,
+) -> None:
+    """A heartbeat that could not write its lease ends the lifecycle."""
+    if not _queue_owner_failure(coordinator, f"heartbeat_failed: {error}"):
+        return
+    if coordinator.cleanup_started.is_set():
+        _remember_background_cleanup_error(coordinator, error)
+    try:
+        _acquire_lifecycle(coordinator, deadline)
+    except TimeoutError:
+        return
+    try:
+        _commit_heartbeat_failure_locked(instance, coordinator)
+    finally:
+        _release_lifecycle(coordinator)
+
+
+def _heartbeat_once(instance: LspProcess, coordinator: _LifecycleCoordinator) -> bool:
+    """One heartbeat; False when the loop should stop."""
+    coordinator.heartbeat_wake.wait(_HEARTBEAT_SECONDS)
+    coordinator.heartbeat_wake.clear()
+    if coordinator.heartbeat_stop.is_set():
+        return False
+    maintenance_deadline = time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
+    try:
+        _write_current_lease(instance, maintenance_deadline)
+    except BaseException as error:
+        _record_heartbeat_failure(instance, coordinator, error, maintenance_deadline)
+        return False
+    return True
+
+
 def _heartbeat_loop(instance: LspProcess) -> None:
     coordinator = instance._coordinator
-    while True:
-        coordinator.heartbeat_wake.wait(_HEARTBEAT_SECONDS)
-        coordinator.heartbeat_wake.clear()
-        if coordinator.heartbeat_stop.is_set():
-            return
-        maintenance_deadline = time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
-        try:
-            _write_current_lease(instance, maintenance_deadline)
-        except BaseException as error:
-            if not _queue_owner_failure(coordinator, f"heartbeat_failed: {error}"):
-                return
-            if coordinator.cleanup_started.is_set():
-                _remember_background_cleanup_error(coordinator, error)
-            try:
-                _acquire_lifecycle(coordinator, maintenance_deadline)
-            except TimeoutError:
-                return
-            try:
-                if _select_terminal_failure_locked(
-                    instance, coordinator, "heartbeat_failed"
-                ):
-                    coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
-                    for generation in _generations_locked(coordinator):
-                        _mark_generation_expected_exit(generation)
-                    _notify_lifecycle_locked(coordinator)
-            finally:
-                _release_lifecycle(coordinator)
-            return
+    while _heartbeat_once(instance, coordinator):
+        pass
 
 
 _STOPPED_PHASES = frozenset(
