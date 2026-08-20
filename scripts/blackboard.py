@@ -491,14 +491,26 @@ def claim_task(
     return acquired
 
 
+def _active_record_present(tasks_file: Path, claim_id: str) -> bool:
+    """Whether this claim's activation is already in the task stream."""
+    return any(
+        item.get("kind") == "claim-activated" and item.get("claim_id") == claim_id
+        for item in _read_jsonl(tasks_file)
+    )
+
+
 def _publish_active_claim(tasks_file: Path, acquired: BlackboardClaim) -> None:
-    """Record the acquired claim, releasing it if the record cannot be written.
+    """Record the acquired claim, releasing it if the record did not land.
 
     The resource rows are inserted before the claim is announced. When the
     announcement fails, the caller never learns that it holds the resources,
     and its retry would meet its own rows as a conflict. Releasing here keeps
     the operation atomic from the caller's side: either the claim is held and
     recorded, or it is not held at all.
+
+    An append can also fail *after* its record is committed. Releasing then
+    would leave an activation nothing can ever complete, so a landed record
+    settles it: the claim stands and the caller is told it succeeded.
     """
     try:
         _append_jsonl(
@@ -507,6 +519,8 @@ def _publish_active_claim(tasks_file: Path, acquired: BlackboardClaim) -> None:
             f"blackboard-active:{acquired.claim_id}",
         )
     except BaseException:
+        if _active_record_present(tasks_file, acquired.claim_id):
+            return
         with contextlib.suppress(Exception):
             _delete_exact_claim(_coordinator(), acquired)
         raise

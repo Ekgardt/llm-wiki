@@ -431,3 +431,30 @@ def test_a_claim_whose_record_fails_releases_its_resources(
     )
     assert claim.resources == ("shared/resource",)
     assert blackboard.complete_task("demo", claim) is True
+
+
+def test_a_claim_whose_record_landed_before_the_failure_stands(
+    blackboard_vault: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An append that commits and then fails must not orphan its activation."""
+    real_append = blackboard._append_jsonl
+    failures: list[str] = []
+
+    def append_then_fail(path, record, operation_id):
+        real_append(path, record, operation_id)
+        if operation_id.startswith("blackboard-active:"):
+            failures.append(operation_id)
+            raise TimeoutError("Markdown writer gate deadline expired")
+
+    monkeypatch.setattr(blackboard, "_append_jsonl", append_then_fail)
+    claim = blackboard.claim_task(
+        "demo", "task", "agent-a", resources=["shared/resource"]
+    )
+    assert len(failures) == 1
+
+    monkeypatch.setattr(blackboard, "_append_jsonl", real_append)
+    status = blackboard.get_status("demo")
+    assert status["active_tasks"] == 1
+    assert blackboard.complete_task("demo", claim) is True
+    assert blackboard.get_status("demo")["active_tasks"] == 0
