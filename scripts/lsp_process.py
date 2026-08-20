@@ -220,6 +220,47 @@ class _OwnerDirectory:
         if first_error is not None:
             raise first_error
 
+    def _retry_posix_temp_name(self, name: str) -> None:
+        """Remove one leftover; an absent file is already the outcome we want."""
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(name, dir_fd=self.owner_handle)
+        self._forget_temp_name(name)
+
+    def _delete_temp_handle(self, handle: object) -> None:
+        """Delete through the handle and always close it, keeping the first error."""
+        delete_error: BaseException | None = None
+        try:
+            _windows_workspace.delete_handle(handle)
+        except BaseException as error:
+            delete_error = error
+        try:
+            self._close_child_handle(handle)
+        except BaseException as close_error:
+            if delete_error is not None:
+                raise delete_error from close_error
+            raise
+        if delete_error is not None:
+            raise delete_error
+
+    def _retry_windows_temp_name(self, name: str) -> None:
+        try:
+            handle = _windows_workspace.open_deletable_file(self.owner_handle, name)
+        except FileNotFoundError:
+            self._forget_temp_name(name)
+            return
+        self._delete_temp_handle(handle)
+        self._forget_temp_name(name)
+
+    def _retry_one_temp_name(self, name: str) -> None:
+        if os.name == "posix":
+            self._retry_posix_temp_name(name)
+            return
+        if os.name != "nt":
+            raise RuntimeError(
+                "LSP temporary cleanup is unsupported on this platform"
+            )
+        self._retry_windows_temp_name(name)
+
     def _retry_pending_temp_names(self) -> None:
         with self._child_handle_lock:
             if os.name == "nt":
@@ -227,41 +268,7 @@ class _OwnerDirectory:
             if self._pending_temp_names and self.owner_handle is None:
                 raise RuntimeError("LSP pending temporary owner is closed")
             for name in tuple(self._pending_temp_names):
-                if os.name == "posix":
-                    try:
-                        os.unlink(name, dir_fd=self.owner_handle)
-                    except FileNotFoundError:
-                        pass
-                    else:
-                        self._forget_temp_name(name)
-                        continue
-                    self._forget_temp_name(name)
-                    continue
-                if os.name != "nt":
-                    raise RuntimeError(
-                        "LSP temporary cleanup is unsupported on this platform"
-                    )
-                try:
-                    handle = _windows_workspace.open_deletable_file(
-                        self.owner_handle, name
-                    )
-                except FileNotFoundError:
-                    self._forget_temp_name(name)
-                    continue
-                delete_error: BaseException | None = None
-                try:
-                    _windows_workspace.delete_handle(handle)
-                except BaseException as error:
-                    delete_error = error
-                try:
-                    self._close_child_handle(handle)
-                except BaseException as close_error:
-                    if delete_error is not None:
-                        raise delete_error from close_error
-                    raise
-                if delete_error is not None:
-                    raise delete_error
-                self._forget_temp_name(name)
+                self._retry_one_temp_name(name)
 
     def _finish_windows_temporary(
         self,
@@ -1251,22 +1258,35 @@ def _atexit_cleanup_startups() -> None:
             pass
 
 
-def lsp_environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
-    """Build a new, canonical environment containing only required process values."""
-    values = os.environ if source is None else source
+def _check_environment_pairs(values: Mapping[str, str]) -> None:
+    """Every inherited name and value is a string without a NUL."""
     for name, value in values.items():
         if not isinstance(name, str) or not isinstance(value, str):
             raise TypeError("environment names and values must be strings")
         if "\0" in name or "\0" in value:
             raise ValueError("environment names and values must not contain NUL")
-    if os.name == "nt":
-        system_root = values.get("SYSTEMROOT")
-        if (
-            not system_root
-            or not Path(system_root).is_absolute()
-            or not Path(system_root).is_dir()
-        ):
-            raise ValueError("SYSTEMROOT must be an inherited existing directory on Windows")
+
+
+def _is_existing_directory(path: Path) -> bool:
+    return path.is_absolute() and path.is_dir()
+
+
+def _check_windows_system_root(values: Mapping[str, str]) -> None:
+    """Windows needs an inherited SYSTEMROOT that actually exists."""
+    if os.name != "nt":
+        return
+    system_root = values.get("SYSTEMROOT")
+    if not system_root or not _is_existing_directory(Path(system_root)):
+        raise ValueError(
+            "SYSTEMROOT must be an inherited existing directory on Windows"
+        )
+
+
+def lsp_environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Build a new, canonical environment containing only required process values."""
+    values = os.environ if source is None else source
+    _check_environment_pairs(values)
+    _check_windows_system_root(values)
     return {name: values[name] for name in sorted(LSP_ENV_ALLOWLIST) if name in values}
 
 
