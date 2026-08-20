@@ -19,6 +19,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from types import MappingProxyType
 
 try:
     import fcntl as _fcntl
@@ -1692,24 +1693,94 @@ def _global_git_ignore_path() -> Path | None:
     return root / "git/ignore"
 
 
-def _safe_private_git_config(content: bytes, *, hash_name: str) -> bool:
-    try:
-        text = content.decode("utf-8", errors="strict")
-    except UnicodeError:
-        return False
-    section = None
-    seen: set[str] = set()
-    allowed = {
-        "core": {
-            "repositoryformatversion",
-            "filemode",
-            "bare",
-            "logallrefupdates",
-            "trustctime",
-        },
-        "extensions": {"objectformat"},
-        "user": {"email", "name"},
+# The only keys a private repository config may set, by section.
+_ALLOWED_PRIVATE_CONFIG_KEYS = MappingProxyType(
+    {
+        "core": frozenset(
+            {
+                "repositoryformatversion",
+                "filemode",
+                "bare",
+                "logallrefupdates",
+                "trustctime",
+            }
+        ),
+        "extensions": frozenset({"objectformat"}),
+        "user": frozenset({"email", "name"}),
     }
+)
+
+# The keys a private repository config must set for the private read to stand.
+_REQUIRED_PRIVATE_CONFIG_KEYS = frozenset(
+    {"core.bare", "core.filemode", "core.repositoryformatversion"}
+)
+
+# The private config keys whose value has to be a plain boolean.
+_BOOLEAN_PRIVATE_CONFIG_KEYS = frozenset(
+    {"core.bare", "core.filemode", "core.logallrefupdates", "core.trustctime"}
+)
+
+
+def _decoded_config(content: bytes) -> str | None:
+    """A git config's text, or None when it is not valid UTF-8."""
+    try:
+        return content.decode("utf-8", errors="strict")
+    except UnicodeError:
+        return None
+
+
+def _config_key_value(line: str) -> tuple[str, str] | None:
+    """The key and value this config line sets, or None when it sets none."""
+    if "=" not in line:
+        return None
+    key, value = (part.strip() for part in line.split("=", 1))
+    if not key or value.endswith("\\"):
+        return None
+    return key.lower(), value
+
+
+def _private_config_value_allowed(qualified: str, value: str, hash_name: str) -> bool:
+    """Whether this private config setting carries a value the read can accept."""
+    if qualified == "core.repositoryformatversion":
+        return value in {"0", "1"}
+    if qualified in _BOOLEAN_PRIVATE_CONFIG_KEYS:
+        return _boolean_config_value(qualified, value)
+    if qualified == "extensions.objectformat":
+        return value.lower() == hash_name
+    return True
+
+
+def _boolean_config_value(qualified: str, value: str) -> bool:
+    """A boolean config value; `core.bare` in a private read must be false."""
+    if value.lower() not in {"false", "true"}:
+        return False
+    return qualified != "core.bare" or value.lower() == "false"
+
+
+def _private_config_setting_allowed(
+    section: str | None, line: str, hash_name: str, seen: set[str]
+) -> bool:
+    """Whether this line is a setting the private read tolerates."""
+    if section is None or line.startswith(("#", ";")):
+        return False
+    pair = _config_key_value(line)
+    if pair is None:
+        return False
+    key, value = pair
+    if key not in _ALLOWED_PRIVATE_CONFIG_KEYS[section]:
+        return False
+    qualified = f"{section}.{key}"
+    seen.add(qualified)
+    return _private_config_value_allowed(qualified, value, hash_name)
+
+
+def _safe_private_git_config(content: bytes, *, hash_name: str) -> bool:
+    """Whether the repository's own config leaves git's behaviour predictable."""
+    text = _decoded_config(content)
+    if text is None:
+        return False
+    section: str | None = None
+    seen: set[str] = set()
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line:
@@ -1718,56 +1789,37 @@ def _safe_private_git_config(content: bytes, *, hash_name: str) -> bool:
         if match is not None:
             section = match.group(1).lower()
             continue
-        if section is None or line.startswith(("#", ";")) or "=" not in line:
+        if not _private_config_setting_allowed(section, line, hash_name, seen):
             return False
-        key, value = (part.strip() for part in line.split("=", 1))
-        key = key.lower()
-        if key not in allowed[section] or not key or value.endswith("\\"):
-            return False
-        qualified = f"{section}.{key}"
-        seen.add(qualified)
-        if qualified == "core.repositoryformatversion" and value not in {"0", "1"}:
-            return False
-        if qualified in {
-            "core.bare",
-            "core.filemode",
-            "core.logallrefupdates",
-            "core.trustctime",
-        } and value.lower() not in {"false", "true"}:
-            return False
-        if qualified == "core.bare" and value.lower() != "false":
-            return False
-        if qualified == "extensions.objectformat" and value.lower() != hash_name:
-            return False
-    required = {
-        "core.bare",
-        "core.filemode",
-        "core.repositoryformatversion",
-    }
-    return required <= seen
+    return _REQUIRED_PRIVATE_CONFIG_KEYS <= seen
+
+
+def _ignored_config_setting_allowed(line: str, in_user_section: bool) -> bool:
+    """Whether this line of an external config is one the read can ignore."""
+    if line.startswith("[") or not in_user_section:
+        return False
+    pair = _config_key_value(line)
+    if pair is None:
+        return False
+    return pair[0] in {"email", "name"}
 
 
 def _safe_ignored_git_config(content: bytes) -> bool:
-    try:
-        text = content.decode("utf-8", errors="strict")
-    except UnicodeError:
+    """Whether an external git config sets nothing that changes what git reads."""
+    text = _decoded_config(content)
+    if text is None:
         return False
     in_user_section = False
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith(("#", ";")):
             continue
-        section = re.fullmatch(r"\[user\]", line, flags=re.IGNORECASE)
-        if section is not None:
+        if re.fullmatch(r"\[user\]", line, flags=re.IGNORECASE) is not None:
             in_user_section = True
             continue
-        if line.startswith("[") or not in_user_section or "=" not in line:
-            return False
-        key, value = (part.strip() for part in line.split("=", 1))
-        if key.lower() not in {"email", "name"} or value.endswith("\\"):
+        if not _ignored_config_setting_allowed(line, in_user_section):
             return False
     return True
-
 
 def _inert_git_attributes(content: bytes) -> bool:
     return all(not line.strip() or line.startswith(b"#") for line in content.splitlines())
@@ -2820,6 +2872,258 @@ def _validate_private_git_proof(
     return True
 
 
+@dataclass
+class _RevisionBuild:
+    """Everything one revision computation accumulates as it goes."""
+
+    root: Path
+    resolved_root: Path
+    deadline: float | None
+    cancelled: Callable[[], bool] | None
+    raw_entries: dict[str, tuple[str, Path | None]] = field(default_factory=dict)
+    normalized_inputs: dict[str, str] = field(default_factory=dict)
+    directory_snapshots: dict[Path, _DirectorySnapshot] = field(default_factory=dict)
+    file_snapshots: list[_FileSnapshot] = field(default_factory=list)
+    entry_snapshots: dict[Path, _StrongIdentity] = field(default_factory=dict)
+    prepared_files: dict[str, _FileSnapshot] = field(default_factory=dict)
+    private_safe: list[bool] = field(default_factory=lambda: [True])
+    relevant_files: dict[str, Path] = field(default_factory=dict)
+
+    def normalized(self, raw: str) -> str:
+        """This path's normalized form, refusing a collision with another input."""
+        normalized = _normalized_path(raw)
+        previous = self.normalized_inputs.get(normalized)
+        if previous is not None and previous != raw:
+            raise ValueError(
+                "workspace revision contains a Unicode normalization collision"
+            )
+        return normalized
+
+    def add(self, raw: str, kind: str, path: Path | None) -> None:
+        """Record one path under its normalized form, within the file ceiling."""
+        normalized = self.normalized(raw)
+        self.normalized_inputs[normalized] = raw
+        if (
+            len(self.raw_entries) >= MAX_REVISION_FILES
+            and normalized not in self.raw_entries
+        ):
+            raise ValueError("workspace revision exceeds the file-count ceiling")
+        if _is_configuration(normalized) and path is not None:
+            kind = "configuration"
+        self.raw_entries[normalized] = (kind, path)
+
+
+def _refuse_relevant_git_link(
+    path: Path, normalized: str, info: os.stat_result
+) -> None:
+    """A link or reparse point git named in a relevant place stops the walk."""
+    if _is_relevant_path(normalized) or path.is_dir() or stat.S_ISDIR(info.st_mode):
+        raise PermissionError(
+            "workspace revision Git path is a relevant symlink or reparse directory"
+        )
+
+
+def _status_entry_stat(path: Path, normalized: str) -> os.stat_result | None:
+    """The path's metadata now, or None when it cannot contribute an entry."""
+    info = path.lstat()
+    if path.is_symlink() or _is_reparse(info):
+        _refuse_relevant_git_link(path, normalized, info)
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    return info
+
+
+def _require_inside_checkout(path: Path, resolved_root: Path) -> None:
+    """A source git names has to resolve to somewhere inside the checkout."""
+    try:
+        path.resolve(strict=True).relative_to(resolved_root)
+    except (OSError, ValueError) as exc:
+        raise PermissionError("workspace revision source escapes checkout") from exc
+
+
+def _add_status_entry(build: _RevisionBuild, raw: str, status: str) -> None:
+    """Record one path git reported as changed."""
+    normalized = _normalized_path(raw)
+    path = build.root / PurePosixPath(normalized)
+    if status == "deleted":
+        build.add(raw, "deleted", None)
+        return
+    try:
+        info = _status_entry_stat(path, normalized)
+    except FileNotFoundError:
+        build.add(raw, "deleted", None)
+        return
+    if info is None:
+        return
+    _require_inside_checkout(path, build.resolved_root)
+    build.add(raw, status, path)
+
+
+def _initial_git_state(
+    build: _RevisionBuild, repository: RepositoryScope
+) -> tuple[str | None, bytes | None]:
+    """Git's starting state, with every path it reports as changed recorded."""
+    if repository.git_common_dir is None:
+        return None, None
+    git_head, git_status = _git_state(
+        build.root,
+        allow_missing_head=repository.git_commit is None,
+        deadline=build.deadline,
+        cancelled=build.cancelled,
+    )
+    for raw, status in _status_paths(git_status):
+        _check_stop(build.deadline, build.cancelled)
+        _add_status_entry(build, raw, status)
+    return git_head, git_status
+
+
+def _walked_kind(normalized: str) -> str:
+    """What a file found only by the walk is called."""
+    if _is_configuration(normalized):
+        return "configuration"
+    return "source"
+
+
+def _add_relevant_file(build: _RevisionBuild, path: Path) -> None:
+    """Record one walked file, keeping git's kind for it when git had one."""
+    raw = path.relative_to(build.root).as_posix()
+    normalized = build.normalized(raw)
+    build.relevant_files[normalized] = path
+    existing = build.raw_entries.get(normalized)
+    if existing is None:
+        build.add(raw, _walked_kind(normalized), path)
+        return
+    kind, existing_path = existing
+    if existing_path is None:
+        build.add(raw, kind, path)
+
+
+def _add_relevant_files(build: _RevisionBuild) -> None:
+    """Record every relevant file the walk finds under the checkout root."""
+    for path in _relevant_files(
+        build.root,
+        resolved_root=build.resolved_root,
+        directory_snapshots=build.directory_snapshots,
+        entry_snapshots=build.entry_snapshots,
+        prepared_files=build.prepared_files,
+        prepared_paths=set(build.raw_entries),
+        private_inventory_safe=build.private_safe,
+        deadline=build.deadline,
+        cancelled=build.cancelled,
+    ):
+        _check_stop(build.deadline, build.cancelled)
+        _add_relevant_file(build, path)
+
+
+def _revision_entries(build: _RevisionBuild) -> list[RevisionEntry]:
+    """Hash every recorded path, in order, within the total byte ceiling."""
+    entries: list[RevisionEntry] = []
+    total_bytes = 0
+    for relative, (kind, path) in sorted(build.raw_entries.items()):
+        _check_stop(build.deadline, build.cancelled)
+        if path is None:
+            entries.append(RevisionEntry(relative, "deleted", None, 0))
+            continue
+        sha256, size, snapshot = _hash_file(
+            path,
+            root=build.root,
+            resolved_root=build.resolved_root,
+            directory_snapshots=build.directory_snapshots,
+            remaining_bytes=MAX_REVISION_BYTES - total_bytes,
+            deadline=build.deadline,
+            cancelled=build.cancelled,
+        )
+        total_bytes += size
+        build.file_snapshots.append(snapshot)
+        entries.append(RevisionEntry(relative, kind, sha256, size))
+    return entries
+
+
+def _require_git_unchanged(
+    build: _RevisionBuild,
+    repository: RepositoryScope,
+    git_head: str | None,
+    git_status: bytes | None,
+) -> None:
+    """Git has to be exactly where it was when the manifest started."""
+    if repository.git_common_dir is None:
+        return
+    final_head, final_status = _git_state(
+        build.root,
+        allow_missing_head=git_head is None,
+        deadline=build.deadline,
+        cancelled=build.cancelled,
+    )
+    if final_head != git_head:
+        raise RuntimeError("Git HEAD changed during workspace revision")
+    if final_status != git_status:
+        raise RuntimeError("Git status changed during workspace revision")
+
+
+def _require_build_consistent(build: _RevisionBuild) -> None:
+    """Re-check every snapshot the build took, and every recorded deletion."""
+    _validate_pass_snapshots(
+        build.root,
+        build.directory_snapshots,
+        build.file_snapshots,
+        deadline=build.deadline,
+        cancelled=build.cancelled,
+    )
+    for relative, (_kind, path) in build.raw_entries.items():
+        if path is None and os.path.lexists(build.root / PurePosixPath(relative)):
+            raise PermissionError(
+                "workspace revision deleted path changed before consistency fence"
+            )
+
+
+def _revision_result(
+    repository: RepositoryScope, git_head: str | None, entries: list[RevisionEntry]
+) -> WorkspaceRevision:
+    """The finished revision, with the digest taken over its own contents."""
+    values = {
+        "repository_id": repository.repository_id,
+        "checkout_id": repository.checkout_id,
+        "git_head": git_head,
+        "entries": [
+            {
+                "path": item.path,
+                "kind": item.kind,
+                "sha256": item.sha256,
+                "size": item.size,
+            }
+            for item in entries
+        ],
+    }
+    return WorkspaceRevision(
+        repository_id=repository.repository_id,
+        checkout_id=repository.checkout_id,
+        git_head=git_head,
+        entries=tuple(entries),
+        revision_sha256=hashlib.sha256(canonical_json_bytes(values)).hexdigest(),
+    )
+
+
+def _publish_build_hint(
+    build: _RevisionBuild, repository: RepositoryScope, result: WorkspaceRevision
+) -> None:
+    """Publish what this computation learned, for the next verification to reuse."""
+    _publish_inventory_hint(
+        _RevisionInventoryHint(
+            repository.repository_id,
+            repository.checkout_id,
+            result.revision_sha256,
+            build.root,
+            build.resolved_root,
+            tuple(build.directory_snapshots.values()),
+            tuple(build.entry_snapshots.items()),
+            tuple(build.prepared_files.items()),
+            tuple(build.relevant_files.items()),
+            build.private_safe[0],
+        )
+    )
+
+
 def compute_workspace_revision(
     repository: RepositoryScope,
     *,
@@ -2829,165 +3133,15 @@ def compute_workspace_revision(
     """Compute a bounded content manifest for one live checkout."""
     _check_stop(deadline, cancelled)
     root = Path(repository.checkout_root)
-    resolved_root = root.resolve(strict=True)
-    raw_entries: dict[str, tuple[str, Path | None]] = {}
-    normalized_inputs: dict[str, str] = {}
-    directory_snapshots: dict[Path, _DirectorySnapshot] = {}
-    file_snapshots: list[_FileSnapshot] = []
-    git_status: bytes | None = None
-    inventory_entry_snapshots: dict[Path, _StrongIdentity] = {}
-    inventory_prepared_files: dict[str, _FileSnapshot] = {}
-    inventory_private_safe = [True]
-    inventory_relevant_files: dict[str, Path] = {}
-
-    def add(raw: str, kind: str, path: Path | None) -> None:
-        normalized = _normalized_path(raw)
-        previous = normalized_inputs.get(normalized)
-        if previous is not None and previous != raw:
-            raise ValueError("workspace revision contains a Unicode normalization collision")
-        normalized_inputs[normalized] = raw
-        if len(raw_entries) >= MAX_REVISION_FILES and normalized not in raw_entries:
-            raise ValueError("workspace revision exceeds the file-count ceiling")
-        if _is_configuration(normalized) and path is not None:
-            kind = "configuration"
-        raw_entries[normalized] = (kind, path)
-
-    if repository.git_common_dir is not None:
-        git_head, git_status = _git_state(
-            root,
-            allow_missing_head=repository.git_commit is None,
-            deadline=deadline,
-            cancelled=cancelled,
-        )
-        for raw, status in _status_paths(git_status):
-            _check_stop(deadline, cancelled)
-            normalized = _normalized_path(raw)
-            path = root / PurePosixPath(normalized)
-            if status == "deleted":
-                add(raw, "deleted", None)
-                continue
-            try:
-                info = path.lstat()
-            except FileNotFoundError:
-                add(raw, "deleted", None)
-                continue
-            unsafe = path.is_symlink() or _is_reparse(info)
-            if unsafe:
-                linked_directory = path.is_dir()
-                if _is_relevant_path(normalized) or linked_directory or stat.S_ISDIR(info.st_mode):
-                    raise PermissionError(
-                        "workspace revision Git path is a relevant symlink or reparse directory"
-                    )
-                continue
-            if not stat.S_ISREG(info.st_mode):
-                continue
-            try:
-                path.resolve(strict=True).relative_to(resolved_root)
-            except (OSError, ValueError) as exc:
-                raise PermissionError("workspace revision source escapes checkout") from exc
-            add(raw, status, path)
-
-    else:
-        git_head = None
-
-    for path in _relevant_files(
-        root,
-        resolved_root=resolved_root,
-        directory_snapshots=directory_snapshots,
-        entry_snapshots=inventory_entry_snapshots,
-        prepared_files=inventory_prepared_files,
-        prepared_paths=set(raw_entries),
-        private_inventory_safe=inventory_private_safe,
-        deadline=deadline,
-        cancelled=cancelled,
-    ):
-        _check_stop(deadline, cancelled)
-        raw = path.relative_to(root).as_posix()
-        normalized = _normalized_path(raw)
-        previous = normalized_inputs.get(normalized)
-        if previous is not None and previous != raw:
-            raise ValueError("workspace revision contains a Unicode normalization collision")
-        inventory_relevant_files[normalized] = path
-        if normalized not in raw_entries:
-            add(raw, "configuration" if _is_configuration(normalized) else "source", path)
-        else:
-            kind, existing = raw_entries[normalized]
-            if existing is None:
-                add(raw, kind, path)
-
-    entries: list[RevisionEntry] = []
-    total_bytes = 0
-    for relative, (kind, path) in sorted(raw_entries.items()):
-        _check_stop(deadline, cancelled)
-        if path is None:
-            entries.append(RevisionEntry(relative, "deleted", None, 0))
-            continue
-        sha256, size, snapshot = _hash_file(
-            path,
-            root=root,
-            resolved_root=resolved_root,
-            directory_snapshots=directory_snapshots,
-            remaining_bytes=MAX_REVISION_BYTES - total_bytes,
-            deadline=deadline,
-            cancelled=cancelled,
-        )
-        total_bytes += size
-        file_snapshots.append(snapshot)
-        entries.append(RevisionEntry(relative, kind, sha256, size))
-
-    if repository.git_common_dir is not None:
-        final_head, final_status = _git_state(
-            root,
-            allow_missing_head=git_head is None,
-            deadline=deadline,
-            cancelled=cancelled,
-        )
-        if final_head != git_head:
-            raise RuntimeError("Git HEAD changed during workspace revision")
-        if final_status != git_status:
-            raise RuntimeError("Git status changed during workspace revision")
-    for snapshot in directory_snapshots.values():
-        _check_stop(deadline, cancelled)
-        _validate_directory_snapshot(root, snapshot)
-    for snapshot in file_snapshots:
-        _check_stop(deadline, cancelled)
-        _validate_file_snapshot(root, snapshot)
-    for relative, (_kind, path) in raw_entries.items():
-        if path is None and os.path.lexists(root / PurePosixPath(relative)):
-            raise PermissionError("workspace revision deleted path changed before consistency fence")
-
-    values = {
-        "repository_id": repository.repository_id,
-        "checkout_id": repository.checkout_id,
-        "git_head": git_head,
-        "entries": [
-            {"path": item.path, "kind": item.kind, "sha256": item.sha256, "size": item.size}
-            for item in entries
-        ],
-    }
-    result = WorkspaceRevision(
-        repository_id=repository.repository_id,
-        checkout_id=repository.checkout_id,
-        git_head=git_head,
-        entries=tuple(entries),
-        revision_sha256=hashlib.sha256(canonical_json_bytes(values)).hexdigest(),
-    )
-    _publish_inventory_hint(
-        _RevisionInventoryHint(
-            repository.repository_id,
-            repository.checkout_id,
-            result.revision_sha256,
-            root,
-            resolved_root,
-            tuple(directory_snapshots.values()),
-            tuple(inventory_entry_snapshots.items()),
-            tuple(inventory_prepared_files.items()),
-            tuple(inventory_relevant_files.items()),
-            inventory_private_safe[0],
-        )
-    )
+    build = _RevisionBuild(root, root.resolve(strict=True), deadline, cancelled)
+    git_head, git_status = _initial_git_state(build, repository)
+    _add_relevant_files(build)
+    entries = _revision_entries(build)
+    _require_git_unchanged(build, repository, git_head, git_status)
+    _require_build_consistent(build)
+    result = _revision_result(repository, git_head, entries)
+    _publish_build_hint(build, repository, result)
     return result
-
 
 def verify_workspace_revision_unchanged(
     repository: RepositoryScope,
