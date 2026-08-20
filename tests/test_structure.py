@@ -13,6 +13,7 @@ from __future__ import annotations
 import ast
 import os
 import re
+import subprocess
 from datetime import date, datetime
 from pathlib import Path
 
@@ -856,3 +857,42 @@ def test_a_context_manager_decorator_stayed_on_a_function_that_yields() -> None:
             offenders[str(path.relative_to(ROOT))] = found
 
     assert offenders == {}
+
+_VAULT_METADATA_FILES = ("knowledge/index.md", "knowledge/log.md")
+
+
+def _tracked_note_paths() -> set[str]:
+    """Every note this repository actually publishes."""
+    result = subprocess.run(
+        ["git", "ls-files", "-z", "knowledge/notes"],
+        capture_output=True,
+        check=True,
+        cwd=ROOT,
+    )
+    return {path for path in result.stdout.decode("utf-8").split("\0") if path}
+
+
+def _linked_note_paths(text: str) -> set[str]:
+    """The note pages this file links to by path."""
+    return {
+        f"knowledge/notes/{name}.md"
+        for name in re.findall(r"\[\[knowledge/notes/([^\]|]+)", text)
+    }
+
+
+def test_the_vault_index_and_log_name_only_published_notes() -> None:
+    """A running vault rewrites these two files, and they are the only tracked
+    knowledge files it writes. If one of them names a page this repository does
+    not publish, the page is personal and the file must not be committed."""
+    sample = "- [[knowledge/notes/private-thing]] — a page this repo does not ship.\n"
+    assert _linked_note_paths(sample) == {"knowledge/notes/private-thing.md"}
+
+    tracked = _tracked_note_paths()
+    leaked = {}
+    for name in _VAULT_METADATA_FILES:
+        linked = _linked_note_paths((ROOT / name).read_text(encoding="utf-8"))
+        unpublished = sorted(linked - tracked)
+        if unpublished:
+            leaked[name] = unpublished
+
+    assert leaked == {}
