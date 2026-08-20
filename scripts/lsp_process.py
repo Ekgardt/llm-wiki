@@ -2114,17 +2114,22 @@ def _startup_already_terminal(
     protocol: object,
 ) -> bool:
     """True when anything already recorded a terminal failure for this start."""
+    if _terminal_recorded(coordinator):
+        return True
+    # The caller already holds this generation's failure lock, so the lock-free
+    # form is the only one that can be used here.
+    if _generation_exiting_locked(generation):
+        return True
+    return process.poll() is not None or protocol.fatal
+
+
+def _terminal_recorded(coordinator: _LifecycleCoordinator) -> bool:
+    """The coordinator already knows how this lifecycle ends."""
     if coordinator.terminal_outcome is not None:
         return True
     if coordinator.mandatory_failure_intent is not None:
         return True
-    if coordinator.pending_failure_intents > 0 or coordinator.success_committed:
-        return True
-    if generation._exit_observed or generation.failure_queued:
-        return True
-    if generation.expected_exit.is_set():
-        return True
-    return process.poll() is not None or protocol.fatal
+    return coordinator.pending_failure_intents > 0 or coordinator.success_committed
 
 
 def _promote_started_generation(
@@ -2814,12 +2819,17 @@ def _running_generation_locked(
     return coordinator.active
 
 
+def _generation_exiting_locked(generation: _Generation) -> bool:
+    """Something has told us this generation is going; caller holds its lock."""
+    if generation._exit_observed or generation.failure_queued:
+        return True
+    return generation.expected_exit.is_set()
+
+
 def _generation_not_exiting(generation: _Generation) -> bool:
     """Nothing has told us this generation is on its way out."""
     with generation.failure_lock:
-        if generation._exit_observed or generation.failure_queued:
-            return False
-        return not generation.expected_exit.is_set()
+        return not _generation_exiting_locked(generation)
 
 
 def _active_drain_generation(
@@ -4123,6 +4133,35 @@ def _terminal_failure_lsp_process(
         _release_driver(coordinator)
 
 
+def _hand_off_to_recovery(
+    instance: LspProcess, coordinator: _LifecycleCoordinator
+) -> None:
+    """Ask recovery to pick up what a failed restart left behind."""
+    try:
+        _schedule_autonomous_recovery(instance)
+    except BaseException as recovery_error:
+        recovery = coordinator.recovery_thread
+        if recovery is None or not recovery.is_alive():
+            _remember_background_cleanup_error(coordinator, recovery_error)
+        coordinator.recovery_wake.set()
+
+
+def _finish_restart(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    *,
+    driver_acquired: bool,
+    handoff_required: bool,
+) -> None:
+    """Release the driver, then hand off if the restart did not complete."""
+    try:
+        if driver_acquired:
+            _release_driver(coordinator)
+    finally:
+        if handoff_required:
+            _hand_off_to_recovery(instance, coordinator)
+
+
 def _restart_lsp_process(instance: LspProcess, deadline: float) -> None:
     deadline = _validated_deadline(deadline)
     coordinator = instance._coordinator
@@ -4138,20 +4177,12 @@ def _restart_lsp_process(instance: LspProcess, deadline: float) -> None:
         handoff_required = True
         raise
     finally:
-        try:
-            if driver_acquired:
-                _release_driver(coordinator)
-        finally:
-            if handoff_required:
-                try:
-                    _schedule_autonomous_recovery(instance)
-                except BaseException as recovery_error:
-                    recovery = coordinator.recovery_thread
-                    if recovery is None or not recovery.is_alive():
-                        _remember_background_cleanup_error(
-                            coordinator, recovery_error
-                        )
-                    coordinator.recovery_wake.set()
+        _finish_restart(
+            instance,
+            coordinator,
+            driver_acquired=driver_acquired,
+            handoff_required=handoff_required,
+        )
 
 
 def _restart_lsp_process_owned(instance: LspProcess, deadline: float) -> None:
@@ -4361,33 +4392,62 @@ def _commit_restart_generation_owned(
         _release_lifecycle(coordinator)
 
 
-def _fail_restart_generation(instance: LspProcess, failure_deadline: float) -> None:
-    coordinator = instance._coordinator
+def _restart_failure_context(
+    coordinator: _LifecycleCoordinator, failure_deadline: float
+) -> tuple[bool, bool]:
+    """(a success is already committed, this thread owns recovery)."""
     _acquire_lifecycle(coordinator, failure_deadline, allow_expired=True)
     try:
-        success_committed = coordinator.success_committed
-        recovery_owned = coordinator.recovery_thread is threading.current_thread()
+        return (
+            coordinator.success_committed,
+            coordinator.recovery_thread is threading.current_thread(),
+        )
     finally:
         _release_lifecycle(coordinator)
-    if success_committed:
-        _drive_cleanup(instance, failure_deadline, terminal=False)
-        return
-    if recovery_owned:
-        failure_deadline = _fresh_cleanup_deadline()
+
+
+def _mark_restart_failure(
+    instance: LspProcess, coordinator: _LifecycleCoordinator, failure_deadline: float
+) -> None:
+    """Record the terminal failure; a refusal here must not stop the cleanup."""
     _remember_mandatory_terminal_failure(
         instance,
         coordinator,
         "restart_failed",
     )
-    try:
+    with contextlib.suppress(BaseException):
         _mark_terminal_failure(
             instance,
             coordinator,
             "restart_failed",
             failure_deadline,
         )
-    except BaseException:
-        pass
+
+
+def _fail_restart_generation(instance: LspProcess, failure_deadline: float) -> None:
+    coordinator = instance._coordinator
+    success_committed, recovery_owned = _restart_failure_context(
+        coordinator, failure_deadline
+    )
+    if success_committed:
+        _drive_cleanup(instance, failure_deadline, terminal=False)
+        return
+    if recovery_owned:
+        failure_deadline = _fresh_cleanup_deadline()
+    _mark_restart_failure(instance, coordinator, failure_deadline)
+    _drive_restart_failure_cleanup(
+        instance, coordinator, failure_deadline, recovery_owned=recovery_owned
+    )
+
+
+def _drive_restart_failure_cleanup(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    failure_deadline: float,
+    *,
+    recovery_owned: bool,
+) -> None:
+    """Terminal cleanup for a failed restart, retaining owners if it lags."""
     try:
         _drive_cleanup(
             instance,
