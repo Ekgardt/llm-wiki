@@ -2562,67 +2562,119 @@ def _acquire_recovery_driver(
     return False
 
 
+_RECOVERABLE_PHASES = frozenset(
+    {
+        _LifecyclePhase.RECOVERY_PENDING,
+        _LifecyclePhase.RESTARTING,
+        _LifecyclePhase.CLEANUP_PENDING,
+    }
+)
+
+
+def _clear_recovery_request_locked(coordinator: _LifecycleCoordinator) -> None:
+    """Nothing is owed to this request any more."""
+    coordinator.recovery_request_nonce = None
+    coordinator.recovery_request_pending.clear()
+    _notify_lifecycle_locked(coordinator)
+
+
+def _terminal_recovery_outcome_locked(
+    coordinator: _LifecycleCoordinator,
+) -> tuple[bool, str | None]:
+    """What a lifecycle that already ended owes a recovery request."""
+    if coordinator.cleanup_result.ownership_pending:
+        return False, coordinator.terminal_code or "restart_failed"
+    _clear_recovery_request_locked(coordinator)
+    return False, None
+
+
+def _requested_generation_owned_locked(
+    coordinator: _LifecycleCoordinator, requested_nonce: str
+) -> bool:
+    """Whether the generation this request names is still one of ours."""
+    active = coordinator.active
+    if active is not None and active.nonce == requested_nonce:
+        return True
+    return any(
+        generation.nonce == requested_nonce
+        for generation in _generations_locked(coordinator)
+    )
+
+
+def _recovery_plan_locked(
+    coordinator: _LifecycleCoordinator,
+) -> tuple[bool, str | None] | None:
+    """What the request owes, or None when a restart should be attempted."""
+    requested_nonce = coordinator.recovery_request_nonce
+    if requested_nonce is None:
+        coordinator.recovery_request_pending.clear()
+        return False, None
+    if coordinator.terminal_outcome is not None:
+        return _terminal_recovery_outcome_locked(coordinator)
+    if not _requested_generation_owned_locked(coordinator, requested_nonce):
+        _clear_recovery_request_locked(coordinator)
+        return False, None
+    if coordinator.phase not in _RECOVERABLE_PHASES:
+        return True, None
+    return None
+
+
+def _recovery_plan(
+    coordinator: _LifecycleCoordinator, deadline: float
+) -> tuple[bool, str | None] | None:
+    """The plan under the lifecycle lock, or a retry when it is out of reach."""
+    try:
+        _acquire_lifecycle(coordinator, deadline)
+    except TimeoutError:
+        return True, None
+    try:
+        return _recovery_plan_locked(coordinator)
+    finally:
+        _release_lifecycle(coordinator)
+
+
+def _restart_for_recovery(
+    instance: LspProcess, coordinator: _LifecycleCoordinator
+) -> tuple[bool, str | None]:
+    """Restart the generation; a failure becomes a mandatory terminal failure."""
+    try:
+        _restart_generation(instance, _fresh_bootstrap_deadline(coordinator))
+    except BaseException as restart_error:
+        _remember_background_restart_error(coordinator, restart_error)
+        _remember_mandatory_terminal_failure(
+            instance,
+            coordinator,
+            "restart_failed",
+        )
+        if coordinator.cleanup_result.ownership_pending:
+            _retain_autonomous_cleanup_owners(instance)
+            return False, "restart_failed"
+    return False, None
+
+
+def _recovery_driver_busy(
+    coordinator: _LifecycleCoordinator,
+) -> tuple[bool, str | None]:
+    """Another driver holds recovery; retry while a request is still pending."""
+    return (
+        coordinator.recovery_request_pending.is_set()
+        and not coordinator.recovery_stop.is_set(),
+        None,
+    )
+
+
 def _process_recovery_request(
     instance: LspProcess,
     deadline: float,
 ) -> tuple[bool, str | None]:
     coordinator = instance._coordinator
     if not _acquire_recovery_driver(coordinator, deadline):
-        return (
-            coordinator.recovery_request_pending.is_set()
-            and not coordinator.recovery_stop.is_set(),
-            None,
-        )
+        return _recovery_driver_busy(coordinator)
     try:
-        try:
-            _acquire_lifecycle(coordinator, deadline)
-        except TimeoutError:
-            return True, None
-        try:
-            requested_nonce = coordinator.recovery_request_nonce
-            if requested_nonce is None:
-                coordinator.recovery_request_pending.clear()
-                return False, None
-            if coordinator.terminal_outcome is not None:
-                if coordinator.cleanup_result.ownership_pending:
-                    return False, coordinator.terminal_code or "restart_failed"
-                coordinator.recovery_request_nonce = None
-                coordinator.recovery_request_pending.clear()
-                _notify_lifecycle_locked(coordinator)
-                return False, None
-            active = coordinator.active
-            if active is None or active.nonce != requested_nonce:
-                requested_owned = any(
-                    generation.nonce == requested_nonce
-                    for generation in _generations_locked(coordinator)
-                )
-                if not requested_owned:
-                    coordinator.recovery_request_nonce = None
-                    coordinator.recovery_request_pending.clear()
-                    _notify_lifecycle_locked(coordinator)
-                    return False, None
-            if coordinator.phase not in {
-                _LifecyclePhase.RECOVERY_PENDING,
-                _LifecyclePhase.RESTARTING,
-                _LifecyclePhase.CLEANUP_PENDING,
-            }:
-                return True, None
-        finally:
-            _release_lifecycle(coordinator)
-
-        try:
-            _restart_generation(instance, _fresh_bootstrap_deadline(coordinator))
-        except BaseException as restart_error:
-            _remember_background_restart_error(coordinator, restart_error)
-            _remember_mandatory_terminal_failure(
-                instance,
-                coordinator,
-                "restart_failed",
-            )
-            if coordinator.cleanup_result.ownership_pending:
-                _retain_autonomous_cleanup_owners(instance)
-                return False, "restart_failed"
-        return False, None
+        planned = _recovery_plan(coordinator, deadline)
+        if planned is not None:
+            return planned
+        return _restart_for_recovery(instance, coordinator)
     finally:
         _release_driver(coordinator)
 
