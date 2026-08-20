@@ -15,8 +15,8 @@ import sys
 import threading
 import time
 import unicodedata
-from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 try:
@@ -2441,6 +2441,313 @@ def _prepared_attributes_inert(
     )
 
 
+@dataclass(frozen=True)
+class _EntryHashContext:
+    """The fixed inputs every entry in one verification pass is hashed against."""
+
+    root: Path
+    resolved_root: Path
+    plan: _PrivateIndexPlan
+    directory_snapshots: dict[Path, _DirectorySnapshot]
+    current_relevant_paths: dict[str, Path]
+    deadline: float | None
+    cancelled: Callable[[], bool] | None
+    inventory_hint_used: bool
+    allow_private: bool
+
+
+@dataclass
+class _HashedEntries:
+    """What the per-entry pass gathered, while every entry still matched."""
+
+    file_snapshots: list[_FileSnapshot] = field(default_factory=list)
+    verification_hashes: dict[str, _VerificationHash] = field(default_factory=dict)
+    total_bytes: int = 0
+
+
+def _refuse_relevant_link(path: Path, relative: str, info: os.stat_result) -> None:
+    """A link or reparse point where it matters is a refusal, not a change."""
+    if _is_relevant_path(relative) or path.is_dir() or stat.S_ISDIR(info.st_mode):
+        raise PermissionError(
+            "workspace revision expected path is a relevant symlink or reparse directory"
+        )
+
+
+def _regular_entry_stat(path: Path, relative: str) -> os.stat_result | None:
+    """The entry's own metadata, or None when it is no longer a plain file."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if path.is_symlink() or _is_reparse(info):
+        _refuse_relevant_link(path, relative, info)
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    return info
+
+
+def _hash_direct_entry(
+    relative: str, context: _EntryHashContext, remaining: int
+) -> tuple[str, int, _FileSnapshot] | None:
+    """Hash one entry straight from the working tree."""
+    path = context.current_relevant_paths.get(
+        relative, context.root / PurePosixPath(relative)
+    )
+    if _regular_entry_stat(path, relative) is None:
+        return None
+    return _hash_file(
+        path,
+        root=context.root,
+        resolved_root=context.resolved_root,
+        directory_snapshots=context.directory_snapshots,
+        remaining_bytes=remaining,
+        deadline=context.deadline,
+        cancelled=context.cancelled,
+    )
+
+
+def _hash_prepared_entry(
+    relative: str, entry: RevisionEntry, context: _EntryHashContext, remaining: int
+) -> _VerificationHash | None:
+    """Hash one entry through the private index the pass prepared."""
+    plan = context.plan
+    if plan.prepared_files is None:
+        raise AssertionError("private-index file snapshots are unavailable")
+    prepared = plan.prepared_files.get(relative)
+    if prepared is None or prepared.identity[3] != entry.size:
+        return None
+    try:
+        return _hash_file_for_verification(
+            prepared.path,
+            root=context.root,
+            resolved_root=context.resolved_root,
+            directory_snapshots=context.directory_snapshots,
+            remaining_bytes=remaining,
+            deadline=context.deadline,
+            cancelled=context.cancelled,
+            git_hash_name=plan.hash_name,
+            snapshot=prepared,
+            validate_parents=False,
+        )
+    except PermissionError:
+        if context.inventory_hint_used:
+            raise _RestartVerification(context.allow_private) from None
+        raise
+
+
+def _entry_hash(
+    relative: str,
+    entry: RevisionEntry,
+    context: _EntryHashContext,
+    gathered: _HashedEntries,
+) -> tuple[str, int, _FileSnapshot] | None:
+    """The digest, size and snapshot for one entry, by whichever path applies."""
+    remaining = MAX_REVISION_BYTES - gathered.total_bytes
+    if context.plan.hash_name is None:
+        return _hash_direct_entry(relative, context, remaining)
+    verification = _hash_prepared_entry(relative, entry, context, remaining)
+    if verification is None:
+        return None
+    gathered.verification_hashes[relative] = verification
+    return verification.sha256, verification.size, verification.snapshot
+
+
+def _entry_still_matches(
+    relative: str,
+    entry: RevisionEntry,
+    context: _EntryHashContext,
+    gathered: _HashedEntries,
+) -> bool:
+    """Whether this entry still matches; its hash joins the pass when it does."""
+    if entry.kind == "deleted":
+        return not os.path.lexists(context.root / PurePosixPath(relative))
+    hashed = _entry_hash(relative, entry, context, gathered)
+    if hashed is None:
+        return False
+    sha256, size, snapshot = hashed
+    gathered.total_bytes += size
+    gathered.file_snapshots.append(snapshot)
+    return size == entry.size and sha256 == entry.sha256
+
+
+def _hash_expected_entries(
+    entries: Mapping[str, RevisionEntry], context: _EntryHashContext
+) -> _HashedEntries | None:
+    """Hash every expected entry; None as soon as one no longer matches."""
+    gathered = _HashedEntries()
+    for relative, entry in sorted(entries.items()):
+        _check_stop(context.deadline, context.cancelled)
+        if not _entry_still_matches(relative, entry, context, gathered):
+            return None
+    return gathered
+
+
+def _private_git_state(
+    root: Path,
+    expected: WorkspaceRevision,
+    plan: _PrivateIndexPlan,
+    verification_hashes: dict[str, _VerificationHash],
+    directory_snapshots: dict[Path, _DirectorySnapshot],
+    worktree_ignore_paths: tuple[Path, ...],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> _PrivateGitState | None:
+    """The git state read through the private index, or None if it was not armed.
+
+    Once the fast path is armed it either produces a state or restarts the
+    verification without it; it never falls back to the ordinary reader here.
+    """
+    if plan.hash_name is None:
+        return None
+    if plan.index_path is None:
+        raise AssertionError("private-index path is unavailable")
+    if plan.installation is None or plan.entry_snapshots is None:
+        raise AssertionError("private-index installation proof is unavailable")
+    try:
+        state = _try_private_git_state(
+            root,
+            expected,
+            verification_hashes,
+            directory_snapshots,
+            plan.entry_snapshots,
+            worktree_ignore_paths,
+            installation=plan.installation,
+            index_path=plan.index_path,
+            hash_name=plan.hash_name,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+    except _RevisionStopped:
+        raise
+    except (OSError, subprocess.SubprocessError, UnicodeError, ValueError):
+        raise _RestartVerification(allow_private=False) from None
+    if state is None:
+        raise _RestartVerification(allow_private=False) from None
+    return state
+
+
+def _revision_git_state(
+    root: Path,
+    expected: WorkspaceRevision,
+    private_state: _PrivateGitState | None,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> tuple[str | None, object]:
+    """The head and status this pass compares against, private or ordinary."""
+    if private_state is not None:
+        return private_state.head, private_state.status
+    return _git_state(
+        root,
+        allow_missing_head=expected.git_head is None,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+
+
+def _revision_state_matches(
+    current_head: str | None,
+    git_state: object,
+    expected: WorkspaceRevision,
+    entries: Mapping[str, RevisionEntry],
+    private_state: _PrivateGitState | None,
+) -> bool:
+    """Whether git agrees; a private-path failure restarts instead of raising."""
+    try:
+        return _git_state_matches_revision(current_head, git_state, expected, entries)
+    except _RevisionStopped:
+        raise
+    except (OSError, subprocess.SubprocessError, UnicodeError, ValueError):
+        if private_state is None:
+            raise
+        raise _RestartVerification(allow_private=False) from None
+
+
+def _validate_pass_snapshots(
+    root: Path,
+    directory_snapshots: dict[Path, _DirectorySnapshot],
+    file_snapshots: list[_FileSnapshot],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    """Re-check every directory and file snapshot the pass took."""
+    for directory in directory_snapshots.values():
+        _check_stop(deadline, cancelled)
+        _validate_directory_snapshot(root, directory)
+    for snapshot in file_snapshots:
+        _check_stop(deadline, cancelled)
+        _validate_file_snapshot(root, snapshot)
+
+
+def _tree_entry_unchanged(
+    path: Path,
+    identity: _StrongIdentity,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    """Whether this tree entry still has exactly the identity it was recorded with."""
+    _check_stop(deadline, cancelled)
+    try:
+        current = path.lstat()
+    except OSError as exc:
+        raise PermissionError("workspace revision tree entry changed") from exc
+    return _strong_identity(current) == identity
+
+
+def _tree_entries_unchanged(
+    plan: _PrivateIndexPlan,
+    file_snapshots: list[_FileSnapshot],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    """Whether every prepared tree entry the pass did not hash is still identical."""
+    if plan.entry_snapshots is None:
+        return True
+    hashed_paths = {snapshot.path for snapshot in file_snapshots}
+    return all(
+        _tree_entry_unchanged(path, identity, deadline=deadline, cancelled=cancelled)
+        for path, identity in plan.entry_snapshots.items()
+        if path not in hashed_paths
+    )
+
+
+def _deleted_entries_absent(
+    root: Path, entries: Mapping[str, RevisionEntry]
+) -> bool:
+    """Whether every entry the revision records as deleted is still absent."""
+    return not any(
+        entry.kind == "deleted" and os.path.lexists(root / PurePosixPath(path))
+        for path, entry in entries.items()
+    )
+
+
+def _require_private_proof(
+    private_state: _PrivateGitState | None,
+    root: Path,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    """A private pass stands only while its own proof still validates."""
+    if private_state is None:
+        return
+    try:
+        proof_valid = _validate_private_git_proof(
+            private_state.proof, root=root, deadline=deadline, cancelled=cancelled
+        )
+    except _RevisionStopped:
+        raise
+    except (OSError, subprocess.SubprocessError, UnicodeError, ValueError):
+        proof_valid = False
+    if not proof_valid:
+        raise _RestartVerification(allow_private=False) from None
+
+
 class _RestartVerification(Exception):
     """Raised when a verification pass has to be redone without a fast path."""
 
@@ -2479,6 +2786,227 @@ def _verify_workspace_revision_unchanged(
         )
 
 
+@dataclass
+class _CurrentState:
+    """What a verification pass found in the checkout, and how it found it."""
+
+    relevant: set[str] = field(default_factory=set)
+    paths: dict[str, Path] = field(default_factory=dict)
+    from_hint: bool = False
+
+
+def _restore_matching_hint(
+    repository: RepositoryScope,
+    expected: WorkspaceRevision,
+    plan: _PrivateIndexPlan,
+    state: _CurrentState,
+    *,
+    root: Path,
+    resolved_root: Path,
+    directory_snapshots: dict[Path, _DirectorySnapshot],
+    allow_inventory_hint: bool,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    """Whether a stored inventory hint supplied this pass's current state."""
+    if not allow_inventory_hint:
+        return False
+    hint = _matching_inventory_hint(
+        repository, expected, root=root, resolved_root=resolved_root
+    )
+    if hint is None:
+        return False
+    return _restore_inventory_hint(
+        hint,
+        root=root,
+        directory_snapshots=directory_snapshots,
+        entry_snapshots=plan.entry_snapshots,
+        prepared_files=plan.prepared_files,
+        private_inventory_safe=plan.inventory_safe,
+        current_relevant=state.relevant,
+        current_relevant_paths=state.paths,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+
+
+def _walk_relevant_files(
+    root: Path,
+    resolved_root: Path,
+    entries: Mapping[str, RevisionEntry],
+    plan: _PrivateIndexPlan,
+    state: _CurrentState,
+    *,
+    directory_snapshots: dict[Path, _DirectorySnapshot],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    """Walk the checkout for what it holds now, keyed by normalized path."""
+    for current_path in _relevant_files(
+        root,
+        resolved_root=resolved_root,
+        directory_snapshots=directory_snapshots,
+        entry_snapshots=plan.entry_snapshots,
+        prepared_files=plan.prepared_files,
+        prepared_paths=set(entries),
+        private_inventory_safe=plan.inventory_safe,
+        relevant_paths=state.relevant,
+        deadline=deadline,
+        cancelled=cancelled,
+    ):
+        normalized = _normalized_path(current_path.relative_to(root).as_posix())
+        if normalized in state.paths:
+            raise ValueError(
+                "workspace revision contains a Unicode normalization collision"
+            )
+        state.paths[normalized] = current_path
+
+
+def _current_checkout_state(
+    repository: RepositoryScope,
+    expected: WorkspaceRevision,
+    entries: Mapping[str, RevisionEntry],
+    plan: _PrivateIndexPlan,
+    *,
+    root: Path,
+    resolved_root: Path,
+    directory_snapshots: dict[Path, _DirectorySnapshot],
+    allow_inventory_hint: bool,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> _CurrentState:
+    """What the checkout currently holds, from a stored hint or a fresh walk."""
+    state = _CurrentState()
+    state.from_hint = _restore_matching_hint(
+        repository,
+        expected,
+        plan,
+        state,
+        root=root,
+        resolved_root=resolved_root,
+        directory_snapshots=directory_snapshots,
+        allow_inventory_hint=allow_inventory_hint,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    if not state.from_hint:
+        _walk_relevant_files(
+            root,
+            resolved_root,
+            entries,
+            plan,
+            state,
+            directory_snapshots=directory_snapshots,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+    return state
+
+
+def _settle_private_plan(
+    plan: _PrivateIndexPlan,
+    root: Path,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    """Give up the fast path if the prepared tree broke the rules it relies on."""
+    if not _prepared_attributes_inert(
+        plan, root, deadline=deadline, cancelled=cancelled
+    ):
+        plan.disable()
+        return
+    if plan.inventory_safe is not None and not plan.inventory_safe[0]:
+        plan.disable()
+
+
+def _expected_relevant_paths(entries: Mapping[str, RevisionEntry]) -> set[str]:
+    """The stored paths a walk of the current checkout is expected to find."""
+    return {
+        path
+        for path, entry in entries.items()
+        if entry.kind != "deleted" and _is_relevant_path(path)
+    }
+
+
+def _verified_after_git(
+    entries: Mapping[str, RevisionEntry],
+    plan: _PrivateIndexPlan,
+    gathered: _HashedEntries,
+    private_state: _PrivateGitState | None,
+    *,
+    root: Path,
+    directory_snapshots: dict[Path, _DirectorySnapshot],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    """Re-check the snapshots, the recorded deletions, and the private proof."""
+    if private_state is None:
+        _validate_pass_snapshots(
+            root,
+            directory_snapshots,
+            gathered.file_snapshots,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+    elif not _tree_entries_unchanged(
+        plan, gathered.file_snapshots, deadline=deadline, cancelled=cancelled
+    ):
+        return False
+    if not _deleted_entries_absent(root, entries):
+        return False
+    _require_private_proof(private_state, root, deadline=deadline, cancelled=cancelled)
+    _check_stop(deadline, cancelled)
+    return True
+
+
+def _verified_against_git(
+    repository: RepositoryScope,
+    expected: WorkspaceRevision,
+    entries: Mapping[str, RevisionEntry],
+    plan: _PrivateIndexPlan,
+    gathered: _HashedEntries,
+    worktree_ignore_paths: tuple[Path, ...],
+    *,
+    root: Path,
+    directory_snapshots: dict[Path, _DirectorySnapshot],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    """The second half of a pass: git agreement, then everything after it."""
+    private_state = None
+    if repository.git_common_dir is not None:
+        private_state = _private_git_state(
+            root,
+            expected,
+            plan,
+            gathered.verification_hashes,
+            directory_snapshots,
+            worktree_ignore_paths,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+        current_head, git_state = _revision_git_state(
+            root, expected, private_state, deadline=deadline, cancelled=cancelled
+        )
+        if not _revision_state_matches(
+            current_head, git_state, expected, entries, private_state
+        ):
+            return False
+    elif expected.git_head is not None:
+        return False
+    return _verified_after_git(
+        entries,
+        plan,
+        gathered,
+        private_state,
+        root=root,
+        directory_snapshots=directory_snapshots,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+
+
 def _verify_revision_pass(
     repository: RepositoryScope,
     expected: WorkspaceRevision,
@@ -2493,230 +3021,52 @@ def _verify_revision_pass(
     root = Path(repository.checkout_root)
     resolved_root = root.resolve(strict=True)
     entries = _validated_expected_entries(expected, deadline, cancelled)
-
     directory_snapshots: dict[Path, _DirectorySnapshot] = {}
-    plan = _private_index_plan(
-        repository, root, expected, allow_private=allow_private
-    )
-    current_relevant: set[str] = set()
-    current_relevant_paths: dict[str, Path] = {}
-    inventory_hint = (
-        _matching_inventory_hint(
-            repository,
-            expected,
-            root=root,
-            resolved_root=resolved_root,
-        )
-        if allow_inventory_hint
-        else None
-    )
-    inventory_hint_used = inventory_hint is not None and _restore_inventory_hint(
-        inventory_hint,
+    plan = _private_index_plan(repository, root, expected, allow_private=allow_private)
+    state = _current_checkout_state(
+        repository,
+        expected,
+        entries,
+        plan,
         root=root,
+        resolved_root=resolved_root,
         directory_snapshots=directory_snapshots,
-        entry_snapshots=plan.entry_snapshots,
-        prepared_files=plan.prepared_files,
-        private_inventory_safe=plan.inventory_safe,
-        current_relevant=current_relevant,
-        current_relevant_paths=current_relevant_paths,
+        allow_inventory_hint=allow_inventory_hint,
         deadline=deadline,
         cancelled=cancelled,
     )
-    if not inventory_hint_used:
-        for current_path in _relevant_files(
-            root,
+    worktree_ignore_paths = _prepared_files_named(plan, ".gitignore")
+    _settle_private_plan(plan, root, deadline=deadline, cancelled=cancelled)
+    if state.relevant != _expected_relevant_paths(entries):
+        return False
+    gathered = _hash_expected_entries(
+        entries,
+        _EntryHashContext(
+            root=root,
             resolved_root=resolved_root,
+            plan=plan,
             directory_snapshots=directory_snapshots,
-            entry_snapshots=plan.entry_snapshots,
-            prepared_files=plan.prepared_files,
-            prepared_paths=set(entries),
-            private_inventory_safe=plan.inventory_safe,
-            relevant_paths=current_relevant,
+            current_relevant_paths=state.paths,
             deadline=deadline,
             cancelled=cancelled,
-        ):
-            normalized = _normalized_path(current_path.relative_to(root).as_posix())
-            if normalized in current_relevant_paths:
-                raise ValueError("workspace revision contains a Unicode normalization collision")
-            current_relevant_paths[normalized] = current_path
-    worktree_ignore_paths = _prepared_files_named(plan, ".gitignore")
-    if not _prepared_attributes_inert(
-        plan, root, deadline=deadline, cancelled=cancelled
-    ):
-        plan.disable()
-    if plan.inventory_safe is not None and not plan.inventory_safe[0]:
-        plan.disable()
-    expected_relevant = {
-        path
-        for path, entry in entries.items()
-        if entry.kind != "deleted" and _is_relevant_path(path)
-    }
-    if current_relevant != expected_relevant:
+            inventory_hint_used=state.from_hint,
+            allow_private=allow_private,
+        ),
+    )
+    if gathered is None:
         return False
-
-    file_snapshots: list[_FileSnapshot] = []
-    verification_hashes: dict[str, _VerificationHash] = {}
-    total_bytes = 0
-    for relative, entry in sorted(entries.items()):
-        _check_stop(deadline, cancelled)
-        if entry.kind == "deleted":
-            path = root / PurePosixPath(relative)
-            if os.path.lexists(path):
-                return False
-            continue
-        if plan.hash_name is None:
-            path = current_relevant_paths.get(relative, root / PurePosixPath(relative))
-            try:
-                info = path.lstat()
-            except FileNotFoundError:
-                return False
-            unsafe = path.is_symlink() or _is_reparse(info)
-            if unsafe:
-                if _is_relevant_path(relative) or path.is_dir() or stat.S_ISDIR(info.st_mode):
-                    raise PermissionError(
-                        "workspace revision expected path is a relevant symlink or reparse directory"
-                    )
-                return False
-            if not stat.S_ISREG(info.st_mode):
-                return False
-            sha256, size, snapshot = _hash_file(
-                path,
-                root=root,
-                resolved_root=resolved_root,
-                directory_snapshots=directory_snapshots,
-                remaining_bytes=MAX_REVISION_BYTES - total_bytes,
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-        else:
-            if plan.prepared_files is None:
-                raise AssertionError("private-index file snapshots are unavailable")
-            prepared = plan.prepared_files.get(relative)
-            if prepared is None:
-                return False
-            if prepared.identity[3] != entry.size:
-                return False
-            path = prepared.path
-            try:
-                verification_hash = _hash_file_for_verification(
-                    path,
-                    root=root,
-                    resolved_root=resolved_root,
-                    directory_snapshots=directory_snapshots,
-                    remaining_bytes=MAX_REVISION_BYTES - total_bytes,
-                    deadline=deadline,
-                    cancelled=cancelled,
-                    git_hash_name=plan.hash_name,
-                    snapshot=prepared,
-                    validate_parents=False,
-                )
-            except PermissionError:
-                if inventory_hint_used:
-                    raise _RestartVerification(allow_private) from None
-                raise
-            sha256 = verification_hash.sha256
-            size = verification_hash.size
-            snapshot = verification_hash.snapshot
-            verification_hashes[relative] = verification_hash
-        total_bytes += size
-        file_snapshots.append(snapshot)
-        if size != entry.size or sha256 != entry.sha256:
-            return False
-    private_state = None
-    private_attempted = False
-    if repository.git_common_dir is not None:
-        if plan.hash_name is not None:
-            if plan.index_path is None:
-                raise AssertionError("private-index path is unavailable")
-            if plan.installation is None or plan.entry_snapshots is None:
-                raise AssertionError("private-index installation proof is unavailable")
-            private_attempted = True
-            try:
-                private_state = _try_private_git_state(
-                    root,
-                    expected,
-                    verification_hashes,
-                    directory_snapshots,
-                    plan.entry_snapshots,
-                    worktree_ignore_paths,
-                    installation=plan.installation,
-                    index_path=plan.index_path,
-                    hash_name=plan.hash_name,
-                    deadline=deadline,
-                    cancelled=cancelled,
-                )
-            except _RevisionStopped:
-                raise
-            except (OSError, subprocess.SubprocessError, UnicodeError, ValueError):
-                raise _RestartVerification(allow_private=False) from None
-        if private_state is None:
-            if private_attempted:
-                raise _RestartVerification(allow_private=False) from None
-            current_head, git_state = _git_state(
-                root,
-                allow_missing_head=expected.git_head is None,
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-        else:
-            current_head, git_state = private_state.head, private_state.status
-        try:
-            state_matches = _git_state_matches_revision(
-                current_head,
-                git_state,
-                expected,
-                entries,
-            )
-        except _RevisionStopped:
-            raise
-        except (OSError, subprocess.SubprocessError, UnicodeError, ValueError):
-            if private_state is None:
-                raise
-            raise _RestartVerification(allow_private=False) from None
-        if not state_matches:
-            return False
-    elif expected.git_head is not None:
-        return False
-
-    if private_state is None:
-        for snapshot in directory_snapshots.values():
-            _check_stop(deadline, cancelled)
-            _validate_directory_snapshot(root, snapshot)
-        for snapshot in file_snapshots:
-            _check_stop(deadline, cancelled)
-            _validate_file_snapshot(root, snapshot)
-    if private_state is not None and plan.entry_snapshots is not None:
-        hashed_paths = {snapshot.path for snapshot in file_snapshots}
-        for path, identity in plan.entry_snapshots.items():
-            if path in hashed_paths:
-                continue
-            _check_stop(deadline, cancelled)
-            try:
-                current = path.lstat()
-            except OSError as exc:
-                raise PermissionError("workspace revision tree entry changed") from exc
-            if _strong_identity(current) != identity:
-                return False
-    for path, entry in entries.items():
-        if entry.kind == "deleted" and os.path.lexists(root / PurePosixPath(path)):
-            return False
-    if private_state is not None:
-        try:
-            proof_valid = _validate_private_git_proof(
-                private_state.proof,
-                root=root,
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-        except _RevisionStopped:
-            raise
-        except (OSError, subprocess.SubprocessError, UnicodeError, ValueError):
-            proof_valid = False
-        if not proof_valid:
-            raise _RestartVerification(allow_private=False) from None
-    _check_stop(deadline, cancelled)
-    return True
-
+    return _verified_against_git(
+        repository,
+        expected,
+        entries,
+        plan,
+        gathered,
+        worktree_ignore_paths,
+        root=root,
+        directory_snapshots=directory_snapshots,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
 
 def diff_workspace_revisions(
     before: WorkspaceRevision, after: WorkspaceRevision
