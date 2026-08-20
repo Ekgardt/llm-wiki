@@ -149,6 +149,36 @@ class _ObjectIdentity:
     reparse_attributes: int
 
 
+def _read_bounded_descriptor(descriptor: int) -> bytes:
+    """Read the whole file, refusing anything past the evidence bound."""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = os.read(descriptor, min(4096, _MAX_EVIDENCE_BYTES + 1 - total))
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > _MAX_EVIDENCE_BYTES:
+            raise ValueError("LSP evidence record exceeds its byte bound")
+
+
+def _canonical_evidence_record(payload: bytes) -> dict[str, object]:
+    """The record these bytes hold, if they are its own canonical encoding."""
+    try:
+        record = json.loads(payload.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("LSP evidence record is not canonical JSON") from exc
+    if not isinstance(record, dict):
+        raise ValueError("LSP evidence record is not a JSON object")
+    canonical = json.dumps(record, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    if canonical != payload:
+        raise ValueError("LSP evidence record is not canonical JSON")
+    return record
+
+
 def _evidence_payload(record: Mapping[str, object]) -> bytes:
     """One evidence record as compact JSON bytes, within its bound."""
     payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode(
@@ -729,55 +759,42 @@ class _OwnerDirectory:
                 self._close_child_handle(handle)
             self._lease_expires_monotonic = None
 
+    def _read_record_posix(self, name: str) -> bytes:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=self.owner_handle,
+        )
+        try:
+            identity = _identity_from_stat(os.fstat(descriptor))
+            _require_file_identity(identity, "LSP evidence record")
+            return _read_bounded_descriptor(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def _read_record_windows(self, name: str) -> bytes:
+        with self._child_handle_lock:
+            self._retry_pending_child_handles()
+            handle = _windows_workspace.open_file(self.owner_handle, name)
+            try:
+                return b"".join(
+                    _windows_workspace.read_chunks(
+                        handle,
+                        chunk_bytes=4096,
+                        max_bytes=_MAX_EVIDENCE_BYTES,
+                    )
+                )
+            finally:
+                self._close_child_handle(handle)
+
     def read_record(self, name: str) -> dict[str, object]:
         if name not in {"owner.json", "failure.json"} or self.owner_handle is None:
             raise ValueError("LSP evidence name or owner handle is invalid")
         if os.name == "posix":
-            descriptor = os.open(
-                name,
-                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
-                dir_fd=self.owner_handle,
-            )
-            try:
-                identity = _identity_from_stat(os.fstat(descriptor))
-                _require_file_identity(identity, "LSP evidence record")
-                chunks: list[bytes] = []
-                total = 0
-                while True:
-                    chunk = os.read(descriptor, min(4096, _MAX_EVIDENCE_BYTES + 1 - total))
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                    total += len(chunk)
-                    if total > _MAX_EVIDENCE_BYTES:
-                        raise ValueError("LSP evidence record exceeds its byte bound")
-                payload = b"".join(chunks)
-            finally:
-                os.close(descriptor)
+            payload = self._read_record_posix(name)
         else:
-            with self._child_handle_lock:
-                self._retry_pending_child_handles()
-                handle = _windows_workspace.open_file(self.owner_handle, name)
-                try:
-                    payload = b"".join(
-                        _windows_workspace.read_chunks(
-                            handle,
-                            chunk_bytes=4096,
-                            max_bytes=_MAX_EVIDENCE_BYTES,
-                        )
-                    )
-                finally:
-                    self._close_child_handle(handle)
-        try:
-            record = json.loads(payload.decode("utf-8", errors="strict"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ValueError("LSP evidence record is not canonical JSON") from exc
-        if not isinstance(record, dict):
-            raise ValueError("LSP evidence record is not a JSON object")
-        canonical = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        if canonical != payload:
-            raise ValueError("LSP evidence record is not canonical JSON")
-        return record
+            payload = self._read_record_windows(name)
+        return _canonical_evidence_record(payload)
 
     def _unlink_posix_scratch(self) -> None:
         """Remove the evidence files and the cancellation directory."""
