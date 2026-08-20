@@ -2043,16 +2043,26 @@ def _run_generation_bootstrap(
     _require_startup_deadline(deadline, "generation bootstrap start")
     state = bootstrap(protocol, process.pid, generation.nonce, deadline)
     _require_startup_deadline(deadline, "generation bootstrap completion")
-    if not isinstance(state, ProcessState):
-        raise TypeError("generation_bootstrap must return a ProcessState")
-    if state not in {
+    _check_bootstrap_state(state)
+    # PROCESS_RUNNING explicitly represents a configured no-op bootstrap.
+    return state
+
+
+_ACTIVE_BOOTSTRAP_STATES = frozenset(
+    {
         ProcessState.PROCESS_RUNNING,
         ProcessState.PROTOCOL_INITIALIZED,
         ProcessState.WORKSPACE_READY,
-    }:
+    }
+)
+
+
+def _check_bootstrap_state(state: object) -> None:
+    """A bootstrap may only report a state an active generation can hold."""
+    if not isinstance(state, ProcessState):
+        raise TypeError("generation_bootstrap must return a ProcessState")
+    if state not in _ACTIVE_BOOTSTRAP_STATES:
         raise ValueError("generation_bootstrap returned an invalid active state")
-    # PROCESS_RUNNING explicitly represents a configured no-op bootstrap.
-    return state
 
 
 @contextmanager
@@ -3172,20 +3182,27 @@ def _retry_autonomous_terminal_cleanup(
     coordinator = instance._coordinator
     deadline = time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
     if not _acquire_recovery_driver(coordinator, deadline):
-        return (
-            coordinator.cleanup_result.ownership_pending
-            and not coordinator.recovery_stop.is_set()
-        )
+        return _recovery_driver_busy(coordinator)[0]
     try:
-        try:
-            _terminal_failure_lsp_process(instance, code, deadline)
-        except BaseException as cleanup_error:
-            _remember_background_cleanup_error(coordinator, cleanup_error)
+        _try_terminal_failure(instance, coordinator, code, deadline)
         if not coordinator.cleanup_result.ownership_pending:
             return False
         return _retain_autonomous_cleanup_owners(instance)
     finally:
         _release_driver(coordinator)
+
+
+def _try_terminal_failure(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    code: str,
+    deadline: float,
+) -> None:
+    """Drive the terminal failure; a refusal becomes a background error."""
+    try:
+        _terminal_failure_lsp_process(instance, code, deadline)
+    except BaseException as cleanup_error:
+        _remember_background_cleanup_error(coordinator, cleanup_error)
 
 
 def _adopt_recovery_ownership_locked(
@@ -4131,9 +4148,15 @@ def _select_terminal_failure_locked(
         coordinator.failure_evidence_identity = _failure_identity(
             instance, coordinator, coordinator.terminal_code
         )
-    if instance is not None and instance.state is not ProcessState.FAILED:
-        instance.state = ProcessState.DEGRADED
+    _degrade_unfailed_instance(instance)
     return True
+
+
+def _degrade_unfailed_instance(instance: LspProcess | None) -> None:
+    """An instance that has not already failed is at least degraded."""
+    if instance is None or instance.state is ProcessState.FAILED:
+        return
+    instance.state = ProcessState.DEGRADED
 
 
 def _mark_terminal_failure(
@@ -6105,14 +6128,17 @@ def _copied_handler_mapping(
 ) -> Mapping[str, Callable[[object], object]]:
     if not isinstance(handlers, Mapping):
         raise TypeError(f"{label} must be a mapping")
-    copied: dict[str, Callable[[object], object]] = {}
     for method, handler in handlers.items():
-        if not isinstance(method, str) or not method:
-            raise ValueError(f"{label} method names must be non-empty strings")
-        if not callable(handler):
-            raise TypeError(f"{label} handlers must be callable")
-        copied[method] = handler
-    return MappingProxyType(copied)
+        _check_handler_entry(method, handler, label)
+    return MappingProxyType(dict(handlers))
+
+
+def _check_handler_entry(method: object, handler: object, label: str) -> None:
+    """One handler entry: a non-empty method name bound to something callable."""
+    if not isinstance(method, str) or not method:
+        raise ValueError(f"{label} method names must be non-empty strings")
+    if not callable(handler):
+        raise TypeError(f"{label} handlers must be callable")
 
 
 def _validated_generation_configuration(
