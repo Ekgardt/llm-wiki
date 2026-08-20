@@ -15,7 +15,7 @@ import sys
 import threading
 import time
 import unicodedata
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -1460,126 +1460,174 @@ def _raw_semantics_environment() -> tuple[tuple[str, str], ...]:
     )
 
 
-def _private_raw_semantics_safe(
-    root: Path,
+@dataclass
+class _SemanticsScan:
+    """The fences and known-absent paths one raw-semantics proof gathers."""
+
+    files: list[_SemanticsFileFence] = field(default_factory=list)
+    absent: list[tuple[Path, Path]] = field(default_factory=list)
+
+
+def _content_unchecked(content: bytes) -> bool:
+    """No content rule applies to this file; only its fence matters."""
+    return True
+
+
+def _private_git_environment_overridden() -> bool:
+    """Whether the environment can steer git's configuration out from under us."""
+    if any(name in os.environ for name in _PRIVATE_GIT_SELECTOR_ENVIRONMENT):
+        return True
+    return any(
+        name.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")) for name in os.environ
+    )
+
+
+def _global_semantics_locations() -> tuple[tuple[Path, ...], Path, Path] | None:
+    """The global config, attributes and ignore locations, when all are known."""
+    configs = _global_git_config_paths()
+    attributes = _global_git_attributes_path()
+    ignore = _global_git_ignore_path()
+    if configs is None or attributes is None or ignore is None:
+        return None
+    return configs, attributes, ignore
+
+
+def _external_semantics_paths(
+    paths: Iterable[Path],
+) -> tuple[tuple[Path, Path], ...] | None:
+    """Each path paired with its filesystem root, or None if one is relative."""
+    pairs: list[tuple[Path, Path]] = []
+    for path in paths:
+        if not path.is_absolute():
+            return None
+        pairs.append((Path(path.anchor), path))
+    return tuple(pairs)
+
+
+def _deduplicated_ignore_paths(
+    pairs: Sequence[tuple[Path, Path]],
+) -> tuple[tuple[Path, Path], ...] | None:
+    """The ignore files to fence, once each, or None if one is not absolute."""
+    seen: set[Path] = set()
+    unique: list[tuple[Path, Path]] = []
+    for owner_root, path in pairs:
+        if not path.is_absolute():
+            return None
+        if path in seen:
+            continue
+        seen.add(path)
+        unique.append((owner_root, path))
+    return tuple(unique)
+
+
+def _add_semantics_file(
+    scan: _SemanticsScan,
+    owner_root: Path,
+    path: Path,
+    limit: int,
+    inert: Callable[[bytes], bool],
     *,
-    hash_name: str,
-    installation: _PrivateGitInstallation,
-    worktree_ignore_paths: tuple[Path, ...],
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
-) -> _RawSemanticsProof | None:
-    if any(name in os.environ for name in _PRIVATE_GIT_SELECTOR_ENVIRONMENT) or any(
-        name.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")) for name in os.environ
-    ):
-        return None
-    global_configs = _global_git_config_paths()
-    global_attributes = _global_git_attributes_path()
-    global_ignore = _global_git_ignore_path()
-    if global_configs is None or global_attributes is None or global_ignore is None:
-        return None
-    files: list[_SemanticsFileFence] = []
-    absent: list[tuple[Path, Path]] = []
-    marker = root / ".git"
-    info_attributes = marker / "info/attributes"
-    if _owned_path_exists_or_is_uncertain(root, info_attributes):
-        try:
-            attributes = _read_owned_file(
-                root,
-                info_attributes,
-                _MAX_PRIVATE_ATTRIBUTES_BYTES,
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-        except _RevisionStopped:
-            raise
-        except OSError:
-            return None
-        if attributes is None or not _inert_git_attributes(attributes.content):
-            return None
-        files.append(
-            _SemanticsFileFence(root, attributes.fence, _MAX_PRIVATE_ATTRIBUTES_BYTES)
+) -> bool:
+    """Fence one semantics file; False when it cannot be trusted or read."""
+    if not _owned_path_exists_or_is_uncertain(owner_root, path):
+        scan.absent.append((owner_root, path))
+        return True
+    try:
+        read = _read_owned_file(
+            owner_root, path, limit, deadline=deadline, cancelled=cancelled
         )
-    else:
-        absent.append((root, info_attributes))
-    ignore_paths = ((root, marker / "info/exclude"),)
-    ignore_paths += tuple((root, path) for path in worktree_ignore_paths)
-    ignore_paths += ((Path(global_ignore.anchor), global_ignore),)
-    seen_ignore_paths: set[Path] = set()
-    for ignore_root, path in ignore_paths:
-        if path in seen_ignore_paths or not path.is_absolute():
-            if not path.is_absolute():
-                return None
-            continue
-        seen_ignore_paths.add(path)
-        if not _owned_path_exists_or_is_uncertain(ignore_root, path):
-            absent.append((ignore_root, path))
-            continue
-        try:
-            ignore = _read_owned_file(
-                ignore_root,
-                path,
-                _MAX_PRIVATE_IGNORE_BYTES,
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-        except _RevisionStopped:
-            raise
-        except OSError:
-            return None
-        if ignore is None:
-            return None
-        files.append(_SemanticsFileFence(ignore_root, ignore.fence, _MAX_PRIVATE_IGNORE_BYTES))
-    for path in (*global_configs, *installation.system_config_paths):
-        if not path.is_absolute():
-            return None
-        external_root = Path(path.anchor)
-        if not _owned_path_exists_or_is_uncertain(external_root, path):
-            absent.append((external_root, path))
-            continue
-        try:
-            config = _read_owned_file(
-                external_root,
-                path,
-                _MAX_PRIVATE_CONFIG_BYTES,
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-        except _RevisionStopped:
-            raise
-        except OSError:
-            return None
-        if config is None or not _safe_ignored_git_config(config.content):
-            return None
-        files.append(_SemanticsFileFence(external_root, config.fence, _MAX_PRIVATE_CONFIG_BYTES))
-    for path in (global_attributes, *installation.system_attribute_paths):
-        if not path.is_absolute():
-            return None
-        external_root = Path(path.anchor)
-        if not _owned_path_exists_or_is_uncertain(external_root, path):
-            absent.append((external_root, path))
-            continue
-        try:
-            attributes = _read_owned_file(
-                external_root,
-                path,
-                _MAX_PRIVATE_ATTRIBUTES_BYTES,
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-        except _RevisionStopped:
-            raise
-        except OSError:
-            return None
-        if attributes is None or not _inert_git_attributes(attributes.content):
-            return None
-        files.append(
-            _SemanticsFileFence(
-                external_root,
-                attributes.fence,
-                _MAX_PRIVATE_ATTRIBUTES_BYTES,
-            )
+    except _RevisionStopped:
+        raise
+    except OSError:
+        return False
+    if read is None or not inert(read.content):
+        return False
+    scan.files.append(_SemanticsFileFence(owner_root, read.fence, limit))
+    return True
+
+
+def _fence_semantics_files(
+    scan: _SemanticsScan,
+    pairs: Iterable[tuple[Path, Path]],
+    limit: int,
+    inert: Callable[[bytes], bool],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    """Fence every one of these files; False as soon as one is untrustworthy."""
+    return all(
+        _add_semantics_file(
+            scan, owner_root, path, limit, inert, deadline=deadline, cancelled=cancelled
         )
+        for owner_root, path in pairs
+    )
+
+
+def _semantics_groups(
+    root: Path,
+    marker: Path,
+    installation: _PrivateGitInstallation,
+    worktree_ignore_paths: tuple[Path, ...],
+    locations: tuple[tuple[Path, ...], Path, Path],
+) -> tuple[tuple[tuple[tuple[Path, Path], ...], int, Callable[[bytes], bool]], ...] | None:
+    """Every semantics file to fence, in read order, grouped by the rule it obeys."""
+    global_configs, global_attributes, global_ignore = locations
+    ignore_pairs = _deduplicated_ignore_paths(
+        (
+            (root, marker / "info/exclude"),
+            *((root, path) for path in worktree_ignore_paths),
+            (Path(global_ignore.anchor), global_ignore),
+        )
+    )
+    config_pairs = _external_semantics_paths(
+        (*global_configs, *installation.system_config_paths)
+    )
+    attribute_pairs = _external_semantics_paths(
+        (global_attributes, *installation.system_attribute_paths)
+    )
+    if ignore_pairs is None or config_pairs is None or attribute_pairs is None:
+        return None
+    return (
+        (
+            ((root, marker / "info/attributes"),),
+            _MAX_PRIVATE_ATTRIBUTES_BYTES,
+            _inert_git_attributes,
+        ),
+        (ignore_pairs, _MAX_PRIVATE_IGNORE_BYTES, _content_unchecked),
+        (config_pairs, _MAX_PRIVATE_CONFIG_BYTES, _safe_ignored_git_config),
+        (attribute_pairs, _MAX_PRIVATE_ATTRIBUTES_BYTES, _inert_git_attributes),
+    )
+
+
+def _fence_semantics_groups(
+    scan: _SemanticsScan,
+    groups: Iterable[tuple[Iterable[tuple[Path, Path]], int, Callable[[bytes], bool]]],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    """Fence every group in order; False as soon as one file cannot be trusted."""
+    for pairs, limit, inert in groups:
+        if not _fence_semantics_files(
+            scan, pairs, limit, inert, deadline=deadline, cancelled=cancelled
+        ):
+            return False
+    return True
+
+
+def _fence_private_config(
+    scan: _SemanticsScan,
+    root: Path,
+    marker: Path,
+    hash_name: str,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    """Fence the repository's own config, which must name the expected hash."""
     try:
         config = _read_owned_file(
             root,
@@ -1591,17 +1639,51 @@ def _private_raw_semantics_safe(
     except _RevisionStopped:
         raise
     except OSError:
+        return False
+    if config is None or not _safe_private_git_config(
+        config.content, hash_name=hash_name
+    ):
+        return False
+    scan.files.append(_SemanticsFileFence(root, config.fence, _MAX_PRIVATE_CONFIG_BYTES))
+    return True
+
+
+def _private_raw_semantics_safe(
+    root: Path,
+    *,
+    hash_name: str,
+    installation: _PrivateGitInstallation,
+    worktree_ignore_paths: tuple[Path, ...],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> _RawSemanticsProof | None:
+    """The proof that git's raw semantics are the ones this pass assumes."""
+    if _private_git_environment_overridden():
         return None
-    if config is None or not _safe_private_git_config(config.content, hash_name=hash_name):
+    locations = _global_semantics_locations()
+    if locations is None:
         return None
-    files.append(_SemanticsFileFence(root, config.fence, _MAX_PRIVATE_CONFIG_BYTES))
+    marker = root / ".git"
+    groups = _semantics_groups(
+        root, marker, installation, worktree_ignore_paths, locations
+    )
+    if groups is None:
+        return None
+    scan = _SemanticsScan()
+    if not _fence_semantics_groups(
+        scan, groups, deadline=deadline, cancelled=cancelled
+    ):
+        return None
+    if not _fence_private_config(
+        scan, root, marker, hash_name, deadline=deadline, cancelled=cancelled
+    ):
+        return None
     return _RawSemanticsProof(
-        tuple(files),
-        tuple(absent),
+        tuple(scan.files),
+        tuple(scan.absent),
         _raw_semantics_environment(),
         installation,
     )
-
 
 def _parse_git_index(
     content: bytes | bytearray,
