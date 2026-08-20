@@ -4355,71 +4355,118 @@ def _record_cleanup_error(
     current.append(error)
 
 
+def _failure_evidence_owner_locked(
+    coordinator: _LifecycleCoordinator, code: str
+) -> _OwnerDirectory:
+    """The owner directory this evidence belongs in, for exactly this code."""
+    owner = coordinator.owner_directory
+    if owner is None:
+        raise RuntimeError("LSP failure evidence owner is unavailable")
+    terminal_code = coordinator.terminal_code
+    if terminal_code is None or code != terminal_code:
+        raise RuntimeError(
+            "LSP failure evidence code does not match terminal identity"
+        )
+    return owner
+
+
+def _failure_evidence_identity_locked(
+    instance: LspProcess | None,
+    coordinator: _LifecycleCoordinator,
+    terminal_code: str,
+) -> _FailureEvidenceIdentity:
+    """The identity this evidence is written under, settled once and kept."""
+    identity = coordinator.failure_evidence_identity
+    if identity is None:
+        identity = _failure_identity(instance, coordinator, terminal_code)
+        if identity is None:
+            raise RuntimeError(
+                "LSP failure evidence generation identity is unavailable"
+            )
+        coordinator.failure_evidence_identity = identity
+    if identity.code != terminal_code:
+        raise RuntimeError(
+            "LSP failure evidence identity is not terminal-code exact"
+        )
+    return identity
+
+
+def _claim_failure_evidence(
+    instance: LspProcess | None,
+    coordinator: _LifecycleCoordinator,
+    code: str,
+    deadline: float,
+) -> tuple[_OwnerDirectory, _FailureEvidenceIdentity]:
+    _acquire_lifecycle(coordinator, deadline, allow_expired=True)
+    try:
+        owner = _failure_evidence_owner_locked(coordinator, code)
+        identity = _failure_evidence_identity_locked(instance, coordinator, code)
+        return owner, identity
+    finally:
+        _release_lifecycle(coordinator)
+
+
+def _write_failure_evidence_once(
+    owner: _OwnerDirectory, identity: _FailureEvidenceIdentity
+) -> None:
+    """Write the record, accepting one that is already there and identical."""
+    try:
+        _write_failure_record(
+            owner,
+            code=identity.code,
+            owner_nonce=identity.owner_nonce,
+            generation_nonce=identity.generation_nonce,
+            pid=identity.pid,
+        )
+    except FileExistsError:
+        _validate_failure_record(
+            owner.read_record("failure.json"),
+            code=identity.code,
+            owner_nonce=identity.owner_nonce,
+            generation_nonce=identity.generation_nonce,
+            pid=identity.pid,
+        )
+        owner.sync_directory()
+
+
+def _commit_failure_evidence(
+    instance: LspProcess | None,
+    coordinator: _LifecycleCoordinator,
+    identity: _FailureEvidenceIdentity,
+    deadline: float,
+) -> None:
+    """Record the evidence as written, unless the identity moved meanwhile."""
+    _acquire_lifecycle(coordinator, deadline, allow_expired=True)
+    try:
+        if (
+            coordinator.terminal_code != identity.code
+            or coordinator.failure_evidence_identity != identity
+        ):
+            raise RuntimeError(
+                "LSP terminal identity changed during evidence write"
+            )
+        coordinator.cleanup_result.succeeded("evidence")
+        if instance is not None:
+            instance.state = ProcessState.FAILED
+        _notify_lifecycle_locked(coordinator)
+    finally:
+        _release_lifecycle(coordinator)
+
+
 def _ensure_failure_evidence(
     instance: LspProcess | None,
     coordinator: _LifecycleCoordinator,
     code: str,
     deadline: float,
 ) -> None:
-    result = coordinator.cleanup_result
-    _acquire_lifecycle(coordinator, deadline, allow_expired=True)
-    try:
-        owner = coordinator.owner_directory
-        if owner is None:
-            raise RuntimeError("LSP failure evidence owner is unavailable")
-        terminal_code = coordinator.terminal_code
-        if terminal_code is None or code != terminal_code:
-            raise RuntimeError("LSP failure evidence code does not match terminal identity")
-        identity = coordinator.failure_evidence_identity
-        if identity is None:
-            identity = _failure_identity(instance, coordinator, terminal_code)
-            if identity is None:
-                raise RuntimeError(
-                    "LSP failure evidence generation identity is unavailable"
-                )
-            coordinator.failure_evidence_identity = identity
-        if identity.code != terminal_code:
-            raise RuntimeError("LSP failure evidence identity is not terminal-code exact")
-    finally:
-        _release_lifecycle(coordinator)
-
+    owner, identity = _claim_failure_evidence(instance, coordinator, code, deadline)
     with owner._child_handle_lock:
         owner._retry_pending_temp_names()
-        if result.evidence == "success":
+        if coordinator.cleanup_result.evidence == "success":
             return
-        try:
-            _write_failure_record(
-                owner,
-                code=identity.code,
-                owner_nonce=identity.owner_nonce,
-                generation_nonce=identity.generation_nonce,
-                pid=identity.pid,
-            )
-        except FileExistsError:
-            record = owner.read_record("failure.json")
-            _validate_failure_record(
-                record,
-                code=identity.code,
-                owner_nonce=identity.owner_nonce,
-                generation_nonce=identity.generation_nonce,
-                pid=identity.pid,
-            )
-            owner.sync_directory()
+        _write_failure_evidence_once(owner, identity)
         owner._retry_pending_temp_names()
-
-        _acquire_lifecycle(coordinator, deadline, allow_expired=True)
-        try:
-            if (
-                coordinator.terminal_code != identity.code
-                or coordinator.failure_evidence_identity != identity
-            ):
-                raise RuntimeError("LSP terminal identity changed during evidence write")
-            result.succeeded("evidence")
-            if instance is not None:
-                instance.state = ProcessState.FAILED
-            _notify_lifecycle_locked(coordinator)
-        finally:
-            _release_lifecycle(coordinator)
+        _commit_failure_evidence(instance, coordinator, identity, deadline)
 
 
 def _failure_evidence_required(coordinator: _LifecycleCoordinator) -> bool:
