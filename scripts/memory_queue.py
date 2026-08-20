@@ -3394,6 +3394,52 @@ def _source_fence_row_matches(row: sqlite3.Row, fence: SourceFence) -> bool:
     return stored == expected and fence.owner_pid == os.getpid()
 
 
+def _check_capture_intent_digest(value: str, label: str) -> None:
+    if re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise ValueError(f"{label} must be lowercase 64-hex")
+
+
+def _check_capture_intent_relative_path(intent_path: object) -> None:
+    """A published intent lives under the capture-intent directory, bounded."""
+    if not isinstance(intent_path, str) or "\\" in intent_path:
+        raise ValueError("intent_path is invalid")
+    if not intent_path.startswith("run/capture-intents/"):
+        raise ValueError("intent_path is invalid")
+    if len(intent_path.encode("utf-8")) > 4096:
+        raise ValueError("intent_path is invalid")
+
+
+def _check_capture_intent_size(byte_size: object) -> None:
+    if isinstance(byte_size, bool) or not isinstance(byte_size, int):
+        raise ValueError("intent byte size is invalid")
+    if not 1 <= byte_size <= _MAX_QUEUE_PAYLOAD_BYTES:
+        raise ValueError("intent byte size is invalid")
+
+
+def _check_capture_intent_descriptor(
+    intent_id: str, intent_path: str, intent_sha256: str, byte_size: int
+) -> None:
+    """Everything a publication has to name, before anything is written."""
+    _check_capture_intent_digest(intent_id, "intent_id")
+    _check_capture_intent_digest(intent_sha256, "intent_sha256")
+    _check_capture_intent_relative_path(intent_path)
+    _check_capture_intent_size(byte_size)
+
+
+def _check_ready_intent_identity(
+    existing: sqlite3.Row, intent_path: str, intent_sha256: str, byte_size: int
+) -> None:
+    """A republication has to name exactly the intent already recorded ready."""
+    stored = (
+        existing["relative_path"],
+        existing["intent_sha256"],
+        existing["byte_size"],
+        existing["publication_state"],
+    )
+    if stored != (intent_path, intent_sha256, byte_size, "ready"):
+        raise QueueOperationError("capture_intent_conflict")
+
+
 class MemoryQueue:
     """Durable priority queue with lease-token fencing and at-least-once delivery."""
 
@@ -5372,36 +5418,18 @@ class _QueueV3CandidateReader:
         intent_sha256: str,
         byte_size: int,
     ) -> None:
-        if re.fullmatch(r"[0-9a-f]{64}", intent_id) is None:
-            raise ValueError("intent_id must be lowercase 64-hex")
-        if re.fullmatch(r"[0-9a-f]{64}", intent_sha256) is None:
-            raise ValueError("intent_sha256 must be lowercase 64-hex")
-        if (
-            not isinstance(intent_path, str)
-            or not intent_path.startswith("run/capture-intents/")
-            or "\\" in intent_path
-            or len(intent_path.encode("utf-8")) > 4096
-        ):
-            raise ValueError("intent_path is invalid")
-        if (
-            isinstance(byte_size, bool)
-            or not isinstance(byte_size, int)
-            or not 1 <= byte_size <= _MAX_QUEUE_PAYLOAD_BYTES
-        ):
-            raise ValueError("intent byte size is invalid")
+        _check_capture_intent_descriptor(
+            intent_id, intent_path, intent_sha256, byte_size
+        )
         now = _timestamp(_utc_now())
         with closing(self._connect()) as database, begin_immediate(database):
             existing = database.execute(
                 "SELECT * FROM capture_intents WHERE intent_id=?", (intent_id,)
             ).fetchone()
             if existing is not None:
-                if (
-                    existing["relative_path"] != intent_path
-                    or existing["intent_sha256"] != intent_sha256
-                    or existing["byte_size"] != byte_size
-                    or existing["publication_state"] != "ready"
-                ):
-                    raise QueueOperationError("capture_intent_conflict")
+                _check_ready_intent_identity(
+                    existing, intent_path, intent_sha256, byte_size
+                )
                 return
             inserted = database.execute(
                 """INSERT INTO capture_intents(
