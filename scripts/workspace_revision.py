@@ -1433,6 +1433,80 @@ def _relevant_files(
         yield from _scan_directory(scan, stack.pop(), directories)
         stack.extend(reversed(directories))
 
+class _VerificationDigests:
+    """The SHA-256 every hash needs, plus git's blob hash when one is wanted."""
+
+    def __init__(self, size: int, git_hash_name: str | None) -> None:
+        self.sha256 = hashlib.sha256()
+        self.git = None if git_hash_name is None else hashlib.new(git_hash_name)
+        if self.git is not None:
+            self.git.update(f"blob {size}\0".encode("ascii"))
+
+    def update(self, chunk: bytes) -> None:
+        """Feed one chunk to every digest being taken."""
+        self.sha256.update(chunk)
+        if self.git is not None:
+            self.git.update(chunk)
+
+    def git_digest(self) -> bytes | None:
+        """Git's object id for this content, when one was being taken."""
+        return None if self.git is None else self.git.digest()
+
+
+def _open_source_for_hashing(path: Path) -> int:
+    """A descriptor on the file itself, never on something it points at."""
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        return os.open(path, flags)
+    except OSError as exc:
+        raise PermissionError(
+            "workspace revision source changed or became a symlink at open"
+        ) from exc
+
+
+def _require_opened_source(descriptor: int, snapshot: _FileSnapshot) -> None:
+    """The opened descriptor has to be the very file that was snapshotted."""
+    opened = os.fstat(descriptor)
+    if not stat.S_ISREG(opened.st_mode) or _identity(opened) != snapshot.identity:
+        raise PermissionError("workspace revision source changed before open")
+
+
+def _hash_open_source(
+    descriptor: int,
+    snapshot: _FileSnapshot,
+    digests: _VerificationDigests,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> tuple[int, os.stat_result]:
+    """Read exactly the snapshotted number of bytes, digesting as it goes."""
+    _require_opened_source(descriptor, snapshot)
+    expected_size = snapshot.identity[3]
+    size = 0
+    while size < expected_size:
+        _check_stop(deadline, cancelled)
+        chunk = os.read(descriptor, min(1024 * 1024, expected_size - size))
+        if not chunk:
+            raise PermissionError("workspace revision source changed during read")
+        size += len(chunk)
+        digests.update(chunk)
+    _check_stop(deadline, cancelled)
+    after = os.fstat(descriptor)
+    if _identity(after) != snapshot.identity:
+        raise PermissionError("workspace revision source changed during read")
+    return size, after
+
+
+def _revalidate_hashed_source(
+    root: Path, snapshot: _FileSnapshot, *, validate_parents: bool
+) -> None:
+    """Re-check the file, and its whole parent chain when the caller wants it."""
+    if validate_parents:
+        _validate_file_snapshot(root, snapshot)
+        return
+    _validate_file_identity(snapshot)
+
+
 def _hash_file_for_verification(
     path: Path,
     *,
@@ -1455,45 +1529,20 @@ def _hash_file_for_verification(
         )
     if snapshot.identity[3] > remaining_bytes:
         raise ValueError("workspace revision exceeds the byte ceiling")
-    digest = hashlib.sha256()
-    git_digest = None if git_hash_name is None else hashlib.new(git_hash_name)
-    if git_digest is not None:
-        git_digest.update(f"blob {snapshot.identity[3]}\0".encode("ascii"))
-    size = 0
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    digests = _VerificationDigests(snapshot.identity[3], git_hash_name)
+    descriptor = _open_source_for_hashing(path)
     try:
-        descriptor = os.open(path, flags)
-    except OSError as exc:
-        raise PermissionError("workspace revision source changed or became a symlink at open") from exc
-    try:
-        opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode) or _identity(opened) != snapshot.identity:
-            raise PermissionError("workspace revision source changed before open")
-        expected_size = snapshot.identity[3]
-        while size < expected_size:
-            _check_stop(deadline, cancelled)
-            chunk = os.read(descriptor, min(1024 * 1024, expected_size - size))
-            if not chunk:
-                raise PermissionError("workspace revision source changed during read")
-            size += len(chunk)
-            digest.update(chunk)
-            if git_digest is not None:
-                git_digest.update(chunk)
-        _check_stop(deadline, cancelled)
-        after = os.fstat(descriptor)
-        if _identity(after) != snapshot.identity:
-            raise PermissionError("workspace revision source changed during read")
-        if validate_parents:
-            _validate_file_snapshot(root, snapshot)
-        else:
-            _validate_file_identity(snapshot)
+        size, after = _hash_open_source(
+            descriptor, snapshot, digests, deadline=deadline, cancelled=cancelled
+        )
+        _revalidate_hashed_source(root, snapshot, validate_parents=validate_parents)
     finally:
         os.close(descriptor)
     return _VerificationHash(
-        digest.hexdigest(),
+        digests.sha256.hexdigest(),
         size,
         snapshot,
-        None if git_digest is None else git_digest.digest(),
+        digests.git_digest(),
         after,
         after.st_ctime_ns,
     )
@@ -1522,29 +1571,38 @@ def _hash_file(
     return result.sha256, result.size, result.snapshot
 
 
+# What the private-index path needs from `os` and from `fcntl` to work at all.
+_REQUIRED_OS_NAMES = (
+    "memfd_create",
+    "MFD_CLOEXEC",
+    "MFD_ALLOW_SEALING",
+    "waitid",
+    "P_PID",
+    "WEXITED",
+    "WNOHANG",
+    "WNOWAIT",
+)
+_REQUIRED_FCNTL_NAMES = (
+    "F_ADD_SEALS",
+    "F_GET_SEALS",
+    "F_SEAL_GROW",
+    "F_SEAL_SEAL",
+    "F_SEAL_SHRINK",
+    "F_SEAL_WRITE",
+)
+
+
 def _private_index_platform_supported() -> bool:
-    return (
-        os.name == "posix"
-        and sys.platform.startswith("linux")
-        and hasattr(os, "memfd_create")
-        and hasattr(os, "MFD_CLOEXEC")
-        and hasattr(os, "MFD_ALLOW_SEALING")
-        and hasattr(os, "waitid")
-        and all(hasattr(os, name) for name in ("P_PID", "WEXITED", "WNOHANG", "WNOWAIT"))
-        and _fcntl is not None
-        and all(
-            hasattr(_fcntl, name)
-            for name in (
-                "F_ADD_SEALS",
-                "F_GET_SEALS",
-                "F_SEAL_GROW",
-                "F_SEAL_SEAL",
-                "F_SEAL_SHRINK",
-                "F_SEAL_WRITE",
-            )
-        )
-        and Path("/proc/self/fd").is_dir()
-    )
+    """Whether this machine offers everything the private-index path needs."""
+    if os.name != "posix" or not sys.platform.startswith("linux"):
+        return False
+    if not all(hasattr(os, name) for name in _REQUIRED_OS_NAMES):
+        return False
+    if _fcntl is None:
+        return False
+    if not all(hasattr(_fcntl, name) for name in _REQUIRED_FCNTL_NAMES):
+        return False
+    return Path("/proc/self/fd").is_dir()
 
 
 def _private_git_installation() -> _PrivateGitInstallation | None:
