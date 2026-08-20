@@ -20,6 +20,12 @@ import pytest
 from markdown_transaction import MarkdownChange, MarkdownCoordinator
 from reliable_memory import canonical_json_bytes, sha256_bytes
 
+# How long a coordination wait may take on the slowest supported machine: the
+# hosted four-vCPU Windows and macOS runners, where opening a SQLite database
+# and finishing one transaction has been measured well past two seconds under
+# load. These waits bound a hang, not the expected duration.
+_COORDINATION_BUDGET_SECONDS = 60.0
+
 
 @pytest.fixture
 def vault(tmp_path: Path) -> Path:
@@ -842,17 +848,17 @@ def test_global_writer_gate_serializes_coordinators(vault: Path, state_root: Pat
         with first.writer_gate():
             order.append("first")
             entered.set()
-            assert release.wait(5)
+            assert release.wait(_COORDINATION_BUDGET_SECONDS)
 
     def enter_second():
-        assert entered.wait(5)
+        assert entered.wait(_COORDINATION_BUDGET_SECONDS)
         with second.writer_gate():
             order.append("second")
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         one = pool.submit(hold_first)
         two = pool.submit(enter_second)
-        assert entered.wait(5)
+        assert entered.wait(_COORDINATION_BUDGET_SECONDS)
         time.sleep(0.1)
         assert order == ["first"]
         with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
@@ -1139,9 +1145,9 @@ def test_writer_heartbeat_retries_transient_contention_without_losing_fence(
         args=(token, 1, stop, lost),
     )
     thread.start()
-    assert connected.wait(2)
+    assert connected.wait(_COORDINATION_BUDGET_SECONDS)
     stop.set()
-    thread.join(timeout=2)
+    thread.join(timeout=_COORDINATION_BUDGET_SECONDS)
 
     assert not thread.is_alive()
     assert attempts >= 3
