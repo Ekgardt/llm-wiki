@@ -2677,46 +2677,74 @@ def _heartbeat_loop(instance: LspProcess) -> None:
             return
 
 
+_STOPPED_PHASES = frozenset(
+    {_LifecyclePhase.STOPPED_SUCCESS, _LifecyclePhase.STOPPED_FAILURE}
+)
+
+
+def _lease_write_targets(
+    coordinator: _LifecycleCoordinator, deadline: float
+) -> tuple[_OwnerDirectory | None, _Generation | None]:
+    """The owner and generation the lease describes, or nothing when stopped."""
+    _acquire_lifecycle(coordinator, deadline)
+    try:
+        if coordinator.phase in _STOPPED_PHASES:
+            return None, None
+        return coordinator.owner_directory, coordinator.lease_generation
+    finally:
+        _release_lifecycle(coordinator)
+
+
+def _heartbeat_ownership_lease(
+    coordinator: _LifecycleCoordinator,
+) -> OwnerLease | None:
+    """Refresh the registry lease, when there is a registry holding one."""
+    ownership = coordinator.ownership_lease
+    registry = coordinator.ownership_registry
+    if ownership is None or registry is None:
+        return ownership
+    ownership = registry.heartbeat(ownership)
+    coordinator.ownership_lease = ownership
+    return ownership
+
+
+def _publish_current_lease(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    owner: _OwnerDirectory,
+    generation: _Generation,
+    deadline: float,
+) -> None:
+    ownership = _heartbeat_ownership_lease(coordinator)
+    if ownership is None:
+        _write_generation_lease(
+            owner,
+            generation,
+            instance.owner_nonce,
+            deadline,
+            coordinator.heartbeat_stop,
+        )
+        return
+    _write_generation_lease(
+        owner,
+        generation,
+        instance.owner_nonce,
+        deadline,
+        coordinator.heartbeat_stop,
+        ownership,
+    )
+
+
 def _write_current_lease(instance: LspProcess, deadline: float) -> None:
     coordinator = instance._coordinator
     if coordinator.heartbeat_stop.is_set():
         return
     _acquire_lease(coordinator, deadline)
     try:
-        _acquire_lifecycle(coordinator, deadline)
-        try:
-            if coordinator.phase in {
-                _LifecyclePhase.STOPPED_SUCCESS,
-                _LifecyclePhase.STOPPED_FAILURE,
-            }:
-                return
-            owner = coordinator.owner_directory
-            generation = coordinator.lease_generation
-        finally:
-            _release_lifecycle(coordinator)
-        if generation is not None and owner is not None:
-            ownership = coordinator.ownership_lease
-            registry = coordinator.ownership_registry
-            if ownership is not None and registry is not None:
-                ownership = registry.heartbeat(ownership)
-                coordinator.ownership_lease = ownership
-            if ownership is None:
-                _write_generation_lease(
-                    owner,
-                    generation,
-                    instance.owner_nonce,
-                    deadline,
-                    coordinator.heartbeat_stop,
-                )
-            else:
-                _write_generation_lease(
-                    owner,
-                    generation,
-                    instance.owner_nonce,
-                    deadline,
-                    coordinator.heartbeat_stop,
-                    ownership,
-                )
+        owner, generation = _lease_write_targets(coordinator, deadline)
+        if owner is None or generation is None:
+            return
+        _publish_current_lease(instance, coordinator, owner, generation, deadline)
     finally:
         _release_lease(coordinator)
 
