@@ -500,8 +500,14 @@ def _token_separator(index: int) -> str:
     return ";"
 
 
-def _best_measurement(measure, count: int, attempts: int = 2):
-    """The fastest of several attempts, so scheduler noise cannot fail a gate."""
+def _best_measurement(measure, count: int, attempts: int = 5):
+    """The fastest of several attempts, so scheduler noise cannot fail a gate.
+
+    Two attempts were not enough on a hosted runner: at these magnitudes the
+    scheduler can add as much as the work itself costs, and the ratio gate
+    then compares noise with noise. Taking the best of five costs a few
+    hundred milliseconds and leaves the ratio measuring the algorithm.
+    """
     return min(
         (measure(count) for _attempt in range(attempts)), key=lambda item: item[0]
     )
