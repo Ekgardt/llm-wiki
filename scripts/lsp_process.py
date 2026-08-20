@@ -3889,26 +3889,38 @@ def _notify_under_lifecycle(
     params: object,
     deadline: float,
 ) -> _NotifyOutcome:
-    if not _generation_still_current(
+    if not _notifiable_generation(
         instance, coordinator, generation, generation_nonce
     ):
         return _NotifyOutcome(False, None, None)
     protocol = generation.protocol
     process = generation.process
-    if protocol is None or process is None:
-        return _NotifyOutcome(False, None, None)
-    if _generation_unavailable(generation) or _terminal_pending(coordinator):
-        return _NotifyOutcome(False, None, None)
-    expired = protocol.expired_drain_keys(time.monotonic())
-    if expired:
-        return _NotifyOutcome(False, "expired drain", None)
-    if process.poll() is not None or protocol.fatal:
-        return _NotifyOutcome(False, _PROCESS_EXITED, None)
+    unusable = _generation_unusable(protocol, process)
+    if unusable is not None:
+        return _NotifyOutcome(False, unusable, None)
     try:
         protocol.notify(method, params, deadline=deadline)
     except ProtocolViolation as error:
         return _NotifyOutcome(False, None, error)
     return _NotifyOutcome(True, None, None)
+
+
+def _notifiable_generation(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    generation: _Generation,
+    generation_nonce: str,
+) -> bool:
+    """The generation is still ours, still whole, and nothing is ending it."""
+    if not _generation_still_current(
+        instance, coordinator, generation, generation_nonce
+    ):
+        return False
+    if not _generation_has_channel(generation):
+        return False
+    return not _generation_unavailable(generation) and not _terminal_pending(
+        coordinator
+    )
 
 
 def _generation_died_after_violation(generation: object) -> bool:
