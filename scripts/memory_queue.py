@@ -4220,6 +4220,15 @@ def _apply_failure_state(
         raise LeaseFenceError(f"lease is stale or not owned: {lease.id}")
 
 
+def _failure_is_terminal(
+    row: sqlite3.Row, failure: QueueFailure, attempt_limit: int
+) -> bool:
+    """This failure ends the task: it is permanent, or attempts ran out."""
+    if failure.permanent or failure.error_code in _PERMANENT_CODES:
+        return True
+    return int(row["attempts"]) >= attempt_limit
+
+
 class MemoryQueue:
     """Durable priority queue with lease-token fencing and at-least-once delivery."""
 
@@ -4936,6 +4945,36 @@ class MemoryQueue:
     ) -> None:
         if not failure.error_code:
             raise ValueError("error_code must be non-empty")
+        attempt_limit, retry_base, retry_cap = self._retry_policy(
+            max_attempts, retry_base_seconds, retry_cap_seconds
+        )
+        now = _as_utc(self._clock())
+        with self._connect() as connection, begin_immediate(connection):
+            row = self._require_lease(connection, lease, now)
+            if failure.blocked_capability:
+                self._block_leased_task(connection, lease, row, failure, now)
+                return
+            self._record_attempt(connection, row, now, "failed", failure.error_code)
+            if _failure_is_terminal(row, failure, attempt_limit):
+                self._retire_failed_task(connection, lease, failure, now)
+                return
+            self._reschedule_failed_task(
+                connection,
+                lease,
+                row,
+                failure,
+                now,
+                retry_base=retry_base,
+                retry_cap=retry_cap,
+            )
+
+    def _retry_policy(
+        self,
+        max_attempts: int | None,
+        retry_base_seconds: int | None,
+        retry_cap_seconds: int | None,
+    ) -> tuple[int, int, int]:
+        """This call's retry policy: the caller's numbers, or the queue's."""
         attempt_limit = self._max_attempts if max_attempts is None else max_attempts
         retry_base = (
             self._retry_base_seconds
@@ -4943,68 +4982,89 @@ class MemoryQueue:
             else retry_base_seconds
         )
         retry_cap = (
-            self._retry_cap_seconds if retry_cap_seconds is None else retry_cap_seconds
+            self._retry_cap_seconds
+            if retry_cap_seconds is None
+            else retry_cap_seconds
         )
         _validate_retry_policy(attempt_limit, retry_base, retry_cap)
-        now = _as_utc(self._clock())
-        with self._connect() as connection, begin_immediate(connection):
-            row = self._require_lease(connection, lease, now)
-            if failure.blocked_capability:
-                self._record_attempt(connection, row, now, "blocked", failure.error_code)
-                self._record_payload_failure(
-                    connection,
-                    str(row["payload_json"]),
-                    failure.error_code,
-                    "queue",
-                    now,
-                )
-                connection.execute(
-                    """UPDATE tasks SET state='blocked', attempts=attempts-1, updated_at=?,
-                           lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL,
-                           lease_heartbeat_at=NULL, attempt_started_at=NULL, error_code=?,
-                           blocked_capability=? WHERE id=?""",
-                    (
-                        _timestamp(now),
-                        failure.error_code,
-                        failure.blocked_capability,
-                        lease.id,
-                    ),
-                )
-                return
-            dead = (
-                failure.permanent
-                or failure.error_code in _PERMANENT_CODES
-                or int(row["attempts"]) >= attempt_limit
-            )
-            self._record_attempt(connection, row, now, "failed", failure.error_code)
-            if dead:
-                self._finish_lease(
-                    connection,
-                    lease.id,
-                    now,
-                    "dead",
-                    failure.error_code,
-                    None,
-                    last_attempt_at=now,
-                )
-                return
-            delay = self._retry_delay(
-                int(row["attempts"]),
-                retry_base_seconds=retry_base,
-                retry_cap_seconds=retry_cap,
-            )
-            retry_after = self._retry_after_seconds(failure.retry_after, now)
-            if retry_after is not None:
-                delay = max(delay, retry_after)
-            self._finish_lease(
-                connection,
-                lease.id,
-                now,
-                "ready",
+        return attempt_limit, retry_base, retry_cap
+
+    def _block_leased_task(
+        self,
+        connection: sqlite3.Connection,
+        lease: QueueLease,
+        row: sqlite3.Row,
+        failure: QueueFailure,
+        now: datetime,
+    ) -> None:
+        """A missing capability blocks the task without spending an attempt."""
+        self._record_attempt(connection, row, now, "blocked", failure.error_code)
+        self._record_payload_failure(
+            connection,
+            str(row["payload_json"]),
+            failure.error_code,
+            "queue",
+            now,
+        )
+        connection.execute(
+            """UPDATE tasks SET state='blocked', attempts=attempts-1, updated_at=?,
+                   lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL,
+                   lease_heartbeat_at=NULL, attempt_started_at=NULL, error_code=?,
+                   blocked_capability=? WHERE id=?""",
+            (
+                _timestamp(now),
                 failure.error_code,
-                now + timedelta(seconds=delay),
-                last_attempt_at=now,
-            )
+                failure.blocked_capability,
+                lease.id,
+            ),
+        )
+
+    def _retire_failed_task(
+        self,
+        connection: sqlite3.Connection,
+        lease: QueueLease,
+        failure: QueueFailure,
+        now: datetime,
+    ) -> None:
+        self._finish_lease(
+            connection,
+            lease.id,
+            now,
+            "dead",
+            failure.error_code,
+            None,
+            last_attempt_at=now,
+        )
+
+    def _reschedule_failed_task(
+        self,
+        connection: sqlite3.Connection,
+        lease: QueueLease,
+        row: sqlite3.Row,
+        failure: QueueFailure,
+        now: datetime,
+        *,
+        retry_base: int,
+        retry_cap: int,
+    ) -> None:
+        """Put the task back, no sooner than the backoff and the Retry-After."""
+        delay = self._retry_delay(
+            int(row["attempts"]),
+            retry_base_seconds=retry_base,
+            retry_cap_seconds=retry_cap,
+        )
+        retry_after = self._retry_after_seconds(failure.retry_after, now)
+        if retry_after is not None:
+            delay = max(delay, retry_after)
+        self._finish_lease(
+            connection,
+            lease.id,
+            now,
+            "ready",
+            failure.error_code,
+            now + timedelta(seconds=delay),
+            last_attempt_at=now,
+        )
 
     def _retry_delay(
         self,
