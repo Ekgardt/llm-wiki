@@ -654,6 +654,13 @@ def _hold_protocol_constructor_until_callback(
     monkeypatch.setattr(lsp_process, "LspProtocol", ConstructorCallbackProbe)
 
 
+# Starting a server spawns a child, completes a handshake, publishes a lease
+# and starts two workers. A few seconds is comfortable on a quiet machine and
+# not enough on a loaded hosted runner, so the budget is sized for the slowest
+# supported machine. Every test that wants a timeout injects one instead.
+_STARTUP_BUDGET_SECONDS = 120
+
+
 def _start(tmp_path: Path, *arguments: str) -> LspProcess:
     return LspProcess.start(
         _command(*arguments), cwd=tmp_path, owner_root=tmp_path / OWNER_NONCE
@@ -1128,7 +1135,7 @@ def test_startup_commit_rejects_heartbeat_terminal_failure_during_bootstrap(
                     _command("--lifecycle"),
                     cwd=tmp_path,
                     owner_root=tmp_path / OWNER_NONCE,
-                    deadline=time.monotonic() + 5,
+                    deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
                     server_request_handlers={},
                     server_notification_handlers={},
                     generation_bootstrap=bootstrap,
@@ -1212,7 +1219,7 @@ def test_transparent_restart_bootstraps_fresh_generation_before_request_replay(
         ),
         cwd=tmp_path,
         owner_root=tmp_path / OWNER_NONCE,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
         server_request_handlers={
             "workspace/configuration": lambda params: configurations.append(params) or True
         },
@@ -1316,7 +1323,7 @@ def test_delayed_crash_restart_commits_with_a_short_live_deadline(
         ),
         cwd=tmp_path,
         owner_root=tmp_path / OWNER_NONCE,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
         server_request_handlers={"workspace/configuration": lambda _params: True},
         server_notification_handlers={"$/progress": lambda _params: None},
         generation_bootstrap=bootstrap,
@@ -1328,7 +1335,7 @@ def test_delayed_crash_restart_commits_with_a_short_live_deadline(
         assert process.request(
             "initialized/query",
             {"delayed": True},
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
         )["initialized"] is True
 
         assert process.restart_count == 1
@@ -1354,7 +1361,7 @@ def test_generation_bound_notification_refuses_replacement_generation(
         _command("--lifecycle", "--bootstrap-handshake"),
         cwd=tmp_path,
         owner_root=tmp_path / OWNER_NONCE,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
         server_request_handlers={"workspace/configuration": lambda _params: True},
         server_notification_handlers={"$/progress": lambda _params: None},
         generation_bootstrap=_initialize_generation,
@@ -1368,7 +1375,7 @@ def test_generation_bound_notification_refuses_replacement_generation(
             "initialized/noop",
             {},
             generation_nonce=first_nonce,
-            deadline=time.monotonic() + 1,
+            deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
         ) is False
     finally:
         process.close(time.monotonic() + 5)
@@ -1381,7 +1388,7 @@ def test_workspace_ready_promotion_rejects_pending_terminal_failure(
         _command("--lifecycle", "--bootstrap-handshake"),
         cwd=tmp_path,
         owner_root=tmp_path / OWNER_NONCE,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
         server_request_handlers={"workspace/configuration": lambda _params: True},
         server_notification_handlers={"$/progress": lambda _params: None},
         generation_bootstrap=_initialize_generation,
@@ -1401,7 +1408,7 @@ def test_workspace_ready_promotion_rejects_pending_terminal_failure(
 
             assert process.promote_workspace_ready(
                 generation_nonce=process.generation_nonce,
-                deadline=time.monotonic() + 1,
+                deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
             ) is False
             assert process.state is ProcessState.PROTOCOL_INITIALIZED
 
@@ -1516,7 +1523,7 @@ def test_generation_guard_wraps_each_autonomous_generation_without_transition_lo
         ),
         cwd=tmp_path,
         owner_root=tmp_path / OWNER_NONCE,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
         server_request_handlers={"workspace/configuration": lambda _params: True},
         server_notification_handlers={"$/progress": lambda _params: None},
         generation_bootstrap=bootstrap,
@@ -1578,7 +1585,7 @@ def test_generation_guard_launches_from_inherited_descriptor_after_path_replacem
         (sys.executable, str(server), "--lifecycle", "--bootstrap-handshake"),
         cwd=tmp_path,
         owner_root=tmp_path / OWNER_NONCE,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
         server_request_handlers={"workspace/configuration": lambda _params: True},
         server_notification_handlers={"$/progress": lambda _params: None},
         generation_bootstrap=_initialize_generation,
@@ -1641,7 +1648,7 @@ def test_generation_guard_enter_failure_prevents_spawn_and_cleans_owner(
             _command("--lifecycle"),
             cwd=tmp_path,
             owner_root=owner,
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
             server_request_handlers={},
             server_notification_handlers={},
             generation_bootstrap=lambda *_args: ProcessState.PROCESS_RUNNING,
@@ -1676,7 +1683,7 @@ def test_generation_guard_rejects_non_context_result_before_spawn(
             _command("--lifecycle"),
             cwd=tmp_path,
             owner_root=owner,
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
             server_request_handlers={},
             server_notification_handlers={},
             generation_bootstrap=lambda *_args: ProcessState.PROCESS_RUNNING,
@@ -1733,7 +1740,7 @@ def test_generation_guard_exit_failure_cleans_replacement_without_commit(
         _command("--lifecycle", "--bootstrap-handshake"),
         cwd=tmp_path,
         owner_root=tmp_path / OWNER_NONCE,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
         server_request_handlers={"workspace/configuration": lambda _params: True},
         server_notification_handlers={"$/progress": lambda _params: None},
         generation_bootstrap=_initialize_generation,
@@ -1793,7 +1800,7 @@ def test_generation_guard_cannot_suppress_bootstrap_failure(
             _command("--lifecycle"),
             cwd=tmp_path,
             owner_root=owner,
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
             server_request_handlers={},
             server_notification_handlers={},
             generation_bootstrap=fail_bootstrap,
@@ -2001,7 +2008,7 @@ def test_bootstrap_configuration_request_rejects_missing_or_false_handler(
             _command("--lifecycle", "--bootstrap-handshake"),
             cwd=tmp_path,
             owner_root=owner,
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
             server_request_handlers=handlers,
             server_notification_handlers={},
             generation_bootstrap=_initialize_generation,
@@ -2038,7 +2045,7 @@ def test_configured_handler_maps_are_immutable_snapshots_that_survive_restart(
         _command("--lifecycle", "--bootstrap-handshake"),
         cwd=tmp_path,
         owner_root=tmp_path / OWNER_NONCE,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
         server_request_handlers=request_handlers,
         server_notification_handlers=notification_handlers,
         generation_bootstrap=bootstrap,
@@ -2080,7 +2087,7 @@ def test_configured_process_running_state_is_an_explicit_noop_bootstrap(
         _command("--lifecycle"),
         cwd=tmp_path,
         owner_root=tmp_path / OWNER_NONCE,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
         server_request_handlers={},
         server_notification_handlers={},
         generation_bootstrap=noop,
@@ -2113,7 +2120,7 @@ def test_configured_start_rejects_non_active_bootstrap_state_and_cleans_candidat
             _command("--lifecycle"),
             cwd=tmp_path,
             owner_root=owner,
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
             server_request_handlers={},
             server_notification_handlers={},
             generation_bootstrap=lambda *_args: returned,
@@ -2193,7 +2200,7 @@ def test_configured_start_preserves_explicit_autonomous_bootstrap_budget(
         _command("--lifecycle"),
         cwd=tmp_path,
         owner_root=tmp_path / OWNER_NONCE,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
         server_request_handlers={},
         server_notification_handlers={},
         generation_bootstrap=lambda *_args: ProcessState.PROCESS_RUNNING,
@@ -2234,7 +2241,7 @@ def test_bootstrap_timeout_cleans_initial_candidate_and_retains_failure_evidence
             _command("--lifecycle"),
             cwd=tmp_path,
             owner_root=owner,
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
             server_request_handlers={},
             server_notification_handlers={},
             generation_bootstrap=timeout,
@@ -2277,7 +2284,7 @@ def test_restart_bootstrap_failure_is_terminal_and_never_replays_request(
         ),
         cwd=tmp_path,
         owner_root=tmp_path / OWNER_NONCE,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
         server_request_handlers={"workspace/configuration": lambda _params: True},
         server_notification_handlers={"$/progress": lambda _params: None},
         generation_bootstrap=bootstrap,
@@ -2344,7 +2351,7 @@ def test_restart_bootstrap_failure_gives_every_waiter_a_fresh_sanitized_error(
         ),
         cwd=tmp_path,
         owner_root=tmp_path / OWNER_NONCE,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
         server_request_handlers={"workspace/configuration": lambda _params: True},
         server_notification_handlers={"$/progress": lambda _params: None},
         generation_bootstrap=bootstrap,
@@ -2373,7 +2380,7 @@ def test_restart_bootstrap_failure_gives_every_waiter_a_fresh_sanitized_error(
             process.request(
                 "initialized/query",
                 {"waiter": index},
-                deadline=time.monotonic() + 5,
+                deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
             )
         except BaseException as error:
             return error
@@ -2638,7 +2645,7 @@ def test_concurrent_autonomous_fatals_bootstrap_only_one_replacement(
         _command("--lifecycle", "--bootstrap-handshake"),
         cwd=tmp_path,
         owner_root=tmp_path / OWNER_NONCE,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
         server_request_handlers={"workspace/configuration": lambda _params: True},
         server_notification_handlers={"$/progress": lambda _params: None},
         generation_bootstrap=bootstrap,
@@ -2683,7 +2690,7 @@ def test_explicit_restart_and_autonomous_wake_bootstrap_one_replacement(
         _command("--lifecycle", "--bootstrap-handshake"),
         cwd=tmp_path,
         owner_root=tmp_path / OWNER_NONCE,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
         server_request_handlers={"workspace/configuration": lambda _params: True},
         server_notification_handlers={"$/progress": lambda _params: None},
         generation_bootstrap=bootstrap,
@@ -2817,7 +2824,7 @@ def test_bootstrap_raw_protocol_and_handler_complete_while_driver_is_held(
         _command("--lifecycle", "--bootstrap-handshake"),
         cwd=tmp_path,
         owner_root=tmp_path / OWNER_NONCE,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
         server_request_handlers={
             "workspace/configuration": lambda params: configurations.append(params)
             or True
@@ -2902,7 +2909,7 @@ def test_protocol_callback_lifecycle_operations_fail_fast_without_mutation(
         _command("--lifecycle", "--bootstrap-handshake"),
         cwd=tmp_path,
         owner_root=tmp_path / owner_nonce,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
         server_request_handlers={"workspace/configuration": lambda _params: True},
         server_notification_handlers={"$/progress": progress},
         generation_bootstrap=_initialize_generation,
@@ -2948,7 +2955,7 @@ def test_uncaught_progress_handler_lifecycle_error_is_nonfatal_and_bootstrap_con
         _command("--lifecycle", "--bootstrap-handshake"),
         cwd=tmp_path,
         owner_root=tmp_path / ("e" * 32),
-        deadline=time.monotonic() + 2,
+        deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
         server_request_handlers={"workspace/configuration": lambda _params: True},
         server_notification_handlers={"$/progress": progress},
         generation_bootstrap=_initialize_generation,
@@ -3028,7 +3035,7 @@ def test_startup_callback_rejects_own_lifecycle_before_protocol_constructor_retu
         ),
         cwd=tmp_path,
         owner_root=tmp_path / OWNER_NONCE,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
         server_request_handlers={"workspace/configuration": request_handler},
         server_notification_handlers={"$/progress": notification_handler},
         generation_bootstrap=_initialize_generation,
@@ -3092,7 +3099,7 @@ def test_startup_callback_can_close_unrelated_process_before_constructor_returns
             ),
             cwd=tmp_path,
             owner_root=tmp_path / ("e" * 32),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
             server_request_handlers={"workspace/configuration": request_handler},
             server_notification_handlers={"$/progress": lambda _params: None},
             generation_bootstrap=_initialize_generation,
@@ -3180,7 +3187,7 @@ def test_close_serializes_behind_restart_bootstrap_and_commits_success(
         _command("--lifecycle", "--bootstrap-handshake"),
         cwd=tmp_path,
         owner_root=tmp_path / OWNER_NONCE,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
         server_request_handlers={"workspace/configuration": lambda _params: True},
         server_notification_handlers={"$/progress": lambda _params: None},
         generation_bootstrap=bootstrap,
@@ -3317,7 +3324,7 @@ def test_restart_lease_names_candidate_before_bootstrap_commit_without_activatio
         _command("--lifecycle", "--bootstrap-handshake"),
         cwd=tmp_path,
         owner_root=tmp_path / OWNER_NONCE,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
         server_request_handlers={"workspace/configuration": lambda _params: True},
         server_notification_handlers={"$/progress": lambda _params: None},
         generation_bootstrap=bootstrap,
@@ -4363,7 +4370,7 @@ def test_application_error_and_caller_cancellation_never_restart(
             cancelled.request(
                 "slow",
                 {},
-                deadline=time.monotonic() + 2,
+                deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
                 cancellation=source.token,
             )
         assert cancelled.restart_count == 0
@@ -4776,7 +4783,7 @@ def test_exit_monitor_fails_all_pending_once_and_marks_failed(tmp_path: Path) ->
                 process.request,
                 "pending",
                 {},
-                deadline=time.monotonic() + 5,
+                deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
             )
             for _ in range(2)
         ]
@@ -8881,7 +8888,7 @@ def test_caller_json_violation_never_restarts_and_valid_follow_up_works(
         process.request(
             "invalid",
             _invalid_request_params(case),
-            deadline=time.monotonic() + 2,
+            deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
         )
 
     assert process.restart_count == 0
@@ -8917,7 +8924,7 @@ def test_caller_json_violation_is_not_retried_after_concurrent_restart(
             process.request(
                 "invalid",
                 _invalid_request_params("cycle"),
-                deadline=time.monotonic() + 5,
+                deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
             )
         except BaseException as error:
             request_errors.append(error)
