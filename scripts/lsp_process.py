@@ -4069,6 +4069,15 @@ def _notify_lsp_process_generation(
         )
     finally:
         _release_lifecycle(coordinator)
+    return _settle_notify_outcome(coordinator, generation, outcome)
+
+
+def _settle_notify_outcome(
+    coordinator: _LifecycleCoordinator,
+    generation: _Generation,
+    outcome: _NotifyOutcome,
+) -> bool:
+    """Record what the notification met, then report or raise it."""
     if outcome.queue_reason is not None:
         _queue_generation_failure(coordinator, generation, outcome.queue_reason)
     if outcome.protocol_error is None:
@@ -6402,9 +6411,17 @@ def _run_windows_owner_acl(
         )
     except (OSError, _subprocess.TimeoutExpired) as exc:
         raise PermissionError("owner-only LSP ACL command failed") from exc
-    if len(result.stdout or b"") + len(result.stderr or b"") > _MAX_ACL_OUTPUT_BYTES:
-        raise PermissionError("owner-only LSP ACL output exceeded its byte bound")
+    _check_acl_output_bound(result)
     return result
+
+
+def _check_acl_output_bound(
+    result: _subprocess.CompletedProcess[bytes],
+) -> None:
+    """An ACL tool may not hand us more output than we agreed to read."""
+    produced = len(result.stdout or b"") + len(result.stderr or b"")
+    if produced > _MAX_ACL_OUTPUT_BYTES:
+        raise PermissionError("owner-only LSP ACL output exceeded its byte bound")
 
 
 def _write_all_descriptor(descriptor: int, payload: bytes) -> None:
