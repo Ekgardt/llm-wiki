@@ -20,7 +20,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
@@ -3440,6 +3440,94 @@ def _check_ready_intent_identity(
         raise QueueOperationError("capture_intent_conflict")
 
 
+_CaptureLeaf = tuple[str, str | None, str | None, int]
+
+
+def _superseded_digests(resolutions: Sequence[sqlite3.Row]) -> set[str]:
+    """Every digest a later resolution replaced."""
+    return {
+        str(row["supersedes_digest"])
+        for row in resolutions
+        if row["supersedes_digest"] is not None
+    }
+
+
+def _resolution_leaf(
+    database: sqlite3.Connection, link: sqlite3.Row, resolution: sqlite3.Row
+) -> _CaptureLeaf:
+    """One unsuperseded resolution, with the intent it selected if it named one."""
+    digest = str(resolution["resolution_digest"])
+    selected = resolution["selected_intent_id"]
+    if selected is None:
+        return digest, None, None, int(link["handler_version"])
+    intent = database.execute(
+        "SELECT * FROM capture_intents WHERE intent_id=?", (selected,)
+    ).fetchone()
+    if intent is None:
+        raise QueueOperationError("capture_link_conflicted")
+    return (
+        digest,
+        str(intent["intent_id"]),
+        str(intent["intent_sha256"]),
+        int(link["handler_version"]),
+    )
+
+
+def _capture_link_leaves(
+    database: sqlite3.Connection,
+    link: sqlite3.Row,
+    resolutions: Sequence[sqlite3.Row],
+) -> list[_CaptureLeaf]:
+    """Everything in this link's history that nothing else superseded."""
+    superseded = _superseded_digests(resolutions)
+    leaves: list[_CaptureLeaf] = []
+    if str(link["link_digest"]) not in superseded:
+        leaves.append(
+            (
+                str(link["link_digest"]),
+                str(link["intent_id"]),
+                str(link["intent_sha256"]),
+                int(link["handler_version"]),
+            )
+        )
+    for resolution in resolutions:
+        if str(resolution["resolution_digest"]) in superseded:
+            continue
+        leaves.append(_resolution_leaf(database, link, resolution))
+    return leaves
+
+
+def _capture_binding_of(
+    database: sqlite3.Connection, task_id: str
+) -> CaptureTaskBinding:
+    """The one active binding this task's link history leaves behind."""
+    link = database.execute(
+        "SELECT * FROM capture_task_links WHERE task_id=?", (task_id,)
+    ).fetchone()
+    if link is None:
+        raise QueueOperationError("capture_link_conflicted")
+    resolutions = database.execute(
+        """SELECT * FROM capture_task_link_resolutions
+           WHERE task_id=? ORDER BY created_at,resolution_digest""",
+        (task_id,),
+    ).fetchall()
+    leaves = _capture_link_leaves(database, link, resolutions)
+    if len(leaves) != 1:
+        raise QueueOperationError("capture_link_conflicted")
+    active_digest, intent_id, intent_sha256, handler_version = leaves[0]
+    seal = database.execute(
+        "SELECT * FROM capture_task_link_seals WHERE task_id=?", (task_id,)
+    ).fetchone()
+    return CaptureTaskBinding(
+        task_id=task_id,
+        intent_id=intent_id,
+        intent_sha256=intent_sha256,
+        handler_version=handler_version,
+        active_digest=active_digest,
+        seal_digest=None if seal is None else str(seal["seal_digest"]),
+    )
+
+
 class MemoryQueue:
     """Durable priority queue with lease-token fencing and at-least-once delivery."""
 
@@ -5924,66 +6012,7 @@ class _QueueV3CandidateReader:
         owned = connection is None
         database = self._connect() if owned else connection
         try:
-            link = database.execute(
-                "SELECT * FROM capture_task_links WHERE task_id=?", (task_id,)
-            ).fetchone()
-            if link is None:
-                raise QueueOperationError("capture_link_conflicted")
-            resolutions = database.execute(
-                """SELECT * FROM capture_task_link_resolutions
-                   WHERE task_id=? ORDER BY created_at,resolution_digest""",
-                (task_id,),
-            ).fetchall()
-            superseded = {
-                str(row["supersedes_digest"])
-                for row in resolutions
-                if row["supersedes_digest"] is not None
-            }
-            leaves: list[tuple[str, str | None, str | None, int]] = []
-            if str(link["link_digest"]) not in superseded:
-                leaves.append(
-                    (
-                        str(link["link_digest"]),
-                        str(link["intent_id"]),
-                        str(link["intent_sha256"]),
-                        int(link["handler_version"]),
-                    )
-                )
-            for resolution in resolutions:
-                digest = str(resolution["resolution_digest"])
-                if digest in superseded:
-                    continue
-                selected = resolution["selected_intent_id"]
-                if selected is None:
-                    leaves.append((digest, None, None, int(link["handler_version"])))
-                    continue
-                intent = database.execute(
-                    "SELECT * FROM capture_intents WHERE intent_id=?", (selected,)
-                ).fetchone()
-                if intent is None:
-                    raise QueueOperationError("capture_link_conflicted")
-                leaves.append(
-                    (
-                        digest,
-                        str(intent["intent_id"]),
-                        str(intent["intent_sha256"]),
-                        int(link["handler_version"]),
-                    )
-                )
-            if len(leaves) != 1:
-                raise QueueOperationError("capture_link_conflicted")
-            active_digest, intent_id, intent_sha256, handler_version = leaves[0]
-            seal = database.execute(
-                "SELECT * FROM capture_task_link_seals WHERE task_id=?", (task_id,)
-            ).fetchone()
-            return CaptureTaskBinding(
-                task_id=task_id,
-                intent_id=intent_id,
-                intent_sha256=intent_sha256,
-                handler_version=handler_version,
-                active_digest=active_digest,
-                seal_digest=None if seal is None else str(seal["seal_digest"]),
-            )
+            return _capture_binding_of(database, task_id)
         finally:
             if owned:
                 database.close()
