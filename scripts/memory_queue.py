@@ -4349,6 +4349,126 @@ def _take_v3_task_lease(
     return changed == 1
 
 
+def _exported_lease(row: sqlite3.Row) -> dict[str, object] | None:
+    """The lease a task holds, or None when it holds none."""
+    values = (
+        row["lease_owner"],
+        row["lease_token"],
+        row["lease_expires_at"],
+        row["lease_heartbeat_at"],
+    )
+    if values == (None, None, None, None):
+        return None
+    return {
+        "owner": values[0],
+        "token": values[1],
+        "expires_at": values[2],
+        "heartbeat_at": values[3],
+    }
+
+
+def _exported_result(row: sqlite3.Row) -> dict[str, object] | None:
+    """The published result a task points at, or None when it has none."""
+    values = (
+        row["result_reference"],
+        row["result_sha256"],
+        row["result_operation_id"],
+    )
+    if values == (None, None, None):
+        return None
+    return {
+        "reference": values[0],
+        "sha256": values[1],
+        "operation_id": values[2],
+    }
+
+
+def _exported_capture_binding(
+    link: sqlite3.Row | None, seal: sqlite3.Row | None
+) -> dict[str, object] | None:
+    if link is None:
+        return None
+    return {
+        "intent_id": link["intent_id"],
+        "intent_sha256": link["intent_sha256"],
+        "handler_version": int(link["handler_version"]),
+        "active_digest": str(link["link_digest"]),
+        "seal_digest": None if seal is None else seal["seal_digest"],
+    }
+
+
+def _exported_attempt_history(history: Sequence[sqlite3.Row]) -> list[dict[str, object]]:
+    return [
+        {
+            "attempt": int(item["attempt"]),
+            "started_at": str(item["started_at"]),
+            "finished_at": str(item["finished_at"]),
+            "outcome": str(item["outcome"]),
+            "error_code": item["error_code"],
+        }
+        for item in history
+    ]
+
+
+def _exported_source_links(links: Sequence[sqlite3.Row]) -> list[dict[str, object]]:
+    return [
+        {
+            "logical_path": str(item["logical_path"]),
+            "source_digest": str(item["source_digest"]),
+        }
+        for item in links
+    ]
+
+
+def _exported_task_record(
+    row: sqlite3.Row,
+    payload: object,
+    rows: _ExportedRows,
+) -> dict[str, object]:
+    """The schema-valid export record for one task."""
+    record: dict[str, object] = {
+        "schema_version": "queue-task/v3",
+        "task_id": str(row["id"]),
+        "kind": str(row["kind"]),
+        "handler_version": int(row["handler_version"]),
+        "payload": payload,
+        "input_hash": str(row["input_hash"]),
+        "dedupe_key": row["dedupe_key"],
+        "state": str(row["state"]),
+        "priority": int(row["priority"]),
+        "created_at": str(row["created_at"]),
+        "updated_at": str(row["updated_at"]),
+        "available_at": str(row["available_at"]),
+        "attempts": int(row["attempts"]),
+        "last_attempt_at": row["last_attempt_at"],
+        "lease": _exported_lease(row),
+        "error_code": row["error_code"],
+        "blocked_capability": row["blocked_capability"],
+        "result": _exported_result(row),
+        "redrive_of": row["redrive_of"],
+        "lineage_generation": int(row["lineage_generation"]),
+        "attempt_history": _exported_attempt_history(rows.history),
+        "source_links": _exported_source_links(rows.source_links),
+        "capture_binding": _exported_capture_binding(rows.link, rows.seal),
+    }
+    validate_schema(
+        record, Path(__file__).with_name("schemas") / "queue-task-v3.json"
+    )
+    if len(canonical_json_bytes(record)) > _MAX_EXPORT_METADATA_BYTES:
+        raise QueueOperationError("export_metadata_too_large")
+    return record
+
+
+@dataclass(frozen=True)
+class _ExportedRows:
+    """Everything an export reads about one task, beside the task row."""
+
+    history: Sequence[sqlite3.Row]
+    source_links: Sequence[sqlite3.Row]
+    link: sqlite3.Row | None
+    seal: sqlite3.Row | None
+
+
 class MemoryQueue:
     """Durable priority queue with lease-token fencing and at-least-once delivery."""
 
@@ -9973,9 +10093,33 @@ class _QueueV3CandidateReader:
             self._raise_payload_mismatch()
         return replacement
 
+    def _exported_rows(
+        self, database: sqlite3.Connection, task_id: str
+    ) -> _ExportedRows:
+        """The history, links and seal an export carries beside the task row."""
+        history = database.execute(
+            """SELECT attempt,started_at,finished_at,outcome,error_code
+               FROM attempt_history WHERE task_id=? ORDER BY sequence""",
+            (task_id,),
+        ).fetchall()
+        source_links = database.execute(
+            """SELECT logical_path,source_digest FROM task_source_links
+               WHERE task_id=? ORDER BY logical_path,source_digest""",
+            (task_id,),
+        ).fetchall()
+        link = database.execute(
+            "SELECT * FROM capture_task_links WHERE task_id=?", (task_id,)
+        ).fetchone()
+        seal = database.execute(
+            "SELECT * FROM capture_task_link_seals WHERE task_id=?", (task_id,)
+        ).fetchone()
+        return _ExportedRows(history, source_links, link, seal)
+
     def export_task(self, task_id: str) -> dict[str, object]:
         with closing(self._connect()) as database:
-            row = database.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            row = database.execute(
+                "SELECT * FROM tasks WHERE id=?", (task_id,)
+            ).fetchone()
             if row is None:
                 raise KeyError(task_id)
             validation = validate_payload_blob(
@@ -9983,108 +10127,8 @@ class _QueueV3CandidateReader:
             )
             if validation.code is not None:
                 raise QueueOperationError("payload_hash_mismatch")
-            history = database.execute(
-                """SELECT attempt,started_at,finished_at,outcome,error_code
-                   FROM attempt_history WHERE task_id=? ORDER BY sequence""",
-                (task_id,),
-            ).fetchall()
-            source_links = database.execute(
-                """SELECT logical_path,source_digest FROM task_source_links
-                   WHERE task_id=? ORDER BY logical_path,source_digest""",
-                (task_id,),
-            ).fetchall()
-            link = database.execute(
-                "SELECT * FROM capture_task_links WHERE task_id=?", (task_id,)
-            ).fetchone()
-            seal = database.execute(
-                "SELECT * FROM capture_task_link_seals WHERE task_id=?", (task_id,)
-            ).fetchone()
-        lease_values = (
-            row["lease_owner"],
-            row["lease_token"],
-            row["lease_expires_at"],
-            row["lease_heartbeat_at"],
-        )
-        lease = (
-            None
-            if lease_values == (None, None, None, None)
-            else {
-                "owner": lease_values[0],
-                "token": lease_values[1],
-                "expires_at": lease_values[2],
-                "heartbeat_at": lease_values[3],
-            }
-        )
-        result_values = (
-            row["result_reference"],
-            row["result_sha256"],
-            row["result_operation_id"],
-        )
-        result = (
-            None
-            if result_values == (None, None, None)
-            else {
-                "reference": result_values[0],
-                "sha256": result_values[1],
-                "operation_id": result_values[2],
-            }
-        )
-        capture_binding = None
-        if link is not None:
-            active_digest = str(link["link_digest"])
-            capture_binding = {
-                "intent_id": link["intent_id"],
-                "intent_sha256": link["intent_sha256"],
-                "handler_version": int(link["handler_version"]),
-                "active_digest": active_digest,
-                "seal_digest": None if seal is None else seal["seal_digest"],
-            }
-        record: dict[str, object] = {
-            "schema_version": "queue-task/v3",
-            "task_id": str(row["id"]),
-            "kind": str(row["kind"]),
-            "handler_version": int(row["handler_version"]),
-            "payload": validation.payload,
-            "input_hash": str(row["input_hash"]),
-            "dedupe_key": row["dedupe_key"],
-            "state": str(row["state"]),
-            "priority": int(row["priority"]),
-            "created_at": str(row["created_at"]),
-            "updated_at": str(row["updated_at"]),
-            "available_at": str(row["available_at"]),
-            "attempts": int(row["attempts"]),
-            "last_attempt_at": row["last_attempt_at"],
-            "lease": lease,
-            "error_code": row["error_code"],
-            "blocked_capability": row["blocked_capability"],
-            "result": result,
-            "redrive_of": row["redrive_of"],
-            "lineage_generation": int(row["lineage_generation"]),
-            "attempt_history": [
-                {
-                    "attempt": int(item["attempt"]),
-                    "started_at": str(item["started_at"]),
-                    "finished_at": str(item["finished_at"]),
-                    "outcome": str(item["outcome"]),
-                    "error_code": item["error_code"],
-                }
-                for item in history
-            ],
-            "source_links": [
-                {
-                    "logical_path": str(item["logical_path"]),
-                    "source_digest": str(item["source_digest"]),
-                }
-                for item in source_links
-            ],
-            "capture_binding": capture_binding,
-        }
-        validate_schema(
-            record, Path(__file__).with_name("schemas") / "queue-task-v3.json"
-        )
-        if len(canonical_json_bytes(record)) > _MAX_EXPORT_METADATA_BYTES:
-            raise QueueOperationError("export_metadata_too_large")
-        return record
+            rows = self._exported_rows(database, task_id)
+        return _exported_task_record(row, validation.payload, rows)
 
     def purge(
         self,
