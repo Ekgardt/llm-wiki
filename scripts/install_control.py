@@ -698,6 +698,19 @@ def _default_command_runner(
     return completed
 
 
+def _try_command(runner: CommandRunner, command: tuple[str, ...]) -> None:
+    """Run a teardown step whose own exit code settles nothing.
+
+    Disabling or cleaning units the manager never registered exits nonzero,
+    and that is precisely the state the teardown is trying to reach. Whether
+    the teardown worked is decided by verifying the projection afterwards, so
+    letting these steps stop it is what strands a half-registered scheduler.
+    """
+    _exit_code, output = runner(command, None)
+    if len(output) > MAX_RECORD_BYTES:
+        raise InstallControlError("install_scheduler_output_oversized")
+
+
 def _require_command(runner: CommandRunner, command: tuple[str, ...]) -> bytes:
     exit_code, output = runner(command, None)
     if exit_code != 0:
@@ -807,7 +820,7 @@ def _uninstall_systemd(
     runner: CommandRunner,
     systemctl: str,
 ) -> None:
-    _require_command(
+    _try_command(
         runner,
         (
             systemctl,
@@ -818,7 +831,7 @@ def _uninstall_systemd(
             "llm-wiki-weekly.timer",
         ),
     )
-    _require_command(
+    _try_command(
         runner,
         (
             systemctl,

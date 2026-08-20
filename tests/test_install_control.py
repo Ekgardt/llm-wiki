@@ -2135,3 +2135,36 @@ def test_a_half_registered_scheduler_can_still_be_removed(tmp_path: Path) -> Non
     resource.write_projection(installed, None, {})
 
     assert _definition_directory_state(unit_dir) == {}
+
+class _UnregisteredSystemd(_FakeSystemd):
+    """A user manager that never registered these units, so disabling them fails."""
+
+    def _disable(self, command: tuple[str, ...]) -> tuple[int, bytes]:
+        return 1, b"Failed to disable unit: Unit file does not exist.\n"
+
+
+def test_removal_survives_a_manager_that_never_registered_the_units(
+    tmp_path: Path,
+) -> None:
+    """Disabling a unit the manager never knew fails, and that is the goal state."""
+    runner = _UnregisteredSystemd()
+    unit_dir = tmp_path / "systemd"
+    vault = tmp_path / "vault"
+    state_root = tmp_path / "state"
+    uv_path = tmp_path / "uv"
+    resource = systemd_scheduler_resource(
+        root=vault,
+        state_root=state_root,
+        uv_path=uv_path,
+        unit_directory=unit_dir,
+        runner=runner,
+        systemctl="systemctl",
+    )
+    unit_dir.mkdir(parents=True)
+    for name, value in render_systemd_definitions(vault, state_root, uv_path).items():
+        (unit_dir / name).write_bytes(value)
+
+    assert resource.write_projection is not None
+    resource.write_projection(resource.desired, None, {})
+
+    assert _definition_directory_state(unit_dir) == {}
