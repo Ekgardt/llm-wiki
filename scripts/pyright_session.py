@@ -358,22 +358,33 @@ def _parse_server_capabilities(
     return dict(sorted(capabilities.items())), encodings[encoding_value]
 
 
+def _permission_startup_code(error: PermissionError) -> str | None:
+    """A refused permission that is really a timeout in disguise."""
+    cause = error.__cause__
+    if cause is not None and cause.__class__.__name__ == "TimeoutExpired":
+        return "pyright_startup_timeout"
+    if "deadline expired" in str(error):
+        return "pyright_startup_timeout"
+    return None
+
+
+def _startup_code_of(error: BaseException) -> str | None:
+    """The code this one error names, if it names one."""
+    if isinstance(error, _BootstrapDegradation):
+        return error.code
+    if isinstance(error, TimeoutError):
+        return "pyright_startup_timeout"
+    if isinstance(error, PermissionError):
+        return _permission_startup_code(error)
+    return None
+
+
 def _startup_code(error: BaseException) -> str:
     current: BaseException | None = error
     while current is not None:
-        if isinstance(current, _BootstrapDegradation):
-            return current.code
-        if isinstance(current, TimeoutError):
-            return "pyright_startup_timeout"
-        if isinstance(current, PermissionError):
-            cause = current.__cause__
-            if (
-                cause is not None
-                and cause.__class__.__name__ == "TimeoutExpired"
-            ):
-                return "pyright_startup_timeout"
-            if "deadline expired" in str(current):
-                return "pyright_startup_timeout"
+        code = _startup_code_of(current)
+        if code is not None:
+            return code
         current = current.__cause__
     return "pyright_startup_failed"
 
@@ -408,27 +419,27 @@ def _lsp_coordinate(value: object) -> int | None:
     return value
 
 
+def _lsp_position(value: object) -> LspPosition | None:
+    """One protocol position, when both coordinates are usable."""
+    if not isinstance(value, dict):
+        return None
+    line = _lsp_coordinate(value.get("line"))
+    character = _lsp_coordinate(value.get("character"))
+    if line is None or character is None:
+        return None
+    return LspPosition(line, character)
+
+
 def _lsp_range(value: object) -> LspRange | None:
     if not isinstance(value, dict):
         return None
-    start = value.get("start")
-    end = value.get("end")
-    if not isinstance(start, dict) or not isinstance(end, dict):
+    start = _lsp_position(value.get("start"))
+    end = _lsp_position(value.get("end"))
+    if start is None or end is None:
         return None
-    start_line = _lsp_coordinate(start.get("line"))
-    start_character = _lsp_coordinate(start.get("character"))
-    end_line = _lsp_coordinate(end.get("line"))
-    end_character = _lsp_coordinate(end.get("character"))
-    if None in {start_line, start_character, end_line, end_character}:
+    if (end.line, end.character) < (start.line, start.character):
         return None
-    assert start_line is not None and start_character is not None
-    assert end_line is not None and end_character is not None
-    if (end_line, end_character) < (start_line, start_character):
-        return None
-    return LspRange(
-        LspPosition(start_line, start_character),
-        LspPosition(end_line, end_character),
-    )
+    return LspRange(start, end)
 
 
 def _location_key(location: LspLocation) -> tuple[object, ...]:
@@ -466,6 +477,18 @@ def _bounded_hover_string(value: object) -> str | None:
     return value
 
 
+def _hover_fragment_labelled(value: Mapping[str, object], text: str) -> str | None:
+    """A fragment is usable when its kind or its language names something real."""
+    if "kind" in value:
+        if value.get("kind") in {"plaintext", "markdown"}:
+            return text
+        return None
+    language = value.get("language")
+    if not isinstance(language, str) or not language:
+        return None
+    return text
+
+
 def _hover_fragment(value: object) -> str | None:
     if isinstance(value, str):
         return _bounded_hover_string(value)
@@ -474,12 +497,7 @@ def _hover_fragment(value: object) -> str | None:
     text = _bounded_hover_string(value.get("value"))
     if text is None:
         return None
-    if "kind" in value:
-        return text if value.get("kind") in {"plaintext", "markdown"} else None
-    language = value.get("language")
-    if not isinstance(language, str) or not language:
-        return None
-    return text
+    return _hover_fragment_labelled(value, text)
 
 
 def _hover_contents(value: object) -> tuple[str | None, bool]:
@@ -1598,6 +1616,17 @@ class _LaunchServerGuard:
             raise operation_error.with_traceback(operation_error.__traceback__)
 
 
+def _snapshot_supersedes(
+    existing: _DiagnosticSnapshot | None, version: int | None
+) -> bool:
+    """The snapshot already describes a newer version than the update does."""
+    if existing is None or existing.document_version is None:
+        return False
+    if version is None:
+        return True
+    return version < existing.document_version
+
+
 class PyrightSession:
     """Own one repository-scoped Pyright protocol lifecycle."""
 
@@ -2093,13 +2122,7 @@ class PyrightSession:
     ) -> bool:
         if version is not None and version < document.version:
             return True
-        if existing is None:
-            return False
-        return (
-            version is not None
-            and existing.document_version is not None
-            and version < existing.document_version
-        ) or (version is None and existing.document_version is not None)
+        return _snapshot_supersedes(existing, version)
 
     def _diagnostic_update_admissible_locked(
         self, uri: str, version: int | None
