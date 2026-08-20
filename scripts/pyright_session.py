@@ -500,24 +500,35 @@ def _hover_fragment(value: object) -> str | None:
     return _hover_fragment_labelled(value, text)
 
 
+def _hover_fragments(items: list[object]) -> tuple[list[str], bool]:
+    """Every readable fragment, and whether any had to be dropped."""
+    fragments: list[str] = []
+    partial = False
+    for item in items:
+        fragment = _hover_fragment(item)
+        if fragment is None:
+            partial = True
+            continue
+        fragments.append(fragment)
+    return fragments, partial
+
+
+def _joined_hover_contents(value: list[object]) -> tuple[str | None, bool]:
+    """The list form of hover contents, joined and bounded."""
+    if len(value) > 1024:
+        return None, True
+    fragments, partial = _hover_fragments(value)
+    if not fragments:
+        return None, True
+    joined = "\n\n".join(fragments)
+    if _bounded_hover_string(joined) is None:
+        return None, True
+    return joined, partial
+
+
 def _hover_contents(value: object) -> tuple[str | None, bool]:
     if isinstance(value, list):
-        if len(value) > 1024:
-            return None, True
-        fragments: list[str] = []
-        partial = False
-        for item in value:
-            fragment = _hover_fragment(item)
-            if fragment is None:
-                partial = True
-            else:
-                fragments.append(fragment)
-        if not fragments:
-            return None, True
-        joined = "\n\n".join(fragments)
-        if _bounded_hover_string(joined) is None:
-            return None, True
-        return joined, partial
+        return _joined_hover_contents(value)
     fragment = _hover_fragment(value)
     return fragment, fragment is None
 
@@ -951,11 +962,49 @@ class _WorkspaceQuery:
     epoch: int
 
 
+def _location_fields(value: Mapping[str, object]) -> tuple[object, object] | None:
+    """The URI and range of a location, in either of the protocol's two shapes."""
+    if "targetUri" not in value and "targetSelectionRange" not in value:
+        return value.get("uri"), value.get("range")
+    if _lsp_range(value.get("targetRange")) is None:
+        return None
+    return value.get("targetUri"), value.get("targetSelectionRange")
+
+
+def _check_qualified_identity(identity: PyrightIdentity) -> None:
+    """A qualified identity has to be internally consistent before it is used."""
+    if identity.status != "qualified" or identity.degradation_codes:
+        raise ValueError("qualified Pyright identity is internally inconsistent")
+    if (
+        identity.initialization_options_sha256
+        != PYRIGHT_INITIALIZATION_OPTIONS_SHA256
+    ):
+        raise ValueError(
+            "Pyright initialization options identity is inconsistent"
+        )
+    _check_identity_digest(
+        identity.configuration_sha256, "Pyright configuration identity is invalid"
+    )
+    _check_identity_digest(
+        identity.executable_sha256, "Pyright executable identity is invalid"
+    )
+
+
+def _check_identity_digest(value: object, message: str) -> None:
+    if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
+        raise ValueError(message)
+
+
+def _workspace_query_ready(state: _WorkspaceState) -> bool:
+    """The session holds a current, initialized generation to query."""
+    if state.process is None or state.generation is None:
+        return False
+    return state.initialized and state.current
+
+
 def _workspace_query_status(state: _WorkspaceState) -> str | None:
     """The status refusing a workspace query, or None when it may proceed."""
-    if state.process is None or state.generation is None:
-        return "not_ready"
-    if not state.initialized or not state.current:
+    if not _workspace_query_ready(state):
         return "not_ready"
     if not state.supported:
         return "unsupported"
@@ -2426,20 +2475,7 @@ class PyrightSession:
 
     def _validated_qualified_paths(self, *, deadline: float) -> tuple[Path, Path]:
         identity = self._identity
-        if identity.status != "qualified" or identity.degradation_codes:
-            raise ValueError("qualified Pyright identity is internally inconsistent")
-        if identity.initialization_options_sha256 != PYRIGHT_INITIALIZATION_OPTIONS_SHA256:
-            raise ValueError("Pyright initialization options identity is inconsistent")
-        if (
-            not isinstance(identity.configuration_sha256, str)
-            or _SHA256.fullmatch(identity.configuration_sha256) is None
-        ):
-            raise ValueError("Pyright configuration identity is invalid")
-        if (
-            not isinstance(identity.executable_sha256, str)
-            or _SHA256.fullmatch(identity.executable_sha256) is None
-        ):
-            raise ValueError("Pyright executable identity is invalid")
+        _check_qualified_identity(identity)
         node = _validated_local_file(
             identity.node_executable,
             "node_executable",
@@ -3121,14 +3157,10 @@ class PyrightSession:
     def _normalize_location(self, value: object) -> LspLocation | None:
         if not isinstance(value, dict):
             return None
-        if "targetUri" in value or "targetSelectionRange" in value:
-            uri = value.get("targetUri")
-            range_value = value.get("targetSelectionRange")
-            if _lsp_range(value.get("targetRange")) is None:
-                return None
-        else:
-            uri = value.get("uri")
-            range_value = value.get("range")
+        located = _location_fields(value)
+        if located is None:
+            return None
+        uri, range_value = located
         if not isinstance(uri, str):
             return None
         range_ = _lsp_range(range_value)
@@ -3152,19 +3184,14 @@ class PyrightSession:
         else:
             return (), True
         partial = len(raw) > MAX_LOCATIONS
-        locations: list[LspLocation] = []
-        seen: set[tuple[object, ...]] = set()
+        collected = _BoundedLocations()
         for value in raw[:MAX_LOCATIONS]:
             location = self._normalize_location(value)
             if location is None:
                 partial = True
                 continue
-            key = _location_key(location)
-            if key in seen:
-                continue
-            seen.add(key)
-            locations.append(location)
-        return tuple(locations), partial
+            collected.add(location)
+        return tuple(collected.locations), partial
 
     def _location_params(
         self, query: _DocumentQuery, anchor: SourceAnchor, *, references: bool
@@ -3773,18 +3800,24 @@ class PyrightSession:
         absolute = Path(self._repository.checkout_root, relative_path)
         return path_to_file_uri(absolute)
 
-    def _synchronize_snapshot_replayed_locked(self, process: LspProcess) -> bool:
+    def _replay_generation_current(self, process: LspProcess) -> str | None:
+        """The generation both we and the process agree is current, if any."""
         generation = self._generation_nonce
-        return (
-            self._process is process
-            and process.state not in {ProcessState.DEGRADED, ProcessState.FAILED}
-            and generation is not None
-            and generation == process.generation_nonce
-            and self._position_encoding is not None
-            and all(
-                self._wire_document_opened(document, generation)
-                for document in self._documents.values()
-            )
+        if self._process is not process or generation is None:
+            return None
+        if process.state in {ProcessState.DEGRADED, ProcessState.FAILED}:
+            return None
+        if generation != process.generation_nonce:
+            return None
+        return generation
+
+    def _synchronize_snapshot_replayed_locked(self, process: LspProcess) -> bool:
+        generation = self._replay_generation_current(process)
+        if generation is None or self._position_encoding is None:
+            return False
+        return all(
+            self._wire_document_opened(document, generation)
+            for document in self._documents.values()
         )
 
     def _recovery_unnecessary_locked(
