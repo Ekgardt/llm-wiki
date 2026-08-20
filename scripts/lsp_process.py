@@ -2434,60 +2434,113 @@ def _queue_expired_drain(instance: LspProcess) -> None:
         _queue_generation_failure(instance._coordinator, generation, "expired drain")
 
 
-def _recovery_loop(instance: LspProcess) -> None:
-    coordinator = instance._coordinator
-    request_retry = False
+@dataclass
+class _RecoveryState:
+    """What the recovery loop still owes on its next pass."""
+
+    request_retry: bool = False
     terminal_retry_code: str | None = None
-    while not coordinator.recovery_stop.is_set():
-        if request_retry or terminal_retry_code is not None:
-            coordinator.recovery_wake.clear()
-            if coordinator.recovery_stop.is_set():
-                return
-            coordinator.recovery_wake.wait(_RECOVERY_RETRY_SECONDS)
-        else:
-            drain_deadline = _next_drain_deadline(instance)
-            wait_for = (
-                None
-                if drain_deadline is None
-                else max(0.0, drain_deadline - time.monotonic())
-            )
-            coordinator.recovery_wake.wait(wait_for)
+
+    @property
+    def pending(self) -> bool:
+        return self.request_retry or self.terminal_retry_code is not None
+
+
+def _recovery_wait(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    state: _RecoveryState,
+) -> None:
+    """Wait for work: a short retry beat, or until the next drain deadline."""
+    if state.pending:
         coordinator.recovery_wake.clear()
         if coordinator.recovery_stop.is_set():
             return
+        coordinator.recovery_wake.wait(_RECOVERY_RETRY_SECONDS)
+        return
+    drain_deadline = _next_drain_deadline(instance)
+    wait_for = (
+        None
+        if drain_deadline is None
+        else max(0.0, drain_deadline - time.monotonic())
+    )
+    coordinator.recovery_wake.wait(wait_for)
 
-        if terminal_retry_code is not None:
-            if _retry_autonomous_terminal_cleanup(instance, terminal_retry_code):
-                continue
-            terminal_retry_code = None
-            if coordinator.recovery_stop.is_set():
-                return
 
-        request_failure: str | None = None
-        if coordinator.recovery_request_pending.is_set():
-            maintenance_deadline = time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
-            request_retry, request_failure = _process_recovery_request(
-                instance, maintenance_deadline
-            )
-        else:
-            request_retry = False
-        if request_failure is not None:
-            terminal_retry_code = request_failure
-        if request_retry or terminal_retry_code is not None:
-            continue
+def _retry_terminal_cleanup(
+    instance: LspProcess, state: _RecoveryState
+) -> bool:
+    """True when the same terminal code still needs another pass."""
+    if state.terminal_retry_code is None:
+        return False
+    if _retry_autonomous_terminal_cleanup(instance, state.terminal_retry_code):
+        return True
+    state.terminal_retry_code = None
+    return False
 
-        _queue_expired_drain(instance)
-        while not coordinator.recovery_stop.is_set():
-            try:
-                intent = coordinator.failure_queue.get_nowait()
-            except queue.Empty:
-                break
-            maintenance_deadline = time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
-            terminal_retry_code = _process_failure_intent(
-                instance, intent, maintenance_deadline
-            )
-            if terminal_retry_code is not None:
-                break
+
+def _serve_recovery_request(
+    coordinator: _LifecycleCoordinator,
+    instance: LspProcess,
+    state: _RecoveryState,
+) -> None:
+    """Run a pending maintenance request and record what it left owing."""
+    if not coordinator.recovery_request_pending.is_set():
+        state.request_retry = False
+        return
+    deadline = time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
+    state.request_retry, failure = _process_recovery_request(instance, deadline)
+    if failure is not None:
+        state.terminal_retry_code = failure
+
+
+def _drain_failure_intents(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    state: _RecoveryState,
+) -> None:
+    """Take queued failure intents until one asks for a terminal retry."""
+    _queue_expired_drain(instance)
+    while not coordinator.recovery_stop.is_set():
+        try:
+            intent = coordinator.failure_queue.get_nowait()
+        except queue.Empty:
+            return
+        deadline = time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
+        state.terminal_retry_code = _process_failure_intent(
+            instance, intent, deadline
+        )
+        if state.terminal_retry_code is not None:
+            return
+
+
+def _recovery_pass(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    state: _RecoveryState,
+) -> bool:
+    """One pass of the recovery loop; False when the loop should stop."""
+    _recovery_wait(instance, coordinator, state)
+    coordinator.recovery_wake.clear()
+    if coordinator.recovery_stop.is_set():
+        return False
+    if _retry_terminal_cleanup(instance, state):
+        return True
+    if coordinator.recovery_stop.is_set():
+        return False
+    _serve_recovery_request(coordinator, instance, state)
+    if state.pending:
+        return True
+    _drain_failure_intents(instance, coordinator, state)
+    return True
+
+
+def _recovery_loop(instance: LspProcess) -> None:
+    coordinator = instance._coordinator
+    state = _RecoveryState()
+    while not coordinator.recovery_stop.is_set():
+        if not _recovery_pass(instance, coordinator, state):
+            return
 
 
 def _acquire_recovery_driver(
