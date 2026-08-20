@@ -2533,6 +2533,31 @@ def _index_stat_words(info: os.stat_result) -> tuple[int, ...]:
     )
 
 
+def _matching_index_stat_words(
+    entry: _GitIndexEntry, value: _VerificationHash | None
+) -> tuple[int, ...] | None:
+    """The stat words to write back, when this entry is provably still current."""
+    if value is None or value.git_oid != entry.oid:
+        return None
+    current_mode = 0o100755 if value.info.st_mode & 0o111 else 0o100644
+    if current_mode != entry.mode:
+        return None
+    return _index_stat_words(value.info)
+
+
+def _rewrite_index_stat(
+    result: bytearray, entry: _GitIndexEntry, value: _VerificationHash | None
+) -> None:
+    """Zero this entry's stat fields, restoring them only if they still hold."""
+    words = _matching_index_stat_words(entry, value)
+    if words is None:
+        struct.pack_into("!6I", result, entry.offset, *(0,) * 6)
+        struct.pack_into("!3I", result, entry.offset + 28, *(0,) * 3)
+        return
+    struct.pack_into("!6I", result, entry.offset, *words[:6])
+    struct.pack_into("!3I", result, entry.offset + 28, *words[6:])
+
+
 def _refresh_private_index(
     parsed: _ParsedGitIndex,
     hashes: dict[str, _VerificationHash],
@@ -2549,17 +2574,7 @@ def _refresh_private_index(
         result[offset:end] = parsed.content[offset:end]
     for entry in parsed.entries:
         _check_stop(deadline, cancelled)
-        struct.pack_into("!6I", result, entry.offset, *(0,) * 6)
-        struct.pack_into("!3I", result, entry.offset + 28, *(0,) * 3)
-        value = hashes.get(entry.path)
-        if value is None or value.git_oid != entry.oid:
-            continue
-        current_mode = 0o100755 if value.info.st_mode & 0o111 else 0o100644
-        if current_mode != entry.mode:
-            continue
-        words = _index_stat_words(value.info)
-        struct.pack_into("!6I", result, entry.offset, *words[:6])
-        struct.pack_into("!3I", result, entry.offset + 28, *words[6:])
+        _rewrite_index_stat(result, entry, hashes.get(entry.path))
     result[parsed.entries_end :] = _checked_digest(
         hash_name,
         result,
@@ -2580,6 +2595,52 @@ def _object_hash_name(expected_head: str | None) -> str | None:
     return None
 
 
+def _fence_text(content: bytes | bytearray) -> str | None:
+    """One fenced git file's single line of ASCII, or None when it is not that."""
+    try:
+        return bytes(content).decode("ascii", errors="strict").strip()
+    except UnicodeError:
+        return None
+
+
+def _safe_head_reference(value: str) -> PurePosixPath | None:
+    """The ref this HEAD points at, if it names a plain path under `refs/`."""
+    reference = value[5:]
+    pure = PurePosixPath(reference)
+    if not reference.startswith("refs/") or "\\" in reference:
+        return None
+    if pure.is_absolute():
+        return None
+    return None if any(part in {"", ".", ".."} for part in pure.parts) else pure
+
+
+def _resolved_head_target(
+    value: str,
+    root: Path,
+    marker: Path,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> tuple[str, _OwnedFileFence | None] | None:
+    """The commit HEAD names, with the ref's own fence when it went through one."""
+    if not value.startswith("ref: "):
+        return value, None
+    pure = _safe_head_reference(value)
+    if pure is None:
+        return None
+    reference_read = _read_owned_file(
+        root,
+        marker.joinpath(*pure.parts),
+        _MAX_HEAD_FENCE_BYTES,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    if reference_read is None:
+        return None
+    oid = _fence_text(reference_read.content)
+    return None if oid is None else (oid, reference_read.fence)
+
+
 def _read_direct_head_fence(
     root: Path,
     expected_head: str,
@@ -2597,37 +2658,15 @@ def _read_direct_head_fence(
     )
     if head_read is None:
         return None
-    try:
-        value = head_read.content.decode("ascii", errors="strict").strip()
-    except UnicodeError:
+    value = _fence_text(head_read.content)
+    if value is None:
         return None
-    reference_fence = None
-    if value.startswith("ref: "):
-        reference = value[5:]
-        pure = PurePosixPath(reference)
-        if (
-            not reference.startswith("refs/")
-            or "\\" in reference
-            or pure.is_absolute()
-            or any(part in {"", ".", ".."} for part in pure.parts)
-        ):
-            return None
-        reference_read = _read_owned_file(
-            root,
-            marker.joinpath(*pure.parts),
-            _MAX_HEAD_FENCE_BYTES,
-            deadline=deadline,
-            cancelled=cancelled,
-        )
-        if reference_read is None:
-            return None
-        try:
-            oid = reference_read.content.decode("ascii", errors="strict").strip()
-        except UnicodeError:
-            return None
-        reference_fence = reference_read.fence
-    else:
-        oid = value
+    resolved = _resolved_head_target(
+        value, root, marker, deadline=deadline, cancelled=cancelled
+    )
+    if resolved is None:
+        return None
+    oid, reference_fence = resolved
     if _GIT_COMMIT_RE.fullmatch(oid.encode("ascii")) is None or oid != expected_head:
         return None
     return _HeadFence(oid, head_read.fence, reference_fence)
@@ -2699,9 +2738,7 @@ def _unmatched_entries_bounded(
         if size is None:
             return False
         total += size
-        if total > _MAX_PRIVATE_UNMATCHED_TRACKED_BYTES:
-            return False
-    return True
+    return total <= _MAX_PRIVATE_UNMATCHED_TRACKED_BYTES
 
 
 def _tracked_attributes_inert(
