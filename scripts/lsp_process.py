@@ -148,6 +148,16 @@ class _ObjectIdentity:
     reparse_attributes: int
 
 
+def _lease_payload(record: Mapping[str, object]) -> bytes:
+    """The lease as compact JSON bytes, within its evidence bound."""
+    payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    if len(payload) > _MAX_EVIDENCE_BYTES:
+        raise ValueError("LSP lease exceeds its byte bound")
+    return payload
+
+
 @dataclass(slots=True)
 class _OwnerDirectory:
     owner_root: Path
@@ -476,6 +486,140 @@ class _OwnerDirectory:
         if not published:
             raise OSError("LSP evidence publication did not complete")
 
+    def _lease_retry_deadline(self, deadline: float | None) -> float:
+        """How long a replace may keep retrying, never past our own lease."""
+        retry_deadline = (
+            time.monotonic() if deadline is None else _validated_deadline(deadline)
+        )
+        if self._lease_expires_monotonic is None:
+            return retry_deadline
+        return min(retry_deadline, self._lease_expires_monotonic)
+
+    def _retry_temp_names_always(self, operation_error: BaseException) -> None:
+        """Clean up leftovers; a cleanup failure outranks the original error."""
+        try:
+            self._retry_pending_temp_names()
+        except BaseException as cleanup_error:
+            raise cleanup_error from operation_error
+
+    def _retry_temp_names_after(
+        self, temporary: str, operation_error: BaseException
+    ) -> None:
+        if temporary not in self._pending_temp_names:
+            return
+        self._retry_temp_names_always(operation_error)
+
+    def _write_lease_descriptor(self, descriptor: int, payload: bytes) -> None:
+        """Write and verify the lease through an owned descriptor."""
+        identity = _identity_from_stat(os.fstat(descriptor))
+        _require_file_identity(identity, "LSP lease")
+        _write_all_descriptor(descriptor, payload)
+        os.fchmod(descriptor, 0o600)
+        os.fsync(descriptor)
+        _verify_descriptor(descriptor, identity, mode=0o600, directory=False)
+
+    def _publish_lease_posix(
+        self, temporary: str, payload: bytes, expires_monotonic: float | None
+    ) -> None:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=self.owner_handle,
+        )
+        self._remember_temp_name(temporary)
+        try:
+            self._write_lease_descriptor(descriptor, payload)
+        finally:
+            os.close(descriptor)
+        os.replace(
+            temporary,
+            "lease.json",
+            src_dir_fd=self.owner_handle,
+            dst_dir_fd=self.owner_handle,
+        )
+        self._forget_temp_name(temporary)
+        self.sync_directory()
+        self._lease_expires_monotonic = expires_monotonic
+
+    def _write_lease_posix(
+        self, temporary: str, payload: bytes, expires_monotonic: float | None
+    ) -> None:
+        try:
+            self._publish_lease_posix(temporary, payload, expires_monotonic)
+        except BaseException as operation_error:
+            self._retry_temp_names_after(temporary, operation_error)
+            raise
+
+    @staticmethod
+    def _lease_replace_retryable(
+        error: OSError, retry_deadline: float, retry_stop: threading.Event | None
+    ) -> bool:
+        """Whether this replace failure is one we wait out rather than report."""
+        code = getattr(error, "winerror", None) or error.errno
+        if code not in _WINDOWS_LEASE_RETRY_ERRORS or retry_stop is None:
+            return False
+        remaining = retry_deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        return not retry_stop.wait(min(_WINDOWS_LEASE_RETRY_SECONDS, remaining))
+
+    def _replace_lease_windows(
+        self,
+        handle: object,
+        retry_deadline: float,
+        retry_stop: threading.Event | None,
+    ) -> None:
+        while True:
+            try:
+                _windows_workspace.replace_file(
+                    handle, self.owner_handle, "lease.json"
+                )
+                return
+            except OSError as error:
+                if not self._lease_replace_retryable(
+                    error, retry_deadline, retry_stop
+                ):
+                    raise
+
+    def _write_lease_windows(
+        self,
+        temporary: str,
+        payload: bytes,
+        expires_monotonic: float | None,
+        retry_deadline: float,
+        retry_stop: threading.Event | None,
+    ) -> None:
+        self._remember_temp_name(temporary)
+        try:
+            handle = _windows_workspace.create_file(self.owner_handle, temporary)
+        except BaseException as operation_error:
+            self._retry_temp_names_always(operation_error)
+            raise
+        replaced = False
+        operation_error: BaseException | None = None
+        try:
+            _windows_workspace.write_all(
+                handle, payload, chunk_bytes=_MAX_EVIDENCE_BYTES
+            )
+            _windows_workspace.flush_file(handle)
+            self._replace_lease_windows(handle, retry_deadline, retry_stop)
+            replaced = True
+            self._lease_expires_monotonic = expires_monotonic
+        except BaseException as error:
+            operation_error = error
+        self._finish_windows_temporary(
+            temporary,
+            handle,
+            moved=replaced,
+            operation_error=operation_error,
+        )
+        self.sync_directory()
+
     def write_lease(
         self,
         record: Mapping[str, object],
@@ -486,107 +630,23 @@ class _OwnerDirectory:
     ) -> None:
         if self.owner_handle is None:
             raise RuntimeError("LSP owner directory is closed")
-        retry_deadline = (
-            time.monotonic() if deadline is None else _validated_deadline(deadline)
-        )
-        if self._lease_expires_monotonic is not None:
-            retry_deadline = min(retry_deadline, self._lease_expires_monotonic)
+        retry_deadline = self._lease_retry_deadline(deadline)
         if expires_monotonic is not None:
             expires_monotonic = _validated_deadline(expires_monotonic)
-        payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        if len(payload) > _MAX_EVIDENCE_BYTES:
-            raise ValueError("LSP lease exceeds its byte bound")
+        payload = _lease_payload(record)
         with self._child_handle_lock:
             self._retry_pending_temp_names()
             temporary = f".lease-{secrets.token_hex(8)}.tmp"
             if os.name == "posix":
-                try:
-                    descriptor = os.open(
-                        temporary,
-                        os.O_WRONLY
-                        | os.O_CREAT
-                        | os.O_EXCL
-                        | os.O_NOFOLLOW
-                        | getattr(os, "O_CLOEXEC", 0),
-                        0o600,
-                        dir_fd=self.owner_handle,
-                    )
-                    self._remember_temp_name(temporary)
-                    try:
-                        identity = _identity_from_stat(os.fstat(descriptor))
-                        _require_file_identity(identity, "LSP lease")
-                        _write_all_descriptor(descriptor, payload)
-                        os.fchmod(descriptor, 0o600)
-                        os.fsync(descriptor)
-                        _verify_descriptor(
-                            descriptor, identity, mode=0o600, directory=False
-                        )
-                    finally:
-                        os.close(descriptor)
-                    os.replace(
-                        temporary,
-                        "lease.json",
-                        src_dir_fd=self.owner_handle,
-                        dst_dir_fd=self.owner_handle,
-                    )
-                    self._forget_temp_name(temporary)
-                    self.sync_directory()
-                    self._lease_expires_monotonic = expires_monotonic
-                except BaseException as operation_error:
-                    if temporary in self._pending_temp_names:
-                        try:
-                            self._retry_pending_temp_names()
-                        except BaseException as cleanup_error:
-                            raise cleanup_error from operation_error
-                    raise
+                self._write_lease_posix(temporary, payload, expires_monotonic)
                 return
-
-            self._remember_temp_name(temporary)
-            try:
-                handle = _windows_workspace.create_file(self.owner_handle, temporary)
-            except BaseException as operation_error:
-                try:
-                    self._retry_pending_temp_names()
-                except BaseException as cleanup_error:
-                    raise cleanup_error from operation_error
-                raise
-            replaced = False
-            operation_error: BaseException | None = None
-            try:
-                _windows_workspace.write_all(
-                    handle, payload, chunk_bytes=_MAX_EVIDENCE_BYTES
-                )
-                _windows_workspace.flush_file(handle)
-                while True:
-                    try:
-                        _windows_workspace.replace_file(
-                            handle, self.owner_handle, "lease.json"
-                        )
-                    except OSError as error:
-                        code = getattr(error, "winerror", None) or error.errno
-                        remaining = retry_deadline - time.monotonic()
-                        if (
-                            code not in _WINDOWS_LEASE_RETRY_ERRORS
-                            or retry_stop is None
-                            or remaining <= 0
-                            or retry_stop.wait(
-                                min(_WINDOWS_LEASE_RETRY_SECONDS, remaining)
-                            )
-                        ):
-                            raise
-                    else:
-                        replaced = True
-                        self._lease_expires_monotonic = expires_monotonic
-                        break
-            except BaseException as error:
-                operation_error = error
-            self._finish_windows_temporary(
+            self._write_lease_windows(
                 temporary,
-                handle,
-                moved=replaced,
-                operation_error=operation_error,
+                payload,
+                expires_monotonic,
+                retry_deadline,
+                retry_stop,
             )
-            self.sync_directory()
 
     def sync_directory(self) -> None:
         handle = self.owner_handle
