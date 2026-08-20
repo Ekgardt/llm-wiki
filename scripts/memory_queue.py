@@ -2766,14 +2766,19 @@ def _require_dedupe_key(dedupe_key: object) -> None:
         raise ValueError("dedupe_key must be a non-empty bounded string")
 
 
+def _unsafe_link_shape(logical_path: str) -> bool:
+    """Whether the path's shape puts it outside the vault's naming rules."""
+    if logical_path.startswith(("/", "\\")) or "\\" in logical_path:
+        return True
+    return any(part in {"", ".", ".."} for part in logical_path.split("/"))
+
+
 def _unsafe_link_path(logical_path: object) -> bool:
     if not isinstance(logical_path, str) or not logical_path:
         return True
     if len(logical_path.encode("utf-8")) > 4096:
         return True
-    if logical_path.startswith(("/", "\\")) or "\\" in logical_path:
-        return True
-    return any(part in {"", ".", ".."} for part in logical_path.split("/"))
+    return _unsafe_link_shape(logical_path)
 
 
 def _link_pair(item: object) -> tuple[object, object]:
@@ -3136,16 +3141,21 @@ def _blocked_purge(task_id: str, code: str) -> CorruptPurgeProgress:
     return _purge_progress(task_id, "", 0, 0, state="blocked", code=code)
 
 
+def _redacted_mapping(value: dict[object, object]) -> dict[object, object]:
+    """A mapping with secret-named keys blanked and every other value walked."""
+    return {
+        key: "[REDACTED]" if _is_secret_key(key) else _redact_payload(item)
+        for key, item in value.items()
+    }
+
+
 def _redact_payload(value: object) -> object:
     if isinstance(value, str):
         return redact_secrets(value)
     if isinstance(value, (list, tuple)):
         return [_redact_payload(item) for item in value]
     if isinstance(value, dict):
-        return {
-            key: "[REDACTED]" if _is_secret_key(key) else _redact_payload(item)
-            for key, item in value.items()
-        }
+        return _redacted_mapping(value)
     return value
 
 
@@ -4603,6 +4613,79 @@ def _require_projectable_parent(registry: Any, parent: object, role: str) -> Non
         registry.require(database, parent)
 
 
+# The queue tables whose rows keep the run directory alive.
+_RETAINING_QUEUE_QUERIES = (
+    "SELECT 1 FROM tasks LIMIT 1",
+    "SELECT 1 FROM source_fences LIMIT 1",
+    "SELECT 1 FROM source_failures LIMIT 1",
+)
+
+
+def _directory_holds_anything(path: Path) -> bool:
+    """Whether the directory has an entry; one that cannot be read counts as held."""
+    try:
+        return path.exists() and any(path.iterdir())
+    except OSError:
+        return True
+
+
+def _is_positive_int(value: object) -> bool:
+    """A real positive integer; `True` is not one."""
+    if not isinstance(value, int) or isinstance(value, bool):
+        return False
+    return value > 0
+
+
+def _require_positive_lease(lease_seconds: object) -> None:
+    """Refuse a fence lease that is not a positive number of seconds."""
+    if not _is_positive_int(lease_seconds):
+        raise ValueError("source fence lease must be a positive integer")
+
+
+def _valid_heartbeat_interval(heartbeat_seconds: object, lease_seconds: object) -> bool:
+    """A heartbeat interval that is strictly shorter than the lease it renews."""
+    if not _is_positive_int(heartbeat_seconds):
+        return False
+    if not isinstance(lease_seconds, int) or isinstance(lease_seconds, bool):
+        return False
+    return lease_seconds > heartbeat_seconds
+
+
+def _require_known_states(states: tuple[str, ...]) -> None:
+    """Refuse a state filter that names something the queue cannot hold."""
+    if not states or any(state not in _STATES for state in states):
+        raise ValueError("invalid queue state")
+
+
+def _require_canonical_daily_id(daily_id: object) -> None:
+    """Refuse anything that is not a canonical `YYYY-MM-DD` daily id."""
+    if (
+        not isinstance(daily_id, str)
+        or re.fullmatch(r"\d{4}-\d{2}-\d{2}", daily_id) is None
+    ):
+        raise ValueError("daily_id must be a canonical date")
+    try:
+        if date.fromisoformat(daily_id).isoformat() != daily_id:
+            raise ValueError
+    except ValueError as exc:
+        raise ValueError("daily_id must be a canonical date") from exc
+
+
+def _insert_source_fence(
+    connection: sqlite3.Connection, values: tuple[object, ...]
+) -> None:
+    """Record the fence, refusing when another one already holds the source."""
+    try:
+        connection.execute(
+            "INSERT INTO source_fences "
+            "(daily_id, source_digest, token, owner_pid, acquired_at, "
+            "heartbeat_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            values,
+        )
+    except sqlite3.IntegrityError as exc:
+        raise QueueOperationError("source_fenced") from exc
+
+
 class MemoryQueue:
     """Durable priority queue with lease-token fencing and at-least-once delivery."""
 
@@ -5593,14 +5676,11 @@ class MemoryQueue:
 
     @staticmethod
     def _validate_source_identity(daily_id: str, source_digest: str) -> None:
-        if not isinstance(daily_id, str) or re.fullmatch(r"\d{4}-\d{2}-\d{2}", daily_id) is None:
-            raise ValueError("daily_id must be a canonical date")
-        try:
-            if date.fromisoformat(daily_id).isoformat() != daily_id:
-                raise ValueError
-        except ValueError as exc:
-            raise ValueError("daily_id must be a canonical date") from exc
-        if not isinstance(source_digest, str) or re.fullmatch(r"[0-9a-f]{64}", source_digest) is None:
+        _require_canonical_daily_id(daily_id)
+        if (
+            not isinstance(source_digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", source_digest) is None
+        ):
             raise ValueError("source_digest must be a lowercase SHA-256")
 
     @staticmethod
@@ -5755,8 +5835,7 @@ class MemoryQueue:
         states: tuple[str, ...] = ("ready", "leased", "blocked", "dead"),
     ) -> tuple[str, ...]:
         self._validate_source_identity(daily_id, source_digest)
-        if not states or any(state not in _STATES for state in states):
-            raise ValueError("invalid queue state")
+        _require_known_states(states)
         placeholders = ",".join("?" for _ in states)
         with self._connect() as connection:
             cursor = connection.execute(
@@ -5764,13 +5843,29 @@ class MemoryQueue:
                 "ORDER BY created_at, rowid",  # noqa: S608 - generated placeholders
                 states,
             )
-            matches = []
-            for row in cursor:
+            return tuple(
+                str(row["id"])
+                for row in cursor
                 if self._payload_references_source(
                     str(row["payload_json"]), daily_id, source_digest
-                ):
-                    matches.append(str(row["id"]))
-            return tuple(matches)
+                )
+            )
+
+    def _require_source_unreferenced(
+        self, connection: sqlite3.Connection, daily_id: str, source_digest: str
+    ) -> None:
+        """Refuse a fence over a source that some live task still points at."""
+        rows = connection.execute(
+            "SELECT id, payload_json FROM tasks "
+            "WHERE state IN ('ready','leased','blocked','dead')"
+        )
+        if any(
+            self._payload_references_source(
+                str(row["payload_json"]), daily_id, source_digest
+            )
+            for row in rows
+        ):
+            raise QueueOperationError("source_referenced")
 
     def acquire_source_fence(
         self,
@@ -5780,38 +5875,25 @@ class MemoryQueue:
         lease_seconds: int = DEFAULTS.queue_lease_seconds,
     ) -> SourceFence:
         self._validate_source_identity(daily_id, source_digest)
-        if not isinstance(lease_seconds, int) or isinstance(lease_seconds, bool) or lease_seconds <= 0:
-            raise ValueError("source fence lease must be a positive integer")
+        _require_positive_lease(lease_seconds)
         token = f"{self._rng.getrandbits(256):064x}"
         acquired = _as_utc(self._clock())
         expires = acquired + timedelta(seconds=lease_seconds)
         with self._connect() as connection, begin_immediate(connection):
             self._delete_stale_source_fences(connection)
-            for row in connection.execute(
-                "SELECT id, payload_json FROM tasks "
-                "WHERE state IN ('ready','leased','blocked','dead')"
-            ):
-                if self._payload_references_source(
-                    str(row["payload_json"]), daily_id, source_digest
-                ):
-                    raise QueueOperationError("source_referenced")
-            try:
-                connection.execute(
-                    "INSERT INTO source_fences "
-                    "(daily_id, source_digest, token, owner_pid, acquired_at, "
-                    "heartbeat_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        daily_id,
-                        source_digest,
-                        token,
-                        os.getpid(),
-                        _timestamp(acquired),
-                        _timestamp(acquired),
-                        _timestamp(expires),
-                    ),
-                )
-            except sqlite3.IntegrityError as exc:
-                raise QueueOperationError("source_fenced") from exc
+            self._require_source_unreferenced(connection, daily_id, source_digest)
+            _insert_source_fence(
+                connection,
+                (
+                    daily_id,
+                    source_digest,
+                    token,
+                    os.getpid(),
+                    _timestamp(acquired),
+                    _timestamp(acquired),
+                    _timestamp(expires),
+                ),
+            )
         return SourceFence(
             daily_id,
             source_digest,
@@ -5830,8 +5912,7 @@ class MemoryQueue:
     ) -> SourceFence:
         if not isinstance(fence, SourceFence):
             raise TypeError("source heartbeat requires a SourceFence")
-        if not isinstance(lease_seconds, int) or isinstance(lease_seconds, bool) or lease_seconds <= 0:
-            raise ValueError("source fence lease must be a positive integer")
+        _require_positive_lease(lease_seconds)
         now = _as_utc(self._clock())
         expires = now + timedelta(seconds=lease_seconds)
         with self._connect() as connection, begin_immediate(connection):
@@ -5864,14 +5945,7 @@ class MemoryQueue:
         heartbeat_seconds: int = DEFAULTS.queue_heartbeat_seconds,
         lease_seconds: int = DEFAULTS.queue_lease_seconds,
     ):
-        if (
-            not isinstance(heartbeat_seconds, int)
-            or isinstance(heartbeat_seconds, bool)
-            or heartbeat_seconds <= 0
-            or not isinstance(lease_seconds, int)
-            or isinstance(lease_seconds, bool)
-            or lease_seconds <= heartbeat_seconds
-        ):
+        if not _valid_heartbeat_interval(heartbeat_seconds, lease_seconds):
             raise ValueError("source heartbeat interval must be shorter than its lease")
         heartbeat = _SourceFenceHeartbeat(
             self,
@@ -5949,27 +6023,20 @@ class MemoryQueue:
             if changed != 1:
                 raise QueueOperationError("source_fence_lost")
 
-    def retains_run_directory(self) -> bool:
+    def _has_any_retaining_row(self) -> bool:
+        """Whether any queue table still holds a row."""
         with self._connect() as connection:
-            task = connection.execute("SELECT 1 FROM tasks LIMIT 1").fetchone()
-            source_fence = connection.execute(
-                "SELECT 1 FROM source_fences LIMIT 1"
-            ).fetchone()
-            source_failure = connection.execute(
-                "SELECT 1 FROM source_failures LIMIT 1"
-            ).fetchone()
-        if task is not None or source_fence is not None or source_failure is not None:
+            return any(
+                connection.execute(query).fetchone() is not None
+                for query in _RETAINING_QUEUE_QUERIES
+            )
+
+    def retains_run_directory(self) -> bool:
+        if self._has_any_retaining_row():
             return True
-        quarantine = self.run_dir / "queue-quarantine"
-        try:
-            if quarantine.exists() and any(quarantine.iterdir()):
-                return True
-        except OSError:
+        if _directory_holds_anything(self.run_dir / "queue-quarantine"):
             return True
-        try:
-            return any(self.results_dir.iterdir())
-        except OSError:
-            return True
+        return _directory_holds_anything(self.results_dir)
 
     def _purge_selection(
         self, states: tuple[str, ...], cutoff: datetime
