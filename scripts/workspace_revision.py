@@ -2894,13 +2894,14 @@ def _try_private_git_state(
     )
     return _PrivateGitState(current_head, status, proof)
 
-def _validate_private_git_proof(
+def _proof_index_unchanged(
     proof: _PrivateGitProof,
-    *,
     root: Path,
+    *,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
 ) -> bool:
+    """Whether the index and HEAD the private read used are still the same."""
     current_index = _read_owned_file(
         root,
         proof.index.path,
@@ -2911,25 +2912,32 @@ def _validate_private_git_proof(
     if current_index is None or current_index.fence != proof.index:
         return False
     current_head = _read_direct_head_fence(
-        root,
-        proof.head.oid,
-        deadline=deadline,
-        cancelled=cancelled,
+        root, proof.head.oid, deadline=deadline, cancelled=cancelled
     )
-    if current_head != proof.head:
-        return False
+    return current_head == proof.head
+
+
+def _proof_installation_unchanged(proof: _PrivateGitProof) -> bool:
+    """Whether the git binary and the environment are still the proven ones."""
+    installation = proof.raw_semantics.installation
     try:
-        executable_info = proof.raw_semantics.installation.executable.lstat()
+        info = installation.executable.lstat()
     except OSError:
         return False
-    if (
-        _is_reparse(executable_info)
-        or not stat.S_ISREG(executable_info.st_mode)
-        or _strong_identity(executable_info) != proof.raw_semantics.installation.identity
-    ):
+    if _is_reparse(info) or not stat.S_ISREG(info.st_mode):
         return False
-    if _raw_semantics_environment() != proof.raw_semantics.environment:
+    if _strong_identity(info) != installation.identity:
         return False
+    return _raw_semantics_environment() == proof.raw_semantics.environment
+
+
+def _proof_semantics_files_unchanged(
+    proof: _PrivateGitProof,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    """Whether every fenced semantics file still reads exactly as it did."""
     for semantic_file in proof.raw_semantics.files:
         _check_stop(deadline, cancelled)
         current = _read_owned_file(
@@ -2941,28 +2949,77 @@ def _validate_private_git_proof(
         )
         if current is None or current.fence != semantic_file.file:
             return False
+    return True
+
+
+def _proof_absent_paths_still_absent(
+    proof: _PrivateGitProof,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    """Whether every path the proof recorded as missing is still missing."""
     for semantic_root, path in proof.raw_semantics.absent:
         _check_stop(deadline, cancelled)
         if _owned_path_exists_or_is_uncertain(semantic_root, path):
             return False
+    return True
+
+
+def _proof_directory_unchanged(
+    snapshot: _DirectorySnapshot, change_time_ns: int
+) -> bool:
+    """Whether this directory still has the identity and change time proven."""
+    try:
+        current = snapshot.path.lstat()
+    except OSError as exc:
+        raise PermissionError(
+            "workspace revision directory changed after Git state"
+        ) from exc
+    if _identity(current) != snapshot.identity:
+        return False
+    return current.st_ctime_ns == change_time_ns
+
+
+def _proof_change_times_unchanged(
+    proof: _PrivateGitProof,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    """Whether every directory and file still has the change time proven."""
     for snapshot, change_time_ns in proof.directory_change_times:
         _check_stop(deadline, cancelled)
-        try:
-            current = snapshot.path.lstat()
-        except OSError as exc:
-            raise PermissionError("workspace revision directory changed after Git state") from exc
-        if (
-            _identity(current) != snapshot.identity
-            or current.st_ctime_ns != change_time_ns
-        ):
+        if not _proof_directory_unchanged(snapshot, change_time_ns):
             return False
-    for snapshot, change_time_ns in proof.file_change_times:
+    for file_snapshot, change_time_ns in proof.file_change_times:
         _check_stop(deadline, cancelled)
-        current = _validate_file_identity(snapshot)
-        if current.st_ctime_ns != change_time_ns:
+        if _validate_file_identity(file_snapshot).st_ctime_ns != change_time_ns:
             return False
     return True
 
+
+def _validate_private_git_proof(
+    proof: _PrivateGitProof,
+    *,
+    root: Path,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    """Whether everything the private read relied on is still exactly as proven."""
+    if not _proof_index_unchanged(proof, root, deadline=deadline, cancelled=cancelled):
+        return False
+    if not _proof_installation_unchanged(proof):
+        return False
+    if not _proof_semantics_files_unchanged(
+        proof, deadline=deadline, cancelled=cancelled
+    ):
+        return False
+    if not _proof_absent_paths_still_absent(
+        proof, deadline=deadline, cancelled=cancelled
+    ):
+        return False
+    return _proof_change_times_unchanged(proof, deadline=deadline, cancelled=cancelled)
 
 @dataclass
 class _RevisionBuild:
@@ -4071,6 +4128,60 @@ def _verify_revision_pass(
         cancelled=cancelled,
     )
 
+def _hashed_entries(revision: WorkspaceRevision) -> dict[str, RevisionEntry]:
+    """The revision's entries that actually carry content, by path."""
+    return {
+        entry.path: entry for entry in revision.entries if entry.sha256 is not None
+    }
+
+
+def _paths_by_digest(
+    paths: Iterable[str], entries: Mapping[str, RevisionEntry]
+) -> dict[str, list[str]]:
+    """These paths grouped by the digest their entry carries."""
+    grouped: dict[str, list[str]] = {}
+    for path in paths:
+        grouped.setdefault(str(entries[path].sha256), []).append(path)
+    return grouped
+
+
+def _unambiguous_renames(
+    deleted: set[str],
+    created: set[str],
+    before_entries: Mapping[str, RevisionEntry],
+    after_entries: Mapping[str, RevisionEntry],
+) -> list[tuple[str, str]]:
+    """The rename pairs where exactly one path left and one arrived per digest."""
+    deleted_by_hash = _paths_by_digest(deleted, before_entries)
+    created_by_hash = _paths_by_digest(created, after_entries)
+    renames: list[tuple[str, str]] = []
+    for digest in sorted(set(deleted_by_hash) & set(created_by_hash)):
+        old = deleted_by_hash[digest]
+        new = created_by_hash[digest]
+        if len(old) == len(new) == 1:
+            renames.append((old[0], new[0]))
+            deleted.remove(old[0])
+            created.remove(new[0])
+    return renames
+
+
+def _changed_paths(
+    before_entries: Mapping[str, RevisionEntry],
+    after_entries: Mapping[str, RevisionEntry],
+) -> set[str]:
+    """The paths present in both revisions whose content is not the same."""
+    return {
+        path
+        for path in set(before_entries) & set(after_entries)
+        if before_entries[path].sha256 != after_entries[path].sha256
+    }
+
+
+def _any_configuration(paths: Iterable[str]) -> bool:
+    """Whether any of these paths is one of the checkout's configuration files."""
+    return any(_is_configuration(path) for path in paths)
+
+
 def diff_workspace_revisions(
     before: WorkspaceRevision, after: WorkspaceRevision
 ) -> WorkspaceDelta:
@@ -4080,39 +4191,18 @@ def diff_workspace_revisions(
         after.checkout_id,
     ):
         raise ValueError("workspace revisions must describe the same checkout")
-    before_entries = {entry.path: entry for entry in before.entries if entry.sha256 is not None}
-    after_entries = {entry.path: entry for entry in after.entries if entry.sha256 is not None}
+    before_entries = _hashed_entries(before)
+    after_entries = _hashed_entries(after)
     created = set(after_entries) - set(before_entries)
     deleted = set(before_entries) - set(after_entries)
-    changed = {
-        path
-        for path in set(before_entries) & set(after_entries)
-        if before_entries[path].sha256 != after_entries[path].sha256
-    }
-    configuration_changed = any(
-        _is_configuration(path) for path in created | changed | deleted
-    )
-    renames: list[tuple[str, str]] = []
-    deleted_by_hash: dict[str, list[str]] = {}
-    created_by_hash: dict[str, list[str]] = {}
-    for path in deleted:
-        deleted_by_hash.setdefault(str(before_entries[path].sha256), []).append(path)
-    for path in created:
-        created_by_hash.setdefault(str(after_entries[path].sha256), []).append(path)
-    for digest in sorted(set(deleted_by_hash) & set(created_by_hash)):
-        old = deleted_by_hash[digest]
-        new = created_by_hash[digest]
-        if len(old) == len(new) == 1:
-            renames.append((old[0], new[0]))
-            configuration_changed = configuration_changed or any(
-                _is_configuration(path) for path in (old[0], new[0])
-            )
-            deleted.remove(old[0])
-            created.remove(new[0])
+    changed = _changed_paths(before_entries, after_entries)
+    configuration_changed = _any_configuration(created | changed | deleted)
+    renames = _unambiguous_renames(deleted, created, before_entries, after_entries)
     return WorkspaceDelta(
         created=tuple(sorted(created)),
         changed=tuple(sorted(changed)),
         renamed=tuple(sorted(renames)),
         deleted=tuple(sorted(deleted)),
-        configuration_changed=configuration_changed,
+        configuration_changed=configuration_changed
+        or _any_configuration(path for pair in renames for path in pair),
     )
