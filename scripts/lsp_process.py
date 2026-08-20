@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import contextlib
 import json
 import math
 import os
@@ -761,78 +762,107 @@ class _OwnerDirectory:
             raise ValueError("LSP evidence record is not canonical JSON")
         return record
 
+    def _unlink_posix_scratch(self) -> None:
+        """Remove the evidence files and the cancellation directory."""
+        for name in ("owner.json", "failure.json"):
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(name, dir_fd=self.owner_handle)
+        with contextlib.suppress(FileNotFoundError):
+            os.rmdir("cancellation", dir_fd=self.owner_handle)
+        os.fsync(self.owner_handle)
+
+    def _named_owner_identity(self) -> object | None:
+        """The identity of our owner root as its parent names it, if it is there."""
+        try:
+            return _identity_from_stat(
+                os.stat(
+                    self.owner_root.name,
+                    dir_fd=self.parent_handle,
+                    follow_symlinks=False,
+                )
+            )
+        except FileNotFoundError:
+            return None
+
+    def _remove_posix_owner_root(self) -> None:
+        """Remove our owner root, and only ours."""
+        named_identity = self._named_owner_identity()
+        if named_identity is None:
+            return
+        if named_identity != self.owner_identity:
+            raise PermissionError("LSP owner root identity changed before deletion")
+        os.rmdir(self.owner_root.name, dir_fd=self.parent_handle)
+
+    def _remove_success_scratch_posix(self) -> None:
+        if self.owner_handle is None:
+            return
+        self._unlink_posix_scratch()
+        self._remove_posix_owner_root()
+        os.fsync(self.parent_handle)
+
+    def _delete_child(self, handle: object) -> None:
+        try:
+            _windows_workspace.delete_handle(handle)
+        finally:
+            self._close_child_handle(handle)
+
+    def _delete_windows_scratch_files(self, original: object) -> None:
+        for name in ("owner.json", "failure.json"):
+            try:
+                handle = _windows_workspace.open_deletable_file(original, name)
+            except FileNotFoundError:
+                continue
+            self._delete_child(handle)
+
+    def _delete_windows_cancellation(self, original: object) -> None:
+        try:
+            cancellation = _windows_workspace.open_deletable_directory(
+                original, "cancellation"
+            )
+        except FileNotFoundError:
+            return
+        self._delete_child(cancellation)
+
+    def _close_windows_scratch(self) -> None:
+        """Delete everything inside the owner root, then let the handle go."""
+        original = self.owner_handle
+        if original is None:
+            return
+        self._delete_windows_scratch_files(original)
+        self._delete_windows_cancellation(original)
+        _windows_workspace.close_handle(original)
+        self.owner_handle = None
+
+    def _remove_windows_owner_root(self, expected: object) -> None:
+        """Remove our owner root, and only ours."""
+        try:
+            owner = _windows_workspace.open_deletable_directory(
+                self.parent_handle, self.owner_root.name
+            )
+        except FileNotFoundError:
+            return
+        try:
+            if _windows_workspace.identity(owner, directory=True) != expected:
+                raise PermissionError(
+                    "LSP owner root identity changed before deletion"
+                )
+            _windows_workspace.delete_handle(owner)
+        finally:
+            self._close_child_handle(owner)
+
+    def _remove_success_scratch_windows(self) -> None:
+        with self._child_handle_lock:
+            self._retry_pending_child_handles()
+            expected = self.owner_identity
+            self._close_windows_scratch()
+            self._remove_windows_owner_root(expected)
+
     def remove_success_scratch(self) -> None:
         self._retry_pending_temp_names()
         if os.name == "posix":
-            if self.owner_handle is None:
-                return
-            for name in ("owner.json", "failure.json"):
-                try:
-                    os.unlink(name, dir_fd=self.owner_handle)
-                except FileNotFoundError:
-                    pass
-            try:
-                os.rmdir("cancellation", dir_fd=self.owner_handle)
-            except FileNotFoundError:
-                pass
-            os.fsync(self.owner_handle)
-            try:
-                named_identity = _identity_from_stat(
-                    os.stat(
-                        self.owner_root.name,
-                        dir_fd=self.parent_handle,
-                        follow_symlinks=False,
-                    )
-                )
-            except FileNotFoundError:
-                named_identity = None
-            if named_identity is not None:
-                if named_identity != self.owner_identity:
-                    raise PermissionError(
-                        "LSP owner root identity changed before deletion"
-                    )
-                os.rmdir(self.owner_root.name, dir_fd=self.parent_handle)
-            os.fsync(self.parent_handle)
+            self._remove_success_scratch_posix()
             return
-        with self._child_handle_lock:
-            self._retry_pending_child_handles()
-            original = self.owner_handle
-            expected = self.owner_identity
-            if original is not None:
-                for name in ("owner.json", "failure.json"):
-                    try:
-                        handle = _windows_workspace.open_deletable_file(original, name)
-                    except FileNotFoundError:
-                        continue
-                    try:
-                        _windows_workspace.delete_handle(handle)
-                    finally:
-                        self._close_child_handle(handle)
-                try:
-                    cancellation = _windows_workspace.open_deletable_directory(
-                        original, "cancellation"
-                    )
-                except FileNotFoundError:
-                    cancellation = None
-                if cancellation is not None:
-                    try:
-                        _windows_workspace.delete_handle(cancellation)
-                    finally:
-                        self._close_child_handle(cancellation)
-                _windows_workspace.close_handle(original)
-                self.owner_handle = None
-            try:
-                owner = _windows_workspace.open_deletable_directory(
-                    self.parent_handle, self.owner_root.name
-                )
-            except FileNotFoundError:
-                return
-            try:
-                if _windows_workspace.identity(owner, directory=True) != expected:
-                    raise PermissionError("LSP owner root identity changed before deletion")
-                _windows_workspace.delete_handle(owner)
-            finally:
-                self._close_child_handle(owner)
+        self._remove_success_scratch_windows()
 
     def verify_lexical_identity(self) -> None:
         if self.owner_handle is None or self.owner_identity is None:
