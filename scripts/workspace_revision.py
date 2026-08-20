@@ -280,6 +280,54 @@ def _matching_inventory_hint(
     return hint
 
 
+def _fresh_hint_identity(path: Path) -> tuple[Path, _StrongIdentity] | None:
+    """This hinted path's identity now, or None if it is no longer a plain file."""
+    info = path.lstat()
+    if _is_reparse(info) or stat.S_ISDIR(info.st_mode):
+        return None
+    return path, _strong_identity(info)
+
+
+def _revalidated_hint_snapshots(
+    hint: _RevisionInventoryHint,
+    *,
+    root: Path,
+    want_entry_snapshots: bool,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[tuple[Path, _StrongIdentity]] | None:
+    """The hint's entry identities, re-read; None when the hint cannot be used."""
+    fresh: list[tuple[Path, _StrongIdentity]] = []
+    try:
+        for snapshot in hint.directory_snapshots:
+            _check_stop(deadline, cancelled)
+            _validate_directory_snapshot(root, snapshot)
+        if not want_entry_snapshots:
+            return fresh
+        return _fresh_hint_identities(hint, fresh, deadline=deadline, cancelled=cancelled)
+    except _RevisionStopped:
+        raise
+    except OSError:
+        return None
+
+
+def _fresh_hint_identities(
+    hint: _RevisionInventoryHint,
+    fresh: list[tuple[Path, _StrongIdentity]],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[tuple[Path, _StrongIdentity]] | None:
+    """Re-read every hinted entry; None as soon as one is no longer a plain file."""
+    for path, _identity_value in hint.entry_snapshots:
+        _check_stop(deadline, cancelled)
+        identity = _fresh_hint_identity(path)
+        if identity is None:
+            return None
+        fresh.append(identity)
+    return fresh
+
+
 def _restore_inventory_hint(
     hint: _RevisionInventoryHint,
     *,
@@ -293,25 +341,20 @@ def _restore_inventory_hint(
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
 ) -> bool:
-    fresh_entry_snapshots: list[tuple[Path, _StrongIdentity]] = []
-    try:
-        for snapshot in hint.directory_snapshots:
-            _check_stop(deadline, cancelled)
-            _validate_directory_snapshot(root, snapshot)
-        if entry_snapshots is not None:
-            for path, _identity_value in hint.entry_snapshots:
-                _check_stop(deadline, cancelled)
-                info = path.lstat()
-                if _is_reparse(info) or stat.S_ISDIR(info.st_mode):
-                    return False
-                fresh_entry_snapshots.append((path, _strong_identity(info)))
-    except _RevisionStopped:
-        raise
-    except OSError:
+    fresh = _revalidated_hint_snapshots(
+        hint,
+        root=root,
+        want_entry_snapshots=entry_snapshots is not None,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    if fresh is None:
         return False
-    directory_snapshots.update((snapshot.path, snapshot) for snapshot in hint.directory_snapshots)
+    directory_snapshots.update(
+        (snapshot.path, snapshot) for snapshot in hint.directory_snapshots
+    )
     if entry_snapshots is not None:
-        entry_snapshots.update(fresh_entry_snapshots)
+        entry_snapshots.update(fresh)
     if prepared_files is not None:
         prepared_files.update(hint.prepared_files)
     if private_inventory_safe is not None:
@@ -321,18 +364,28 @@ def _restore_inventory_hint(
     return True
 
 
+def _usable_deadline(deadline: object) -> bool:
+    """A deadline has to be a finite monotonic timestamp; `True` is not one."""
+    if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
+        return False
+    return math.isfinite(deadline)
+
+
+def _check_stop_arguments(
+    deadline: float | None, cancelled: Callable[[], bool] | None
+) -> None:
+    """Refuse a deadline or a cancel hook that cannot mean anything."""
+    if deadline is not None and not _usable_deadline(deadline):
+        raise ValueError("deadline must be a finite monotonic timestamp or None")
+    if cancelled is not None and not callable(cancelled):
+        raise TypeError("cancelled must be callable or None")
+
+
 def _check_stop(
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
 ) -> None:
-    if deadline is not None and (
-        isinstance(deadline, bool)
-        or not isinstance(deadline, (int, float))
-        or not math.isfinite(deadline)
-    ):
-        raise ValueError("deadline must be a finite monotonic timestamp or None")
-    if cancelled is not None and not callable(cancelled):
-        raise TypeError("cancelled must be callable or None")
+    _check_stop_arguments(deadline, cancelled)
     if cancelled is not None and cancelled():
         raise _RevisionStopped("workspace revision cancelled")
     if deadline is not None and time.monotonic() >= deadline:
@@ -886,50 +939,117 @@ def _git_head(
     return value.decode("ascii")
 
 
-def _status_paths(output: bytes) -> list[tuple[str, str]]:
+def _status_records(output: bytes) -> list[bytes]:
+    """Git's NUL-separated status records, without the trailing empty one."""
     records = output.split(b"\0")
     if records and records[-1] == b"":
         records.pop()
+    return records
+
+
+def _status_change_kind(change: bytes) -> str:
+    """Whether this two-letter change code describes a deletion or an edit."""
+    if len(change) != 2:
+        raise ValueError("malformed Git status change code")
+    if b"D" in change:
+        return "deleted"
+    return "modified"
+
+
+def _decoded_status_path(raw: bytes) -> str:
+    """One status path, which git has to have written as valid UTF-8."""
+    return raw.decode("utf-8", errors="strict")
+
+
+def _ordinary_status_entry(record: bytes) -> list[tuple[str, str]]:
+    """The entry an ordinary changed-file record describes."""
+    fields = record.split(b" ", 8)
+    kind = _status_change_kind(fields[1])
+    return [(_decoded_status_path(fields[8]), kind)]
+
+
+def _renamed_status_entries(
+    record: bytes, original: bytes
+) -> list[tuple[str, str]]:
+    """The entries a rename or copy record describes, source included."""
+    fields = record.split(b" ", 9)
+    kind = _status_change_kind(fields[1])
+    entries: list[tuple[str, str]] = []
+    if fields[8].startswith(b"R"):
+        entries.append((_decoded_status_path(original), "deleted"))
+    entries.append((_decoded_status_path(fields[9]), kind))
+    return entries
+
+
+def _unmerged_status_entry(record: bytes) -> list[tuple[str, str]]:
+    """The entry an unmerged-path record describes."""
+    return [(_decoded_status_path(record.split(b" ", 10)[10]), "modified")]
+
+
+def _untracked_status_entry(record: bytes) -> list[tuple[str, str]]:
+    """The entry an untracked-path record describes."""
+    return [(_decoded_status_path(record[2:]), "untracked")]
+
+
+def _status_entries(
+    records: list[bytes], index: int
+) -> tuple[list[tuple[str, str]], int]:
+    """The entries this record describes, and the index of the next record."""
+    record = records[index]
+    marker = record[:1]
+    if marker == b"1":
+        return _ordinary_status_entry(record), index + 1
+    if marker == b"2":
+        return _renamed_status_entries(record, records[index + 1]), index + 2
+    if marker == b"u":
+        return _unmerged_status_entry(record), index + 1
+    if marker == b"?":
+        return _untracked_status_entry(record), index + 1
+    if marker not in {b"#", b"!"}:
+        raise ValueError("unknown Git status record")
+    return [], index + 1
+
+
+def _status_paths(output: bytes) -> list[tuple[str, str]]:
+    """Every changed path git reported, with the kind of change it saw."""
+    records = _status_records(output)
     result: list[tuple[str, str]] = []
     index = 0
     while index < len(records):
-        record = records[index]
-        marker = record[:1]
         try:
-            if marker == b"1":
-                fields = record.split(b" ", 8)
-                change = fields[1]
-                if len(change) != 2:
-                    raise ValueError("malformed Git status change code")
-                raw_path = fields[8]
-                kind = "deleted" if b"D" in change else "modified"
-                result.append((raw_path.decode("utf-8", errors="strict"), kind))
-            elif marker == b"2":
-                fields = record.split(b" ", 9)
-                change = fields[1]
-                score = fields[8]
-                if len(change) != 2:
-                    raise ValueError("malformed Git status change code")
-                raw_path = fields[9]
-                index += 1
-                original = records[index]
-                if score.startswith(b"R"):
-                    result.append((original.decode("utf-8", errors="strict"), "deleted"))
-                kind = "deleted" if b"D" in change else "modified"
-                result.append((raw_path.decode("utf-8", errors="strict"), kind))
-            elif marker == b"u":
-                raw_path = record.split(b" ", 10)[10]
-                result.append((raw_path.decode("utf-8", errors="strict"), "modified"))
-            elif marker == b"?":
-                result.append((record[2:].decode("utf-8", errors="strict"), "untracked"))
-            elif marker == b"#":
-                pass
-            elif marker != b"!":
-                raise ValueError("unknown Git status record")
+            entries, index = _status_entries(records, index)
         except (IndexError, UnicodeError) as exc:
             raise ValueError("malformed Git status output") from exc
-        index += 1
+        result.extend(entries)
     return result
+
+# The entry kinds whose git status has to match the recorded kind exactly.
+_STATUS_BOUND_KINDS = frozenset({"modified", "untracked", "deleted"})
+
+
+def _normalized_status(git_state: bytes) -> dict[str, str] | None:
+    """Git's status by normalized path, or None on a normalization collision."""
+    current: dict[str, str] = {}
+    raw_inputs: dict[str, str] = {}
+    for raw, kind in _status_paths(git_state):
+        normalized = _normalized_path(raw)
+        previous = raw_inputs.get(normalized)
+        if previous is not None and previous != raw:
+            return None
+        raw_inputs[normalized] = raw
+        current[normalized] = kind
+    return current
+
+
+def _entry_status_agrees(entry: RevisionEntry, status: str | None) -> bool:
+    """Whether git's status for this path is the one the entry's kind requires."""
+    if entry.kind in _STATUS_BOUND_KINDS:
+        return status == entry.kind
+    if entry.kind == "source":
+        return status is None
+    if entry.kind == "configuration":
+        return status != "deleted"
+    return True
 
 
 def _git_state_matches_revision(
@@ -940,27 +1060,15 @@ def _git_state_matches_revision(
 ) -> bool:
     if current_head != expected.git_head:
         return False
-    current_status: dict[str, str] = {}
-    normalized_inputs: dict[str, str] = {}
-    for raw, kind in _status_paths(git_state):
-        normalized = _normalized_path(raw)
-        previous_raw = normalized_inputs.get(normalized)
-        if previous_raw is not None and previous_raw != raw:
-            return False
-        normalized_inputs[normalized] = raw
-        current_status[normalized] = kind
+    current_status = _normalized_status(git_state)
+    if current_status is None:
+        return False
     if any(path not in entries for path in current_status):
         return False
-    for path, entry in entries.items():
-        status = current_status.get(path)
-        if entry.kind in {"modified", "untracked", "deleted"}:
-            if status != entry.kind:
-                return False
-        elif entry.kind == "source" and status is not None:
-            return False
-        elif entry.kind == "configuration" and status == "deleted":
-            return False
-    return True
+    return all(
+        _entry_status_agrees(entry, current_status.get(path))
+        for path, entry in entries.items()
+    )
 
 
 # The files whose contents change how git reads a tree.
