@@ -4874,24 +4874,40 @@ def _stop_recovery_owner(
     *,
     allow_expired: bool = False,
 ) -> bool:
-    _acquire_lifecycle(coordinator, deadline, allow_expired=allow_expired)
-    try:
-        thread = coordinator.recovery_thread
-    finally:
-        _release_lifecycle(coordinator)
+    thread = _current_recovery_thread(
+        coordinator, deadline, allow_expired=allow_expired
+    )
     coordinator.recovery_stop.set()
     coordinator.recovery_wake.set()
-    if thread is threading.current_thread():
-        _acquire_lifecycle(coordinator, deadline, allow_expired=allow_expired)
-        try:
-            if coordinator.recovery_thread is thread:
-                coordinator.recovery_thread = None
-                _notify_lifecycle_locked(coordinator)
-        finally:
-            _release_lifecycle(coordinator)
-        return True
-    if not _join_owned_thread(thread, deadline):
+    if thread is not threading.current_thread() and not _join_owned_thread(
+        thread, deadline
+    ):
         raise TimeoutError("LSP recovery thread did not stop before deadline")
+    _forget_recovery_thread(coordinator, thread, deadline, allow_expired=allow_expired)
+    return True
+
+
+def _current_recovery_thread(
+    coordinator: _LifecycleCoordinator,
+    deadline: float,
+    *,
+    allow_expired: bool,
+) -> threading.Thread | None:
+    _acquire_lifecycle(coordinator, deadline, allow_expired=allow_expired)
+    try:
+        return coordinator.recovery_thread
+    finally:
+        _release_lifecycle(coordinator)
+
+
+def _forget_recovery_thread(
+    coordinator: _LifecycleCoordinator,
+    thread: threading.Thread | None,
+    deadline: float,
+    *,
+    allow_expired: bool,
+) -> None:
+    """Drop the recovery thread, if it is still the one we stopped."""
     _acquire_lifecycle(coordinator, deadline, allow_expired=allow_expired)
     try:
         if coordinator.recovery_thread is thread:
@@ -4899,7 +4915,6 @@ def _stop_recovery_owner(
             _notify_lifecycle_locked(coordinator)
     finally:
         _release_lifecycle(coordinator)
-    return True
 
 
 def _take_queued_intents(
