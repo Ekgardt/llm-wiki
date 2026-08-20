@@ -4420,6 +4420,29 @@ def _exported_source_links(links: Sequence[sqlite3.Row]) -> list[dict[str, objec
     ]
 
 
+def _read_exported_rows(
+    database: sqlite3.Connection, task_id: str
+) -> _ExportedRows:
+    """The history, links and seal an export carries beside the task row."""
+    history = database.execute(
+        """SELECT attempt,started_at,finished_at,outcome,error_code
+           FROM attempt_history WHERE task_id=? ORDER BY sequence""",
+        (task_id,),
+    ).fetchall()
+    source_links = database.execute(
+        """SELECT logical_path,source_digest FROM task_source_links
+           WHERE task_id=? ORDER BY logical_path,source_digest""",
+        (task_id,),
+    ).fetchall()
+    link = database.execute(
+        "SELECT * FROM capture_task_links WHERE task_id=?", (task_id,)
+    ).fetchone()
+    seal = database.execute(
+        "SELECT * FROM capture_task_link_seals WHERE task_id=?", (task_id,)
+    ).fetchone()
+    return _ExportedRows(history, source_links, link, seal)
+
+
 def _exported_task_record(
     row: sqlite3.Row,
     payload: object,
@@ -4454,8 +4477,6 @@ def _exported_task_record(
     validate_schema(
         record, Path(__file__).with_name("schemas") / "queue-task-v3.json"
     )
-    if len(canonical_json_bytes(record)) > _MAX_EXPORT_METADATA_BYTES:
-        raise QueueOperationError("export_metadata_too_large")
     return record
 
 
@@ -10093,28 +10114,6 @@ class _QueueV3CandidateReader:
             self._raise_payload_mismatch()
         return replacement
 
-    def _exported_rows(
-        self, database: sqlite3.Connection, task_id: str
-    ) -> _ExportedRows:
-        """The history, links and seal an export carries beside the task row."""
-        history = database.execute(
-            """SELECT attempt,started_at,finished_at,outcome,error_code
-               FROM attempt_history WHERE task_id=? ORDER BY sequence""",
-            (task_id,),
-        ).fetchall()
-        source_links = database.execute(
-            """SELECT logical_path,source_digest FROM task_source_links
-               WHERE task_id=? ORDER BY logical_path,source_digest""",
-            (task_id,),
-        ).fetchall()
-        link = database.execute(
-            "SELECT * FROM capture_task_links WHERE task_id=?", (task_id,)
-        ).fetchone()
-        seal = database.execute(
-            "SELECT * FROM capture_task_link_seals WHERE task_id=?", (task_id,)
-        ).fetchone()
-        return _ExportedRows(history, source_links, link, seal)
-
     def export_task(self, task_id: str) -> dict[str, object]:
         with closing(self._connect()) as database:
             row = database.execute(
@@ -10127,8 +10126,11 @@ class _QueueV3CandidateReader:
             )
             if validation.code is not None:
                 raise QueueOperationError("payload_hash_mismatch")
-            rows = self._exported_rows(database, task_id)
-        return _exported_task_record(row, validation.payload, rows)
+            rows = _read_exported_rows(database, task_id)
+        record = _exported_task_record(row, validation.payload, rows)
+        if len(canonical_json_bytes(record)) > _MAX_EXPORT_METADATA_BYTES:
+            raise QueueOperationError("export_metadata_too_large")
+        return record
 
     def purge(
         self,
@@ -11112,96 +11114,15 @@ class _QueueV3CandidateReader:
     def _export_task_in_transaction(
         self, database: sqlite3.Connection, row: sqlite3.Row
     ) -> dict[str, object]:
+        """The export record for one task, read inside an open transaction."""
         task_id = str(row["id"])
         validation = validate_payload_blob(
             bytes(row["payload_blob"]), row["input_hash"], parse=True
         )
         if validation.code is not None:
             raise QueueOperationError("payload_hash_mismatch")
-        history = database.execute(
-            """SELECT attempt,started_at,finished_at,outcome,error_code
-               FROM attempt_history WHERE task_id=? ORDER BY sequence""",
-            (task_id,),
-        ).fetchall()
-        sources = database.execute(
-            """SELECT logical_path,source_digest FROM task_source_links
-               WHERE task_id=? ORDER BY logical_path,source_digest""",
-            (task_id,),
-        ).fetchall()
-        link = database.execute(
-            "SELECT * FROM capture_task_links WHERE task_id=?", (task_id,)
-        ).fetchone()
-        seal = database.execute(
-            "SELECT * FROM capture_task_link_seals WHERE task_id=?", (task_id,)
-        ).fetchone()
-        lease = None
-        if row["lease_owner"] is not None:
-            lease = {
-                "owner": row["lease_owner"],
-                "token": row["lease_token"],
-                "expires_at": row["lease_expires_at"],
-                "heartbeat_at": row["lease_heartbeat_at"],
-            }
-        result = None
-        if row["result_reference"] is not None:
-            result = {
-                "reference": row["result_reference"],
-                "sha256": row["result_sha256"],
-                "operation_id": row["result_operation_id"],
-            }
-        capture_binding = None
-        if link is not None:
-            capture_binding = {
-                "intent_id": link["intent_id"],
-                "intent_sha256": link["intent_sha256"],
-                "handler_version": int(link["handler_version"]),
-                "active_digest": str(link["link_digest"]),
-                "seal_digest": None if seal is None else seal["seal_digest"],
-            }
-        record: dict[str, object] = {
-            "schema_version": "queue-task/v3",
-            "task_id": task_id,
-            "kind": str(row["kind"]),
-            "handler_version": int(row["handler_version"]),
-            "payload": validation.payload,
-            "input_hash": str(row["input_hash"]),
-            "dedupe_key": row["dedupe_key"],
-            "state": str(row["state"]),
-            "priority": int(row["priority"]),
-            "created_at": str(row["created_at"]),
-            "updated_at": str(row["updated_at"]),
-            "available_at": str(row["available_at"]),
-            "attempts": int(row["attempts"]),
-            "last_attempt_at": row["last_attempt_at"],
-            "lease": lease,
-            "error_code": row["error_code"],
-            "blocked_capability": row["blocked_capability"],
-            "result": result,
-            "redrive_of": row["redrive_of"],
-            "lineage_generation": int(row["lineage_generation"]),
-            "attempt_history": [
-                {
-                    "attempt": int(item["attempt"]),
-                    "started_at": str(item["started_at"]),
-                    "finished_at": str(item["finished_at"]),
-                    "outcome": str(item["outcome"]),
-                    "error_code": item["error_code"],
-                }
-                for item in history
-            ],
-            "source_links": [
-                {
-                    "logical_path": str(item["logical_path"]),
-                    "source_digest": str(item["source_digest"]),
-                }
-                for item in sources
-            ],
-            "capture_binding": capture_binding,
-        }
-        validate_schema(
-            record, Path(__file__).with_name("schemas") / "queue-task-v3.json"
-        )
-        return record
+        rows = _read_exported_rows(database, task_id)
+        return _exported_task_record(row, validation.payload, rows)
 
 
 @contextmanager
