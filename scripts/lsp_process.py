@@ -3051,6 +3051,128 @@ def _raise_replacement_startup_failure(
     raise ProtocolViolation("LSP replacement startup failed") from None
 
 
+_RETRY_REQUEST = object()
+
+
+def _retry_or_fail(
+    instance: LspProcess,
+    generation: _Generation,
+    deadline: float,
+    *,
+    attempt: int,
+) -> bool:
+    """True to try a fresh generation; otherwise the caller's error stands."""
+    changed, terminal_code = _wait_for_generation_change(
+        instance, generation.nonce, deadline
+    )
+    if attempt == 0 and changed:
+        return True
+    if terminal_code == "restart_failed":
+        _raise_replacement_startup_failure(instance._coordinator)
+    return False
+
+
+def _generation_unusable(protocol: LspProtocol, process: object) -> str | None:
+    """Why this generation cannot serve a request, if it cannot."""
+    if protocol.expired_drain_keys(time.monotonic()):
+        return "expired drain"
+    if process.poll() is not None or protocol.fatal:
+        return _PROCESS_EXITED
+    return None
+
+
+def _refuse_unusable_generation(
+    instance: LspProcess,
+    generation: _Generation,
+    unusable: str,
+    deadline: float,
+    attempt: int,
+) -> object:
+    """Record the failure, then either ask for a retry or refuse the request."""
+    _queue_generation_failure(instance._coordinator, generation, unusable)
+    if _retry_or_fail(instance, generation, deadline, attempt=attempt):
+        return _RETRY_REQUEST
+    raise ProtocolViolation("LSP generation is fatally unavailable")
+
+
+def _objectively_fatal(
+    instance: LspProcess,
+    generation: _Generation,
+    protocol: LspProtocol,
+    process: object,
+    deadline: float,
+) -> bool:
+    """The violation reflects a dead generation, not a bad request."""
+    if _generation_changed(instance, generation, deadline):
+        return True
+    return protocol.fatal or process.poll() is not None
+
+
+def _serve_lsp_request(
+    instance: LspProcess,
+    generation: _Generation,
+    method: str,
+    params: object,
+    *,
+    deadline: float,
+    cancellation: CancellationToken | None,
+    attempt: int,
+) -> object:
+    """Send the request on this generation, retrying only a fatal one."""
+    protocol = generation.protocol
+    process = generation.process
+    try:
+        return protocol.request(
+            method,
+            params,
+            deadline=deadline,
+            cancellation=cancellation,
+        )
+    except _LocalRequestViolation:
+        raise
+    except ProtocolViolation:
+        if not _objectively_fatal(
+            instance, generation, protocol, process, deadline
+        ):
+            raise
+        _queue_generation_failure(
+            instance._coordinator, generation, _PROCESS_EXITED
+        )
+        if _retry_or_fail(instance, generation, deadline, attempt=attempt):
+            return _RETRY_REQUEST
+        raise
+
+
+def _attempt_lsp_request(
+    instance: LspProcess,
+    method: str,
+    params: object,
+    *,
+    deadline: float,
+    cancellation: CancellationToken | None,
+    attempt: int,
+) -> object:
+    """One attempt; the retry sentinel means the generation moved under us."""
+    generation = _request_generation(instance, deadline)
+    protocol = generation.protocol
+    process = generation.process
+    assert protocol is not None and process is not None
+    unusable = _generation_unusable(protocol, process)
+    if unusable is not None:
+        return _refuse_unusable_generation(
+            instance, generation, unusable, deadline, attempt
+        )
+    return _serve_lsp_request(
+        instance,
+        generation,
+        method,
+        params,
+        deadline=deadline,
+        cancellation=cancellation,
+        attempt=attempt,
+    )
+
+
 def _request_lsp_process(
     instance: LspProcess,
     method: str,
@@ -3061,50 +3183,16 @@ def _request_lsp_process(
 ) -> object:
     deadline = _validated_deadline(deadline)
     for attempt in range(2):
-        generation = _request_generation(instance, deadline)
-        protocol = generation.protocol
-        process = generation.process
-        assert protocol is not None and process is not None
-        expired = protocol.expired_drain_keys(time.monotonic())
-        if expired or process.poll() is not None or protocol.fatal:
-            _queue_generation_failure(
-                instance._coordinator,
-                generation,
-                "expired drain" if expired else _PROCESS_EXITED,
-            )
-            changed, terminal_code = _wait_for_generation_change(
-                instance, generation.nonce, deadline
-            )
-            if attempt == 0 and changed:
-                continue
-            if terminal_code == "restart_failed":
-                _raise_replacement_startup_failure(instance._coordinator)
-            raise ProtocolViolation("LSP generation is fatally unavailable")
-        try:
-            return protocol.request(
-                method,
-                params,
-                deadline=deadline,
-                cancellation=cancellation,
-            )
-        except _LocalRequestViolation:
-            raise
-        except ProtocolViolation:
-            changed = _generation_changed(instance, generation, deadline)
-            objectively_fatal = changed or protocol.fatal or process.poll() is not None
-            if not objectively_fatal:
-                raise
-            _queue_generation_failure(
-                instance._coordinator, generation, _PROCESS_EXITED
-            )
-            changed, terminal_code = _wait_for_generation_change(
-                instance, generation.nonce, deadline
-            )
-            if attempt == 0 and changed:
-                continue
-            if terminal_code == "restart_failed":
-                _raise_replacement_startup_failure(instance._coordinator)
-            raise
+        outcome = _attempt_lsp_request(
+            instance,
+            method,
+            params,
+            deadline=deadline,
+            cancellation=cancellation,
+            attempt=attempt,
+        )
+        if outcome is not _RETRY_REQUEST:
+            return outcome
     raise RuntimeError("LSP request retry invariant breached")
 
 
