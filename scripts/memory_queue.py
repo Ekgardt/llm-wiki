@@ -12405,81 +12405,129 @@ def _operator_status() -> dict[str, object]:
     }
 
 
-def _manual_processor(task: dict[str, Any]) -> bool | DeferredResult:
+def _manual_query(payload: Mapping[str, Any]) -> bool | DeferredResult:
+    """Answer one deferred query with the configured backend."""
     from llm_client import call_llm
 
+    prompt = payload.get("prompt", "")
+    if not prompt:
+        return False
+    result = call_llm(
+        prompt,
+        payload.get("system_prompt", ""),
+        max_tokens=int(payload.get("max_tokens") or 4000),
+    )
+    if not result:
+        return False
+    return DeferredResult(result.encode("utf-8"))
+
+
+def _valid_day(raw_day: object, now: datetime) -> str | None:
+    """The day this flush belongs to, when it is a real calendar date."""
+    day = now.strftime("%Y-%m-%d") if raw_day is None else raw_day
+    if not isinstance(day, str) or re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) is None:
+        return None
+    try:
+        parsed = datetime.strptime(day, "%Y-%m-%d")
+    except ValueError:
+        return None
+    return day if parsed.strftime("%Y-%m-%d") == day else None
+
+
+def _daily_log_path(day: str) -> Path | None:
+    """The daily log for this day, when it stays inside the daily directory."""
+    root = Path(os.environ.get("LLM_WIKI_ROOT", ".")).resolve()
+    daily_dir = (root / "knowledge" / "daily").resolve()
+    daily_path = (daily_dir / f"{day}.md").resolve()
+    try:
+        daily_path.relative_to(daily_dir)
+    except ValueError:
+        return None
+    return daily_path
+
+
+def _append_flush_block(
+    daily_path: Path,
+    payload: Mapping[str, Any],
+    task_id: str,
+    result: str,
+    now: datetime,
+) -> None:
+    """Append what the classifier judged worth keeping, once per task."""
+    from daily_log_append import locked_append_once
+    from flush_memory import _classify_response
+
+    tier, body = _classify_response(result)
+    if tier == "ok" or not body:
+        return
+    session_id = payload.get("session_id", "deferred")
+    event = payload.get("event", "session-end")
+    block = (
+        f"\n## [{now.strftime('%H:%M:%S')}] deferred-{event} | {session_id}\n"
+        f"- Tier: `{tier}`\n\n{redact_secrets(body)}\n"
+    )
+    locked_append_once(daily_path, block, task_id)
+
+
+def _flush_target_path(payload: Mapping[str, Any], now: datetime) -> Path | None:
+    """The daily log this flush may append to, when the day names one."""
+    day = _valid_day(payload.get("day"), now)
+    if day is None:
+        return None
+    return _daily_log_path(day)
+
+
+def _manual_flush(task: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:
+    """Summarize one session into its daily log."""
+    from llm_client import call_llm
+
+    prompt = payload.get("prompt", "")
+    if not prompt:
+        return False
+    now = _utc_now()
+    daily_path = _flush_target_path(payload, now)
+    if daily_path is None:
+        return False
+    result = call_llm(
+        prompt,
+        payload.get("system_prompt", ""),
+        max_tokens=int(payload.get("max_tokens") or 1500),
+    )
+    if not result:
+        return False
+    _append_flush_block(daily_path, payload, str(task["id"]), result, now)
+    return True
+
+
+def _manual_compile() -> bool:
+    """Run one compile pass in a child process."""
+    root = Path(os.environ.get("LLM_WIKI_ROOT", ".")).resolve()
+    command = [
+        sys.executable,
+        str(root / "scripts" / "compile_memory.py"),
+        "--trigger",
+        "auto",
+    ]
+    completed = subprocess.run(
+        command,
+        cwd=root,
+        check=False,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return completed.returncode == 0
+
+
+def _manual_processor(task: dict[str, Any]) -> bool | DeferredResult:
     task_type = task.get("type")
     payload = task.get("payload", {})
     if task_type == "query":
-        prompt = payload.get("prompt", "")
-        if not prompt:
-            return False
-        result = call_llm(
-            prompt,
-            payload.get("system_prompt", ""),
-            max_tokens=int(payload.get("max_tokens") or 4000),
-        )
-        if not result:
-            return False
-        return DeferredResult(result.encode("utf-8"))
+        return _manual_query(payload)
     if task_type == "flush":
-        prompt = payload.get("prompt", "")
-        if not prompt:
-            return False
-        now = _utc_now()
-        raw_day = payload.get("day")
-        day = now.strftime("%Y-%m-%d") if raw_day is None else raw_day
-        if not isinstance(day, str) or re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) is None:
-            return False
-        try:
-            if datetime.strptime(day, "%Y-%m-%d").strftime("%Y-%m-%d") != day:
-                return False
-        except ValueError:
-            return False
-        root = Path(os.environ.get("LLM_WIKI_ROOT", ".")).resolve()
-        daily_dir = (root / "knowledge" / "daily").resolve()
-        daily_path = (daily_dir / f"{day}.md").resolve()
-        try:
-            daily_path.relative_to(daily_dir)
-        except ValueError:
-            return False
-        result = call_llm(
-            prompt,
-            payload.get("system_prompt", ""),
-            max_tokens=int(payload.get("max_tokens") or 1500),
-        )
-        if not result:
-            return False
-        from daily_log_append import locked_append_once
-        from flush_memory import _classify_response
-
-        tier, body = _classify_response(result)
-        if tier != "ok" and body:
-            session_id = payload.get("session_id", "deferred")
-            event = payload.get("event", "session-end")
-            block = (
-                f"\n## [{now.strftime('%H:%M:%S')}] deferred-{event} | {session_id}\n"
-                f"- Tier: `{tier}`\n\n{redact_secrets(body)}\n"
-            )
-            locked_append_once(daily_path, block, str(task["id"]))
-        return True
+        return _manual_flush(task, payload)
     if task_type == "compile":
-        root = Path(os.environ.get("LLM_WIKI_ROOT", ".")).resolve()
-        command = [
-            sys.executable,
-            str(root / "scripts" / "compile_memory.py"),
-            "--trigger",
-            "auto",
-        ]
-        completed = subprocess.run(
-            command,
-            cwd=root,
-            check=False,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        return completed.returncode == 0
+        return _manual_compile()
     return False
 
 
