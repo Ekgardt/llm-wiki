@@ -2249,15 +2249,38 @@ def verify_workspace_revision_unchanged(
     )
 
 
-def _verify_workspace_revision_unchanged(
+# The entry kinds a stored workspace revision may name.
+_REVISION_ENTRY_KINDS = frozenset(
+    {"source", "configuration", "modified", "untracked", "deleted"}
+)
+
+
+def _expected_revision_digest(expected: WorkspaceRevision) -> str:
+    """The digest the stored revision's own contents produce."""
+    values = {
+        "repository_id": expected.repository_id,
+        "checkout_id": expected.checkout_id,
+        "git_head": expected.git_head,
+        "entries": [
+            {
+                "path": item.path,
+                "kind": item.kind,
+                "sha256": item.sha256,
+                "size": item.size,
+            }
+            for item in expected.entries
+        ],
+    }
+    return hashlib.sha256(canonical_json_bytes(values)).hexdigest()
+
+
+def _require_matching_revision(
     repository: RepositoryScope,
     expected: WorkspaceRevision,
-    *,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
-    allow_private: bool,
-    allow_inventory_hint: bool = True,
-) -> bool:
+) -> None:
+    """Refuse a revision that is not a sound record of this very checkout."""
     if not isinstance(repository, RepositoryScope):
         raise TypeError("repository must be a RepositoryScope")
     if not isinstance(expected, WorkspaceRevision):
@@ -2270,75 +2293,211 @@ def _verify_workspace_revision_unchanged(
     _check_stop(deadline, cancelled)
     if len(expected.entries) > MAX_REVISION_FILES:
         raise ValueError("expected revision exceeds the file-count ceiling")
-    expected_values = {
-        "repository_id": expected.repository_id,
-        "checkout_id": expected.checkout_id,
-        "git_head": expected.git_head,
-        "entries": [
-            {"path": item.path, "kind": item.kind, "sha256": item.sha256, "size": item.size}
-            for item in expected.entries
-        ],
-    }
-    if hashlib.sha256(canonical_json_bytes(expected_values)).hexdigest() != expected.revision_sha256:
+    if _expected_revision_digest(expected) != expected.revision_sha256:
         raise ValueError("expected revision digest is invalid")
 
-    root = Path(repository.checkout_root)
-    resolved_root = root.resolve(strict=True)
+
+def _require_valid_entry_digest(entry: RevisionEntry) -> None:
+    """A deleted entry carries nothing; every other one carries a real digest."""
+    if entry.kind == "deleted":
+        if entry.sha256 is not None or entry.size != 0:
+            raise ValueError("expected deleted revision entry is invalid")
+        return
+    if (
+        not isinstance(entry.sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", entry.sha256) is None
+    ):
+        raise ValueError("expected revision entry digest is invalid")
+
+
+def _require_revision_entry(entry: object) -> None:
+    """Refuse anything that is not a revision entry at all."""
+    if not isinstance(entry, RevisionEntry):
+        raise TypeError("expected revision entries must be RevisionEntry values")
+
+
+def _require_valid_entry(entry: RevisionEntry) -> None:
+    """Refuse a stored entry whose fields are not a sound revision record."""
+    if entry.kind not in _REVISION_ENTRY_KINDS:
+        raise ValueError("expected revision entry kind is invalid")
+    if isinstance(entry.size, bool) or not isinstance(entry.size, int) or entry.size < 0:
+        raise ValueError("expected revision entry size is invalid")
+    _require_valid_entry_digest(entry)
+
+
+def _validated_expected_entries(
+    expected: WorkspaceRevision,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> dict[str, RevisionEntry]:
+    """The stored entries, keyed by normalized path, each one checked."""
     entries: dict[str, RevisionEntry] = {}
-    normalized_inputs: dict[str, str] = {}
     for entry in expected.entries:
         _check_stop(deadline, cancelled)
-        if not isinstance(entry, RevisionEntry):
-            raise TypeError("expected revision entries must be RevisionEntry values")
+        _require_revision_entry(entry)
         normalized = _normalized_path(entry.path)
-        previous = normalized_inputs.get(normalized)
-        if previous is not None:
+        if normalized in entries:
             raise ValueError("expected revision contains duplicate normalized paths")
-        normalized_inputs[normalized] = entry.path
-        if entry.kind not in {"source", "configuration", "modified", "untracked", "deleted"}:
-            raise ValueError("expected revision entry kind is invalid")
-        if isinstance(entry.size, bool) or not isinstance(entry.size, int) or entry.size < 0:
-            raise ValueError("expected revision entry size is invalid")
-        if entry.kind == "deleted":
-            if entry.sha256 is not None or entry.size != 0:
-                raise ValueError("expected deleted revision entry is invalid")
-        elif (
-            not isinstance(entry.sha256, str)
-            or re.fullmatch(r"[0-9a-f]{64}", entry.sha256) is None
-        ):
-            raise ValueError("expected revision entry digest is invalid")
+        _require_valid_entry(entry)
         entries[normalized] = entry
+    return entries
 
-    directory_snapshots: dict[Path, _DirectorySnapshot] = {}
-    git_hash_name = None
+
+@dataclass
+class _PrivateIndexPlan:
+    """The private-index fast path for one verification, while it stays usable."""
+
+    installation: _PrivateGitInstallation | None
+    index_path: Path | None
+    hash_name: str | None = None
     entry_snapshots: dict[Path, _StrongIdentity] | None = None
     prepared_files: dict[str, _FileSnapshot] | None = None
-    private_inventory_safe: list[bool] | None = None
-    worktree_ignore_paths: tuple[Path, ...] = ()
-    private_installation = (
-        _private_git_installation()
-        if allow_private
-        and repository.git_common_dir is not None
-        and _private_index_platform_supported()
-        else None
-    )
-    candidate_index = (
-        _ordinary_index_path(root)
-        if private_installation is not None
-        else None
-    )
+    inventory_safe: list[bool] | None = None
+
+    def disable(self) -> None:
+        """Give up the fast path; the rest of the pass hashes the files itself."""
+        self.hash_name = None
+        self.entry_snapshots = None
+        self.prepared_files = None
+        self.inventory_safe = None
+
+
+def _private_index_installation(
+    repository: RepositoryScope, *, allow_private: bool
+) -> _PrivateGitInstallation | None:
+    """The private git installation this verification may use, if any."""
+    if not allow_private or repository.git_common_dir is None:
+        return None
+    if not _private_index_platform_supported():
+        return None
+    return _private_git_installation()
+
+
+def _candidate_index_size(candidate: Path | None) -> int | None:
+    """The candidate index's size, or None when there is nothing to measure."""
+    if candidate is None:
+        return None
     try:
-        candidate_size = candidate_index.lstat().st_size if candidate_index is not None else None
+        return candidate.lstat().st_size
     except OSError:
-        candidate_index = None
-        candidate_size = None
-    if candidate_index is not None and candidate_size is not None and candidate_size <= _MAX_PRIVATE_INDEX_BYTES:
-        candidate_hash_name = _object_hash_name(expected.git_head)
-        if candidate_hash_name is not None:
-            git_hash_name = candidate_hash_name
-            entry_snapshots = {}
-            prepared_files = {}
-            private_inventory_safe = [True]
+        return None
+
+
+def _arm_private_index(
+    plan: _PrivateIndexPlan, expected: WorkspaceRevision, size: int
+) -> None:
+    """Arm the fast path when the index is small enough and the head is hashable."""
+    if size > _MAX_PRIVATE_INDEX_BYTES:
+        return
+    hash_name = _object_hash_name(expected.git_head)
+    if hash_name is None:
+        return
+    plan.hash_name = hash_name
+    plan.entry_snapshots = {}
+    plan.prepared_files = {}
+    plan.inventory_safe = [True]
+
+
+def _private_index_plan(
+    repository: RepositoryScope,
+    root: Path,
+    expected: WorkspaceRevision,
+    *,
+    allow_private: bool,
+) -> _PrivateIndexPlan:
+    """The private-index fast path this verification may use, if any."""
+    installation = _private_index_installation(repository, allow_private=allow_private)
+    candidate = _ordinary_index_path(root) if installation is not None else None
+    size = _candidate_index_size(candidate)
+    if size is None:
+        return _PrivateIndexPlan(installation, None)
+    plan = _PrivateIndexPlan(installation, candidate)
+    _arm_private_index(plan, expected, size)
+    return plan
+
+
+def _prepared_files_named(plan: _PrivateIndexPlan, name: str) -> tuple[Path, ...]:
+    """The prepared files whose base name is exactly this one."""
+    if plan.prepared_files is None:
+        return ()
+    return tuple(
+        snapshot.path
+        for path, snapshot in plan.prepared_files.items()
+        if PurePosixPath(path).name == name
+    )
+
+
+def _prepared_attributes_inert(
+    plan: _PrivateIndexPlan,
+    root: Path,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    """Whether every prepared `.gitattributes` leaves the fast path's rules intact."""
+    return all(
+        _owned_attributes_are_inert(root, path, deadline=deadline, cancelled=cancelled)
+        for path in _prepared_files_named(plan, ".gitattributes")
+    )
+
+
+class _RestartVerification(Exception):
+    """Raised when a verification pass has to be redone without a fast path."""
+
+    def __init__(self, allow_private: bool) -> None:
+        super().__init__("restart workspace revision verification")
+        self.allow_private = allow_private
+
+
+def _verify_workspace_revision_unchanged(
+    repository: RepositoryScope,
+    expected: WorkspaceRevision,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+    allow_private: bool,
+    allow_inventory_hint: bool = True,
+) -> bool:
+    """Whether the checkout still matches the stored revision, exactly."""
+    try:
+        return _verify_revision_pass(
+            repository,
+            expected,
+            deadline=deadline,
+            cancelled=cancelled,
+            allow_private=allow_private,
+            allow_inventory_hint=allow_inventory_hint,
+        )
+    except _RestartVerification as restart:
+        return _verify_workspace_revision_unchanged(
+            repository,
+            expected,
+            deadline=deadline,
+            cancelled=cancelled,
+            allow_private=restart.allow_private,
+            allow_inventory_hint=False,
+        )
+
+
+def _verify_revision_pass(
+    repository: RepositoryScope,
+    expected: WorkspaceRevision,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+    allow_private: bool,
+    allow_inventory_hint: bool,
+) -> bool:
+    """One verification attempt, with whatever fast paths it was allowed."""
+    _require_matching_revision(repository, expected, deadline, cancelled)
+    root = Path(repository.checkout_root)
+    resolved_root = root.resolve(strict=True)
+    entries = _validated_expected_entries(expected, deadline, cancelled)
+
+    directory_snapshots: dict[Path, _DirectorySnapshot] = {}
+    plan = _private_index_plan(
+        repository, root, expected, allow_private=allow_private
+    )
     current_relevant: set[str] = set()
     current_relevant_paths: dict[str, Path] = {}
     inventory_hint = (
@@ -2355,9 +2514,9 @@ def _verify_workspace_revision_unchanged(
         inventory_hint,
         root=root,
         directory_snapshots=directory_snapshots,
-        entry_snapshots=entry_snapshots,
-        prepared_files=prepared_files,
-        private_inventory_safe=private_inventory_safe,
+        entry_snapshots=plan.entry_snapshots,
+        prepared_files=plan.prepared_files,
+        private_inventory_safe=plan.inventory_safe,
         current_relevant=current_relevant,
         current_relevant_paths=current_relevant_paths,
         deadline=deadline,
@@ -2368,10 +2527,10 @@ def _verify_workspace_revision_unchanged(
             root,
             resolved_root=resolved_root,
             directory_snapshots=directory_snapshots,
-            entry_snapshots=entry_snapshots,
-            prepared_files=prepared_files,
+            entry_snapshots=plan.entry_snapshots,
+            prepared_files=plan.prepared_files,
             prepared_paths=set(entries),
-            private_inventory_safe=private_inventory_safe,
+            private_inventory_safe=plan.inventory_safe,
             relevant_paths=current_relevant,
             deadline=deadline,
             cancelled=cancelled,
@@ -2380,35 +2539,13 @@ def _verify_workspace_revision_unchanged(
             if normalized in current_relevant_paths:
                 raise ValueError("workspace revision contains a Unicode normalization collision")
             current_relevant_paths[normalized] = current_path
-    if prepared_files is not None:
-        worktree_ignore_paths = tuple(
-            snapshot.path
-            for path, snapshot in prepared_files.items()
-            if PurePosixPath(path).name == ".gitignore"
-        )
-        attribute_files = (
-            snapshot.path
-            for path, snapshot in prepared_files.items()
-            if PurePosixPath(path).name == ".gitattributes"
-        )
-        if any(
-            not _owned_attributes_are_inert(
-                root,
-                path,
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-            for path in attribute_files
-        ):
-            git_hash_name = None
-            entry_snapshots = None
-            prepared_files = None
-            private_inventory_safe = None
-    if private_inventory_safe is not None and not private_inventory_safe[0]:
-        git_hash_name = None
-        entry_snapshots = None
-        prepared_files = None
-        private_inventory_safe = None
+    worktree_ignore_paths = _prepared_files_named(plan, ".gitignore")
+    if not _prepared_attributes_inert(
+        plan, root, deadline=deadline, cancelled=cancelled
+    ):
+        plan.disable()
+    if plan.inventory_safe is not None and not plan.inventory_safe[0]:
+        plan.disable()
     expected_relevant = {
         path
         for path, entry in entries.items()
@@ -2427,7 +2564,7 @@ def _verify_workspace_revision_unchanged(
             if os.path.lexists(path):
                 return False
             continue
-        if git_hash_name is None:
+        if plan.hash_name is None:
             path = current_relevant_paths.get(relative, root / PurePosixPath(relative))
             try:
                 info = path.lstat()
@@ -2452,9 +2589,9 @@ def _verify_workspace_revision_unchanged(
                 cancelled=cancelled,
             )
         else:
-            if prepared_files is None:
+            if plan.prepared_files is None:
                 raise AssertionError("private-index file snapshots are unavailable")
-            prepared = prepared_files.get(relative)
+            prepared = plan.prepared_files.get(relative)
             if prepared is None:
                 return False
             if prepared.identity[3] != entry.size:
@@ -2469,20 +2606,13 @@ def _verify_workspace_revision_unchanged(
                     remaining_bytes=MAX_REVISION_BYTES - total_bytes,
                     deadline=deadline,
                     cancelled=cancelled,
-                    git_hash_name=git_hash_name,
+                    git_hash_name=plan.hash_name,
                     snapshot=prepared,
                     validate_parents=False,
                 )
             except PermissionError:
                 if inventory_hint_used:
-                    return _verify_workspace_revision_unchanged(
-                        repository,
-                        expected,
-                        deadline=deadline,
-                        cancelled=cancelled,
-                        allow_private=allow_private,
-                        allow_inventory_hint=False,
-                    )
+                    raise _RestartVerification(allow_private) from None
                 raise
             sha256 = verification_hash.sha256
             size = verification_hash.size
@@ -2495,10 +2625,10 @@ def _verify_workspace_revision_unchanged(
     private_state = None
     private_attempted = False
     if repository.git_common_dir is not None:
-        if git_hash_name is not None:
-            if candidate_index is None:
+        if plan.hash_name is not None:
+            if plan.index_path is None:
                 raise AssertionError("private-index path is unavailable")
-            if private_installation is None or entry_snapshots is None:
+            if plan.installation is None or plan.entry_snapshots is None:
                 raise AssertionError("private-index installation proof is unavailable")
             private_attempted = True
             try:
@@ -2507,35 +2637,21 @@ def _verify_workspace_revision_unchanged(
                     expected,
                     verification_hashes,
                     directory_snapshots,
-                    entry_snapshots,
+                    plan.entry_snapshots,
                     worktree_ignore_paths,
-                    installation=private_installation,
-                    index_path=candidate_index,
-                    hash_name=git_hash_name,
+                    installation=plan.installation,
+                    index_path=plan.index_path,
+                    hash_name=plan.hash_name,
                     deadline=deadline,
                     cancelled=cancelled,
                 )
             except _RevisionStopped:
                 raise
             except (OSError, subprocess.SubprocessError, UnicodeError, ValueError):
-                return _verify_workspace_revision_unchanged(
-                    repository,
-                    expected,
-                    deadline=deadline,
-                    cancelled=cancelled,
-                    allow_private=False,
-                    allow_inventory_hint=False,
-                )
+                raise _RestartVerification(allow_private=False) from None
         if private_state is None:
             if private_attempted:
-                return _verify_workspace_revision_unchanged(
-                    repository,
-                    expected,
-                    deadline=deadline,
-                    cancelled=cancelled,
-                    allow_private=False,
-                    allow_inventory_hint=False,
-                )
+                raise _RestartVerification(allow_private=False) from None
             current_head, git_state = _git_state(
                 root,
                 allow_missing_head=expected.git_head is None,
@@ -2556,14 +2672,7 @@ def _verify_workspace_revision_unchanged(
         except (OSError, subprocess.SubprocessError, UnicodeError, ValueError):
             if private_state is None:
                 raise
-            return _verify_workspace_revision_unchanged(
-                repository,
-                expected,
-                deadline=deadline,
-                cancelled=cancelled,
-                allow_private=False,
-                allow_inventory_hint=False,
-            )
+            raise _RestartVerification(allow_private=False) from None
         if not state_matches:
             return False
     elif expected.git_head is not None:
@@ -2576,9 +2685,9 @@ def _verify_workspace_revision_unchanged(
         for snapshot in file_snapshots:
             _check_stop(deadline, cancelled)
             _validate_file_snapshot(root, snapshot)
-    if private_state is not None and entry_snapshots is not None:
+    if private_state is not None and plan.entry_snapshots is not None:
         hashed_paths = {snapshot.path for snapshot in file_snapshots}
-        for path, identity in entry_snapshots.items():
+        for path, identity in plan.entry_snapshots.items():
             if path in hashed_paths:
                 continue
             _check_stop(deadline, cancelled)
@@ -2604,14 +2713,7 @@ def _verify_workspace_revision_unchanged(
         except (OSError, subprocess.SubprocessError, UnicodeError, ValueError):
             proof_valid = False
         if not proof_valid:
-            return _verify_workspace_revision_unchanged(
-                repository,
-                expected,
-                deadline=deadline,
-                cancelled=cancelled,
-                allow_private=False,
-                allow_inventory_hint=False,
-            )
+            raise _RestartVerification(allow_private=False) from None
     _check_stop(deadline, cancelled)
     return True
 
