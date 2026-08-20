@@ -4728,33 +4728,7 @@ class MemoryQueue:
                 BEFORE DELETE ON attempt_history BEGIN SELECT RAISE(ABORT, 'attempt history is immutable'); END;
             """
         )
-        columns = {
-            str(row["name"])
-            for row in connection.execute("PRAGMA table_info(tasks)").fetchall()
-        }
-        if "last_attempt_at" not in columns:
-            connection.execute("ALTER TABLE tasks ADD COLUMN last_attempt_at TEXT")
-        if "result_sha256" not in columns:
-            connection.execute("ALTER TABLE tasks ADD COLUMN result_sha256 TEXT")
-        if "redrive_of" not in columns:
-            connection.execute(
-                "ALTER TABLE tasks ADD COLUMN redrive_of TEXT REFERENCES tasks(id)"
-            )
-        source_fence_columns = {
-            str(row["name"])
-            for row in connection.execute("PRAGMA table_info(source_fences)").fetchall()
-        }
-        if "heartbeat_at" not in source_fence_columns:
-            connection.execute("ALTER TABLE source_fences ADD COLUMN heartbeat_at TEXT")
-            connection.execute(
-                "UPDATE source_fences SET heartbeat_at=acquired_at WHERE heartbeat_at IS NULL"
-            )
-        if "expires_at" not in source_fence_columns:
-            connection.execute("ALTER TABLE source_fences ADD COLUMN expires_at TEXT")
-            connection.execute(
-                "UPDATE source_fences SET expires_at=acquired_at WHERE expires_at IS NULL"
-            )
-
+        _add_missing_queue_columns(connection)
     @staticmethod
     def _upgrade_legacy_attempt_constraint(connection: sqlite3.Connection) -> None:
         row = connection.execute(
@@ -11363,6 +11337,109 @@ def _open_queue_ownership_db(state_root: Path) -> sqlite3.Connection:
     return connection
 
 
+# Columns added to the queue v2 tables after the original schema: the table,
+# the column, the statement that adds it, and the backfill it needs, if any.
+_QUEUE_V2_ADDED_COLUMNS = (
+    ("tasks", "last_attempt_at", "ALTER TABLE tasks ADD COLUMN last_attempt_at TEXT", None),
+    ("tasks", "result_sha256", "ALTER TABLE tasks ADD COLUMN result_sha256 TEXT", None),
+    (
+        "tasks",
+        "redrive_of",
+        "ALTER TABLE tasks ADD COLUMN redrive_of TEXT REFERENCES tasks(id)",
+        None,
+    ),
+    (
+        "source_fences",
+        "heartbeat_at",
+        "ALTER TABLE source_fences ADD COLUMN heartbeat_at TEXT",
+        "UPDATE source_fences SET heartbeat_at=acquired_at WHERE heartbeat_at IS NULL",
+    ),
+    (
+        "source_fences",
+        "expires_at",
+        "ALTER TABLE source_fences ADD COLUMN expires_at TEXT",
+        "UPDATE source_fences SET expires_at=acquired_at WHERE expires_at IS NULL",
+    ),
+)
+
+
+def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    """The column names a table currently has."""
+    rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+    return {str(row["name"]) for row in rows}
+
+
+def _run_optional_statement(connection: sqlite3.Connection, sql: str | None) -> None:
+    """Run the statement if this column needs one."""
+    if sql is None:
+        return
+    connection.execute(sql)
+
+
+def _add_missing_queue_columns(connection: sqlite3.Connection) -> None:
+    """Bring an older queue v2 schema up to the current column set."""
+    present = {
+        table: _table_columns(connection, table)
+        for table in ("tasks", "source_fences")
+    }
+    for table, column, add, backfill in _QUEUE_V2_ADDED_COLUMNS:
+        if column in present[table]:
+            continue
+        connection.execute(add)
+        _run_optional_statement(connection, backfill)
+
+
+def _require_owner_row_free(row: sqlite3.Row, busy_code: str) -> None:
+    """Refuse to take a role whose current owner is still alive."""
+    if row["token"] is None:
+        return
+    existing_pid = row["pid"]
+    if isinstance(existing_pid, int) and _pid_is_alive(existing_pid):
+        raise MigrationBusy(busy_code)
+
+
+def _claim_queue_ownership(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row | None,
+    values: tuple[object, ...],
+    role: str,
+) -> None:
+    """Write this role's ownership row, inserting it the first time round."""
+    if row is None:
+        connection.execute(
+            """INSERT INTO queue_ownership(
+                   role, token, pid, heartbeat_at, expires_at, epoch
+               ) VALUES (?, ?, ?, ?, ?, ?)""",
+            (role, *values),
+        )
+        return
+    connection.execute(
+        """UPDATE queue_ownership
+           SET token=?, pid=?, heartbeat_at=?, expires_at=?, epoch=?
+           WHERE role=?""",
+        (*values, role),
+    )
+
+
+def _take_queue_ownership(
+    connection: sqlite3.Connection,
+    role: str,
+    busy_code: str,
+    values: tuple[object, ...],
+) -> int:
+    """Take the role for this process; answer the epoch it was taken at."""
+    row = connection.execute(
+        "SELECT * FROM queue_ownership WHERE role=?", (role,)
+    ).fetchone()
+    if row is None:
+        _claim_queue_ownership(connection, row, (*values, 1), role)
+        return 1
+    _require_owner_row_free(row, busy_code)
+    epoch = int(row["epoch"]) + 1
+    _claim_queue_ownership(connection, row, (*values, epoch), role)
+    return epoch
+
+
 def _acquire_queue_owner(
     state_root: Path,
     role: str,
@@ -11377,50 +11454,12 @@ def _acquire_queue_owner(
     token = uuid.uuid4().hex
     pid = os.getpid()
     expires_at = acquired_at + timedelta(seconds=ttl_seconds)
+    values = (token, pid, _timestamp(acquired_at), _timestamp(expires_at))
     with _open_queue_ownership_db(state_root) as connection, begin_immediate(connection):
-        row = connection.execute(
-            "SELECT * FROM queue_ownership WHERE role=?", (role,)
-        ).fetchone()
-        epoch = 1
-        if row is not None:
-            epoch = int(row["epoch"]) + 1
-            existing_token = row["token"]
-            if existing_token is not None:
-                existing_pid = row["pid"]
-                dead = not isinstance(existing_pid, int) or not _pid_is_alive(existing_pid)
-                if not dead:
-                    raise MigrationBusy(busy_code)
-            connection.execute(
-                """UPDATE queue_ownership
-                   SET token=?, pid=?, heartbeat_at=?, expires_at=?, epoch=?
-                   WHERE role=?""",
-                (
-                    token,
-                    pid,
-                    _timestamp(acquired_at),
-                    _timestamp(expires_at),
-                    epoch,
-                    role,
-                ),
-            )
-        else:
-            connection.execute(
-                """INSERT INTO queue_ownership(
-                       role, token, pid, heartbeat_at, expires_at, epoch
-                   ) VALUES (?, ?, ?, ?, ?, ?)""",
-                (
-                    role,
-                    token,
-                    pid,
-                    _timestamp(acquired_at),
-                    _timestamp(expires_at),
-                    epoch,
-                ),
-            )
+        epoch = _take_queue_ownership(connection, role, busy_code, values)
     return QueueOwnerLease(
         Path(state_root).resolve(), role, token, pid, epoch, expires_at, ttl_seconds
     )
-
 
 def _owner_fence_lost_code(role: str) -> str:
     """The refusal a role reports when its ownership fence no longer holds."""
