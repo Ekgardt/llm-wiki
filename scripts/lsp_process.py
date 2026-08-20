@@ -300,25 +300,25 @@ class _OwnerDirectory:
             for name in tuple(self._pending_temp_names):
                 self._retry_one_temp_name(name)
 
-    def _finish_windows_temporary(
+    def _mark_temporary_deleted(
+        self, handle: int, *, moved: bool, operation_error: BaseException | None
+    ) -> tuple[bool, BaseException | None]:
+        """Mark the leftover for deletion; (marked, why it could not be)."""
+        if operation_error is None or moved:
+            return False, None
+        try:
+            _windows_workspace.delete_handle(handle)
+        except BaseException as error:
+            return False, error
+        return True, None
+
+    def _close_temporary_handle(
         self,
-        name: str,
         handle: int,
-        *,
-        moved: bool,
+        cleanup_error: BaseException | None,
         operation_error: BaseException | None,
     ) -> None:
-        cleanup_error: BaseException | None = None
-        delete_marked = False
-        if operation_error is not None and not moved:
-            try:
-                _windows_workspace.delete_handle(handle)
-            except BaseException as error:
-                cleanup_error = error
-            else:
-                delete_marked = True
-        if moved:
-            self._forget_temp_name(name)
+        """Close the handle, chaining whatever already went wrong behind it."""
         try:
             self._close_child_handle(handle)
         except BaseException as close_error:
@@ -327,6 +327,21 @@ class _OwnerDirectory:
             if operation_error is not None:
                 raise close_error from operation_error
             raise
+
+    def _finish_windows_temporary(
+        self,
+        name: str,
+        handle: int,
+        *,
+        moved: bool,
+        operation_error: BaseException | None,
+    ) -> None:
+        delete_marked, cleanup_error = self._mark_temporary_deleted(
+            handle, moved=moved, operation_error=operation_error
+        )
+        if moved:
+            self._forget_temp_name(name)
+        self._close_temporary_handle(handle, cleanup_error, operation_error)
         if delete_marked:
             self._forget_temp_name(name)
         if cleanup_error is not None:
