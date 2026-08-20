@@ -913,44 +913,57 @@ class _OwnerDirectory:
             return
         self._remove_success_scratch_windows()
 
-    def verify_lexical_identity(self) -> None:
-        if self.owner_handle is None or self.owner_identity is None:
-            raise RuntimeError("LSP owner directory was not created")
-        if os.name == "posix":
-            if _current_identity(self.owner_root.parent) != self.parent_identity:
-                raise RuntimeError("owner_root parent identity changed during startup")
-            if _current_identity(self.owner_root) != self.owner_identity:
-                raise RuntimeError("LSP owner root identity changed during startup")
-            _verify_descriptor(
-                self.owner_handle, self.owner_identity, mode=0o700, directory=True
-            )
-            return
+    def _verify_lexical_identity_posix(self) -> None:
+        if _current_identity(self.owner_root.parent) != self.parent_identity:
+            raise RuntimeError("owner_root parent identity changed during startup")
+        if _current_identity(self.owner_root) != self.owner_identity:
+            raise RuntimeError("LSP owner root identity changed during startup")
+        _verify_descriptor(
+            self.owner_handle, self.owner_identity, mode=0o700, directory=True
+        )
 
+    def _check_windows_parent_identity(self, parent: int) -> None:
+        if (
+            _windows_workspace.identity(parent, directory=True)
+            != self.parent_identity
+        ):
+            raise RuntimeError("owner_root parent identity changed during startup")
+
+    def _check_windows_named_identity(self, named: int) -> None:
+        if _windows_workspace.identity(named, directory=True) != self.owner_identity:
+            raise RuntimeError("LSP owner root identity changed during startup")
+
+    def _check_windows_held_identity(self) -> None:
+        if (
+            _windows_workspace.identity(self.owner_handle, directory=True)
+            != self.owner_identity
+        ):
+            raise RuntimeError(
+                "held LSP owner root identity changed during startup"
+            )
+
+    def _verify_lexical_identity_windows(self) -> None:
         with self._child_handle_lock:
             self._retry_pending_child_handles()
             parent = _windows_workspace.open_directory_path(self.owner_root.parent)
             named: int | None = None
             try:
-                if (
-                    _windows_workspace.identity(parent, directory=True)
-                    != self.parent_identity
-                ):
-                    raise RuntimeError("owner_root parent identity changed during startup")
-                named = _windows_workspace.open_directory(parent, self.owner_root.name)
-                if (
-                    _windows_workspace.identity(named, directory=True)
-                    != self.owner_identity
-                ):
-                    raise RuntimeError("LSP owner root identity changed during startup")
-                if (
-                    _windows_workspace.identity(self.owner_handle, directory=True)
-                    != self.owner_identity
-                ):
-                    raise RuntimeError(
-                        "held LSP owner root identity changed during startup"
-                    )
+                self._check_windows_parent_identity(parent)
+                named = _windows_workspace.open_directory(
+                    parent, self.owner_root.name
+                )
+                self._check_windows_named_identity(named)
+                self._check_windows_held_identity()
             finally:
                 self._close_child_handles(named, parent)
+
+    def verify_lexical_identity(self) -> None:
+        if self.owner_handle is None or self.owner_identity is None:
+            raise RuntimeError("LSP owner directory was not created")
+        if os.name == "posix":
+            self._verify_lexical_identity_posix()
+            return
+        self._verify_lexical_identity_windows()
 
     def _close_native_handle(self, handle: int) -> None:
         """Close one handle the way this platform closes handles."""
