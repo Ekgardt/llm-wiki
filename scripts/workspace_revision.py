@@ -606,45 +606,66 @@ def _validate_file_snapshot(root: Path, snapshot: _FileSnapshot) -> None:
     _validate_file_identity(snapshot)
 
 
-def _terminate_process_tree(
-    process: subprocess.Popen[bytes], *, platform_name: str | None = None
-) -> None:
-    platform_name = platform_name or os.name
-    if platform_name == "nt":
-        system_root = os.environ.get("SystemRoot", r"C:\Windows")
-        taskkill = str(PureWindowsPath(system_root) / "System32" / "taskkill.exe")
+def _kill_windows_tree(pid: int) -> None:
+    """Kill the whole tree through taskkill, which Windows has no signal for."""
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    taskkill = str(PureWindowsPath(system_root) / "System32" / "taskkill.exe")
+    try:
+        terminator = subprocess.Popen(
+            [taskkill, "/PID", str(pid), "/T", "/F"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            shell=False,
+        )
+        _finish_terminator(terminator)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _finish_terminator(terminator: subprocess.Popen) -> None:
+    """Let taskkill finish; kill it if it will not."""
+    try:
+        terminator.communicate(timeout=_PROCESS_CLEANUP_SECONDS)
+    except subprocess.TimeoutExpired:
+        terminator.kill()
+        terminator.wait(timeout=_PROCESS_CLEANUP_SECONDS)
+
+
+def _kill_posix_group(pid: int) -> None:
+    """Signal the whole process group, first politely and then not."""
+    for number in (signal.SIGTERM, getattr(signal, "SIGKILL", 9)):
         try:
-            terminator = subprocess.Popen(
-                [taskkill, "/PID", str(process.pid), "/T", "/F"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                shell=False,
-            )
-            try:
-                terminator.communicate(timeout=_PROCESS_CLEANUP_SECONDS)
-            except subprocess.TimeoutExpired:
-                terminator.kill()
-                terminator.wait(timeout=_PROCESS_CLEANUP_SECONDS)
-        except (OSError, subprocess.SubprocessError):
-            pass
-    else:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
+            os.killpg(pid, number)
         except OSError:
             pass
-        try:
-            os.killpg(process.pid, getattr(signal, "SIGKILL", 9))
-        except OSError:
-            pass
+
+
+def _reap_terminated(process: subprocess.Popen) -> None:
+    """Wait for the child to go, killing it directly if it still will not."""
     try:
         process.wait(timeout=_PROCESS_CLEANUP_SECONDS)
     except (OSError, subprocess.TimeoutExpired):
-        try:
-            process.kill()
-            process.wait(timeout=_PROCESS_CLEANUP_SECONDS)
-        except (OSError, subprocess.TimeoutExpired):
-            pass
+        _kill_directly(process)
+
+
+def _kill_directly(process: subprocess.Popen) -> None:
+    """Last resort: kill this one process and stop caring whether it worked."""
+    try:
+        process.kill()
+        process.wait(timeout=_PROCESS_CLEANUP_SECONDS)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def _terminate_process_tree(
+    process: subprocess.Popen[bytes], *, platform_name: str | None = None
+) -> None:
+    if (platform_name or os.name) == "nt":
+        _kill_windows_tree(process.pid)
+    else:
+        _kill_posix_group(process.pid)
+    _reap_terminated(process)
 
 
 def _git_command(root: Path, arguments: list[str], executable: str) -> list[str]:
@@ -1592,17 +1613,49 @@ _REQUIRED_FCNTL_NAMES = (
 )
 
 
+def _has_all_attributes(module: object, names: Iterable[str]) -> bool:
+    """Whether the module offers every one of these names."""
+    return all(hasattr(module, name) for name in names)
+
+
+def _private_index_runtime_available() -> bool:
+    """Whether os and fcntl offer the sealing and waiting calls the path needs."""
+    if not _has_all_attributes(os, _REQUIRED_OS_NAMES):
+        return False
+    if _fcntl is None:
+        return False
+    return _has_all_attributes(_fcntl, _REQUIRED_FCNTL_NAMES)
+
+
 def _private_index_platform_supported() -> bool:
     """Whether this machine offers everything the private-index path needs."""
     if os.name != "posix" or not sys.platform.startswith("linux"):
         return False
-    if not all(hasattr(os, name) for name in _REQUIRED_OS_NAMES):
-        return False
-    if _fcntl is None:
-        return False
-    if not all(hasattr(_fcntl, name) for name in _REQUIRED_FCNTL_NAMES):
+    if not _private_index_runtime_available():
         return False
     return Path("/proc/self/fd").is_dir()
+
+
+def _overridden(
+    override: tuple[Path, ...] | None, default: tuple[Path, ...]
+) -> tuple[Path, ...]:
+    """The test override when one is set, including when it is deliberately empty."""
+    return default if override is None else override
+
+
+# The git installations whose system config and attribute locations are known.
+_KNOWN_GIT_PREFIXES = MappingProxyType(
+    {
+        "/usr/bin/git": (
+            (Path("/etc/gitconfig"), Path("/usr/etc/gitconfig")),
+            (Path("/etc/gitattributes"), Path("/usr/etc/gitattributes")),
+        ),
+        "/usr/local/bin/git": (
+            (Path("/etc/gitconfig"), Path("/usr/local/etc/gitconfig")),
+            (Path("/etc/gitattributes"), Path("/usr/local/etc/gitattributes")),
+        ),
+    }
+)
 
 
 def _private_git_installation() -> _PrivateGitInstallation | None:
@@ -1616,49 +1669,37 @@ def _private_git_installation() -> _PrivateGitInstallation | None:
         return None
     if _is_reparse(info) or not stat.S_ISREG(info.st_mode):
         return None
-    if executable == Path("/usr/bin/git"):
-        config_paths = (Path("/etc/gitconfig"), Path("/usr/etc/gitconfig"))
-        attribute_paths = (
-            Path("/etc/gitattributes"),
-            Path("/usr/etc/gitattributes"),
-        )
-    elif executable == Path("/usr/local/bin/git"):
-        config_paths = (
-            Path("/etc/gitconfig"),
-            Path("/usr/local/etc/gitconfig"),
-        )
-        attribute_paths = (
-            Path("/etc/gitattributes"),
-            Path("/usr/local/etc/gitattributes"),
-        )
-    else:
+    prefixes = _KNOWN_GIT_PREFIXES.get(executable.as_posix())
+    if prefixes is None:
         return None
-    if _SYSTEM_GIT_CONFIG_PATHS is not None:
-        config_paths = _SYSTEM_GIT_CONFIG_PATHS
-    if _SYSTEM_GIT_ATTRIBUTE_PATHS is not None:
-        attribute_paths = _SYSTEM_GIT_ATTRIBUTE_PATHS
+    config_paths, attribute_paths = prefixes
     return _PrivateGitInstallation(
         executable,
         _strong_identity(info),
-        config_paths,
-        attribute_paths,
+        _overridden(_SYSTEM_GIT_CONFIG_PATHS, config_paths),
+        _overridden(_SYSTEM_GIT_ATTRIBUTE_PATHS, attribute_paths),
     )
 
 
-def _ordinary_index_path(root: Path) -> Path | None:
-    marker = root / ".git"
+def _plain_entry_stat(path: Path, want_directory: bool) -> os.stat_result | None:
+    """The path's own metadata, if it is a plain directory or a plain file."""
     try:
-        marker_info = marker.lstat()
+        info = path.lstat()
     except OSError:
         return None
-    if _is_reparse(marker_info) or not stat.S_ISDIR(marker_info.st_mode):
+    if _is_reparse(info):
+        return None
+    wanted = stat.S_ISDIR(info.st_mode) if want_directory else stat.S_ISREG(info.st_mode)
+    return info if wanted else None
+
+
+def _ordinary_index_path(root: Path) -> Path | None:
+    """The checkout's ordinary git index, when `.git` is a real directory."""
+    marker = root / ".git"
+    if _plain_entry_stat(marker, want_directory=True) is None:
         return None
     index = marker / "index"
-    try:
-        index_info = index.lstat()
-    except OSError:
-        return None
-    if _is_reparse(index_info) or not stat.S_ISREG(index_info.st_mode):
+    if _plain_entry_stat(index, want_directory=False) is None:
         return None
     return index
 
@@ -1796,22 +1837,37 @@ def _owned_path_exists_or_is_uncertain(root: Path, path: Path) -> bool:
         os.close(parent_descriptor)
 
 
+def _absolute_environment_path(value: str) -> Path | None:
+    """The path this environment value names, or None if it is not absolute."""
+    path = Path(value)
+    if not path.is_absolute():
+        return None
+    return path
+
+
+def _xdg_git_config_path(xdg_value: str | None, home_value: str | None) -> Path | None:
+    """Where git looks for the XDG-located user config, if it looks anywhere."""
+    if not xdg_value:
+        return Path(home_value) / ".config/git/config" if home_value else None
+    xdg = _absolute_environment_path(xdg_value)
+    return None if xdg is None else xdg / "git/config"
+
+
 def _global_git_config_paths() -> tuple[Path, ...] | None:
+    """Every user-level git config location, or None if one is not absolute."""
     home_value = os.environ.get("HOME")
     xdg_value = os.environ.get("XDG_CONFIG_HOME")
     paths: list[Path] = []
     if home_value:
-        home = Path(home_value)
-        if not home.is_absolute():
+        home = _absolute_environment_path(home_value)
+        if home is None:
             return None
         paths.append(home / ".gitconfig")
-    if xdg_value:
-        xdg = Path(xdg_value)
-        if not xdg.is_absolute():
-            return None
-        paths.append(xdg / "git/config")
-    elif home_value:
-        paths.append(Path(home_value) / ".config/git/config")
+    xdg_config = _xdg_git_config_path(xdg_value, home_value)
+    if xdg_config is None and xdg_value:
+        return None
+    if xdg_config is not None:
+        paths.append(xdg_config)
     return tuple(paths)
 
 
