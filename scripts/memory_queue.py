@@ -3375,6 +3375,25 @@ def _corrupt_payload_matches(
     return manifest["rolling_root"] == disposition["original_frozen_root"]
 
 
+def _source_fence_row_matches(row: sqlite3.Row, fence: SourceFence) -> bool:
+    """The stored fence names the same source, token and owning process."""
+    stored = (
+        str(row["daily_id"]),
+        str(row["source_digest"]),
+        str(row["token"]),
+        int(row["owner_pid"]),
+        str(row["acquired_at"]),
+    )
+    expected = (
+        fence.daily_id,
+        fence.source_digest,
+        fence.token,
+        os.getpid(),
+        _timestamp(fence.acquired_at),
+    )
+    return stored == expected and fence.owner_pid == os.getpid()
+
+
 class MemoryQueue:
     """Durable priority queue with lease-token fencing and at-least-once delivery."""
 
@@ -4705,43 +4724,52 @@ class MemoryQueue:
             raise TypeError("source finalization requires a SourceFence")
         with self._connect() as connection, begin_immediate(connection):
             self._delete_stale_source_fences(connection)
-            row = connection.execute(
-                "SELECT daily_id, source_digest, token, owner_pid, acquired_at, expires_at "
-                "FROM source_fences WHERE token=?",
-                (fence.token,),
-            ).fetchone()
-            now = _as_utc(self._clock())
-            row_expires_at = (
-                None if row is None else _parse_timestamp(str(row["expires_at"]))
-            )
-            if (
-                row is None
-                or str(row["daily_id"]) != fence.daily_id
-                or str(row["source_digest"]) != fence.source_digest
-                or str(row["token"]) != fence.token
-                or int(row["owner_pid"]) != os.getpid()
-                or fence.owner_pid != os.getpid()
-                or str(row["acquired_at"]) != _timestamp(fence.acquired_at)
-                or row_expires_at is None
-                or now >= row_expires_at
-            ):
-                raise QueueOperationError("source_fence_lost")
-            logical_path = f"knowledge/daily/{fence.daily_id}.md"
-            if connection.execute(
-                "SELECT 1 FROM source_failures "
-                "WHERE logical_path=? AND source_digest=?",
-                (logical_path, fence.source_digest),
-            ).fetchone() is not None:
-                raise QueueOperationError("source_failure")
-            for task in connection.execute(
-                "SELECT payload_json FROM tasks "
-                "WHERE state IN ('ready','leased','blocked','dead')"
-            ):
-                if self._payload_references_source(
-                    str(task["payload_json"]), fence.daily_id, fence.source_digest
-                ):
-                    raise QueueOperationError("source_referenced")
+            self._require_live_source_fence(connection, fence)
+            self._require_no_source_failure(connection, fence)
+            self._require_no_source_reference(connection, fence)
             yield
+
+    def _require_live_source_fence(
+        self, connection: sqlite3.Connection, fence: SourceFence
+    ) -> None:
+        """The fence row still matches this holder, and has not expired."""
+        row = connection.execute(
+            "SELECT daily_id, source_digest, token, owner_pid, acquired_at, expires_at "
+            "FROM source_fences WHERE token=?",
+            (fence.token,),
+        ).fetchone()
+        if row is None or not _source_fence_row_matches(row, fence):
+            raise QueueOperationError("source_fence_lost")
+        expires_at = _parse_timestamp(str(row["expires_at"]))
+        if expires_at is None or _as_utc(self._clock()) >= expires_at:
+            raise QueueOperationError("source_fence_lost")
+
+    @staticmethod
+    def _require_no_source_failure(
+        connection: sqlite3.Connection, fence: SourceFence
+    ) -> None:
+        """A source that already failed must not be finalized."""
+        logical_path = f"knowledge/daily/{fence.daily_id}.md"
+        row = connection.execute(
+            "SELECT 1 FROM source_failures "
+            "WHERE logical_path=? AND source_digest=?",
+            (logical_path, fence.source_digest),
+        ).fetchone()
+        if row is not None:
+            raise QueueOperationError("source_failure")
+
+    def _require_no_source_reference(
+        self, connection: sqlite3.Connection, fence: SourceFence
+    ) -> None:
+        """No retained task may still point at the source being finalized."""
+        for task in connection.execute(
+            "SELECT payload_json FROM tasks "
+            "WHERE state IN ('ready','leased','blocked','dead')"
+        ):
+            if self._payload_references_source(
+                str(task["payload_json"]), fence.daily_id, fence.source_digest
+            ):
+                raise QueueOperationError("source_referenced")
 
     def release_source_fence(self, token: str) -> None:
         if not isinstance(token, str) or re.fullmatch(r"[0-9a-f]{64}", token) is None:
