@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import blackboard
+import markdown_transaction
 import pytest
 
 from tests.test_reliability_v3_adoption import (
@@ -17,19 +18,65 @@ from tests.test_reliability_v3_adoption import (
 )
 
 
+def _child_writer_budget() -> None:
+    """Give a child the gate budget a hosted Windows image actually needs.
+
+    `claim_task` is not retry-safe: the SQLite claim is durable before the
+    journal line is appended, so a caller that retries after losing the gate
+    conflicts with its own live claim. Waiting long enough for the gate is the
+    honest way to keep these processes from retrying at all.
+    """
+    markdown_transaction._WRITER_WAIT_SECONDS = 120.0
+
+
+def _is_contention(error: BaseException) -> bool:
+    """Losing the writer gate, its lease, or the SQLite lock is contention."""
+    if isinstance(error, TimeoutError):
+        return True
+    if isinstance(error, sqlite3.OperationalError):
+        return "database is locked" in str(error)
+    return isinstance(error, RuntimeError) and "gate ownership was lost" in str(error)
+
+
+def _under_contention(call, *arguments, attempts: int = 12, **keywords):
+    """Retry a blackboard call whose global writer gate timed out.
+
+    Every blackboard operation, reads included, appends through the one global
+    Markdown writer gate, and each append hardens files with `icacls` on
+    Windows. With six processes on a hosted runner a caller can lose that gate
+    for longer than its ten-second budget. That is contention, not incoherence,
+    and a real caller retries it.
+    """
+    for attempt in range(attempts):
+        try:
+            return call(*arguments, **keywords)
+        except BaseException as error:
+            if attempt == attempts - 1 or not _is_contention(error):
+                raise
+            time.sleep(0.05 * (attempt + 1))
+    raise AssertionError("unreachable")
+
+
 def _write_blackboard_batch(vault: str, state_root: str, worker: int, count: int) -> int:
     os.environ["LLM_WIKI_ROOT"] = vault
     os.environ["LLM_WIKI_STATE_ROOT"] = state_root
     blackboard.PROJECTS_DIR = Path(vault) / "knowledge/projects"
+    _child_writer_budget()
     completed = 0
     for index in range(count):
-        claim = blackboard.claim_task(
+        claim = _under_contention(
+            blackboard.claim_task,
             "demo",
             f"worker {worker} task {index}",
             f"agent-{worker}",
             resources=[f"worker/{worker}/task/{index}"],
+            # The default lease is thirty seconds. Six processes queueing for
+            # one writer gate on a hosted Windows image can spend longer than
+            # that between claim and completion, and the expiry then fails the
+            # run for contention rather than for incoherence.
+            ttl_seconds=600,
         )
-        if blackboard.complete_task("demo", claim):
+        if _under_contention(blackboard.complete_task, "demo", claim):
             completed += 1
     return completed
 
@@ -38,9 +85,10 @@ def _read_blackboard_status(vault: str, state_root: str, count: int) -> int:
     os.environ["LLM_WIKI_ROOT"] = vault
     os.environ["LLM_WIKI_STATE_ROOT"] = state_root
     blackboard.PROJECTS_DIR = Path(vault) / "knowledge/projects"
+    _child_writer_budget()
     largest = 0
     for _ in range(count):
-        status = blackboard.get_status("demo")
+        status = _under_contention(blackboard.get_status, "demo")
         largest = max(largest, status["active_tasks"] + status["completed_tasks"])
         assert status["active_tasks"] >= 0
         assert status["completed_tasks"] >= 0
@@ -57,6 +105,7 @@ def _compete_for_blackboard_resource(
     os.environ["LLM_WIKI_ROOT"] = vault
     os.environ["LLM_WIKI_STATE_ROOT"] = state_root
     blackboard.PROJECTS_DIR = Path(vault) / "knowledge/projects"
+    _child_writer_budget()
     time.sleep(max(0.0, start_at - time.monotonic()))
     try:
         claim = blackboard.claim_task(
@@ -171,10 +220,10 @@ def test_multiprocess_status_reads_remain_coherent_during_claim_and_complete(
             )
             for worker in range(writers)
         ]
-        assert [future.result(timeout=120) for future in writes] == [
+        assert [future.result(timeout=300) for future in writes] == [
             tasks_per_writer
         ] * writers
-        assert all(future.result(timeout=120) >= 0 for future in readers)
+        assert all(future.result(timeout=300) >= 0 for future in readers)
 
     status = blackboard.get_status("demo")
     assert status["active_tasks"] == 0
@@ -198,7 +247,7 @@ def test_multiprocess_same_resource_claim_has_one_fenced_winner(
             )
             for agent in ("opencode", "codex")
         ]
-        results = [future.result(timeout=120) for future in futures]
+        results = [future.result(timeout=300) for future in futures]
 
     assert sorted(status for status, _identity in results) == ["claimed", "conflict"]
     with sqlite3.connect(
@@ -305,3 +354,107 @@ def test_conflict_and_resolution_are_immutable_events(
         vault / "knowledge/projects/demo/.blackboard/conflicts.jsonl"
     )
     assert [record["kind"] for record in records] == ["conflict", "resolution"]
+
+
+def test_a_retried_completion_keeps_the_first_published_record(blackboard_vault):
+    """A completion is published once; a retry must not re-stamp or be refused."""
+    claim = blackboard.claim_task(
+        "demo", "shared task", "agent-a", resources=["src/one.py"]
+    )
+    published = blackboard._completion_record(claim, blackboard._utc_now(None))
+    completed_file = blackboard._bb_dir("demo") / "completed.jsonl"
+    blackboard._append_jsonl(
+        completed_file, published, f"blackboard-complete:{claim.claim_id}"
+    )
+
+    time.sleep(0.01)
+    assert blackboard.complete_task("demo", claim) is True
+
+    records = blackboard._read_jsonl(completed_file)
+    assert [record["id"] for record in records] == [claim.claim_id]
+    assert records[0]["completed_at"] == published["completed_at"]
+    assert blackboard.get_status("demo")["active_tasks"] == 0
+
+
+def test_a_reconciled_activation_does_not_break_the_claimer(blackboard_vault):
+    """The reader may publish the activation first; the claimer must still finish."""
+    claim = blackboard._new_claim(
+        "demo",
+        "shared task",
+        "agent-a",
+        blackboard._normalize_resources(["src/one.py", "src/two.py"]),
+        30,
+        blackboard._utc_now(None),
+    )
+    tasks_file = blackboard._bb_dir("demo") / "tasks.jsonl"
+    blackboard._append_jsonl(
+        tasks_file,
+        blackboard._claim_request_record(claim),
+        f"blackboard-request:{claim.claim_id}",
+    )
+    acquired = blackboard._acquire_claim(blackboard._coordinator(), claim)
+
+    blackboard.get_status("demo")
+
+    blackboard._append_jsonl(
+        tasks_file,
+        blackboard._claim_active_record(acquired),
+        f"blackboard-active:{claim.claim_id}",
+    )
+    assert blackboard.get_status("demo")["active_tasks"] == 1
+
+
+def test_a_claim_whose_record_fails_releases_its_resources(
+    blackboard_vault: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller that never learns it holds a claim must not be blocked by it."""
+    real_append = blackboard._append_jsonl
+    failures: list[str] = []
+
+    def failing_append(path, record, operation_id):
+        if operation_id.startswith("blackboard-active:"):
+            failures.append(operation_id)
+            raise TimeoutError("Markdown writer gate deadline expired")
+        return real_append(path, record, operation_id)
+
+    monkeypatch.setattr(blackboard, "_append_jsonl", failing_append)
+    with pytest.raises(TimeoutError):
+        blackboard.claim_task(
+            "demo", "task", "agent-a", resources=["shared/resource"]
+        )
+    assert len(failures) == 1
+
+    monkeypatch.setattr(blackboard, "_append_jsonl", real_append)
+    claim = blackboard.claim_task(
+        "demo", "task", "agent-a", resources=["shared/resource"]
+    )
+    assert claim.resources == ("shared/resource",)
+    assert blackboard.complete_task("demo", claim) is True
+
+
+def test_a_claim_whose_record_landed_before_the_failure_stands(
+    blackboard_vault: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An append that commits and then fails must not orphan its activation."""
+    real_append = blackboard._append_jsonl
+    failures: list[str] = []
+
+    def append_then_fail(path, record, operation_id):
+        real_append(path, record, operation_id)
+        if operation_id.startswith("blackboard-active:"):
+            failures.append(operation_id)
+            raise TimeoutError("Markdown writer gate deadline expired")
+
+    monkeypatch.setattr(blackboard, "_append_jsonl", append_then_fail)
+    claim = blackboard.claim_task(
+        "demo", "task", "agent-a", resources=["shared/resource"]
+    )
+    assert len(failures) == 1
+
+    monkeypatch.setattr(blackboard, "_append_jsonl", real_append)
+    status = blackboard.get_status("demo")
+    assert status["active_tasks"] == 1
+    assert blackboard.complete_task("demo", claim) is True
+    assert blackboard.get_status("demo")["active_tasks"] == 0

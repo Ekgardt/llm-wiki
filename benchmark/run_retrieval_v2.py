@@ -1069,6 +1069,17 @@ def _locked_package_versions(lock_path: Path) -> dict[str, str]:
     return {name: next(iter(versions)) for name, versions in observed.items() if len(versions) == 1}
 
 
+def _is_recorded_digest(value: object) -> bool:
+    """True when a report field is a well-formed recorded SHA-256.
+
+    Used where a digest is provenance rather than a live check: the baseline
+    records the `uv.lock` digest it was measured against, and that value must
+    still be a real digest even though it is no longer compared to the current
+    file.
+    """
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
 def _locked_package_version_sets(lock_path: Path) -> dict[str, set[str]]:
     raw = read_stable_bytes(lock_path, 16 * 1024 * 1024, label="uv lock")
     parsed = tomllib.loads(raw.decode("utf-8"))
@@ -3739,6 +3750,21 @@ def _baseline_policy_sha256(report: dict) -> str:
 
 
 def _verify_baseline_package_contract(report: dict) -> dict:
+    """Check the baseline was measured in the environment it claims.
+
+    The binding is to the packages this benchmark loads, not to the byte digest
+    of `uv.lock`. That file locks several hundred packages; retiring the Cognee
+    bridge in `350eec8` regenerated it and invalidated a frozen baseline whose
+    every relevant version was still locked exactly as recorded. A contract
+    that fails on unrelated dependency churn stops testing the environment and
+    starts testing the file.
+
+    What is still bound, and is what "the environment is unchanged" means here:
+    the exact package set, each frozen version still present in the current
+    `uv.lock`, the report's own package map digest, and the report's internal
+    consistency. Approved by the machine owner on 2026-08-17; see
+    `knowledge/notes/baseline-environment-binding-decision.md`.
+    """
     environment = report.get("methodology", {}).get("environment_provenance")
     verified = environment.get("verified_lock") if isinstance(environment, dict) else None
     locked = _locked_package_version_sets(ROOT / "uv.lock")
@@ -3749,7 +3775,6 @@ def _verify_baseline_package_contract(report: dict) -> dict:
         for name in ("numpy", "sentence-transformers", "torch", "transformers")
     }
     expected_environment_packages["usearch"] = None
-    lock_sha256 = _sha256_file(ROOT / "uv.lock")
     if (
         not isinstance(environment, dict)
         or set(environment) != {
@@ -3768,8 +3793,8 @@ def _verify_baseline_package_contract(report: dict) -> dict:
         )
         or environment["packages"] != expected_environment_packages
         or environment["runner_sha256"] != report.get("benchmark_runner_sha256")
-        or environment["uv_lock_sha256"] != lock_sha256
-        or verified["uv_lock_sha256"] != lock_sha256
+        or not _is_recorded_digest(environment["uv_lock_sha256"])
+        or verified["uv_lock_sha256"] != environment["uv_lock_sha256"]
         or verified["package_map_sha256"] != _sha256_json(frozen_packages)
     ):
         raise ValueError("bound baseline frozen package contract mismatch")

@@ -262,26 +262,19 @@ def test_ci_qualifies_real_pyright_on_all_supported_os_families():
         (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
     )
     job = workflow["jobs"]["pyright-navigation"]
-    assert job["strategy"]["matrix"]["include"] == [
-        {
-            "os": "ubuntu-24.04",
-            "platform": "linux",
-            "python": "3.10",
-            "node": "22.23.1",
-        },
-        {
-            "os": "windows-2025",
-            "platform": "windows",
-            "python": "3.10",
-            "node": "22.23.1",
-        },
-        {
-            "os": "macos-15",
-            "platform": "macos",
-            "python": "3.10",
-            "node": "22.23.1",
-        },
+    entries = job["strategy"]["matrix"]["include"]
+    assert [
+        (entry["os"], entry["platform"], entry["python"], entry["node"])
+        for entry in entries
+    ] == [
+        ("ubuntu-24.04", "linux", "3.10", "22.23.1"),
+        ("windows-2025", "windows", "3.10", "22.23.1"),
+        ("macos-15", "macos", "3.10", "22.23.1"),
     ]
+    # The budget is per platform, because the same suite takes about three
+    # times longer on the hosted Windows image. Every family declares one.
+    assert all(entry["timeout"] > 0 for entry in entries)
+    assert job["timeout-minutes"] == "${{ matrix.timeout }}"
     assert job["env"]["LLM_WIKI_STATE_ROOT"] == ("${{ github.workspace }}/../llm-wiki-state")
     assert job["env"]["LLM_WIKI_TEST_USE_EXTERNAL_STATE"] == "1"
     install_step = next(

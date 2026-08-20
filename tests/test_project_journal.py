@@ -1464,11 +1464,11 @@ def test_concurrent_newer_sequence_retries_after_crashed_head(
         with pytest.raises(ProjectPendingPriorError):
             newer_store.checkpoint("demo", second_event, "agent-b")
         newer_blocked.set()
-        assert head_committed.wait(5)
+        assert head_committed.wait(120)
         return newer_store.checkpoint("demo", second_event, "agent-b")
 
     def replay_head():
-        assert newer_blocked.wait(5)
+        assert newer_blocked.wait(120)
         receipt = ProjectStore(vault, state_root).checkpoint(
             "demo", first_event, "agent-c"
         )
@@ -1478,7 +1478,7 @@ def test_concurrent_newer_sequence_retries_after_crashed_head(
     with ThreadPoolExecutor(max_workers=2) as pool:
         newer = pool.submit(replay_newer)
         head = pool.submit(replay_head)
-        receipts = [head.result(timeout=10), newer.result(timeout=10)]
+        receipts = [head.result(timeout=180), newer.result(timeout=180)]
 
     assert [receipt.sequence for receipt in receipts] == [1, 2]
     assert [record["occurrence_id"] for record in journal_records(ProjectStore(vault, state_root))] == [
@@ -1610,7 +1610,7 @@ def test_same_owner_simultaneous_projectors_retry_without_sharing_lease(
 
     def pause_first(reservation, lease):
         first_reserved.set()
-        assert release_first.wait(5)
+        assert release_first.wait(60)
         return project(reservation, lease)
 
     monkeypatch.setattr(first_store, "_project_reserved", pause_first)
@@ -1621,7 +1621,7 @@ def test_same_owner_simultaneous_projectors_retry_without_sharing_lease(
             checkpoint_event("evt-first", "same-owner:first"),
             "agent-a",
         )
-        assert first_reserved.wait(5)
+        assert first_reserved.wait(60)
         with pytest.raises(ProjectLeaseBusy):
             second_store.checkpoint(
                 "demo",
@@ -1629,7 +1629,7 @@ def test_same_owner_simultaneous_projectors_retry_without_sharing_lease(
                 "agent-a",
             )
         release_first.set()
-        first_receipt = first.result(timeout=5)
+        first_receipt = first.result(timeout=60)
 
     second_receipt = second_store.checkpoint(
         "demo",

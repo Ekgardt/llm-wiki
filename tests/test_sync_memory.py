@@ -33,6 +33,90 @@ def _load_sync_memory():
     return module
 
 
+def _tree_paths(tree, *, read_only: bool) -> list:
+    """Children first when locking, parent first when unlocking."""
+    if read_only:
+        return [*tree.rglob("*"), tree]
+    return [tree, *tree.rglob("*")]
+
+
+def _entry_mode(path, *, read_only: bool) -> int:
+    if path.is_dir():
+        return 0o555 if read_only else 0o755
+    return 0o444 if read_only else 0o644
+
+
+def _set_tree_mode(tree, *, read_only: bool) -> None:
+    """Flip a whole tree between read-only and writable, best effort."""
+    for path in _tree_paths(tree, read_only=read_only):
+        _chmod_quietly(path, _entry_mode(path, read_only=read_only))
+
+
+def _chmod_quietly(path, mode: int) -> None:
+    try:
+        path.chmod(mode)
+    except OSError:
+        pass
+
+
+def _sync_apply_line(script: str) -> str:
+    return next(
+        line
+        for line in script.splitlines()
+        if "sync_memory.py" in line and "--apply" in line
+    )
+
+
+def _apply_knowledge_change(root, original, change: str) -> None:
+    """One way the knowledge tree can differ from the built index."""
+    if change == "added":
+        added = root / "knowledge" / "notes" / "added.md"
+        added.write_text("---\ntype: concept\n---\n# Added\n", encoding="utf-8")
+        return
+    if change == "removed":
+        original.unlink()
+        return
+    original.write_text("---\ntype: concept\n---\n# Modified\n", encoding="utf-8")
+
+
+def _damage_manifest(manifest, manifest_state: str) -> None:
+    if manifest_state == "missing":
+        manifest.unlink()
+        return
+    manifest.write_text("{not-json", encoding="utf-8")
+
+
+def _assert_stale_index_action(report, apply: bool) -> None:
+    """Check mode reports the staleness; apply mode rebuilds it."""
+    action = next(item for item in report["actions"] if item["id"] == "indexes")
+    assert action["status"] == ("changed" if apply else "skipped"), action
+    if apply:
+        return
+    assert action["details"]["freshness"] == "stale"
+    assert action["details"]["source_rebuild_required"] is True
+
+
+def _check_details(check_id: str, status: str) -> dict[str, object]:
+    if check_id != "index":
+        return {}
+    return {
+        "freshness": "fresh" if status == "ok" else "missing",
+        "repairable": status == "degraded",
+    }
+
+
+def _action_ids(report) -> tuple[str, ...]:
+    return tuple(action["id"] for action in report["actions"])
+
+
+def _all_actions_ok(report) -> bool:
+    return all(action["status"] == "ok" for action in report["actions"])
+
+
+def _all_dry_run(calls) -> bool:
+    return all(call["repair"] is False for call in calls)
+
+
 def _doctor_report(
     *,
     repaired: list[dict] | None = None,
@@ -60,14 +144,7 @@ def _doctor_report(
                 "id": check_id,
                 "status": status,
                 "message": f"{check_id} is {status}",
-                "details": (
-                    {
-                        "freshness": "fresh" if status == "ok" else "missing",
-                        "repairable": status == "degraded",
-                    }
-                    if check_id == "index"
-                    else {}
-                ),
+                "details": _check_details(check_id, status),
             }
             for check_id, status in statuses.items()
         ],
@@ -168,9 +245,9 @@ def test_check_is_default_dry_run_and_actions_are_ordered(tmp_path, monkeypatch)
     report = sync_memory.run_sync(root=tmp_path, state_root=tmp_path, home=tmp_path)
 
     assert report["mode"] == "check"
-    assert tuple(action["id"] for action in report["actions"]) == EXPECTED_ACTIONS
-    assert all(action["status"] == "ok" for action in report["actions"])
-    assert calls and all(call["repair"] is False for call in calls)
+    assert _action_ids(report) == EXPECTED_ACTIONS
+    assert _all_actions_ok(report)
+    assert calls and _all_dry_run(calls)
 
 
 def test_dependency_action_checks_lock_and_baseline_environment(tmp_path):
@@ -353,7 +430,10 @@ def test_dependency_commands_share_one_deadline(tmp_path):
     timeouts = []
     def run_uv(command, **kwargs):
         timeouts.append(kwargs["timeout"])
-        time.sleep(0.03)
+        # Longer than the 20 ms the assertions require the budget to shrink by,
+        # and longer than the ~15.6 ms Windows timer tick, which let a 30 ms
+        # sleep return after 16 ms and made the shrink look absent.
+        time.sleep(0.15)
         stdout = (
             json.dumps({"sync": {"changes": [{"package": "mcp"}]}})
             if "--dry-run" in command
@@ -361,11 +441,14 @@ def test_dependency_commands_share_one_deadline(tmp_path):
         )
         return subprocess.CompletedProcess(command, 0, stdout, "")
 
+    # The budget only has to outlast three commands plus process overhead;
+    # 0.2 s left no room on a loaded macOS runner and the action reported
+    # "error" for a machine-speed reason, not a contract one.
     result = sync_memory._dependency_action(
         root=tmp_path,
         apply=True,
         run_uv=run_uv,
-        deadline=time.monotonic() + 0.2,
+        deadline=time.monotonic() + 2.0,
     )
 
     assert result["status"] == "changed"
@@ -474,7 +557,7 @@ def test_apply_leaves_prepared_transaction_and_flush_compile_queue_untouched(
         state_root=state,
         home=home,
         apply=True,
-        time_limit_seconds=5,
+        time_limit_seconds=120,
     )
 
     with sqlite3.connect(state / "run" / "markdown-transactions.sqlite3") as database:
@@ -554,7 +637,10 @@ def test_blocking_index_builder_is_killed_before_timeout_is_reported(
     elapsed = time.monotonic() - started
     index = next(action for action in report["actions"] if action["id"] == "indexes")
 
-    assert elapsed < 0.8
+    # The claim is that the builder is killed rather than left to finish, which
+    # the marker checks below prove. The wall-clock bound only rules out waiting
+    # for the child, and killing a process tree is not instant on Windows.
+    assert elapsed < 15
     assert index["status"] == "error"
     assert index["details"]["timed_out"] is True
     assert not marker.exists()
@@ -821,7 +907,7 @@ def test_sync_index_builder_excludes_symlinked_outside_page(tmp_path, monkeypatc
         state_root=state,
         home=home,
         apply=True,
-        time_limit_seconds=5,
+        time_limit_seconds=120,
     )
 
     assert next(item for item in report["actions"] if item["id"] == "indexes")["status"] == "changed"
@@ -843,13 +929,7 @@ def test_sync_detects_recent_knowledge_source_changes(
     index_mtime = time.time() - 60
     os.utime(index, (index_mtime, index_mtime))
     original = root / "knowledge" / "notes" / "example.md"
-    if change == "added":
-        changed = root / "knowledge" / "notes" / "added.md"
-        changed.write_text("---\ntype: concept\n---\n# Added\n", encoding="utf-8")
-    elif change == "removed":
-        original.unlink()
-    else:
-        original.write_text("---\ntype: concept\n---\n# Modified\n", encoding="utf-8")
+    _apply_knowledge_change(root, original, change)
     knowledge = root / "knowledge"
     before = _snapshot(knowledge)
     monkeypatch.setattr(sync_memory, "_dependency_action", lambda **kwargs: _dependency_result())
@@ -859,14 +939,10 @@ def test_sync_detects_recent_knowledge_source_changes(
         state_root=state,
         home=home,
         apply=apply,
-        time_limit_seconds=5,
+        time_limit_seconds=120,
     )
 
-    action = next(item for item in report["actions"] if item["id"] == "indexes")
-    assert action["status"] == ("changed" if apply else "skipped"), action
-    if not apply:
-        assert action["details"]["freshness"] == "stale"
-        assert action["details"]["source_rebuild_required"] is True
+    _assert_stale_index_action(report, apply)
     assert _snapshot(knowledge) == before
 
 
@@ -879,10 +955,7 @@ def test_sync_treats_missing_or_invalid_source_manifest_as_stale(
     root, state, home = _build_vault(tmp_path)
     _build_fresh_search_index(sync_memory, root, state)
     manifest = state / "cache" / ".paths-manifest"
-    if manifest_state == "missing":
-        manifest.unlink()
-    else:
-        manifest.write_text("{not-json", encoding="utf-8")
+    _damage_manifest(manifest, manifest_state)
     knowledge = root / "knowledge"
     before = _snapshot(knowledge)
     monkeypatch.setattr(sync_memory, "_dependency_action", lambda **kwargs: _dependency_result())
@@ -892,14 +965,10 @@ def test_sync_treats_missing_or_invalid_source_manifest_as_stale(
         state_root=state,
         home=home,
         apply=apply,
-        time_limit_seconds=5,
+        time_limit_seconds=120,
     )
 
-    action = next(item for item in report["actions"] if item["id"] == "indexes")
-    assert action["status"] == ("changed" if apply else "skipped")
-    if not apply:
-        assert action["details"]["freshness"] == "stale"
-        assert action["details"]["source_rebuild_required"] is True
+    _assert_stale_index_action(report, apply)
     assert _snapshot(knowledge) == before
 
 
@@ -933,11 +1002,7 @@ def test_apply_never_writes_under_read_only_knowledge_tree(tmp_path, monkeypatch
     _create_index(state / "cache" / "index.sqlite")
     knowledge = root / "knowledge"
     before = _snapshot(knowledge)
-    for path in [*knowledge.rglob("*"), knowledge]:
-        try:
-            path.chmod(0o555 if path.is_dir() else 0o444)
-        except OSError:
-            pass
+    _set_tree_mode(knowledge, read_only=True)
     monkeypatch.setattr(sync_memory, "_dependency_action", lambda **kwargs: _dependency_result())
 
     try:
@@ -946,17 +1011,13 @@ def test_apply_never_writes_under_read_only_knowledge_tree(tmp_path, monkeypatch
             state_root=state,
             home=home,
             apply=True,
-            time_limit_seconds=5,
+            time_limit_seconds=120,
         )
     finally:
-        for path in [knowledge, *knowledge.rglob("*")]:
-            try:
-                path.chmod(0o755 if path.is_dir() else 0o644)
-            except OSError:
-                pass
+        _set_tree_mode(knowledge, read_only=False)
 
     assert _snapshot(knowledge) == before
-    assert tuple(action["id"] for action in report["actions"]) == EXPECTED_ACTIONS
+    assert _action_ids(report) == EXPECTED_ACTIONS
 
 
 def test_cli_json_defaults_to_check_and_rejects_conflicting_flags(monkeypatch, capsys):
@@ -1017,10 +1078,8 @@ def test_installers_handle_sync_exit_codes_explicitly():
     powershell = (ROOT / "install.ps1").read_text(encoding="utf-8")
 
     assert 'sync_memory.py" --apply' in powershell
-    shell_line = next(line for line in shell.splitlines() if "sync_memory.py" in line and "--apply" in line)
-    powershell_line = next(
-        line for line in powershell.splitlines() if "sync_memory.py" in line and "--apply" in line
-    )
+    shell_line = _sync_apply_line(shell)
+    powershell_line = _sync_apply_line(powershell)
     assert "|| true" not in shell_line
     assert "2>$null" not in powershell_line
     assert "Out-Null" not in powershell_line
@@ -1067,7 +1126,9 @@ $syncWarning = $false
         capture_output=True,
         text=True,
         errors="replace",
-        timeout=10,
+        # A hang guard, not a budget: pwsh startup alone exceeded ten seconds
+        # on a loaded hosted Linux runner.
+        timeout=120,
         check=False,
     )
 
@@ -1109,7 +1170,9 @@ $syncWarning = $false
         capture_output=True,
         text=True,
         errors="replace",
-        timeout=10,
+        # A hang guard, not a budget: pwsh startup alone exceeded ten seconds
+        # on a loaded hosted Linux runner.
+        timeout=120,
         check=False,
     )
 
@@ -1223,7 +1286,9 @@ $agents = @()
         capture_output=True,
         text=True,
         errors="replace",
-        timeout=10,
+        # A hang guard, not a budget: pwsh startup alone exceeded ten seconds
+        # on a loaded hosted Linux runner.
+        timeout=120,
         check=False,
     )
 

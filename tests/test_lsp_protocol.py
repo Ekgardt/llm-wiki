@@ -617,6 +617,105 @@ def test_notification_uses_owned_writer_and_waits_for_delivery() -> None:
     protocol.close()
 
 
+def _cancel_all_and_expect(sources, futures, *, timeout: float) -> None:
+    """Cancel every source; every caller must observe RequestCancelled."""
+    for source in sources:
+        source.cancel()
+    for future in futures:
+        with pytest.raises(RequestCancelled):
+            future.result(timeout=timeout)
+
+
+def _dispatch_late_responses(protocol, count: int) -> None:
+    for request_id in range(1, count + 1):
+        protocol._dispatch_message(
+            {"jsonrpc": "2.0", "id": request_id, "result": "late"},
+            generation_nonce="stream-probe",
+        )
+
+
+def _linked_errors(error: BaseException) -> list[BaseException]:
+    return [item for item in (error.__cause__, error.__context__) if item is not None]
+
+
+def _reachable_errors(error: BaseException) -> list[BaseException]:
+    """Every error reachable through cause and context, each visited once."""
+    pending = [error]
+    seen: set[int] = set()
+    reachable: list[BaseException] = []
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        reachable.append(current)
+        pending.extend(_linked_errors(current))
+    return reachable
+
+
+def _first_retained_cleanup(errors):
+    return next(
+        (
+            error
+            for error in errors
+            if isinstance(error, lsp_protocol._ProtocolStartupCleanupError)
+        ),
+        None,
+    )
+
+
+def _assert_error_graph_is_acyclic(error: BaseException) -> None:
+    pending = [error]
+    visited: set[int] = set()
+    while pending:
+        current = pending.pop()
+        assert id(current) not in visited
+        visited.add(id(current))
+        pending.extend(_linked_errors(current))
+
+
+def _lsp_thread_idents() -> set[int]:
+    return {
+        thread.ident
+        for thread in threading.enumerate()
+        if thread.name.startswith("lsp-")
+    }
+
+
+def _await_cancel_frames(writer, count: int, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while _cancel_frames(writer) < count and time.monotonic() < deadline:
+        time.sleep(0.001)
+
+
+def _all_requests_sent(protocol, count: int) -> bool:
+    with protocol._state_lock:
+        if len(protocol._pending) != count:
+            return False
+        return all(
+            pending.write_phase == "sent" for pending in protocol._pending.values()
+        )
+
+
+def _await_all_sent(protocol, count: int, timeout: float = 1.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _all_requests_sent(protocol, count):
+            return True
+        time.sleep(0.001)
+    return False
+
+
+def _await_frames(writer, count: int, timeout: float = 1.0) -> None:
+    deadline = time.monotonic() + timeout
+    while len(writer.frames) < count and time.monotonic() < deadline:
+        time.sleep(0.001)
+
+
+def _cancel_frames(writer) -> int:
+    return len([frame for frame in writer.frames if b"$/cancelRequest" in frame])
+
+
 def test_cancel_all_releases_pending_callers_and_sends_one_cancel_each() -> None:
     reader = _BlockingReader()
     writer = _BlockingWriter(block_after=100)
@@ -632,26 +731,14 @@ def test_cancel_all_releases_pending_callers_and_sends_one_cancel_each() -> None
             )
             for _ in range(2)
         ]
-        deadline = time.monotonic() + 1
-        while time.monotonic() < deadline:
-            with protocol._state_lock:
-                sent = len(protocol._pending) == 2 and all(
-                    pending.write_phase == "sent"
-                    for pending in protocol._pending.values()
-                )
-            if sent:
-                break
-            time.sleep(0.001)
-        assert sent
+        assert _await_all_sent(protocol, 2)
         protocol.cancel_all("manager shutdown")
         for future in futures:
             with pytest.raises(RequestCancelled):
                 future.result(timeout=1)
 
-    deadline = time.monotonic() + 1
-    while len(writer.frames) < 4 and time.monotonic() < deadline:
-        time.sleep(0.001)
-    assert len([frame for frame in writer.frames if b"$/cancelRequest" in frame]) == 2
+    _await_frames(writer, 4)
+    assert _cancel_frames(writer) == 2
     assert protocol.pending_count == 2
     protocol.close()
 
@@ -908,7 +995,7 @@ def test_one_reader_thread_owns_stdout(fake_server: FakeLspServer) -> None:
 def test_constructor_thread_start_failure_retains_no_owner_threads(
     monkeypatch: pytest.MonkeyPatch, failure_owner: str
 ) -> None:
-    baseline = {thread.ident for thread in threading.enumerate() if thread.name.startswith("lsp-")}
+    baseline = _lsp_thread_idents()
     real_start = threading.Thread.start
 
     def fail_selected(thread: threading.Thread) -> None:
@@ -938,7 +1025,7 @@ def test_constructor_thread_start_failure_retains_no_owner_threads(
 def test_constructor_startup_wait_failure_retains_no_owner_threads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    baseline = {thread.ident for thread in threading.enumerate() if thread.name.startswith("lsp-")}
+    baseline = _lsp_thread_idents()
 
     def fail_wait(
         _event: threading.Event, _owner_name: str, _deadline: float
@@ -1279,39 +1366,11 @@ def test_constructor_partial_owner_retains_cleanup_behind_acyclic_interruption(
             raised_error = error
 
     assert raised_error is not None
-    reachable: list[BaseException] = []
-    pending = [raised_error]
-    discovered: set[int] = set()
-    while pending:
-        current = pending.pop()
-        if id(current) in discovered:
-            continue
-        discovered.add(id(current))
-        reachable.append(current)
-        if current.__cause__ is not None:
-            pending.append(current.__cause__)
-        if current.__context__ is not None:
-            pending.append(current.__context__)
-    retained = next(
-        (
-            error
-            for error in reachable
-            if isinstance(error, lsp_protocol._ProtocolStartupCleanupError)
-        ),
-        None,
-    )
+    reachable = _reachable_errors(raised_error)
+    retained = _first_retained_cleanup(reachable)
     assert retained is not None
     try:
-        pending = [raised_error]
-        visited: set[int] = set()
-        while pending:
-            current = pending.pop()
-            assert id(current) not in visited
-            visited.add(id(current))
-            if current.__cause__ is not None:
-                pending.append(current.__cause__)
-            if current.__context__ is not None:
-                pending.append(current.__context__)
+        _assert_error_graph_is_acyclic(raised_error)
 
         assert raised_error is interruption
         assert retained in reachable
@@ -1514,6 +1573,9 @@ def test_constructor_accepts_live_sub_half_second_owner_start_deadline(
             protocol.close(real_monotonic() + 1)
 
 
+_MONOTONIC_TICK = 0.0156
+
+
 def test_constructor_rechecks_budget_before_each_owner_thread_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1526,8 +1588,11 @@ def test_constructor_rechecks_budget_before_each_owner_thread_start(
         starts.append(thread.name)
         if thread.name.startswith("lsp-stdin-"):
             remaining = startup_deadline - time.monotonic()
-            if remaining > 0:
-                time.sleep(remaining + 0.01)
+            if remaining > -_MONOTONIC_TICK:
+                # `time.monotonic()` advances in 15.6 ms steps on Windows, so
+                # overshoot the deadline by several ticks or the recheck still
+                # reads a time inside the budget.
+                time.sleep(remaining + _MONOTONIC_TICK * 4)
         real_start(thread)
 
     reader = _BlockingReader()
@@ -1545,23 +1610,10 @@ def test_constructor_rechecks_budget_before_each_owner_thread_start(
         except BaseException as error:
             raised_error = error
 
-    assert raised_error is not None
+    assert raised_error is not None, starts
     pending: list[BaseException] = [raised_error]
-    seen: set[int] = set()
-    retained: lsp_protocol._ProtocolStartupCleanupError | None = None
-    errors: list[BaseException] = []
-    while pending:
-        current = pending.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        errors.append(current)
-        if isinstance(current, lsp_protocol._ProtocolStartupCleanupError):
-            retained = current
-        if current.__context__ is not None:
-            pending.append(current.__context__)
-        if current.__cause__ is not None:
-            pending.append(current.__cause__)
+    errors = _reachable_errors(pending[0])
+    retained = _first_retained_cleanup(errors)
     if retained is not None:
         retained.protocol.close(time.monotonic() + 1)
 
@@ -1852,7 +1904,10 @@ def test_blocked_cancellation_write_never_extends_original_deadline() -> None:
     protocol = _protocol_with_streams(reader, writer)
     source = CancellationSource()
     timer = threading.Timer(0.02, source.cancel)
-    deadline = time.monotonic() + 0.08
+    # The cancellation has to win the race with the deadline for the test to
+    # measure anything; 0.08 s left the timer competing with the scheduler and
+    # a macOS runner timed out instead of cancelling.
+    deadline = time.monotonic() + 0.5
     timer.start()
 
     with pytest.raises(RequestCancelled):
@@ -2001,8 +2056,10 @@ def test_close_from_reader_handler_does_not_deadlock(fake_server: FakeLspServer)
         peer_handler,
         server_notification_handlers={"$/progress": notification_handler},
     )
-    assert handler_returned.wait(1)
-    protocol.reader_thread.join(1)
+    # This is a liveness test: a deadlock still fails it, just later. The wait
+    # has to outlast a loaded CI runner, not describe how fast the close is.
+    assert handler_returned.wait(60)
+    protocol.reader_thread.join(60)
     assert not protocol.reader_thread.is_alive()
     assert not protocol.writer_thread.is_alive()
 
@@ -2063,9 +2120,7 @@ def test_duplicate_cancel_finalization_emits_only_one_cancel_frame() -> None:
             deadline=time.monotonic() + 1,
             cancellation=source.token,
         )
-        deadline = time.monotonic() + 1
-        while not writer.frames and time.monotonic() < deadline:
-            time.sleep(0.001)
+        _await_frames(writer, 1)
         key = protocol.pending_keys[0]
         pending = protocol._pending[key]
         assert source.cancel() is True
@@ -2281,10 +2336,8 @@ def test_cancellation_timestamp_before_response_wins_processing_race() -> None:
         )
     thread.join()
     assert protocol.pending_count == 0
-    deadline = time.monotonic() + 1
-    while len(writer.frames) < 2 and time.monotonic() < deadline:
-        time.sleep(0.001)
-    assert len([frame for frame in writer.frames if b"$/cancelRequest" in frame]) == 1
+    _await_frames(writer, 2)
+    assert _cancel_frames(writer) == 1
     protocol.close()
 
 
@@ -2404,26 +2457,16 @@ def test_sent_cancelled_requests_remain_charged_until_late_responses() -> None:
             )
             for source in sources
         ]
-        deadline = time.monotonic() + 1
-        while len(writer.frames) < MAX_PENDING_REQUESTS and time.monotonic() < deadline:
-            time.sleep(0.001)
+        _await_frames(writer, MAX_PENDING_REQUESTS)
         assert len(writer.frames) == MAX_PENDING_REQUESTS
-        for source in sources:
-            source.cancel()
-        for future in futures:
-            with pytest.raises(RequestCancelled):
-                future.result(timeout=1)
+        _cancel_all_and_expect(sources, futures, timeout=1)
 
     assert protocol.pending_count == MAX_PENDING_REQUESTS
     assert protocol._next_request_id == MAX_PENDING_REQUESTS + 1
     with pytest.raises(PendingRequestLimitExceeded):
         _request(protocol)
 
-    for request_id in range(1, MAX_PENDING_REQUESTS + 1):
-        protocol._dispatch_message(
-            {"jsonrpc": "2.0", "id": request_id, "result": "late"},
-            generation_nonce="stream-probe",
-        )
+    _dispatch_late_responses(protocol, MAX_PENDING_REQUESTS)
     assert protocol.pending_count == 0
     assert protocol.pending_keys == ()
     protocol.close()
@@ -2464,9 +2507,7 @@ def test_full_ordinary_queue_still_accepts_all_active_cancellations() -> None:
             )
             for source in sources
         ]
-        deadline = time.monotonic() + 1
-        while len(writer.frames) < MAX_PENDING_REQUESTS and time.monotonic() < deadline:
-            time.sleep(0.001)
+        _await_frames(writer, MAX_PENDING_REQUESTS)
         assert len(writer.frames) == MAX_PENDING_REQUESTS
         protocol._write_message({"jsonrpc": "2.0", "method": "test/block"})
         assert writer.started.wait(1)
@@ -2481,20 +2522,13 @@ def test_full_ordinary_queue_still_accepts_all_active_cancellations() -> None:
                 deadline=time.monotonic() + 3,
             )
         assert protocol._ordinary_queued == ordinary_limit
-        for source in sources:
-            source.cancel()
-        for future in futures:
-            with pytest.raises(RequestCancelled):
-                future.result(timeout=0.5)
+        _cancel_all_and_expect(sources, futures, timeout=0.5)
         assert protocol._control_queued == MAX_PENDING_REQUESTS
         assert protocol._write_queue.qsize() == lsp_protocol._MAX_QUEUED_WRITES
         writer.released.set()
 
-    deadline = time.monotonic() + 2
-    while len([frame for frame in writer.frames if b"$/cancelRequest" in frame]) < 32:
-        assert time.monotonic() < deadline
-        time.sleep(0.001)
-    assert len([frame for frame in writer.frames if b"$/cancelRequest" in frame]) == 32
+    _await_cancel_frames(writer, 32)
+    assert _cancel_frames(writer) == 32
     assert protocol.fatal is False
     protocol.close()
 
@@ -2548,9 +2582,7 @@ def test_late_peer_cancellation_drains_without_changing_local_outcome() -> None:
             deadline=time.monotonic() + 1,
             cancellation=source.token,
         )
-        deadline = time.monotonic() + 1
-        while not writer.frames and time.monotonic() < deadline:
-            time.sleep(0.001)
+        _await_frames(writer, 1)
         source.cancel()
         with pytest.raises(RequestCancelled):
             future.result(timeout=1)
@@ -2637,9 +2669,7 @@ def test_finish_after_process_exit_completes_pending_immediately_and_clears_it()
             deadline=time.monotonic() + 5,
         )
         assert writer.started.wait(1) is False
-        deadline = time.monotonic() + 1
-        while not writer.frames and time.monotonic() < deadline:
-            time.sleep(0.001)
+        _await_frames(writer, 1)
         assert writer.frames
 
         protocol._finish_io_after_process_exit(time.monotonic() + 1)

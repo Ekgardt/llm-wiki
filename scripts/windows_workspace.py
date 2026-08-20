@@ -531,14 +531,13 @@ def open_shared_readonly_source_file(parent: int, name: str) -> int:
     )
 
 
-def open_exclusive_readonly_source_file(path: Path) -> int:
-    """Open one local no-follow file while denying writers and deleters."""
+def _open_local_readonly_path(path: Path, share_access: int) -> int:
     require_capability()
     value, _pure = _bounded_local_absolute_path(path)
     handle = _API.create_file(
         f"\\\\?\\{value}",
         _FILE_READ_DATA | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE,
-        _FILE_SHARE_READ,
+        share_access,
         None,
         _OPEN_EXISTING,
         _FILE_ATTRIBUTE_NORMAL | _FILE_FLAG_OPEN_REPARSE_POINT,
@@ -553,6 +552,24 @@ def open_exclusive_readonly_source_file(path: Path) -> int:
         close_handle(result)
         raise
     return result
+
+
+def open_exclusive_readonly_source_file(path: Path) -> int:
+    """Open one local no-follow file while denying writers and deleters."""
+    return _open_local_readonly_path(path, _FILE_SHARE_READ)
+
+
+def open_shared_readonly_runtime_file(path: Path) -> int:
+    """Open one local no-follow runtime file without excluding live writers.
+
+    Operational databases are open for writing by this process and by other
+    local agents. Identity capture only needs the volume and the file id, so
+    demanding a window in which nobody may write turns a normal second call in
+    the same process into `ERROR_SHARING_VIOLATION`.
+    """
+    return _open_local_readonly_path(
+        path, _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE
+    )
 
 
 def open_deletable_file(parent: int, name: str) -> int:
@@ -903,6 +920,7 @@ __all__ = [
     "open_directory_path",
     "open_exclusive_readonly_source_file",
     "open_file",
+    "open_shared_readonly_runtime_file",
     "open_shared_readonly_source_file",
     "open_writable_directory_path",
     "publish_file",

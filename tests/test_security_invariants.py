@@ -23,6 +23,121 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
+
+RENAME_APIS = {"rename", "replace", "move"}
+CONTEXT_WINDOW = 200
+
+
+def _calls_near(source: str, pattern: str, needle: str, window: int = CONTEXT_WINDOW) -> bool:
+    """True when `pattern` matches with `needle` in the preceding source window."""
+    for match in re.finditer(pattern, source):
+        before = source[max(0, match.start() - window) : match.start()]
+        if needle in before.casefold():
+            return True
+    return False
+
+
+def _is_rename_call(node: object) -> bool:
+    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+        return False
+    return node.func.attr in RENAME_APIS
+
+
+def _rename_calls(tree: ast.AST) -> list[ast.Call]:
+    return [node for node in ast.walk(tree) if _is_rename_call(node)]
+
+
+def _mentions_daily_archive(text: str) -> bool:
+    lowered = text.casefold()
+    return "daily" in lowered and "archive" in lowered
+
+
+def _assignment_sources(source: str, tree: ast.AST) -> list[str]:
+    return [
+        ast.get_source_segment(source, node) or ""
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Assign, ast.AnnAssign))
+    ]
+
+
+def _archive_assignment(source: str, tree: ast.AST) -> bool:
+    return any(_mentions_daily_archive(text) for text in _assignment_sources(source, tree))
+
+
+def _archive_rename(source: str, renames: list[ast.Call]) -> bool:
+    return any(
+        _mentions_daily_archive(ast.get_source_segment(source, call) or "")
+        for call in renames
+    )
+
+
+def _publishes_daily_archive(path: Path) -> bool:
+    """A script publishes an archive when it renames a daily-archive path."""
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    renames = _rename_calls(tree)
+    if not renames:
+        return False
+    return _archive_assignment(source, tree) or _archive_rename(source, renames)
+
+
+def _parsed_module(py: Path) -> ast.AST | None:
+    try:
+        return ast.parse(py.read_text(encoding="utf-8"))
+    except SyntaxError:
+        return None
+
+
+def _string_constants(tree: ast.AST) -> list[ast.Constant]:
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    ]
+
+
+def _pattern_hits(py: Path, pattern: str) -> list[str]:
+    tree = _parsed_module(py)
+    if tree is None:
+        return []
+    return [
+        f"{py.name}:{node.lineno}"
+        for node in _string_constants(tree)
+        if pattern in node.value
+    ]
+
+
+def _tolerated_hit(hit: str) -> bool:
+    """export_vault.py lists the forbidden paths; test files quote them."""
+    return "export_vault" in hit or hit.startswith("test_")
+
+
+def _opens_daily_append(src: str) -> bool:
+    if not _calls_near(src, r'\.open\s*\(\s*["\']a', "daily"):
+        return False
+    return "locked_append" not in src and "append_daily" not in src
+
+
+def _start_threads(threads: list) -> None:
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+
+def _assert_triple_contiguous(lines: list[str], index: int) -> None:
+    assert lines[index].startswith("START-"), (
+        f"Expected START at line {index}, got: {lines[index]!r}"
+    )
+    _, tid, num = lines[index].split("-")
+    assert lines[index + 1] == f"MIDDLE-{tid}-{num}", (
+        f"Interleaving detected: line {index + 1} expected MIDDLE-{tid}-{num}, "
+        f"got {lines[index + 1]!r}"
+    )
+    assert lines[index + 2] == f"END-{tid}-{num}", (
+        f"Interleaving detected: line {index + 2} expected END-{tid}-{num}, "
+        f"got {lines[index + 2]!r}"
+    )
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
@@ -91,58 +206,24 @@ class TestNoLLMBypass:
         """No script should use shell=True with subprocess."""
         for py in SCRIPTS.glob("*.py"):
             src = py.read_text(encoding="utf-8")
-            # Broad regex: catches shell=True anywhere in a subprocess call
-            # even if the value is computed (shell=condition)
-            for match in re.finditer(r"shell\s*=\s*True", src):
-                # Check context: is it inside a subprocess call?
-                before = src[max(0, match.start() - 200) : match.start()]
-                if "subprocess" in before:
-                    pytest.fail(
-                        f"{py.name}: subprocess with shell=True found"
-                    )
-            # Also check for shell=<variable> pattern
-            for match in re.finditer(r"shell\s*=\s*isinstance", src):
-                before = src[max(0, match.start() - 200) : match.start()]
-                if "subprocess" in before:
-                    pytest.fail(
-                        f"{py.name}: subprocess with shell=isinstance(...) found — "
-                        "use list args only"
-                    )
+            # Broad patterns: the value may be computed (shell=condition),
+            # so context decides whether the flag reaches a subprocess call.
+            assert not _calls_near(src, r"shell\s*=\s*True", "subprocess"), (
+                f"{py.name}: subprocess with shell=True found"
+            )
+            assert not _calls_near(src, r"shell\s*=\s*isinstance", "subprocess"), (
+                f"{py.name}: subprocess with shell=isinstance(...) found — "
+                "use list args only"
+            )
 
     def test_only_daily_archiver_has_directory_publication_exception(self):
-        rename_apis = {"rename", "replace", "move"}
-        offenders = set()
-        for path in SCRIPTS.glob("*.py"):
-            if path.name == "check_knowledge_writers.py":
-                continue  # Scanner patterns are data, not publication calls.
-            source = path.read_text(encoding="utf-8")
-            tree = ast.parse(source)
-            archive_assignments = [
-                ast.get_source_segment(source, node) or ""
-                for node in ast.walk(tree)
-                if isinstance(node, (ast.Assign, ast.AnnAssign))
-            ]
-            rename_calls = [
-                node
-                for node in ast.walk(tree)
-                if isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr in rename_apis
-            ]
-            has_archive_boundary = any(
-                "daily" in assignment.casefold()
-                and "archive" in assignment.casefold()
-                for assignment in archive_assignments
-            ) or any(
-                all(
-                    token in (ast.get_source_segment(source, call) or "").casefold()
-                    for token in ("daily", "archive")
-                )
-                for call in rename_calls
-            )
-            has_directory_rename = bool(rename_calls)
-            if has_archive_boundary and has_directory_rename:
-                offenders.add(path.name)
+        offenders = {
+            path.name
+            for path in SCRIPTS.glob("*.py")
+            # Scanner patterns are data, not publication calls.
+            if path.name != "check_knowledge_writers.py"
+            and _publishes_daily_archive(path)
+        }
         assert offenders == {"archive_daily.py"}
 
 
@@ -194,6 +275,41 @@ class TestRedactionBeforePersistence:
 
         out = redact_secrets("entropy=short-secret entropy: another-secret")
         assert out == "entropy=[REDACTED] entropy: [REDACTED]"
+
+    def test_redact_catches_hyphenated_provider_key(self):
+        """Modern provider keys carry hyphenated prefixes (sk-ant-…, sk-proj-…)."""
+        from secret_redact import redact_secrets
+
+        key = "sk-ant-api03-QWERTYUIOPASDFGHJKLZXCVBNM1234"
+        out = redact_secrets(f"call failed with {key}")
+        assert key not in out
+        assert "[REDACTED_API_KEY]" in out
+
+    def test_redact_keeps_hyphenated_prose(self):
+        """A long hyphenated identifier is not a key just because it is long."""
+        from secret_redact import redact_secrets
+
+        text = "branch fix/linux-installer-and-transient-cleanup is ready"
+        assert redact_secrets(text) == text
+
+    def test_redact_keeps_macos_temporary_paths(self):
+        """A macOS temp path is 41 characters of `[A-Za-z0-9/]` at entropy 4.46."""
+        from secret_redact import redact_secrets
+
+        path = (
+            "/private/var/folders/_5/zjnzxgh147qcg3bb5cg2wvqw0000gn/T/"
+            "pytest-of-runner/pytest-0/test_case0/Project With Spaces"
+        )
+        assert redact_secrets(path) == path
+
+    def test_redact_still_catches_base64_with_slashes(self):
+        """A real blob keeps long dense runs between its separators."""
+        from secret_redact import redact_secrets
+
+        blob = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldY/YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4"
+        out = redact_secrets(f"payload {blob}")
+        assert blob not in out
+        assert "[REDACTED_TOKEN]" in out
 
     def test_redact_does_not_redact_sha256(self):
         """Git SHA hashes (pure hex) must NOT be redacted."""
@@ -367,28 +483,16 @@ class TestNoLegacyPaths:
     def test_no_legacy_path_in_active_code(self, pattern, search_dir):
         """Check that forbidden paths don't appear in active code logic
         (comments and docstrings are tolerated for historical context)."""
-        import ast
-
-        violations = []
-        for py in (ROOT / search_dir).glob("*.py"):
-            try:
-                tree = ast.parse(py.read_text(encoding="utf-8"))
-            except SyntaxError:
-                continue
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                    if pattern in node.value:
-                        # Check if it's in a comment-like context (docstring)
-                        violations.append(f"{py.name}:{node.lineno}")
-        # Filter: allow in export_vault.py FORBIDDEN list
-        violations = [v for v in violations if "export_vault" not in v]
-        # Filter: allow in test files
-        violations = [v for v in violations if not v.startswith("test_")]
-        if violations:
-            pytest.fail(
-                f"Legacy path '{pattern}' found in active code: {violations[:3]}. "
-                "Update to current three-zone paths."
-            )
+        violations = [
+            hit
+            for py in (ROOT / search_dir).glob("*.py")
+            for hit in _pattern_hits(py, pattern)
+            if not _tolerated_hit(hit)
+        ]
+        assert not violations, (
+            f"Legacy path '{pattern}' found in active code: {violations[:3]}. "
+            "Update to current three-zone paths."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -428,30 +532,12 @@ class TestDailyLockExclusivity:
                         f.write(line)
 
         threads = [threading.Thread(target=writer, args=(t,)) for t in range(5)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+        _start_threads(threads)
 
         # Verify: each START/MIDDLE/END triple must be contiguous
-        content = daily_path.read_text(encoding="utf-8")
-        lines = content.strip().splitlines()
-        i = 0
-        while i < len(lines):
-            if not lines[i].startswith("START-"):
-                pytest.fail(f"Expected START at line {i}, got: {lines[i]!r}")
-            # Next line must be the matching MIDDLE
-            parts = lines[i].split("-")
-            tid, num = parts[1], parts[2]
-            assert lines[i + 1] == f"MIDDLE-{tid}-{num}", (
-                f"Interleaving detected: line {i+1} expected MIDDLE-{tid}-{num}, "
-                f"got {lines[i+1]!r}"
-            )
-            assert lines[i + 2] == f"END-{tid}-{num}", (
-                f"Interleaving detected: line {i+2} expected END-{tid}-{num}, "
-                f"got {lines[i+2]!r}"
-            )
-            i += 3
+        lines = daily_path.read_text(encoding="utf-8").strip().splitlines()
+        for index in range(0, len(lines), 3):
+            _assert_triple_contiguous(lines, index)
 
     def test_lock_is_fail_closed(self, tmp_path, monkeypatch):
         """If lock can't be acquired, it must raise (not silently write)."""
@@ -521,21 +607,13 @@ class TestSingleDailyWritePath:
     def test_no_direct_daily_file_open_outside_infra(self):
         """No script outside daily_log_append.py should open a daily-log
         file directly with open(... 'a') — it must use locked_append()."""
-        for py in (SCRIPTS).glob("*.py"):
+        for py in SCRIPTS.glob("*.py"):
             if py.name in self.DAILY_APPEND_INFRA:
                 continue
-            src = py.read_text(encoding="utf-8")
-            # Look for pattern: path.open("a" or "a") on a daily-log-like path
-            for m in re.finditer(r'\.open\s*\(\s*["\']a', src):
-                # Check context: is this a daily-log write?
-                before = src[max(0, m.start() - 200):m.start()]
-                if "daily" in before.lower():
-                    has_delegate = "locked_append" in src or "append_daily" in src
-                    if not has_delegate:
-                        pytest.fail(
-                            f"{py.name}: opens daily-log file directly with "
-                            f"open('a') instead of delegating to locked_append()."
-                        )
+            assert not _opens_daily_append(py.read_text(encoding="utf-8")), (
+                f"{py.name}: opens daily-log file directly with "
+                f"open('a') instead of delegating to locked_append()."
+            )
 
 
 # ---------------------------------------------------------------------------

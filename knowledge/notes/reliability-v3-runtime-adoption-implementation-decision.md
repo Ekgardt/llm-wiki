@@ -124,3 +124,6 @@ separate marker table. The implementation uses these minimal clarifications:
 - [[knowledge/notes/audit-closure-security-recovery-control-plane-decision]]
 - [[knowledge/notes/v4-reliability-contracts-decision]]
 - [[knowledge/notes/reliable-memory-stage-2]]
+- [[knowledge/notes/blackboard-fenced-resource-claims-decision]]
+- [[knowledge/notes/durable-capture-producer-activation-decision]]
+- [[knowledge/notes/install-ownership-control-plane-decision]]

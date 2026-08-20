@@ -82,7 +82,7 @@ provider：OpenCode、Codex、Claude 和 OpenAI 可能使用云服务；Ollama �
 - **可用时进行 Triple-fusion**：BM25（FTS5）+ Vector（sentence-transformers）+ evidence-backed Graph-neighbor RRF
 - **加权 RRF**：BM25=2.0、Vector=1.0、Graph=0.5——防止已知项查询回归
 - **Title + filename 提升**——文件名精确匹配直接短路到 rank 1
-- **Typed-provenance 排序**——`source_authority: user` 高于 `ai-derived` / `inferred`
+- **Typed-provenance 排序**——同一张权重表（`user` 1.35、`web` 1.1、`ai-derived` 1.0、`inferred` 0.8）在每条路径上乘以决定顺序的分数：BM25、融合 RRF 与重排序之后
 - **时间查询**——`--as-of YYYY-MM-DD` 按 `valid_to` frontmatter 过滤
 - **本地检索模式**——小规模直接读取页面，始终可用的 SQLite FTS5 BM25，以及可选的 vectors/LanceDB + graph + reranker 混合检索
 - **Grounded QA**——检索到的 source span 带有 citation ID、路径、source/span 哈希、revision 及 byte/line 范围；证据不足、冲突或超出时间范围时会拒答
@@ -101,7 +101,7 @@ provider：OpenCode、Codex、Claude 和 OpenAI 可能使用云服务；Ollama �
 - **智能体时间线**——归因：哪个智能体何时做了什么决策
 
 ### 维护
-- **14 项 lint 检查（13 项结构性 + 1 项 LLM 判定矛盾）**——损坏的 wikilinks、孤儿页面、缺失 frontmatter、无效 supersede 链、时间有效性、gap、稀疏页面、缺失来源、矛盾
+- **16 项 lint 检查（15 项结构性 + 1 项 LLM 判定矛盾）**——损坏的 wikilinks、孤儿页面、未编译日志、缺失反向链接、稀疏页面、缺失 frontmatter、缺失或无效 type、缺失来源、无效 supersede 链、孤立 gap、时间有效性、无法解析的证据、无效 claim 模式、矛盾
 - **类型感知归档**——debugging 60 天、patterns 180 天、decisions 永不
 - **Nightly + weekly 计划**——编译、lint、归档、OKF 迁移（Windows 使用 Task Scheduler，macOS 使用 LaunchAgent，Linux 使用用户级 systemd；cron 仅作为显式降级回退）
 - **OKF v0.1 frontmatter**——`type`、`confidence`、`source_authority`、`supersede` 字段；从遗留页面自动迁移
@@ -264,6 +264,7 @@ Markdown 仍是权威来源。Runtime SQLite 用于协调可恢复写入和排�
 ```bash
 uv run python scripts/doctor.py
 uv run python scripts/doctor.py --repair
+uv run python scripts/doctor.py --time-budget 60
 uv run python scripts/markdown_transaction.py recover
 uv run python scripts/markdown_transaction.py undo <transaction-id>
 uv run python scripts/markdown_transaction.py prune --retention-days 30
@@ -271,8 +272,11 @@ uv run python scripts/memory_queue.py migrate
 uv run python scripts/memory_queue.py work --max-tasks 20 --max-seconds 600 --idle-seconds 2 --lease-seconds 120 --heartbeat-seconds 40 --max-attempts 8 --retry-base-seconds 30 --retry-cap-seconds 3600
 uv run python scripts/memory_queue.py redrive <task-id>
 uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> --export <path>
+uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> --export <path> --include-dead
+uv run python scripts/memory_queue.py restore --export <path>
 uv run python scripts/archive_daily.py --commit --hot-days 90
 uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contradiction-v1.json
+uv run python benchmark/run_flush_classification.py --corpus benchmark/flush-classification-v1.json
 ```
 
 队列采用至少一次投递，因此 handler 使用稳定 operation ID 保证幂等。归档把超过 90 天 hot window 且符合条件的 daily 日志移动到经过验证、未压缩的 BagIt 包，同时保留逻辑 evidence 解析。无法确定或 evaluator 有分歧的 claims 会进入 quarantine；在 frozen benchmark gate 达标之前，semantic supersession 保持禁用。恢复、保留和安全删除流程见 [docs/USER-GUIDE.md](docs/USER-GUIDE.md)。

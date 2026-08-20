@@ -252,7 +252,7 @@ def test_drain_heartbeats_long_handler_past_270_seconds(
             if len(waits) == 7:
                 completed.set()
             return False
-        return stop.wait(2)
+        return stop.wait(60)
 
     queue = MemoryQueue(
         tmp_path,
@@ -272,7 +272,10 @@ def test_drain_heartbeats_long_handler_past_270_seconds(
     monkeypatch.setattr(memory_queue, "_queue", lambda: queue)
 
     counts = memory_queue.drain_with(
-        lambda task: completed.wait(2),
+        # The handler waits for the heartbeat thread to reach its seventh beat.
+        # Two seconds was not enough on a loaded runner, and the task then
+        # failed on the fixture rather than on the behaviour under test.
+        lambda task: completed.wait(60),
         max_tasks=1,
     )
     assert counts == {"ok": 1, "failed": 0, "dead": 0, "skipped": 0}
@@ -333,3 +336,46 @@ def test_drain_reports_failure_when_heartbeat_loses_fence(
         thread.name == f"memory-queue-heartbeat-{task_id}" and thread.is_alive()
         for thread in threading.enumerate()
     )
+
+
+def test_a_busy_database_makes_the_worker_wait_instead_of_dying(tmp_path, monkeypatch):
+    """Another worker holding the write lock must not end this worker's run."""
+    queue = MemoryQueue(tmp_path)
+    task_id = queue.enqueue("query", 1, {"n": 1})
+    real_claim = queue.claim
+    attempts = []
+
+    def busy_once(owner, **options):
+        attempts.append(owner)
+        if len(attempts) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real_claim(owner, **options)
+
+    monkeypatch.setattr(queue, "claim", busy_once)
+    monkeypatch.setattr(memory_queue, "_queue", lambda **options: queue)
+
+    summary = memory_queue.run_worker(
+        lambda payload: True,
+        max_tasks=1,
+        max_seconds=30,
+        idle_seconds=0,
+        processor_runner=lambda processor, task, timeout: processor(task),
+    )
+
+    assert len(attempts) >= 2
+    assert summary.succeeded == 1
+    assert queue.get(task_id).state == "succeeded"
+
+
+def test_the_windows_process_tree_comes_from_the_kernel_snapshot(monkeypatch):
+    """One source, present on every supported Windows and needing no subprocess."""
+    monkeypatch.setattr(memory_queue, "_windows_process_pairs", lambda: [(11, 5), (12, 11)])
+
+    assert memory_queue._tracked_descendant_pids(5, "nt") == {11, 12}
+
+
+def test_a_failed_snapshot_reports_unknown_rather_than_empty(monkeypatch):
+    """An unknown descendant set must not read as a verified clean tree."""
+    monkeypatch.setattr(memory_queue, "_windows_process_pairs", lambda: None)
+
+    assert memory_queue._tracked_descendant_pids(5, "nt") is None

@@ -21,6 +21,30 @@ SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 DOCTOR = SCRIPTS / "doctor.py"
 
 
+GENEROUS_BUDGET_SECONDS = 120.0
+
+
+@pytest.fixture(autouse=True)
+def _budget_that_survives_a_slow_runner(monkeypatch):
+    """Give every doctor run in this file enough time to reach its findings.
+
+    `run_doctor` bounds itself at five seconds and reports "budget exhausted"
+    instead of a finding when it runs out. On a loaded hosted Windows runner a
+    single repair pass took 8.5 seconds, so tests asserting on findings were
+    reading the clock rather than the behaviour. Tests about the budget itself
+    pass their own value and keep it.
+    """
+    import doctor
+
+    original = doctor.run_doctor
+
+    def run(**kwargs):
+        kwargs.setdefault("time_budget_seconds", GENEROUS_BUDGET_SECONDS)
+        return original(**kwargs)
+
+    monkeypatch.setattr(doctor, "run_doctor", run)
+
+
 def _codex_hooks_fixture() -> dict:
     command = {
         "type": "command",
@@ -299,6 +323,7 @@ def test_report_schema_and_all_check_classes_are_json_safe(tmp_path, monkeypatch
         "generation",
         "index",
         "scheduler",
+        "capture",
         "mcp",
         "integrations",
         "pyright",
@@ -326,6 +351,34 @@ def test_environment_reports_missing_root_layout_and_python(tmp_path, monkeypatc
     assert check["status"] == "error"
     assert check["details"]["python"]["status"] == "error"
     assert check["details"]["vault_root"]["status"] == "error"
+
+
+def test_the_cli_accepts_a_larger_time_budget_and_refuses_an_impossible_one(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    """A slow machine must be able to ask for more time than the five-second default."""
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    seen = {}
+
+    def record(**kwargs):
+        seen.update(kwargs)
+        return {"overall_status": "ok", "repaired": [], "checks": []}
+
+    monkeypatch.setattr(doctor, "run_doctor", record)
+
+    assert doctor.main(["--time-budget", "45"]) == 0
+    assert seen["time_budget_seconds"] == 45.0
+    assert doctor.main([]) == 0
+    assert seen["time_budget_seconds"] == doctor.DEFAULT_TIME_BUDGET_SECONDS
+
+    with pytest.raises(SystemExit):
+        doctor.main(["--time-budget", "0"])
+    assert "positive" in capsys.readouterr().err
+    del root, state_root, home
 
 
 def test_read_only_runtime_probe_leaves_no_files_or_directories(tmp_path):
@@ -1194,9 +1247,14 @@ def test_maintenance_heartbeat_runs_during_long_operation(tmp_path, monkeypatch)
     monkeypatch.setattr(doctor, "_heartbeat_maintenance_owner", heartbeat)
 
     def wait_for_two_heartbeats() -> None:
-        assert second_beat.wait(timeout=1)
+        # Each beat writes through the coordinator, so two of them cost far
+        # more than the 10 ms interval on a loaded machine. The wait ends as
+        # soon as the second beat lands; the budget is only its upper bound.
+        assert second_beat.wait(timeout=120)
 
-    with doctor._MaintenanceHeartbeat(coordinator, lease, deadline=time.monotonic() + 2) as guard:
+    with doctor._MaintenanceHeartbeat(
+        coordinator, lease, deadline=time.monotonic() + 180
+    ) as guard:
         guard.run(wait_for_two_heartbeats)
 
     assert len(beats) >= 2
@@ -1487,17 +1545,12 @@ def test_cli_repair_json_is_idempotent(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
     clock = iter([0.0])
     monkeypatch.setattr(doctor.time, "monotonic", lambda: next(clock, 6.0))
-    run_doctor = doctor.run_doctor
+    budgeted = ["--repair", "--json", "--time-budget", "30"]
 
-    def run_doctor_with_test_budget(**kwargs):
-        return run_doctor(time_budget_seconds=30, **kwargs)
-
-    monkeypatch.setattr(doctor, "run_doctor", run_doctor_with_test_budget)
-
-    first_return_code = doctor.main(["--repair", "--json"])
+    first_return_code = doctor.main(budgeted)
     first_report = json.loads(capsys.readouterr().out)
     after_first = _snapshot(state_root)
-    second_return_code = doctor.main(["--repair", "--json"])
+    second_return_code = doctor.main(budgeted)
     second_report = json.loads(capsys.readouterr().out)
 
     assert first_return_code == 0
@@ -1537,7 +1590,7 @@ def test_repair_does_not_touch_knowledge_config_network_or_subprocess(tmp_path, 
 
     report = doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
 
-    assert report["overall_status"] in {"ok", "degraded"}
+    assert report["overall_status"] in {"ok", "degraded"}, report
     assert _snapshot(root) == before_root
     assert _snapshot(home) == before_home
 
@@ -1661,7 +1714,7 @@ def test_index_symlink_is_rejected_and_external_target_untouched(tmp_path):
 
     report = run_doctor(root=root, state_root=state_root, home=home, repair=True)
 
-    assert _check(report, "index")["status"] == "error"
+    assert _check(report, "index")["status"] == "error", _check(report, "index")
     assert external.read_bytes() == before
 
 
@@ -1750,7 +1803,7 @@ def test_existing_index_rebuild_lock_defers_without_touching_live_index(tmp_path
     assert index.read_bytes() == before
     check = _check(report, "index")
     assert check["status"] == "degraded"
-    assert check["details"]["repair_deferred"] is True
+    assert check["details"].get("repair_deferred") is True, check
     assert "deferred" in check["message"].lower()
 
 
@@ -1897,7 +1950,7 @@ def test_queue_recovery_lock_is_owner_aware(tmp_path, monkeypatch, active):
 
     if active:
         assert lease.exists()
-        assert check["details"]["repair_deferred"] is True
+        assert check["details"].get("repair_deferred") is True, check
         assert "deferred" in check["message"].lower()
     else:
         assert not lease.exists()
@@ -2016,7 +2069,8 @@ def test_budget_exhaustion_degrades_overall_and_health_summary(tmp_path):
     assert "index" in degraded_summary(report)
 
 
-def test_locked_index_returns_immediately_as_degraded(tmp_path):
+def test_locked_index_returns_bounded_as_degraded(tmp_path):
+    """The wait for a lock is bounded, so the check returns instead of blocking."""
     import doctor
 
     _, state_root, _ = _build_root(tmp_path)
@@ -2036,9 +2090,64 @@ def test_locked_index_returns_immediately_as_degraded(tmp_path):
         writer.rollback()
         writer.close()
 
-    assert elapsed < 0.5
+    # The holder only releases after this call returns, so any finite time
+    # proves the wait was bounded. The exact figure is the machine's, not ours;
+    # the chosen wait itself is covered by the _read_busy_ms unit test.
+    assert elapsed < 30
     assert check["status"] == "degraded"
     assert check["details"]["database_busy"] is True
+
+
+def test_the_read_wait_survives_a_budgetless_deadline():
+    """Most checks default to an infinite deadline; arithmetic must survive it."""
+    import doctor
+
+    assert doctor._read_busy_ms(float("inf")) == doctor.READ_BUSY_MS
+    assert doctor._read_busy_ms(None) == doctor.READ_BUSY_MS
+    assert doctor._read_busy_ms(time.monotonic() - 1) == 0
+    assert 0 < doctor._read_busy_ms(time.monotonic() + 0.1) <= doctor.READ_BUSY_MS
+
+
+def test_a_brief_commit_lock_does_not_make_a_healthy_index_look_busy(
+    tmp_path, monkeypatch
+):
+    """A millisecond commit is normal; only a stuck database is worth reporting."""
+    import doctor
+
+    # The shipped wait is 250 ms; a loaded CI runner can hold a 50 ms lock for
+    # longer than that, so the wait itself is what this test exercises.
+    monkeypatch.setattr(doctor, "READ_BUSY_MS", 30_000)
+    _, state_root, _ = _build_root(tmp_path)
+    index = state_root / "cache" / "index.sqlite"
+    _create_index(index)
+    locked = threading.Event()
+    released = threading.Event()
+
+    def hold_briefly() -> None:
+        writer = sqlite3.connect(index, isolation_level=None)
+        try:
+            writer.execute("BEGIN EXCLUSIVE")
+            locked.set()
+            time.sleep(0.05)
+            writer.execute("ROLLBACK")
+        finally:
+            writer.close()
+        released.set()
+
+    worker = threading.Thread(target=hold_briefly)
+    worker.start()
+    try:
+        assert locked.wait(10)
+        check = doctor._index_check(
+            state_root,
+            datetime.now(timezone.utc),
+            deadline=time.monotonic() + 120.0,
+        )
+    finally:
+        worker.join()
+
+    assert released.is_set()
+    assert check["details"].get("database_busy") is not True
 
 
 def test_indexed_path_scan_detects_bounded_overflow(tmp_path, monkeypatch):
@@ -3975,3 +4084,42 @@ def test_doctor_repair_preserves_lsp_runtime_bytes(tmp_path, monkeypatch) -> Non
     )
 
     assert _snapshot(lsp_root) == before
+
+
+def test_lost_captures_are_reported_as_a_degraded_capture_check(tmp_path):
+    """A capture the hooks lost must show up in health, not only at session start."""
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    (state_root / "run").mkdir(parents=True, exist_ok=True)
+    (state_root / "run" / "state.json").write_text(
+        json.dumps(
+            {
+                "capture_failures": {
+                    "session_end": {"count": 2, "last_reason": "spawn_failed"},
+                    "pre_compact": {"count": 1, "last_reason": "spawn_failed"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "capture")
+
+    assert check["status"] == "degraded"
+    assert check["details"]["lost"] == 3
+    assert check["details"]["kinds"] == {"session_end": 2, "pre_compact": 1}
+    assert "capture-failures.jsonl" in check["details"]["trail"]
+    del home
+
+
+def test_a_vault_without_lost_captures_reports_the_capture_check_as_ok(tmp_path):
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+
+    check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "capture")
+
+    assert check["status"] == "ok"
+    assert check["details"]["lost"] == 0
+    del home

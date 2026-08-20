@@ -32,9 +32,10 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Callable, Iterator
-from contextlib import closing, contextmanager, nullcontext
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager, closing, contextmanager, nullcontext
 from pathlib import Path
+from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import read_stable_bytes  # noqa: E402
@@ -49,6 +50,7 @@ from corpus_snapshot import (  # noqa: E402
 )
 from generation_catalog import GenerationCatalog  # noqa: E402
 from memory_state import ROOT, STATE_ROOT, _is_pid_alive, atomic_write  # noqa: E402
+from provenance import authority_weight  # noqa: E402
 from reliable_memory import (  # noqa: E402
     canonical_json_bytes,
     fsync_directory,
@@ -239,42 +241,7 @@ def _publish_new_file(temporary: Path, destination: Path) -> None:
             pass
 
 
-def build_generation_fts(
-    snapshot: CorpusSnapshot,
-    generation_directory: Path,
-    *,
-    deadline: float | None = None,
-    cancelled: Callable[[], bool] | None = None,
-) -> dict[str, object]:
-    """Build one immutable generation-local FTS5 artifact from captured chunks."""
-    if not isinstance(snapshot, CorpusSnapshot):
-        raise TypeError("snapshot must be a CorpusSnapshot")
-    _check_generation_stop(deadline, cancelled)
-    if len(snapshot.chunks) > MAX_GENERATION_FTS_CHUNKS:
-        raise ValueError("generation FTS chunk row ceiling exceeded")
-    directory = _generation_directory(generation_directory)
-    destination = directory / GENERATION_FTS_ARTIFACT
-    if destination.exists() or destination.is_symlink():
-        raise FileExistsError(destination)
-    temporary = directory / f".{GENERATION_FTS_ARTIFACT}.{uuid.uuid4().hex}.tmp"
-    database = None
-    stopped = False
-    complete = False
-
-    def progress() -> int:
-        nonlocal stopped
-        stopped = bool(cancelled and cancelled()) or bool(
-            deadline is not None and time.monotonic() >= deadline
-        )
-        return int(stopped)
-
-    try:
-        database = sqlite3.connect(temporary)
-        database.set_progress_handler(progress, GENERATION_FTS_PROGRESS_OPCODES)
-        database.execute("PRAGMA journal_mode=DELETE")
-        database.execute("PRAGMA synchronous=FULL")
-        database.executescript(
-            """
+_GENERATION_FTS_DDL = """
             CREATE TABLE generation_metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE VIRTUAL TABLE chunks USING fts5(
                 chunk_id UNINDEXED,
@@ -302,65 +269,140 @@ def build_generation_fts(
                 tokenize = 'porter unicode61'
             );
             """
-        )
-        metadata = {
-            "schema_version": GENERATION_SEARCH_SCHEMA_VERSION,
-            "collector_version": snapshot.collector_version,
-            "extractor_version": snapshot.extractor_version,
-            "tokenizer_version": GENERATION_TOKENIZER_VERSION,
-            "tokenizer_config_sha256": GENERATION_TOKENIZER_CONFIG_SHA256,
-            "source_manifest_sha256": snapshot.corpus_sha256,
-            "chunk_count": str(len(snapshot.chunks)),
-        }
-        database.executemany(
-            "INSERT INTO generation_metadata(key, value) VALUES (?, ?)",
-            sorted(metadata.items()),
-        )
-        def rows():
-            for order, chunk in enumerate(snapshot.chunks):
-                _check_generation_stop(deadline, cancelled)
-                title = chunk.heading_ancestry[-1] if chunk.heading_ancestry else Path(
-                    chunk.source_path
-                ).stem
-                yield (
-                    chunk.id,
-                    order,
-                    chunk.source_id,
-                    chunk.source_path,
-                    chunk.source_sha256,
-                    chunk.parent_page,
-                    json.dumps(
-                        chunk.heading_ancestry,
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ),
-                    chunk.byte_start,
-                    chunk.byte_end,
-                    chunk.line_start,
-                    chunk.line_end,
-                    chunk.span_sha256,
-                    chunk.type,
-                    chunk.project,
-                    chunk.authority,
-                    chunk.confidence,
-                    chunk.status,
-                    chunk.valid_from,
-                    chunk.valid_to,
-                    chunk.language,
-                    title,
-                    chunk.text,
-                )
-        database.executemany(
-            "INSERT INTO chunks VALUES ("
-            + ",".join("?" for _ in range(22))
-            + ")",
-            rows(),
-        )
-        database.commit()
-        if database.execute("PRAGMA integrity_check").fetchone() != ("ok",):
-            raise ValueError("generation FTS integrity check failed")
-        database.close()
-        database = None
+
+
+def _generation_fts_metadata(snapshot: CorpusSnapshot) -> dict[str, str]:
+    return {
+        "schema_version": GENERATION_SEARCH_SCHEMA_VERSION,
+        "collector_version": snapshot.collector_version,
+        "extractor_version": snapshot.extractor_version,
+        "tokenizer_version": GENERATION_TOKENIZER_VERSION,
+        "tokenizer_config_sha256": GENERATION_TOKENIZER_CONFIG_SHA256,
+        "source_manifest_sha256": snapshot.corpus_sha256,
+        "chunk_count": str(len(snapshot.chunks)),
+    }
+
+
+def _generation_chunk_row(chunk: object, order: int) -> tuple[object, ...]:
+    """The exact stored row for one chunk.
+
+    The builder writes these and the validator rebuilds them from the
+    authoritative sources to compare, so this shape is stated once.
+    """
+    """The exact stored row for one chunk.
+
+    The builder writes these and the validator rebuilds them from the
+    authoritative sources to compare; two copies of this shape would drift.
+    """
+    title = (
+        chunk.heading_ancestry[-1]
+        if chunk.heading_ancestry
+        else Path(chunk.source_path).stem
+    )
+    return (
+        chunk.id,
+        order,
+        chunk.source_id,
+        chunk.source_path,
+        chunk.source_sha256,
+        chunk.parent_page,
+        json.dumps(chunk.heading_ancestry, ensure_ascii=False, separators=(",", ":")),
+        chunk.byte_start,
+        chunk.byte_end,
+        chunk.line_start,
+        chunk.line_end,
+        chunk.span_sha256,
+        chunk.type,
+        chunk.project,
+        chunk.authority,
+        chunk.confidence,
+        chunk.status,
+        chunk.valid_from,
+        chunk.valid_to,
+        chunk.language,
+        title,
+        chunk.text,
+    )
+
+
+def _write_generation_fts(
+    database: sqlite3.Connection,
+    snapshot: CorpusSnapshot,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    """Schema, metadata and every chunk, verified before the caller publishes."""
+    database.execute("PRAGMA journal_mode=DELETE")
+    database.execute("PRAGMA synchronous=FULL")
+    database.executescript(_GENERATION_FTS_DDL)
+    database.executemany(
+        "INSERT INTO generation_metadata(key, value) VALUES (?, ?)",
+        sorted(_generation_fts_metadata(snapshot).items()),
+    )
+
+    def rows():
+        for order, chunk in enumerate(snapshot.chunks):
+            _check_generation_stop(deadline, cancelled)
+            yield _generation_chunk_row(chunk, order)
+
+    database.executemany(
+        "INSERT INTO chunks VALUES (" + ",".join("?" for _ in range(22)) + ")",
+        rows(),
+    )
+    database.commit()
+    if database.execute("PRAGMA integrity_check").fetchone() != ("ok",):
+        raise ValueError("generation FTS integrity check failed")
+
+
+def _stop_reached(
+    deadline: float | None, cancelled: Callable[[], bool] | None
+) -> bool:
+    if cancelled is not None and cancelled():
+        return True
+    return deadline is not None and time.monotonic() >= deadline
+
+
+def _require_buildable_snapshot(
+    snapshot: object,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    if not isinstance(snapshot, CorpusSnapshot):
+        raise TypeError("snapshot must be a CorpusSnapshot")
+    _check_generation_stop(deadline, cancelled)
+    if len(snapshot.chunks) > MAX_GENERATION_FTS_CHUNKS:
+        raise ValueError("generation FTS chunk row ceiling exceeded")
+
+
+def _discard_unfinished_fts(destination: Path, temporary: Path, *, complete: bool) -> None:
+    if not complete:
+        _remove_quietly((destination,))
+    _remove_quietly((temporary,))
+
+
+def _built_fts_artifact(
+    snapshot: CorpusSnapshot,
+    directory: Path,
+    destination: Path,
+    temporary: Path,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> dict[str, object]:
+    """Write the artifact under a temporary name, then publish it atomically."""
+    state = {"stopped": False, "complete": False}
+
+    def progress() -> int:
+        state["stopped"] = _stop_reached(deadline, cancelled)
+        return int(state["stopped"])
+
+    try:
+        with closing(sqlite3.connect(temporary)) as database:
+            database.set_progress_handler(progress, GENERATION_FTS_PROGRESS_OPCODES)
+            _write_generation_fts(
+                database, snapshot, deadline=deadline, cancelled=cancelled
+            )
         fsync_file(temporary)
         _check_generation_stop(deadline, cancelled)
         _publish_new_file(temporary, destination)
@@ -371,24 +413,40 @@ def build_generation_fts(
             deadline=deadline,
             cancelled=cancelled,
         )
-        complete = True
+        state["complete"] = True
         return descriptor
     except sqlite3.DatabaseError as exc:
-        if stopped:
-            raise TimeoutError("generation FTS build cancelled or deadline reached") from exc
+        if state["stopped"]:
+            raise TimeoutError(
+                "generation FTS build cancelled or deadline reached"
+            ) from exc
         raise
     finally:
-        if database is not None:
-            database.close()
-        if not complete:
-            try:
-                destination.unlink()
-            except FileNotFoundError:
-                pass
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
+        _discard_unfinished_fts(destination, temporary, complete=state["complete"])
+
+
+def build_generation_fts(
+    snapshot: CorpusSnapshot,
+    generation_directory: Path,
+    *,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> dict[str, object]:
+    """Build one immutable generation-local FTS5 artifact from captured chunks."""
+    _require_buildable_snapshot(snapshot, deadline, cancelled)
+    directory = _generation_directory(generation_directory)
+    destination = directory / GENERATION_FTS_ARTIFACT
+    if destination.exists() or destination.is_symlink():
+        raise FileExistsError(destination)
+    temporary = directory / f".{GENERATION_FTS_ARTIFACT}.{uuid.uuid4().hex}.tmp"
+    return _built_fts_artifact(
+        snapshot,
+        directory,
+        destination,
+        temporary,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
 
 
 def _call_generation_embedder(embedder: object, texts: list[str]):
@@ -400,38 +458,51 @@ def _call_generation_embedder(embedder: object, texts: list[str]):
     return encode(texts, show_progress_bar=False, convert_to_numpy=True)
 
 
-def build_generation_numpy_vectors(
-    snapshot: CorpusSnapshot,
-    generation_directory: Path,
-    *,
-    embedder: object,
-    model_id: str,
-    model_revision: str,
-    dimensions: int,
-) -> list[dict[str, object]]:
-    """Build an exact NumPy matrix and closed metadata from one chunk sequence."""
+def _require_positive_int(value: object, message: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(message)
+
+
+def _require_vector_build_inputs(
+    snapshot: object, model_id: str, model_revision: str, dimensions: int
+) -> None:
     if not isinstance(snapshot, CorpusSnapshot):
         raise TypeError("snapshot must be a CorpusSnapshot")
     if not model_id or not model_revision:
         raise ValueError("model ID and revision must be non-empty")
-    if isinstance(dimensions, bool) or not isinstance(dimensions, int) or dimensions < 1:
-        raise ValueError("dimensions must be a positive integer")
-    directory = _generation_directory(generation_directory)
-    destinations = [directory / name for name in GENERATION_VECTOR_ARTIFACTS]
+    _require_positive_int(dimensions, "dimensions must be a positive integer")
+
+
+def _require_absent_artifacts(destinations: list[Path]) -> None:
     for destination in destinations:
         if destination.exists() or destination.is_symlink():
             raise FileExistsError(destination)
 
+
+def _chunk_texts(snapshot: CorpusSnapshot) -> list[str]:
+    return [chunk.text for chunk in snapshot.chunks]
+
+
+def _embedded_matrix(
+    snapshot: CorpusSnapshot, embedder: object, dimensions: int
+) -> object:
+    """The embedder's output, refused unless it is finite and the right shape."""
     import numpy as np
 
-    texts = [chunk.text for chunk in snapshot.chunks]
-    matrix = np.asarray(_call_generation_embedder(embedder, texts))
+    matrix = np.asarray(
+        _call_generation_embedder(embedder, _chunk_texts(snapshot))
+    )
     if matrix.ndim != 2 or matrix.shape != (len(snapshot.chunks), dimensions):
         raise ValueError("embedder returned a matrix with incompatible shape")
     if matrix.dtype.kind not in "fiu" or not np.isfinite(matrix).all():
         raise ValueError("embedder returned a non-finite numeric matrix")
-    matrix = np.ascontiguousarray(matrix, dtype=np.float32)
-    metadata = {
+    return np.ascontiguousarray(matrix, dtype=np.float32)
+
+
+def _vector_metadata(
+    snapshot: CorpusSnapshot, *, model_id: str, model_revision: str, dimensions: int
+) -> dict[str, object]:
+    return {
         "schema_version": "corpus-vectors/v1",
         "corpus_sha256": snapshot.corpus_sha256,
         "collector_version": snapshot.collector_version,
@@ -444,6 +515,25 @@ def build_generation_numpy_vectors(
         "source_paths": [chunk.source_path for chunk in snapshot.chunks],
         "source_sha256": [chunk.source_sha256 for chunk in snapshot.chunks],
     }
+
+
+def _remove_quietly(paths: Iterable[Path]) -> None:
+    for path in paths:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _publish_vector_artifacts(
+    directory: Path,
+    destinations: list[Path],
+    metadata: Mapping[str, object],
+    matrix: object,
+) -> None:
+    """Write both artifacts to temporaries and publish them, or leave neither."""
+    import numpy as np
+
     temporary_json = directory / f".vectors.json.{uuid.uuid4().hex}.tmp"
     temporary_npy = directory / f".vectors.npy.{uuid.uuid4().hex}.tmp"
     created: list[Path] = []
@@ -461,18 +551,37 @@ def build_generation_numpy_vectors(
             _publish_new_file(temporary, destination)
             created.append(destination)
     except BaseException:
-        for path in created:
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
+        _remove_quietly(created)
         raise
     finally:
-        for path in (temporary_json, temporary_npy):
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
+        _remove_quietly((temporary_json, temporary_npy))
+
+
+def build_generation_numpy_vectors(
+    snapshot: CorpusSnapshot,
+    generation_directory: Path,
+    *,
+    embedder: object,
+    model_id: str,
+    model_revision: str,
+    dimensions: int,
+) -> list[dict[str, object]]:
+    """Build an exact NumPy matrix and closed metadata from one chunk sequence."""
+    _require_vector_build_inputs(snapshot, model_id, model_revision, dimensions)
+    directory = _generation_directory(generation_directory)
+    destinations = [directory / name for name in GENERATION_VECTOR_ARTIFACTS]
+    _require_absent_artifacts(destinations)
+    _publish_vector_artifacts(
+        directory,
+        destinations,
+        _vector_metadata(
+            snapshot,
+            model_id=model_id,
+            model_revision=model_revision,
+            dimensions=dimensions,
+        ),
+        _embedded_matrix(snapshot, embedder, dimensions),
+    )
     return [
         _artifact_descriptor(directory / name, name)
         for name in GENERATION_VECTOR_ARTIFACTS
@@ -531,6 +640,153 @@ def _publish_validated_generation(
     )
 
 
+def _require_finite_deadline(deadline: float | None) -> None:
+    if deadline is None:
+        return
+    if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
+        raise ValueError("deadline must be a finite monotonic timestamp")
+    if not math.isfinite(deadline):
+        raise ValueError("deadline must be a finite monotonic timestamp")
+
+
+def _publication_gate(
+    coordinator: object | None, wait_seconds: float | None
+) -> AbstractContextManager[object]:
+    """The Markdown writer gate, or nothing when no coordinator was supplied."""
+    if coordinator is None:
+        return nullcontext()
+    if wait_seconds is None:
+        return coordinator.writer_gate()
+    return coordinator.writer_gate(wait_seconds=wait_seconds)
+
+
+def _require_matching_repository(
+    vault: Path,
+    expected_repository_scope: object | None,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    if expected_repository_scope is None:
+        return
+    from repository_scope import RepositoryScope, resolve_repository_scope
+
+    if not isinstance(expected_repository_scope, RepositoryScope):
+        raise TypeError("expected_repository_scope must be a RepositoryScope")
+    live_scope = resolve_repository_scope(vault, deadline=deadline, cancelled=cancelled)
+    if live_scope != expected_repository_scope:
+        raise ValueError("publication root does not match generation repository scope")
+
+
+def _discard_unactivated(
+    catalog: GenerationCatalog, generation_id: str, catalog_options: Mapping[str, object]
+) -> None:
+    discard = getattr(catalog, "discard_unactivated", None)
+    if callable(discard):
+        discard(generation_id, **catalog_options)
+
+
+def _register_generation(
+    catalog: GenerationCatalog,
+    generation_id: str,
+    candidate: object | None,
+    catalog_options: Mapping[str, object],
+) -> None:
+    if candidate is None:
+        catalog.register(generation_id, **catalog_options)
+        return
+    catalog._register_validated(candidate, **catalog_options)  # noqa: SLF001
+
+
+def _activate_generation(
+    catalog: GenerationCatalog,
+    generation_id: str,
+    candidate: object | None,
+    *,
+    expected_active: str | None,
+    catalog_options: Mapping[str, object],
+) -> bool:
+    if candidate is None:
+        return bool(
+            catalog.activate(
+                generation_id, expected_active=expected_active, **catalog_options
+            )
+        )
+    return bool(
+        catalog._activate_validated(  # noqa: SLF001
+            candidate, expected_active=expected_active, **catalog_options
+        )
+    )
+
+
+def _stop_options(
+    deadline: float | None, cancelled: Callable[[], bool] | None
+) -> dict[str, object]:
+    options: dict[str, object] = {}
+    if deadline is not None:
+        options["deadline"] = float(deadline)
+    if cancelled is not None:
+        options["cancelled"] = cancelled
+    return options
+
+
+def _validation_options(
+    remaining: Callable[[], float | None],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> dict[str, object]:
+    options: dict[str, object] = {"coordinator": None}
+    if cancelled is not None:
+        options["cancelled"] = cancelled
+    if deadline is not None:
+        options["deadline_seconds"] = remaining()
+    return options
+
+
+def _publish_under_gate(
+    snapshot: CorpusSnapshot,
+    vault: Path,
+    catalog: GenerationCatalog,
+    generation_id: str,
+    *,
+    candidate: object | None,
+    expected_repository_scope: object | None,
+    expected_active: str | None,
+    remaining: Callable[[], float | None],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    """Validate, register, activate — and discard anything left unactivated."""
+    catalog_options = _stop_options(deadline, cancelled)
+    registered = False
+    try:
+        _check_generation_stop(deadline, cancelled)
+        _require_matching_repository(
+            vault, expected_repository_scope, deadline=deadline, cancelled=cancelled
+        )
+        validate_live_snapshot(
+            snapshot, vault, **_validation_options(remaining, deadline, cancelled)
+        )
+        remaining()
+        _register_generation(catalog, generation_id, candidate, catalog_options)
+        registered = True
+        remaining()
+        activated = _activate_generation(
+            catalog,
+            generation_id,
+            candidate,
+            expected_active=expected_active,
+            catalog_options=catalog_options,
+        )
+        if not activated:
+            _discard_unactivated(catalog, generation_id, catalog_options)
+        return activated
+    except BaseException:
+        if registered:
+            _discard_unactivated(catalog, generation_id, catalog_options)
+        raise
+
+
 def _publish_generation(
     snapshot: CorpusSnapshot,
     vault: Path,
@@ -544,12 +800,7 @@ def _publish_generation(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> bool:
-    if deadline is not None and (
-        isinstance(deadline, bool)
-        or not isinstance(deadline, (int, float))
-        or not math.isfinite(deadline)
-    ):
-        raise ValueError("deadline must be a finite monotonic timestamp")
+    _require_finite_deadline(deadline)
 
     def remaining() -> float | None:
         _check_generation_stop(deadline, cancelled)
@@ -560,68 +811,29 @@ def _publish_generation(
             raise TimeoutError("generation publication deadline reached")
         return value
 
-    wait_seconds = remaining()
-    if coordinator is None:
-        gate = nullcontext()
-    elif wait_seconds is None:
-        gate = coordinator.writer_gate()
-    else:
-        gate = coordinator.writer_gate(wait_seconds=wait_seconds)
-    with gate:
-        registered = False
-        try:
-            _check_generation_stop(deadline, cancelled)
-            if expected_repository_scope is not None:
-                from repository_scope import RepositoryScope, resolve_repository_scope
+    with _publication_gate(coordinator, remaining()):
+        return _publish_under_gate(
+            snapshot,
+            vault,
+            catalog,
+            generation_id,
+            candidate=candidate,
+            expected_repository_scope=expected_repository_scope,
+            expected_active=expected_active,
+            remaining=remaining,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
 
-                if not isinstance(expected_repository_scope, RepositoryScope):
-                    raise TypeError("expected_repository_scope must be a RepositoryScope")
-                live_scope = resolve_repository_scope(
-                    vault, deadline=deadline, cancelled=cancelled
-                )
-                if live_scope != expected_repository_scope:
-                    raise ValueError("publication root does not match generation repository scope")
-            validation_options = {"coordinator": None}
-            if cancelled is not None:
-                validation_options["cancelled"] = cancelled
-            if deadline is not None:
-                validation_options["deadline_seconds"] = remaining()
-            validate_live_snapshot(snapshot, vault, **validation_options)
-            remaining()
-            catalog_options = {}
-            if deadline is not None:
-                catalog_options["deadline"] = float(deadline)
-            if cancelled is not None:
-                catalog_options["cancelled"] = cancelled
-            if candidate is None:
-                catalog.register(generation_id, **catalog_options)
-            else:
-                catalog._register_validated(candidate, **catalog_options)  # noqa: SLF001
-            registered = True
-            remaining()
-            if candidate is None:
-                activated = catalog.activate(
-                    generation_id,
-                    expected_active=expected_active,
-                    **catalog_options,
-                )
-            else:
-                activated = catalog._activate_validated(  # noqa: SLF001
-                    candidate,
-                    expected_active=expected_active,
-                    **catalog_options,
-                )
-            if not activated:
-                discard = getattr(catalog, "discard_unactivated", None)
-                if callable(discard):
-                    discard(generation_id, **catalog_options)
-            return activated
-        except BaseException:
-            if registered:
-                discard = getattr(catalog, "discard_unactivated", None)
-                if callable(discard):
-                    discard(generation_id, **catalog_options)
-            raise
+
+def _blank_query(query: str) -> bool:
+    return not query or not query.strip()
+
+
+def _no_stop_requested(
+    deadline: float | None, cancelled: Callable[[], bool] | None
+) -> bool:
+    return deadline is None and cancelled is None
 
 
 def _check_legacy_stop(
@@ -633,38 +845,10 @@ def _check_legacy_stop(
         raise TimeoutError("legacy retrieval deadline reached")
 
 
-@contextmanager
-def _legacy_sqlite_guard(
-    connection: sqlite3.Connection,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> Iterator[None]:
-    _check_legacy_stop(deadline, cancelled)
-    if deadline is None and cancelled is None:
-        yield
-        return
-    stopped = False
-
-    def progress() -> int:
-        nonlocal stopped
-        stopped = bool(cancelled and cancelled()) or bool(
-            deadline is not None and time.monotonic() >= deadline
-        )
-        return int(stopped)
-
-    connection.set_progress_handler(progress, 1000)
-    try:
-        yield
-    except sqlite3.DatabaseError as exc:
-        if stopped:
-            raise TimeoutError(
-                "legacy SQLite work cancelled or deadline exceeded"
-            ) from exc
-        _check_legacy_stop(deadline, cancelled)
-        raise
-    finally:
-        connection.set_progress_handler(None, 0)
-    _check_legacy_stop(deadline, cancelled)
+def _prefixed_for_query(texts: list[str], is_query: bool) -> list[str]:
+    if not is_query or not QUERY_INSTRUCTION:
+        return texts
+    return [f"{QUERY_INSTRUCTION} {text}" for text in texts]
 
 
 def _embed_texts(
@@ -684,8 +868,7 @@ def _embed_texts(
     if not embedder:
         return None
     try:
-        if is_query and QUERY_INSTRUCTION:
-            texts = [f"{QUERY_INSTRUCTION} {t}" for t in texts]
+        texts = _prefixed_for_query(texts, is_query)
         vectors = embedder.encode(texts, show_progress_bar=False, convert_to_numpy=True)
         _check_legacy_stop(deadline, cancelled)
         return vectors.tolist()
@@ -706,6 +889,166 @@ def _cosine_similarity(query_vec: list[float], doc_vecs: list[list[float]]) -> l
     return (docs_norm @ q_norm).tolist()
 
 
+class _PageWalkLimits:
+    """Bounded traversal budget for one page collection."""
+
+    def __init__(self, deadline: float) -> None:
+        self.deadline = deadline
+        self.entries = 0
+        self.directories = 0
+
+    def check_deadline(self) -> None:
+        if time.monotonic() >= self.deadline:
+            raise TimeoutError("searchable page collection deadline reached")
+
+    def count_directory(self) -> None:
+        self.directories += 1
+        if self.directories > MAX_SEARCH_DIRECTORIES:
+            raise ValueError("searchable directory limit exceeded")
+
+    def count_entry(self) -> None:
+        self.entries += 1
+        if self.entries > MAX_SEARCH_ENTRIES:
+            raise ValueError("searchable entry limit exceeded")
+
+
+def _is_safe_entry(path: Path, *, directory: bool) -> bool:
+    """No symlinks, no reparse points, and the kind the caller expects."""
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    if path.is_symlink():
+        return False
+    reparse = getattr(info, "st_file_attributes", 0) & getattr(
+        stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400
+    )
+    if reparse:
+        return False
+    if directory:
+        return stat.S_ISDIR(info.st_mode)
+    return stat.S_ISREG(info.st_mode)
+
+
+def _require_safe_ancestry(root: Path, source_root: Path) -> None:
+    """Every directory from the vault down to the root must be safe."""
+    try:
+        relative_root = root.relative_to(source_root)
+    except ValueError as exc:
+        raise OSError("searchable knowledge root escapes the vault") from exc
+    component = source_root
+    components = [source_root]
+    for part in relative_root.parts:
+        component /= part
+        components.append(component)
+    if not all(_is_safe_entry(item, directory=True) for item in components):
+        raise OSError("unsafe knowledge directory")
+
+
+def _classify_entry(
+    name: str, parent: Path, directories: list[Path], filenames: list[str]
+) -> None:
+    path = parent / name
+    if name not in SKIP_DIRS and _is_safe_entry(path, directory=True):
+        directories.append(path)
+        return
+    if name.endswith(".md"):
+        filenames.append(name)
+
+
+def _scan_directory(
+    current_path: Path, limits: _PageWalkLimits
+) -> tuple[list[Path], list[str]] | None:
+    """(safe subdirectories, markdown names), or None when it cannot be read."""
+    directories: list[Path] = []
+    filenames: list[str] = []
+    try:
+        with os.scandir(current_path) as entries:
+            for entry in entries:
+                limits.check_deadline()
+                limits.count_entry()
+                _classify_entry(entry.name, current_path, directories, filenames)
+    except OSError:
+        return None
+    return directories, filenames
+
+
+def _is_retired_page(content: str) -> bool:
+    """Superseded and archived pages are history, not search results."""
+    frontmatter = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
+    if not frontmatter:
+        return False
+    status = re.search(r"^status:\s*(.+?)\s*$", frontmatter.group(1), re.MULTILINE)
+    return bool(status) and status.group(1).strip() in ("superseded", "archived")
+
+
+def _searchable_page(md: Path, name: str, seen: set[Path]) -> bool:
+    if name in SKIP_NAMES or md in seen:
+        return False
+    if not _is_safe_entry(md, directory=False):
+        return False
+    try:
+        raw = read_stable_bytes(md, MAX_PAGE_BYTES, label="search page")
+    except (OSError, ValueError):
+        return False
+    return not _is_retired_page(raw.decode("utf-8", errors="ignore"))
+
+
+def _collect_directory_pages(
+    current_path: Path,
+    filenames: list[str],
+    *,
+    pages: list[Path],
+    seen: set[Path],
+    limits: _PageWalkLimits,
+) -> None:
+    for name in sorted(filenames):
+        limits.check_deadline()
+        md = current_path / name
+        if not _searchable_page(md, name, seen):
+            continue
+        seen.add(md)
+        pages.append(md)
+        if len(pages) > MAX_SEARCHABLE_PAGES:
+            raise ValueError("searchable page limit exceeded")
+
+
+def _require_depth_within_limit(depth: int) -> None:
+    if depth > MAX_SEARCH_DEPTH:
+        raise ValueError("searchable directory depth limit exceeded")
+
+
+def _require_no_deeper_directories(depth: int, directories: list[str]) -> None:
+    if depth >= MAX_SEARCH_DEPTH and directories:
+        raise ValueError("searchable directory depth limit exceeded")
+
+
+def _walk_knowledge_root(
+    root: Path,
+    *,
+    pages: list[Path],
+    seen: set[Path],
+    limits: _PageWalkLimits,
+) -> None:
+    pending = [(root, 0)]
+    while pending:
+        current_path, depth = pending.pop()
+        limits.check_deadline()
+        limits.count_directory()
+        _require_depth_within_limit(depth)
+        scanned = _scan_directory(current_path, limits)
+        if scanned is None:
+            continue
+        directories, filenames = scanned
+        _require_no_deeper_directories(depth, directories)
+        limits.check_deadline()
+        _collect_directory_pages(
+            current_path, filenames, pages=pages, seen=seen, limits=limits
+        )
+        limits.check_deadline()
+        pending.extend((directory, depth + 1) for directory in reversed(sorted(directories)))
+
+
 def _collect_pages(
     scope: str = "all",
     *,
@@ -714,104 +1057,21 @@ def _collect_pages(
     deadline: float = float("inf"),
 ) -> list[Path]:
     """Collect bounded regular markdown pages without following links."""
-    pages: list[Path] = []
-    seen: set[Path] = set()
-    inspected_entries = 0
-    traversed_directories = 0
+    # Every scope resolves to the one knowledge/notes tree after the three-zone
+    # consolidation; "wiki" and "memory" remain accepted aliases.
+    if scope not in ("wiki", "memory", "knowledge", "all"):
+        return []
     selected_knowledge = knowledge_dir or KNOWLEDGE_DIR
     source_root = root or selected_knowledge.parents[1]
-
-    def check_deadline() -> None:
-        if time.monotonic() >= deadline:
-            raise TimeoutError("searchable page collection deadline reached")
-
-    def is_safe(path: Path, *, directory: bool) -> bool:
-        try:
-            info = path.lstat()
-        except OSError:
-            return False
-        unsafe = path.is_symlink() or bool(
-            getattr(info, "st_file_attributes", 0)
-            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-        )
-        expected = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
-        return not unsafe and expected
-
-    roots: list[Path] = []
-    # All scope values resolve to the single knowledge/notes tree after the
-    # three-zone consolidation; "wiki" and "memory" are kept as legacy aliases.
-    if scope in ("wiki", "memory", "knowledge", "all"):
-        roots.append(selected_knowledge)
-
-    for root in roots:
-        check_deadline()
-        if not root.exists():
-            continue
-        try:
-            relative_root = root.relative_to(source_root)
-        except ValueError as exc:
-            raise OSError("searchable knowledge root escapes the vault") from exc
-        components = [source_root]
-        component = source_root
-        for part in relative_root.parts:
-            component /= part
-            components.append(component)
-        if not all(is_safe(component, directory=True) for component in components):
-            raise OSError("unsafe knowledge directory")
-        pending = [(root, 0)]
-        while pending:
-            current_path, depth = pending.pop()
-            check_deadline()
-            traversed_directories += 1
-            if traversed_directories > MAX_SEARCH_DIRECTORIES:
-                raise ValueError("searchable directory limit exceeded")
-            if depth > MAX_SEARCH_DEPTH:
-                raise ValueError("searchable directory depth limit exceeded")
-            safe_directories: list[Path] = []
-            filenames: list[str] = []
-            try:
-                with os.scandir(current_path) as entries:
-                    for entry in entries:
-                        check_deadline()
-                        inspected_entries += 1
-                        if inspected_entries > MAX_SEARCH_ENTRIES:
-                            raise ValueError("searchable entry limit exceeded")
-                        name = entry.name
-                        path = current_path / name
-                        if name not in SKIP_DIRS and is_safe(path, directory=True):
-                            safe_directories.append(path)
-                        elif name.endswith(".md"):
-                            filenames.append(name)
-            except OSError:
-                continue
-            if depth >= MAX_SEARCH_DEPTH and safe_directories:
-                raise ValueError("searchable directory depth limit exceeded")
-            check_deadline()
-            for name in sorted(filenames):
-                check_deadline()
-                md = current_path / name
-                if not name.endswith(".md") or name in SKIP_NAMES or md in seen:
-                    continue
-                if not is_safe(md, directory=False):
-                    continue
-                try:
-                    content = read_stable_bytes(md, MAX_PAGE_BYTES, label="search page").decode(
-                        "utf-8", errors="ignore"
-                    )
-                except (OSError, ValueError):
-                    continue
-                fm = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
-                if fm:
-                    status_m = re.search(r"^status:\s*(.+?)\s*$", fm.group(1), re.MULTILINE)
-                    if status_m and status_m.group(1).strip() in ("superseded", "archived"):
-                        continue
-                seen.add(md)
-                pages.append(md)
-                if len(pages) > MAX_SEARCHABLE_PAGES:
-                    raise ValueError("searchable page limit exceeded")
-            check_deadline()
-            for directory in reversed(sorted(safe_directories)):
-                pending.append((directory, depth + 1))
+    limits = _PageWalkLimits(deadline)
+    limits.check_deadline()
+    if not selected_knowledge.exists():
+        return []
+    _require_safe_ancestry(selected_knowledge, source_root)
+    pages: list[Path] = []
+    _walk_knowledge_root(
+        selected_knowledge, pages=pages, seen=set(), limits=limits
+    )
     return pages
 
 
@@ -831,16 +1091,6 @@ AUTHORITY_FIELD_RE = re.compile(
 )
 VALID_TO_FIELD_RE = re.compile(r"^valid_to:\s*(.+?)\s*$", re.MULTILINE)
 
-# Higher weight = preferred in ranking (typed provenance).
-AUTHORITY_WEIGHTS = {
-    "user": 1.35,
-    "human": 1.35,
-    "web": 1.1,
-    "ai-derived": 1.0,
-    "ai": 1.0,
-    "inferred": 0.8,
-    "unknown": 1.0,
-}
 
 
 def _extract_title_and_summary(content: str, fallback_stem: str) -> tuple[str, str]:
@@ -862,6 +1112,79 @@ def _strip_frontmatter(content: str) -> str:
     return FRONTMATTER_RE.sub("", content, count=1)
 
 
+_FTS5_TABLE_RE = re.compile(
+    r"\bCREATE\s+VIRTUAL\s+TABLE\b.*\bUSING\s+fts5\s*\(", re.IGNORECASE | re.DOTALL
+)
+_SEARCH_INDEX_MARKERS = (
+    "path unindexed",
+    "project unindexed",
+    "timestamp unindexed",
+    "tokenize = 'porter unicode61'",
+)
+
+
+def _index_schema_is_current(columns: tuple[str, ...], schema_sql: str) -> bool:
+    """The live index must have today's columns and today's FTS5 declaration."""
+    if columns != SEARCH_INDEX_COLUMNS:
+        return False
+    if _FTS5_TABLE_RE.search(schema_sql) is None:
+        return False
+    normalized = " ".join(schema_sql.casefold().split())
+    return all(marker in normalized for marker in _SEARCH_INDEX_MARKERS)
+
+
+def _deadline_timeout_options(deadline: float | None) -> dict[str, object]:
+    if deadline is None:
+        return {}
+    return {"timeout": max(0.0, min(5.0, deadline - time.monotonic()))}
+
+
+def _schema_sql(schema_row: object) -> str:
+    if not schema_row or not isinstance(schema_row[0], str):
+        return ""
+    return schema_row[0]
+
+
+def _index_state(
+    current_index: Path, deadline: float | None, cancelled: Callable[[], bool] | None
+) -> tuple[tuple[str, ...], str, list[str]] | None:
+    """(columns, schema SQL, manifest paths) read from the live index."""
+    connect_options = _deadline_timeout_options(deadline)
+    with closing(sqlite3.connect(str(current_index), **connect_options)) as conn:
+        with _legacy_sqlite_guard(conn, deadline, cancelled):
+            columns = tuple(row[1] for row in conn.execute("PRAGMA table_info(pages)"))
+            schema_row = conn.execute(
+                "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?",
+                ("pages",),
+            ).fetchone()
+            manifest_row = conn.execute(
+                "SELECT value FROM index_metadata WHERE key = 'paths'"
+            ).fetchone()
+    if manifest_row is None:
+        return None
+    return columns, _schema_sql(schema_row), json.loads(manifest_row[0])
+
+
+def _any_page_newer_than(
+    pages: list[Path],
+    index_mtime: float,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    for page in pages:
+        _check_legacy_stop(deadline, cancelled)
+        try:
+            if page.stat().st_mtime > index_mtime:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _index_targets(root: Path | None, index_file: Path | None) -> tuple[Path, Path]:
+    return root or ROOT, index_file or INDEX_FILE
+
+
 def _needs_rebuild(
     pages: list[Path],
     *,
@@ -871,10 +1194,9 @@ def _needs_rebuild(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> bool:
-    """Check if any page is newer than the index, or if pages were added/removed."""
+    """True when a page is newer than the index, or membership changed."""
     _check_legacy_stop(deadline, cancelled)
-    source_root = root or ROOT
-    current_index = index_file or INDEX_FILE
+    source_root, current_index = _index_targets(root, index_file)
     if not current_index.exists():
         return True
     if index_file is None and index_manifest is None:
@@ -887,61 +1209,42 @@ def _needs_rebuild(
                 deadline=deadline,
                 cancelled=cancelled,
             )
+    return _index_is_stale(pages, source_root, current_index, deadline, cancelled)
+
+
+def _readable_index_state(
+    current_index: Path, deadline: float | None, cancelled: Callable[[], bool] | None
+) -> tuple | None:
+    """An unreadable or malformed index is just another reason to rebuild."""
     try:
-        connect_options = {}
-        if deadline is not None:
-            connect_options["timeout"] = max(0.0, min(5.0, deadline - time.monotonic()))
-        with closing(sqlite3.connect(str(current_index), **connect_options)) as conn:
-            with _legacy_sqlite_guard(conn, deadline, cancelled):
-                columns = tuple(
-                    row[1] for row in conn.execute("PRAGMA table_info(pages)")
-                )
-                schema_row = conn.execute(
-                    "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?",
-                    ("pages",),
-                ).fetchone()
-                manifest_row = conn.execute(
-                    "SELECT value FROM index_metadata WHERE key = 'paths'"
-                ).fetchone()
-        schema_sql = schema_row[0] if schema_row and isinstance(schema_row[0], str) else ""
-        normalized_schema = " ".join(schema_sql.casefold().split())
-        if columns != SEARCH_INDEX_COLUMNS or re.search(
-            r"\bCREATE\s+VIRTUAL\s+TABLE\b.*\bUSING\s+fts5\s*\(",
-            schema_sql,
-            re.IGNORECASE | re.DOTALL,
-        ) is None or any(
-            marker not in normalized_schema
-            for marker in (
-                "path unindexed",
-                "project unindexed",
-                "timestamp unindexed",
-                "tokenize = 'porter unicode61'",
-            )
-        ):
-            return True
-        if manifest_row is None:
-            return True
-        manifest_paths = json.loads(manifest_row[0])
-    except sqlite3.Error:
+        return _index_state(current_index, deadline, cancelled)
+    except (sqlite3.Error, TypeError, ValueError):
+        return None
+
+
+def _index_is_stale(
+    pages: list[Path],
+    source_root: Path,
+    current_index: Path,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    state = _readable_index_state(current_index, deadline, cancelled)
+    if state is None:
         return True
-    except (TypeError, ValueError, json.JSONDecodeError):
+    columns, schema_sql, manifest_paths = state
+    if not _index_schema_is_current(columns, schema_sql):
         return True
-    # The manifest is stored inside the SQLite candidate, so index and source
+    # The manifest lives inside the SQLite candidate, so index and source
     # membership become active through the same atomic file replacement.
     _check_legacy_stop(deadline, cancelled)
-    current_paths = sorted(p.relative_to(source_root).as_posix() for p in pages)
+    current_paths = sorted(page.relative_to(source_root).as_posix() for page in pages)
     if manifest_paths != current_paths:
         return True
     _check_legacy_stop(deadline, cancelled)
-    index_mtime = current_index.stat().st_mtime
-    for p in pages:
-        _check_legacy_stop(deadline, cancelled)
-        try:
-            if p.stat().st_mtime > index_mtime:
-                return True
-        except OSError:
-            continue
-    return False
+    return _any_page_newer_than(
+        pages, current_index.stat().st_mtime, deadline, cancelled
+    )
 
 
 def _is_transient_windows_access_error(error: OSError) -> bool:
@@ -949,6 +1252,100 @@ def _is_transient_windows_access_error(error: OSError) -> bool:
         getattr(error, "winerror", None) in {5, 32, 33}
         or error.errno == 13
     )
+
+
+def _unlink_quietly(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _write_lock_claim(lock_file: Path, payload: bytes) -> bool:
+    """Create the lock exclusively and write the claim, or report it is taken."""
+    try:
+        descriptor = os.open(str(lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        return False
+    except PermissionError as error:
+        if not _is_transient_windows_access_error(error):
+            raise
+        return False
+    try:
+        os.write(descriptor, payload)
+    except BaseException:
+        os.close(descriptor)
+        _unlink_quietly(lock_file)
+        raise
+    os.close(descriptor)
+    return True
+
+
+def _lock_owner_alive(lock_file: Path) -> bool:
+    """A malformed or unreadable claim counts as abandoned."""
+    try:
+        owner = json.loads(lock_file.read_text(encoding="utf-8"))
+        owner_pid = owner.get("pid")
+        owner_token = owner.get("token")
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return False
+    if not isinstance(owner_pid, int) or not isinstance(owner_token, str) or not owner_token:
+        return False
+    return bool(_is_pid_alive(owner_pid))
+
+
+def _lock_age_seconds(lock_file: Path) -> float:
+    try:
+        return time.time() - lock_file.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _clear_stale_lock(lock_file: Path) -> bool:
+    """Remove a lock whose owner is gone; report whether it is now free."""
+    if _lock_age_seconds(lock_file) < _INDEX_SWAP_STALE_SECONDS:
+        return False
+    if _lock_owner_alive(lock_file):
+        return False
+    try:
+        lock_file.unlink()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _acquire_index_swap_lock(
+    lock_file: Path,
+    payload: bytes,
+    *,
+    end: float,
+    poll: float,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    while True:
+        _check_legacy_stop(end, cancelled)
+        if _write_lock_claim(lock_file, payload):
+            return
+        if _clear_stale_lock(lock_file):
+            continue
+        _check_legacy_stop(end, cancelled)
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"Could not acquire index swap lock: {lock_file}")
+        time.sleep(min(poll, remaining))
+        _check_legacy_stop(end, cancelled)
+
+
+def _release_index_swap_lock(lock_file: Path, token: str) -> None:
+    """Release only our own claim; another owner's lock is not ours to remove."""
+    try:
+        owner = json.loads(lock_file.read_text(encoding="utf-8"))
+        if owner.get("token") == token:
+            lock_file.unlink()
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
 
 
 @contextmanager
@@ -964,73 +1361,19 @@ def _index_swap_lock(
     token = uuid.uuid4().hex
     payload = json.dumps({"pid": os.getpid(), "token": token}).encode("utf-8")
     end = time.monotonic() + timeout if deadline is None else deadline
-
-    while True:
-        _check_legacy_stop(end, cancelled)
-        try:
-            descriptor = os.open(
-                str(lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
-            )
-        except FileExistsError:
-            pass
-        except PermissionError as error:
-            if not _is_transient_windows_access_error(error):
-                raise
-        else:
-            try:
-                os.write(descriptor, payload)
-            except BaseException:
-                os.close(descriptor)
-                try:
-                    lock_file.unlink()
-                except OSError:
-                    pass
-                raise
-            else:
-                os.close(descriptor)
-            break
-
-        try:
-            age = time.time() - lock_file.stat().st_mtime
-        except OSError:
-            age = 0.0
-        if age >= _INDEX_SWAP_STALE_SECONDS:
-            try:
-                owner = json.loads(lock_file.read_text(encoding="utf-8"))
-                owner_pid = owner.get("pid")
-                owner_token = owner.get("token")
-                valid_owner = (
-                    isinstance(owner_pid, int)
-                    and isinstance(owner_token, str)
-                    and bool(owner_token)
-                )
-            except (OSError, json.JSONDecodeError, AttributeError):
-                valid_owner = False
-                owner_pid = 0
-            if not valid_owner or not _is_pid_alive(owner_pid):
-                try:
-                    lock_file.unlink()
-                    continue
-                except FileNotFoundError:
-                    continue
-                except OSError:
-                    pass
-        _check_legacy_stop(end, cancelled)
-        remaining = end - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError(f"Could not acquire index swap lock: {lock_file}")
-        time.sleep(min(poll, remaining))
-        _check_legacy_stop(end, cancelled)
-
+    _acquire_index_swap_lock(
+        lock_file, payload, end=end, poll=poll, cancelled=cancelled
+    )
     try:
         yield
     finally:
-        try:
-            owner = json.loads(lock_file.read_text(encoding="utf-8"))
-            if owner.get("token") == token:
-                lock_file.unlink()
-        except (OSError, json.JSONDecodeError, AttributeError):
-            pass
+        _release_index_swap_lock(lock_file, token)
+
+
+def _replace_deadline(deadline: float | None) -> float:
+    if deadline is None:
+        return time.monotonic() + _INDEX_REPLACE_WAIT_SECONDS
+    return deadline
 
 
 def _replace_live_index(
@@ -1039,11 +1382,7 @@ def _replace_live_index(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> None:
-    end = (
-        time.monotonic() + _INDEX_REPLACE_WAIT_SECONDS
-        if deadline is None
-        else deadline
-    )
+    end = _replace_deadline(deadline)
     attempt = 0
     while True:
         _check_legacy_stop(end, cancelled)
@@ -1063,114 +1402,159 @@ def _replace_live_index(
             attempt += 1
 
 
+_SEARCH_INDEX_DDL = """
+    CREATE VIRTUAL TABLE pages USING fts5(
+        path UNINDEXED,
+        title,
+        summary,
+        body,
+        project UNINDEXED,
+        timestamp UNINDEXED,
+        slug,
+        tokenize = 'porter unicode61'
+    )
+    """
+
+
+def _create_index_schema(conn: sqlite3.Connection, manifest_paths: list[str]) -> None:
+    conn.execute(_SEARCH_INDEX_DDL)
+    conn.execute(
+        "CREATE TABLE index_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL) "
+        "WITHOUT ROWID"
+    )
+    conn.execute(
+        "INSERT INTO index_metadata (key, value) VALUES ('paths', ?)",
+        (json.dumps(manifest_paths, separators=(",", ":")),),
+    )
+
+
+def _index_one_page(conn: sqlite3.Connection, page: Path) -> str | None:
+    """Insert one page and return the digest of the bytes that were indexed."""
+    try:
+        source = read_stable_bytes(page, MAX_PAGE_BYTES, label="search page")
+    except (OSError, ValueError):
+        return None
+    content = source.decode("utf-8", errors="ignore")
+    title, summary = _extract_title_and_summary(content, page.stem)
+    timestamp = (_extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or "")[:10]
+    conn.execute(
+        "INSERT INTO pages (path, title, summary, body, project, timestamp, slug) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            page.relative_to(ROOT).as_posix(),
+            title,
+            summary,
+            _strip_frontmatter(content),
+            (_extract_frontmatter_field(content, PROJECT_FIELD_RE) or "").lower(),
+            timestamp,
+            page.stem.replace("-", " ").replace("_", " "),
+        ),
+    )
+    return hashlib.sha256(source).hexdigest()
+
+
+def _sources_unchanged(
+    source_digests: Mapping[Path, str],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    """A page edited while the index was building invalidates this build."""
+    for path, expected_digest in source_digests.items():
+        _check_legacy_stop(deadline, cancelled)
+        try:
+            current = read_stable_bytes(
+                path, MAX_PAGE_BYTES, label="search page publication"
+            )
+        except (OSError, ValueError):
+            return False
+        if hashlib.sha256(current).hexdigest() != expected_digest:
+            return False
+    return True
+
+
+def _build_index_candidate(
+    tmp_file: Path,
+    pages: list[Path],
+    manifest_paths: list[str],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> dict[Path, str]:
+    """Fill a fresh index file and report the digests it was built from."""
+    source_digests: dict[Path, str] = {}
+    conn = sqlite3.connect(str(tmp_file))
+    try:
+        _create_index_schema(conn, manifest_paths)
+        for page in pages:
+            _check_legacy_stop(deadline, cancelled)
+            digest = _index_one_page(conn, page)
+            if digest is not None:
+                source_digests[page] = digest
+        conn.commit()
+        _check_legacy_stop(deadline, cancelled)
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001 - a close failure must not mask the build
+            pass
+    return source_digests
+
+
+def _publish_index_candidate(
+    tmp_file: Path,
+    source_digests: Mapping[Path, str],
+    manifest_paths: list[str],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    """Builders work independently, then briefly serialise the atomic swap."""
+    with _index_swap_lock(deadline=deadline, cancelled=cancelled):
+        if not _sources_unchanged(source_digests, deadline, cancelled):
+            return
+        _replace_live_index(tmp_file, deadline=deadline, cancelled=cancelled)
+        try:
+            atomic_write(INDEX_MANIFEST, json.dumps(manifest_paths))
+        except OSError:
+            pass  # best-effort: the manifest inside the index is authoritative
+
+
 def _build_index(
     pages: list[Path],
     *,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> None:
-    """Build the FTS5 index from scratch (atomically).
+    """Build the FTS5 index from scratch into a temporary file, then swap it in.
 
-    Builds into a temporary database file, then atomically replaces the
-    live index via ``os.replace``. This ensures concurrent searches never
-    see a partially-built index or a missing-index window.
+    Concurrent searches never see a partially built index or a window with no
+    index at all.
     """
     _check_legacy_stop(deadline, cancelled)
     INDEX_DIR.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
+    descriptor, tmp_name = tempfile.mkstemp(
         prefix=f".{INDEX_FILE.name}.", suffix=".tmp", dir=INDEX_DIR
     )
-    os.close(fd)
+    os.close(descriptor)
     tmp_file = Path(tmp_name)
-    conn = None
-    source_digests: dict[Path, str] = {}
-    manifest_paths = sorted(p.relative_to(ROOT).as_posix() for p in pages)
+    manifest_paths = sorted(page.relative_to(ROOT).as_posix() for page in pages)
     try:
-        conn = sqlite3.connect(str(tmp_file))
-        conn.execute(
-            """
-            CREATE VIRTUAL TABLE pages USING fts5(
-                path UNINDEXED,
-                title,
-                summary,
-                body,
-                project UNINDEXED,
-                timestamp UNINDEXED,
-                slug,
-                tokenize = 'porter unicode61'
-            )
-            """
+        source_digests = _build_index_candidate(
+            tmp_file, pages, manifest_paths, deadline=deadline, cancelled=cancelled
         )
-        conn.execute(
-            "CREATE TABLE index_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL) "
-            "WITHOUT ROWID"
+        _publish_index_candidate(
+            tmp_file,
+            source_digests,
+            manifest_paths,
+            deadline=deadline,
+            cancelled=cancelled,
         )
-        conn.execute(
-            "INSERT INTO index_metadata (key, value) VALUES ('paths', ?)",
-            (json.dumps(manifest_paths, separators=(",", ":")),),
-        )
-
-        for p in pages:
-            _check_legacy_stop(deadline, cancelled)
-            try:
-                source = read_stable_bytes(p, MAX_PAGE_BYTES, label="search page")
-            except (OSError, ValueError):
-                continue
-            source_digests[p] = hashlib.sha256(source).hexdigest()
-            content = source.decode("utf-8", errors="ignore")
-            title, summary = _extract_title_and_summary(content, p.stem)
-            body = _strip_frontmatter(content)
-            rel_path = p.relative_to(ROOT).as_posix()
-            project = _extract_frontmatter_field(content, PROJECT_FIELD_RE) or ""
-            timestamp = _extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or ""
-            # Truncate timestamp to date only for filtering
-            timestamp = timestamp[:10] if timestamp else ""
-            slug = p.stem.replace("-", " ").replace("_", " ")
-            conn.execute(
-                "INSERT INTO pages (path, title, summary, body, project, timestamp, slug) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (rel_path, title, summary, body, project.lower(), timestamp, slug),
-            )
-
-        conn.commit()
-        _check_legacy_stop(deadline, cancelled)
-        conn.close()
-        conn = None
-
-        # Builders do the expensive work independently, then briefly serialize
-        # the atomic live-index swap. Windows readers may transiently deny it.
-        with _index_swap_lock(deadline=deadline, cancelled=cancelled):
-            for path, expected_digest in source_digests.items():
-                _check_legacy_stop(deadline, cancelled)
-                try:
-                    current = read_stable_bytes(
-                        path, MAX_PAGE_BYTES, label="search page publication"
-                    )
-                except (OSError, ValueError):
-                    return
-                if hashlib.sha256(current).hexdigest() != expected_digest:
-                    return
-            _replace_live_index(
-                tmp_file, deadline=deadline, cancelled=cancelled
-            )
-
-            # Keep the manifest paired with the winning index build.
-            try:
-                atomic_write(
-                    INDEX_MANIFEST,
-                    json.dumps(manifest_paths),
-                )
-            except OSError:
-                pass  # best-effort
     finally:
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:
-                pass
         try:
             tmp_file.unlink()
         except FileNotFoundError:
             pass
+
 
 def _authority_weight(path: str) -> float:
     """Read source_authority from page frontmatter; default 1.0."""
@@ -1179,10 +1563,7 @@ def _authority_weight(path: str) -> float:
         content = p.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return 1.0
-    auth = _extract_frontmatter_field(content, AUTHORITY_FIELD_RE)
-    if not auth:
-        return 1.0
-    return AUTHORITY_WEIGHTS.get(auth.strip().lower(), 1.0)
+    return authority_weight(_extract_frontmatter_field(content, AUTHORITY_FIELD_RE))
 
 
 def _valid_as_of(path: str, as_of: str) -> bool:
@@ -1224,6 +1605,11 @@ def _maybe_rerank(query: str, results: list[dict], limit: int) -> list[dict]:
     """Apply cross-encoder reranker if available, else return results as-is."""
     if not results or len(results) <= 1:
         return results[:limit]
+    return _deduplicate_by_slug(_reranked(query, results, limit))[:limit]
+
+
+def _reranked(query: str, results: list[dict], limit: int) -> list[dict]:
+    """The reranker is optional; any failure leaves the order untouched."""
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         from reranker import rerank, should_rerank
@@ -1234,14 +1620,57 @@ def _maybe_rerank(query: str, results: list[dict], limit: int) -> list[dict]:
             analysis_intents=(),
             rerank_enabled=True,
         )
-        if apply:
-            results = rerank(query, results, limit=max(limit, len(results)))
+        if not apply:
+            return results
+        return rerank(query, results, limit=max(limit, len(results)))
+    except Exception:
+        return results
+
+
+def _stamp_retrieval_mode(results: list[dict], mode: str) -> None:
+    for result in results:
+        result.setdefault("generation", "legacy")
+        result["requested_mode"] = mode
+        result["effective_mode"] = mode
+        result.setdefault("fallback_reason", None)
+
+
+def _impression_events(
+    query: str, results: list[dict], mode: str, source_tool: str, make_event
+) -> list:
+    events = []
+    for rank, result in enumerate(results, start=1):
+        event = make_event(
+            event_kind="impression",
+            query=query,
+            retrieval_mode=mode,
+            candidate_id=result.get("slug") or Path(result.get("path", "")).stem,
+            rank=rank,
+            generation=str(result.get("generation") or "legacy"),
+            source_tool=source_tool,
+        )
+        if event is not None:
+            events.append(event)
+    return events
+
+
+def _best_effort_record_impressions(
+    query: str, results: list[dict], mode: str, source_tool: str
+) -> None:
+    """Telemetry never changes what a search returns, so it swallows failures."""
+    try:
+        from retrieval_telemetry import (
+            best_effort_make_event,
+            best_effort_record_events,
+        )
+
+        events = _impression_events(
+            query, results, mode, source_tool, best_effort_make_event
+        )
+        if events:
+            best_effort_record_events(events)
     except Exception:
         pass
-
-    results = _deduplicate_by_slug(results)
-
-    return results[:limit]
 
 
 def _finalize_results(
@@ -1256,37 +1685,10 @@ def _finalize_results(
     """Finalize one returned list and best-effort record its impressions once."""
     final = _deduplicate_by_slug(results)[:limit]
     mode = str(retrieval_mode or "bm25").lower()
-    for result in final:
-        result.setdefault("generation", "legacy")
-        result["requested_mode"] = mode
-        result["effective_mode"] = mode
-        result.setdefault("fallback_reason", None)
+    _stamp_retrieval_mode(final, mode)
     if not final or not emit_telemetry:
         return final
-    try:
-        from retrieval_telemetry import (
-            best_effort_make_event,
-            best_effort_record_events,
-        )
-
-        events = []
-        for rank, result in enumerate(final, start=1):
-            candidate_id = result.get("slug") or Path(result.get("path", "")).stem
-            event = best_effort_make_event(
-                event_kind="impression",
-                query=query,
-                retrieval_mode=mode,
-                candidate_id=candidate_id,
-                rank=rank,
-                generation=str(result.get("generation") or "legacy"),
-                source_tool=source_tool,
-            )
-            if event is not None:
-                events.append(event)
-        if events:
-            best_effort_record_events(events)
-    except Exception:
-        pass
+    _best_effort_record_impressions(query, final, mode, source_tool)
     return final
 
 
@@ -1318,22 +1720,24 @@ def _check_generation_stop(
 
 
 @contextmanager
-def _generation_sqlite_guard(
+def _sqlite_stop_guard(
     connection: sqlite3.Connection,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
+    *,
+    check: Callable[[float | None, Callable[[], bool] | None], None],
+    message: str,
 ) -> Iterator[None]:
-    _check_generation_stop(deadline, cancelled)
-    if deadline is None and cancelled is None:
+    """Turn an interrupted SQLite statement into the stop that caused it."""
+    check(deadline, cancelled)
+    if _no_stop_requested(deadline, cancelled):
         yield
         return
     stopped = False
 
     def progress() -> int:
         nonlocal stopped
-        stopped = bool(cancelled and cancelled()) or bool(
-            deadline is not None and time.monotonic() >= deadline
-        )
+        stopped = _stop_reached(deadline, cancelled)
         return int(stopped)
 
     connection.set_progress_handler(progress, 1000)
@@ -1341,14 +1745,44 @@ def _generation_sqlite_guard(
         yield
     except sqlite3.DatabaseError as exc:
         if stopped:
-            raise TimeoutError(
-                "generation SQLite work cancelled or deadline exceeded"
-            ) from exc
-        _check_generation_stop(deadline, cancelled)
+            raise TimeoutError(message) from exc
+        check(deadline, cancelled)
         raise
     finally:
         connection.set_progress_handler(None, 0)
-    _check_generation_stop(deadline, cancelled)
+    check(deadline, cancelled)
+
+
+@contextmanager
+def _legacy_sqlite_guard(
+    connection: sqlite3.Connection,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> Iterator[None]:
+    with _sqlite_stop_guard(
+        connection,
+        deadline,
+        cancelled,
+        check=_check_legacy_stop,
+        message="legacy SQLite work cancelled or deadline exceeded",
+    ):
+        yield
+
+
+@contextmanager
+def _generation_sqlite_guard(
+    connection: sqlite3.Connection,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> Iterator[None]:
+    with _sqlite_stop_guard(
+        connection,
+        deadline,
+        cancelled,
+        check=_check_generation_stop,
+        message="generation SQLite work cancelled or deadline exceeded",
+    ):
+        yield
 
 
 def _canonical_manifest_bytes(manifest: dict[str, object]) -> bytes:
@@ -1360,6 +1794,52 @@ def _canonical_manifest_bytes(manifest: dict[str, object]) -> bytes:
     ).encode("utf-8")
 
 
+def _require_regular_file(path: Path):
+    before = path.lstat()
+    if path.is_symlink() or not stat.S_ISREG(before.st_mode):
+        raise PermissionError("generation artifact must be a regular file")
+    return before
+
+
+def _hashed_open_file(
+    source,
+    before,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> tuple[int, str, object, object]:
+    """Hash an open file while proving it stays the same file throughout."""
+    opened = os.fstat(source.fileno())
+    if not os.path.samestat(before, opened):
+        raise PermissionError("generation artifact changed while opening")
+    digest = hashlib.sha256()
+    size = 0
+    while chunk := source.read(64 * 1024):
+        _check_generation_stop(deadline, cancelled)
+        size += len(chunk)
+        digest.update(chunk)
+    _check_generation_stop(deadline, cancelled)
+    return size, digest.hexdigest(), opened, os.fstat(source.fileno())
+
+
+def _require_stable_identity(opened, after_open, after) -> None:
+    if (
+        not os.path.samestat(opened, after_open)
+        or not os.path.samestat(after_open, after)
+        or (opened.st_size, opened.st_mtime_ns)
+        != (after_open.st_size, after_open.st_mtime_ns)
+    ):
+        raise PermissionError("generation artifact changed while hashing")
+
+
+def _require_expected_seal(
+    expected: dict[str, object] | None, size: int, checksum: str
+) -> None:
+    if expected is None:
+        return
+    if expected.get("size") != size or expected.get("sha256") != checksum:
+        raise ValueError("generation artifact does not match active manifest")
+
+
 def _sealed_file(
     path: Path,
     expected: dict[str, object] | None = None,
@@ -1368,34 +1848,14 @@ def _sealed_file(
     cancelled: Callable[[], bool] | None = None,
 ) -> tuple:
     _check_generation_stop(deadline, cancelled)
-    before = path.lstat()
-    if path.is_symlink() or not stat.S_ISREG(before.st_mode):
-        raise PermissionError("generation artifact must be a regular file")
-    digest = hashlib.sha256()
-    size = 0
+    before = _require_regular_file(path)
     with path.open("rb") as source:
-        opened = os.fstat(source.fileno())
-        if not os.path.samestat(before, opened):
-            raise PermissionError("generation artifact changed while opening")
-        while chunk := source.read(64 * 1024):
-            _check_generation_stop(deadline, cancelled)
-            size += len(chunk)
-            digest.update(chunk)
-        _check_generation_stop(deadline, cancelled)
-        after_open = os.fstat(source.fileno())
+        size, checksum, opened, after_open = _hashed_open_file(
+            source, before, deadline, cancelled
+        )
     after = path.lstat()
-    if (
-        not os.path.samestat(opened, after_open)
-        or not os.path.samestat(after_open, after)
-        or (opened.st_size, opened.st_mtime_ns)
-        != (after_open.st_size, after_open.st_mtime_ns)
-    ):
-        raise PermissionError("generation artifact changed while hashing")
-    checksum = digest.hexdigest()
-    if expected is not None and (
-        expected.get("size") != size or expected.get("sha256") != checksum
-    ):
-        raise ValueError("generation artifact does not match active manifest")
+    _require_stable_identity(opened, after_open, after)
+    _require_expected_seal(expected, size, checksum)
     return (
         after.st_dev,
         after.st_ino,
@@ -1407,6 +1867,66 @@ def _sealed_file(
     )
 
 
+def _artifact_descriptors(manifest: Mapping[str, object]) -> dict[str, dict] | None:
+    """One descriptor per artifact path, or None when the manifest is malformed."""
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list):
+        return None
+    descriptors = {
+        item.get("path"): item for item in artifacts if _is_path_descriptor(item)
+    }
+    if len(descriptors) != len(artifacts):
+        return None
+    return descriptors
+
+
+def _is_path_descriptor(item: object) -> bool:
+    return isinstance(item, dict) and isinstance(item.get("path"), str)
+
+
+def _artifact_seals(
+    directory: Path,
+    descriptors: Mapping[str, dict],
+    artifact_names: tuple[str, ...],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[tuple[str, object]] | None:
+    seals: list[tuple[str, object]] = []
+    for name in artifact_names:
+        _check_generation_stop(deadline, cancelled)
+        descriptor = descriptors.get(name)
+        if not isinstance(descriptor, dict):
+            return None
+        seals.append(
+            (
+                name,
+                _sealed_file(
+                    directory / name, descriptor, deadline=deadline, cancelled=cancelled
+                ),
+            )
+        )
+    return seals
+
+
+def _manifest_seal(
+    manifest_path: Path,
+    canonical: bytes,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> object | None:
+    """A generation may predate the on-disk manifest; absence is not a failure."""
+    if not manifest_path.exists() and not manifest_path.is_symlink():
+        return None
+    return _sealed_file(
+        manifest_path,
+        {"size": len(canonical), "sha256": hashlib.sha256(canonical).hexdigest()},
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+
+
 def _generation_consumption_seal(
     catalog: object,
     manifest: dict[str, object],
@@ -1415,59 +1935,75 @@ def _generation_consumption_seal(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> tuple | None:
+    """What this reader saw, so a later check can prove nothing moved."""
     try:
-        _check_generation_stop(deadline, cancelled)
-        generation_id = manifest["generation_id"]
-        generations_path = Path(getattr(catalog, "generations_path"))
-        if not isinstance(generation_id, str):
-            return None
-        artifacts = manifest.get("artifacts")
-        if not isinstance(artifacts, list):
-            return None
-        descriptors = {
-            item.get("path"): item
-            for item in artifacts
-            if isinstance(item, dict) and isinstance(item.get("path"), str)
-        }
-        if len(descriptors) != len(artifacts):
-            return None
-        directory = generations_path / generation_id
-        seals = []
-        for name in artifact_names:
-            _check_generation_stop(deadline, cancelled)
-            descriptor = descriptors.get(name)
-            if not isinstance(descriptor, dict):
-                return None
-            seals.append(
-                (
-                    name,
-                    _sealed_file(
-                        directory / name,
-                        descriptor,
-                        deadline=deadline,
-                        cancelled=cancelled,
-                    ),
-                )
-            )
-        manifest_path = directory / "manifest.json"
-        canonical = _canonical_manifest_bytes(manifest)
-        if manifest_path.exists() or manifest_path.is_symlink():
-            manifest_seal = _sealed_file(
-                manifest_path,
-                {
-                    "size": len(canonical),
-                    "sha256": hashlib.sha256(canonical).hexdigest(),
-                },
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-        else:
-            manifest_seal = None
-        return hashlib.sha256(canonical).hexdigest(), manifest_seal, tuple(seals)
+        return _sealed_generation(
+            catalog, manifest, artifact_names, deadline=deadline, cancelled=cancelled
+        )
     except TimeoutError:
         raise
     except (OSError, PermissionError, TypeError, ValueError):
         return None
+
+
+def _sealed_generation(
+    catalog: object,
+    manifest: Mapping[str, object],
+    artifact_names: tuple[str, ...],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> tuple | None:
+    _check_generation_stop(deadline, cancelled)
+    generation_id = manifest["generation_id"]
+    descriptors = _artifact_descriptors(manifest)
+    if not isinstance(generation_id, str) or descriptors is None:
+        return None
+    directory = Path(getattr(catalog, "generations_path")) / generation_id
+    seals = _artifact_seals(
+        directory, descriptors, artifact_names, deadline=deadline, cancelled=cancelled
+    )
+    if seals is None:
+        return None
+    canonical = _canonical_manifest_bytes(manifest)
+    manifest_seal = _manifest_seal(
+        directory / "manifest.json", canonical, deadline=deadline, cancelled=cancelled
+    )
+    return hashlib.sha256(canonical).hexdigest(), manifest_seal, tuple(seals)
+
+
+def _active_for_repository(
+    catalog: object,
+    repository_scope: object,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> object:
+    if _no_stop_requested(deadline, cancelled):
+        return catalog.get_active_for_repository(repository_scope)
+    return catalog.get_active_for_repository(
+        repository_scope, deadline=deadline, cancelled=cancelled
+    )
+
+
+def _same_sealed_generation(
+    catalog: object,
+    active: object,
+    manifest: dict[str, object],
+    artifact_names: tuple[str, ...],
+    expected_seal: tuple,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    """The active generation is still the one this reader sealed."""
+    if not isinstance(active, dict):
+        return False
+    if _canonical_manifest_bytes(active) != _canonical_manifest_bytes(manifest):
+        return False
+    seal = _generation_consumption_seal(
+        catalog, active, artifact_names, deadline=deadline, cancelled=cancelled
+    )
+    return seal == expected_seal
 
 
 def _generation_consumption_unchanged(
@@ -1483,29 +2019,69 @@ def _generation_consumption_unchanged(
         from repository_scope import RepositoryScope
 
         _check_generation_stop(deadline, cancelled)
-        repository_scope = RepositoryScope.from_dict(manifest.get("repository_scope"))
-        if deadline is None and cancelled is None:
-            active = catalog.get_active_for_repository(repository_scope)
-        else:
-            active = catalog.get_active_for_repository(
-                repository_scope, deadline=deadline, cancelled=cancelled
-            )
-        return (
-            isinstance(active, dict)
-            and _canonical_manifest_bytes(active) == _canonical_manifest_bytes(manifest)
-            and _generation_consumption_seal(
-                catalog,
-                active,
-                artifact_names,
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-            == expected_seal
+        active = _active_for_repository(
+            catalog,
+            RepositoryScope.from_dict(manifest.get("repository_scope")),
+            deadline,
+            cancelled,
+        )
+        return _same_sealed_generation(
+            catalog,
+            active,
+            manifest,
+            artifact_names,
+            expected_seal,
+            deadline=deadline,
+            cancelled=cancelled,
         )
     except TimeoutError:
         raise
     except (OSError, PermissionError, sqlite3.Error, TypeError, ValueError):
         return False
+
+
+def _read_only_connect_options(deadline: float | None) -> dict[str, object]:
+    return {"uri": True, **_deadline_timeout_options(deadline)}
+
+
+def _close_quietly(connection: sqlite3.Connection) -> None:
+    try:
+        connection.close()
+    except sqlite3.Error:
+        pass
+
+
+def _connectable_generation(
+    manifest: dict[str, object], generations_path: object, generation_id: object
+) -> bool:
+    if not isinstance(generation_id, str) or generations_path is None:
+        return False
+    return bool(_generation_artifact(manifest, GENERATION_FTS_ARTIFACT))
+
+
+def _validated_generation_connection(
+    artifact: Path,
+    manifest: dict[str, object],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> sqlite3.Connection | None:
+    """Open the artifact read-only and hand it back only once it validates."""
+    _check_generation_stop(deadline, cancelled)
+    connection = sqlite3.connect(
+        f"{artifact.resolve().as_uri()}?mode=ro",
+        **_read_only_connect_options(deadline),
+    )
+    try:
+        _check_generation_stop(deadline, cancelled)
+        if not _valid_generation_fts(
+            connection, manifest, deadline=deadline, cancelled=cancelled
+        ):
+            connection.close()
+            return None
+        return connection
+    except BaseException:
+        _close_quietly(connection)
+        raise
 
 
 def _generation_connection(
@@ -1516,41 +2092,18 @@ def _generation_connection(
     cancelled: Callable[[], bool] | None = None,
 ) -> sqlite3.Connection | None:
     _check_generation_stop(deadline, cancelled)
-    generation_id = manifest.get("generation_id")
     generations_path = getattr(catalog, "generations_path", None)
-    if not isinstance(generation_id, str) or generations_path is None:
-        return None
-    if not _generation_artifact(manifest, GENERATION_FTS_ARTIFACT):
+    generation_id = manifest.get("generation_id")
+    if not _connectable_generation(manifest, generations_path, generation_id):
         return None
     artifact = Path(generations_path) / generation_id / GENERATION_FTS_ARTIFACT
     try:
-        connect_options = {"uri": True}
-        if deadline is not None:
-            connect_options["timeout"] = max(
-                0.0, min(5.0, deadline - time.monotonic())
-            )
-        _check_generation_stop(deadline, cancelled)
-        connection = sqlite3.connect(
-            f"{artifact.resolve().as_uri()}?mode=ro", **connect_options
+        return _validated_generation_connection(
+            artifact, manifest, deadline, cancelled
         )
-        _check_generation_stop(deadline, cancelled)
-        if not _valid_generation_fts(
-            connection, manifest, deadline=deadline, cancelled=cancelled
-        ):
-            connection.close()
-            return None
-        return connection
     except TimeoutError:
-        try:
-            connection.close()
-        except (UnboundLocalError, sqlite3.Error):
-            pass
         raise
     except (OSError, PermissionError, sqlite3.Error, TypeError, ValueError):
-        try:
-            connection.close()
-        except (UnboundLocalError, sqlite3.Error):
-            pass
         return None
 
 
@@ -1572,111 +2125,178 @@ def _valid_generation_fts(
         )
 
 
-def _generation_authoritative_sources(
+def _read_bounded_chunks(
+    descriptor: int,
+    *,
+    max_bytes: int,
+    label: str,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[bytes]:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        _check_generation_stop(deadline, cancelled)
+        chunk = os.read(descriptor, 64 * 1024)
+        if not chunk:
+            return chunks
+        total += len(chunk)
+        if total > max_bytes:
+            raise ValueError(f"{label} exceeds its byte ceiling")
+        chunks.append(chunk)
+
+
+def _read_identity_stable_bytes(
+    file_path: Path,
+    expected: os.stat_result,
+    *,
+    max_bytes: int,
+    label: str,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bytes:
+    """Read a file whose identity is proved unchanged before, during and after."""
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(file_path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not os.path.samestat(expected, opened):
+            raise PermissionError(f"{label} identity changed before read")
+        chunks = _read_bounded_chunks(
+            descriptor,
+            max_bytes=max_bytes,
+            label=label,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+        after = os.fstat(descriptor)
+        _require_same_file(opened, after, label)
+    finally:
+        os.close(descriptor)
+    current = file_path.stat(follow_symlinks=False)
+    if not os.path.samestat(after, current):
+        raise PermissionError(f"{label} identity changed after read")
+    return b"".join(chunks)
+
+
+def _require_same_file(before: os.stat_result, after: os.stat_result, label: str) -> None:
+    same_identity = os.path.samestat(before, after)
+    same_content = (before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns)
+    if not same_identity or not same_content:
+        raise PermissionError(f"{label} changed during read")
+
+
+def _validated_source_manifest(
     generation_path: Path,
-    manifest: dict[str, object],
+    manifest: Mapping[str, object],
     *,
     state_root: Path,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
-) -> dict[str, dict[str, object]]:
-    _check_generation_stop(deadline, cancelled)
+) -> dict:
     source_manifest_path = generation_path / "source-manifest.json"
-    expected_manifest = validate_runtime_file(
+    expected = validate_runtime_file(
         source_manifest_path, state_root, max_bytes=MAX_CORPUS_TOTAL_BYTES
     )
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(source_manifest_path, flags)
-    try:
-        opened_manifest = os.fstat(descriptor)
-        if not os.path.samestat(expected_manifest, opened_manifest):
-            raise PermissionError("generation source manifest identity changed before read")
-        chunks = []
-        total = 0
-        while True:
-            _check_generation_stop(deadline, cancelled)
-            chunk = os.read(descriptor, 64 * 1024)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > MAX_CORPUS_TOTAL_BYTES:
-                raise ValueError("generation source manifest exceeds its byte ceiling")
-            chunks.append(chunk)
-        after_manifest = os.fstat(descriptor)
-        if not os.path.samestat(opened_manifest, after_manifest) or (
-            opened_manifest.st_size,
-            opened_manifest.st_mtime_ns,
-        ) != (after_manifest.st_size, after_manifest.st_mtime_ns):
-            raise PermissionError("generation source manifest changed during read")
-        source_manifest_raw = b"".join(chunks)
-    finally:
-        os.close(descriptor)
-    current_manifest = source_manifest_path.stat(follow_symlinks=False)
-    if not os.path.samestat(after_manifest, current_manifest):
-        raise PermissionError("generation source manifest identity changed after read")
+    raw = _read_identity_stable_bytes(
+        source_manifest_path,
+        expected,
+        max_bytes=MAX_CORPUS_TOTAL_BYTES,
+        label="generation source manifest",
+        deadline=deadline,
+        cancelled=cancelled,
+    )
     _check_generation_stop(deadline, cancelled)
     try:
-        source_manifest_value = json.loads(source_manifest_raw)
+        value = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("generation source manifest is invalid") from exc
-    source_manifest = validate_canonical_source_manifest(source_manifest_value)
-    if (
-        canonical_json_bytes(source_manifest) != source_manifest_raw
-        or hashlib.sha256(source_manifest_raw).hexdigest()
-        != manifest.get("source_manifest_sha256")
-    ):
+    source_manifest = validate_canonical_source_manifest(value)
+    if canonical_json_bytes(source_manifest) != raw:
         raise ValueError("generation source manifest hash is invalid")
+    if hashlib.sha256(raw).hexdigest() != manifest.get("source_manifest_sha256"):
+        raise ValueError("generation source manifest hash is invalid")
+    return source_manifest
 
-    evidence_path = generation_path / "evidence.sqlite3"
-    validate_runtime_file(evidence_path, state_root, max_bytes=16 * 1024 * 1024 * 1024)
-    uri = f"{evidence_path.resolve(strict=True).as_uri()}?mode=ro&immutable=1"
-    source_metadata: list[tuple[str, str, str, int]] = []
-    seen_source_ids: set[str] = set()
+
+def _all_ints(values: tuple[object, ...]) -> bool:
+    return all(isinstance(value, int) for value in values)
+
+
+def _valid_source_shape(
+    relative_path: object, digest: object, size: object, content_size: object
+) -> bool:
+    return _all_strings((relative_path, digest)) and _all_ints((size, content_size))
+
+
+def _valid_source_row(row: tuple[object, ...], seen: set[str]) -> bool:
+    source_id, relative_path, digest, size, content_size = row
+    if not isinstance(source_id, str) or source_id in seen:
+        return False
+    if not _valid_source_shape(relative_path, digest, size, content_size):
+        return False
+    return content_size <= MAX_CORPUS_FILE_BYTES and size == content_size
+
+
+def _source_metadata_rows(
+    database: sqlite3.Connection,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[tuple[str, str, str, int]]:
+    """Bounded source identity rows, refusing anything past a ceiling."""
+    metadata: list[tuple[str, str, str, int]] = []
+    seen: set[str] = set()
     total_bytes = 0
-    with closing(sqlite3.connect(uri, uri=True, timeout=0)) as database:
-        with _generation_sqlite_guard(database, deadline, cancelled):
-            rows = database.execute(
-                "SELECT source_id, relative_path, sha256, size, length(content) FROM source "
-                "ORDER BY relative_path, source_id LIMIT ?",
-                (MAX_CORPUS_FILES + 1,),
-            )
-            for row in rows:
-                _check_generation_stop(deadline, cancelled)
-                if len(source_metadata) >= MAX_CORPUS_FILES:
-                    raise ValueError("generation source row ceiling exceeded")
-                source_id, relative_path, digest, size, content_size = row
-                if (
-                    not isinstance(source_id, str)
-                    or source_id in seen_source_ids
-                    or not isinstance(relative_path, str)
-                    or not isinstance(digest, str)
-                    or not isinstance(size, int)
-                    or not isinstance(content_size, int)
-                    or content_size > MAX_CORPUS_FILE_BYTES
-                    or size != content_size
-                ):
-                    raise ValueError("generation evidence source rows are invalid")
-                total_bytes += content_size
-                if total_bytes > MAX_CORPUS_TOTAL_BYTES:
-                    raise ValueError("generation evidence source bytes exceed their ceiling")
-                seen_source_ids.add(source_id)
-                source_metadata.append((source_id, relative_path, digest, size))
-            sources: dict[str, dict[str, object]] = {}
-            for source_id, relative_path, digest, size in source_metadata:
-                _check_generation_stop(deadline, cancelled)
-                content_row = database.execute(
-                    "SELECT content FROM source WHERE source_id = ?", (source_id,)
-                ).fetchone()
-                if content_row is None:
-                    raise ValueError("generation evidence source content is missing")
-                content = bytes(content_row[0])
-                if len(content) != size or hashlib.sha256(content).hexdigest() != digest:
-                    raise ValueError("generation evidence source content is invalid")
-                sources[source_id] = {
-                    "relative_path": relative_path,
-                    "sha256": digest,
-                    "content": content,
-                }
+    rows = database.execute(
+        "SELECT source_id, relative_path, sha256, size, length(content) FROM source "
+        "ORDER BY relative_path, source_id LIMIT ?",
+        (MAX_CORPUS_FILES + 1,),
+    )
+    for row in rows:
+        _check_generation_stop(deadline, cancelled)
+        if len(metadata) >= MAX_CORPUS_FILES:
+            raise ValueError("generation source row ceiling exceeded")
+        if not _valid_source_row(row, seen):
+            raise ValueError("generation evidence source rows are invalid")
+        source_id, relative_path, digest, size, content_size = row
+        total_bytes += content_size
+        if total_bytes > MAX_CORPUS_TOTAL_BYTES:
+            raise ValueError("generation evidence source bytes exceed their ceiling")
+        seen.add(source_id)
+        metadata.append((source_id, relative_path, digest, size))
+    return metadata
+
+
+def _verified_source_contents(
+    database: sqlite3.Connection,
+    metadata: list[tuple[str, str, str, int]],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> dict[str, dict[str, object]]:
+    sources: dict[str, dict[str, object]] = {}
+    for source_id, relative_path, digest, size in metadata:
+        _check_generation_stop(deadline, cancelled)
+        row = database.execute(
+            "SELECT content FROM source WHERE source_id = ?", (source_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError("generation evidence source content is missing")
+        content = bytes(row[0])
+        if len(content) != size or hashlib.sha256(content).hexdigest() != digest:
+            raise ValueError("generation evidence source content is invalid")
+        sources[source_id] = {
+            "relative_path": relative_path,
+            "sha256": digest,
+            "content": content,
+        }
+    return sources
+
+
+def _require_membership_matches(
+    sources: Mapping[str, Mapping[str, object]], source_manifest: Mapping[str, object]
+) -> None:
     membership = [
         {
             "logical_id": source_id,
@@ -1689,6 +2309,37 @@ def _generation_authoritative_sources(
     ]
     if membership != source_manifest["sources"]:
         raise ValueError("generation evidence source membership does not match source manifest")
+
+
+def _generation_authoritative_sources(
+    generation_path: Path,
+    manifest: dict[str, object],
+    *,
+    state_root: Path,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> dict[str, dict[str, object]]:
+    """Every source the generation claims, read back and verified byte for byte."""
+    _check_generation_stop(deadline, cancelled)
+    source_manifest = _validated_source_manifest(
+        generation_path,
+        manifest,
+        state_root=state_root,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    evidence_path = generation_path / "evidence.sqlite3"
+    validate_runtime_file(evidence_path, state_root, max_bytes=16 * 1024 * 1024 * 1024)
+    uri = f"{evidence_path.resolve(strict=True).as_uri()}?mode=ro&immutable=1"
+    with closing(sqlite3.connect(uri, uri=True, timeout=0)) as database:
+        with _generation_sqlite_guard(database, deadline, cancelled):
+            metadata = _source_metadata_rows(
+                database, deadline=deadline, cancelled=cancelled
+            )
+            sources = _verified_source_contents(
+                database, metadata, deadline=deadline, cancelled=cancelled
+            )
+    _require_membership_matches(sources, source_manifest)
     return sources
 
 
@@ -1726,60 +2377,99 @@ def validate_generation_fts_artifact(
     _check_generation_stop(deadline, cancelled)
 
 
-def _valid_generation_fts_contents(
-    connection: sqlite3.Connection,
-    manifest: dict[str, object],
-    *,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-    authoritative_sources: dict[str, dict[str, object]] | None = None,
-) -> bool:
-    if connection.execute("PRAGMA integrity_check").fetchone() != ("ok",):
-        return False
+class _UnusableAuthoritativeSource(Exception):
+    """An authoritative source that cannot produce chunks at all."""
+
+
+_FTS_METADATA_SCHEMA = (
+    ("key", "TEXT", 0, 1),
+    ("value", "TEXT", 1, 0),
+)
+_FTS_TABLE_PREFIX = "create virtual table chunks using fts5("
+_FTS_CHUNK_SELECT = (
+    "SELECT chunk_id, chunk_order, source_id, source_path, source_sha256, "
+    "parent_page, heading_ancestry, byte_start, byte_end, line_start, line_end, "
+    "span_sha256, type, project, authority, confidence, status, valid_from, "
+    "valid_to, language, title, content FROM chunks ORDER BY chunk_order"
+)
+
+
+def _valid_table_shapes(connection: sqlite3.Connection) -> bool:
     metadata_schema = tuple(
         (row[1], row[2].upper(), row[3], row[5])
         for row in connection.execute("PRAGMA table_info(generation_metadata)")
     )
     chunk_columns = tuple(row[1] for row in connection.execute("PRAGMA table_info(chunks)"))
-    if metadata_schema != (
-        ("key", "TEXT", 0, 1),
-        ("value", "TEXT", 1, 0),
-    ) or chunk_columns != GENERATION_FTS_COLUMNS:
+    return metadata_schema == _FTS_METADATA_SCHEMA and chunk_columns == GENERATION_FTS_COLUMNS
+
+
+def _valid_fts_schema(connection: sqlite3.Connection) -> bool:
+    """Integrity, table shapes, and the exact FTS5 declaration."""
+    if connection.execute("PRAGMA integrity_check").fetchone() != ("ok",):
         return False
-    schema_row = connection.execute(
-        "SELECT sql FROM sqlite_schema WHERE type='table' AND name='chunks'"
-    ).fetchone()
-    if not schema_row or not isinstance(schema_row[0], str):
+    if not _valid_table_shapes(connection):
         return False
-    normalized_schema = " ".join(schema_row[0].casefold().split())
-    prefix = "create virtual table chunks using fts5("
-    if not normalized_schema.startswith(prefix) or not normalized_schema.endswith(")"):
-        return False
-    arguments = [
-        argument.strip()
-        for argument in normalized_schema[len(prefix) : -1].split(",")
-    ]
-    expected_arguments = [
+    return _valid_fts_declaration(connection)
+
+
+def _expected_fts_arguments() -> list[str]:
+    return [
         *(f"{column} unindexed" for column in GENERATION_FTS_COLUMNS[:-2]),
         "title",
         "content",
         "tokenize = 'porter unicode61'",
     ]
-    if arguments != expected_arguments:
+
+
+def _chunks_table_sql(connection: sqlite3.Connection) -> str | None:
+    row = connection.execute(
+        "SELECT sql FROM sqlite_schema WHERE type='table' AND name='chunks'"
+    ).fetchone()
+    if not row or not isinstance(row[0], str):
+        return None
+    return " ".join(row[0].casefold().split())
+
+
+def _declared_fts_arguments(connection: sqlite3.Connection) -> list[str] | None:
+    normalized = _chunks_table_sql(connection)
+    if normalized is None:
+        return None
+    if not normalized.startswith(_FTS_TABLE_PREFIX) or not normalized.endswith(")"):
+        return None
+    return [
+        argument.strip()
+        for argument in normalized[len(_FTS_TABLE_PREFIX) : -1].split(",")
+    ]
+
+
+def _valid_fts_declaration(connection: sqlite3.Connection) -> bool:
+    return _declared_fts_arguments(connection) == _expected_fts_arguments()
+
+
+def _valid_metadata_rows(rows: list[tuple[object, object]]) -> bool:
+    if len(rows) != len(GENERATION_METADATA_KEYS):
         return False
-    metadata_rows = list(
+    if {row[0] for row in rows} != GENERATION_METADATA_KEYS:
+        return False
+    return all(isinstance(row[1], str) for row in rows)
+
+
+def _generation_metadata(connection: sqlite3.Connection) -> dict[str, str] | None:
+    """Exactly the expected keys, all strings, or None."""
+    rows = list(
         connection.execute(
             "SELECT key, value FROM generation_metadata LIMIT ?",
             (len(GENERATION_METADATA_KEYS) + 1,),
         )
     )
-    if (
-        len(metadata_rows) != len(GENERATION_METADATA_KEYS)
-        or {row[0] for row in metadata_rows} != GENERATION_METADATA_KEYS
-        or any(not isinstance(row[1], str) for row in metadata_rows)
-    ):
-        return False
-    metadata = dict(metadata_rows)
+    if not _valid_metadata_rows(rows):
+        return None
+    return dict(rows)
+
+
+def _metadata_matches_manifest(
+    metadata: Mapping[str, str], manifest: Mapping[str, object]
+) -> bool:
     expected = {
         "schema_version": GENERATION_SEARCH_SCHEMA_VERSION,
         "collector_version": manifest.get("collector_version"),
@@ -1788,159 +2478,264 @@ def _valid_generation_fts_contents(
         "tokenizer_config_sha256": GENERATION_TOKENIZER_CONFIG_SHA256,
         "source_manifest_sha256": manifest.get("source_manifest_sha256"),
     }
-    if any(metadata.get(key) != value for key, value in expected.items()):
-        return False
-    expected_chunks: list[tuple[object, ...]] = []
-    if authoritative_sources is not None:
-        ordered_sources = sorted(
-            authoritative_sources.items(),
-            key=lambda item: (str(item[1]["relative_path"]), item[0]),
-        )
-        for source_id, source in ordered_sources:
-            _check_generation_stop(deadline, cancelled)
-            source_path = str(source["relative_path"])
-            source_sha256 = str(source["sha256"])
-            source_content = source["content"]
-            if not isinstance(source_content, bytes):
-                return False
-            for chunk in canonical_retrieval_chunks(
-                source_id=source_id,
-                source_path=source_path,
-                source_sha256=source_sha256,
-                content=source_content,
-                extractor_version=str(manifest.get("extractor_version")),
+    return all(metadata.get(key) == value for key, value in expected.items())
+
+
+def _expected_source_chunks(
+    source_id: str,
+    source: Mapping[str, object],
+    *,
+    manifest: Mapping[str, object],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> Iterator[object]:
+    content = source["content"]
+    if not isinstance(content, bytes):
+        raise _UnusableAuthoritativeSource
+    yield from canonical_retrieval_chunks(
+        source_id=source_id,
+        source_path=str(source["relative_path"]),
+        source_sha256=str(source["sha256"]),
+        content=content,
+        extractor_version=str(manifest.get("extractor_version")),
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+
+
+def _appended_chunk_rows(rows: list[tuple[object, ...]], chunks) -> bool:
+    """False once the stored-chunk ceiling is crossed."""
+    for chunk in chunks:
+        rows.append(_generation_chunk_row(chunk, len(rows)))
+        if len(rows) > MAX_GENERATION_FTS_CHUNKS:
+            return False
+    return True
+
+
+def _expected_chunk_rows(
+    authoritative_sources: Mapping[str, Mapping[str, object]],
+    *,
+    manifest: Mapping[str, object],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[tuple[object, ...]] | None:
+    """Every chunk the authoritative sources must produce, in stored order."""
+    ordered = sorted(
+        authoritative_sources.items(),
+        key=lambda item: (str(item[1]["relative_path"]), item[0]),
+    )
+    rows: list[tuple[object, ...]] = []
+    for source_id, source in ordered:
+        _check_generation_stop(deadline, cancelled)
+        try:
+            chunks = _expected_source_chunks(
+                source_id,
+                source,
+                manifest=manifest,
                 deadline=deadline,
                 cancelled=cancelled,
-            ):
-                title = chunk.heading_ancestry[-1] if chunk.heading_ancestry else Path(
-                    chunk.source_path
-                ).stem
-                expected_chunks.append(
-                    (
-                        chunk.id,
-                        len(expected_chunks),
-                        chunk.source_id,
-                        chunk.source_path,
-                        chunk.source_sha256,
-                        chunk.parent_page,
-                        json.dumps(
-                            chunk.heading_ancestry,
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        ),
-                        chunk.byte_start,
-                        chunk.byte_end,
-                        chunk.line_start,
-                        chunk.line_end,
-                        chunk.span_sha256,
-                        chunk.type,
-                        chunk.project,
-                        chunk.authority,
-                        chunk.confidence,
-                        chunk.status,
-                        chunk.valid_from,
-                        chunk.valid_to,
-                        chunk.language,
-                        title,
-                        chunk.text,
-                    )
-                )
-                if len(expected_chunks) > MAX_GENERATION_FTS_CHUNKS:
-                    return False
-    counted_rows = list(
-        connection.execute(
-            "SELECT 1 FROM chunks LIMIT ?", (MAX_GENERATION_FTS_CHUNKS + 1,)
+            )
+        except _UnusableAuthoritativeSource:
+            return None
+        if not _appended_chunk_rows(rows, chunks):
+            return None
+    return rows
+
+
+def _stored_chunk_count(connection: sqlite3.Connection) -> int:
+    return len(
+        list(
+            connection.execute(
+                "SELECT 1 FROM chunks LIMIT ?", (MAX_GENERATION_FTS_CHUNKS + 1,)
+            )
         )
     )
-    count = len(counted_rows)
-    if (
-        count > MAX_GENERATION_FTS_CHUNKS
-        or metadata.get("chunk_count") != str(count)
-        or (
-            authoritative_sources is not None
-            and count != len(expected_chunks)
-        )
-    ):
+
+
+def _chunk_count_agrees(
+    count: int, metadata: Mapping[str, str], expected_chunks: list[tuple[object, ...]] | None
+) -> bool:
+    if count > MAX_GENERATION_FTS_CHUNKS:
         return False
-    seen_chunk_ids: set[str] = set()
-    rows = connection.execute(
-        "SELECT chunk_id, chunk_order, source_id, source_path, source_sha256, "
-        "parent_page, heading_ancestry, byte_start, byte_end, line_start, line_end, "
-        "span_sha256, type, project, authority, confidence, status, valid_from, "
-        "valid_to, language, title, content FROM chunks ORDER BY chunk_order"
-    )
-    for expected_order, row in enumerate(rows):
+    if metadata.get("chunk_count") != str(count):
+        return False
+    return expected_chunks is None or count == len(expected_chunks)
+
+
+def _is_sha256(value: object) -> bool:
+    return isinstance(value, str) and _SHA256_RE.fullmatch(value) is not None
+
+
+def _is_filled_str(value: object) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _fresh_chunk_id(
+    chunk_id: object, order: int, chunk_order: object, seen: set[str]
+) -> bool:
+    return _is_sha256(chunk_id) and chunk_id not in seen and chunk_order == order
+
+
+def _valid_source_reference(
+    source_id: object, source_path: object, parent_page: object
+) -> bool:
+    if not _is_filled_str(source_path):
+        return False
+    return source_id == f"source:{source_path}" and parent_page == source_path
+
+
+def _valid_chunk_identity(row: tuple[object, ...], order: int, seen: set[str]) -> bool:
+    chunk_id, chunk_order, source_id, source_path, source_sha256, parent_page = row[:6]
+    if not _fresh_chunk_id(chunk_id, order, chunk_order, seen):
+        return False
+    if not _valid_source_reference(source_id, source_path, parent_page):
+        return False
+    return _is_sha256(source_sha256)
+
+
+def _is_string_list(value: object) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _ordered_bounds(start: object, end: object, *, floor: int) -> bool:
+    """Both offsets are integers and the span runs forward from `floor`."""
+    if not isinstance(start, int) or not isinstance(end, int):
+        return False
+    return floor <= start <= end
+
+
+def _valid_chunk_span(row: tuple[object, ...], ancestry: object) -> bool:
+    byte_start, byte_end, line_start, line_end, span_sha256 = row[7:12]
+    if not _is_string_list(ancestry):
+        return False
+    if not _ordered_bounds(byte_start, byte_end, floor=0):
+        return False
+    if not _ordered_bounds(line_start, line_end, floor=1):
+        return False
+    return _is_sha256(span_sha256)
+
+
+def _all_optional_strings(values: tuple[object, ...]) -> bool:
+    return all(value is None or isinstance(value, str) for value in values)
+
+
+def _all_strings(values: tuple[object, ...]) -> bool:
+    return all(isinstance(value, str) for value in values)
+
+
+def _valid_chunk_text(row: tuple[object, ...]) -> bool:
+    optional_text = (row[13], row[14], row[15], row[17], row[18], row[19])
+    status_value, title, content = row[16], row[20], row[21]
+    if not _is_filled_str(row[12]) or not _all_optional_strings(optional_text):
+        return False
+    if not _all_strings((status_value, title)):
+        return False
+    return isinstance(content, str) and bool(content.strip())
+
+
+def _valid_stored_chunk(row: tuple[object, ...], order: int, seen: set[str]) -> bool:
+    try:
+        ancestry = json.loads(row[6])
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if not _valid_chunk_identity(row, order, seen):
+        return False
+    if not _valid_chunk_span(row, ancestry):
+        return False
+    return _valid_chunk_text(row)
+
+
+def _chunk_row_mismatch(
+    row: tuple[object, ...],
+    order: int,
+    expected_chunks: list[tuple[object, ...]] | None,
+) -> bool:
+    if expected_chunks is None or order >= len(expected_chunks):
+        return False
+    return row != expected_chunks[order]
+
+
+def _stored_chunks_match(
+    connection: sqlite3.Connection,
+    expected_chunks: list[tuple[object, ...]] | None,
+    *,
+    count: int,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    seen: set[str] = set()
+    for order, row in enumerate(connection.execute(_FTS_CHUNK_SELECT)):
         _check_generation_stop(deadline, cancelled)
-        (
-            chunk_id,
-            chunk_order,
-            source_id,
-            source_path,
-            source_sha256,
-            parent_page,
-            ancestry_json,
-            byte_start,
-            byte_end,
-            line_start,
-            line_end,
-            span_sha256,
-            type_value,
-            project,
-            authority,
-            confidence,
-            status_value,
-            valid_from,
-            valid_to,
-            language,
-            title,
-            content,
-        ) = row
-        try:
-            ancestry = json.loads(ancestry_json)
-        except (TypeError, json.JSONDecodeError):
+        if not _valid_stored_chunk(row, order, seen):
             return False
-        optional_text = (project, authority, confidence, valid_from, valid_to, language)
-        expected_chunk = (
-            expected_chunks[expected_order]
-            if authoritative_sources is not None and expected_order < len(expected_chunks)
-            else None
-        )
-        if (
-            not isinstance(chunk_id, str)
-            or _SHA256_RE.fullmatch(chunk_id) is None
-            or chunk_id in seen_chunk_ids
-            or chunk_order != expected_order
-            or not isinstance(source_id, str)
-            or source_id != f"source:{source_path}"
-            or not isinstance(source_path, str)
-            or not source_path
-            or parent_page != source_path
-            or not isinstance(source_sha256, str)
-            or _SHA256_RE.fullmatch(source_sha256) is None
-            or not isinstance(ancestry, list)
-            or any(not isinstance(item, str) for item in ancestry)
-            or not isinstance(byte_start, int)
-            or not isinstance(byte_end, int)
-            or not 0 <= byte_start <= byte_end
-            or not isinstance(line_start, int)
-            or not isinstance(line_end, int)
-            or not 1 <= line_start <= line_end
-            or not isinstance(span_sha256, str)
-            or _SHA256_RE.fullmatch(span_sha256) is None
-            or not isinstance(type_value, str)
-            or not type_value
-            or any(value is not None and not isinstance(value, str) for value in optional_text)
-            or not isinstance(status_value, str)
-            or not isinstance(title, str)
-            or not isinstance(content, str)
-            or not content.strip()
-        ):
+        if _chunk_row_mismatch(row, order, expected_chunks):
             return False
-        if expected_chunk is not None:
-            if row != expected_chunk:
-                return False
-        seen_chunk_ids.add(chunk_id)
-    return len(seen_chunk_ids) == count
+        seen.add(str(row[0]))
+    return len(seen) == count
+
+
+_UNUSABLE_CHUNKS = object()
+
+
+def _valid_fts_metadata(
+    connection: sqlite3.Connection, manifest: dict[str, object]
+) -> dict | None:
+    """The metadata row, or None when the artifact does not describe itself."""
+    if not _valid_fts_schema(connection):
+        return None
+    metadata = _generation_metadata(connection)
+    if metadata is None or not _metadata_matches_manifest(metadata, manifest):
+        return None
+    return metadata
+
+
+def _expected_chunks(
+    authoritative_sources: dict[str, dict[str, object]] | None,
+    manifest: dict[str, object],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+):
+    """Rows the sources must produce, None when unchecked, sentinel when unusable."""
+    if authoritative_sources is None:
+        return None
+    rows = _expected_chunk_rows(
+        authoritative_sources,
+        manifest=manifest,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    if rows is None:
+        return _UNUSABLE_CHUNKS
+    return rows
+
+
+def _valid_generation_fts_contents(
+    connection: sqlite3.Connection,
+    manifest: dict[str, object],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+    authoritative_sources: dict[str, dict[str, object]] | None = None,
+) -> bool:
+    """Every structural claim the FTS artifact makes about itself must hold."""
+    metadata = _valid_fts_metadata(connection, manifest)
+    if metadata is None:
+        return False
+    expected_chunks = _expected_chunks(
+        authoritative_sources, manifest, deadline, cancelled
+    )
+    if expected_chunks is _UNUSABLE_CHUNKS:
+        return False
+    count = _stored_chunk_count(connection)
+    if not _chunk_count_agrees(count, metadata, expected_chunks):
+        return False
+    return _stored_chunks_match(
+        connection,
+        expected_chunks,
+        count=count,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
 
 
 def _fts_query(query: str) -> str:
@@ -1979,6 +2774,153 @@ def _generation_filters(
     return (" AND " + " AND ".join(clauses) if clauses else ""), values
 
 
+_NOTES_SCOPES = frozenset({"wiki", "memory", "knowledge"})
+_OPEN_ENDED_VALID_TO = frozenset({"", "null", "none"})
+
+
+def _row_path(row: Mapping[str, object]) -> str:
+    return str(row.get("path") or row.get("relative_path") or "")
+
+
+def _out_of_scope(row: Mapping[str, object], scope: str) -> bool:
+    """Notes-only scopes keep pages under knowledge/notes."""
+    if scope not in _NOTES_SCOPES:
+        return False
+    path = _row_path(row)
+    if not path:
+        return False
+    return "knowledge/notes/" not in path.replace("\\", "/")
+
+
+def _field_mismatch(row: Mapping[str, object], field: str, wanted: str | None) -> bool:
+    if not wanted:
+        return False
+    return str(row.get(field) or "").casefold() != wanted.casefold()
+
+
+def _before_since(timestamp: str, since: str | None) -> bool:
+    if not since or not timestamp:
+        return False
+    return timestamp[:10] < since[:10]
+
+
+def _after(day: str, value: str) -> bool:
+    return bool(value) and value[:10] > day
+
+
+def _expired_by(row: Mapping[str, object], day: str) -> bool:
+    valid_to = str(row.get("valid_to") or "")[:10]
+    if not valid_to or valid_to in _OPEN_ENDED_VALID_TO:
+        return False
+    return valid_to <= day
+
+
+def _outside_as_of(row: Mapping[str, object], timestamp: str, as_of: str) -> bool:
+    """A page is out of scope when it started later or stopped being true."""
+    day = as_of[:10]
+    if _after(day, timestamp) or _after(day, str(row.get("valid_from") or "")):
+        return True
+    return _expired_by(row, day)
+
+
+def _superseded_now(row: Mapping[str, object]) -> bool:
+    """Without an as-of date only currently active pages answer."""
+    status = str(row.get("status") or "").casefold()
+    return bool(status) and status != "active"
+
+
+def _temporally_excluded(row: Mapping[str, object], since: str | None, as_of: str | None) -> bool:
+    timestamp = str(row.get("timestamp") or row.get("valid_from") or "")
+    if _before_since(timestamp, since):
+        return True
+    if as_of:
+        return _outside_as_of(row, timestamp, as_of)
+    return _superseded_now(row)
+
+
+def _passes_hard_filters(
+    row: Mapping[str, object],
+    *,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+    scope: str,
+    authority: str | None,
+) -> bool:
+    if _out_of_scope(row, scope):
+        return False
+    if _field_mismatch(row, "project", project):
+        return False
+    if _field_mismatch(row, "authority", authority):
+        return False
+    return not _temporally_excluded(row, since, as_of)
+
+
+def _subset_or_empty(inner: set[str], outer: set[str]) -> bool:
+    """An empty side is never a subset match, however the sets compare."""
+    return bool(inner) and inner.issubset(outer)
+
+
+def _same_project(row_project: str, project: str | None) -> bool:
+    if not project:
+        return False
+    return row_project.casefold() == project.casefold()
+
+
+def _title_boost(title: str, query_lower: str, query_words: set[str]) -> float:
+    """A title that is the query is the strongest lexical signal there is."""
+    title_lower = (title or "").lower().strip()
+    title_words = set(title_lower.split())
+    if title_lower == query_lower:
+        return 5.0
+    if _subset_or_empty(query_words, title_words):
+        return 3.0
+    if _subset_or_empty(title_words, query_words):
+        return 2.0
+    return 1.0
+
+
+def _filename_boost(path: str, query_lower: str, query_words: set[str]) -> float:
+    slug = Path(path).stem.lower().replace("-", " ")
+    if slug == query_lower:
+        return 10.0
+    if query_words and query_words.issubset(set(slug.split())):
+        return 4.0
+    return 1.0
+
+
+def _project_boost(row_project: str, project: str | None) -> float:
+    if project and row_project and row_project.lower() == project.lower():
+        return 2.0
+    return 1.0
+
+
+def _notes_boost(path: str) -> float:
+    """knowledge/notes/ is the canonical durable tree; ties break toward it."""
+    if "knowledge/notes/" in path:
+        return 1.3
+    return 1.0
+
+
+def _boosted_lexical_score(
+    rank: float,
+    *,
+    path: str,
+    title: str,
+    row_project: str,
+    query_lower: str,
+    query_words: set[str],
+    project: str | None,
+) -> float:
+    """One lexical scoring ladder, shared by the generation and legacy paths."""
+    score = -rank
+    score *= _project_boost(row_project, project)
+    score *= _title_boost(title, query_lower, query_words)
+    score *= _filename_boost(path, query_lower, query_words)
+    score *= _notes_boost(path)
+    return score * _authority_weight(path)
+
+
 def apply_hard_filters(
     rows: list[dict],
     *,
@@ -1990,57 +2932,43 @@ def apply_hard_filters(
     **_ignored: object,
 ) -> list[dict]:
     """Single hard-filter contract shared by lexical / NumPy / Lance paths."""
-    filtered: list[dict] = []
-    for row in rows:
-        path = str(row.get("path") or row.get("relative_path") or "")
-        if scope in {"wiki", "memory", "knowledge"} and path and "knowledge/notes/" not in path.replace("\\", "/"):
-            continue
-        proj = str(row.get("project") or "")
-        if project and proj.casefold() != project.casefold():
-            continue
-        auth = str(row.get("authority") or "")
-        if authority and auth.casefold() != authority.casefold():
-            continue
-        ts = str(row.get("timestamp") or row.get("valid_from") or "")
-        status = str(row.get("status") or "").casefold()
-        valid_from = str(row.get("valid_from") or "")[:10]
-        valid_to = str(row.get("valid_to") or "")[:10]
-        if since and ts:
-            try:
-                if ts[:10] < since[:10]:
-                    continue
-            except (IndexError, TypeError):
-                pass
-        if as_of:
-            if ts:
-                try:
-                    if ts[:10] > as_of[:10]:
-                        continue
-                except (IndexError, TypeError):
-                    pass
-            if valid_from and valid_from > as_of[:10]:
-                continue
-            if valid_to and valid_to not in {"", "null", "none"} and valid_to <= as_of[:10]:
-                continue
-        elif status and status not in {"", "active"}:
-            continue
-        filtered.append(row)
-    return filtered
+    return [
+        row
+        for row in rows
+        if _passes_hard_filters(
+            row,
+            project=project,
+            since=since,
+            as_of=as_of,
+            scope=scope,
+            authority=authority,
+        )
+    ]
+
+
+def _row_text(row: sqlite3.Row, key: str) -> str:
+    return row[key] or ""
+
+
+def _first_line(content: str) -> str:
+    stripped = content.strip()
+    if not stripped:
+        return ""
+    return stripped.splitlines()[0][:120]
 
 
 def _generation_result(row: sqlite3.Row, generation_id: str) -> dict[str, object]:
-    score = -float(row["rank"])
-    authority = row["authority"] or ""
-    score *= AUTHORITY_WEIGHTS.get(authority.casefold(), 1.0)
-    content = row["content"] or ""
+    authority = _row_text(row, "authority")
+    score = -float(row["rank"]) * authority_weight(authority)
+    content = _row_text(row, "content")
     return {
         "path": row["source_path"],
         "title": row["title"] or Path(row["source_path"]).stem,
-        "summary": content.strip().splitlines()[0][:120] if content.strip() else "",
+        "summary": _first_line(content),
         "content": content,
         "score": score,
-        "project": row["project"] or "",
-        "timestamp": (row["valid_from"] or "")[:10],
+        "project": _row_text(row, "project"),
+        "timestamp": _row_text(row, "valid_from")[:10],
         "chunk_id": row["chunk_id"],
         "candidate_id": row["chunk_id"],
         "source_id": row["source_id"],
@@ -2048,8 +2976,8 @@ def _generation_result(row: sqlite3.Row, generation_id: str) -> dict[str, object
         "heading_ancestry": json.loads(row["heading_ancestry"]),
         "type": row["type"],
         "authority": authority,
-        "confidence": row["confidence"] or "",
-        "status": row["status"] or "",
+        "confidence": _row_text(row, "confidence"),
+        "status": _row_text(row, "status"),
         "valid_from": row["valid_from"],
         "valid_to": row["valid_to"],
         "language": row["language"],
@@ -2059,6 +2987,103 @@ def _generation_result(row: sqlite3.Row, generation_id: str) -> dict[str, object
         "fallback_reason": None,
         "_chunk_order": row["chunk_order"],
     }
+
+
+_GENERATION_CHUNK_COLUMNS = (
+    "chunk_id, chunk_order, source_id, source_path, source_sha256, "
+    "heading_ancestry, type, project, authority, confidence, status, valid_from, "
+    "valid_to, language, title, content"
+)
+
+
+def _register_filename_stem_function(connection: sqlite3.Connection) -> None:
+    connection.create_function(
+        "llm_wiki_filename_stem",
+        1,
+        lambda value: _normalized_filename_stem(value) if isinstance(value, str) else "",
+        deterministic=True,
+    )
+
+
+def _exact_filename_rows(
+    connection: sqlite3.Connection,
+    normalized_stem: str,
+    filters: str,
+    values: Sequence[object],
+    project: str | None,
+) -> list[sqlite3.Row]:
+    """The one chunk whose file name is the query, if the corpus holds it."""
+    exact_filters = filters
+    exact_values = list(values)
+    if project:
+        exact_filters += " AND lower(project) = lower(?)"
+        exact_values.append(project)
+    return connection.execute(
+        f"SELECT {_GENERATION_CHUNK_COLUMNS}, 0.0 AS rank FROM chunks "
+        "WHERE llm_wiki_filename_stem(source_path) = ?"
+        f"{exact_filters} ORDER BY source_path, chunk_order LIMIT 1",
+        [normalized_stem, *exact_values],
+    ).fetchall()
+
+
+def _generation_matched_rows(
+    connection: sqlite3.Connection,
+    query: str,
+    filters: str,
+    values: Sequence[object],
+    limit: int,
+) -> list[sqlite3.Row]:
+    return connection.execute(
+        f"SELECT {_GENERATION_CHUNK_COLUMNS}, bm25(chunks) AS rank FROM chunks "
+        f"WHERE chunks MATCH ?{filters} ORDER BY rank, chunk_order LIMIT ?",
+        [_fts_query(query), *values, limit * 5],
+    ).fetchall()
+
+
+def _deduplicated_results(
+    rows: Sequence[sqlite3.Row],
+    generation_id: str,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[dict[str, object]]:
+    results: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for row in rows:
+        _check_generation_stop(deadline, cancelled)
+        chunk_id = str(row["chunk_id"])
+        if chunk_id in seen:
+            continue
+        seen.add(chunk_id)
+        results.append(_generation_result(row, generation_id))
+    return results
+
+
+def _boosted_generation_score(
+    result: dict[str, object], query_words: set[str], project: str | None
+) -> float:
+    score = float(result["score"])
+    if _same_project(str(result["project"]), project):
+        score *= 2.0
+    title_words = set(str(result["title"]).casefold().split())
+    if _subset_or_empty(query_words, title_words):
+        score *= 3.0
+    return score
+
+
+def _boost_generation_results(
+    results: list[dict[str, object]],
+    query: str,
+    project: str | None,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    """Project match doubles the score here; a title containing the query triples it."""
+    query_words = set(query.casefold().split())
+    for result in results:
+        _check_generation_stop(deadline, cancelled)
+        result["score"] = _boosted_generation_score(result, query_words, project)
 
 
 def _generation_fts_search(
@@ -2074,57 +3099,25 @@ def _generation_fts_search(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> list[dict[str, object]]:
+    """BM25 over one generation, with an exact filename match kept in front."""
     with _generation_sqlite_guard(connection, deadline, cancelled):
         connection.row_factory = sqlite3.Row
         filters, values = _generation_filters(scope=scope, since=since, as_of=as_of)
-        normalized_stem = _normalized_filename_stem(query)
-        connection.create_function(
-            "llm_wiki_filename_stem",
-            1,
-            lambda value: (
-                _normalized_filename_stem(value) if isinstance(value, str) else ""
-            ),
-            deterministic=True,
+        _register_filename_stem_function(connection)
+        exact_rows = _exact_filename_rows(
+            connection, _normalized_filename_stem(query), filters, values, project
         )
-        exact_filters = filters
-        exact_values = list(values)
-        if project:
-            exact_filters += " AND lower(project) = lower(?)"
-            exact_values.append(project)
-        exact_rows = connection.execute(
-            "SELECT chunk_id, chunk_order, source_id, source_path, source_sha256, "
-            "heading_ancestry, type, project, authority, confidence, status, valid_from, "
-            "valid_to, language, title, content, 0.0 AS rank FROM chunks "
-            "WHERE llm_wiki_filename_stem(source_path) = ?"
-            f"{exact_filters} ORDER BY source_path, chunk_order LIMIT 1",
-            [normalized_stem, *exact_values],
-        ).fetchall()
-        rows = connection.execute(
-            "SELECT chunk_id, chunk_order, source_id, source_path, source_sha256, "
-            "heading_ancestry, type, project, authority, confidence, status, valid_from, "
-            "valid_to, language, title, content, bm25(chunks) AS rank FROM chunks "
-            f"WHERE chunks MATCH ?{filters} ORDER BY rank, chunk_order LIMIT ?",
-            [_fts_query(query), *values, limit * 5],
-        ).fetchall()
-    generation_id = str(manifest["generation_id"])
-    results = []
-    seen_chunk_ids: set[str] = set()
+        rows = _generation_matched_rows(connection, query, filters, values, limit)
     exact_path = str(exact_rows[0]["source_path"]) if exact_rows else None
-    for row in [*exact_rows, *rows]:
-        _check_generation_stop(deadline, cancelled)
-        chunk_id = str(row["chunk_id"])
-        if chunk_id in seen_chunk_ids:
-            continue
-        seen_chunk_ids.add(chunk_id)
-        results.append(_generation_result(row, generation_id))
-    query_words = set(query.casefold().split())
-    for result in results:
-        _check_generation_stop(deadline, cancelled)
-        if project and str(result["project"]).casefold() == project.casefold():
-            result["score"] = float(result["score"]) * 2.0
-        title_words = set(str(result["title"]).casefold().split())
-        if query_words and query_words.issubset(title_words):
-            result["score"] = float(result["score"]) * 3.0
+    results = _deduplicated_results(
+        [*exact_rows, *rows],
+        str(manifest["generation_id"]),
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    _boost_generation_results(
+        results, query, project, deadline=deadline, cancelled=cancelled
+    )
     results.sort(
         key=lambda item: (
             0 if item["path"] == exact_path else 1,
@@ -2137,10 +3130,225 @@ def _generation_fts_search(
         _check_generation_stop(deadline, cancelled)
         result["score"] = round(float(result["score"]), 4)
         result.pop("_chunk_order", None)
-    results = apply_hard_filters(
+    filtered = apply_hard_filters(
         results, project=project, since=since, as_of=as_of, scope=scope
     )
-    return results[:limit]
+    return filtered[:limit]
+
+
+def _vectors_match_manifest(
+    manifest: Mapping[str, object], model_id: str, model_revision: str
+) -> bool:
+    """The generation must claim complete vectors from this exact model."""
+    if manifest.get("vector_state") != "complete":
+        return False
+    if manifest.get("embedding_model_id") != model_id:
+        return False
+    if manifest.get("embedding_model_revision") != model_revision:
+        return False
+    return all(_generation_artifact(manifest, name) for name in GENERATION_VECTOR_ARTIFACTS)
+
+
+def _read_vector_metadata(
+    directory: Path, deadline: float | None, cancelled: Callable[[], bool] | None
+) -> dict:
+    metadata_bytes = bytearray()
+    with (directory / "vectors.json").open("rb") as source:
+        while chunk := source.read(64 * 1024):
+            _check_generation_stop(deadline, cancelled)
+            metadata_bytes.extend(chunk)
+    _check_generation_stop(deadline, cancelled)
+    return json.loads(metadata_bytes.decode("utf-8"))
+
+
+def _matrix_is_finite(
+    matrix: object, deadline: float | None, cancelled: Callable[[], bool] | None
+) -> bool:
+    import numpy as np
+
+    for start in range(0, len(matrix), 4096):
+        _check_generation_stop(deadline, cancelled)
+        if not np.isfinite(matrix[start : start + 4096]).all():
+            return False
+    return True
+
+
+def _column(ordered: list[sqlite3.Row], index: int) -> list[object]:
+    return [row[index] for row in ordered]
+
+
+def _vector_metadata_matches(
+    metadata: Mapping[str, object],
+    manifest: Mapping[str, object],
+    ordered: list[sqlite3.Row],
+    *,
+    model_id: str,
+    model_revision: str,
+    dimensions: object,
+) -> bool:
+    """Every claim vectors.json makes about its corpus must hold."""
+    expected = {
+        "schema_version": "corpus-vectors/v1",
+        "corpus_sha256": manifest.get("source_manifest_sha256"),
+        "collector_version": manifest.get("collector_version"),
+        "extractor_version": manifest.get("extractor_version"),
+        "model_id": model_id,
+        "model_revision": model_revision,
+        "dimensions": dimensions,
+        "chunk_ids": _column(ordered, 0),
+        "source_ids": _column(ordered, 1),
+        "source_paths": _column(ordered, 2),
+        "source_sha256": _column(ordered, 3),
+    }
+    return all(metadata.get(key) == value for key, value in expected.items())
+
+
+def _usable_vector_matrix(
+    matrix: object, ordered: list[sqlite3.Row], dimensions: object, *, deadline, cancelled
+) -> bool:
+    import numpy as np
+
+    if matrix.shape != (len(ordered), dimensions):
+        return False
+    if matrix.dtype != np.dtype(np.float32):
+        return False
+    return _matrix_is_finite(matrix, deadline, cancelled)
+
+
+def _usable_query_vector(query_matrix: object, dimensions: object) -> bool:
+    import numpy as np
+
+    if query_matrix.shape != (1, dimensions):
+        return False
+    if query_matrix.dtype.kind != "f":
+        return False
+    return bool(np.isfinite(query_matrix).all())
+
+
+def _cosine_similarities(
+    matrix: object, query_vector: object, *, deadline, cancelled
+) -> object:
+    import numpy as np
+
+    query_norm = np.linalg.norm(query_vector) + 1e-10
+    similarities = np.empty(len(matrix), dtype=np.float32)
+    for start in range(0, len(matrix), 4096):
+        _check_generation_stop(deadline, cancelled)
+        block = matrix[start : start + 4096]
+        similarities[start : start + len(block)] = (block @ query_vector) / (
+            (np.linalg.norm(block, axis=1) + 1e-10) * query_norm
+        )
+    return similarities
+
+
+def _ordered_chunk_identity(
+    connection: sqlite3.Connection, deadline, cancelled
+) -> list[sqlite3.Row]:
+    with _generation_sqlite_guard(connection, deadline, cancelled):
+        connection.row_factory = sqlite3.Row
+        return connection.execute(
+            "SELECT chunk_id, source_id, source_path, source_sha256 "
+            "FROM chunks ORDER BY chunk_order"
+        ).fetchall()
+
+
+def _vector_scored_rows(
+    connection: sqlite3.Connection,
+    similarities: object,
+    generation_id: str,
+    *,
+    scope: str,
+    since: str | None,
+    as_of: str | None,
+    project: str | None,
+    deadline,
+    cancelled,
+) -> list[dict[str, object]]:
+    filters, values = _generation_filters(scope=scope, since=since, as_of=as_of)
+    with _generation_sqlite_guard(connection, deadline, cancelled):
+        rows = connection.execute(
+            "SELECT chunk_id, chunk_order, source_id, source_path, source_sha256, "
+            "heading_ancestry, type, project, authority, confidence, status, valid_from, "
+            "valid_to, language, title, content, 0.0 AS rank FROM chunks "
+            f"WHERE 1=1{filters} ORDER BY chunk_order",
+            values,
+        ).fetchall()
+    results = []
+    for row in rows:
+        _check_generation_stop(deadline, cancelled)
+        result = _generation_result(row, generation_id)
+        score = float(similarities[row["chunk_order"]])
+        # The vector path boosts a project match by 1.5, not by the lexical 2.0.
+        if project and str(result["project"]).casefold() == project.casefold():
+            score *= 1.5
+        result["score"] = round(score, 4)
+        result["requested_mode"] = "hybrid"
+        result["effective_mode"] = "hybrid"
+        results.append(result)
+    results.sort(key=lambda item: (-float(item["score"]), str(item["chunk_id"])))
+    return results
+
+
+def _generation_vector_rows(
+    query: str,
+    connection: sqlite3.Connection,
+    manifest: dict[str, object],
+    directory: Path,
+    generation_id: str,
+    *,
+    embedder: object,
+    model_id: str,
+    model_revision: str,
+    scope: str,
+    limit: int,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[dict[str, object]] | None:
+    """The scored rows, or None when the stored vectors cannot be trusted."""
+    import numpy as np
+
+    metadata = _read_vector_metadata(directory, deadline, cancelled)
+    matrix = np.load(directory / "vectors.npy", mmap_mode="r", allow_pickle=False)
+    _check_generation_stop(deadline, cancelled)
+    ordered = _ordered_chunk_identity(connection, deadline, cancelled)
+    dimensions = manifest.get("vector_dimensions")
+    if not _vector_metadata_matches(
+        metadata,
+        manifest,
+        ordered,
+        model_id=model_id,
+        model_revision=model_revision,
+        dimensions=dimensions,
+    ):
+        return None
+    if not _usable_vector_matrix(
+        matrix, ordered, dimensions, deadline=deadline, cancelled=cancelled
+    ):
+        return None
+    _check_generation_stop(deadline, cancelled)
+    query_matrix = np.asarray(_call_generation_embedder(embedder, [query]))
+    _check_generation_stop(deadline, cancelled)
+    if not _usable_query_vector(query_matrix, dimensions):
+        return None
+    similarities = _cosine_similarities(
+        matrix, query_matrix[0], deadline=deadline, cancelled=cancelled
+    )
+    results = _vector_scored_rows(
+        connection,
+        similarities,
+        generation_id,
+        scope=scope,
+        since=since,
+        as_of=as_of,
+        project=project,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    _check_generation_stop(deadline, cancelled)
+    return results[: limit * 3]
 
 
 def _generation_vectors_search(
@@ -2160,99 +3368,30 @@ def _generation_vectors_search(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> list[dict[str, object]] | None:
+    """Cosine search over one generation's vectors, or None when unusable."""
     _check_generation_stop(deadline, cancelled)
-    if (
-        manifest.get("vector_state") != "complete"
-        or manifest.get("embedding_model_id") != model_id
-        or manifest.get("embedding_model_revision") != model_revision
-        or not all(_generation_artifact(manifest, name) for name in GENERATION_VECTOR_ARTIFACTS)
-    ):
+    if not _vectors_match_manifest(manifest, model_id, model_revision):
         return None
     generation_id = str(manifest["generation_id"])
     directory = Path(getattr(catalog, "generations_path")) / generation_id
     try:
-        import numpy as np
-
-        metadata_bytes = bytearray()
-        with (directory / "vectors.json").open("rb") as source:
-            while chunk := source.read(64 * 1024):
-                _check_generation_stop(deadline, cancelled)
-                metadata_bytes.extend(chunk)
-        _check_generation_stop(deadline, cancelled)
-        metadata = json.loads(metadata_bytes.decode("utf-8"))
-        matrix = np.load(directory / "vectors.npy", mmap_mode="r", allow_pickle=False)
-        _check_generation_stop(deadline, cancelled)
-        with _generation_sqlite_guard(connection, deadline, cancelled):
-            connection.row_factory = sqlite3.Row
-            ordered = connection.execute(
-                "SELECT chunk_id, source_id, source_path, source_sha256 "
-                "FROM chunks ORDER BY chunk_order"
-            ).fetchall()
-        dimensions = manifest.get("vector_dimensions")
-        matrix_finite = True
-        for start in range(0, len(matrix), 4096):
-            _check_generation_stop(deadline, cancelled)
-            if not np.isfinite(matrix[start : start + 4096]).all():
-                matrix_finite = False
-                break
-        if (
-            metadata.get("schema_version") != "corpus-vectors/v1"
-            or metadata.get("corpus_sha256") != manifest.get("source_manifest_sha256")
-            or metadata.get("collector_version") != manifest.get("collector_version")
-            or metadata.get("extractor_version") != manifest.get("extractor_version")
-            or metadata.get("model_id") != model_id
-            or metadata.get("model_revision") != model_revision
-            or metadata.get("dimensions") != dimensions
-            or metadata.get("chunk_ids") != [row[0] for row in ordered]
-            or metadata.get("source_ids") != [row[1] for row in ordered]
-            or metadata.get("source_paths") != [row[2] for row in ordered]
-            or metadata.get("source_sha256") != [row[3] for row in ordered]
-            or matrix.shape != (len(ordered), dimensions)
-            or matrix.dtype != np.dtype(np.float32)
-            or not matrix_finite
-        ):
-            return None
-        _check_generation_stop(deadline, cancelled)
-        query_matrix = np.asarray(_call_generation_embedder(embedder, [query]))
-        _check_generation_stop(deadline, cancelled)
-        if (
-            query_matrix.shape != (1, dimensions)
-            or query_matrix.dtype.kind != "f"
-            or not np.isfinite(query_matrix).all()
-        ):
-            return None
-        query_vector = query_matrix[0]
-        query_norm = np.linalg.norm(query_vector) + 1e-10
-        similarities = np.empty(len(matrix), dtype=np.float32)
-        for start in range(0, len(matrix), 4096):
-            _check_generation_stop(deadline, cancelled)
-            block = matrix[start : start + 4096]
-            similarities[start : start + len(block)] = (block @ query_vector) / (
-                (np.linalg.norm(block, axis=1) + 1e-10) * query_norm
-            )
-        filters, values = _generation_filters(scope=scope, since=since, as_of=as_of)
-        with _generation_sqlite_guard(connection, deadline, cancelled):
-            rows = connection.execute(
-                "SELECT chunk_id, chunk_order, source_id, source_path, source_sha256, "
-                "heading_ancestry, type, project, authority, confidence, status, valid_from, "
-                "valid_to, language, title, content, 0.0 AS rank FROM chunks "
-                f"WHERE 1=1{filters} ORDER BY chunk_order",
-                values,
-            ).fetchall()
-        results = []
-        for row in rows:
-            _check_generation_stop(deadline, cancelled)
-            result = _generation_result(row, generation_id)
-            score = float(similarities[row["chunk_order"]])
-            if project and str(result["project"]).casefold() == project.casefold():
-                score *= 1.5
-            result["score"] = round(score, 4)
-            result["requested_mode"] = "hybrid"
-            result["effective_mode"] = "hybrid"
-            results.append(result)
-        results.sort(key=lambda item: (-float(item["score"]), str(item["chunk_id"])))
-        _check_generation_stop(deadline, cancelled)
-        return results[: limit * 3]
+        return _generation_vector_rows(
+            query,
+            connection,
+            manifest,
+            directory,
+            generation_id,
+            embedder=embedder,
+            model_id=model_id,
+            model_revision=model_revision,
+            scope=scope,
+            limit=limit,
+            project=project,
+            since=since,
+            as_of=as_of,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
     except TimeoutError:
         raise
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
@@ -2293,30 +3432,46 @@ def _finalize_generation_results(
 ) -> list[dict[str, object]]:
     if not results or not emit_telemetry:
         return results
+    _best_effort_record_generation_impressions(results, query, source_tool)
+    return results
+
+
+def _generation_impression_events(
+    results: list[dict[str, object]], query: str, source_tool: str, make_event
+) -> list:
+    events = []
+    for rank, result in enumerate(results, 1):
+        event = make_event(
+            event_kind="impression",
+            query=query,
+            retrieval_mode=str(result["effective_mode"]),
+            candidate_id=str(result["chunk_id"]),
+            rank=rank,
+            generation=str(result["generation"]),
+            source_tool=source_tool,
+        )
+        if event is not None:
+            events.append(event)
+    return events
+
+
+def _best_effort_record_generation_impressions(
+    results: list[dict[str, object]], query: str, source_tool: str
+) -> None:
+    """Telemetry never changes what a search returns, so it swallows failures."""
     try:
         from retrieval_telemetry import (
             best_effort_make_event,
             best_effort_record_events,
         )
 
-        events = []
-        for rank, result in enumerate(results, 1):
-            event = best_effort_make_event(
-                event_kind="impression",
-                query=query,
-                retrieval_mode=str(result["effective_mode"]),
-                candidate_id=str(result["chunk_id"]),
-                rank=rank,
-                generation=str(result["generation"]),
-                source_tool=source_tool,
-            )
-            if event is not None:
-                events.append(event)
+        events = _generation_impression_events(
+            results, query, source_tool, best_effort_make_event
+        )
         if events:
             best_effort_record_events(events)
     except Exception:
         pass
-    return results
 
 
 def search(
@@ -2345,7 +3500,7 @@ def search(
 ) -> list[dict]:
     """Public search API — always routes through retrieval.retrieve()."""
     limit = _validate_search_limit(limit)
-    if not query or not query.strip():
+    if _blank_query(query):
         return []
     from retrieval import retrieve_via_search_memory
 
@@ -2374,6 +3529,326 @@ def search(
     )
 
 
+def _legacy_fetch_rows(
+    query: str,
+    *,
+    limit: int,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[tuple]:
+    """One bounded BM25 read from the legacy index."""
+    _check_legacy_stop(deadline, cancelled)
+    connect_timeout = 5.0
+    if deadline is not None:
+        connect_timeout = max(0.0, min(connect_timeout, deadline - time.monotonic()))
+    conn = sqlite3.connect(str(INDEX_FILE), timeout=connect_timeout)
+    try:
+        _check_legacy_stop(deadline, cancelled)
+        with _legacy_sqlite_guard(conn, deadline, cancelled):
+            return _legacy_bm25_rows(conn, query, limit)
+    finally:
+        conn.close()
+
+
+def _rebuilt_if_needed(
+    pages: list[Path],
+    needs_rebuild: bool,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    if not needs_rebuild:
+        return True
+    return _rebuild_legacy_index(pages, deadline=deadline, cancelled=cancelled)
+
+
+def _fetched_rows_or_none(
+    query: str,
+    limit: int,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[tuple] | None:
+    try:
+        return _legacy_fetch_rows(
+            query, limit=limit, deadline=deadline, cancelled=cancelled
+        )
+    except sqlite3.DatabaseError:
+        return None
+
+
+def _legacy_rows_or_rebuild(
+    query: str,
+    pages: list[Path],
+    *,
+    limit: int,
+    needs_rebuild: bool,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[tuple] | None:
+    """BM25 rows, rebuilding once if the index is missing or broken.
+
+    None means the index could not be read at all, and the caller reads
+    Markdown directly instead.
+    """
+    if not _rebuilt_if_needed(pages, needs_rebuild, deadline, cancelled):
+        return None
+    rows = _fetched_rows_or_none(query, limit, deadline, cancelled)
+    if rows is not None:
+        return rows
+    # One rebuild per call: if the index was already rebuilt above, a broken
+    # read now means the index cannot be read at all.
+    if needs_rebuild:
+        return None
+    if not _rebuild_legacy_index(pages, deadline=deadline, cancelled=cancelled):
+        return None
+    return _fetched_rows_or_none(query, limit, deadline, cancelled)
+
+
+def _rebuild_legacy_index(
+    pages: list[Path],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    try:
+        if deadline is None and cancelled is None:
+            _build_index(pages)
+        else:
+            _build_index(pages, deadline=deadline, cancelled=cancelled)
+    except sqlite3.DatabaseError:
+        return False
+    return True
+
+
+def _legacy_index_needs_rebuild(
+    pages: list[Path],
+    *,
+    force_rebuild: bool,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    if force_rebuild:
+        return True
+    if deadline is None and cancelled is None:
+        return _needs_rebuild(pages)
+    return _needs_rebuild(pages, deadline=deadline, cancelled=cancelled)
+
+
+def _clipped_summary(summary: object) -> str:
+    if not summary:
+        return ""
+    return summary[:120]
+
+
+def _legacy_hit(
+    path: object,
+    title: object,
+    summary: object,
+    project: str,
+    timestamp: str,
+    score: float,
+) -> dict:
+    return {
+        "path": path,
+        "title": title,
+        "summary": _clipped_summary(summary),
+        "score": score,
+        "bm25_score": score,
+        "project": project,
+        "timestamp": timestamp,
+        "candidate_id": Path(path).stem,
+        "generation": "legacy",
+    }
+
+
+def _legacy_hit_rows(
+    rows: list[tuple],
+    *,
+    query_lower: str,
+    query_words: set[str],
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[dict]:
+    hits: list[dict] = []
+    for row in rows:
+        _check_legacy_stop(deadline, cancelled)
+        path, title, summary, proj, timestamp, rank = row
+        row_project = proj or ""
+        row_timestamp = timestamp or ""
+        if _legacy_row_excluded(str(path), str(row_timestamp), since, as_of):
+            continue
+        score = _boosted_lexical_score(
+            rank,
+            path=path,
+            title=title,
+            row_project=row_project,
+            query_lower=query_lower,
+            query_words=query_words,
+            project=project,
+        )
+        hits.append(
+            _legacy_hit(path, title, summary, row_project, row_timestamp, score)
+        )
+    return hits
+
+
+class _PageRead(NamedTuple):
+    """What one Markdown page says about itself, read once."""
+
+    stem: str
+    relative_path: str
+    raw: bytes
+    content: str
+    title: str
+    summary: str
+    project: str
+    timestamp: str
+    authority: str
+
+
+def _read_page(page: Path, label: str) -> _PageRead | None:
+    try:
+        relative_path = page.relative_to(ROOT).as_posix()
+        raw = read_stable_bytes(page, MAX_PAGE_BYTES, label=label)
+        content = raw.decode("utf-8", errors="ignore")
+    except (OSError, ValueError):
+        return None
+    title, summary = _extract_title_and_summary(content, page.stem)
+    return _PageRead(
+        stem=page.stem,
+        relative_path=relative_path,
+        raw=raw,
+        content=content,
+        title=title,
+        summary=summary,
+        project=_extract_frontmatter_field(content, PROJECT_FIELD_RE) or "",
+        timestamp=(_extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or "")[:10],
+        authority=_extract_frontmatter_field(content, AUTHORITY_FIELD_RE) or "",
+    )
+
+
+def _page_read_eligible(
+    read: _PageRead, *, project: str | None, since: str | None, as_of: str | None
+) -> bool:
+    return _exact_page_eligible(
+        read.relative_path,
+        page_project=read.project,
+        timestamp=read.timestamp,
+        project=project,
+        since=since,
+        as_of=as_of,
+    )
+
+
+def _page_hit(read: _PageRead, *, score: float, bm25_score: float) -> dict:
+    return {
+        "path": read.relative_path,
+        "title": read.title,
+        "summary": read.summary[:120],
+        "score": score,
+        "bm25_score": bm25_score,
+        "project": read.project,
+        "timestamp": read.timestamp,
+        "candidate_id": read.stem,
+        "source_sha256": hashlib.sha256(read.raw).hexdigest(),
+        "byte_start": 0,
+        "byte_end": len(read.raw),
+        "generation": "legacy",
+        "authority": read.authority,
+    }
+
+
+def _exact_page_hit(
+    page: Path,
+    *,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+) -> dict | None:
+    """A page whose filename is the query, read straight from Markdown.
+
+    The index may not contain it yet; a filename match is too strong a signal
+    to lose to a stale index.
+    """
+    read = _read_page(page, "exact filename search page")
+    if read is None:
+        return None
+    if not _page_read_eligible(read, project=project, since=since, as_of=as_of):
+        return None
+    score = round(10.0 * authority_weight(read.authority), 2)
+    return _page_hit(read, score=score, bm25_score=0.0)
+
+
+def _project_matches(page_project: str, project: str | None) -> bool:
+    if not project:
+        return True
+    return page_project.casefold() == project.casefold()
+
+
+def _exact_page_eligible(
+    relative_path: str,
+    *,
+    page_project: str,
+    timestamp: str,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+) -> bool:
+    if not _project_matches(page_project, project):
+        return False
+    if _before_since(timestamp, since):
+        return False
+    return not as_of or _valid_as_of(relative_path, as_of)
+
+
+def _matching_page(pages: list[Path], normalized_stem: str) -> Path | None:
+    for item in pages:
+        if _normalized_filename_stem(item.name) == normalized_stem:
+            return item
+    return None
+
+
+def _with_exact_page(
+    hits: list[dict],
+    pages: list[Path],
+    normalized_stem: str,
+    *,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+) -> list[dict]:
+    page = _matching_page(pages, normalized_stem)
+    if page is None:
+        return hits
+    relative = page.relative_to(ROOT).as_posix()
+    if any(hit["path"] == relative for hit in hits):
+        return hits
+    extra = _exact_page_hit(page, project=project, since=since, as_of=as_of)
+    if extra is None:
+        return hits
+    return [*hits, extra]
+
+
+def _filename_matches(hits: list[dict], normalized_stem: str) -> list[dict]:
+    return [
+        hit
+        for hit in hits
+        if _normalized_filename_stem(str(hit["path"])) == normalized_stem
+    ]
+
+
+def _promoted_filename_first(hits: list[dict], normalized_stem: str) -> list[dict]:
+    """Keep a pure ranked list, but a filename match leads it."""
+    matches = _filename_matches(hits, normalized_stem)
+    if not matches:
+        return hits
+    matches.sort(key=lambda hit: (_notes_first(hit), -hit["score"], hit["path"]))
+    best = matches[0]
+    return [best, *(hit for hit in hits if hit["path"] != best["path"])]
+
+
 def _legacy_lexical_hits(
     query: str,
     *,
@@ -2389,65 +3864,22 @@ def _legacy_lexical_hits(
 ) -> list[dict]:
     """Independent lexical backend used by retrieve() — no dense/graph fusion."""
     _check_legacy_stop(deadline, cancelled)
-    if not query or not query.strip():
+    if _blank_query(query):
         return []
-
-    pages = (
-        page_paths
-        if page_paths is not None
-        else _collect_pages(scope, deadline=deadline or float("inf"))
-    )
+    pages = _resolved_pages(page_paths, scope, deadline)
     if not pages:
         return []
-
-    needs_rebuild = force_rebuild
-    if not needs_rebuild:
-        if deadline is None and cancelled is None:
-            needs_rebuild = _needs_rebuild(pages)
-        else:
-            needs_rebuild = _needs_rebuild(
-                pages, deadline=deadline, cancelled=cancelled
-            )
-    def rebuild() -> None:
-        if deadline is None and cancelled is None:
-            _build_index(pages)
-        else:
-            _build_index(pages, deadline=deadline, cancelled=cancelled)
-
-    def query_index() -> list[tuple]:
-        _check_legacy_stop(deadline, cancelled)
-        connect_timeout = 5.0
-        if deadline is not None:
-            connect_timeout = max(
-                0.0, min(connect_timeout, deadline - time.monotonic())
-            )
-        conn = sqlite3.connect(str(INDEX_FILE), timeout=connect_timeout)
-        try:
-            _check_legacy_stop(deadline, cancelled)
-            with _legacy_sqlite_guard(conn, deadline, cancelled):
-                fts_terms = []
-                for word in query.split():
-                    if not word:
-                        continue
-                    safe = word.replace('"', '""')
-                    fts_terms.append(f'"{safe}"')
-                fts_query = " ".join(fts_terms)
-                query_word_count = len([word for word in query.split() if word])
-                fetch_multiplier = 5 if query_word_count <= 3 else 3
-                return conn.execute(
-                    """
-                    SELECT path, title, summary, project, timestamp, bm25(pages) as rank
-                    FROM pages
-                    WHERE pages MATCH ?
-                    ORDER BY rank
-                    LIMIT ?
-                    """,
-                    (fts_query, limit * fetch_multiplier),
-                ).fetchall()
-        finally:
-            conn.close()
-
-    def direct_fallback() -> list[dict]:
+    rows = _legacy_rows_or_rebuild(
+        query,
+        pages,
+        limit=limit,
+        needs_rebuild=_legacy_index_needs_rebuild(
+            pages, force_rebuild=force_rebuild, deadline=deadline, cancelled=cancelled
+        ),
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    if rows is None:
         return _direct_markdown_hits(
             query,
             pages,
@@ -2458,147 +3890,100 @@ def _legacy_lexical_hits(
             deadline=deadline,
             cancelled=cancelled,
         )
-
-    rebuilt = False
-    if needs_rebuild:
-        try:
-            rebuild()
-            rebuilt = True
-        except sqlite3.DatabaseError:
-            return direct_fallback()
-
-    try:
-        bm25_raw = query_index()
-    except sqlite3.DatabaseError:
-        if not rebuilt:
-            try:
-                rebuild()
-                rebuilt = True
-            except sqlite3.DatabaseError:
-                return direct_fallback()
-        try:
-            bm25_raw = query_index()
-        except sqlite3.DatabaseError:
-            return direct_fallback()
-
-    query_lower = query.lower().strip()
-    query_words = set(query_lower.split())
-    bm25_results: list[dict] = []
-    for row in bm25_raw:
-        _check_legacy_stop(deadline, cancelled)
-        path, title, summary, proj, ts, rank = row
-        if since and ts:
-            try:
-                if ts[:10] < since:
-                    continue
-            except (IndexError, TypeError):
-                pass
-        if as_of and ts:
-            try:
-                if ts[:10] > as_of[:10]:
-                    continue
-            except (IndexError, TypeError):
-                pass
-        if as_of and not _valid_as_of(path, as_of):
-            continue
-        score = -rank
-        if project and proj and proj.lower() == project.lower():
-            score *= 2.0
-        title_lower = (title or "").lower().strip()
-        title_words = set(title_lower.split())
-        if title_lower == query_lower:
-            score *= 5.0
-        elif query_words and query_words.issubset(title_words):
-            score *= 3.0
-        elif title_words and title_words.issubset(query_words):
-            score *= 2.0
-        filename_slug = Path(path).stem.lower().replace("-", " ")
-        if filename_slug == query_lower:
-            score *= 10.0
-        elif query_words and query_words.issubset(set(filename_slug.split())):
-            score *= 4.0
-        if "knowledge/notes/" in path:
-            score *= 1.3
-        score *= _authority_weight(path)
-        bm25_results.append(
-            {
-                "path": path,
-                "title": title,
-                "summary": summary[:120] if summary else "",
-                "score": score,
-                "bm25_score": score,
-                "project": proj or "",
-                "timestamp": ts or "",
-                "candidate_id": Path(path).stem,
-                "generation": "legacy",
-            }
-        )
-    normalized_stem = _normalized_filename_stem(query)
-    exact_page = next(
-        (page for page in pages if _normalized_filename_stem(page.name) == normalized_stem),
-        None,
+    return _ranked_lexical_hits(
+        rows,
+        pages,
+        query,
+        limit=limit,
+        project=project,
+        since=since,
+        as_of=as_of,
+        deadline=deadline,
+        cancelled=cancelled,
     )
-    if exact_page is not None:
-        try:
-            relative_path = exact_page.relative_to(ROOT).as_posix()
-            raw = read_stable_bytes(
-                exact_page, MAX_PAGE_BYTES, label="exact filename search page"
-            )
-            content = raw.decode("utf-8", errors="ignore")
-        except (OSError, ValueError):
-            exact_page = None
-        else:
-            title, summary = _extract_title_and_summary(content, exact_page.stem)
-            page_project = _extract_frontmatter_field(content, PROJECT_FIELD_RE) or ""
-            timestamp = _extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or ""
-            timestamp = timestamp[:10] if timestamp else ""
-            eligible = not project or page_project.casefold() == project.casefold()
-            eligible = eligible and (not since or not timestamp or timestamp >= since[:10])
-            eligible = eligible and (not as_of or _valid_as_of(relative_path, as_of))
-            if eligible and all(item["path"] != relative_path for item in bm25_results):
-                authority = _extract_frontmatter_field(content, AUTHORITY_FIELD_RE) or ""
-                bm25_results.append(
-                    {
-                        "path": relative_path,
-                        "title": title,
-                        "summary": summary[:120],
-                        "score": round(
-                            10.0 * AUTHORITY_WEIGHTS.get(authority.casefold(), 1.0),
-                            2,
-                        ),
-                        "bm25_score": 0.0,
-                        "project": page_project,
-                        "timestamp": timestamp,
-                        "candidate_id": exact_page.stem,
-                        "source_sha256": hashlib.sha256(raw).hexdigest(),
-                        "byte_start": 0,
-                        "byte_end": len(raw),
-                        "generation": "legacy",
-                        "authority": authority,
-                    }
-                )
-    bm25_results.sort(key=lambda x: (-x["score"], x["path"]))
-    for result in bm25_results:
-        result["score"] = round(float(result["score"]), 2)
-        result["bm25_score"] = round(float(result["bm25_score"]), 2)
-    # Prefer filename exact matches first while remaining a pure ranked list.
-    filename_matches = [
-        result
-        for result in bm25_results
-        if _normalized_filename_stem(str(result["path"])) == normalized_stem
-    ]
-    if filename_matches:
-        filename_matches.sort(
-            key=lambda r: (
-                0 if "knowledge/notes/" in r["path"] else 1,
-                -r["score"],
-                r["path"],
-            )
-        )
-        best = filename_matches[0]
-        rest = [x for x in bm25_results if x["path"] != best["path"]]
-        bm25_results = [best] + rest
-    return bm25_results[: max(limit * 3, limit)]
+
+
+def _round_scores(hits: list[dict]) -> None:
+    for hit in hits:
+        hit["score"] = round(float(hit["score"]), 2)
+        hit["bm25_score"] = round(float(hit["bm25_score"]), 2)
+
+
+def _ranked_lexical_hits(
+    rows: list[tuple],
+    pages: list[Path],
+    query: str,
+    *,
+    limit: int,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[dict]:
+    """Score the matched rows, then let an exact filename match come first."""
+    query_lower = query.lower().strip()
+    hits = _legacy_hit_rows(
+        rows,
+        query_lower=query_lower,
+        query_words=set(query_lower.split()),
+        project=project,
+        since=since,
+        as_of=as_of,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    normalized_stem = _normalized_filename_stem(query)
+    hits = _with_exact_page(
+        hits, pages, normalized_stem, project=project, since=since, as_of=as_of
+    )
+    hits.sort(key=lambda hit: (-hit["score"], hit["path"]))
+    _round_scores(hits)
+    hits = _promoted_filename_first(hits, normalized_stem)
+    return hits[: max(limit * 3, limit)]
+
+
+def _document_terms(page: Path, title: str, summary: str, body: str) -> set[str]:
+    haystack = f"{page.stem.replace('-', ' ')} {title} {summary} {body}".casefold()
+    return set(re.findall(r"\w+", haystack))
+
+
+def _direct_match_score(
+    page: Path, title: str, authority: str, query_terms: set[str]
+) -> float:
+    """Literal matching has no BM25, so the term count carries the base score."""
+    score = float(len(query_terms))
+    if query_terms.issubset(set(re.findall(r"\w+", title.casefold()))):
+        score *= 3.0
+    if query_terms.issubset(set(re.findall(r"\w+", page.stem.casefold()))):
+        score *= 4.0
+    return score * authority_weight(authority)
+
+
+def _direct_page_hit(
+    page: Path,
+    *,
+    query_terms: set[str],
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+) -> dict | None:
+    """One literal Markdown match, or None when the page does not qualify."""
+    read = _read_page(page, "search page")
+    if read is None:
+        return None
+    body = _strip_frontmatter(read.content)
+    terms = _document_terms(page, read.title, read.summary, body)
+    if not query_terms.issubset(terms):
+        return None
+    if not _page_read_eligible(read, project=project, since=since, as_of=as_of):
+        return None
+    score = round(_direct_match_score(page, read.title, read.authority, query_terms), 2)
+    return {
+        **_page_hit(read, score=score, bm25_score=score),
+        "fallback_reason": "legacy_sqlite_unavailable",
+        "partial": True,
+    }
 
 
 def _direct_markdown_hits(
@@ -2613,70 +3998,151 @@ def _direct_markdown_hits(
     cancelled: Callable[[], bool] | None,
 ) -> list[dict]:
     """Return bounded literal matches from authoritative Markdown only."""
-    query_terms = tuple(dict.fromkeys(re.findall(r"\w+", query.casefold())))
-    query_term_set = set(query_terms)
+    query_terms = set(re.findall(r"\w+", query.casefold()))
+    if not query_terms:
+        raise LegacySearchUnavailable(
+            "legacy SQLite unavailable and direct Markdown search found no matching page"
+        )
     results: list[dict] = []
     for page in pages:
         _check_legacy_stop(deadline, cancelled)
-        try:
-            relative_path = page.relative_to(ROOT).as_posix()
-            raw = read_stable_bytes(page, MAX_PAGE_BYTES, label="search page")
-            content = raw.decode("utf-8", errors="ignore")
-        except (OSError, ValueError):
-            continue
-        title, summary = _extract_title_and_summary(content, page.stem)
-        body = _strip_frontmatter(content)
-        document_terms = set(
-            re.findall(
-                r"\w+",
-                f"{page.stem.replace('-', ' ')} {title} {summary} {body}".casefold(),
-            )
+        hit = _direct_page_hit(
+            page,
+            query_terms=query_terms,
+            project=project,
+            since=since,
+            as_of=as_of,
         )
-        if not query_terms or not query_term_set.issubset(document_terms):
-            continue
-        page_project = _extract_frontmatter_field(content, PROJECT_FIELD_RE) or ""
-        if project and page_project.casefold() != project.casefold():
-            continue
-        timestamp = _extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or ""
-        timestamp = timestamp[:10] if timestamp else ""
-        if since and timestamp and timestamp < since[:10]:
-            continue
-        if as_of and not _valid_as_of(relative_path, as_of):
-            continue
-        score = float(len(query_terms))
-        title_terms = set(re.findall(r"\w+", title.casefold()))
-        filename_terms = set(re.findall(r"\w+", page.stem.casefold()))
-        if query_term_set.issubset(title_terms):
-            score *= 3.0
-        if query_term_set.issubset(filename_terms):
-            score *= 4.0
-        authority = _extract_frontmatter_field(content, AUTHORITY_FIELD_RE) or ""
-        score *= AUTHORITY_WEIGHTS.get(authority.casefold(), 1.0)
-        results.append(
-            {
-                "path": relative_path,
-                "title": title,
-                "summary": summary[:120],
-                "score": round(score, 2),
-                "bm25_score": round(score, 2),
-                "project": page_project,
-                "timestamp": timestamp,
-                "candidate_id": page.stem,
-                "source_sha256": hashlib.sha256(raw).hexdigest(),
-                "byte_start": 0,
-                "byte_end": len(raw),
-                "generation": "legacy",
-                "authority": authority,
-                "fallback_reason": "legacy_sqlite_unavailable",
-                "partial": True,
-            }
-        )
+        if hit is not None:
+            results.append(hit)
     results.sort(key=lambda item: (-float(item["score"]), str(item["path"])))
     if not results:
         raise LegacySearchUnavailable(
             "legacy SQLite unavailable and direct Markdown search found no matching page"
         )
     return results[: max(limit * 3, limit)]
+
+
+def _as_legacy_dense_row(item: Mapping[str, object], score_key: str) -> dict:
+    row = dict(item)
+    row["vector_score"] = row.get("vector_score", row.get(score_key))
+    row.setdefault("candidate_id", Path(str(row.get("path") or "")).stem)
+    row["generation"] = "legacy"
+    return row
+
+
+def _lance_dense_hits(
+    query: str,
+    pages: list[Path],
+    *,
+    limit: int,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[dict] | None:
+    """LanceDB results bound to this model and this source membership."""
+    results = _lance_results(
+        query,
+        pages,
+        limit=limit,
+        project=project,
+        since=since,
+        as_of=as_of,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    if not results:
+        return None
+    return [_as_legacy_dense_row(item, "score") for item in results]
+
+
+def _lance_results(
+    query: str,
+    pages: list[Path],
+    *,
+    limit: int,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list | None:
+    """None when the optional backend is absent or cannot answer in time."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from lance_store import have_lancedb
+        from lance_store import vector_search as _lance_search
+
+        if not have_lancedb():
+            return None
+        vectors = _embed_texts([query], is_query=True, deadline=deadline, cancelled=cancelled)
+        if not vectors:
+            return None
+        results = _lance_search(
+            vectors[0],
+            limit * 3,
+            project,
+            since=since,
+            as_of=as_of,
+            expected_model_id=EMBEDDING_MODEL,
+            expected_model_revision=EMBEDDING_MODEL_REVISION,
+            expected_sources=_legacy_vector_source_membership(
+                pages, deadline=deadline, cancelled=cancelled
+            ),
+        )
+        _check_legacy_stop(deadline, cancelled)
+    except TimeoutError:
+        raise
+    except Exception:  # noqa: BLE001 - an optional backend that cannot answer
+        return None
+    return results
+
+
+def _numpy_dense_hits(
+    query: str,
+    pages: list[Path],
+    *,
+    limit: int,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[dict] | None:
+    try:
+        results = _vector_search(
+            query,
+            pages,
+            limit * 3,
+            project,
+            since,
+            as_of,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+    except TimeoutError:
+        raise
+    except Exception:  # noqa: BLE001 - no usable vectors is not an error
+        return None
+    if results is None:
+        return None
+    return [_as_legacy_dense_row(row, "score") for row in results]
+
+
+def _dense_backend_ready(query: str) -> bool:
+    if _blank_query(query):
+        return False
+    return _have_sentence_transformers()
+
+
+def _resolved_pages(
+    page_paths: list[Path] | None, scope: str, deadline: float | None
+) -> list[Path]:
+    if page_paths is not None:
+        return page_paths
+    return _collect_pages(scope, deadline=deadline or float("inf"))
 
 
 def _legacy_dense_hits(
@@ -2695,75 +4161,298 @@ def _legacy_dense_hits(
     _check_legacy_stop(deadline, cancelled)
     if deadline is not None:
         return None
-    if not query or not query.strip():
+    if not _dense_backend_ready(query):
         return None
-    if not _have_sentence_transformers():
-        return None
-    pages = (
-        page_paths
-        if page_paths is not None
-        else _collect_pages(scope, deadline=deadline or float("inf"))
-    )
+    pages = _resolved_pages(page_paths, scope, deadline)
     if not pages:
         return None
-    vector_results = None
-    try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from lance_store import have_lancedb
-        from lance_store import vector_search as _lance_search
+    hits = _lance_dense_hits(
+        query,
+        pages,
+        limit=limit,
+        project=project,
+        since=since,
+        as_of=as_of,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    if hits is not None:
+        return hits
+    return _numpy_dense_hits(
+        query,
+        pages,
+        limit=limit,
+        project=project,
+        since=since,
+        as_of=as_of,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
 
-        if have_lancedb():
-            qvecs = _embed_texts(
-                [query], is_query=True, deadline=deadline, cancelled=cancelled
-            )
-            if qvecs:
-                lance_results = _lance_search(
-                    qvecs[0],
-                    limit * 3,
-                    project,
-                    since=since,
-                    as_of=as_of,
-                    expected_model_id=EMBEDDING_MODEL,
-                    expected_model_revision=EMBEDDING_MODEL_REVISION,
-                    expected_sources=_legacy_vector_source_membership(
-                        pages, deadline=deadline, cancelled=cancelled
-                    ),
-                )
-                _check_legacy_stop(deadline, cancelled)
-                if lance_results:
-                    vector_results = []
-                    for item in lance_results:
-                        row = dict(item)
-                        row["vector_score"] = row.get("vector_score", row.get("score"))
-                        row["candidate_id"] = Path(str(row.get("path") or "")).stem
-                        row["generation"] = "legacy"
-                        vector_results.append(row)
+
+def _vectors_wanted(
+    manifest: Mapping[str, object],
+    semantic: bool,
+    embedder: object | None,
+    model_id: str | None,
+    model_revision: str | None,
+) -> bool:
+    if not semantic or embedder is None:
+        return False
+    if model_id is None or model_revision is None:
+        return False
+    return manifest.get("vector_state") == "complete"
+
+
+def _generation_artifact_names(
+    manifest: Mapping[str, object],
+    *,
+    semantic: bool,
+    embedder: object | None,
+    model_id: str | None,
+    model_revision: str | None,
+) -> tuple[str, ...]:
+    """Vectors join the sealed set only when they are complete and wanted."""
+    if _vectors_wanted(manifest, semantic, embedder, model_id, model_revision):
+        return (GENERATION_FTS_ARTIFACT, *GENERATION_VECTOR_ARTIFACTS)
+    return (GENERATION_FTS_ARTIFACT,)
+
+
+def _active_manifest(
+    catalog: GenerationCatalog, stop_options: Mapping[str, object]
+) -> dict | None:
+    try:
+        manifest = catalog.get_active(**stop_options)
     except TimeoutError:
         raise
-    except Exception:
-        vector_results = None
-    if vector_results is None:
-        try:
-            vector_results = _vector_search(
-                query,
-                pages,
-                limit * 3,
-                project,
-                since,
-                as_of,
-                deadline=deadline,
-                cancelled=cancelled,
+    except (OSError, PermissionError, sqlite3.Error, TypeError, ValueError):
+        return None
+    return manifest if isinstance(manifest, dict) else None
+
+
+def _generation_vector_hits(
+    query: str,
+    catalog: GenerationCatalog,
+    manifest: Mapping[str, object],
+    connection: sqlite3.Connection,
+    *,
+    embedder: object | None,
+    model_id: str | None,
+    model_revision: str | None,
+    scope: str,
+    limit: int,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+    stop_options: Mapping[str, object],
+) -> list[dict] | None:
+    if embedder is None or model_id is None or model_revision is None:
+        return None
+    return _generation_vectors_search(
+        query,
+        catalog,
+        manifest,
+        connection,
+        embedder=embedder,
+        model_id=model_id,
+        model_revision=model_revision,
+        scope=scope,
+        limit=limit,
+        project=project,
+        since=since,
+        as_of=as_of,
+        **stop_options,
+    )
+
+
+def _mark_vectors_unavailable(
+    lexical: list[dict], deadline: float | None, cancelled: Callable[[], bool] | None
+) -> None:
+    for result in lexical:
+        _check_generation_stop(deadline, cancelled)
+        result["requested_mode"] = "hybrid"
+        result["fallback_reason"] = "generation_vectors_unavailable"
+
+
+def _generation_search_results(
+    query: str,
+    catalog: GenerationCatalog,
+    manifest: Mapping[str, object],
+    connection: sqlite3.Connection,
+    *,
+    artifact_names: tuple[str, ...],
+    consumption_seal: object,
+    scope: str,
+    limit: int,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+    semantic: bool,
+    embedder: object | None,
+    model_id: str | None,
+    model_revision: str | None,
+    source_tool: str,
+    emit_telemetry: bool,
+    stop_options: Mapping[str, object],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[dict] | None:
+    """Results from the sealed generation, or None when the seal no longer holds."""
+    lexical = _generation_fts_search(
+        query,
+        manifest,
+        connection,
+        scope=scope,
+        limit=limit,
+        project=project,
+        since=since,
+        as_of=as_of,
+        **stop_options,
+    )
+
+    def sealed() -> bool:
+        return bool(
+            _generation_consumption_unchanged(
+                catalog, manifest, artifact_names, consumption_seal, **stop_options
             )
-            if vector_results is not None:
-                for row in vector_results:
-                    row["vector_score"] = row.get("score")
-                    row.setdefault("candidate_id", Path(str(row.get("path") or "")).stem)
-                    row["generation"] = "legacy"
-        except TimeoutError:
-            raise
-        except Exception:
-            return None
-    return vector_results
+        )
+
+    if semantic:
+        vectors = _generation_vector_hits(
+            query,
+            catalog,
+            manifest,
+            connection,
+            embedder=embedder,
+            model_id=model_id,
+            model_revision=model_revision,
+            scope=scope,
+            limit=limit,
+            project=project,
+            since=since,
+            as_of=as_of,
+            stop_options=stop_options,
+        )
+        if vectors is not None and sealed():
+            return _finalize_generation_results(
+                _fuse_generation_results(lexical, vectors, limit),
+                query=query,
+                source_tool=source_tool,
+                emit_telemetry=emit_telemetry,
+            )
+        _mark_vectors_unavailable(lexical, deadline, cancelled)
+    if not sealed():
+        return None
+    return _finalize_generation_results(
+        lexical, query=query, source_tool=source_tool, emit_telemetry=emit_telemetry
+    )
+
+
+def _generation_attempt_inputs(
+    catalog: GenerationCatalog,
+    stop_options: Mapping[str, object],
+    *,
+    semantic: bool,
+    embedder: object | None,
+    model_id: str | None,
+    model_revision: str | None,
+) -> tuple | None:
+    """The manifest, its sealed artifact set, the seal, and an open artifact."""
+    manifest = _active_manifest(catalog, stop_options)
+    if manifest is None:
+        return None
+    artifact_names = _generation_artifact_names(
+        manifest,
+        semantic=semantic,
+        embedder=embedder,
+        model_id=model_id,
+        model_revision=model_revision,
+    )
+    seal = _generation_consumption_seal(
+        catalog, manifest, artifact_names, **stop_options
+    )
+    if seal is None:
+        return None
+    # Opened last: an unusable seal must not leave a connection behind.
+    connection = _generation_connection(catalog, manifest, **stop_options)
+    if connection is None:
+        return None
+    return manifest, artifact_names, seal, connection
+
+
+def _try_generation_search(
+    query: str,
+    catalog: GenerationCatalog,
+    *,
+    scope: str,
+    limit: int,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+    semantic: bool,
+    embedder: object | None,
+    model_id: str | None,
+    model_revision: str | None,
+    source_tool: str,
+    emit_telemetry: bool,
+    stop_options: Mapping[str, object],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[dict] | None:
+    """One attempt through the active generation; None means fall back."""
+    inputs = _generation_attempt_inputs(
+        catalog,
+        stop_options,
+        semantic=semantic,
+        embedder=embedder,
+        model_id=model_id,
+        model_revision=model_revision,
+    )
+    if inputs is None:
+        return None
+    manifest, artifact_names, consumption_seal, connection = inputs
+    try:
+        return _generation_search_results(
+            query,
+            catalog,
+            manifest,
+            connection,
+            artifact_names=artifact_names,
+            consumption_seal=consumption_seal,
+            scope=scope,
+            limit=limit,
+            project=project,
+            since=since,
+            as_of=as_of,
+            semantic=semantic,
+            embedder=embedder,
+            model_id=model_id,
+            model_revision=model_revision,
+            source_tool=source_tool,
+            emit_telemetry=emit_telemetry,
+            stop_options=stop_options,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+    except TimeoutError:
+        raise
+    except (
+        OSError,
+        PermissionError,
+        sqlite3.Error,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+    ):
+        return None
+    finally:
+        connection.close()
+
+
+def _generation_search_allowed(
+    catalog: object, force_rebuild: bool, page_paths: list[Path] | None
+) -> bool:
+    return catalog is not None and not force_rebuild and page_paths is None
 
 
 def _search_backends(
@@ -2790,121 +4479,32 @@ def _search_backends(
 ) -> list[dict]:
     """Prefer a validated generation and otherwise preserve legacy search behavior."""
     limit = _validate_search_limit(limit)
-    if not query or not query.strip():
+    if _blank_query(query):
         return []
     selected_catalog = catalog if catalog is not None else _active_generation_catalog()
-    stop_options = {}
-    if deadline is not None:
-        stop_options["deadline"] = deadline
-    if cancelled is not None:
-        stop_options["cancelled"] = cancelled
+    stop_options = _stop_options(deadline, cancelled)
     _check_generation_stop(deadline, cancelled)
-    if selected_catalog is not None and not force_rebuild and page_paths is None:
-        try:
-            manifest = selected_catalog.get_active(**stop_options)
-        except TimeoutError:
-            raise
-        except (OSError, PermissionError, sqlite3.Error, TypeError, ValueError):
-            manifest = None
-        if isinstance(manifest, dict):
-            artifact_names = (GENERATION_FTS_ARTIFACT,)
-            vector_requested = (
-                semantic
-                and generation_embedder is not None
-                and generation_model_id is not None
-                and generation_model_revision is not None
-                and manifest.get("vector_state") == "complete"
-            )
-            if vector_requested:
-                artifact_names += GENERATION_VECTOR_ARTIFACTS
-            consumption_seal = _generation_consumption_seal(
-                selected_catalog, manifest, artifact_names, **stop_options
-            )
-            connection = (
-                _generation_connection(selected_catalog, manifest, **stop_options)
-                if consumption_seal is not None
-                else None
-            )
-            if connection is not None:
-                try:
-                    lexical = _generation_fts_search(
-                        query,
-                        manifest,
-                        connection,
-                        scope=scope,
-                        limit=limit,
-                        project=project,
-                        since=since,
-                        as_of=as_of,
-                        **stop_options,
-                    )
-                    if semantic:
-                        vectors = None
-                        if (
-                            generation_embedder is not None
-                            and generation_model_id is not None
-                            and generation_model_revision is not None
-                        ):
-                            vectors = _generation_vectors_search(
-                                query,
-                                selected_catalog,
-                                manifest,
-                                connection,
-                                embedder=generation_embedder,
-                                model_id=generation_model_id,
-                                model_revision=generation_model_revision,
-                                scope=scope,
-                                limit=limit,
-                                project=project,
-                                since=since,
-                                as_of=as_of,
-                                **stop_options,
-                            )
-                        if vectors is not None:
-                            if _generation_consumption_unchanged(
-                                selected_catalog,
-                                manifest,
-                                artifact_names,
-                                consumption_seal,
-                                **stop_options,
-                            ):
-                                return _finalize_generation_results(
-                                    _fuse_generation_results(lexical, vectors, limit),
-                                    query=query,
-                                    source_tool=source_tool,
-                                    emit_telemetry=emit_telemetry,
-                                )
-                            vectors = None
-                        for result in lexical:
-                            _check_generation_stop(deadline, cancelled)
-                            result["requested_mode"] = "hybrid"
-                            result["fallback_reason"] = "generation_vectors_unavailable"
-                    if _generation_consumption_unchanged(
-                        selected_catalog,
-                        manifest,
-                        artifact_names,
-                        consumption_seal,
-                        **stop_options,
-                    ):
-                        return _finalize_generation_results(
-                            lexical,
-                            query=query,
-                            source_tool=source_tool,
-                            emit_telemetry=emit_telemetry,
-                        )
-                except TimeoutError:
-                    raise
-                except (
-                    OSError,
-                    PermissionError,
-                    sqlite3.Error,
-                    TypeError,
-                    ValueError,
-                    json.JSONDecodeError,
-                ):
-                    pass
-                finally:
-                    connection.close()
+    if _generation_search_allowed(selected_catalog, force_rebuild, page_paths):
+        results = _try_generation_search(
+            query,
+            selected_catalog,
+            scope=scope,
+            limit=limit,
+            project=project,
+            since=since,
+            as_of=as_of,
+            semantic=semantic,
+            embedder=generation_embedder,
+            model_id=generation_model_id,
+            model_revision=generation_model_revision,
+            source_tool=source_tool,
+            emit_telemetry=emit_telemetry,
+            stop_options=stop_options,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+        if results is not None:
+            return results
     _check_generation_stop(deadline, cancelled)
     return _legacy_search(
         query,
@@ -2923,6 +4523,188 @@ def _search_backends(
     )
 
 
+def _legacy_bm25_rows(
+    conn: sqlite3.Connection, query: str, limit: int
+) -> list[tuple[object, ...]]:
+    """Adaptive fetch: short queries match more pages, so ask for more."""
+    words = [word for word in query.split() if word]
+    fts_query = " ".join(f'"{word.replace(chr(34), chr(34) * 2)}"' for word in words)
+    multiplier = 5 if len(words) <= 3 else 3
+    return conn.execute(
+        """
+        SELECT path, title, summary, project, timestamp, bm25(pages) as rank
+        FROM pages
+        WHERE pages MATCH ?
+        ORDER BY rank
+        LIMIT ?
+        """,
+        (fts_query, limit * multiplier),
+    ).fetchall()
+
+
+def _older_than_since(timestamp: str, since: str | None) -> bool:
+    if not since or not timestamp:
+        return False
+    return timestamp[:10] < since
+
+
+def _newer_than_as_of(timestamp: str, as_of: str) -> bool:
+    if not timestamp:
+        return False
+    return timestamp[:10] > as_of[:10]
+
+
+def _legacy_row_excluded(path: str, timestamp: str, since: str | None, as_of: str | None) -> bool:
+    if _older_than_since(timestamp, since):
+        return True
+    if not as_of:
+        return False
+    if _newer_than_as_of(timestamp, as_of):
+        return True
+    return not _valid_as_of(path, as_of)
+
+
+def _legacy_scored_rows(
+    rows: list[tuple[object, ...]],
+    *,
+    query_lower: str,
+    query_words: set[str],
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+) -> list[dict]:
+    scored = [
+        _legacy_scored_row(
+            row,
+            query_lower=query_lower,
+            query_words=query_words,
+            project=project,
+        )
+        for row in rows
+        if not _legacy_row_excluded(str(row[0]), str(row[4] or ""), since, as_of)
+    ]
+    # FTS5 returns bm25() order; the boosts above change it.
+    scored.sort(key=lambda row: row["score"], reverse=True)
+    return scored
+
+
+def _legacy_scored_row(
+    row: tuple[object, ...],
+    *,
+    query_lower: str,
+    query_words: set[str],
+    project: str | None,
+) -> dict:
+    path, title, summary, proj, timestamp, rank = row
+    score = _boosted_lexical_score(
+        rank,
+        path=path,
+        title=title,
+        row_project=proj or "",
+        query_lower=query_lower,
+        query_words=query_words,
+        project=project,
+    )
+    return {
+        "path": path,
+        "title": title,
+        "summary": summary[:120] if summary else "",
+        "score": round(score, 2),
+        "project": proj or "",
+        "timestamp": timestamp or "",
+    }
+
+
+def _notes_first(row: dict) -> int:
+    """Duplicates prefer the canonical notes tree."""
+    return 0 if "knowledge/notes/" in row["path"] else 1
+
+
+def _stem_matches(rows: list[dict], normalized: str) -> list[dict]:
+    return [row for row in rows if Path(row["path"]).stem.lower() == normalized]
+
+
+def _exact_filename_answer(rows: list[dict], query: str, limit: int) -> list[dict] | None:
+    """A page whose filename is the query wins outright, before any fusion.
+
+    Otherwise a graph neighbour can promote a linked-but-wrong page above it.
+    Duplicates prefer the canonical notes tree.
+    """
+    normalized = query.lower().strip().replace(" ", "-")
+    matches = _stem_matches(rows[:10], normalized)
+    if not matches:
+        return None
+    matches.sort(key=lambda row: (_notes_first(row), -row["score"]))
+    best = matches[0]
+    rest = [row for row in rows if row["path"] != best["path"]][: limit - 1]
+    return [best, *rest]
+
+
+def _legacy_vector_results(
+    query: str,
+    pages: list[Path],
+    limit: int,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+) -> list[dict] | None:
+    """LanceDB when it is there, brute-force NumPy otherwise, None on failure."""
+    results = _lance_vector_results(query, limit, project, since, as_of)
+    if results is not None:
+        return results
+    try:
+        return _vector_search(query, pages, limit * 3, project, since, as_of)
+    except Exception as error:  # noqa: BLE001 - a failed optional signal is reported
+        print(f"  (vector search failed: {error})", file=sys.stderr)
+        return None
+
+
+def _lance_vector_results(
+    query: str,
+    limit: int,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+) -> list[dict] | None:
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from lance_store import have_lancedb
+        from lance_store import vector_search as _lance_search
+
+        if not have_lancedb():
+            return None
+        vectors = _embed_texts([query], is_query=True)
+        if not vectors:
+            return None
+        return _lance_search(vectors[0], limit * 3, project, since=since, as_of=as_of) or None
+    except Exception:  # noqa: BLE001 - optional backend
+        return None
+
+
+def _legacy_graph_boosts(
+    graph: bool, bm25_results: list[dict], vector_results: list[dict] | None
+) -> list[dict] | None:
+    if not graph:
+        return None
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from graph_neighbors import boost_graph_neighbors
+
+        return boost_graph_neighbors(bm25_results, vector_results)
+    except Exception:  # noqa: BLE001 - optional signal
+        return None
+
+
+def _project_boosted_fusion(fused: list[dict], project: str | None) -> list[dict]:
+    if not project:
+        return fused
+    for row in fused:
+        if row.get("project", "").lower() == project.lower():
+            row["fused_score"] = round(row["fused_score"] * 1.5, 4)
+    fused.sort(key=lambda row: row.get("fused_score", 0), reverse=True)
+    return fused
+
+
 def _legacy_search(
     query: str,
     scope: str = "all",
@@ -2938,229 +4720,181 @@ def _legacy_search(
     source_tool: str = "search_memory",
     emit_telemetry: bool = True,
 ) -> list[dict]:
-    """Run a hybrid BM25 + optional vector search.
+    """Run a hybrid BM25 + optional vector search over the legacy index.
 
-    Optional filters:
-    - project: boost results tagged with `project: <slug>` (x2 score boost)
-    - since: only results with timestamp >= YYYY-MM-DD
-    - as_of: only results valid on YYYY-MM-DD (timestamp <= as_of and
-      valid_to empty or >= as_of); also applies source_authority weights
-    - semantic: if sentence-transformers is installed, also run vector
-      search and fuse results via RRF. Finds semantically related pages
-      even when keywords don't match.
+    `project` boosts pages tagged with that slug, `since` and `as_of` filter by
+    time, and `semantic` adds vector search fused with BM25 through RRF so
+    related pages surface when the keywords do not match.
     """
-    if not query or not query.strip():
+    if _blank_query(query):
         return []
-
     pages = page_paths if page_paths is not None else _collect_pages(scope)
     if not pages:
         return []
-
-    if force_rebuild or _needs_rebuild(pages):
-        _build_index(pages)
-
-    conn = sqlite3.connect(str(INDEX_FILE))
-
-    # BM25 search (always runs)
-    # Escape FTS5 special tokens: wrap each word in double quotes to
-    # prevent FTS5 from interpreting common words (in, not, and, or,
-    # near) as operators or column names. This preserves AND semantics
-    # between terms while avoiding syntax errors.
-    fts_terms = []
-    for w in query.split():
-        if not w:
-            continue
-        safe = w.replace('"', '""')
-        fts_terms.append(f'"{safe}"')
-    fts_query = " ".join(fts_terms)
-    # Adaptive fetch limit: short queries (≤3 words) match more pages,
-    # so fetch more candidates to give filename/title boosts a chance.
-    query_word_count = len([w for w in query.split() if w])
-    fetch_multiplier = 5 if query_word_count <= 3 else 3
-    bm25_raw = conn.execute(
-        """
-        SELECT path, title, summary, project, timestamp, bm25(pages) as rank
-        FROM pages
-        WHERE pages MATCH ?
-        ORDER BY rank
-        LIMIT ?
-        """,
-        (fts_query, limit * fetch_multiplier),
-    ).fetchall()
-    conn.close()
-
-    # TITLE BOOST: if a page's title matches the query, boost its score.
-    # This fixes Recall@1 regressions where a duplicate page (promoted
-    # wiki copy) outscores the original knowledge page.
-    query_lower = query.lower().strip()
-    query_words = set(query_lower.split())
-
-    bm25_results = []
-    for row in bm25_raw:
-        path, title, summary, proj, ts, rank = row
-        if since and ts:
-            try:
-                if ts[:10] < since:
-                    continue
-            except (IndexError, TypeError):
-                pass
-        if as_of and ts:
-            try:
-                if ts[:10] > as_of[:10]:
-                    continue
-            except (IndexError, TypeError):
-                pass
-        if as_of and not _valid_as_of(path, as_of):
-            continue
-        score = -rank
-        if project and proj and proj.lower() == project.lower():
-            score *= 2.0
-
-        # Title boost (highest impact on Recall@1)
-        title_lower = (title or "").lower().strip()
-        title_words = set(title_lower.split())
-        if title_lower == query_lower:
-            # Exact title match → massive boost
-            score *= 5.0
-        elif query_words and query_words.issubset(title_words):
-            # All query words are in the title → strong boost
-            score *= 3.0
-        elif title_words and title_words.issubset(query_words):
-            # Title is a subset of query → moderate boost
-            score *= 2.0
-
-        # FILENAME MATCH BOOST: if the query matches the filename slug,
-        # this is almost certainly the right page. Strongest precision signal.
-        # "hook scripts defense-in-depth" → filename "hook-scripts-defense-in-depth"
-        filename_slug = Path(path).stem.lower().replace("-", " ")
-        if filename_slug == query_lower:
-            score *= 10.0  # near-guaranteed correct match
-        elif query_words and query_words.issubset(set(filename_slug.split())):
-            score *= 4.0
-
-        # Path preference: knowledge/notes/ is the canonical durable-pages
-        # tree. (Pre-three-zone this distinguished wiki/ from memory/; both
-        # now resolve to the same knowledge/notes path, so the boost is a
-        # no-op kept for forward-compat if a second tree is reintroduced.)
-        if "knowledge/notes/" in path:
-            score *= 1.3  # increased from 1.2 to break ties more decisively
-
-        # Typed provenance: user-said outranks inferred/ai-derived.
-        score *= _authority_weight(path)
-
-        bm25_results.append({
-            "path": path,
-            "title": title,
-            "summary": summary[:120] if summary else "",
-            "score": round(score, 2),
-            "project": proj or "",
-            "timestamp": ts or "",
-        })
-
-    # RE-SORT after boosts! FTS5 returns results in bm25() order, but
-    # title/filename boosts change the effective score. Without this
-    # re-sort, a page boosted to score=300 stays at its original FTS5
-    # position (e.g. rank 2) even though it should be rank 1.
-    bm25_results.sort(key=lambda x: x["score"], reverse=True)
-
-    # SHORT-CIRCUIT: if any page has exact filename match with the query,
-    # return it at rank 1 immediately. This prevents graph-neighbor RRF
-    # from pushing a filename-matched page down by promoting a linked
-    # but incorrect page (e.g. wiki copy beating the knowledge original).
-    # When multiple pages match (duplicates), prefer knowledge/notes/.
-    query_normalized = query.lower().strip().replace(" ", "-")
-    filename_matches = [
-        r for r in bm25_results[:10]
-        if Path(r["path"]).stem.lower() == query_normalized
-    ]
-    if filename_matches:
-        # Sort matches: knowledge/notes/ first (primary source),
-        # then by score (highest first)
-        filename_matches.sort(
-            key=lambda r: (
-                0 if "knowledge/notes/" in r["path"] else 1,
-                -r["score"],
-            )
-        )
-        best = filename_matches[0]
-        rest = [x for x in bm25_results if x["path"] != best["path"]][:limit-1]
-        return _finalize_results(
-            query,
-            [best] + rest,
-            limit,
-            retrieval_mode="exact",
-            source_tool=source_tool,
-            emit_telemetry=emit_telemetry,
-        )
-
-    # Optional: vector search for semantic matching
-    vector_results = None
-    if semantic and _have_sentence_transformers():
-        # Try LanceDB (HNSW index) first, fall back to numpy brute-force.
-        try:
-            sys.path.insert(0, str(Path(__file__).resolve().parent))
-            from lance_store import have_lancedb
-            from lance_store import vector_search as _lance_search
-
-            if have_lancedb():
-                qvecs = _embed_texts([query], is_query=True)
-                if qvecs:
-                    lance_results = _lance_search(
-                        qvecs[0], limit * 3, project, since=since, as_of=as_of
-                    )
-                    if lance_results:
-                        vector_results = lance_results
-        except Exception:
-            pass
-
-        # Fall back to numpy brute-force if LanceDB unavailable or empty.
-        if vector_results is None:
-            try:
-                vector_results = _vector_search(query, pages, limit * 3, project, since, as_of)
-            except Exception as e:
-                print(f"  (vector search failed: {e})", file=sys.stderr)
-                vector_results = None
-
-    # Optional: graph-neighbor boost (3rd retrieval signal)
-    graph_boosts = None
-    if graph:
-        try:
-            sys.path.insert(0, str(Path(__file__).resolve().parent))
-            from graph_neighbors import boost_graph_neighbors
-            graph_boosts = boost_graph_neighbors(bm25_results, vector_results)
-        except Exception:
-            pass
-
-    # Fuse results: BM25 + Vector + Graph-neighbor via RRF
-    if vector_results or graph_boosts:
-        fused = _rrf_fuse_triple(bm25_results, vector_results, graph_boosts)
-        # Apply project boost on fused results
-        if project:
-            for r in fused:
-                if r.get("project", "").lower() == project.lower():
-                    r["fused_score"] = round(r["fused_score"] * 1.5, 4)
-            fused.sort(key=lambda x: x.get("fused_score", 0), reverse=True)
-        final = _maybe_rerank(query, fused, limit) if rerank else fused[:limit]
-        return _finalize_results(
-            query,
-            final,
-            limit,
-            retrieval_mode="hybrid",
-            source_tool=source_tool,
-            emit_telemetry=emit_telemetry,
-        )
-
-    # BM25 only (fallback)
-    bm25_results.sort(key=lambda x: x["score"], reverse=True)
-    final = _maybe_rerank(query, bm25_results, limit) if rerank else bm25_results[:limit]
+    ranked, retrieval_mode = _legacy_ranked(
+        query,
+        pages,
+        limit,
+        force_rebuild=force_rebuild,
+        project=project,
+        since=since,
+        as_of=as_of,
+        semantic=semantic,
+        graph=graph,
+        rerank=rerank,
+    )
     return _finalize_results(
         query,
-        final,
+        ranked,
         limit,
-        retrieval_mode="bm25",
+        retrieval_mode=retrieval_mode,
         source_tool=source_tool,
         emit_telemetry=emit_telemetry,
     )
+
+
+def _legacy_ranked(
+    query: str,
+    pages: list[Path],
+    limit: int,
+    *,
+    force_rebuild: bool,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+    semantic: bool,
+    graph: bool,
+    rerank: bool,
+) -> tuple[list[dict], str]:
+    """Order the legacy index and report which path produced that order."""
+    bm25_results = _legacy_bm25_results(
+        query,
+        pages,
+        limit,
+        force_rebuild=force_rebuild,
+        project=project,
+        since=since,
+        as_of=as_of,
+    )
+    exact = _exact_filename_answer(bm25_results, query, limit)
+    if exact is not None:
+        return exact, "exact"
+
+    vector_results = _optional_vector_results(
+        query, pages, limit, project, since, as_of, semantic=semantic
+    )
+    graph_boosts = _legacy_graph_boosts(graph, bm25_results, vector_results)
+    if not vector_results and not graph_boosts:
+        return _reranked_or_capped(query, bm25_results, limit, rerank), "bm25"
+
+    fused = _project_boosted_fusion(
+        _rrf_fuse_triple(bm25_results, vector_results, graph_boosts), project
+    )
+    return _reranked_or_capped(query, fused, limit, rerank), "hybrid"
+
+
+def _legacy_bm25_results(
+    query: str,
+    pages: list[Path],
+    limit: int,
+    *,
+    force_rebuild: bool,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+) -> list[dict]:
+    if force_rebuild or _needs_rebuild(pages):
+        _build_index(pages)
+    conn = sqlite3.connect(str(INDEX_FILE))
+    try:
+        raw_rows = _legacy_bm25_rows(conn, query, limit)
+    finally:
+        conn.close()
+    query_lower = query.lower().strip()
+    return _legacy_scored_rows(
+        raw_rows,
+        query_lower=query_lower,
+        query_words=set(query_lower.split()),
+        project=project,
+        since=since,
+        as_of=as_of,
+    )
+
+
+def _optional_vector_results(
+    query: str,
+    pages: list[Path],
+    limit: int,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+    *,
+    semantic: bool,
+) -> list[dict] | None:
+    """Vectors are opt-in and need the optional dependency to be installed."""
+    if not semantic or not _have_sentence_transformers():
+        return None
+    return _legacy_vector_results(query, pages, limit, project, since, as_of)
+
+
+def _reranked_or_capped(
+    query: str, results: list[dict], limit: int, rerank: bool
+) -> list[dict]:
+    if not rerank:
+        return results[:limit]
+    return _maybe_rerank(query, results, limit)
+
+
+def _fold_ranked(
+    scores: dict[str, float],
+    metadata: dict[str, dict],
+    ranked: list[dict],
+    *,
+    weight: float,
+    k: int,
+) -> None:
+    """Add one ranked list to the fused scores, keeping the first metadata seen."""
+    for rank, result in enumerate(ranked):
+        path = result["path"]
+        scores[path] = scores.get(path, 0) + weight / (k + rank + 1)
+        metadata.setdefault(path, result)
+
+
+def _graph_only_metadata(path: str) -> dict:
+    """A neighbour reached only through links has no row of its own."""
+    return {
+        "path": path,
+        "title": path.split("/")[-1].replace(".md", ""),
+        "summary": "",
+        "score": 0,
+        "project": "",
+        "timestamp": "",
+    }
+
+
+def _fold_graph_boosts(
+    scores: dict[str, float],
+    metadata: dict[str, dict],
+    boosts: list[dict],
+    *,
+    k: int,
+) -> None:
+    for rank, result in enumerate(boosts):
+        path = result["path"]
+        contribution = 0.5 * result.get("graph_boost", 0) / (k * 2 + rank + 1)
+        scores[path] = scores.get(path, 0) + contribution
+        metadata.setdefault(path, _graph_only_metadata(path))
+
+
+def _fused_in_score_order(
+    scores: dict[str, float], metadata: dict[str, dict]
+) -> list[dict]:
+    results = []
+    for path, score in sorted(scores.items(), key=lambda item: item[1], reverse=True):
+        result = metadata[path].copy()
+        result["fused_score"] = round(score, 4)
+        results.append(result)
+    return results
 
 
 def _rrf_fuse_triple(
@@ -3182,42 +4916,111 @@ def _rrf_fuse_triple(
     """
     scores: dict[str, float] = {}
     metadata: dict[str, dict] = {}
-
-    # BM25 — weight 2.0 (most reliable signal)
-    for rank, r in enumerate(bm25_results):
-        path = r["path"]
-        scores[path] = scores.get(path, 0) + 2.0 / (k + rank + 1)
-        metadata[path] = r
-
-    # Vector — weight 1.0 (helps when BM25 misses)
+    _fold_ranked(scores, metadata, bm25_results, weight=2.0, k=k)
     if vector_results:
-        for rank, r in enumerate(vector_results):
-            path = r["path"]
-            scores[path] = scores.get(path, 0) + 1.0 / (k + rank + 1)
-            if path not in metadata:
-                metadata[path] = r
-
-    # Graph-neighbor — weight 0.5 (softest signal, boosts through links)
+        _fold_ranked(scores, metadata, vector_results, weight=1.0, k=k)
     if graph_boosts:
-        for rank, r in enumerate(graph_boosts):
-            path = r["path"]
-            scores[path] = scores.get(path, 0) + 0.5 * r.get("graph_boost", 0) / (k * 2 + rank + 1)
-            if path not in metadata:
-                metadata[path] = {
-                    "path": path,
-                    "title": path.split("/")[-1].replace(".md", ""),
-                    "summary": "",
-                    "score": 0,
-                    "project": "",
-                    "timestamp": "",
-                }
+        _fold_graph_boosts(scores, metadata, graph_boosts, k=k)
+    return _fused_in_score_order(scores, metadata)
 
-    sorted_paths = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+
+_PAGE_STATUS_RE = re.compile(r"^status:\s*[\"\']?([^\"\'\n]+)[\"\']?\s*$", re.MULTILINE)
+
+
+def _page_status(path: str) -> str:
+    """The page's own status, or "active" when it does not say."""
+    try:
+        page = ROOT / path if not Path(path).is_absolute() else Path(path)
+        content = page.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return "active"
+    status = _extract_frontmatter_field(content, _PAGE_STATUS_RE) or "active"
+    return status.strip().lower()
+
+
+def _legacy_vector_excluded(
+    path: str, timestamp: str, *, since: str | None, as_of: str | None
+) -> bool:
+    if _legacy_row_excluded(path, timestamp, since, as_of):
+        return True
+    if as_of:
+        return False
+    # Without an as-of date, a superseded page is history.
+    status = _page_status(path)
+    return bool(status) and status != "active"
+
+
+def _vector_cache_matrix(vectors_data: Mapping[str, object]) -> object | None:
+    """The cached matrix as an ndarray, or None when the cache is unusable."""
+    import numpy as np
+
+    vectors = vectors_data["vectors"]
+    if isinstance(vectors, list):
+        # Refuse list-converted caches; require ndarray/mmap.
+        return None
+    matrix = np.asarray(vectors)
+    if matrix.ndim != 2 or matrix.shape[0] != len(vectors_data["paths"]):
+        return None
+    return matrix
+
+
+def _query_vector_for(
+    query: str, matrix: object, *, deadline: float | None, cancelled
+) -> object | None:
+    import numpy as np
+
+    embedded = _embed_texts([query], is_query=True, deadline=deadline, cancelled=cancelled)
+    if not embedded:
+        return None
+    vector = np.asarray(embedded[0], dtype=np.float32)
+    if vector.shape[0] != matrix.shape[1] or not np.isfinite(vector).all():
+        return None
+    return vector
+
+
+def _vector_hit(
+    index: int,
+    similarity: float,
+    vectors_data: Mapping[str, object],
+    project: str | None,
+) -> dict:
+    path = vectors_data["paths"][index]
+    row_project = vectors_data["projects"][index]
+    score = round(float(similarity), 4)
+    if project and row_project and row_project.lower() == project.lower():
+        score = round(score * 1.5, 4)
+    return {
+        "path": path,
+        "title": vectors_data["titles"][index],
+        "summary": (vectors_data["summaries"][index] or "")[:120],
+        "score": score,
+        "project": row_project,
+        "timestamp": vectors_data["timestamps"][index],
+        "candidate_id": Path(path).stem,
+    }
+
+
+def _vector_hits(
+    similarities: list[float],
+    vectors_data: dict,
+    *,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[dict]:
     results = []
-    for path, score in sorted_paths:
-        r = metadata[path].copy()
-        r["fused_score"] = round(score, 4)
-        results.append(r)
+    for index, similarity in enumerate(similarities):
+        _check_legacy_stop(deadline, cancelled)
+        excluded = _legacy_vector_excluded(
+            vectors_data["paths"][index],
+            str(vectors_data["timestamps"][index] or ""),
+            since=since,
+            as_of=as_of,
+        )
+        if not excluded:
+            results.append(_vector_hit(index, similarity, vectors_data, project))
     return results
 
 
@@ -3232,95 +5035,47 @@ def _vector_search(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> list[dict] | None:
-    """Run vector similarity search using sentence-transformers.
-
-    Builds embeddings for all pages (cached) and the query, then
-    returns pages ranked by cosine similarity.
-    """
-    import numpy as np
-
-    # Load or build vector cache
+    """Rank pages by cosine similarity against the cached page embeddings."""
     _check_legacy_stop(deadline, cancelled)
-    vectors_data = _load_or_build_vectors(
-        pages, deadline=deadline, cancelled=cancelled
-    )
+    vectors_data = _load_or_build_vectors(pages, deadline=deadline, cancelled=cancelled)
     if not vectors_data:
         return None
-
-    paths = vectors_data["paths"]
-    titles = vectors_data["titles"]
-    summaries = vectors_data["summaries"]
-    projects = vectors_data["projects"]
-    timestamps = vectors_data["timestamps"]
-    vectors = vectors_data["vectors"]
-    if isinstance(vectors, list):
-        # Refuse list-converted caches; require ndarray/mmap.
+    matrix = _vector_cache_matrix(vectors_data)
+    if matrix is None:
         return None
-    matrix = np.asarray(vectors)
-    if matrix.ndim != 2 or matrix.shape[0] != len(paths):
-        return None
-
-    # Embed the query
-    query_vec = _embed_texts(
-        [query], is_query=True, deadline=deadline, cancelled=cancelled
+    query_vector = _query_vector_for(
+        query, matrix, deadline=deadline, cancelled=cancelled
     )
-    if not query_vec:
+    if query_vector is None:
         return None
-    q = np.asarray(query_vec[0], dtype=np.float32)
-    if q.shape[0] != matrix.shape[1] or not np.isfinite(q).all():
-        return None
-
-    # Compute cosine similarity without materializing full Python lists.
-    sims = _cosine_similarity(q, matrix)
-
-    # Build results
-    results = []
-    for i, sim in enumerate(sims):
-        _check_legacy_stop(deadline, cancelled)
-        proj = projects[i]
-        ts = timestamps[i]
-        path = paths[i]
-        if since and ts:
-            try:
-                if ts[:10] < since:
-                    continue
-            except (IndexError, TypeError):
-                pass
-        if as_of and ts:
-            try:
-                if ts[:10] > as_of[:10]:
-                    continue
-            except (IndexError, TypeError):
-                pass
-        if as_of and not _valid_as_of(path, as_of):
-            continue
-        # status filter parity when frontmatter status is superseded and no as_of
-        if not as_of:
-            try:
-                p = ROOT / path if not Path(path).is_absolute() else Path(path)
-                content = p.read_text(encoding="utf-8", errors="ignore")
-                status = (_extract_frontmatter_field(content, re.compile(
-                    r"^status:\s*[\"']?([^\"'\n]+)[\"']?\s*$", re.MULTILINE
-                )) or "active").strip().lower()
-                if status and status not in {"active", ""}:
-                    continue
-            except OSError:
-                pass
-        score = round(float(sim), 4)
-        if project and proj and proj.lower() == project.lower():
-            score = round(score * 1.5, 4)
-        results.append({
-            "path": path,
-            "title": titles[i],
-            "summary": (summaries[i] or "")[:120],
-            "score": score,
-            "project": proj,
-            "timestamp": ts,
-            "candidate_id": Path(path).stem,
-        })
-
-    results.sort(key=lambda x: (-x["score"], x["path"]))
+    results = _vector_hits(
+        _cosine_similarity(query_vector, matrix),
+        vectors_data,
+        project=project,
+        since=since,
+        as_of=as_of,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    results.sort(key=lambda hit: (-hit["score"], hit["path"]))
     return results[:limit]
+
+
+def _append_vector_document(documents: dict[str, list[str]], page: Path) -> None:
+    """One page's contribution to the parallel columns the vector cache stores."""
+    raw = read_stable_bytes(page, MAX_PAGE_BYTES, label="legacy vector source")
+    content = raw.decode("utf-8", errors="ignore")
+    title, summary = _extract_title_and_summary(content, page.stem)
+    body = _strip_frontmatter(content)[:500]
+    project = _extract_frontmatter_field(content, PROJECT_FIELD_RE) or ""
+    timestamp = _extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or ""
+    documents["source_paths"].append(page.relative_to(ROOT).as_posix())
+    documents["source_sha256"].append(hashlib.sha256(raw).hexdigest())
+    documents["titles"].append(title)
+    documents["summaries"].append(summary)
+    documents["projects"].append(project.lower())
+    documents["timestamps"].append(timestamp[:10])
+    documents["texts"].append(f"{title}. {summary}. {body[:300]}")
 
 
 def _legacy_vector_documents(
@@ -3344,19 +5099,7 @@ def _legacy_vector_documents(
     )
     for page in ordered:
         _check_legacy_stop(deadline, cancelled)
-        raw = read_stable_bytes(page, MAX_PAGE_BYTES, label="legacy vector source")
-        content = raw.decode("utf-8", errors="ignore")
-        title, summary = _extract_title_and_summary(content, page.stem)
-        body = _strip_frontmatter(content)[:500]
-        project = _extract_frontmatter_field(content, PROJECT_FIELD_RE) or ""
-        timestamp = _extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or ""
-        documents["source_paths"].append(page.relative_to(ROOT).as_posix())
-        documents["source_sha256"].append(hashlib.sha256(raw).hexdigest())
-        documents["titles"].append(title)
-        documents["summaries"].append(summary)
-        documents["projects"].append(project.lower())
-        documents["timestamps"].append(timestamp[:10] if timestamp else "")
-        documents["texts"].append(f"{title}. {summary}. {body[:300]}")
+        _append_vector_document(documents, page)
     return documents
 
 
@@ -3368,6 +5111,59 @@ def _legacy_vector_source_membership(
 ) -> list[tuple[str, str]]:
     live = _legacy_vector_documents(pages, deadline=deadline, cancelled=cancelled)
     return list(zip(live["source_paths"], live["source_sha256"], strict=True))
+
+
+def _expected_vector_metadata(live: dict, vectors, finite: bool) -> dict:
+    """What the sidecar must say for the cached artifact to still be usable."""
+    return {
+        "schema_version": "legacy-vectors/v1",
+        "model_id": EMBEDDING_MODEL,
+        "model_revision": EMBEDDING_MODEL_REVISION,
+        "dimensions": EMBEDDING_DIM,
+        "source_paths": live["source_paths"],
+        "source_sha256": live["source_sha256"],
+        "titles": live["titles"],
+        "summaries": live["summaries"],
+        "projects": live["projects"],
+        "timestamps": live["timestamps"],
+        "dtype": str(vectors.dtype),
+        "shape": list(vectors.shape),
+        "finite": finite,
+        "artifact_sha256": _artifact_descriptor(VECTOR_NPY, "vectors.npy")["sha256"],
+    }
+
+
+def _matching_vector_block(vectors, count: int, finite: bool) -> bool:
+    import numpy as np
+
+    return (
+        vectors.ndim == 2
+        and vectors.shape == (count, EMBEDDING_DIM)
+        and vectors.dtype == np.dtype(np.float32)
+        and finite
+    )
+
+
+def _cached_vectors(
+    pages: list[Path], deadline: float | None, cancelled: Callable[[], bool] | None
+) -> dict | None:
+    """Accept the cached artifact only when it still describes the live sources."""
+    try:
+        import numpy as np
+
+        cache_meta = json.loads(VECTOR_META.read_text(encoding="utf-8"))
+        vectors = np.load(str(VECTOR_NPY), mmap_mode="r", allow_pickle=False)
+        live = _legacy_vector_documents(pages, deadline=deadline, cancelled=cancelled)
+        finite = bool(np.isfinite(vectors).all())
+        expected = _expected_vector_metadata(live, vectors, finite)
+        count = len(live["source_paths"])
+        if cache_meta != expected or not _matching_vector_block(vectors, count, finite):
+            return None
+        return {**live, **cache_meta, "paths": live["source_paths"], "vectors": vectors}
+    except TimeoutError:
+        raise
+    except Exception:
+        return None
 
 
 def _load_or_build_vectors(
@@ -3382,50 +5178,10 @@ def _load_or_build_vectors(
     small .json for metadata. Existing artifacts are accepted only when every
     metadata value still matches the configured model and live source bytes.
     """
-    # Try .npy format (fast, memory-mapped). Never convert mmap → Python list.
+    # Try .npy format (fast, memory-mapped). Never convert mmap to a Python list.
     _check_legacy_stop(deadline, cancelled)
     if VECTOR_NPY.exists() and VECTOR_META.exists():
-        try:
-            import numpy as np
-
-            cache_meta = json.loads(VECTOR_META.read_text(encoding="utf-8"))
-            vectors = np.load(str(VECTOR_NPY), mmap_mode="r", allow_pickle=False)
-            live = _legacy_vector_documents(
-                pages, deadline=deadline, cancelled=cancelled
-            )
-            finite = bool(np.isfinite(vectors).all())
-            expected = {
-                "schema_version": "legacy-vectors/v1",
-                "model_id": EMBEDDING_MODEL,
-                "model_revision": EMBEDDING_MODEL_REVISION,
-                "dimensions": EMBEDDING_DIM,
-                "source_paths": live["source_paths"],
-                "source_sha256": live["source_sha256"],
-                "titles": live["titles"],
-                "summaries": live["summaries"],
-                "projects": live["projects"],
-                "timestamps": live["timestamps"],
-                "dtype": str(vectors.dtype),
-                "shape": list(vectors.shape),
-                "finite": finite,
-                "artifact_sha256": _artifact_descriptor(VECTOR_NPY, "vectors.npy")[
-                    "sha256"
-                ],
-            }
-            if (
-                cache_meta != expected
-                or vectors.ndim != 2
-                or vectors.shape != (len(live["source_paths"]), EMBEDDING_DIM)
-                or vectors.dtype != np.dtype(np.float32)
-                or not finite
-            ):
-                return None
-            return {**live, **cache_meta, "paths": live["source_paths"], "vectors": vectors}
-        except TimeoutError:
-            raise
-        except Exception:
-            return None
-
+        return _cached_vectors(pages, deadline, cancelled)
     return _build_vectors(pages, deadline=deadline, cancelled=cancelled)
 
 
@@ -3442,67 +5198,104 @@ def _build_vectors(
         return None
 
     INDEX_DIR.mkdir(parents=True, exist_ok=True)
+    documents = _live_documents_and_texts(pages, deadline, cancelled)
+    if documents is None:
+        return None
+    live, texts_list = documents
 
+    vectors = _encoded_page_vectors(embedder, texts_list, deadline, cancelled)
+    if vectors is None:
+        return None
+    metadata = _persisted_vector_metadata(vectors, live)
+    if metadata is None:
+        return None
+    return {**live, **metadata, "paths": live["source_paths"], "vectors": vectors}
+
+
+def _live_documents_and_texts(
+    pages: list[Path], deadline: float | None, cancelled: Callable[[], bool] | None
+) -> tuple[dict, list[str]] | None:
+    """The live page set plus the texts to embed, or None when there is none."""
     try:
-        live = _legacy_vector_documents(
-            pages, deadline=deadline, cancelled=cancelled
-        )
+        live = _legacy_vector_documents(pages, deadline=deadline, cancelled=cancelled)
     except (OSError, ValueError):
         return None
     texts_list = live.pop("texts")
-
     if not texts_list:
         return None
+    return live, texts_list
 
-    # Embed all texts
+
+def _usable_vector_block(vectors, count: int) -> bool:
+    import numpy as np
+
+    return (
+        vectors.ndim == 2
+        and vectors.shape == (count, EMBEDDING_DIM)
+        and vectors.dtype.kind in "fiu"
+        and bool(np.isfinite(vectors).all())
+    )
+
+
+def _encoded_page_vectors(
+    embedder,
+    texts: list[str],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+):
+    """Encode the page texts, or None when the model output is unusable."""
     try:
         import numpy as np
 
         vectors = np.asarray(
-            embedder.encode(texts_list, show_progress_bar=False, convert_to_numpy=True)
+            embedder.encode(texts, show_progress_bar=False, convert_to_numpy=True)
         )
         _check_legacy_stop(deadline, cancelled)
     except TimeoutError:
         raise
     except Exception:
         return None
-    if (
-        vectors.ndim != 2
-        or vectors.shape != (len(texts_list), EMBEDDING_DIM)
-        or vectors.dtype.kind not in "fiu"
-        or not np.isfinite(vectors).all()
-    ):
+    if not _usable_vector_block(vectors, len(texts)):
         return None
-    vectors = np.ascontiguousarray(vectors, dtype=np.float32)
+    return np.ascontiguousarray(vectors, dtype=np.float32)
 
-    # v4.0: Save vectors as binary .npy (memory-mapped, fast load).
-    # Save metadata as small JSON (no vectors → small file).
+
+def _legacy_vector_metadata(vectors, live: dict) -> dict:
+    """Describes the .npy that was just written, so a reader can verify it."""
+    import numpy as np
+
+    return {
+        "schema_version": "legacy-vectors/v1",
+        "model_id": EMBEDDING_MODEL,
+        "model_revision": EMBEDDING_MODEL_REVISION,
+        "dimensions": EMBEDDING_DIM,
+        **live,
+        "dtype": str(vectors.dtype),
+        "shape": list(vectors.shape),
+        "finite": bool(np.isfinite(vectors).all()),
+        "artifact_sha256": _artifact_descriptor(VECTOR_NPY, "vectors.npy")["sha256"],
+    }
+
+
+def _persisted_vector_metadata(vectors, live: dict) -> dict | None:
+    """Save vectors as binary .npy (memory-mapped, fast load) plus small JSON."""
     try:
+        import numpy as np
+
         INDEX_DIR.mkdir(parents=True, exist_ok=True)
         np.save(str(VECTOR_NPY), vectors, allow_pickle=False)
-        metadata = {
-            "schema_version": "legacy-vectors/v1",
-            "model_id": EMBEDDING_MODEL,
-            "model_revision": EMBEDDING_MODEL_REVISION,
-            "dimensions": EMBEDDING_DIM,
-            **live,
-            "dtype": str(vectors.dtype),
-            "shape": list(vectors.shape),
-            "finite": bool(np.isfinite(vectors).all()),
-            "artifact_sha256": _artifact_descriptor(VECTOR_NPY, "vectors.npy")[
-                "sha256"
-            ],
-        }
+        metadata = _legacy_vector_metadata(vectors, live)
         atomic_write(
             VECTOR_META,
-            json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            json.dumps(
+                metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ),
         )
     except TimeoutError:
         raise
     except Exception:
         return None
-
-    return {**live, **metadata, "paths": live["source_paths"], "vectors": vectors}
+    return metadata
 
 
 def main() -> int:
@@ -3542,32 +5335,44 @@ def main() -> int:
         args.query = sys.stdin.read().strip()
 
     if args.status:
-        pages = _collect_pages("all")
-        if INDEX_FILE.exists():
-            conn = sqlite3.connect(str(INDEX_FILE))
-            count = conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
-            conn.close()
-            print(f"Index: {INDEX_FILE}")
-            print(f"  Pages indexed: {count}")
-            print(f"  Pages on disk: {len(pages)}")
-            print(f"  Index size: {INDEX_FILE.stat().st_size} bytes")
-            print(f"  Needs rebuild: {_needs_rebuild(pages)}")
-        else:
-            print(f"Index: not built ({len(pages)} pages would be indexed)")
-        return 0
+        return _print_index_status()
 
     if args.rebuild:
-        pages = _collect_pages(args.scope)
-        print(f"Rebuilding index with {len(pages)} pages...")
-        t0 = time.time()
-        _build_index(pages)
-        print(f"Done in {time.time() - t0:.2f}s")
-        return 0
+        return _rebuild_index_cli(args.scope)
 
     if not args.query:
         print("Usage: python search_memory.py \"<query>\"", file=sys.stderr)
         return 1
 
+    return _run_cli_search(args)
+
+
+def _print_index_status() -> int:
+    pages = _collect_pages("all")
+    if not INDEX_FILE.exists():
+        print(f"Index: not built ({len(pages)} pages would be indexed)")
+        return 0
+    conn = sqlite3.connect(str(INDEX_FILE))
+    count = conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
+    conn.close()
+    print(f"Index: {INDEX_FILE}")
+    print(f"  Pages indexed: {count}")
+    print(f"  Pages on disk: {len(pages)}")
+    print(f"  Index size: {INDEX_FILE.stat().st_size} bytes")
+    print(f"  Needs rebuild: {_needs_rebuild(pages)}")
+    return 0
+
+
+def _rebuild_index_cli(scope: str) -> int:
+    pages = _collect_pages(scope)
+    print(f"Rebuilding index with {len(pages)} pages...")
+    t0 = time.time()
+    _build_index(pages)
+    print(f"Done in {time.time() - t0:.2f}s")
+    return 0
+
+
+def _run_cli_search(args: argparse.Namespace) -> int:
     t0 = time.time()
     try:
         results = search(
@@ -3590,7 +5395,12 @@ def main() -> int:
         print(f"No results for '{args.query}' ({elapsed:.3f}s)")
         return 0
 
-    print(f"Found {len(results)} result(s) for '{args.query}' ({elapsed:.3f}s):\n")
+    _print_search_results(args.query, results, elapsed)
+    return 0
+
+
+def _print_search_results(query: str, results: list[dict], elapsed: float) -> None:
+    print(f"Found {len(results)} result(s) for '{query}' ({elapsed:.3f}s):\n")
     for i, r in enumerate(results, 1):
         proj_tag = f" [{r['project']}]" if r["project"] else ""
         ts_tag = f" ({r['timestamp']})" if r["timestamp"] else ""
@@ -3599,8 +5409,6 @@ def main() -> int:
         if r["summary"]:
             print(f"   {r['summary']}")
         print()
-
-    return 0
 
 
 if __name__ == "__main__":

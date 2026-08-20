@@ -141,20 +141,28 @@ def _write_proc_stat(
     )
 
 
+def _fixture_line(tree: ProcessTree, line: bytes) -> dict[str, object]:
+    """One record from the fixture, or a readable failure when it died first.
+
+    An empty line means end of stream, which `select` also reports as readable;
+    decoding it produced a JSON error that said nothing about the real cause.
+    """
+    assert line, f"process-tree fixture exited (code {tree.process.poll()}) before it reported"
+    record = json.loads(line)
+    assert isinstance(record, dict)
+    return record
+
+
 def _descendant(tree: ProcessTree) -> int:
     assert tree.process.stdout is not None
-    line = tree.process.stdout.readline()
-    record = json.loads(line)
-    return int(record["descendant_pid"])
+    return int(_fixture_line(tree, tree.process.stdout.readline())["descendant_pid"])
 
 
-def _process_record(tree: ProcessTree, timeout: float = 2.0) -> dict[str, object]:
+def _process_record(tree: ProcessTree, timeout: float = 10.0) -> dict[str, object]:
     assert tree.process.stdout is not None
     readable, _, _ = select.select([tree.process.stdout], [], [], timeout)
     assert readable, "timed out waiting for process-tree fixture record"
-    record = json.loads(tree.process.stdout.readline())
-    assert isinstance(record, dict)
-    return record
+    return _fixture_line(tree, tree.process.stdout.readline())
 
 
 def test_public_process_tree_shape_is_exact() -> None:

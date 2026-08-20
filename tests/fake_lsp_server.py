@@ -685,6 +685,7 @@ def _run_semantic_server(args: argparse.Namespace) -> None:
 def _run_process_server() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--stderr-bytes", type=int, default=0)
+    parser.add_argument("--stderr-linger-seconds", type=float, default=3.0)
     parser.add_argument("--report-environment", action="store_true")
     parser.add_argument("--echo", action="store_true")
     parser.add_argument("--exit-while-pending", action="store_true")
@@ -962,6 +963,11 @@ def _run_process_server() -> None:
         os.write(2, chunk)
         offset += size
         remaining -= size
+    if args.stderr_bytes:
+        # Stay alive while the parent finishes starting this generation. On a
+        # hosted Windows runner the write finished first and the exit turned
+        # into `LSP process exited during generation startup`.
+        time.sleep(args.stderr_linger_seconds)
 
     if args.report_environment or args.echo or args.exit_while_pending:
         request = _read_message(sys.stdin.buffer)

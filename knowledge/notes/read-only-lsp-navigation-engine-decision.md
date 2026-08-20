@@ -87,3 +87,4 @@ valid; the one-shot consent/SCIP/publication direction in Tasks 6-16 does not.
 - [[persistent-code-intelligence-kernel-decision]]
 - [[solo-operator-superset-product-decision]]
 - [[derived-evidence-generation-decision]]
+- [[warm-navigation-overhead-threshold-decision]]

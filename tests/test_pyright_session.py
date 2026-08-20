@@ -618,6 +618,324 @@ def test_server_identity_is_held_and_reverified_through_bootstrap(
         session.close(deadline=time.monotonic() + 5)
 
 
+def _assert_evictions_reserved(manager, evicting) -> None:
+    """Capacity stays full while the two reserved sessions refuse new work."""
+    with manager._lock:
+        assert len(manager._sessions) == MAX_LSP_PROCESSES
+    for session in evicting:
+        assert session._closing is True
+        _assert_operations_refused(session)
+
+
+def _all_retained(manager, sessions) -> bool:
+    return all(session in manager._sessions.values() for session in sessions)
+
+
+def _stagger_last_used(sessions) -> None:
+    """Give the sessions a deterministic idle order for eviction."""
+    for index, session in enumerate(sessions):
+        with session._lock:
+            session._last_used_monotonic = float(index)
+
+
+def _patch_blocked_closes(patch, sessions, blocked_close) -> None:
+    for index, session in enumerate(sessions):
+        patch.setattr(
+            session,
+            "close",
+            lambda *, deadline, index=index: blocked_close(index, deadline=deadline),
+        )
+
+
+def _prepared_scopes(tmp_path: Path, monkeypatch, prefix: str, count: int):
+    """Build N repositories and patch discovery to their fixture identities."""
+    scopes: list[RepositoryScope] = []
+    identities: dict[str, object] = {}
+    for index in range(count):
+        repo, fixture = _make_repo_fixture(tmp_path, f"{prefix}-{index}")
+        scope = resolve_repository_scope(repo)
+        scopes.append(scope)
+        identities[scope.checkout_id] = fixture.identity
+    _patch_discovery(monkeypatch, identities)
+    return scopes
+
+
+def _hold_first_response(count: int, ready, release, deadline: float) -> None:
+    """Only the first semantic response waits for the test to release it."""
+    if count != 1:
+        return
+    ready.set()
+    if not release.wait(max(0.0, deadline - time.monotonic())):
+        raise TimeoutError("semantic response release expired")
+
+
+def _started_threads(target, arguments):
+    threads = [threading.Thread(target=target, args=(item,)) for item in arguments]
+    for thread in threads:
+        thread.start()
+    return threads
+
+
+def _assert_operations_refused(session) -> None:
+    with pytest.raises(RuntimeError, match="closing"):
+        with session._operation():
+            pytest.fail("operation started after eviction reservation")
+
+
+def _wait_for_release(release, deadline: float) -> None:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0 or not release.wait(remaining):
+        raise TimeoutError("parallel eviction release expired")
+
+
+def _manager_is_closed(manager) -> bool:
+    with manager._lock:
+        return manager._closed
+
+
+def _await_manager_closed(manager, deadline: float) -> None:
+    while not _manager_is_closed(manager):
+        if time.monotonic() >= deadline:
+            pytest.fail("close_all did not close manager before key waiter release")
+        time.sleep(0.01)
+
+
+def _probe_lock_from_thread(lock, observed, deadline: float) -> None:
+    """Prove the manager lock is free while a close runs outside it."""
+    def probe() -> None:
+        remaining = deadline - time.monotonic()
+        if remaining > 0 and lock.acquire(timeout=remaining):
+            observed.set()
+            lock.release()
+
+    thread = threading.Thread(target=probe)
+    thread.start()
+    thread.join(max(0.0, deadline - time.monotonic()))
+
+
+def _sessions_for_checkout(manager, checkout_id: str) -> list:
+    return [
+        session
+        for session in manager._sessions.values()
+        if session._repository.checkout_id == checkout_id
+    ]
+
+
+def _oversized_entry(entry):
+    if entry.path != "pkg/service.py":
+        return entry
+    return replace(entry, size=pyright_session_module._MAX_DOCUMENT_BYTES + 1)
+
+
+def _oversized_document_revision(revision):
+    """Claim the changed document exceeds the per-document byte limit."""
+    return replace(
+        revision, entries=tuple(_oversized_entry(entry) for entry in revision.entries)
+    )
+
+
+def _lower_open_document_limit(monkeypatch, revision) -> None:
+    """Put the aggregate open-document limit just under the changed document."""
+    entry = next(item for item in revision.entries if item.path == "pkg/service.py")
+    monkeypatch.setattr(
+        pyright_session_module, "_MAX_OPEN_DOCUMENT_BYTES", entry.size - 1
+    )
+
+
+def _hold_at_barrier(ready, release, deadline: float) -> None:
+    """Publish that this stage completed, then wait for the test to release it."""
+    ready.set()
+    if not release.wait(max(0.0, deadline - time.monotonic())):
+        raise TimeoutError("call prepare publication barrier expired")
+
+
+def _definition_requests(fixture) -> int:
+    return sum(
+        event.get("method") == "textDocument/definition" for event in fixture.events()
+    )
+
+
+def _generation_methods(messages, pid: int) -> list[str]:
+    return [event["method"] for event in messages if event["pid"] == pid]
+
+
+def _opened_document(messages, pid: int) -> dict:
+    return next(
+        event["message"]["params"]["textDocument"]
+        for event in messages
+        if event["pid"] == pid and event["method"] == "textDocument/didOpen"
+    )
+
+
+def _assert_generation_replayed(messages, pid: int, content: str) -> None:
+    """Each server generation gets the same opening sequence and document."""
+    assert _generation_methods(messages, pid)[:5] == [
+        "initialize",
+        "initialized",
+        "workspace/didChangeConfiguration",
+        "textDocument/didOpen",
+        "textDocument/documentSymbol",
+    ]
+    opened = _opened_document(messages, pid)
+    assert opened["version"] == 1
+    assert opened["text"] == content
+
+
+def _benign_response_results(fixture) -> list[object]:
+    return [
+        event["response"]["result"]
+        for event in fixture.events()
+        if event["kind"] == "client-response"
+        and event["request_id"] != "semantic-configuration"
+    ]
+
+
+def _runtime_file_names(state_root: Path) -> list[str]:
+    return [
+        path.relative_to(state_root).as_posix()
+        for path in state_root.rglob("*")
+        if path.is_file()
+    ]
+
+
+def _runtime_files_matching(state_root: Path, markers) -> list[str]:
+    """Runtime files whose path names any of these markers."""
+    return [
+        name
+        for name in _runtime_file_names(state_root)
+        if any(marker in name for marker in markers)
+    ]
+
+
+def _client_events(events) -> list[dict]:
+    return [event for event in events if event["kind"] == "client-message"]
+
+
+def _probe_uris(messages, pid: int) -> list[str]:
+    return [
+        event["message"]["params"]["textDocument"]["uri"]
+        for event in messages
+        if event["pid"] == pid and event["method"] == "textDocument/documentSymbol"
+    ]
+
+
+def _client_pids(events) -> tuple[int, ...]:
+    """Distinct server processes that received client messages, in order."""
+    return tuple(
+        dict.fromkeys(
+            event["pid"] for event in events if event["kind"] == "client-message"
+        )
+    )
+
+
+def _method_events(events, pid: int, method: str) -> int:
+    return sum(
+        1
+        for event in events
+        if event["pid"] == pid and event.get("method") == method
+    )
+
+
+def _join_all(threads, timeout: float = 5) -> None:
+    for thread in threads:
+        thread.join(timeout)
+    assert all(not thread.is_alive() for thread in threads)
+
+
+def _client_methods(fixture) -> list[str]:
+    return [
+        event["method"]
+        for event in fixture.events()
+        if event["kind"] == "client-message"
+    ]
+
+
+def _pending_cleanup_owner_ids() -> set[int]:
+    return {
+        id(coordinator)
+        for coordinator in lsp_process._pending_startup_cleanup_snapshot()
+    }
+
+
+def _unregister_cleanup_owners(errors) -> None:
+    for error in errors:
+        coordinator = error.coordinator
+        if coordinator is not None:
+            lsp_process._unregister_startup_cleanup(coordinator)
+
+
+def _acyclic_exception_graph(error: BaseException) -> list[BaseException]:
+    """Every exception reachable through cause and context, proving no cycle."""
+    pending = [error]
+    seen: set[int] = set()
+    reachable: list[BaseException] = []
+    while pending:
+        current = pending.pop()
+        assert id(current) not in seen
+        seen.add(id(current))
+        reachable.append(current)
+        pending.extend(_linked_exceptions(current))
+    return reachable
+
+
+def _linked_exceptions(error: BaseException) -> list[BaseException]:
+    return [item for item in (error.__cause__, error.__context__) if item is not None]
+
+
+def _client_message_payloads(events) -> list[dict]:
+    return [event["message"] for event in events if event["kind"] == "client-message"]
+
+
+def _client_messages_once_logged(semantic_pyright, expected: int, timeout: float = 30.0):
+    """Wait for the fake server to log what it has already answered.
+
+    The server appends to its event log after replying, so a hosted macOS
+    runner could observe two of the three startup messages even though the
+    session had recorded all three as readiness evidence.
+    """
+    deadline = time.monotonic() + timeout
+    messages = _client_message_payloads(semantic_pyright.events())
+    while len(messages) < expected and time.monotonic() < deadline:
+        time.sleep(0.02)
+        messages = _client_message_payloads(semantic_pyright.events())
+    return messages
+
+
+def _assert_start_command(command, semantic_pyright, owner_root: Path) -> None:
+    assert command == (
+        str(semantic_pyright.identity.node_executable),
+        str(semantic_pyright.identity.server_executable),
+        "--stdio",
+        f"--cancellationReceive=file:{owner_root / 'cancellation'}",
+    )
+
+
+def _assert_start_options(options, scope) -> None:
+    assert options["cwd"] == Path(scope.checkout_root)
+    assert options["deadline"] > time.monotonic()
+    assert set(options["server_request_handlers"]) == {
+        "client/registerCapability",
+        "client/unregisterCapability",
+        "window/workDoneProgress/create",
+        "workspace/configuration",
+    }
+    assert set(options["server_notification_handlers"]) == {
+        "$/progress",
+        "pyright/beginProgress",
+        "pyright/endProgress",
+        "pyright/reportProgress",
+        "textDocument/publishDiagnostics",
+    }
+
+
+def _assert_owner_root_is_private(owner_root: Path, state_root: Path) -> None:
+    assert owner_root.parent == state_root / "run/lsp"
+    assert owner_root.parent.is_dir()
+    assert not owner_root.parent.is_symlink()
+    if os.name == "posix":
+        assert stat.S_IMODE(owner_root.parent.stat().st_mode) == 0o700
+
+
 def test_start_uses_exact_command_initialize_and_configuration_contract(
     monkeypatch: pytest.MonkeyPatch,
     repository: Path,
@@ -663,39 +981,11 @@ def test_start_uses_exact_command_initialize_and_configuration_contract(
         command, options = calls[0]
         owner_root = options["owner_root"]
         assert isinstance(owner_root, Path)
-        assert command == (
-            str(semantic_pyright.identity.node_executable),
-            str(semantic_pyright.identity.server_executable),
-            "--stdio",
-            f"--cancellationReceive=file:{owner_root / 'cancellation'}",
-        )
-        assert options["cwd"] == Path(scope.checkout_root)
-        assert options["deadline"] > time.monotonic()
-        assert set(options["server_request_handlers"]) == {
-            "client/registerCapability",
-            "client/unregisterCapability",
-            "window/workDoneProgress/create",
-            "workspace/configuration",
-        }
-        assert set(options["server_notification_handlers"]) == {
-            "$/progress",
-            "pyright/beginProgress",
-            "pyright/endProgress",
-            "pyright/reportProgress",
-            "textDocument/publishDiagnostics",
-        }
-        assert owner_root.parent == state_root / "run/lsp"
-        assert owner_root.parent.is_dir()
-        assert not owner_root.parent.is_symlink()
-        if os.name == "posix":
-            assert stat.S_IMODE(owner_root.parent.stat().st_mode) == 0o700
+        _assert_start_command(command, semantic_pyright, owner_root)
+        _assert_start_options(options, scope)
+        _assert_owner_root_is_private(owner_root, state_root)
 
-        events = semantic_pyright.events()
-        client_messages = [
-            event["message"]
-            for event in events
-            if event["kind"] == "client-message"
-        ]
+        client_messages = _client_messages_once_logged(semantic_pyright, 3)
         assert [message["method"] for message in client_messages] == [
             "initialize",
             "initialized",
@@ -762,7 +1052,9 @@ def test_start_uses_exact_command_initialize_and_configuration_contract(
         settings = thaw_pyright_profile_value(PYRIGHT_CONFIGURATION)
         assert client_messages[2]["params"] == {"settings": settings}
         configuration = next(
-            event for event in events if event["kind"] == "configuration"
+            event
+            for event in semantic_pyright.events()
+            if event["kind"] == "configuration"
         )
         assert configuration["values"] == [
             settings["python"],
@@ -1086,18 +1378,7 @@ def test_close_unwraps_retained_cleanup_interruption_and_preserves_owner(
         ) as raised:
             session.close(deadline=time.monotonic() + 5)
 
-        pending = [raised.value]
-        seen: set[int] = set()
-        reachable: list[BaseException] = []
-        while pending:
-            current = pending.pop()
-            assert id(current) not in seen
-            seen.add(id(current))
-            reachable.append(current)
-            if current.__cause__ is not None:
-                pending.append(current.__cause__)
-            if current.__context__ is not None:
-                pending.append(current.__context__)
+        reachable = _acyclic_exception_graph(raised.value)
 
         assert raised.value is interruption
         assert wrapper in reachable
@@ -1145,18 +1426,7 @@ def test_close_unwraps_retained_process_interruption_and_preserves_owner(
         with pytest.raises(SystemExit) as raised:
             session.close(deadline=time.monotonic() + 5)
 
-        pending = [raised.value]
-        seen: set[int] = set()
-        reachable: list[BaseException] = []
-        while pending:
-            current = pending.pop()
-            assert id(current) not in seen
-            seen.add(id(current))
-            reachable.append(current)
-            if current.__cause__ is not None:
-                pending.append(current.__cause__)
-            if current.__context__ is not None:
-                pending.append(current.__context__)
+        reachable = _acyclic_exception_graph(raised.value)
 
         assert raised.value is interruption
         assert wrapper is not None and wrapper in reachable
@@ -1220,10 +1490,7 @@ def test_session_adopts_cleanup_owner_without_exhausting_global_registry(
     state_root: Path,
     semantic_pyright: SemanticPyrightFixture,
 ) -> None:
-    baseline = {
-        id(coordinator)
-        for coordinator in lsp_process._pending_startup_cleanup_snapshot()
-    }
+    baseline = _pending_cleanup_owner_ids()
     sessions: list[PyrightSession] = []
     errors: list[StartupCleanupError] = []
     cleanup_attempts: dict[int, int] = {}
@@ -1255,18 +1522,12 @@ def test_session_adopts_cleanup_owner_without_exhausting_global_registry(
             session.start(deadline=time.monotonic() + 5)
 
         assert len(errors) == lsp_process._MAX_STARTUP_CLEANUP_OWNERS + 1
-        assert {
-            id(coordinator)
-            for coordinator in lsp_process._pending_startup_cleanup_snapshot()
-        } == baseline
+        assert _pending_cleanup_owner_ids() == baseline
         assert [session._startup_cleanup_error for session in sessions] == errors
     finally:
         for session in sessions:
             session.close(deadline=time.monotonic() + 5)
-        for error in errors:
-            coordinator = error.coordinator
-            if coordinator is not None:
-                lsp_process._unregister_startup_cleanup(coordinator)
+        _unregister_cleanup_owners(errors)
 
 
 def test_failed_session_atexit_registration_keeps_global_cleanup_owner(
@@ -1390,18 +1651,7 @@ def test_wrapped_interruption_during_retained_cleanup_is_rethrown_with_owner(
         ) as raised:
             session.start(deadline=time.monotonic() + 5)
 
-        pending = [raised.value]
-        seen: set[int] = set()
-        reachable: list[BaseException] = []
-        while pending:
-            current = pending.pop()
-            assert id(current) not in seen
-            seen.add(id(current))
-            reachable.append(current)
-            if current.__cause__ is not None:
-                pending.append(current.__cause__)
-            if current.__context__ is not None:
-                pending.append(current.__context__)
+        reachable = _acyclic_exception_graph(raised.value)
 
         assert raised.value is interruption
         assert wrapper in reachable
@@ -1453,18 +1703,7 @@ def test_wrapped_interruption_during_retained_process_close_is_rethrown_with_own
         with pytest.raises(SystemExit) as raised:
             session.start(deadline=time.monotonic() + 5)
 
-        pending = [raised.value]
-        seen: set[int] = set()
-        reachable: list[BaseException] = []
-        while pending:
-            current = pending.pop()
-            assert id(current) not in seen
-            seen.add(id(current))
-            reachable.append(current)
-            if current.__cause__ is not None:
-                pending.append(current.__cause__)
-            if current.__context__ is not None:
-                pending.append(current.__context__)
+        reachable = _acyclic_exception_graph(raised.value)
 
         assert raised.value is interruption
         assert wrapper is not None and wrapper in reachable
@@ -2089,18 +2328,11 @@ def test_concurrent_first_open_sends_one_didopen(
         thread.start()
     start.wait()
     try:
-        for thread in threads:
-            thread.join(5)
-        assert all(not thread.is_alive() for thread in threads)
+        _join_all(threads)
         assert errors == []
         assert len(documents) == 2
         assert documents[0] is documents[1]
-        methods = [
-            event["method"]
-            for event in semantic_pyright.events()
-            if event["kind"] == "client-message"
-        ]
-        assert methods.count("textDocument/didOpen") == 1
+        assert _client_methods(semantic_pyright).count("textDocument/didOpen") == 1
     finally:
         session.close(deadline=time.monotonic() + 5)
 
@@ -2161,22 +2393,9 @@ def test_open_racing_restart_sends_didopen_once_for_replacement_generation(
         assert process is not None
         assert process.restart_count == 1
         events = semantic_pyright.events()
-        pids = tuple(
-            dict.fromkeys(
-                event["pid"]
-                for event in events
-                if event["kind"] == "client-message"
-            )
-        )
+        pids = _client_pids(events)
         assert len(pids) == 2
-        replacement_pid = pids[-1]
-        replacement_opens = [
-            event
-            for event in events
-            if event["pid"] == replacement_pid
-            and event.get("method") == "textDocument/didOpen"
-        ]
-        assert len(replacement_opens) == 1
+        assert _method_events(events, pids[-1], "textDocument/didOpen") == 1
     finally:
         session.close(deadline=time.monotonic() + 5)
 
@@ -2293,12 +2512,7 @@ def test_ready_second_document_cannot_authorize_failed_first_document(
         )
 
         assert result == ProviderLocations((), "not_ready", True)
-        methods = [
-            event["method"]
-            for event in fixture.events()
-            if event["kind"] == "client-message"
-        ]
-        assert "textDocument/definition" not in methods
+        assert "textDocument/definition" not in _client_methods(fixture)
     finally:
         session.close(deadline=time.monotonic() + 5)
 
@@ -2333,20 +2547,10 @@ def test_restart_rebuilds_readiness_per_replayed_document(
 
         assert result == ProviderLocations((), "not_ready", True)
         assert session.readiness == "query_ready"
-        messages = [
-            event
-            for event in fixture.events()
-            if event["kind"] == "client-message"
-        ]
-        pids = tuple(dict.fromkeys(event["pid"] for event in messages))
+        messages = _client_events(fixture.events())
+        pids = _client_pids(messages)
         assert len(pids) == 2
-        restarted_probes = [
-            event["message"]["params"]["textDocument"]["uri"]
-            for event in messages
-            if event["pid"] == pids[1]
-            and event["method"] == "textDocument/documentSymbol"
-        ]
-        assert restarted_probes == [
+        assert _probe_uris(messages, pids[1]) == [
             (repository / "pkg/service.py").resolve().as_uri(),
             (repository / "pkg/api.py").resolve().as_uri(),
         ]
@@ -2406,12 +2610,7 @@ def test_malformed_document_symbol_list_cannot_establish_readiness(
             deadline=time.monotonic() + 10,
         )
         assert result == ProviderLocations((), "not_ready", True)
-        methods = [
-            event["method"]
-            for event in fixture.events()
-            if event["kind"] == "client-message"
-        ]
-        assert "textDocument/definition" not in methods
+        assert "textDocument/definition" not in _client_methods(fixture)
     finally:
         session.close(deadline=time.monotonic() + 5)
 
@@ -2508,14 +2707,22 @@ def test_open_document_propagates_deadline_to_stable_source_read(
         session.close(deadline=time.monotonic() + 5)
 
 
+# The subject must return on its own deadline while the lock is still held, so
+# the holder keeps holding until the test says otherwise. A fixed sleep raced
+# the assertions on a loaded macOS runner and the hold ended first.
+CONTENTION_HOLD_SECONDS = 60.0
+CONTENTION_RETURN_SECONDS = 5.0
+
+
 def _hold_document_lock_for_contention(
     session: PyrightSession,
     held: threading.Event,
     released: threading.Event,
+    release_request: threading.Event,
 ) -> None:
     with session._document_lock:
         held.set()
-        time.sleep(0.25)
+        release_request.wait(CONTENTION_HOLD_SECONDS)
     released.set()
 
 
@@ -2527,9 +2734,10 @@ def test_open_document_lock_contention_obeys_deadline_without_mutation(
     session = _session(repository, state_root, semantic_pyright)
     held = threading.Event()
     released = threading.Event()
+    release_request = threading.Event()
     holder = threading.Thread(
         target=_hold_document_lock_for_contention,
-        args=(session, held, released),
+        args=(session, held, released, release_request),
     )
     holder.start()
     assert held.wait(1)
@@ -2556,7 +2764,7 @@ def test_open_document_lock_contention_obeys_deadline_without_mutation(
                 "pkg/service.py",
                 deadline=started + 0.05,
             )
-        assert time.monotonic() - started < 0.2
+        assert time.monotonic() - started < CONTENTION_RETURN_SECONDS
         assert released.is_set() is False
         assert (
             session._readiness,
@@ -2576,8 +2784,9 @@ def test_open_document_lock_contention_obeys_deadline_without_mutation(
         assert tuple(semantic_pyright.events()) == before_events
         assert not (state_root / "run/lsp").exists()
     finally:
-        holder.join(1)
-        session.close(deadline=time.monotonic() + 1)
+        release_request.set()
+        holder.join(30)
+        session.close(deadline=time.monotonic() + 30)
     assert not holder.is_alive()
 
 
@@ -2593,9 +2802,10 @@ def test_synchronize_lock_contention_obeys_deadline_without_mutation(
     )
     held = threading.Event()
     released = threading.Event()
+    release_request = threading.Event()
     holder = threading.Thread(
         target=_hold_document_lock_for_contention,
-        args=(session, held, released),
+        args=(session, held, released, release_request),
     )
     holder.start()
     assert held.wait(1)
@@ -2619,7 +2829,7 @@ def test_synchronize_lock_contention_obeys_deadline_without_mutation(
     try:
         with pytest.raises(TimeoutError, match="document lock"):
             session.synchronize(revision, deadline=started + 0.05)
-        assert time.monotonic() - started < 0.2
+        assert time.monotonic() - started < CONTENTION_RETURN_SECONDS
         assert released.is_set() is False
         assert (
             session._readiness,
@@ -2639,8 +2849,9 @@ def test_synchronize_lock_contention_obeys_deadline_without_mutation(
         assert tuple(semantic_pyright.events()) == before_events
         assert not (state_root / "run/lsp").exists()
     finally:
-        holder.join(1)
-        session.close(deadline=time.monotonic() + 1)
+        release_request.set()
+        holder.join(30)
+        session.close(deadline=time.monotonic() + 30)
     assert not holder.is_alive()
 
 
@@ -2780,12 +2991,7 @@ def test_missing_or_false_capability_sends_no_feature_request(
             deadline=time.monotonic() + 10,
         )
         assert result == ProviderLocations((), "unsupported", True)
-        methods = [
-            event["method"]
-            for event in fixture.events()
-            if event["kind"] == "client-message"
-        ]
-        assert "textDocument/definition" not in methods
+        assert "textDocument/definition" not in _client_methods(fixture)
     finally:
         session.close(deadline=time.monotonic() + 5)
 
@@ -2805,12 +3011,7 @@ def test_not_ready_never_returns_a_complete_provider_negative(
             deadline=time.monotonic() + 10,
         )
         assert result == ProviderLocations((), "not_ready", True)
-        methods = [
-            event["method"]
-            for event in fixture.events()
-            if event["kind"] == "client-message"
-        ]
-        assert "textDocument/definition" not in methods
+        assert "textDocument/definition" not in _client_methods(fixture)
     finally:
         session.close(deadline=time.monotonic() + 5)
 
@@ -3551,10 +3752,14 @@ def test_diagnostic_replacement_and_stale_accounting_are_exact(
             "end": {"line": 0, "character": 1},
         },
     }
+    # The cap has to leave room for the URIs themselves: a macOS temporary path
+    # runs about ninety characters longer than a Linux one, and a fixed budget
+    # evicts the second file there before the policy under test is exercised.
+    cap = 1400 + len(service_uri) + len(api_uri)
     monkeypatch.setattr(
         pyright_session_module,
         "_MAX_DIAGNOSTIC_BYTES",
-        1400,
+        cap,
         raising=False,
     )
     try:
@@ -3589,7 +3794,7 @@ def test_diagnostic_replacement_and_stale_accounting_are_exact(
         assert session._diagnostic_bytes == sum(
             snapshot.retained_bytes for snapshot in session._diagnostics.values()
         )
-        assert session._diagnostic_bytes <= 1400
+        assert session._diagnostic_bytes <= cap
 
         retained_bytes = session._diagnostic_bytes
         retained = session._diagnostics[service_uri]
@@ -3623,20 +3828,9 @@ def test_benign_server_requests_and_progress_are_bounded_in_memory_only(
             ("pyright/reportProgress", "Analyzing files"),
             ("pyright/endProgress",),
         )
-        responses = [
-            event["response"]
-            for event in fixture.events()
-            if event["kind"] == "client-response"
-            and event["request_id"] != "semantic-configuration"
-        ]
-        assert [response["result"] for response in responses] == [None, None, None]
+        assert _benign_response_results(fixture) == [None, None, None]
         assert session.capabilities["implementations"] is False
-        runtime_files = tuple(
-            path.relative_to(state_root).as_posix()
-            for path in state_root.rglob("*")
-            if path.is_file()
-        )
-        assert all("progress" not in path and "diagnostic" not in path for path in runtime_files)
+        assert not _runtime_files_matching(state_root, ("progress", "diagnostic"))
     finally:
         session.close(deadline=time.monotonic() + 5)
 
@@ -3714,30 +3908,11 @@ def test_transparent_restart_requires_fresh_query_after_reopen_and_reprobe(
             "didOpen",
             "documentSymbol",
         )
-        messages = [
-            event
-            for event in fixture.events()
-            if event["kind"] == "client-message"
-        ]
-        pids = tuple(dict.fromkeys(event["pid"] for event in messages))
+        messages = _client_events(fixture.events())
+        pids = _client_pids(messages)
         assert len(pids) == 2
         for pid in pids:
-            generation = [event["method"] for event in messages if event["pid"] == pid]
-            assert generation[:5] == [
-                "initialize",
-                "initialized",
-                "workspace/didChangeConfiguration",
-                "textDocument/didOpen",
-                "textDocument/documentSymbol",
-            ]
-            opened = next(
-                event["message"]["params"]["textDocument"]
-                for event in messages
-                if event["pid"] == pid
-                and event["method"] == "textDocument/didOpen"
-            )
-            assert opened["version"] == 1
-            assert opened["text"] == content
+            _assert_generation_replayed(messages, pid, content)
         assert sum(event["method"] == "textDocument/definition" for event in messages) == 3
         assert session.diagnostics(
             "pkg/service.py",
@@ -4090,10 +4265,7 @@ def test_terminal_process_state_revokes_session_readiness_before_semantic_use(
         assert process is not None
         original_state = process.state
         process.state = terminal_state
-        definitions_before = sum(
-            event.get("method") == "textDocument/definition"
-            for event in semantic_pyright.events()
-        )
+        definitions_before = _definition_requests(semantic_pyright)
 
         assert session.readiness == "not_ready"
         assert session.readiness_evidence == ()
@@ -4103,10 +4275,7 @@ def test_terminal_process_state_revokes_session_readiness_before_semantic_use(
             _anchor(repository, "pkg/service.py", 10, 20),
             deadline=time.monotonic() + 10,
         ) == ProviderLocations((), "not_ready", True)
-        assert sum(
-            event.get("method") == "textDocument/definition"
-            for event in semantic_pyright.events()
-        ) == definitions_before
+        assert _definition_requests(semantic_pyright) == definitions_before
     finally:
         if process is not None and original_state is not None:
             process.state = original_state
@@ -4373,12 +4542,12 @@ def test_synchronize_fence_rejects_queries_started_before_and_during_wire_commit
             )
             if current is process and method == request_method:
                 semantic_requests += 1
-                if semantic_requests == 1:
-                    first_response_ready.set()
-                    if not release_first_response.wait(
-                        max(0.0, deadline - time.monotonic())
-                    ):
-                        raise TimeoutError("semantic response release expired")
+                _hold_first_response(
+                    semantic_requests,
+                    first_response_ready,
+                    release_first_response,
+                    deadline,
+                )
             return result
 
         def hold_after_delivered_change(
@@ -4530,11 +4699,11 @@ def test_call_hierarchy_stops_after_prepare_when_document_version_changes(
                 deadline=deadline,
                 cancellation=cancellation,  # type: ignore[arg-type]
             )
-            if current is process and method == "textDocument/prepareCallHierarchy":
-                prepare_ready.set()
-                if not release_prepare.wait(max(0.0, deadline - time.monotonic())):
-                    raise TimeoutError("call prepare publication barrier expired")
-            elif current is process and method == "callHierarchy/incomingCalls":
+            if current is not process:
+                return result
+            if method == "textDocument/prepareCallHierarchy":
+                _hold_at_barrier(prepare_ready, release_prepare, deadline)
+            elif method == "callHierarchy/incomingCalls":
                 second_stage_calls += 1
             return result
 
@@ -5238,28 +5407,10 @@ def test_synchronize_rejects_projected_source_bounds_before_reads_or_notificatio
         (repository / "pkg/service.py").write_bytes(b"projected = True\n")
         revision = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
         if bound == "document":
-            revision = replace(
-                revision,
-                entries=tuple(
-                    replace(
-                        entry,
-                        size=pyright_session_module._MAX_DOCUMENT_BYTES + 1,
-                    )
-                    if entry.path == "pkg/service.py"
-                    else entry
-                    for entry in revision.entries
-                ),
-            )
+            revision = _oversized_document_revision(revision)
             expected = "source document byte limit"
         else:
-            entry = next(
-                item for item in revision.entries if item.path == "pkg/service.py"
-            )
-            monkeypatch.setattr(
-                pyright_session_module,
-                "_MAX_OPEN_DOCUMENT_BYTES",
-                entry.size - 1,
-            )
+            _lower_open_document_limit(monkeypatch, revision)
             expected = "open document source bytes limit"
 
         reads = 0
@@ -5698,30 +5849,28 @@ def test_synchronize_deadline_recovery_quarantines_partially_mutated_process(
             generation_nonce: str,
             deadline: float,
         ) -> bool:
-            if current is process and failure_returned:
-                stale_fresh_calls.append(method)
-                raise AssertionError("fresh work reached quarantined process")
-            if current is process and method == "textDocument/didChange":
-                delivered = notify_generation(
+            def deliver() -> bool:
+                return notify_generation(
                     current,
                     method,
                     params,
                     generation_nonce=generation_nonce,
                     deadline=deadline,
                 )
-                assert delivered is True
+
+            if current is not process:
+                return deliver()
+            if failure_returned:
+                stale_fresh_calls.append(method)
+                raise AssertionError("fresh work reached quarantined process")
+            if method == "textDocument/didChange":
+                assert deliver() is True
                 partial_changes.append(generation_nonce)
                 return True
-            if current is process and method == "workspace/didChangeWatchedFiles":
+            if method == "workspace/didChangeWatchedFiles":
                 assert partial_changes == [generation]
                 return False
-            return notify_generation(
-                current,
-                method,
-                params,
-                generation_nonce=generation_nonce,
-                deadline=deadline,
-            )
+            return deliver()
 
         def expire_recovery(current: LspProcess, deadline: float) -> None:
             if current is process:
@@ -6082,7 +6231,9 @@ def test_synchronize_rejects_noop_recovery_as_unproven(
                 generation_nonce=generation_nonce,
                 deadline=deadline,
             )
-            return False if current is process and method == "textDocument/didChange" else delivered
+            if current is process and method == "textDocument/didChange":
+                return False
+            return delivered
 
         monkeypatch.setattr(LspProcess, "notify_generation", partial_change)
         monkeypatch.setattr(
@@ -6663,11 +6814,13 @@ def test_session_close_state_lock_wait_obeys_absolute_deadline(
     )
     held = threading.Event()
 
+    release_request = threading.Event()
+
     def hold_state_lock() -> None:
         session._lock.acquire()
         try:
             held.set()
-            time.sleep(0.25)
+            release_request.wait(CONTENTION_HOLD_SECONDS)
         finally:
             session._lock.release()
 
@@ -6678,11 +6831,12 @@ def test_session_close_state_lock_wait_obeys_absolute_deadline(
     try:
         with pytest.raises(TimeoutError, match="state lock"):
             session.close(deadline=started + 0.05)
-        assert time.monotonic() - started < 0.2
+        assert time.monotonic() - started < CONTENTION_RETURN_SECONDS
         assert session._closed is False
     finally:
-        holder.join(1)
-        session.close(deadline=time.monotonic() + 1)
+        release_request.set()
+        holder.join(30)
+        session.close(deadline=time.monotonic() + 30)
     assert not holder.is_alive()
     assert session._closed is True
 
@@ -6740,15 +6894,7 @@ def test_manager_failed_eviction_retains_slot_and_closes_outside_global_lock(
     lock_was_available = threading.Event()
 
     def fail_close(*, deadline: float) -> None:
-        def probe_manager_lock() -> None:
-            remaining = deadline - time.monotonic()
-            if remaining > 0 and manager._lock.acquire(timeout=remaining):
-                lock_was_available.set()
-                manager._lock.release()
-
-        probe = threading.Thread(target=probe_manager_lock)
-        probe.start()
-        probe.join(max(0.0, deadline - time.monotonic()))
+        _probe_lock_from_thread(manager._lock, lock_was_available, deadline)
         raise OSError("injected close failure")
 
     try:
@@ -6761,10 +6907,7 @@ def test_manager_failed_eviction_retains_slot_and_closes_outside_global_lock(
         assert len(manager._sessions) == 4
         assert retained[0] in manager._sessions.values()
         assert retained[0]._closed is False
-        assert all(
-            session._repository.checkout_id != scopes[4].checkout_id
-            for session in manager._sessions.values()
-        )
+        assert not _sessions_for_checkout(manager, scopes[4].checkout_id)
     finally:
         manager.close_all(deadline=time.monotonic() + 5)
 
@@ -6835,14 +6978,7 @@ def test_manager_close_all_retains_failures_continues_and_rethrows_first_interru
     state_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    scopes: list[RepositoryScope] = []
-    identities: dict[str, object] = {}
-    for index in range(4):
-        repo, fixture = _make_repo_fixture(tmp_path, f"interrupt-{index}")
-        scope = resolve_repository_scope(repo)
-        scopes.append(scope)
-        identities[scope.checkout_id] = fixture.identity
-    _patch_discovery(monkeypatch, identities)
+    scopes = _prepared_scopes(tmp_path, monkeypatch, "interrupt", 4)
     manager = PyrightSessionManager(state_root=state_root)
     sessions = [
         manager.get(scope, deadline=time.monotonic() + 10)
@@ -6851,15 +6987,16 @@ def test_manager_close_all_retains_failures_continues_and_rethrows_first_interru
     attempts: list[int] = []
     real_close = [session.close for session in sessions]
 
+    first_failures = {
+        0: OSError("first close failed"),
+        1: KeyboardInterrupt("first interruption"),
+        2: SystemExit(29),
+    }
+
     def flaky_close(index: int, *, deadline: float) -> None:
         attempts.append(index)
-        if attempts.count(index) == 1:
-            if index == 0:
-                raise OSError("first close failed")
-            if index == 1:
-                raise KeyboardInterrupt("first interruption")
-            if index == 2:
-                raise SystemExit(29)
+        if attempts.count(index) == 1 and index in first_failures:
+            raise first_failures[index]
         real_close[index](deadline=deadline)
 
     with monkeypatch.context() as patch:
@@ -6892,14 +7029,7 @@ def test_manager_close_all_unwraps_earliest_interruption_without_cycle(
     state_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    scopes: list[RepositoryScope] = []
-    identities: dict[str, object] = {}
-    for index in range(3):
-        repo, fixture = _make_repo_fixture(tmp_path, f"wrapped-interrupt-{index}")
-        scope = resolve_repository_scope(repo)
-        scopes.append(scope)
-        identities[scope.checkout_id] = fixture.identity
-    _patch_discovery(monkeypatch, identities)
+    scopes = _prepared_scopes(tmp_path, monkeypatch, "wrapped-interrupt", 3)
     manager = PyrightSessionManager(state_root=state_root)
     sessions = [
         manager.get(scope, deadline=time.monotonic() + 10)
@@ -6912,13 +7042,12 @@ def test_manager_close_all_unwraps_earliest_interruption_without_cycle(
     wrapper = RuntimeError("manager close interruption wrapper")
     wrapper.__cause__ = interruption
 
+    first_failures = {0: wrapper, 1: ordinary_error}
+
     def flaky_close(index: int, *, deadline: float) -> None:
         attempts.append(index)
-        if attempts.count(index) == 1:
-            if index == 0:
-                raise wrapper
-            if index == 1:
-                raise ordinary_error
+        if attempts.count(index) == 1 and index in first_failures:
+            raise first_failures[index]
         real_close[index](deadline=deadline)
 
     with monkeypatch.context() as patch:
@@ -7038,14 +7167,7 @@ def test_manager_get_rechecks_closed_after_per_key_wait(
 
         closer = threading.Thread(target=close_manager)
         closer.start()
-        closed_deadline = time.monotonic() + 1
-        while True:
-            with manager._lock:
-                if manager._closed:
-                    break
-            if time.monotonic() >= closed_deadline:
-                pytest.fail("close_all did not close manager before key waiter release")
-            time.sleep(0.01)
+        _await_manager_closed(manager, time.monotonic() + 1)
         assert close_done.wait(0.05) is False
     finally:
         key_lock_state.lock.release()
@@ -7273,8 +7395,11 @@ def test_manager_reference_gate_deadline_stays_bounded_across_sequential_waiters
 
     def keep_reference() -> None:
         try:
+            # The keeper only has to outlive the hundred contenders below; ten
+            # seconds was shorter than that loop on a hosted macOS runner, so
+            # the fixture expired instead of the subject under test.
             keeper_results.append(
-                manager.get(scope, deadline=time.monotonic() + 10)
+                manager.get(scope, deadline=time.monotonic() + 180)
             )
         except BaseException as error:
             keeper_errors.append(error)
@@ -7448,31 +7573,20 @@ def test_manager_parallel_evictions_reserve_distinct_idle_sessions_with_capacity
     state_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    scopes: list[RepositoryScope] = []
-    identities: dict[str, object] = {}
-    for index in range(6):
-        repo, fixture = _make_repo_fixture(tmp_path, f"parallel-{index}")
-        scope = resolve_repository_scope(repo)
-        scopes.append(scope)
-        identities[scope.checkout_id] = fixture.identity
-    _patch_discovery(monkeypatch, identities)
+    scopes = _prepared_scopes(tmp_path, monkeypatch, "parallel", 6)
     manager = PyrightSessionManager(state_root=state_root)
     retained = [
         manager.get(scope, deadline=time.monotonic() + 10)
         for scope in scopes[:4]
     ]
-    for index, session in enumerate(retained):
-        with session._lock:
-            session._last_used_monotonic = float(index)
+    _stagger_last_used(retained)
     close_entered = [threading.Event(), threading.Event()]
     release_close = threading.Event()
     real_close = [retained[index].close for index in range(2)]
 
     def blocked_close(index: int, *, deadline: float) -> None:
         close_entered[index].set()
-        remaining = deadline - time.monotonic()
-        if remaining <= 0 or not release_close.wait(remaining):
-            raise TimeoutError("parallel eviction release expired")
+        _wait_for_release(release_close, deadline)
         real_close[index](deadline=deadline)
 
     results: list[PyrightSession] = []
@@ -7486,39 +7600,17 @@ def test_manager_parallel_evictions_reserve_distinct_idle_sessions_with_capacity
 
     try:
         with monkeypatch.context() as patch:
-            for index in range(2):
-                patch.setattr(
-                    retained[index],
-                    "close",
-                    lambda *, deadline, index=index: blocked_close(
-                        index,
-                        deadline=deadline,
-                    ),
-                )
-            getters = [
-                threading.Thread(target=get_new, args=(scope,))
-                for scope in scopes[4:]
-            ]
-            for getter in getters:
-                getter.start()
+            _patch_blocked_closes(patch, retained[:2], blocked_close)
+            getters = _started_threads(get_new, scopes[4:])
             assert all(event.wait(2) for event in close_entered)
-            with manager._lock:
-                assert len(manager._sessions) == MAX_LSP_PROCESSES
-            assert retained[0]._closing is True
-            assert retained[1]._closing is True
-            for session in retained[:2]:
-                with pytest.raises(RuntimeError, match="closing"):
-                    with session._operation():
-                        pytest.fail("operation started after eviction reservation")
+            _assert_evictions_reserved(manager, retained[:2])
             release_close.set()
-            for getter in getters:
-                getter.join(5)
-                assert not getter.is_alive()
+            _join_all(getters)
 
         assert errors == []
         assert len(results) == 2
         assert len(manager._sessions) == MAX_LSP_PROCESSES
-        assert all(session in manager._sessions.values() for session in results)
+        assert _all_retained(manager, results)
         assert retained[0]._closed is True
         assert retained[1]._closed is True
     finally:

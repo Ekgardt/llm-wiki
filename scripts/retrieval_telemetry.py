@@ -391,7 +391,11 @@ def _readonly_database(path: Path) -> sqlite3.Connection | None:
     if not path.exists() and not path.is_symlink():
         return None
     return open_readonly_operational_db(
-        path, path.parent, max_bytes=MAX_DATABASE_BYTES, owner_only=False
+        path,
+        path.parent,
+        max_bytes=MAX_DATABASE_BYTES,
+        owner_only=False,
+        busy_ms=STRICT_BUSY_MS,
     )
 
 

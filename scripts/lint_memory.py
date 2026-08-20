@@ -65,14 +65,11 @@ from vault_editorial import (  # noqa: E402
     EDITORIAL_NAMES,
 )
 
-MEMORY = ROOT / "knowledge"
-KNOWLEDGE = MEMORY / "notes"
-DAILY_DIR = MEMORY / "daily"
-MEMORY_INDEX = MEMORY / "index.md"
-
-# Post three-zone: notes live under knowledge/notes; vault index is knowledge/index.md.
-WIKI = ROOT / "knowledge" / "notes"
-WIKI_INDEX = MEMORY / "index.md"
+# Three-zone layout: one knowledge tree, notes under it, one vault index.
+VAULT = ROOT / "knowledge"
+NOTES = VAULT / "notes"
+DAILY_DIR = VAULT / "daily"
+VAULT_INDEX = VAULT / "index.md"
 
 REPORTS = REPORTS_DIR
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+?)(?:\|[^\]]+)?\]\]")
@@ -130,14 +127,17 @@ def _rel(p: Path) -> str:
     return p.relative_to(ROOT).as_posix()
 
 
+def _is_body_line(line: str) -> bool:
+    """Content lines only: no blanks, no frontmatter fence, no headers."""
+    stripped = line.strip()
+    if not stripped or stripped.startswith("---"):
+        return False
+    return not line.lstrip().startswith("#")
+
+
 def _word_count(md: Path) -> int:
     text = md.read_text(encoding="utf-8", errors="ignore")
-    body_lines = [
-        ln for ln in text.splitlines()
-        if ln.strip() and not ln.strip().startswith("---")
-    ]
-    # Drop H1/H2/H3 headers from body for a content-only word count.
-    body = "\n".join(ln for ln in body_lines if not ln.lstrip().startswith("#"))
+    body = "\n".join(line for line in text.splitlines() if _is_body_line(line))
     return len(WORD_RE.findall(body))
 
 
@@ -146,22 +146,28 @@ def _extract_links(md: Path) -> list[str]:
     return [m.group(1) for m in WIKILINK_RE.finditer(text)]
 
 
-def _resolve_link(target: str, search_roots: list[Path]) -> Path | None:
-    t = target.strip()
-    if not t:
-        return None
-    # Path-style targets (e.g. "knowledge/notes/concepts/foo") — anchor at ROOT.
-    if "/" in t:
-        cands = [(ROOT / (t + ".md")).resolve(), (ROOT / t).resolve()]
-        for c in cands:
-            if c.exists() and c.is_file():
-                return c
-        return None
-    # Bare targets — search each tree for a page whose stem matches.
-    for root in search_roots:
-        for p in root.rglob(f"{t}.md"):
-            return p
+def _resolve_path_style_link(target: str) -> Path | None:
+    """A target with a slash is anchored at the vault root, with or without .md."""
+    for candidate in ((ROOT / (target + ".md")).resolve(), (ROOT / target).resolve()):
+        if candidate.is_file():
+            return candidate
     return None
+
+
+def _resolve_bare_link(target: str, search_roots: list[Path]) -> Path | None:
+    for root in search_roots:
+        for page in root.rglob(f"{target}.md"):
+            return page
+    return None
+
+
+def _resolve_link(target: str, search_roots: list[Path]) -> Path | None:
+    stripped = target.strip()
+    if not stripped:
+        return None
+    if "/" in stripped:
+        return _resolve_path_style_link(stripped)
+    return _resolve_bare_link(stripped, search_roots)
 
 
 def check_evidence_references(pages: list[Path]) -> list[str]:
@@ -213,118 +219,170 @@ def _git_tracked_paths() -> set[str] | None:
     return paths
 
 
-def check_broken_links(pages: list[Path], search_roots: list[Path]) -> list[str]:
+def _vault_relative(path: Path) -> str | None:
+    """Path inside the vault, or None when it points outside."""
+    try:
+        return path.resolve().relative_to(ROOT.resolve()).as_posix()
+    except ValueError:
+        return None
+
+
+def _scannable_page(md: Path, tracked: set[str] | None) -> bool:
+    """Daily logs quote wikilinks as prose, and untracked pages are personal.
+
+    Both are skipped as link sources; links *to* an untracked page still fail
+    below, because a clean checkout would not have that page.
+    """
+    if DAILY_DIR in md.parents or md.name in BROKEN_LINK_SKIP_NAMES:
+        return False
+    if tracked is None:
+        return True
+    relative = _vault_relative(md)
+    return relative is not None and relative in tracked
+
+
+def _is_placeholder_target(target: str) -> bool:
+    """Templates and prose examples are not links to resolve."""
+    stripped = target.strip()
+    if stripped in ("...", "wikilinks"):
+        return True
+    return "<" in stripped or ">" in stripped
+
+
+def _tracked_target_finding(
+    md: Path, target: str, resolved: Path, tracked: set[str]
+) -> str | None:
+    """A link a clean checkout could not follow is broken, even if it resolves here."""
+    relative = _vault_relative(resolved)
+    if relative is None:
+        return f"{_rel(md)} -> [[{target}]] (outside vault)"
+    if relative not in tracked:
+        return f"{_rel(md)} -> [[{target}]] (untracked/gitignored target)"
+    return None
+
+
+def _link_finding(
+    md: Path, target: str, search_roots: list[Path], tracked: set[str] | None
+) -> str | None:
+    if _is_placeholder_target(target):
+        return None
+    resolved = _resolve_link(target, search_roots)
+    if resolved is None:
+        return f"{_rel(md)} -> [[{target}]]"
+    if tracked is None:
+        return None
+    return _tracked_target_finding(md, target, resolved, tracked)
+
+
+def _page_link_findings(
+    md: Path, search_roots: list[Path], tracked: set[str] | None
+) -> list[str]:
     out: list[str] = []
-    tracked = _git_tracked_paths()
-    for md in pages:
-        # Daily logs contain transcribed prose that often cites `[[wikilinks]]`
-        # or `[[...]]` as literal examples. They are append-only raw capture,
-        # not curated pages — skip broken-link scanning over them.
-        if DAILY_DIR in md.parents:
-            continue
-        if md.name in BROKEN_LINK_SKIP_NAMES:
-            continue
-        # When git is available, only scan tracked pages (public vault surface).
-        # Personal gitignored notes under knowledge/projects/* must not fail CI
-        # simulation or local lint — but links *from* tracked pages *to* those
-        # files still fail below (untracked target).
-        if tracked is not None:
-            try:
-                src_rel = md.resolve().relative_to(ROOT.resolve()).as_posix()
-            except ValueError:
-                continue
-            if src_rel not in tracked:
-                continue
-        for t in _extract_links(md):
-            # Skip placeholder-looking targets: ellipses, generic "wikilinks",
-            # or angle-bracket templates like <category>/<slug>.
-            tt = t.strip()
-            if tt in ("...", "wikilinks") or "<" in tt or ">" in tt:
-                continue
-            resolved = _resolve_link(t, search_roots)
-            if resolved is None:
-                out.append(f"{_rel(md)} -> [[{t}]]")
-                continue
-            # If git metadata is available, require the target to be tracked.
-            # Prevents "works on my machine" where a personal gitignored page
-            # satisfies the link but CI clean checkout fails.
-            if tracked is not None:
-                try:
-                    rel = resolved.resolve().relative_to(ROOT.resolve()).as_posix()
-                except ValueError:
-                    out.append(f"{_rel(md)} -> [[{t}]] (outside vault)")
-                    continue
-                if rel not in tracked:
-                    out.append(f"{_rel(md)} -> [[{t}]] (untracked/gitignored target)")
+    for target in _extract_links(md):
+        finding = _link_finding(md, target, search_roots, tracked)
+        if finding is not None:
+            out.append(finding)
     return out
+
+
+def check_broken_links(pages: list[Path], search_roots: list[Path]) -> list[str]:
+    tracked = _git_tracked_paths()
+    out: list[str] = []
+    for md in pages:
+        if _scannable_page(md, tracked):
+            out.extend(_page_link_findings(md, search_roots, tracked))
+    return out
+
+
+def _indexed(md: Path, index_text: str) -> bool:
+    """The index may cite a page by stem or by full relative path."""
+    relative = md.relative_to(ROOT).with_suffix("").as_posix()
+    return md.stem in index_text or relative in index_text
 
 
 def check_orphans_against_index(pages: list[Path], index: Path) -> list[str]:
     if not index.exists():
         return []
-    index_txt = index.read_text(encoding="utf-8", errors="ignore")
-    out: list[str] = []
-    for md in pages:
-        if md.name in EDITORIAL_NAMES:
-            continue
-        # Accept either stem or full relative path as a reference.
-        stem = md.stem
-        rel = md.relative_to(ROOT).with_suffix("").as_posix()
-        if stem not in index_txt and rel not in index_txt:
-            out.append(_rel(md))
-    return out
+    index_text = index.read_text(encoding="utf-8", errors="ignore")
+    return [
+        _rel(md)
+        for md in pages
+        if md.name not in EDITORIAL_NAMES and not _indexed(md, index_text)
+    ]
+
+
+DAILY_LOG_NAME_RE = re.compile(r"\d{4}-\d{2}-\d{2}\.md")
+
+
+def _daily_logs() -> list[Path]:
+    """Only `YYYY-MM-DD.md` is a daily log; `README.md` next to them is not."""
+    if not DAILY_DIR.exists():
+        return []
+    return sorted(
+        path
+        for path in DAILY_DIR.glob("*.md")
+        if DAILY_LOG_NAME_RE.fullmatch(path.name) is not None
+    )
 
 
 def check_orphan_daily_logs(state: dict) -> list[str]:
     compiled = state.get("compiled_daily_hashes", {})
-    out: list[str] = []
-    if not DAILY_DIR.exists():
-        return out
-    for d in sorted(DAILY_DIR.glob("*.md")):
-        if d.name not in compiled:
-            out.append(_rel(d))
-    return out
+    return [_rel(path) for path in _daily_logs() if path.name not in compiled]
 
 
 def check_stale_compiled(state: dict) -> list[str]:
     compiled = state.get("compiled_daily_hashes", {})
     out: list[str] = []
-    if not DAILY_DIR.exists():
-        return out
-    for d in sorted(DAILY_DIR.glob("*.md")):
-        h = compiled.get(d.name)
-        if h and h != file_hash(d):
-            out.append(_rel(d))
+    for path in _daily_logs():
+        recorded = compiled.get(path.name)
+        if recorded and recorded != file_hash(path):
+            out.append(_rel(path))
     return out
+
+
+def _is_backlink_exempt(md: Path) -> bool:
+    return md.name in EDITORIAL_NAMES or md.name in BACKLINK_EXEMPT_NAMES
+
+
+def _resolved_page_links(
+    md: Path, page_set: set[Path], search_roots: list[Path]
+) -> list[Path]:
+    """Links from one page that land on another page in the same set."""
+    resolved: list[Path] = []
+    for target in _extract_links(md):
+        landed = _resolve_link(target, search_roots)
+        if landed is not None and landed in page_set:
+            resolved.append(landed)
+    return resolved
+
+
+def _owed_pairs_from(source: Path, targets: list[Path]) -> list[tuple[Path, Path]]:
+    return [(source, target) for target in targets if _pair_owes_backlink(source, target)]
+
+
+def _backlink_pairs(link_map: dict[Path, list[Path]]) -> list[tuple[Path, Path]]:
+    """Every ordered pair that owes a backlink, each pair once."""
+    owed: list[tuple[Path, Path]] = []
+    for source, targets in link_map.items():
+        owed.extend(_owed_pairs_from(source, targets))
+    return list(dict.fromkeys(owed))
+
+
+def _pair_owes_backlink(source: Path, target: Path) -> bool:
+    if source == target or _is_backlink_exempt(source):
+        return False
+    return not _is_backlink_exempt(target)
 
 
 def check_missing_backlinks(pages: list[Path], search_roots: list[Path]) -> list[str]:
     """Within a set of pages, A->B must be matched by B->A."""
     page_set = set(pages)
-    link_map: dict[Path, list[Path]] = {}
-    for md in pages:
-        resolved: list[Path] = []
-        for t in _extract_links(md):
-            r = _resolve_link(t, search_roots)
-            if r is not None and r in page_set:
-                resolved.append(r)
-        link_map[md] = resolved
-
-    out: list[str] = []
-    seen: set[tuple[Path, Path]] = set()
-    for a, targets in link_map.items():
-        if a.name in EDITORIAL_NAMES or a.name in BACKLINK_EXEMPT_NAMES:
-            continue
-        for b in targets:
-            if b == a or b.name in EDITORIAL_NAMES or b.name in BACKLINK_EXEMPT_NAMES:
-                continue
-            pair = (a, b)
-            if pair in seen:
-                continue
-            seen.add(pair)
-            if a not in link_map.get(b, []):
-                out.append(f"{_rel(a)} -> {_rel(b)} (no backlink)")
-    return out
+    link_map = {md: _resolved_page_links(md, page_set, search_roots) for md in pages}
+    return [
+        f"{_rel(source)} -> {_rel(target)} (no backlink)"
+        for source, target in _backlink_pairs(link_map)
+        if source not in link_map.get(target, [])
+    ]
 
 
 def check_sparse_pages(pages: list[Path], min_words: int) -> list[str]:
@@ -402,105 +460,140 @@ def check_missing_frontmatter(pages: list[Path]) -> list[str]:
     return out
 
 
+def _frontmatter_of(md: Path) -> str | None:
+    """The frontmatter block, or None when the page has none or cannot be read."""
+    if md.name in EDITORIAL_NAMES:
+        return None
+    try:
+        content = md.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+    match = FRONTMATTER_RE.match(content)
+    if match is None:
+        return None
+    return match.group(1)
+
+
+def _declared_type(frontmatter: str) -> str | None:
+    match = TYPE_FIELD_RE.search(frontmatter)
+    if match is None:
+        return None
+    return match.group(1).strip().strip("\"'")
+
+
+def _missing_type(md: Path) -> bool:
+    """A page with frontmatter but no usable `type:`.
+
+    A page without frontmatter at all is reported by the frontmatter check;
+    counting it twice would not tell the operator anything new.
+    """
+    frontmatter = _frontmatter_of(md)
+    if frontmatter is None:
+        return False
+    return not _declared_type(frontmatter)
+
+
 def check_missing_required_type(pages: list[Path]) -> list[str]:
     """Pages whose frontmatter lacks a non-empty `type:` field."""
-    out: list[str] = []
-    for md in pages:
-        if md.name in EDITORIAL_NAMES:
-            continue
-        try:
-            content = md.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        fm = FRONTMATTER_RE.match(content)
-        if not fm:
-            continue  # reported by check_missing_frontmatter; don't double-count
-        m = TYPE_FIELD_RE.search(fm.group(1))
-        if not m or not m.group(1).strip():
-            out.append(_rel(md))
-    return out
+    return [_rel(md) for md in pages if _missing_type(md)]
+
+
+def _invalid_type_value(md: Path) -> str | None:
+    frontmatter = _frontmatter_of(md)
+    if frontmatter is None:
+        return None
+    declared = _declared_type(frontmatter)
+    if not declared:
+        return None
+    canonical = TYPE_ALIASES.get(declared, declared)
+    if canonical in VALID_TYPES:
+        return None
+    return canonical
 
 
 def check_invalid_type_value(pages: list[Path]) -> list[str]:
     """Pages whose `type:` value is not in the canonical OKF type set."""
     out: list[str] = []
     for md in pages:
-        if md.name in EDITORIAL_NAMES:
-            continue
-        try:
-            content = md.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        fm = FRONTMATTER_RE.match(content)
-        if not fm:
-            continue
-        m = TYPE_FIELD_RE.search(fm.group(1))
-        if not m:
-            continue
-        type_val = m.group(1).strip().strip("\"'")
-        type_val = TYPE_ALIASES.get(type_val, type_val)
-        if type_val and type_val not in VALID_TYPES:
-            out.append(f"{_rel(md)} (type: {type_val!r} — not in canonical set)")
+        invalid = _invalid_type_value(md)
+        if invalid is not None:
+            out.append(f"{_rel(md)} (type: {invalid!r} — not in canonical set)")
     return out
 
 
-def _validate_claim_schemas(pages: list[Path]) -> list[str]:
+def _page_type_of(text: str) -> str | None:
+    frontmatter = FRONTMATTER_RE.match(text)
+    if frontmatter is None:
+        return None
+    return _declared_type(frontmatter.group(1))
+
+
+def _candidate_record(page: Path, text: str) -> dict:
+    """One inbox claim candidate: exactly one canonical JSON record, validated."""
+    candidate_root = (ROOT / "knowledge" / "inbox" / "claims").resolve(strict=False)
+    if candidate_root not in Path(page).resolve(strict=True).parents:
+        raise ValueError("claim-candidate is allowed only under knowledge/inbox/claims")
+    matches = CANDIDATE_JSON_RE.findall(text)
+    if len(matches) != 1:
+        raise ValueError("claim-candidate must embed exactly one JSON record")
+    encoded = matches[0].encode("utf-8")
+    candidate = json.loads(encoded)
+    if canonical_json_bytes(candidate) != encoded:
+        raise ValueError("claim-candidate record is not restricted canonical JSON")
+    validate_schema(candidate, CANDIDATE_SCHEMA)
+    validate_claim_record(candidate["claim"])
+    return candidate["claim"]
+
+
+def _ledger_records(raw: bytes) -> list[dict]:
+    ledger = parse_claim_ledger(raw)
+    if ledger is None:
+        if b"## Claims" in raw:
+            raise ValueError("Claims heading is malformed")
+        return []
+    return ledger["claims"]
+
+
+def _claim_records(page: Path, raw: bytes, text: str) -> list[dict]:
+    if _page_type_of(text) in INBOX_TYPES:
+        return [_candidate_record(page, text)]
+    return _ledger_records(raw)
+
+
+def _require_evidence_matches(resolver: EvidenceResolver, record: dict) -> None:
+    evidence = record["evidence"]
+    resolved = resolver.resolve(evidence["reference"])
+    same_bytes = resolved.bytes.decode("utf-8", errors="strict") == evidence["text"]
+    if resolved.sha256 != evidence["sha256"] or not same_bytes:
+        raise ValueError("claim evidence does not match resolved bytes")
+
+
+def _validate_one_claim_page(resolver: EvidenceResolver, page: Path) -> None:
+    raw = read_stable_bytes(page, MAX_CLAIM_PAGE_BYTES, label="lint claim page")
+    text = raw.decode("utf-8", errors="strict")
+    for record in _claim_records(page, raw, text):
+        _require_evidence_matches(resolver, record)
+
+
+def _page_label(page: Path) -> str:
+    try:
+        return _rel(page)
+    except ValueError:
+        return Path(page).as_posix()
+
+
+def check_claim_schemas(pages: list[Path]) -> list[str]:
     """Validate canonical claim ledgers and quarantined inbox candidates."""
-    findings: list[str] = []
     resolver = EvidenceResolver(ROOT, state_root=STATE_ROOT)
+    findings: list[str] = []
     for page in pages:
         try:
-            raw = read_stable_bytes(
-                page, MAX_CLAIM_PAGE_BYTES, label="lint claim page"
-            )
-            text = raw.decode("utf-8", errors="strict")
-            frontmatter = FRONTMATTER_RE.match(text)
-            type_match = TYPE_FIELD_RE.search(frontmatter.group(1)) if frontmatter else None
-            page_type = type_match.group(1).strip().strip("\"'") if type_match else None
-            candidate_root = (ROOT / "knowledge" / "inbox" / "claims").resolve(
-                strict=False
-            )
-            resolved_page = Path(page).resolve(strict=True)
-            in_inbox = candidate_root in resolved_page.parents
-            if page_type in INBOX_TYPES:
-                if not in_inbox:
-                    raise ValueError(
-                        "claim-candidate is allowed only under knowledge/inbox/claims"
-                    )
-                matches = CANDIDATE_JSON_RE.findall(text)
-                if len(matches) != 1:
-                    raise ValueError("claim-candidate must embed exactly one JSON record")
-                encoded = matches[0].encode("utf-8")
-                candidate = json.loads(encoded)
-                if canonical_json_bytes(candidate) != encoded:
-                    raise ValueError("claim-candidate record is not restricted canonical JSON")
-                validate_schema(candidate, CANDIDATE_SCHEMA)
-                validate_claim_record(candidate["claim"])
-                records = [candidate["claim"]]
-            else:
-                ledger = parse_claim_ledger(raw)
-                if ledger is None and b"## Claims" in raw:
-                    raise ValueError("Claims heading is malformed")
-                records = ledger["claims"] if ledger is not None else []
-            for record in records:
-                evidence = record["evidence"]
-                resolved = resolver.resolve(evidence["reference"])
-                if (
-                    resolved.sha256 != evidence["sha256"]
-                    or resolved.bytes.decode("utf-8", errors="strict")
-                    != evidence["text"]
-                ):
-                    raise ValueError("claim evidence does not match resolved bytes")
+            _validate_one_claim_page(resolver, page)
         except (OSError, UnicodeDecodeError, ValueError, TypeError, KeyError) as exc:
-            try:
-                label = _rel(page)
-            except ValueError:
-                label = Path(page).as_posix()
-            findings.append(f"{label}: {exc}")
+            findings.append(f"{_page_label(page)}: {exc}")
     return findings
 
 
-check_claim_schemas = _validate_claim_schemas
 
 
 def _project_claim_pages(projects_root: Path) -> list[Path]:
@@ -515,61 +608,62 @@ def _project_claim_pages(projects_root: Path) -> list[Path]:
     )
 
 
-def check_missing_sources_section(pages: list[Path]) -> list[str]:
-    """Claim-bearing pages should cite their source (frontmatter or section).
+def _needs_source_citation(md: Path) -> bool:
+    """Claim-bearing pages long enough to have said something.
 
-    Only fires for OKF types in CLAIM_BEARING_TYPES — skills / rules /
-    project-state are operational and need no external citation.
-    Skips pages under 50 words (too short to require provenance).
+    Skills, rules, and project state are operational and cite nothing; a page
+    under fifty words is a stub, not yet a claim.
     """
-    out: list[str] = []
-    for md in pages:
-        if md.name in EDITORIAL_NAMES:
-            continue
-        ptype = _page_type(md)
-        if ptype not in CLAIM_BEARING_TYPES:
-            continue
-        # Skip short pages — likely stubs, not yet ready for citation.
-        if _word_count(md) < 50:
-            continue
-        try:
-            content = md.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        fm = FRONTMATTER_RE.match(content)
-        has_sources_field = bool(fm and SOURCES_FIELD_RE.search(fm.group(1)))
-        has_source_section = bool(SOURCE_SECTION_RE.search(content))
-        if not has_sources_field and not has_source_section:
-            out.append(_rel(md))
-    return out
+    if md.name in EDITORIAL_NAMES:
+        return False
+    if _page_type(md) not in CLAIM_BEARING_TYPES:
+        return False
+    return _word_count(md) >= 50
+
+
+def _cites_a_source(md: Path) -> bool:
+    try:
+        content = md.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return True
+    if SOURCE_SECTION_RE.search(content):
+        return True
+    frontmatter = FRONTMATTER_RE.match(content)
+    return bool(frontmatter and SOURCES_FIELD_RE.search(frontmatter.group(1)))
+
+
+def check_missing_sources_section(pages: list[Path]) -> list[str]:
+    """Claim-bearing pages should cite their source (frontmatter or section)."""
+    return [
+        _rel(md)
+        for md in pages
+        if _needs_source_citation(md) and not _cites_a_source(md)
+    ]
+
+
+def _supersede_target(md: Path) -> str:
+    """The page this one claims to be superseded by, or an empty string."""
+    try:
+        content = md.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return ""
+    match = SUPERSEDED_BY_RE.search(content)
+    if match is None:
+        return ""
+    target = match.group(1).strip().strip("`\"'")
+    return target.replace("[[", "").replace("]]", "").strip()
 
 
 def check_invalid_supersede_chain(pages: list[Path]) -> list[str]:
     """`superseded_by:` references must resolve to an existing page.
 
-    Returns findings of the form:
-        <page> -> superseded_by <target> (target not found)
-    Cycle detection is left to a future check — for now we just verify
-    the immediate target exists.
+    Cycle detection is left to a future check; this verifies the immediate
+    target exists.
     """
     out: list[str] = []
     for md in pages:
-        try:
-            content = md.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        # Look for superseded_by: in frontmatter OR body (be lenient).
-        m = SUPERSEDED_BY_RE.search(content)
-        if not m:
-            continue
-        target = m.group(1).strip().strip("`\"'")
-        # Strip wikilink brackets if present.
-        target = target.replace("[[", "").replace("]]", "").strip()
-        if not target:
-            continue
-        # Try to resolve as a wikilink target.
-        resolved = _resolve_link(target, [MEMORY, WIKI])
-        if resolved is None:
+        target = _supersede_target(md)
+        if target and _resolve_link(target, [VAULT, NOTES]) is None:
             out.append(f"{_rel(md)} -> superseded_by [[{target}]] (target not found)")
     return out
 
@@ -579,125 +673,139 @@ VALID_FROM_RE = re.compile(r"^valid_from:\s*(.+?)\s*$", re.MULTILINE)
 VALID_TO_RE = re.compile(r"^valid_to:\s*(.+?)\s*$", re.MULTILINE)
 
 
-def check_temporal_validity(pages: list[Path]) -> list[str]:
-    """Flag pages where valid_to is in the past but status is still active.
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_STATUS_FIELD_RE = re.compile(r"^status:\s*(.+?)\s*$", re.MULTILINE)
+_OPEN_ENDED_VALID_TO = ("null", "none", "~", "")
 
-    Inspired by Graphiti's bi-temporal model. A fact with valid_to in
-    the past should be marked superseded, not left as 'active' —
-    otherwise stale facts pollute search results.
+
+def _expiry_date(frontmatter: str) -> str | None:
+    """The page's `valid_to` as an ISO date, or None when it does not expire.
+
+    A non-date value such as "forever" is not a violation, and comparing it as
+    a string would sort it before today and report one.
     """
-    out: list[str] = []
+    match = VALID_TO_RE.search(frontmatter)
+    if match is None:
+        return None
+    value = match.group(1).strip().strip('"\'')
+    if value.lower() in _OPEN_ENDED_VALID_TO:
+        return None
+    date = value[:10]
+    if _ISO_DATE_RE.match(date) is None:
+        return None
+    return date
+
+
+def _declared_status(frontmatter: str) -> str:
+    match = _STATUS_FIELD_RE.search(frontmatter)
+    if match is None:
+        return ""
+    return match.group(1).strip()
+
+
+def _expired_active_finding(md: Path, today: str) -> str | None:
+    frontmatter = _frontmatter_of(md)
+    if frontmatter is None:
+        return None
+    expiry = _expiry_date(frontmatter)
+    if expiry is None or expiry >= today:
+        return None
+    status = _declared_status(frontmatter)
+    if status not in ("", "active"):
+        return None
+    return (
+        f"{_rel(md)} (valid_to={expiry} < today={today}, "
+        f"but status={status or 'unset'})"
+    )
+
+
+def check_temporal_validity(pages: list[Path]) -> list[str]:
+    """Flag pages whose `valid_to` has passed while status is still active.
+
+    A fact that stopped being true should be marked superseded; left active it
+    keeps turning up in search results.
+    """
     today = datetime.now().strftime("%Y-%m-%d")
+    out: list[str] = []
     for md in pages:
-        if md.name in EDITORIAL_NAMES:
-            continue
-        try:
-            content = md.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        fm = FRONTMATTER_RE.match(content)
-        if not fm:
-            continue
-        fm_text = fm.group(1)
-        # Check if page has valid_to at all
-        valid_to_m = VALID_TO_RE.search(fm_text)
-        if not valid_to_m:
-            continue
-        valid_to = valid_to_m.group(1).strip().strip('"\'')
-        if valid_to.lower() in ("null", "none", "~", ""):
-            continue  # explicitly open-ended
-        # Validate ISO date format before comparing — non-date values
-        # like "forever" must not trigger false positives (string
-        # comparison would sort them before today).
-        if not re.match(r"^\d{4}-\d{2}-\d{2}$", valid_to[:10]):
-            continue  # Non-date value (e.g., "forever") — skip, not a violation
-        # Check if valid_to is in the past
-        try:
-            # Try ISO date parsing (YYYY-MM-DD or full ISO)
-            vt_date = valid_to[:10]  # take just the date part
-            if vt_date < today:
-                # Check status — if still 'active', flag it
-                status_val = ""
-                sm = re.search(r"^status:\s*(.+?)\s*$", fm_text, re.MULTILINE)
-                if sm:
-                    status_val = sm.group(1).strip()
-                if status_val in ("", "active"):
-                    out.append(
-                        f"{_rel(md)} (valid_to={vt_date} < today={today}, "
-                        f"but status={status_val or 'unset'})"
-                    )
-        except (ValueError, IndexError):
-            pass
+        finding = _expired_active_finding(md, today)
+        if finding is not None:
+            out.append(finding)
     return out
+
+
+def _referenced_targets(pages: list[Path], skip: set[Path]) -> set[str]:
+    """Every wikilink target named by a page outside `skip`, alias stripped."""
+    referenced: set[str] = set()
+    for md in pages:
+        if md.resolve() in skip:
+            continue
+        referenced.update(_page_link_targets(md))
+    return referenced
+
+
+def _page_link_targets(md: Path) -> set[str]:
+    try:
+        content = md.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return set()
+    return {link.strip().split("|")[0].strip() for link in WIKILINK_RE.findall(content)}
 
 
 def check_orphan_gaps(pages: list[Path]) -> list[str]:
     """Pages with type: gap should be linked from at least one non-gap page.
 
-    A gap page exists to mark a "mentioned but not-yet-written" concept.
-    If no non-gap page references it, the gap itself is orphaned signal.
-    Scans by frontmatter type (flat-layout compatible).
+    A gap page marks a concept mentioned but not yet written. With no non-gap
+    page pointing at it, the gap is itself an orphan and nobody will close it.
     """
-    gap_pages = [p for p in pages if _page_type(p) == "gap"]
+    gap_pages = _gap_pages(pages)
     if not gap_pages:
         return []
-    out: list[str] = []
-    referenced: set[str] = set()
-    gap_paths = {g.resolve() for g in gap_pages}
-    for md in pages:
-        if md.resolve() in gap_paths:
-            continue
-        try:
-            content = md.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        for link in WIKILINK_RE.findall(content):
-            referenced.add(link.strip().split("|")[0].strip())
-    for gap_md in sorted(gap_pages):
-        if gap_md.name in EDITORIAL_NAMES:
-            continue
-        stem = gap_md.stem
-        if stem not in referenced and _rel(gap_md) not in referenced:
-            out.append(_rel(gap_md))
-    return out
+    referenced = _referenced_targets(pages, {p.resolve() for p in gap_pages})
+    return [_rel(gap) for gap in gap_pages if _is_orphan_gap(gap, referenced)]
+
+
+def _gap_pages(pages: list[Path]) -> list[Path]:
+    return sorted(page for page in pages if _page_type(page) == "gap")
+
+
+def _is_orphan_gap(gap: Path, referenced: set[str]) -> bool:
+    if gap.name in EDITORIAL_NAMES:
+        return False
+    return gap.stem not in referenced and _rel(gap) not in referenced
 
 
 # ---------- contradictions (LLM, opt-in) ----------
 
-def check_contradictions(pages: list[Path]) -> list[str]:
-    """Ask the LLM to flag pairs of pages that appear to contradict each other.
+MAX_CONTRADICTION_BYTES = 120_000
+CONTRADICTION_SYSTEM_PROMPT = "You are a careful auditor. Only flag real contradictions."
 
-    Structural checks are free; this one uses the unified llm_client
-    (Codex CLI / OpenAI / Ollama) and costs API calls. Opt-in via
-    --contradictions. Returns a list of short finding strings. Non-fatal
-    on LLM absence.
-    """
-    try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from llm_client import call_llm
-    except ImportError:
-        return ["(llm_client not available — skipped)"]
 
-    if not pages:
-        return []
-
-    # Feed page bodies in a single pass; cap total size to keep cost bounded.
-    MAX_BYTES = 120_000
-    blob_parts: list[str] = []
+def _bounded_page_blob(pages: list[Path], max_bytes: int) -> str:
+    """Page bodies concatenated up to a byte cap, so one call stays affordable."""
+    parts: list[str] = []
     total = 0
     for md in pages:
-        try:
-            text = md.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
+        chunk = _page_chunk(md)
+        if chunk is None:
             continue
-        chunk = f"\n\n### FILE: {_rel(md)}\n{text}"
-        if total + len(chunk) > MAX_BYTES:
+        if total + len(chunk) > max_bytes:
             break
-        blob_parts.append(chunk)
+        parts.append(chunk)
         total += len(chunk)
-    blob = "".join(blob_parts)
+    return "".join(parts)
 
-    prompt = f"""You are auditing a markdown knowledge vault for logical contradictions.
+
+def _page_chunk(md: Path) -> str | None:
+    try:
+        text = md.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+    return f"\n\n### FILE: {_rel(md)}\n{text}"
+
+
+def _contradiction_prompt(blob: str) -> str:
+    return f"""You are auditing a markdown knowledge vault for logical contradictions.
 
 Read the following pages. Flag ONLY concrete contradictions between them — not
 stylistic drift, not differing levels of detail, not overlapping scope.
@@ -710,187 +818,262 @@ Output format: one finding per line, prefixed with "- ". Each line: "<page A> vs
 --- PAGES ---
 {blob}
 """
-    text = call_llm(
-        prompt,
-        system_prompt="You are a careful auditor. Only flag real contradictions.",
+
+
+def _bulleted_findings(answer: str) -> list[str]:
+    return [line[2:].strip() for line in answer.splitlines() if line.startswith("- ")]
+
+
+def _contradiction_findings(answer: str | None) -> list[str]:
+    if not answer:
+        return []
+    if "NO_CONTRADICTIONS" in answer.upper():
+        return []
+    if answer.startswith("("):
+        # llm_client returns parenthesized error strings on failure.
+        return [answer]
+    return _bulleted_findings(answer)
+
+
+def check_contradictions(pages: list[Path]) -> list[str]:
+    """Ask the LLM to flag pairs of pages that appear to contradict each other.
+
+    Structural checks are free; this one costs a model call and is opt-in via
+    `--contradictions`. Absence of a provider is reported, not fatal.
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from llm_client import call_llm
+    except ImportError:
+        return ["(llm_client not available — skipped)"]
+    if not pages:
+        return []
+    answer = call_llm(
+        _contradiction_prompt(_bounded_page_blob(pages, MAX_CONTRADICTION_BYTES)),
+        system_prompt=CONTRADICTION_SYSTEM_PROMPT,
         max_tokens=2000,
     )
-    if not text or "NO_CONTRADICTIONS" in text.upper():
-        return []
-    if text.startswith("("):
-        # llm_client returns parenthesized error strings on failure.
-        return [text]
-    return [ln[2:].strip() for ln in text.splitlines() if ln.startswith("- ")]
+    return _contradiction_findings(answer)
 
 
 # ---------- driver ----------
 
-def run_checks(args: argparse.Namespace) -> dict[str, list[str]]:
-    findings: dict[str, list[str]] = {k: [] for k in (
-        "broken_wikilinks",
-        "orphan_pages",
-        "orphan_daily_logs",
-        "stale_compiled",
-        "missing_backlinks",
-        "sparse_pages",
-        # Phase 2 OKF conformance checks.
-        "missing_frontmatter",
-        "missing_required_type",
-        "invalid_type_value",
-        "missing_sources_section",
-        "invalid_supersede_chain",
-        "orphan_gaps",
-        # Phase 6 temporal validity.
-        "temporal_validity",
-        "invalid_evidence",
-        "invalid_claim_schema",
-        "contradictions",
-    )}
+CHECK_NAMES = (
+    "broken_wikilinks",
+    "orphan_pages",
+    "orphan_daily_logs",
+    "stale_compiled",
+    "missing_backlinks",
+    "sparse_pages",
+    # Phase 2 OKF conformance checks.
+    "missing_frontmatter",
+    "missing_required_type",
+    "invalid_type_value",
+    "missing_sources_section",
+    "invalid_supersede_chain",
+    "orphan_gaps",
+    # Phase 6 temporal validity.
+    "temporal_validity",
+    "invalid_evidence",
+    "invalid_claim_schema",
+    "contradictions",
+)
 
-    search_roots = [MEMORY, WIKI]
 
-    # Three-zone: notes are a single tree. Keep legacy --scope labels as aliases
-    # but never double-scan the same pages under "all".
-    scopes: list[tuple[str, list[Path], Path]] = []
-    notes_pages = [p for p in _iter_tree_md(KNOWLEDGE) if p.name not in EDITORIAL_NAMES]
-    if args.scope in ("memory", "wiki", "all"):
-        label = "notes" if args.scope == "all" else args.scope
-        scopes.append((label, notes_pages, WIKI_INDEX if WIKI_INDEX.exists() else MEMORY_INDEX))
+def _labelled(label: str, items: list[str]) -> list[str]:
+    return [f"[{label}] {item}" for item in items]
 
-    # State-dependent checks (daily / compile hashes).
-    if args.scope in ("memory", "all"):
-        state = load_state()
-        findings["orphan_daily_logs"] = check_orphan_daily_logs(state)
-        findings["stale_compiled"] = check_stale_compiled(state)
-        project_pages = _project_claim_pages(ROOT / "knowledge" / "projects")
-        findings["invalid_claim_schema"] += [
-            f"[projects] {x}" for x in check_claim_schemas(project_pages)
-        ]
 
-    all_pages_for_contradictions: list[Path] = []
+def _unique_by_resolved_path(pages: list[Path]) -> list[Path]:
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for page in pages:
+        resolved = page.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            unique.append(page)
+    return unique
 
+
+def _notes_scope(scope: str) -> list[tuple[str, list[Path], Path]]:
+    """Notes are one tree; the legacy scope labels stay as aliases."""
+    if scope not in ("memory", "wiki", "all"):
+        return []
+    pages = [p for p in _iter_tree_md(NOTES) if p.name not in EDITORIAL_NAMES]
+    label = "notes" if scope == "all" else scope
+    return [(label, pages, VAULT_INDEX)]
+
+
+def _state_findings(findings: dict[str, list[str]]) -> None:
+    state = load_state()
+    findings["orphan_daily_logs"] = check_orphan_daily_logs(state)
+    findings["stale_compiled"] = check_stale_compiled(state)
+    project_pages = _project_claim_pages(ROOT / "knowledge" / "projects")
+    findings["invalid_claim_schema"] += _labelled(
+        "projects", check_claim_schemas(project_pages)
+    )
+
+
+def _page_checks(
+    label: str,
+    pages: list[Path],
+    index: Path,
+    sparse_words: int,
+) -> dict[str, list[str]]:
+    """Every per-page check for one scope, already labelled."""
+    tree = _unique_by_resolved_path(list(_iter_tree_md(NOTES)))
+    search_roots = [VAULT, NOTES]
+    results = {
+        "broken_wikilinks": check_broken_links(tree, search_roots),
+        "orphan_pages": check_orphans_against_index(pages, index),
+        "missing_backlinks": check_missing_backlinks(pages, search_roots),
+        "sparse_pages": check_sparse_pages(pages, sparse_words),
+        "missing_frontmatter": check_missing_frontmatter(pages),
+        "missing_required_type": check_missing_required_type(pages),
+        "invalid_type_value": check_invalid_type_value(pages),
+        "missing_sources_section": check_missing_sources_section(pages),
+        "invalid_supersede_chain": check_invalid_supersede_chain(pages),
+        "orphan_gaps": check_orphan_gaps(pages),
+        "temporal_validity": check_temporal_validity(pages),
+        "invalid_evidence": check_evidence_references(pages),
+        "invalid_claim_schema": check_claim_schemas(pages),
+    }
+    return {name: _labelled(label, items) for name, items in results.items()}
+
+
+def _frontmatter_only_findings(findings: dict[str, list[str]]) -> None:
+    """Skills and rules carry OKF frontmatter but no wikilinks or backlinks."""
+    for label, root in (("skills", ROOT / "skills"), ("rules", ROOT / "rules")):
+        pages = _iter_tree_md(root)
+        findings["missing_frontmatter"] += _labelled(
+            label, check_missing_frontmatter(pages)
+        )
+        findings["missing_required_type"] += _labelled(
+            label, check_missing_required_type(pages)
+        )
+    findings["invalid_claim_schema"] += _labelled(
+        "inbox", check_claim_schemas(_iter_tree_md(ROOT / "knowledge" / "inbox"))
+    )
+
+
+def _merge(findings: dict[str, list[str]], produced: dict[str, list[str]]) -> None:
+    for name, items in produced.items():
+        findings[name] += items
+
+
+def _scan_scopes(
+    findings: dict[str, list[str]],
+    scopes: list[tuple[str, list[Path], Path]],
+    sparse_words: int,
+) -> list[Path]:
+    scanned: list[Path] = []
     for label, pages, index in scopes:
-        # Single-tree scan (three-zone: notes is the only knowledge subtree).
-        tree_all = list(_iter_tree_md(KNOWLEDGE))
-        # Deduplicate by resolved path
-        seen: set[Path] = set()
-        unique_tree: list[Path] = []
-        for p in tree_all:
-            rp = p.resolve()
-            if rp not in seen:
-                seen.add(rp)
-                unique_tree.append(p)
-        findings["broken_wikilinks"] += [f"[{label}] {x}" for x in check_broken_links(unique_tree, search_roots)]
-        findings["orphan_pages"] += [f"[{label}] {x}" for x in check_orphans_against_index(pages, index)]
-        findings["missing_backlinks"] += [f"[{label}] {x}" for x in check_missing_backlinks(pages, search_roots)]
-        findings["sparse_pages"] += [f"[{label}] {x}" for x in check_sparse_pages(pages, args.sparse_words)]
-        findings["missing_frontmatter"] += [f"[{label}] {x}" for x in check_missing_frontmatter(pages)]
-        findings["missing_required_type"] += [f"[{label}] {x}" for x in check_missing_required_type(pages)]
-        findings["invalid_type_value"] += [f"[{label}] {x}" for x in check_invalid_type_value(pages)]
-        findings["missing_sources_section"] += [f"[{label}] {x}" for x in check_missing_sources_section(pages)]
-        findings["invalid_supersede_chain"] += [f"[{label}] {x}" for x in check_invalid_supersede_chain(pages)]
-        findings["orphan_gaps"] += [f"[{label}] {x}" for x in check_orphan_gaps(pages)]
-        findings["temporal_validity"] += [f"[{label}] {x}" for x in check_temporal_validity(pages)]
-        findings["invalid_evidence"] += [
-            f"[{label}] {x}" for x in check_evidence_references(pages)
-        ]
-        findings["invalid_claim_schema"] += [
-            f"[{label}] {x}" for x in check_claim_schemas(pages)
-        ]
-        all_pages_for_contradictions += pages
+        _merge(findings, _page_checks(label, pages, index, sparse_words))
+        scanned += pages
+    return scanned
 
-    # OKF frontmatter conformance for skills/ and rules/ (AGENTS.md contract).
-    # Only missing_frontmatter + missing_required_type apply — wikilink /
-    # backlink / sparse checks are notes-specific and don't apply here.
+
+def _scope_findings(args: argparse.Namespace, findings: dict[str, list[str]]) -> list[Path]:
+    """Run every scope-dependent check and return the pages that were scanned."""
+    if args.scope in ("memory", "all"):
+        _state_findings(findings)
+    scanned = _scan_scopes(findings, _notes_scope(args.scope), args.sparse_words)
     if args.scope == "all":
-        for extra_label, extra_root in (
-            ("skills", ROOT / "skills"),
-            ("rules", ROOT / "rules"),
-        ):
-            extra_pages = _iter_tree_md(extra_root)
-            if not extra_pages:
-                continue
-            findings["missing_frontmatter"] += [
-                f"[{extra_label}] {x}" for x in check_missing_frontmatter(extra_pages)
-            ]
-            findings["missing_required_type"] += [
-                f"[{extra_label}] {x}" for x in check_missing_required_type(extra_pages)
-            ]
-        inbox_candidates = _iter_tree_md(ROOT / "knowledge" / "inbox")
-        findings["invalid_claim_schema"] += [
-            f"[inbox] {x}" for x in check_claim_schemas(inbox_candidates)
-        ]
+        _frontmatter_only_findings(findings)
+    return scanned
 
+
+def run_checks(args: argparse.Namespace) -> dict[str, list[str]]:
+    findings: dict[str, list[str]] = {name: [] for name in CHECK_NAMES}
+    scanned = _scope_findings(args, findings)
     if args.contradictions and not args.structural_only:
-        findings["contradictions"] = check_contradictions(all_pages_for_contradictions)
-
+        findings["contradictions"] = check_contradictions(scanned)
     return findings
+
+
+def _contradiction_state(args: argparse.Namespace) -> str:
+    if args.contradictions and not args.structural_only:
+        return "on"
+    return "off"
+
+
+def _section_lines(section: str, items: list[str]) -> list[str]:
+    lines = [f"## {section.replace('_', ' ').title()} ({len(items)})"]
+    lines.extend(f"- {item}" for item in items or ["(none)"])
+    lines.append("")
+    return lines
 
 
 def write_report(findings: dict[str, list[str]], args: argparse.Namespace) -> Path:
     REPORTS.mkdir(parents=True, exist_ok=True)
     today = datetime.now().strftime("%Y-%m-%d")
     out = REPORTS / f"lint-{today}.md"
+    total = sum(len(items) for items in findings.values())
     lines = [
         f"# Vault lint — {today}",
         "",
         f"Scope: `{args.scope}`  |  Sparse floor: {args.sparse_words} words  |  "
-        f"Contradictions: {'on' if (args.contradictions and not args.structural_only) else 'off'}",
+        f"Contradictions: {_contradiction_state(args)}",
+        "",
+        f"Total findings: **{total}**",
         "",
     ]
-    total = sum(len(v) for v in findings.values())
-    lines.append(f"Total findings: **{total}**")
-    lines.append("")
     for section, items in findings.items():
-        lines.append(f"## {section.replace('_', ' ').title()} ({len(items)})")
-        if items:
-            for item in items:
-                lines.append(f"- {item}")
-        else:
-            lines.append("- (none)")
-        lines.append("")
+        lines.extend(_section_lines(section, items))
     out.write_text("\n".join(lines), encoding="utf-8")
     return out
+
+
+def _report_display(report: Path) -> str:
+    """Vault-relative when it lives inside the vault, absolute otherwise."""
+    try:
+        return report.relative_to(ROOT).as_posix()
+    except ValueError:
+        return report.as_posix()
+
+
+def _print_summary(findings: dict[str, list[str]], report: Path) -> None:
+    total = sum(len(items) for items in findings.values())
+    print(f"lint_memory: {total} finding(s). Report: {_report_display(report)}")
+    for section, items in findings.items():
+        if items:
+            print(f"  {section}: {len(items)}")
+
+
+def _blocking_findings(
+    findings: dict[str, list[str]], allowed: set[str]
+) -> dict[str, list[str]]:
+    return {
+        section: items
+        for section, items in findings.items()
+        if items and section not in allowed
+    }
+
+
+def _report_blocking(blocking: dict[str, list[str]], allowed: set[str]) -> None:
+    total = sum(len(items) for items in blocking.values())
+    print("")
+    print(
+        f"lint_memory: FAILING BUILD — {total} blocking finding(s) "
+        f"in {len(blocking)} categor(ies): {', '.join(blocking)}."
+    )
+    print(f"(Allowed / non-blocking categories: {sorted(allowed) or '(none)'})")
 
 
 def main() -> int:
     args = parse_args()
     findings = run_checks(args)
-    report = write_report(findings, args)
-    total = sum(len(v) for v in findings.values())
-    # Report lives inside the vault (runtime logs/ is gitignored) — show the
-    # path relative to ROOT for a compact display, absolute as fallback.
-    try:
-        display = report.relative_to(ROOT).as_posix()
-    except ValueError:
-        display = report.as_posix()
-    print(f"lint_memory: {total} finding(s). Report: {display}")
-    for section, items in findings.items():
-        if items:
-            print(f"  {section}: {len(items)}")
-
-    # CI enforcement: exit non-zero if any finding falls OUTSIDE the
-    # allowed-categories exemption list. Without --fail-on-findings,
-    # behavior is unchanged (always exit 0). See parse_args() for
-    # rationale; orphan_daily_logs is exempt by default because it
-    # self-resolves on the next compile pass.
-    if getattr(args, "fail_on_findings", False):
-        allowed = set(args.allowed_categories or [])
-        blocking = {
-            section: items
-            for section, items in findings.items()
-            if items and section not in allowed
-        }
-        if blocking:
-            print("")
-            print(
-                f"lint_memory: FAILING BUILD — "
-                f"{sum(len(v) for v in blocking.values())} blocking finding(s) "
-                f"in {len(blocking)} categor(ies): {', '.join(blocking)}."
-            )
-            print(f"(Allowed / non-blocking categories: {sorted(allowed) or '(none)'})")
-            return 1
-    return 0
+    _print_summary(findings, write_report(findings, args))
+    # Without --fail-on-findings the exit code stays 0. `orphan_daily_logs` is
+    # exempt by default because the next compile pass clears it on its own.
+    if not getattr(args, "fail_on_findings", False):
+        return 0
+    allowed = set(args.allowed_categories or [])
+    blocking = _blocking_findings(findings, allowed)
+    if not blocking:
+        return 0
+    _report_blocking(blocking, allowed)
+    return 1
 
 
 if __name__ == "__main__":

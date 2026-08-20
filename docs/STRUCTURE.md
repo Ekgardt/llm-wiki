@@ -496,6 +496,13 @@ or nonzero active state remains fail-closed.
   `run_contradiction_benchmark.py`, and `contradiction-v1.json`.
   `run_benchmark.py` defaults to retrieval-v2. Only plain `--legacy-only`
   selects the old gate; conflicting legacy flags fail closed.
+  The frozen retrieval-v2 baseline binds to the exact versions of the five
+  packages the benchmark loads (`jieba`, `numpy`, `sentence-transformers`,
+  `torch`, `transformers`), not to the byte digest of the whole `uv.lock`.
+  The recorded `uv_lock_sha256` stays in the report as provenance and must
+  remain a well-formed digest, but it is no longer compared to the current
+  lock file. See
+  `knowledge/notes/baseline-environment-binding-decision.md`.
 
 ### KNOWLEDGE zone (tracked: public fixtures; gitignored: personal)
 - `knowledge/daily/` — append-only `YYYY-MM-DD.md`. Private (gitignored).
@@ -604,7 +611,11 @@ For safe rollback, stop active commands and remove only the derived
 the catalog API. Do not delete `knowledge/`, project journals, Git data, or `run/`.
 With legacy caches retained, readers fall back to legacy FTS/vector/Lance paths;
 graph-dependent code tools use bounded live extraction and label it incomplete.
-- `logs/` — `lint-YYYY-MM-DD.md`, `compile-last.log`, `session-start-last.txt`.
+- `logs/` — `lint-YYYY-MM-DD.md`, `compile-last.log`, `session-start-last.txt`,
+  `capture-failures.jsonl` (bounded trail of lost prompt/post-tool captures),
+  and `logs/maintenance/` (owner-only `*.out.log` / `*.err.log` artifacts holding
+  the full output of each nightly and weekly step). Both are disposable and
+  bounded: the trail by size, the artifacts by age, count, and total size.
 - `run/` — `state.json`, `compile.pid`, `run/markdown-transactions.sqlite3`,
   `run/transactions/`, `run/queue.sqlite3`, `run/queue-results/`, receipts, and
   locks. The proposed target adds `run/capture-intents/`, two active `*-v3.sqlite3`

@@ -8,6 +8,65 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Completing a blackboard task and resolving a blackboard conflict survive a
+  retry. Both publish under a stable operation id but stamped the record with
+  the moment of the write, so a caller retrying after a transient failure was
+  refused with `operation_id is already bound to a different request` instead
+  of finding its own earlier publication already there.
+
+- `doctor` reports a locked FTS index as busy instead of as an exhausted time
+  budget. The two verdicts were decided by the clock, so on a slow machine the
+  wait for the lock consumed the budget and the more actionable answer was
+  lost.
+
+- A new structural test fails when any module we own binds the same top-level
+  name twice. A second definition silently replaces the first, so an edit to
+  the wrong copy changes nothing and an edit to the right one changes
+  everything.
+
+- Read-only opens on the generation catalog, retrieval telemetry, the MCP queue
+  view, and `doctor` wait out a lock instead of failing on one. A commit on a
+  rollback-journal database locks readers out for milliseconds, and a
+  zero-length wait turned that normal moment into `database is locked` — a
+  flaky test failure and a false `doctor` finding about an unreadable database.
+  `doctor` spends at most half of its remaining budget waiting, so a genuinely
+  busy database is still reported as busy rather than as an exhausted budget.
+
+- A generation-catalog writer without a caller deadline waits out contention
+  instead of surfacing `database is locked`. Two compare-and-swaps on a loaded
+  machine can hold the write lock for longer than the previous five-second
+  window, which turned a decided race into a raw SQLite error.
+
+- Windows cleanup verification reads the process tree from the kernel snapshot.
+  It used to ask `wmic`, which current Windows no longer ships, and fall back to
+  a PowerShell CIM enumeration that does not finish inside its budget on a
+  loaded machine; without an answer the worker reported
+  `process_cleanup_failed` for a tree it had already terminated. Both tools are
+  removed rather than kept as fallbacks.
+
+- A grounded answer now fails when a cited span shares no content with the claim
+  it is offered for, which is the case where a truthful citation about a
+  different subject passed every other gate. It is a necessary condition, not
+  entailment: support itself is still unverified and is not claimed.
+
+- A Markdown write no longer fails when the writer-gate heartbeat is starved by a
+  busy database. Ownership loss is now decided by the projection row, which a
+  reclaim deletes, and the error names its cause. A queue worker likewise waits
+  out a busy database instead of ending its run with `database is locked`, and a
+  concurrent Pyright installer waits for a lock it does not own instead of
+  deleting it.
+- `doctor` reports lost captures: a new `capture` check names the per-kind counts
+  from `state.json` and points at `logs/capture-failures.jsonl`. The two capture
+  wrappers now record that loss when they are invoked directly and their detached
+  flush cannot start. `doctor.py` also accepts `--time-budget` so a slow machine
+  can finish its checks instead of reporting an exhausted budget.
+- The installed OpenCode plugin carries the vault root it was installed from, so
+  an OpenCode started from a desktop launcher captures instead of silently
+  disabling itself. The environment still wins when it is set.
+- The structural lint no longer counts `knowledge/daily/README.md` as an
+  uncompiled daily log, and `docs/EXPORTING.md` no longer presents an export as a
+  way to migrate a vault: an export carries committed files only.
+
 - Made the v4 reliability platform fail closed: Windows path/handle identity no
   longer truncates IDs or compares incompatible creation/change times; SQLite
   readers close explicitly; MCP timeout tests drain late workers; metadata
@@ -26,7 +85,30 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   exact LLM-Wiki-owned backup names after verification, and create no backup for a
   no-op merge.
 
+### Changed
+
+- The Pyright qualification gate `warm_overhead_p95_ms` is 30 ms instead of 20.
+  Three consecutive four-vCPU hosted runs measured 22.80, 22.08, and 22.16 ms,
+  a spread under one millisecond, so the number described the machine rather
+  than a regression: the navigation facade pays for its freshness guarantee
+  with an extra workspace-revision walk. The gate still fails closed and now
+  names the slowest supported machine class. See
+  `knowledge/notes/warm-navigation-overhead-threshold-decision.md`.
+
 ### Added
+
+- `benchmark/run_flush_classification.py` measures what session classification
+  keeps and what it drops: tier accuracy, durable-content recall, and the
+  false-promotion rate against a labelled corpus, scored through the product's
+  own classification prompt. The shipped corpus is nine public synthetic cases;
+  a real answer needs an installed vault's own sessions via `--corpus`.
+
+- `memory_queue.py restore --export <path>` brings the work in one verified purge
+  export back as new ready tasks, refusing the whole export if the manifest, the
+  records digest, any result digest, or the id list fails to verify.
+- `memory_queue.py purge --include-dead` retires attempts-exhausted tasks through
+  that same export-first path. Without the flag they are retained, because a dead
+  task records work the system promised and never did.
 
 - Read-only Python code navigation through pinned Pyright 1.1.411: bounded stdlib
   LSP protocol, generation-aware process lifecycle ownership, workspace-revision

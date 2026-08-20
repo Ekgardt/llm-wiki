@@ -28,6 +28,62 @@ def _sleep_processor(task: dict) -> bool:
     return True
 
 
+def _report_alive(sender) -> None:
+    """Report and stay alive; the parent decides when this child ends."""
+    sender.send_bytes(b"R")
+    time.sleep(120)
+
+
+def test_a_spawned_child_of_this_module_starts_and_reports_back() -> None:
+    """Windows hides a spawn child's bootstrap failure: it dies with no output.
+
+    Several worker tests failed there with `child exited 1 before cleanup`,
+    which is what the parent sees when the child never ran. This isolates that
+    question from the worker logic around it.
+    """
+    import multiprocessing
+
+    context = multiprocessing.get_context("spawn")
+    receiver, sender = context.Pipe(duplex=True)
+    process = context.Process(target=_report_alive, args=(sender,), daemon=False)
+    process.start()
+    sender.close()
+    try:
+        reported = receiver.poll(60)
+        assert reported, f"child exited {process.exitcode} without reporting"
+        assert receiver.recv_bytes(1) == b"R"
+    finally:
+        process.terminate()
+        process.join(30)
+        receiver.close()
+
+
+def _silent_sleeper() -> None:
+    """Sleep without reporting: the shape the worker's own child has."""
+    time.sleep(120)
+
+
+def test_a_spawned_child_that_only_sleeps_is_still_alive_five_seconds_later() -> None:
+    """The worker's child dies with exit code 1 on Windows before its deadline.
+
+    Its sibling probe, which reports first and then sleeps, survives — so this
+    one isolates the case where the child produces nothing before it is killed.
+    """
+    import multiprocessing
+
+    context = multiprocessing.get_context("spawn")
+    process = context.Process(target=_silent_sleeper, daemon=False)
+    process.start()
+    try:
+        time.sleep(5)
+        alive = process.is_alive()
+        exitcode = process.exitcode
+        assert alive, f"sleeping child exited {exitcode} on its own"
+    finally:
+        process.terminate()
+        process.join(30)
+
+
 def _result_processor(task: dict) -> memory_queue.DeferredResult:
     return memory_queue.DeferredResult(b"x" * task["payload"]["size"])
 
@@ -106,6 +162,7 @@ class _FakeProcess:
         self.stubborn = stubborn
         self.terminated = 0
         self.killed = 0
+        self.exitcode = None
 
     def is_alive(self) -> bool:
         return self.alive
@@ -262,16 +319,23 @@ def test_worker_policy_overrides_claim_heartbeat_attempts_and_backoff(
 
 
 def test_worker_child_process_is_terminated_at_deadline() -> None:
+    # The deadline has to outlast process creation. Spawning a Python child on
+    # a hosted Windows runner takes about a second, and a 0.2 s deadline landed
+    # while the child was still starting: the call then reported the wreckage
+    # of a child that never ran (`process_cleanup_failed`) instead of the
+    # deadline this case is about.
+    deadline_seconds = 5.0
     started = time.monotonic()
 
     with pytest.raises(TimeoutError):
         memory_queue._run_processor_child(
             _sleep_processor,
-            {"payload": {"seconds": 5}},
-            0.2,
+            {"payload": {"seconds": 120}},
+            deadline_seconds,
         )
 
-    assert time.monotonic() - started < 2
+    elapsed = time.monotonic() - started
+    assert deadline_seconds <= elapsed < deadline_seconds + 15
 
 
 def test_worker_timeout_kills_spawned_grandchild_tree(tmp_path: Path) -> None:
@@ -297,7 +361,7 @@ def test_worker_cleans_grandchild_before_returning_normal_result(tmp_path: Path)
         result = memory_queue._run_processor_child(
             _exiting_grandchild_processor,
             {"payload": {"pid_path": str(pid_path)}},
-            10,
+            60,
         )
         pid = int(pid_path.read_text(encoding="ascii"))
         assert result is True
@@ -317,7 +381,7 @@ def test_worker_cleans_grandchild_before_reporting_malformed_result(
             memory_queue._run_processor_child(
                 _malformed_grandchild_processor,
                 {"payload": {"pid_path": str(pid_path)}},
-                10,
+                60,
             )
         pid = int(pid_path.read_text(encoding="ascii"))
         assert raised.value.code == "processor_result_malformed"
@@ -337,7 +401,7 @@ def test_worker_cleans_grandchild_before_reporting_processor_crash(
             memory_queue._run_processor_child(
                 _crashing_grandchild_processor,
                 {"payload": {"pid_path": str(pid_path)}},
-                10,
+                60,
             )
         pid = int(pid_path.read_text(encoding="ascii"))
         assert raised.value.code == "processor_exception"
@@ -393,7 +457,7 @@ def test_deferred_compile_timeout_kills_compiler_tree(
         "import os, time\n"
         "from pathlib import Path\n"
         "Path(os.environ['TEST_COMPILE_PID']).write_text(str(os.getpid()), encoding='ascii')\n"
-        "time.sleep(30)\n",
+        "time.sleep(300)\n",
         encoding="ascii",
     )
     queue = MemoryQueue(tmp_path)
@@ -402,10 +466,12 @@ def test_deferred_compile_timeout_kills_compiler_tree(
     monkeypatch.setenv("TEST_COMPILE_PID", str(pid_path))
     monkeypatch.setattr(memory_queue, "_queue", lambda **kwargs: queue)
 
+    # The budget has to outlast process spawn on the slowest supported runner,
+    # or the compiler is killed before it records the PID this test kills.
     summary = memory_queue.run_worker(
         memory_queue._manual_processor,
         max_tasks=1,
-        max_seconds=1,
+        max_seconds=8,
         idle_seconds=0,
     )
 
@@ -421,7 +487,7 @@ def test_worker_child_drains_one_megabyte_result_before_join() -> None:
     result = memory_queue._run_processor_child(
         _result_processor,
         {"payload": {"size": 1024 * 1024}},
-        10,
+        60,
     )
 
     assert isinstance(result, memory_queue.DeferredResult)
@@ -432,7 +498,7 @@ def test_worker_child_drains_result_at_queue_size_limit() -> None:
     result = memory_queue._run_processor_child(
         _result_processor,
         {"payload": {"size": memory_queue._MAX_RESULT_BYTES}},
-        10,
+        60,
     )
 
     assert isinstance(result, memory_queue.DeferredResult)
@@ -444,7 +510,7 @@ def test_worker_child_rejects_oversize_result_without_deadlock() -> None:
         memory_queue._run_processor_child(
             _result_processor,
             {"payload": {"size": memory_queue._MAX_RESULT_BYTES + 1}},
-            10,
+            60,
         )
 
     assert raised.value.code == "processor_result_oversize"

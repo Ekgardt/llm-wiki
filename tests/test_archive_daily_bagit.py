@@ -167,6 +167,48 @@ def test_archive_queries_release_transaction_database(archive_vault) -> None:
     os.replace(replacement, database)
 
 
+def _block_with_manual_pin(root: Path, state_root: Path, daily: Path, digest: str) -> None:
+    (state_root / "run" / "archive-pins.json").write_text(
+        json.dumps({"daily_ids": [daily.stem], "source_hashes": []}), encoding="utf-8"
+    )
+
+
+def _block_with_decision(root: Path, state_root: Path, daily: Path, digest: str) -> None:
+    (root / "knowledge/notes/decision.md").write_text(
+        f"---\ntype: decision\n---\n\nEvidence: daily:{daily.stem} sha256:{digest}\n",
+        encoding="utf-8",
+    )
+
+
+def _block_with_queue_task(root: Path, state_root: Path, daily: Path, digest: str) -> None:
+    from memory_queue import MemoryQueue
+
+    MemoryQueue(state_root).enqueue("compile", 1, {"daily_id": daily.stem, "hash": digest})
+
+
+def _block_with_legacy_queue(root: Path, state_root: Path, daily: Path, digest: str) -> None:
+    legacy = state_root / "run" / "queue"
+    legacy.mkdir()
+    (legacy / "task.json").write_text(json.dumps({"daily_id": daily.stem}), encoding="utf-8")
+
+
+def _block_with_transaction(root: Path, state_root: Path, daily: Path, digest: str) -> None:
+    MarkdownCoordinator(root, state_root).prepare(
+        [MarkdownChange.delete(f"knowledge/daily/{daily.name}", max_before_bytes=1024)],
+        operation_id="pending-daily-delete",
+        preconditions={f"knowledge/daily/{daily.name}": digest},
+    )
+
+
+_BLOCKERS = {
+    "manual_pin": _block_with_manual_pin,
+    "decision": _block_with_decision,
+    "queue": _block_with_queue_task,
+    "legacy_queue": _block_with_legacy_queue,
+    "transaction": _block_with_transaction,
+}
+
+
 @pytest.mark.parametrize(
     ("blocker", "reason"),
     [
@@ -182,31 +224,9 @@ def test_eligibility_rejects_every_live_or_pinned_reference(
 ) -> None:
     root, state_root, daily = archive_vault
     digest = sha256_bytes(daily.read_bytes())
-    coordinator = MarkdownCoordinator(root, state_root)
 
-    if blocker == "manual_pin":
-        (state_root / "run" / "archive-pins.json").write_text(
-            json.dumps({"daily_ids": [daily.stem], "source_hashes": []}), encoding="utf-8"
-        )
-    elif blocker == "decision":
-        (root / "knowledge/notes/decision.md").write_text(
-            f"---\ntype: decision\n---\n\nEvidence: daily:{daily.stem} sha256:{digest}\n",
-            encoding="utf-8",
-        )
-    elif blocker == "queue":
-        from memory_queue import MemoryQueue
+    _BLOCKERS[blocker](root, state_root, daily, digest)
 
-        MemoryQueue(state_root).enqueue("compile", 1, {"daily_id": daily.stem, "hash": digest})
-    elif blocker == "legacy_queue":
-        legacy = state_root / "run" / "queue"
-        legacy.mkdir()
-        (legacy / "task.json").write_text(json.dumps({"daily_id": daily.stem}), encoding="utf-8")
-    elif blocker == "transaction":
-        coordinator.prepare(
-            [MarkdownChange.delete(f"knowledge/daily/{daily.name}", max_before_bytes=1024)],
-            operation_id="pending-daily-delete",
-            preconditions={f"knowledge/daily/{daily.name}": digest},
-        )
     result = _archiver(root, state_root).eligible(daily, hot_days=90)
     assert not result.eligible
     assert reason in result.reasons
@@ -864,7 +884,10 @@ def test_recovery_passes_deadline_and_cancellation_to_source_removal(
 
     monkeypatch.setattr(archiver.coordinator, "prepare", prepare)
     monkeypatch.setattr(archiver.coordinator, "apply", apply)
-    deadline = time.monotonic() + 5
+    # Recovery rebuilds the archive index on the way through. What is under
+    # test is that the deadline and the cancellation callback reach source
+    # removal, not how long the rebuild takes on the host.
+    deadline = time.monotonic() + 60
 
     def cancelled() -> bool:
         return False
@@ -971,14 +994,14 @@ def test_archive_heartbeats_source_fence_past_original_lease(
         clock.advance(interval)
         if len(waits) == 4:
             four_heartbeats.set()
-            return stop.wait(5)
+            return stop.wait(180)
         return False
 
     queue = MemoryQueue(state_root, clock=clock, heartbeat_wait=wait)
 
     def hold_build(point: str) -> None:
         if point == "after_build":
-            assert four_heartbeats.wait(5)
+            assert four_heartbeats.wait(120)
 
     archived = _archiver(
         root,
@@ -1033,7 +1056,7 @@ def test_archive_stops_before_publish_when_source_heartbeat_loses_takeover(
 
     def hold_build(point: str) -> None:
         if point == "after_build":
-            assert heartbeat_lost.wait(5)
+            assert heartbeat_lost.wait(120)
 
     with pytest.raises(RuntimeError) as raised:
         _archiver(
@@ -1070,7 +1093,7 @@ def test_failure_winning_finalization_race_preserves_flat_source(
 
     def pause_record(*args) -> None:
         failure_holds_lock.set()
-        assert continue_failure.wait(5)
+        assert continue_failure.wait(180)
         original_record(*args)
 
     monkeypatch.setattr(
@@ -1080,7 +1103,7 @@ def test_failure_winning_finalization_race_preserves_flat_source(
     def killpoint(point: str) -> None:
         if point == "after_revalidate":
             archive_at_revalidate.set()
-            assert continue_archive.wait(5)
+            assert continue_archive.wait(180)
 
     def archive() -> None:
         try:
@@ -1090,9 +1113,12 @@ def test_failure_winning_finalization_race_preserves_flat_source(
         finally:
             archive_done.set()
 
+    # Every wait here only orders two threads; the budgets are sized for the
+    # slowest supported machine. The two 0.25 second observation windows stay
+    # short on purpose: they assert that something did not happen.
     archive_thread = threading.Thread(target=archive)
     archive_thread.start()
-    assert archive_at_revalidate.wait(10)
+    assert archive_at_revalidate.wait(120)
 
     failure_thread = threading.Thread(
         target=lambda: MemoryQueue(state_root).record_source_failure(
@@ -1103,12 +1129,12 @@ def test_failure_winning_finalization_race_preserves_flat_source(
         )
     )
     failure_thread.start()
-    assert failure_holds_lock.wait(5)
+    assert failure_holds_lock.wait(120)
     continue_archive.set()
     archive_completed_while_failure_locked = archive_done.wait(0.25)
     continue_failure.set()
-    archive_thread.join(10)
-    failure_thread.join(10)
+    archive_thread.join(120)
+    failure_thread.join(120)
 
     assert not archive_thread.is_alive() and not failure_thread.is_alive()
     assert not archive_completed_while_failure_locked
@@ -1137,7 +1163,7 @@ def test_archive_winning_finalization_race_deletes_before_failure_records(
         record = archiver.coordinator._record(transaction_id)
         if record is not None and record.operation_id.startswith("archive-remove:"):
             deletion_started.set()
-            assert continue_deletion.wait(5)
+            assert continue_deletion.wait(180)
         return original_apply(transaction_id)
 
     monkeypatch.setattr(archiver.coordinator, "apply", pause_delete)
@@ -1168,17 +1194,17 @@ def test_archive_winning_finalization_race_deletes_before_failure_records(
 
     archive_thread = threading.Thread(target=archive)
     archive_thread.start()
-    assert deletion_started.wait(10)
+    assert deletion_started.wait(120)
     failure_thread = threading.Thread(
         target=record_failure, name="archive-failure-writer"
     )
     failure_thread.start()
-    assert failure_started.wait(5)
-    assert failure_connected.wait(5)
+    assert failure_started.wait(120)
+    assert failure_connected.wait(120)
     failure_completed_while_delete_paused = failure_done.wait(0.25)
     continue_deletion.set()
-    archive_thread.join(10)
-    failure_thread.join(10)
+    archive_thread.join(120)
+    failure_thread.join(120)
 
     assert not archive_thread.is_alive() and not failure_thread.is_alive()
     assert not failure_completed_while_delete_paused
@@ -1396,6 +1422,64 @@ def test_windows_read_only_acl_is_verified_and_fail_closed(tmp_path, monkeypatch
         archive_daily.DailyArchiver._set_archive_read_only(path)
 
 
+def _acl_removal_commands(calls: list) -> list:
+    return [command for command in calls if "/remove:g" in command or "/remove:d" in command]
+
+
+def test_windows_seal_removes_the_broad_principals(tmp_path, monkeypatch) -> None:
+    """Granting read-only access is not enough on a hosted Windows image.
+
+    `/inheritance:r` drops inherited entries only. The temporary tree carries
+    explicit SYSTEM, Administrators and OWNER RIGHTS entries, which survived the
+    grant and then failed the seal's own verification.
+    """
+    import archive_daily
+
+    path = tmp_path / "bag"
+    path.mkdir()
+    monkeypatch.setattr(archive_daily.os, "name", "nt")
+    monkeypatch.setattr(archive_daily, "_windows_acl_identity", lambda: "DOMAIN\\owner")
+    calls = []
+
+    def acl(command):
+        calls.append(command)
+        return SimpleNamespace(
+            returncode=0,
+            stdout=b"bag DOMAIN\\owner:(OI)(CI)(RX)\r\n",
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(archive_daily, "_run_acl_command", acl)
+    archive_daily.DailyArchiver._set_archive_read_only(path)
+
+    removals = _acl_removal_commands(calls)
+    assert [command[2] for command in removals] == ["/remove:g", "/remove:d"]
+    assert len(removals) == 2
+    for sid in ("*S-1-3-4", "*S-1-5-18", "*S-1-5-32-544"):
+        assert all(sid in command for command in removals)
+
+
+def test_windows_seal_fails_when_another_principal_survives(tmp_path, monkeypatch) -> None:
+    """The verification pass stays fail-closed once the removals have run."""
+    import archive_daily
+
+    path = tmp_path / "bag"
+    path.mkdir()
+    monkeypatch.setattr(archive_daily.os, "name", "nt")
+    monkeypatch.setattr(archive_daily, "_windows_acl_identity", lambda: "DOMAIN\\owner")
+    survivor = (
+        b"bag DOMAIN\\owner:(OI)(CI)(RX)\r\n"
+        b"    NT AUTHORITY\\SYSTEM:(F)\r\n"
+    )
+    monkeypatch.setattr(
+        archive_daily,
+        "_run_acl_command",
+        lambda command: SimpleNamespace(returncode=0, stdout=survivor, stderr=b""),
+    )
+    with pytest.raises(PermissionError, match="principal other than"):
+        archive_daily.DailyArchiver._set_archive_read_only(path)
+
+
 def test_cli_exposes_hot_and_transaction_retention_flags() -> None:
     import archive_daily
 
@@ -1405,10 +1489,19 @@ def test_cli_exposes_hot_and_transaction_retention_flags() -> None:
 
 
 def test_only_archiver_uses_daily_archive_directory_rename_exception() -> None:
+    """Publishing a bag by directory rename stays inside the archiver.
+
+    The marker follows `_publish_build`, which now owns the rename: the build
+    root has to be writable for the call, because macOS denies renaming a
+    directory that lacks write permission (`rename(2)` EACCES, "needed to
+    update the `..` entry"). Keeping that window in one place is the point of
+    the check, so the marker tracks the helper rather than the raw call it
+    replaced.
+    """
     scripts = Path(__file__).resolve().parents[1] / "scripts"
     offenders = set()
     for path in scripts.glob("*.py"):
         text = path.read_text(encoding="utf-8")
-        if "publish_build.replace(final_bag)" in text:
+        if "def _publish_build(" in text:
             offenders.add(path.name)
     assert offenders == {"archive_daily.py"}

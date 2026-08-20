@@ -15,6 +15,7 @@ import inspect
 import os
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from doctor import (  # noqa: E402
     DEFAULT_GENERATION_SOURCE_LIMIT,
     run_generation_maintenance,
 )
+from maintenance_helpers import prune_maintenance_output  # noqa: E402
 from maintenance_helpers import run_step as _run_step  # noqa: E402
 from maintenance_helpers import wait_for_compile_idle as _wait_for_compile_idle
 from memory_state import (  # noqa: E402
@@ -106,129 +108,167 @@ def _accepts_ownership(function) -> bool:
     )
 
 
-def _run_nightly_body(*, ownership: OwnerLease | None) -> int:
-    today = datetime.now().strftime("%Y-%m-%d")
-    if ownership is not None and (
-        ownership.role not in {"nightly", "weekly"} or ownership.scope != "global"
-    ):
-        raise ValueError("nightly work requires a nightly or weekly global owner")
+@dataclass(frozen=True)
+class _Step:
+    """One nightly subprocess step: what to announce, run, and how long to wait."""
 
+    message: str
+    label: str
+    command: list[str]
+    timeout: int
+
+
+def _script(name: str) -> list[str]:
+    return [sys.executable, str(ROOT / "scripts" / name)]
+
+
+def _queue_step() -> _Step:
+    return _Step(
+        "Step 1: working deferred memory queue...",
+        "work",
+        _script("memory_queue.py") + ["work"],
+        600,
+    )
+
+
+def _compile_step() -> _Step:
+    return _Step(
+        "Step 2: triggering compile (if needed)...",
+        "maybe_compile",
+        _script("maybe_compile.py"),
+        60,
+    )
+
+
+def _post_compile_steps() -> list[_Step]:
+    return [
+        _Step(
+            "Step 3: structural lint...",
+            "lint",
+            _script("lint_memory.py"),
+            120,
+        ),
+        _Step(
+            "Step 3b: rebuilding FTS5 search index...",
+            "search",
+            _script("search_memory.py") + ["--rebuild"],
+            60,
+        ),
+    ]
+
+
+def _run_steps(run_step, log, steps: list[_Step]) -> int:
+    """Run each step in order and count the ones that failed."""
+    failures = 0
+    for step in steps:
+        log(step.message)
+        failures += int(bool(run_step(step.command, log, step.label, timeout=step.timeout)))
+    return failures
+
+
+def _compile_running() -> bool:
+    """Best effort: an unreadable status counts as finished, as before."""
+    try:
+        return bool(maybe_compile.status()["compile_running"])
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _wait_compile_finished() -> bool:
+    """Wait up to 5 minutes (60 × 5s) for a running compile to finish."""
+    for _ in range(60):
+        if not _compile_running():
+            return True
+        time.sleep(5)
+    return False
+
+
+def _compact_telemetry(log) -> None:
+    """Compact disposable telemetry without touching knowledge."""
+    try:
+        from retrieval_telemetry import compact
+
+        log(f"  telemetry: compacted {compact()} event(s)")
+    except Exception as e:  # noqa: BLE001
+        log(f"  telemetry: failed ({e}) — skipping")
+
+
+def _post_compile_pass(run_step, log, ownership: OwnerLease | None) -> int:
+    failures = _run_steps(run_step, log, _post_compile_steps())
+
+    # Step 3c: refresh one immutable generation under the shared fence.
+    log("Step 3c: refreshing immutable evidence generation...")
+    failures += _refresh_generation(log, ownership=ownership)
+
+    # Step 3d: compact disposable telemetry without touching knowledge.
+    log("Step 3d: compacting retrieval telemetry...")
+    _compact_telemetry(log)
+    return failures
+
+
+def _prune_reports(log) -> None:
+    """Retention over every maintenance report family and its artifacts."""
+    log("Step 4: pruning maintenance reports and artifacts...")
+    log(f"  pruned {prune_maintenance_output()} old file(s)")
+
+
+def _nightly_steps(run_step, log, ownership: OwnerLease | None) -> int:
+    failures = _run_steps(run_step, log, [_queue_step()])
+
+    # Step 2 must not skip compile just because a hook-triggered one runs.
+    _wait_for_compile_idle(log)
+    failures += _run_steps(run_step, log, [_compile_step()])
+
+    log("Step 2b: waiting for compile to finish...")
+    if not _wait_compile_finished():
+        log("WARNING: compile still running after 5 min — skipping lint/index/graph")
+        # Steps 3, 3b, 3c depend on compile output.
+        return failures + 1
+    return failures + _post_compile_pass(run_step, log, ownership)
+
+
+def _require_nightly_owner(ownership: OwnerLease | None) -> None:
+    if ownership is None:
+        return
+    if ownership.role in {"nightly", "weekly"} and ownership.scope == "global":
+        return
+    raise ValueError("nightly work requires a nightly or weekly global owner")
+
+
+def _nightly_logger(log_file: Path):
+    def log(msg: str) -> None:
+        line = f"[{datetime.now().isoformat(timespec='seconds')}] {msg}"
+        print(line)
+        with log_file.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+
+    return log
+
+
+def _owned_step_runner(ownership: OwnerLease | None):
+    """Pass the maintenance owner through to steps that accept one."""
     def run_step(command, log, name, *, timeout):
         if ownership is not None and _accepts_ownership(_run_step):
-            return _run_step(
-                command,
-                log,
-                name,
-                timeout=timeout,
-                ownership=ownership,
-            )
+            return _run_step(command, log, name, timeout=timeout, ownership=ownership)
         return _run_step(command, log, name, timeout=timeout)
+
+    return run_step
+
+
+def _run_nightly_body(*, ownership: OwnerLease | None) -> int:
+    today = datetime.now().strftime("%Y-%m-%d")
+    _require_nightly_owner(ownership)
+    run_step = _owned_step_runner(ownership)
 
     failures = 1
     terminal_error = None
     try:
-        log_file = REPORTS_DIR / f"nightly-{today}.md"
         REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-
-        def log(msg: str) -> None:
-            line = f"[{datetime.now().isoformat(timespec='seconds')}] {msg}"
-            print(line)
-            with log_file.open("a", encoding="utf-8") as f:
-                f.write(line + "\n")
-
+        log = _nightly_logger(REPORTS_DIR / f"nightly-{today}.md")
         log(f"=== Nightly consolidation pass — {today} ===")
-        failures = 0
 
-        # Step 1: run the bounded deferred queue worker.
-        log("Step 1: working deferred memory queue...")
-        rc = run_step(
-            [sys.executable, str(ROOT / "scripts" / "memory_queue.py"), "work"],
-            log,
-            "work",
-            timeout=600,
-        )
-        if rc:
-            failures += 1
-
-        # Step 2: maybe_compile (will spawn compile if there's pending work).
-        _wait_for_compile_idle(log)
-        log("Step 2: triggering compile (if needed)...")
-        rc = run_step(
-            [sys.executable, str(ROOT / "scripts" / "maybe_compile.py")],
-            log,
-            "maybe_compile",
-            timeout=60,
-        )
-        if rc:
-            failures += 1
-
-        # Step 2b: wait for compile to finish before rebuilding indexes.
-        log("Step 2b: waiting for compile to finish...")
-        compile_still_running = False
-        for _ in range(60):  # max 5 minutes (60 × 5s)
-            try:
-                st = maybe_compile.status()
-                if not st["compile_running"]:
-                    break
-            except Exception:
-                break
-            time.sleep(5)
-        else:
-            compile_still_running = True
-
-        if compile_still_running:
-            log("WARNING: compile still running after 5 min — skipping lint/index/graph")
-            # Skip steps 3, 3b, 3c — they depend on compile output
-            failures += 1
-        else:
-            # Step 3: structural lint (cheap, no LLM).
-            log("Step 3: structural lint...")
-            rc = run_step(
-                [sys.executable, str(ROOT / "scripts" / "lint_memory.py")],
-                log,
-                "lint",
-                timeout=120,
-            )
-            if rc:
-                failures += 1
-
-            # Step 3b: rebuild FTS5 search index (cheap, no LLM, <1s for 100 pages).
-            log("Step 3b: rebuilding FTS5 search index...")
-            rc = run_step(
-                [sys.executable, str(ROOT / "scripts" / "search_memory.py"), "--rebuild"],
-                log,
-                "search",
-                timeout=60,
-            )
-            if rc:
-                failures += 1
-
-            # Step 3c: refresh one immutable generation under the shared fence.
-            log("Step 3c: refreshing immutable evidence generation...")
-            failures += _refresh_generation(log, ownership=ownership)
-
-            # Step 3d: compact disposable telemetry without touching knowledge.
-            log("Step 3d: compacting retrieval telemetry...")
-            try:
-                from retrieval_telemetry import compact
-
-                compacted = compact()
-                log(f"  telemetry: compacted {compacted} event(s)")
-            except Exception as e:
-                log(f"  telemetry: failed ({e}) — skipping")
-
-        # Step 4: prune old nightly logs (>30 days).
-        log("Step 4: pruning old nightly reports...")
-        pruned = 0
-        cutoff = datetime.now().timestamp() - (30 * 86400)
-        for p in REPORTS_DIR.glob("nightly-*.md"):
-            try:
-                if p.stat().st_mtime < cutoff:
-                    p.unlink()
-                    pruned += 1
-            except OSError:
-                pass
-        log(f"  pruned {pruned} old report(s)")
+        failures = _nightly_steps(run_step, log, ownership)
+        _prune_reports(log)
 
         log(f"=== Nightly pass complete (failures={failures}) ===")
         return 1 if failures else 0
@@ -249,36 +289,48 @@ def run_nightly(*, ownership: OwnerLease | None) -> int:
         return _run_nightly_body(ownership=ownership)
 
 
+def _write_marker(marker: Path) -> bool:
+    """Create the marker exclusively and stamp it with this PID."""
+    try:
+        descriptor = os.open(str(marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    try:
+        os.write(descriptor, str(os.getpid()).encode("ascii"))
+    finally:
+        os.close(descriptor)
+    return True
+
+
+def _marker_is_abandoned(marker: Path) -> bool:
+    """A marker older than 30 minutes whose owner process is gone."""
+    from memory_state import _is_pid_alive
+
+    try:
+        if time.time() - marker.stat().st_mtime <= 1800:
+            return False
+        old_pid = int(marker.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return False
+    return not _is_pid_alive(old_pid)
+
+
+def _steal_marker(marker: Path) -> bool:
+    if not _marker_is_abandoned(marker):
+        return False
+    try:
+        marker.unlink()
+    except OSError:
+        return False
+    return _write_marker(marker)
+
+
 def _acquire_legacy_maintenance_marker() -> Path | None:
     marker = STATE_ROOT / "run/maintenance.lock"
     marker.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        descriptor = os.open(str(marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        try:
-            os.write(descriptor, str(os.getpid()).encode("ascii"))
-        finally:
-            os.close(descriptor)
+    if _write_marker(marker):
         return marker
-    except FileExistsError:
-        try:
-            age = time.time() - marker.stat().st_mtime
-            if age > 1800:
-                from memory_state import _is_pid_alive
-
-                old_pid = int(marker.read_text(encoding="utf-8").strip())
-                if not _is_pid_alive(old_pid):
-                    marker.unlink()
-                    descriptor = os.open(
-                        str(marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY
-                    )
-                    try:
-                        os.write(descriptor, str(os.getpid()).encode("ascii"))
-                    finally:
-                        os.close(descriptor)
-                    return marker
-        except (OSError, ValueError):
-            pass
-        return None
+    return marker if _steal_marker(marker) else None
 
 
 def _release_legacy_maintenance_marker(marker: Path) -> None:

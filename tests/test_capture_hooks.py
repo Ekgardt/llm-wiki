@@ -507,7 +507,10 @@ def test_prompt_counter_is_durable_and_concurrency_safe(tmp_path, monkeypatch):
     monkeypatch.setattr(memory_state, "STATE_DIR", tmp_path / "run")
     monkeypatch.setattr(memory_state, "STATE_FILE", tmp_path / "run" / "state.json")
     monkeypatch.setattr(memory_state, "LOCK_FILE", tmp_path / "run" / "state.json.lock")
-    monkeypatch.setattr(user_prompt_capture, "HOOK_STATE_LOCK_TIMEOUT", 10.0)
+    # Twenty threads contending for one file lock: the claim is that no update
+    # is lost, not that each waits under ten seconds, and ten was not enough on
+    # a loaded Windows runner.
+    monkeypatch.setattr(user_prompt_capture, "HOOK_STATE_LOCK_TIMEOUT", 120.0)
     errors = []
 
     def observed_update(mutator, **kwargs):
@@ -541,7 +544,7 @@ def test_prompt_counters_are_isolated_across_parallel_sessions(tmp_path, monkeyp
     monkeypatch.setattr(memory_state, "STATE_FILE", tmp_path / "run" / "state.json")
     monkeypatch.setattr(memory_state, "LOCK_FILE", tmp_path / "run" / "state.json.lock")
     monkeypatch.setattr(user_prompt_capture, "update_state", memory_state.update_state)
-    monkeypatch.setattr(user_prompt_capture, "HOOK_STATE_LOCK_TIMEOUT", 10.0)
+    monkeypatch.setattr(user_prompt_capture, "HOOK_STATE_LOCK_TIMEOUT", 120.0)
 
     work = [(session, project) for session, project in (("s-a", "p-a"), ("s-b", "p-b")) for _ in range(20)]
     with ThreadPoolExecutor(max_workers=20) as pool:
@@ -1246,7 +1249,7 @@ def test_prompt_capture_dedupe_claim_is_atomic_under_concurrency(tmp_path, monke
     monkeypatch.setattr(memory_state, "LOCK_FILE", state_dir / "state.json.lock")
     monkeypatch.setattr(memory_state, "REPORTS_DIR", tmp_path / "logs")
     monkeypatch.setattr(user_prompt_capture, "STATE_ROOT", tmp_path)
-    monkeypatch.setattr(user_prompt_capture, "HOOK_STATE_LOCK_TIMEOUT", 10.0)
+    monkeypatch.setattr(user_prompt_capture, "HOOK_STATE_LOCK_TIMEOUT", 120.0)
 
     with ThreadPoolExecutor(max_workers=16) as pool:
         claims = list(
@@ -1270,3 +1273,64 @@ def tmp_path_state(tmp_path: Path, monkeypatch, module):
     state_dir.mkdir()
     monkeypatch.setattr(module, "STATE_ROOT", tmp_path)
     return state_dir / "state.json"
+
+
+def test_a_failed_direct_spawn_leaves_a_capture_failure_trace(monkeypatch, capsys):
+    """Called outside the adapter there is no durable intent, so record the loss."""
+    import precompact_capture
+    import session_end_capture
+
+    recorded = []
+    for module, event in ((session_end_capture, "session_end"), (precompact_capture, "pre_compact")):
+        monkeypatch.setattr(module, "spawn_detached", lambda args: None)
+        monkeypatch.setattr(
+            module,
+            "record_capture_failure",
+            lambda kind, reason, **fields: recorded.append((kind, reason, fields)),
+        )
+        assert _run_capture_with_stdin(
+            module.__name__, {"session_id": "session-7", "transcript_path": "session.jsonl"}
+        ) == 0
+        assert json.loads(capsys.readouterr().out) == {"flush_started": False}
+        del event
+
+    assert [item[0] for item in recorded] == ["session_end", "pre_compact"]
+    assert {item[1] for item in recorded} == {"flush_spawn_failed"}
+    assert {item[2]["session_id"] for item in recorded} == {"session-7"}
+
+
+def test_operational_errors_survive_a_process_boundary():
+    """These cross the queue worker's process boundary; they must arrive intact.
+
+    A `BlackboardConflictError` in a worker child used to reach the parent as
+    `TypeError: __init__() missing 1 required positional argument`, hiding the
+    real failure.
+    """
+    import pickle
+
+    from blackboard import BlackboardConflictError
+    from markdown_transaction import (
+        ProjectPendingPriorError,
+        TransactionDriftError,
+        TransactionFailure,
+    )
+    from memory_queue import QueueOperationError
+    from operational_ownership import OperationalOwnershipError
+    from project_journal import ProjectJournalReadError, ProjectJournalRebuildRequired
+
+    errors = [
+        BlackboardConflictError(("resource-a",), "conflict-1"),
+        TransactionFailure("boom", "target_drift", "committed"),
+        TransactionDriftError("tx-1", ("knowledge/notes/a.md",)),
+        ProjectPendingPriorError("demo", 4, 3),
+        ProjectJournalRebuildRequired("demo", 4, 2),
+        ProjectJournalReadError("unreadable", "file is not regular"),
+        QueueOperationError("process_cleanup_failed", "child exited 1"),
+        OperationalOwnershipError("owner_busy", "another owner holds the lease"),
+    ]
+
+    for error in errors:
+        restored = pickle.loads(pickle.dumps(error))
+        assert type(restored) is type(error)
+        assert str(restored) == str(error)
+        assert vars(restored) == vars(error)

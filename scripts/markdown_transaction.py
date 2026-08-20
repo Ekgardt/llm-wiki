@@ -24,7 +24,7 @@ from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 if TYPE_CHECKING:
     from operational_ownership import OwnerLease
@@ -1606,6 +1606,10 @@ class TransactionFailure(RuntimeError):
         self.code = code
         self.state = state
 
+    def __reduce__(self):
+        """Carry the disposition across a process boundary, not just the text."""
+        return (self.__class__, (str(self), self.code, self.state))
+
 
 class TransactionDriftError(RuntimeError):
     """A committed operation no longer matches its persisted after-state."""
@@ -1617,6 +1621,9 @@ class TransactionDriftError(RuntimeError):
             "committed transaction target drift detected; use a new operation_id: "
             + ", ".join(paths)
         )
+
+    def __reduce__(self):
+        return (self.__class__, (self.transaction_id, self.paths))
 
 
 class ProjectPendingPriorError(TransactionFailure):
@@ -1634,6 +1641,10 @@ class ProjectPendingPriorError(TransactionFailure):
         self.sequence = sequence
         self.prior_sequence = prior_sequence
 
+    def __reduce__(self):
+        """This subclass takes its own arguments, not the base three."""
+        return (self.__class__, (self.project, self.sequence, self.prior_sequence))
+
 
 class TargetBoundaryFailure(RuntimeError):
     """A persisted target no longer has its prepared containment identity."""
@@ -1641,6 +1652,532 @@ class TargetBoundaryFailure(RuntimeError):
 
 class TargetTooLargeError(ValueError):
     """A transaction target exceeds the authoritative target-size contract."""
+
+
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+_CLAIM_TARGET_FIELDS = {
+    "page",
+    "claim_id",
+    "fingerprint",
+    "record_hash",
+    "evidence_hash",
+}
+
+
+def _is_sha256_hex(value: object) -> bool:
+    return isinstance(value, str) and _SHA256_HEX.fullmatch(value) is not None
+
+
+def _is_filled_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _valid_positive_epoch(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return False
+    return value >= 1
+
+
+def _require_bounded_sequence(expected: object, name: str) -> None:
+    if not isinstance(expected, Sequence) or isinstance(expected, (str, bytes)):
+        raise TypeError(f"{name} precondition must be an array")
+    if not 1 <= len(expected) <= 1000:
+        raise ValueError(f"{name} precondition must be bounded")
+
+
+def _require_mapping_fields(expected: object, required: set[str], name: str) -> None:
+    if not isinstance(expected, Mapping):
+        raise TypeError(f"{name} precondition must be a mapping")
+    if set(expected) != required:
+        raise ValueError(f"{name} precondition has invalid fields")
+
+
+def _require_claim_target_hashes(item: Mapping[str, object]) -> None:
+    for field in ("fingerprint", "record_hash", "evidence_hash"):
+        if not _is_sha256_hex(item[field]):
+            raise ValueError("claim_targets precondition has invalid hash")
+
+
+def _valid_project_lease_values(expected: Mapping[str, object]) -> bool:
+    if not _is_filled_string(expected["project"]):
+        return False
+    if not _is_filled_string(expected["lease_token"]):
+        return False
+    if not isinstance(expected["fencing_epoch"], int):
+        return False
+    if expected["fencing_epoch"] < 1:
+        return False
+    return isinstance(expected["expires_at"], str)
+
+
+def _validated_project_lease(expected: object) -> dict:
+    _require_mapping_fields(
+        expected,
+        {"project", "lease_token", "fencing_epoch", "expires_at"},
+        "project_lease",
+    )
+    if not _valid_project_lease_values(expected):
+        raise ValueError("project_lease precondition has invalid values")
+    _parse_timestamp(expected["expires_at"])
+    return dict(expected)
+
+
+def _valid_intent_fence_values(expected: Mapping[str, object]) -> bool:
+    if not _is_sha256_hex(str(expected["intent_id"])):
+        return False
+    if expected["mode"] not in {"capture", "worker", "operator"}:
+        return False
+    if not _is_filled_string(expected["token"]):
+        return False
+    if not _valid_positive_epoch(expected["fencing_epoch"]):
+        return False
+    return isinstance(expected["expires_at"], str)
+
+
+def _validated_intent_fence(expected: object) -> dict:
+    _require_mapping_fields(
+        expected,
+        {"intent_id", "mode", "token", "fencing_epoch", "expires_at"},
+        "intent_fence",
+    )
+    if not _valid_intent_fence_values(expected):
+        raise ValueError("intent_fence precondition has invalid values")
+    _parse_timestamp(str(expected["expires_at"]))
+    return dict(expected)
+
+
+def _valid_capture_binding_values(expected: Mapping[str, object]) -> bool:
+    if not _is_sha256_hex(str(expected["intent_id"])):
+        return False
+    if not _is_filled_string(expected["task_id"]):
+        return False
+    if not _is_sha256_hex(str(expected["active_link_digest"])):
+        return False
+    return _is_sha256_hex(str(expected["seal_digest"]))
+
+
+def _validated_capture_binding(expected: object) -> dict:
+    _require_mapping_fields(
+        expected,
+        {"intent_id", "task_id", "active_link_digest", "seal_digest"},
+        "capture_binding",
+    )
+    if not _valid_capture_binding_values(expected):
+        raise ValueError("capture_binding precondition has invalid values")
+    return dict(expected)
+
+
+def _require_hash_or_absent(expected: object) -> None:
+    if expected == ABSENT:
+        return
+    if not _is_sha256_hex(expected):
+        raise ValueError("precondition values must be 'absent' or SHA-256 hashes")
+
+
+_RECOVERY_MANIFEST_FIELDS = {
+    "schema_version",
+    "transaction_id",
+    "request_hash",
+    "plan_hash",
+    "operations",
+}
+_PERSISTED_OPERATION_FIELDS = {
+    "position",
+    "before_hash",
+    "after_hash",
+    "parent_device",
+    "parent_inode",
+}
+# Which side of a recorded operation must be absent, per kind.
+_OPERATION_ABSENCE = {
+    "create": (True, False),
+    "replace": (False, False),
+    "delete": (False, True),
+}
+
+
+class _BuiltOperation(NamedTuple):
+    row: tuple
+    change: dict
+    parent_mismatch: bool
+
+
+class _PromotionPlan(NamedTuple):
+    manifest: dict
+    operations: list
+    parent_mismatch: bool
+
+
+def _manifest_identity_matches(
+    manifest: Mapping[str, object], transaction_id: str, plan_bytes: bytes
+) -> bool:
+    if manifest["schema_version"] != "markdown-transaction-recovery/v1":
+        return False
+    if manifest["transaction_id"] != transaction_id:
+        return False
+    return manifest["plan_hash"] == sha256_bytes(plan_bytes)
+
+
+def _comparable_operation_lists(plan_operations: object, manifest_operations: object) -> bool:
+    if not isinstance(plan_operations, list) or not isinstance(manifest_operations, list):
+        return False
+    return len(plan_operations) == len(manifest_operations)
+
+
+def _persisted_integers(persisted: Mapping[str, object]) -> bool:
+    if type(persisted["position"]) is not int:
+        return False
+    if type(persisted["parent_device"]) is not int:
+        return False
+    return type(persisted["parent_inode"]) is int
+
+
+def _persisted_shape_matches(persisted: object, position: int) -> bool:
+    if not isinstance(persisted, dict):
+        return False
+    if set(persisted) != _PERSISTED_OPERATION_FIELDS:
+        return False
+    if persisted["position"] != position:
+        return False
+    return _persisted_integers(persisted)
+
+
+def _validated_persisted_operation(
+    persisted: object, position: int, operation: object
+) -> tuple | None:
+    """The encoded parent identity, or None when the pair does not line up."""
+    if not isinstance(operation, dict):
+        return None
+    if not _persisted_shape_matches(persisted, position):
+        return None
+    try:
+        return _encode_parent_identity(
+            (persisted["parent_device"], persisted["parent_inode"])
+        )
+    except ValueError:
+        return None
+
+
+def _kind_transition_valid(kind: object, before_hash: str, after_hash: str) -> bool:
+    expected = _OPERATION_ABSENCE.get(kind)
+    if expected is None:
+        return True
+    return (before_hash == ABSENT, after_hash == ABSENT) == expected
+
+
+def _operation_hashes_consistent(
+    persisted: Mapping[str, object], kind: object, before_hash: str, after_hash: str
+) -> bool:
+    if persisted["before_hash"] != before_hash:
+        return False
+    if persisted["after_hash"] != after_hash:
+        return False
+    return _kind_transition_valid(kind, before_hash, after_hash)
+
+
+_RESERVED_DEVICE_NAMES = {"con", "prn", "aux", "nul"} | {
+    f"{prefix}{number}" for prefix in ("com", "lpt") for number in range(1, 10)
+}
+
+
+def _require_normalized_path(value: str) -> None:
+    if unicodedata.normalize("NFC", value) != value:
+        raise ValueError("path must use NFC Unicode normalization")
+
+
+def _require_bounded_path(value: str, relative: Path) -> None:
+    if len(value.encode("utf-8")) > MAX_KNOWLEDGE_PATH_BYTES:
+        raise ValueError("target path exceeds length limit")
+    if len(relative.parts) > MAX_KNOWLEDGE_DEPTH:
+        raise ValueError("target path depth exceeds limit")
+    if any(
+        len(part.encode("utf-8")) > MAX_KNOWLEDGE_COMPONENT_BYTES
+        for part in relative.parts
+    ):
+        raise ValueError("target path component exceeds length limit")
+
+
+def _non_portable_component(part: str) -> bool:
+    if part.endswith((" ", ".")):
+        return True
+    if any(character in '<>:"|?*' or ord(character) < 32 for character in part):
+        return True
+    return part.rstrip(" .").split(".", 1)[0].casefold() in _RESERVED_DEVICE_NAMES
+
+
+def _require_portable_components(relative: Path) -> None:
+    for part in relative.parts:
+        if _non_portable_component(part):
+            raise ValueError("path contains a non-portable or reserved component")
+
+
+def _require_allowed_root(normalized: str) -> None:
+    if normalized in _ALLOWED_FILES:
+        return
+    if any(normalized.startswith(f"{root}/") for root in _ALLOWED_DIRECTORIES):
+        return
+    raise ValueError("path is outside every allowed Markdown root")
+
+
+def _require_markdown_target(normalized: str) -> None:
+    if normalized.startswith("knowledge/feedback/"):
+        raise ValueError("feedback candidates must use JSON")
+
+
+def _require_feedback_target(normalized: str) -> None:
+    if _FEEDBACK_JSON_RE.fullmatch(normalized) is None:
+        raise ValueError("JSON targets must be feedback candidates")
+
+
+def _require_blackboard_target(normalized: str) -> None:
+    if _BLACKBOARD_JSONL_RE.fullmatch(normalized) is None:
+        raise ValueError("JSONL targets must be project blackboard streams")
+
+
+def _require_approved_suffix(relative: Path, normalized: str) -> None:
+    """Each approved file type belongs in exactly one place."""
+    suffix = relative.suffix.casefold()
+    if suffix == ".md":
+        _require_markdown_target(normalized)
+        return
+    if suffix == ".json":
+        _require_feedback_target(normalized)
+        return
+    if suffix == ".jsonl":
+        _require_blackboard_target(normalized)
+        return
+    raise ValueError("transaction targets must use an approved file type")
+
+
+def _require_recovery_bound(max_transactions: object) -> None:
+    if max_transactions is None:
+        return
+    if isinstance(max_transactions, bool) or not isinstance(max_transactions, int):
+        raise ValueError("max_transactions must be a non-negative integer or None")
+    if max_transactions < 0:
+        raise ValueError("max_transactions must be a non-negative integer or None")
+
+
+def _preparing_owner_alive(selected_state: str, owner_pid: object) -> bool:
+    if selected_state != "preparing" or owner_pid is None:
+        return False
+    return _pid_alive(owner_pid)
+
+
+class _ArtifactRoots(NamedTuple):
+    artifact: Path
+    before: Path
+    after: Path
+
+
+class _StagedOperation(NamedTuple):
+    operation: MarkdownOperation
+    parent_identity: tuple[int, int]
+    plan_entry: dict[str, object]
+
+
+class _StagedPlan(NamedTuple):
+    operations: list[MarkdownOperation]
+    parent_identities: list[tuple[int, int]]
+    plan_operations: list[dict[str, object]]
+
+
+def _require_prepare_arguments(
+    operation_id: object, changes: Sequence[MarkdownChange], content_guard: object
+) -> None:
+    if not isinstance(operation_id, str) or not operation_id:
+        raise ValueError("operation_id must be a non-empty string")
+    if not changes:
+        raise ValueError("a transaction requires at least one change")
+    if content_guard not in {None, "model_output"}:
+        raise ValueError("content_guard must be 'model_output' or None")
+
+
+def _require_matching_reservation(
+    project_reservation: object,
+    operation_id: str,
+    persisted_preconditions: Mapping[str, object],
+) -> None:
+    if project_reservation is None:
+        return
+    if not isinstance(project_reservation, ProjectCheckpointReservation):
+        raise TypeError("project_reservation must be a ProjectCheckpointReservation")
+    if project_reservation.operation_id != operation_id:
+        raise ValueError("project reservation operation_id does not match")
+    if "project_lease" not in persisted_preconditions:
+        raise ValueError("project reservation requires a project lease precondition")
+
+
+def _require_capture_matches_kind(change: MarkdownChange, before: bytes | None) -> None:
+    if change.kind == "create" and before is not None:
+        raise FileExistsError(change.path)
+    if change.kind in {"replace", "delete"} and before is None:
+        raise FileNotFoundError(change.path)
+
+
+def _require_change_precondition(
+    change: MarkdownChange,
+    before_hash: str,
+    persisted_preconditions: Mapping[str, object],
+) -> None:
+    expected_before = persisted_preconditions.get(change.path)
+    if expected_before is not None and expected_before != before_hash:
+        raise ValueError(
+            f"target precondition changed before prepare: {change.path}"
+        )
+
+
+def _content_hash(content: bytes | None) -> str:
+    if content is None:
+        return ABSENT
+    return sha256_bytes(content)
+
+
+def _run_plan_validators(plan: dict, validators: Sequence[Validator]) -> None:
+    for validator in validators:
+        if not callable(validator):
+            raise TypeError("validators must be callable")
+        if validator(copy.deepcopy(plan)) is False:
+            raise ValueError("transaction validator rejected the plan")
+
+
+def _validated_plan(
+    transaction_id: str,
+    plan_operations: list[dict[str, object]],
+    content_guard: object,
+    validators: Sequence[Validator],
+) -> dict[str, object]:
+    plan: dict[str, object] = {
+        "schema_version": "markdown-transaction/v1",
+        "transaction_id": transaction_id,
+        "operations": plan_operations,
+    }
+    if content_guard is not None:
+        plan["content_guard"] = content_guard
+    validate_schema(plan, _SCHEMA)
+    _run_plan_validators(plan, validators)
+    validate_schema(plan, _SCHEMA)
+    return plan
+
+
+def _recovery_manifest(
+    transaction_id: str, request_hash: str, plan_bytes: bytes, staged: _StagedPlan
+) -> dict[str, object]:
+    return {
+        "schema_version": "markdown-transaction-recovery/v1",
+        "transaction_id": transaction_id,
+        "request_hash": request_hash,
+        "plan_hash": sha256_bytes(plan_bytes),
+        "operations": [
+            {
+                "position": position,
+                "before_hash": operation.before_hash,
+                "after_hash": operation.after_hash,
+                "parent_device": staged.parent_identities[position][0],
+                "parent_inode": staged.parent_identities[position][1],
+            }
+            for position, operation in enumerate(staged.operations)
+        ],
+    }
+
+
+_ABORT_FENCE_QUERY = """SELECT 1 FROM intent_fences AS fence
+                       JOIN capture_binding_projections AS binding
+                         ON binding.intent_id=fence.intent_id
+                        AND binding.intent_fence_token=fence.token
+                        AND binding.intent_fence_epoch=fence.fencing_epoch
+                       WHERE fence.intent_id=? AND fence.token=?
+                         AND fence.fencing_epoch=? AND fence.expires_at>?
+                         AND binding.active_link_digest=?"""
+
+
+def _require_operator_fence(intent_fence: object, active_link_digest: object) -> None:
+    if not isinstance(intent_fence, IntentFence) or intent_fence.mode != "operator":
+        raise ValueError("abort requires an operator intent fence")
+    if re.fullmatch(r"[0-9a-f]{64}", str(active_link_digest)) is None:
+        raise ValueError("active link digest must be lowercase 64-hex")
+
+
+def _require_actor_identity(actor_identity: object) -> None:
+    if not isinstance(actor_identity, str):
+        raise ValueError("actor identity is invalid")
+    if not 1 <= len(actor_identity.encode("utf-8")) <= 512:
+        raise ValueError("actor identity is invalid")
+
+
+def _require_abortable_state(row: sqlite3.Row, transaction_id: str) -> None:
+    if row["state"] == "committed":
+        raise TransactionFailure(
+            "committed transaction cannot be aborted",
+            "abort_committed",
+            "committed",
+        )
+    if row["state"] in {"conflicted", "quarantined"}:
+        raise TransactionFailure(
+            "conflicted transaction cannot be aborted",
+            "abort_state_refused",
+            str(row["state"]),
+        )
+
+
+def _inverse_kind(before_hash: str, after_hash: str) -> str:
+    if before_hash == ABSENT:
+        return "delete"
+    if after_hash == ABSENT:
+        return "create"
+    return "replace"
+
+
+def _abort_identity(
+    transaction_id: str,
+    intent_fence: IntentFence,
+    active_link_digest: str,
+    manifest_sha256: str,
+) -> str:
+    identity = {
+        "active_link_digest": active_link_digest,
+        "before_manifest_sha256": manifest_sha256,
+        "intent_fence_epoch": intent_fence.epoch,
+        "intent_id": intent_fence.intent_id,
+        "transaction_id": transaction_id,
+    }
+    return f"transaction-abort:{sha256_bytes(canonical_json_bytes(identity))}"
+
+
+class _AbortDirection(NamedTuple):
+    operation_id: str
+    manifest_sha256: str
+    chosen_at: str
+
+
+def _require_gate_wait(wait_seconds: object) -> None:
+    if wait_seconds is None:
+        return
+    if isinstance(wait_seconds, bool) or not isinstance(wait_seconds, (int, float)):
+        raise ValueError("writer gate wait_seconds must be non-negative or None")
+    if wait_seconds < 0:
+        raise ValueError("writer gate wait_seconds must be non-negative or None")
+
+
+def _gate_wait_seconds(wait_seconds: float | None) -> float:
+    if wait_seconds is None:
+        return _WRITER_WAIT_SECONDS
+    return wait_seconds
+
+
+def _retry_gate_or_fail(
+    exc: BaseException, attempt: int, deadline: float
+) -> int:
+    """The next attempt number, or the timeout that ends the wait."""
+    if not _is_transient_writer_contention(exc):
+        raise exc
+    delay = _writer_retry_delay(attempt, deadline)
+    if delay <= 0:
+        raise TimeoutError(
+            "timed out waiting for the global Markdown writer gate"
+        ) from exc
+    time.sleep(delay)
+    return attempt + 1
 
 
 def _is_target_boundary_error(error: BaseException) -> bool:
@@ -1681,6 +2218,16 @@ def _is_transient_writer_contention(error: BaseException) -> bool:
     if isinstance(error, OSError):
         return getattr(error, "winerror", None) in {32, 33} or error.errno in {32, 33}
     return False
+
+
+def _writer_gate_loss_message(heartbeat_lost: bool) -> str:
+    """Say what actually went wrong, since only a reclaim is a real loss."""
+    if heartbeat_lost:
+        return (
+            "Markdown writer gate ownership was lost: the lease heartbeat stopped "
+            "and another owner reclaimed the gate"
+        )
+    return "Markdown writer gate ownership was lost: another owner holds the gate"
 
 
 def _writer_retry_delay(attempt: int, deadline: float) -> float:
@@ -1819,6 +2366,140 @@ def _relative_target(coordinator: MarkdownCoordinator, path: Path) -> str:
     return relative
 
 
+def _relative_changes(
+    coordinator: MarkdownCoordinator, changes: Mapping[Path, bytes | None]
+) -> dict[str, bytes | None]:
+    relative_changes = {
+        _relative_target(coordinator, Path(path)): content
+        for path, content in changes.items()
+    }
+    for content in relative_changes.values():
+        if content is None:
+            continue
+        if len(_require_bytes(content)) > MAX_KNOWLEDGE_TARGET_BYTES:
+            raise ValueError("knowledge target size exceeds limit")
+    return relative_changes
+
+
+def _desired_hashes(relative_changes: Mapping[str, bytes | None]) -> dict[str, str]:
+    return {
+        path: ABSENT if content is None else sha256_bytes(content)
+        for path, content in relative_changes.items()
+    }
+
+
+def _persisted_hashes(record: TransactionRecord) -> dict[str, str]:
+    return {operation.path: operation.after_hash for operation in record.operations}
+
+
+def _existing_committed_record(
+    coordinator: MarkdownCoordinator,
+    operation_id: str,
+    relative_changes: Mapping[str, bytes | None],
+) -> TransactionRecord | None:
+    """The committed record already bound to this operation id, if there is one."""
+    if coordinator._record_for_operation_id(operation_id) is None:
+        return None
+    existing = _settle_operation(coordinator, operation_id)
+    if existing is None:
+        return None
+    if _desired_hashes(relative_changes) != _persisted_hashes(existing):
+        raise ValueError("operation_id is already bound to a different request")
+    if existing.state != "committed":
+        raise RuntimeError(
+            f"duplicate mutation ended in noncommitted state {existing.state}"
+        )
+    _verify_committed_targets(coordinator, existing)
+    return existing
+
+
+def _captured_targets(
+    coordinator: MarkdownCoordinator, relative_changes: Mapping[str, bytes | None]
+) -> dict[str, bytes | None]:
+    with coordinator.writer_gate():
+        return {
+            relative: coordinator._read_bounded_target(
+                coordinator._target(relative), MAX_KNOWLEDGE_TARGET_BYTES
+            )
+            for relative in relative_changes
+        }
+
+
+def _prepared_change(
+    relative: str, content: bytes | None, before: bytes | None
+) -> MarkdownChange:
+    if content is None:
+        if before is None:
+            raise FileNotFoundError(relative)
+        return MarkdownChange.delete(relative)
+    if before is None:
+        return MarkdownChange.create(relative, _require_bytes(content))
+    return MarkdownChange.replace(relative, _require_bytes(content))
+
+
+def _prepared_changes(
+    relative_changes: Mapping[str, bytes | None],
+    captured: Mapping[str, bytes | None],
+    preconditions: Mapping[str, object] | None,
+) -> tuple[list[MarkdownChange], dict[str, object]]:
+    """The changes to prepare, plus the preconditions they were captured under."""
+    expected = dict(preconditions or {})
+    prepared: list[MarkdownChange] = []
+    for relative, content in relative_changes.items():
+        before = captured[relative]
+        captured_hash = ABSENT if before is None else sha256_bytes(before)
+        caller_expected = expected.get(relative)
+        if caller_expected is not None and caller_expected != captured_hash:
+            raise ValueError(f"caller precondition does not match target: {relative}")
+        expected[relative] = captured_hash
+        prepared.append(_prepared_change(relative, content, before))
+    return prepared, expected
+
+
+def _recovered_duplicate(
+    coordinator: MarkdownCoordinator,
+    operation_id: str,
+    relative_changes: Mapping[str, bytes | None],
+    exc: ValueError,
+) -> TransactionRecord:
+    record = _settle_operation(coordinator, operation_id)
+    if record is None:
+        raise RuntimeError(
+            "winning transaction disappeared during duplicate recovery"
+        ) from exc
+    if _desired_hashes(relative_changes) != _persisted_hashes(record):
+        raise exc
+    if record.state != "committed":
+        raise RuntimeError(
+            f"duplicate mutation ended in noncommitted state {record.state}"
+        )
+    _verify_committed_targets(coordinator, record)
+    return record
+
+
+def _prepare_or_recover(
+    coordinator: MarkdownCoordinator,
+    prepared: list[MarkdownChange],
+    operation_id: str,
+    validators: Sequence[Validator],
+    expected: Mapping[str, object],
+    relative_changes: Mapping[str, bytes | None],
+) -> TransactionRecord | None:
+    """None when preparation won the race, else the record that already won."""
+    try:
+        coordinator.prepare(
+            prepared,
+            operation_id=operation_id,
+            validators=validators,
+            preconditions=expected,
+        )
+    except ValueError as exc:
+        if "operation_id is already bound" not in str(exc):
+            raise
+        return _recovered_duplicate(coordinator, operation_id, relative_changes, exc)
+    return None
+
+
 def mutate_knowledge(
     operation_id: str,
     changes: Mapping[Path, bytes | None],
@@ -1830,81 +2511,18 @@ def mutate_knowledge(
     if not changes:
         raise ValueError("a knowledge mutation requires at least one change")
     coordinator = _default_coordinator()
-    relative_changes = {
-        _relative_target(coordinator, Path(path)): content
-        for path, content in changes.items()
-    }
-    for content in relative_changes.values():
-        if content is not None and len(_require_bytes(content)) > MAX_KNOWLEDGE_TARGET_BYTES:
-            raise ValueError("knowledge target size exceeds limit")
+    relative_changes = _relative_changes(coordinator, changes)
     _recover_initial_contention(coordinator)
-    existing = coordinator._record_for_operation_id(operation_id)
+    existing = _existing_committed_record(coordinator, operation_id, relative_changes)
     if existing is not None:
-        existing = _settle_operation(coordinator, operation_id)
-    if existing is not None:
-        desired = {
-            path: ABSENT if content is None else sha256_bytes(content)
-            for path, content in relative_changes.items()
-        }
-        persisted = {operation.path: operation.after_hash for operation in existing.operations}
-        if desired != persisted:
-            raise ValueError("operation_id is already bound to a different request")
-        if existing.state == "committed":
-            _verify_committed_targets(coordinator, existing)
-            return existing
-        raise RuntimeError(
-            f"duplicate mutation ended in noncommitted state {existing.state}"
-        )
-    with coordinator.writer_gate():
-        captured = {
-            relative: coordinator._read_bounded_target(
-                coordinator._target(relative), MAX_KNOWLEDGE_TARGET_BYTES
-            )
-            for relative in relative_changes
-        }
-    expected = dict(preconditions or {})
-    prepared: list[MarkdownChange] = []
-    for relative, content in relative_changes.items():
-        before = captured[relative]
-        captured_hash = ABSENT if before is None else sha256_bytes(before)
-        caller_expected = expected.get(relative)
-        if caller_expected is not None and caller_expected != captured_hash:
-            raise ValueError(f"caller precondition does not match target: {relative}")
-        expected[relative] = captured_hash
-        if content is None:
-            if before is None:
-                raise FileNotFoundError(relative)
-            prepared.append(MarkdownChange.delete(relative))
-        elif before is None:
-            prepared.append(MarkdownChange.create(relative, _require_bytes(content)))
-        else:
-            prepared.append(MarkdownChange.replace(relative, _require_bytes(content)))
-    try:
-        record = coordinator.prepare(
-            prepared,
-            operation_id=operation_id,
-            validators=validators,
-            preconditions=expected,
-        )
-    except ValueError as exc:
-        if "operation_id is already bound" not in str(exc):
-            raise
-        record = _settle_operation(coordinator, operation_id)
-        if record is None:
-            raise RuntimeError("winning transaction disappeared during duplicate recovery") from exc
-        desired = {
-            path: ABSENT if content is None else sha256_bytes(content)
-            for path, content in relative_changes.items()
-        }
-        persisted = {operation.path: operation.after_hash for operation in record.operations}
-        if desired != persisted:
-            raise
-        if record.state != "committed":
-            raise RuntimeError(
-                f"duplicate mutation ended in noncommitted state {record.state}"
-            )
-        _verify_committed_targets(coordinator, record)
-        return record
+        return existing
+    captured = _captured_targets(coordinator, relative_changes)
+    prepared, expected = _prepared_changes(relative_changes, captured, preconditions)
+    recovered = _prepare_or_recover(
+        coordinator, prepared, operation_id, validators, expected, relative_changes
+    )
+    if recovered is not None:
+        return recovered
     settled = _settle_operation(coordinator, operation_id)
     if settled is None:
         raise RuntimeError("prepared transaction disappeared before apply")
@@ -3360,48 +3978,31 @@ class MarkdownCoordinator:
                 (*_encode_parent_identity(identity), row["transaction_id"], row["position"]),
             )
 
-    def prepare(
-        self,
-        changes: Sequence[MarkdownChange],
-        *,
-        operation_id: str,
-        preconditions: Mapping[str, object] | None = None,
-        validators: Sequence[Validator] = (),
-        content_guard: Literal["model_output"] | None = None,
-        project_reservation: ProjectCheckpointReservation | None = None,
-        _parent_transaction_id: str | None = None,
-        deadline: float = float("inf"),
-        cancelled: Callable[[], bool] | None = None,
-    ) -> TransactionRecord:
-        self._require_operation_active(deadline, cancelled)
-        if not isinstance(operation_id, str) or not operation_id:
-            raise ValueError("operation_id must be a non-empty string")
-        if not changes:
-            raise ValueError("a transaction requires at least one change")
-        if content_guard not in {None, "model_output"}:
-            raise ValueError("content_guard must be 'model_output' or None")
+    def _normalized_changes(
+        self, changes: Sequence[MarkdownChange]
+    ) -> tuple[MarkdownChange, ...]:
         normalized = tuple(self._validate_change(change) for change in changes)
-        paths = [unicodedata.normalize("NFC", change.path).casefold() for change in normalized]
+        paths = [
+            unicodedata.normalize("NFC", change.path).casefold()
+            for change in normalized
+        ]
         if len(paths) != len(set(paths)):
             raise ValueError("duplicate transaction target")
-        persisted_preconditions = self._validate_preconditions(preconditions or {})
-        if project_reservation is not None:
-            if not isinstance(project_reservation, ProjectCheckpointReservation):
-                raise TypeError("project_reservation must be a ProjectCheckpointReservation")
-            if project_reservation.operation_id != operation_id:
-                raise ValueError("project reservation operation_id does not match")
-            if "project_lease" not in persisted_preconditions:
-                raise ValueError("project reservation requires a project lease precondition")
-        request_hash = self._request_hash(normalized, persisted_preconditions)
-        self.recover(deadline=deadline, cancelled=cancelled)
-        self._require_operation_active(deadline, cancelled)
-        existing = self._record_for_operation_id(operation_id)
-        if existing is not None:
-            if self._request_hash_for_operation_id(operation_id) != request_hash:
-                raise ValueError("operation_id is already bound to a different request")
-            return existing
+        return normalized
 
-        transaction_id = uuid.uuid4().hex
+    def _existing_bound_record(
+        self, operation_id: str, request_hash: str
+    ) -> TransactionRecord | None:
+        existing = self._record_for_operation_id(operation_id)
+        if existing is None:
+            return None
+        if self._request_hash_for_operation_id(operation_id) != request_hash:
+            raise ValueError("operation_id is already bound to a different request")
+        return existing
+
+    def _create_artifact_roots(
+        self, transaction_id: str, deadline: float, cancelled: Callable[[], bool] | None
+    ) -> _ArtifactRoots:
         artifact_root = self.transaction_root / transaction_id
         before_root = artifact_root / "before"
         after_root = artifact_root / "after"
@@ -3417,8 +4018,21 @@ class MarkdownCoordinator:
         except BaseException:
             self._remove_artifacts(artifact_root)
             raise
+        return _ArtifactRoots(artifact_root, before_root, after_root)
 
-        timestamp = _now()
+    def _insert_preparing_row(
+        self,
+        transaction_id: str,
+        operation_id: str,
+        request_hash: str,
+        persisted_preconditions: Mapping[str, object],
+        timestamp: str,
+        parent_transaction_id: str | None,
+        artifact_root: Path,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> TransactionRecord | None:
+        """None once the row is inserted, or the record that already owns the id."""
         try:
             self._require_operation_active(deadline, cancelled)
             with self._connect() as database, begin_immediate(
@@ -3439,160 +4053,309 @@ class MarkdownCoordinator:
                         canonical_json_bytes(persisted_preconditions).decode("utf-8"),
                         timestamp,
                         timestamp,
-                        _parent_transaction_id,
+                        parent_transaction_id,
                         os.getpid(),
                     ),
                 )
         except sqlite3.IntegrityError:
             self._remove_artifacts(artifact_root)
             existing = self._record_for_operation_id(operation_id)
-            if existing is None or self._request_hash_for_operation_id(operation_id) != request_hash:
-                raise ValueError("operation_id is already bound to a different request") from None
+            if existing is None:
+                raise ValueError(
+                    "operation_id is already bound to a different request"
+                ) from None
+            if self._request_hash_for_operation_id(operation_id) != request_hash:
+                raise ValueError(
+                    "operation_id is already bound to a different request"
+                ) from None
             return existing
-        self._killpoint("after_preparing", _parent_transaction_id)
+        return None
 
+    def _staged_change(
+        self,
+        position: int,
+        change: MarkdownChange,
+        roots: _ArtifactRoots,
+        persisted_preconditions: Mapping[str, object],
+    ) -> _StagedOperation:
+        target = self._target(change.path)
+        before, parent_identity = self._capture_target(
+            target, max_before_bytes=change.max_before_bytes
+        )
+        _require_capture_matches_kind(change, before)
+        before_hash = _content_hash(before)
+        _require_change_precondition(change, before_hash, persisted_preconditions)
+        before_description = self._stage_state(roots.before, position, before)
+        after_description = self._stage_state(roots.after, position, change.content)
+        return _StagedOperation(
+            MarkdownOperation(
+                change.kind, change.path, before_hash, _content_hash(change.content)
+            ),
+            parent_identity,
+            {
+                "kind": change.kind,
+                "path": change.path,
+                "before": before_description,
+                "after": after_description,
+            },
+        )
+
+    def _staged_operations(
+        self,
+        normalized: tuple[MarkdownChange, ...],
+        roots: _ArtifactRoots,
+        persisted_preconditions: Mapping[str, object],
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> _StagedPlan:
         operations: list[MarkdownOperation] = []
         parent_identities: list[tuple[int, int]] = []
         plan_operations: list[dict[str, object]] = []
-        try:
-            for position, change in enumerate(normalized):
-                self._require_operation_active(deadline, cancelled)
-                target = self._target(change.path)
-                before, parent_identity = self._capture_target(
-                    target, max_before_bytes=change.max_before_bytes
-                )
-                if change.kind == "create" and before is not None:
-                    raise FileExistsError(change.path)
-                if change.kind in {"replace", "delete"} and before is None:
-                    raise FileNotFoundError(change.path)
-                after = change.content
-                before_hash = ABSENT if before is None else sha256_bytes(before)
-                expected_before = persisted_preconditions.get(change.path)
-                if expected_before is not None and expected_before != before_hash:
-                    raise ValueError(
-                        f"target precondition changed before prepare: {change.path}"
-                    )
-                before_description = self._stage_state(before_root, position, before)
-                after_description = self._stage_state(after_root, position, after)
-                after_hash = ABSENT if after is None else sha256_bytes(after)
-                operations.append(
-                    MarkdownOperation(change.kind, change.path, before_hash, after_hash)
-                )
-                parent_identities.append(parent_identity)
-                plan_operations.append(
-                    {
-                        "kind": change.kind,
-                        "path": change.path,
-                        "before": before_description,
-                        "after": after_description,
-                    }
-                )
-
-            self._killpoint("after_images_fsynced", _parent_transaction_id)
-
-            plan: dict[str, object] = {
-                "schema_version": "markdown-transaction/v1",
-                "transaction_id": transaction_id,
-                "operations": plan_operations,
-            }
-            if content_guard is not None:
-                plan["content_guard"] = content_guard
-            validate_schema(plan, _SCHEMA)
-            for validator in validators:
-                if not callable(validator):
-                    raise TypeError("validators must be callable")
-                result = validator(copy.deepcopy(plan))
-                if result is False:
-                    raise ValueError("transaction validator rejected the plan")
-            validate_schema(plan, _SCHEMA)
-            self._verify_plan_artifacts(plan, artifact_root)
-            plan_bytes = canonical_json_bytes(plan)
-            plan_path = artifact_root / "plan.json"
-            self._write_new_file(plan_path, plan_bytes)
-            manifest = {
-                "schema_version": "markdown-transaction-recovery/v1",
-                "transaction_id": transaction_id,
-                "request_hash": request_hash,
-                "plan_hash": sha256_bytes(plan_bytes),
-                "operations": [
-                    {
-                        "position": position,
-                        "before_hash": operation.before_hash,
-                        "after_hash": operation.after_hash,
-                        "parent_device": parent_identities[position][0],
-                        "parent_inode": parent_identities[position][1],
-                    }
-                    for position, operation in enumerate(operations)
-                ],
-            }
-            self._write_new_file(
-                artifact_root / "manifest.json", canonical_json_bytes(manifest)
+        for position, change in enumerate(normalized):
+            self._require_operation_active(deadline, cancelled)
+            staged = self._staged_change(
+                position, change, roots, persisted_preconditions
             )
-            for directory in (before_root, after_root, artifact_root, self.transaction_root):
-                fsync_directory(directory)
-            self._killpoint("after_plan_fsynced", _parent_transaction_id)
+            operations.append(staged.operation)
+            parent_identities.append(staged.parent_identity)
+            plan_operations.append(staged.plan_entry)
+        return _StagedPlan(operations, parent_identities, plan_operations)
 
-            try:
-                self._require_operation_active(deadline, cancelled)
-                with self._connect() as database, begin_immediate(
-                    database,
-                    before_commit=lambda: self._require_operation_active(
-                        deadline, cancelled
-                    ),
-                ):
-                    if project_reservation is not None:
-                        self._bind_project_reservation(
-                            database,
-                            project_reservation,
-                            transaction_id,
-                            persisted_preconditions,
-                        )
-                    database.execute(
-                        'UPDATE "transaction" SET state = \'prepared\', plan_hash = ?, '
-                        "updated_at = ?, owner_pid = NULL "
-                        "WHERE id = ? AND state = 'preparing'",
-                        (
-                            sha256_bytes(plan_bytes),
-                            timestamp,
-                            transaction_id,
-                        ),
+    def _write_plan_artifacts(
+        self,
+        plan: dict[str, object],
+        roots: _ArtifactRoots,
+        transaction_id: str,
+        request_hash: str,
+        staged: _StagedPlan,
+    ) -> bytes:
+        self._verify_plan_artifacts(plan, roots.artifact)
+        plan_bytes = canonical_json_bytes(plan)
+        self._write_new_file(roots.artifact / "plan.json", plan_bytes)
+        self._write_new_file(
+            roots.artifact / "manifest.json",
+            canonical_json_bytes(
+                _recovery_manifest(transaction_id, request_hash, plan_bytes, staged)
+            ),
+        )
+        for directory in (
+            roots.before,
+            roots.after,
+            roots.artifact,
+            self.transaction_root,
+        ):
+            fsync_directory(directory)
+        return plan_bytes
+
+    def _operation_rows_for_insert(
+        self, transaction_id: str, staged: _StagedPlan
+    ) -> list[tuple]:
+        return [
+            (
+                transaction_id,
+                position,
+                operation.kind,
+                operation.path,
+                operation.before_hash,
+                operation.after_hash,
+                *_encode_parent_identity(staged.parent_identities[position]),
+            )
+            for position, operation in enumerate(staged.operations)
+        ]
+
+    def _commit_prepared_row(
+        self,
+        transaction_id: str,
+        plan_bytes: bytes,
+        timestamp: str,
+        staged: _StagedPlan,
+        project_reservation: ProjectCheckpointReservation | None,
+        persisted_preconditions: Mapping[str, object],
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> None:
+        try:
+            self._require_operation_active(deadline, cancelled)
+            with self._connect() as database, begin_immediate(
+                database,
+                before_commit=lambda: self._require_operation_active(
+                    deadline, cancelled
+                ),
+            ):
+                if project_reservation is not None:
+                    self._bind_project_reservation(
+                        database,
+                        project_reservation,
+                        transaction_id,
+                        persisted_preconditions,
                     )
-                    database.executemany(
-                        'INSERT INTO "operation" '
-                        "(transaction_id, position, kind, path, before_hash, after_hash, "
-                        "parent_device, parent_inode) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                        [
-                            (
-                                transaction_id,
-                                position,
-                                operation.kind,
-                                operation.path,
-                                operation.before_hash,
-                                operation.after_hash,
-                                *_encode_parent_identity(parent_identities[position]),
-                            )
-                            for position, operation in enumerate(operations)
-                        ],
-                    )
-            except sqlite3.IntegrityError:
-                raise RuntimeError("transaction operations could not be persisted") from None
-            self._killpoint("after_prepared", _parent_transaction_id)
-            return self._record(transaction_id)
+                database.execute(
+                    'UPDATE "transaction" SET state = \'prepared\', plan_hash = ?, '
+                    "updated_at = ?, owner_pid = NULL "
+                    "WHERE id = ? AND state = 'preparing'",
+                    (sha256_bytes(plan_bytes), timestamp, transaction_id),
+                )
+                database.executemany(
+                    'INSERT INTO "operation" '
+                    "(transaction_id, position, kind, path, before_hash, after_hash, "
+                    "parent_device, parent_inode) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    self._operation_rows_for_insert(transaction_id, staged),
+                )
+        except sqlite3.IntegrityError:
+            raise RuntimeError(
+                "transaction operations could not be persisted"
+            ) from None
+
+    def _discard_failed_preparation(
+        self,
+        transaction_id: str,
+        artifact_root: Path,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> None:
+        record = self._record_if_present(transaction_id)
+        if record is not None and record.state != "preparing":
+            return
+        with self._connect() as database, begin_immediate(
+            database,
+            before_commit=lambda: self._require_operation_active(deadline, cancelled),
+        ):
+            database.execute(
+                'DELETE FROM "transaction" WHERE id = ? AND state = \'preparing\'',
+                (transaction_id,),
+            )
+        self._remove_artifacts(artifact_root)
+
+    def _stage_and_commit(
+        self,
+        normalized: tuple[MarkdownChange, ...],
+        roots: _ArtifactRoots,
+        persisted_preconditions: Mapping[str, object],
+        request_hash: str,
+        transaction_id: str,
+        timestamp: str,
+        *,
+        validators: Sequence[Validator],
+        content_guard: object,
+        project_reservation: ProjectCheckpointReservation | None,
+        parent_transaction_id: str | None,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> TransactionRecord:
+        staged = self._staged_operations(
+            normalized, roots, persisted_preconditions, deadline, cancelled
+        )
+        self._killpoint("after_images_fsynced", parent_transaction_id)
+        plan = _validated_plan(
+            transaction_id, staged.plan_operations, content_guard, validators
+        )
+        plan_bytes = self._write_plan_artifacts(
+            plan, roots, transaction_id, request_hash, staged
+        )
+        self._killpoint("after_plan_fsynced", parent_transaction_id)
+        self._commit_prepared_row(
+            transaction_id,
+            plan_bytes,
+            timestamp,
+            staged,
+            project_reservation,
+            persisted_preconditions,
+            deadline,
+            cancelled,
+        )
+        self._killpoint("after_prepared", parent_transaction_id)
+        return self._record(transaction_id)
+
+    def _prepare_new_transaction(
+        self,
+        normalized: tuple[MarkdownChange, ...],
+        persisted_preconditions: Mapping[str, object],
+        request_hash: str,
+        *,
+        operation_id: str,
+        validators: Sequence[Validator],
+        content_guard: object,
+        project_reservation: ProjectCheckpointReservation | None,
+        parent_transaction_id: str | None,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> TransactionRecord:
+        transaction_id = uuid.uuid4().hex
+        roots = self._create_artifact_roots(transaction_id, deadline, cancelled)
+        timestamp = _now()
+        existing = self._insert_preparing_row(
+            transaction_id,
+            operation_id,
+            request_hash,
+            persisted_preconditions,
+            timestamp,
+            parent_transaction_id,
+            roots.artifact,
+            deadline,
+            cancelled,
+        )
+        if existing is not None:
+            return existing
+        self._killpoint("after_preparing", parent_transaction_id)
+        try:
+            return self._stage_and_commit(
+                normalized,
+                roots,
+                persisted_preconditions,
+                request_hash,
+                transaction_id,
+                timestamp,
+                validators=validators,
+                content_guard=content_guard,
+                project_reservation=project_reservation,
+                parent_transaction_id=parent_transaction_id,
+                deadline=deadline,
+                cancelled=cancelled,
+            )
         except BaseException:
-            record = self._record_if_present(transaction_id)
-            if record is None or record.state == "preparing":
-                with self._connect() as database, begin_immediate(
-                    database,
-                    before_commit=lambda: self._require_operation_active(
-                        deadline, cancelled
-                    ),
-                ):
-                    database.execute(
-                        'DELETE FROM "transaction" WHERE id = ? AND state = \'preparing\'',
-                        (transaction_id,),
-                    )
-                self._remove_artifacts(artifact_root)
+            self._discard_failed_preparation(
+                transaction_id, roots.artifact, deadline, cancelled
+            )
             raise
+
+    def prepare(
+        self,
+        changes: Sequence[MarkdownChange],
+        *,
+        operation_id: str,
+        preconditions: Mapping[str, object] | None = None,
+        validators: Sequence[Validator] = (),
+        content_guard: Literal["model_output"] | None = None,
+        project_reservation: ProjectCheckpointReservation | None = None,
+        _parent_transaction_id: str | None = None,
+        deadline: float = float("inf"),
+        cancelled: Callable[[], bool] | None = None,
+    ) -> TransactionRecord:
+        self._require_operation_active(deadline, cancelled)
+        _require_prepare_arguments(operation_id, changes, content_guard)
+        normalized = self._normalized_changes(changes)
+        persisted_preconditions = self._validate_preconditions(preconditions or {})
+        _require_matching_reservation(
+            project_reservation, operation_id, persisted_preconditions
+        )
+        request_hash = self._request_hash(normalized, persisted_preconditions)
+        self.recover(deadline=deadline, cancelled=cancelled)
+        self._require_operation_active(deadline, cancelled)
+        existing = self._existing_bound_record(operation_id, request_hash)
+        if existing is not None:
+            return existing
+        return self._prepare_new_transaction(
+            normalized,
+            persisted_preconditions,
+            request_hash,
+            operation_id=operation_id,
+            validators=validators,
+            content_guard=content_guard,
+            project_reservation=project_reservation,
+            parent_transaction_id=_parent_transaction_id,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
 
     def _bind_project_reservation(
         self,
@@ -3966,6 +4729,275 @@ class MarkdownCoordinator:
             self._apply_operation(inverse, {"after": before_state})
             self._require_operation_state(inverse, row["before_hash"], "restored state")
 
+    def _abort_before_manifest(self, transaction_id: str) -> list[dict[str, object]]:
+        manifest = [
+            {
+                "position": int(row["position"]),
+                "kind": str(row["kind"]),
+                "path": str(row["path"]),
+                "before_hash": str(row["before_hash"]),
+                "after_hash": str(row["after_hash"]),
+            }
+            for row in self._operation_rows(transaction_id)
+        ]
+        if not manifest:
+            raise KeyError(transaction_id)
+        return manifest
+
+    def _require_live_abort_fence(
+        self,
+        database: sqlite3.Connection,
+        intent_fence: IntentFence,
+        active_link_digest: str,
+        at: str,
+        state: str,
+        code: str,
+        message: str,
+    ) -> None:
+        fence = database.execute(
+            _ABORT_FENCE_QUERY,
+            (
+                intent_fence.intent_id,
+                intent_fence.token,
+                intent_fence.epoch,
+                at,
+                active_link_digest,
+            ),
+        ).fetchone()
+        if fence is None:
+            raise TransactionFailure(message, code, state)
+
+    def _direct_abort(
+        self,
+        database: sqlite3.Connection,
+        row: sqlite3.Row,
+        transaction_id: str,
+        direction: _AbortDirection,
+    ) -> _AbortDirection:
+        """Move the transaction into aborting, or adopt the direction already there."""
+        if row["state"] == "aborting":
+            return _AbortDirection(
+                str(row["abort_operation_id"]),
+                str(row["abort_manifest_sha256"]),
+                str(row["abort_chosen_at"]),
+            )
+        changed = database.execute(
+            """UPDATE "transaction" SET state='aborting',error_code=NULL,
+                   abort_operation_id=?,abort_manifest_sha256=?,
+                   abort_chosen_at=?,updated_at=?
+               WHERE id=? AND state IN ('preparing','prepared','applying')""",
+            (
+                direction.operation_id,
+                direction.manifest_sha256,
+                direction.chosen_at,
+                direction.chosen_at,
+                transaction_id,
+            ),
+        ).rowcount
+        if changed != 1:
+            raise TransactionFailure(
+                "transaction cannot enter aborting",
+                "abort_state_refused",
+                str(row["state"]),
+            )
+        return direction
+
+    def _enter_aborting(
+        self,
+        transaction_id: str,
+        intent_fence: IntentFence,
+        active_link_digest: str,
+        direction: _AbortDirection,
+    ) -> _AbortDirection:
+        with self._connect() as database, begin_immediate(database):
+            row = database.execute(
+                'SELECT * FROM "transaction" WHERE id=?', (transaction_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(transaction_id)
+            _require_abortable_state(row, transaction_id)
+            self._require_live_abort_fence(
+                database,
+                intent_fence,
+                active_link_digest,
+                direction.chosen_at,
+                str(row["state"]),
+                "intent_fence_lost",
+                "abort intent fence is stale",
+            )
+            return self._direct_abort(database, row, transaction_id, direction)
+
+    def _restored_before_state(
+        self, operation: sqlite3.Row, transaction_id: str
+    ) -> object:
+        if operation["before_hash"] == ABSENT:
+            return ABSENT
+        position = int(operation["position"])
+        artifact = (
+            self.transaction_root / transaction_id / "before" / f"{position:06d}.bin"
+        )
+        content = artifact.read_bytes()
+        if sha256_bytes(content) != operation["before_hash"]:
+            raise TransactionFailure(
+                "abort before-image is corrupt",
+                "abort_before_image_corrupt",
+                "aborting",
+            )
+        return {
+            "sha256": operation["before_hash"],
+            "artifact": f"before/{position:06d}.bin",
+        }
+
+    def _restore_one_target(self, operation: sqlite3.Row, transaction_id: str) -> None:
+        current = self._operation_hash(operation)
+        if current == operation["before_hash"]:
+            return
+        if current != operation["after_hash"]:
+            raise TransactionFailure(
+                "abort target has third-party bytes",
+                "abort_target_conflict",
+                "aborting",
+            )
+        before_state = self._restored_before_state(operation, transaction_id)
+        inverse = dict(operation)
+        inverse.update(
+            kind=_inverse_kind(operation["before_hash"], operation["after_hash"]),
+            before_hash=operation["after_hash"],
+            after_hash=operation["before_hash"],
+        )
+        self._apply_operation(inverse, {"after": before_state})
+        self._require_operation_state(
+            inverse, operation["before_hash"], "restored state"
+        )
+        self._killpoint("after_each_abort_target")
+
+    def _restore_abort_targets(
+        self,
+        transaction_id: str,
+        rows: list[sqlite3.Row],
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> None:
+        try:
+            for operation in reversed(rows):
+                self._require_operation_active(deadline, cancelled)
+                self._restore_one_target(operation, transaction_id)
+        except TransactionFailure as exc:
+            self._set_transaction_state(
+                transaction_id, "aborting", error_code=exc.code
+            )
+            raise
+
+    def _abort_receipt_record(
+        self,
+        transaction_id: str,
+        rows: list[sqlite3.Row],
+        intent_fence: IntentFence,
+        active_link_digest: str,
+        actor_identity: str,
+        direction: _AbortDirection,
+    ) -> dict[str, object]:
+        restored = [
+            {"path": str(row["path"]), "sha256": str(row["before_hash"])}
+            for row in rows
+        ]
+        return {
+            "schema_version": "transaction-abort/v1",
+            "transaction_id": transaction_id,
+            "intent_id": intent_fence.intent_id,
+            "active_link_digest": active_link_digest,
+            "intent_fence_token_sha256": sha256_bytes(
+                intent_fence.token.encode("utf-8")
+            ),
+            "intent_fence_epoch": intent_fence.epoch,
+            "abort_operation_id": direction.operation_id,
+            "before_manifest_sha256": direction.manifest_sha256,
+            "restored_target_count": len(rows),
+            "restored_tree_sha256": sha256_bytes(canonical_json_bytes(restored)),
+            "actor_identity": actor_identity,
+            "aborted_at": direction.chosen_at,
+        }
+
+    def _publish_abort_receipt(
+        self, transaction_id: str, receipt_record: dict[str, object]
+    ) -> tuple[str, str]:
+        validate_schema(
+            receipt_record,
+            Path(__file__).with_name("schemas") / "transaction-abort-v1.json",
+        )
+        receipt_bytes = canonical_json_bytes(receipt_record)
+        if len(receipt_bytes) > 64 * 1024:
+            raise TransactionFailure(
+                "abort receipt exceeds its bound",
+                "abort_receipt_oversized",
+                "aborting",
+            )
+        relative_path = f"run/transactions/{transaction_id}/abort-receipt.json"
+        receipt_path = self.state_root / relative_path
+        self._killpoint("before_abort_receipt")
+        publish_runtime_file(
+            receipt_path,
+            receipt_bytes,
+            state_root=self.state_root,
+            create_only=True,
+        )
+        read_back = read_runtime_bytes(
+            receipt_path, self.state_root, max_bytes=64 * 1024, owner_only=True
+        )
+        if read_back != receipt_bytes:
+            raise TransactionFailure(
+                "abort receipt read-back failed",
+                "abort_receipt_conflict",
+                "aborting",
+            )
+        self._killpoint("after_abort_receipt")
+        return relative_path, sha256_bytes(read_back)
+
+    def _finalize_aborted(
+        self,
+        transaction_id: str,
+        rows: list[sqlite3.Row],
+        intent_fence: IntentFence,
+        active_link_digest: str,
+        direction: _AbortDirection,
+        receipt_sha256: str,
+    ) -> None:
+        with self._connect() as database, begin_immediate(database):
+            self._require_live_abort_fence(
+                database,
+                intent_fence,
+                active_link_digest,
+                datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "aborting",
+                "abort_final_verification_failed",
+                "abort final verification failed",
+            )
+            if any(self._operation_hash(row) != row["before_hash"] for row in rows):
+                raise TransactionFailure(
+                    "abort final verification failed",
+                    "abort_final_verification_failed",
+                    "aborting",
+                )
+            self._killpoint("before_aborted")
+            changed = database.execute(
+                """UPDATE "transaction" SET state='aborted',error_code=NULL,
+                       abort_receipt_sha256=?,aborted_at=?,updated_at=?
+                   WHERE id=? AND state='aborting' AND abort_operation_id=?
+                     AND abort_manifest_sha256=?""",
+                (
+                    receipt_sha256,
+                    direction.chosen_at,
+                    direction.chosen_at,
+                    transaction_id,
+                    direction.operation_id,
+                    direction.manifest_sha256,
+                ),
+            ).rowcount
+            if changed != 1:
+                raise TransactionFailure(
+                    "abort fence was lost", "abort_fence_lost", "aborting"
+                )
+
     def abort_for_discard(
         self,
         transaction_id: str,
@@ -3977,264 +5009,198 @@ class MarkdownCoordinator:
         cancelled: Callable[[], bool] | None = None,
     ) -> TransactionAbortReceipt:
         self._require_operation_active(deadline, cancelled)
-        if not isinstance(intent_fence, IntentFence) or intent_fence.mode != "operator":
-            raise ValueError("abort requires an operator intent fence")
-        if re.fullmatch(r"[0-9a-f]{64}", active_link_digest) is None:
-            raise ValueError("active link digest must be lowercase 64-hex")
-        if (
-            not isinstance(actor_identity, str)
-            or not 1 <= len(actor_identity.encode("utf-8")) <= 512
-        ):
-            raise ValueError("actor identity is invalid")
-        before_manifest = [
-            {
-                "position": int(row["position"]),
-                "kind": str(row["kind"]),
-                "path": str(row["path"]),
-                "before_hash": str(row["before_hash"]),
-                "after_hash": str(row["after_hash"]),
-            }
-            for row in self._operation_rows(transaction_id)
-        ]
-        if not before_manifest:
-            raise KeyError(transaction_id)
+        _require_operator_fence(intent_fence, active_link_digest)
+        _require_actor_identity(actor_identity)
+        before_manifest = self._abort_before_manifest(transaction_id)
         manifest_sha256 = sha256_bytes(canonical_json_bytes(before_manifest))
-        now = datetime.now(timezone.utc)
-        chosen_at = now.isoformat().replace("+00:00", "Z")
-        operation_identity = {
-            "active_link_digest": active_link_digest,
-            "before_manifest_sha256": manifest_sha256,
-            "intent_fence_epoch": intent_fence.epoch,
-            "intent_id": intent_fence.intent_id,
-            "transaction_id": transaction_id,
-        }
-        abort_operation_id = f"transaction-abort:{sha256_bytes(canonical_json_bytes(operation_identity))}"
+        chosen_at = (
+            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        )
+        direction = _AbortDirection(
+            _abort_identity(
+                transaction_id, intent_fence, active_link_digest, manifest_sha256
+            ),
+            manifest_sha256,
+            chosen_at,
+        )
         with self.writer_gate():
-            with self._connect() as database, begin_immediate(database):
-                row = database.execute(
-                    'SELECT * FROM "transaction" WHERE id=?', (transaction_id,)
-                ).fetchone()
-                if row is None:
-                    raise KeyError(transaction_id)
-                if row["state"] == "committed":
-                    raise TransactionFailure(
-                        "committed transaction cannot be aborted",
-                        "abort_committed",
-                        "committed",
-                    )
-                if row["state"] in {"conflicted", "quarantined"}:
-                    raise TransactionFailure(
-                        "conflicted transaction cannot be aborted",
-                        "abort_state_refused",
-                        str(row["state"]),
-                    )
-                fence = database.execute(
-                    """SELECT 1 FROM intent_fences AS fence
-                       JOIN capture_binding_projections AS binding
-                         ON binding.intent_id=fence.intent_id
-                        AND binding.intent_fence_token=fence.token
-                        AND binding.intent_fence_epoch=fence.fencing_epoch
-                       WHERE fence.intent_id=? AND fence.mode='operator'
-                         AND fence.token=? AND fence.fencing_epoch=?
-                         AND fence.expires_at>? AND binding.active_link_digest=?""",
-                    (
-                        intent_fence.intent_id,
-                        intent_fence.token,
-                        intent_fence.epoch,
-                        chosen_at,
-                        active_link_digest,
-                    ),
-                ).fetchone()
-                if fence is None:
-                    raise TransactionFailure(
-                        "abort intent fence is stale",
-                        "intent_fence_lost",
-                        str(row["state"]),
-                    )
-                if row["state"] != "aborting":
-                    changed = database.execute(
-                        """UPDATE "transaction" SET state='aborting',error_code=NULL,
-                               abort_operation_id=?,abort_manifest_sha256=?,
-                               abort_chosen_at=?,updated_at=?
-                           WHERE id=? AND state IN ('preparing','prepared','applying')""",
-                        (
-                            abort_operation_id,
-                            manifest_sha256,
-                            chosen_at,
-                            chosen_at,
-                            transaction_id,
-                        ),
-                    ).rowcount
-                    if changed != 1:
-                        raise TransactionFailure(
-                            "transaction cannot enter aborting",
-                            "abort_state_refused",
-                            str(row["state"]),
-                        )
-                else:
-                    abort_operation_id = str(row["abort_operation_id"])
-                    manifest_sha256 = str(row["abort_manifest_sha256"])
-                    chosen_at = str(row["abort_chosen_at"])
+            direction = self._enter_aborting(
+                transaction_id, intent_fence, active_link_digest, direction
+            )
             self._killpoint("after_aborting")
             rows = self._operation_rows(transaction_id)
-            try:
-                for operation in reversed(rows):
-                    self._require_operation_active(deadline, cancelled)
-                    current = self._operation_hash(operation)
-                    if current == operation["before_hash"]:
-                        continue
-                    if current != operation["after_hash"]:
-                        raise TransactionFailure(
-                            "abort target has third-party bytes",
-                            "abort_target_conflict",
-                            "aborting",
-                        )
-                    before_state: object = ABSENT
-                    if operation["before_hash"] != ABSENT:
-                        artifact = (
-                            self.transaction_root
-                            / transaction_id
-                            / "before"
-                            / f"{int(operation['position']):06d}.bin"
-                        )
-                        content = artifact.read_bytes()
-                        if sha256_bytes(content) != operation["before_hash"]:
-                            raise TransactionFailure(
-                                "abort before-image is corrupt",
-                                "abort_before_image_corrupt",
-                                "aborting",
-                            )
-                        before_state = {
-                            "sha256": operation["before_hash"],
-                            "artifact": f"before/{int(operation['position']):06d}.bin",
-                        }
-                    inverse = dict(operation)
-                    inverse.update(
-                        kind="delete"
-                        if operation["before_hash"] == ABSENT
-                        else "create"
-                        if operation["after_hash"] == ABSENT
-                        else "replace",
-                        before_hash=operation["after_hash"],
-                        after_hash=operation["before_hash"],
-                    )
-                    self._apply_operation(inverse, {"after": before_state})
-                    self._require_operation_state(
-                        inverse, operation["before_hash"], "restored state"
-                    )
-                    self._killpoint("after_each_abort_target")
-            except TransactionFailure as exc:
-                self._set_transaction_state(
-                    transaction_id, "aborting", error_code=exc.code
-                )
-                raise
-            restored = [
-                {"path": str(row["path"]), "sha256": str(row["before_hash"])}
-                for row in rows
-            ]
-            restored_tree_sha256 = sha256_bytes(canonical_json_bytes(restored))
-            receipt_record = {
-                "schema_version": "transaction-abort/v1",
-                "transaction_id": transaction_id,
-                "intent_id": intent_fence.intent_id,
-                "active_link_digest": active_link_digest,
-                "intent_fence_token_sha256": sha256_bytes(
-                    intent_fence.token.encode("utf-8")
+            self._restore_abort_targets(transaction_id, rows, deadline, cancelled)
+            relative_path, receipt_sha256 = self._publish_abort_receipt(
+                transaction_id,
+                self._abort_receipt_record(
+                    transaction_id,
+                    rows,
+                    intent_fence,
+                    active_link_digest,
+                    actor_identity,
+                    direction,
                 ),
-                "intent_fence_epoch": intent_fence.epoch,
-                "abort_operation_id": abort_operation_id,
-                "before_manifest_sha256": manifest_sha256,
-                "restored_target_count": len(rows),
-                "restored_tree_sha256": restored_tree_sha256,
-                "actor_identity": actor_identity,
-                "aborted_at": chosen_at,
-            }
-            validate_schema(
-                receipt_record,
-                Path(__file__).with_name("schemas") / "transaction-abort-v1.json",
             )
-            receipt_bytes = canonical_json_bytes(receipt_record)
-            if len(receipt_bytes) > 64 * 1024:
-                raise TransactionFailure(
-                    "abort receipt exceeds its bound",
-                    "abort_receipt_oversized",
-                    "aborting",
-                )
-            relative_path = f"run/transactions/{transaction_id}/abort-receipt.json"
-            receipt_path = self.state_root / relative_path
-            self._killpoint("before_abort_receipt")
-            publish_runtime_file(
-                receipt_path,
-                receipt_bytes,
-                state_root=self.state_root,
-                create_only=True,
+            self._finalize_aborted(
+                transaction_id,
+                rows,
+                intent_fence,
+                active_link_digest,
+                direction,
+                receipt_sha256,
             )
-            read_back = read_runtime_bytes(
-                receipt_path, self.state_root, max_bytes=64 * 1024, owner_only=True
-            )
-            if read_back != receipt_bytes:
-                raise TransactionFailure(
-                    "abort receipt read-back failed",
-                    "abort_receipt_conflict",
-                    "aborting",
-                )
-            receipt_sha256 = sha256_bytes(read_back)
-            self._killpoint("after_abort_receipt")
-            with self._connect() as database, begin_immediate(database):
-                fence = database.execute(
-                    """SELECT 1 FROM intent_fences AS fence
-                       JOIN capture_binding_projections AS binding
-                         ON binding.intent_id=fence.intent_id
-                        AND binding.intent_fence_token=fence.token
-                        AND binding.intent_fence_epoch=fence.fencing_epoch
-                       WHERE fence.intent_id=? AND fence.token=?
-                         AND fence.fencing_epoch=? AND fence.expires_at>?
-                         AND binding.active_link_digest=?""",
-                    (
-                        intent_fence.intent_id,
-                        intent_fence.token,
-                        intent_fence.epoch,
-                        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                        active_link_digest,
-                    ),
-                ).fetchone()
-                if fence is None or any(
-                    self._operation_hash(row) != row["before_hash"] for row in rows
-                ):
-                    raise TransactionFailure(
-                        "abort final verification failed",
-                        "abort_final_verification_failed",
-                        "aborting",
-                    )
-                self._killpoint("before_aborted")
-                changed = database.execute(
-                    """UPDATE "transaction" SET state='aborted',error_code=NULL,
-                           abort_receipt_sha256=?,aborted_at=?,updated_at=?
-                       WHERE id=? AND state='aborting' AND abort_operation_id=?
-                         AND abort_manifest_sha256=?""",
-                    (
-                        receipt_sha256,
-                        chosen_at,
-                        chosen_at,
-                        transaction_id,
-                        abort_operation_id,
-                        manifest_sha256,
-                    ),
-                ).rowcount
-                if changed != 1:
-                    raise TransactionFailure(
-                        "abort fence was lost",
-                        "abort_fence_lost",
-                        "aborting",
-                    )
         return TransactionAbortReceipt(
             transaction_id=transaction_id,
             intent_id=intent_fence.intent_id,
-            abort_operation_id=abort_operation_id,
+            abort_operation_id=direction.operation_id,
             receipt_path=relative_path,
             receipt_sha256=receipt_sha256,
-            aborted_at=chosen_at,
+            aborted_at=direction.chosen_at,
         )
+
+    def _incomplete_transaction_rows(self, max_transactions: int | None) -> list[tuple]:
+        query = (
+            'SELECT id, state, owner_pid FROM "transaction" '
+            "WHERE state IN ('aborting','aborted','preparing','prepared','applying') "
+            "ORDER BY CASE state WHEN 'aborting' THEN 0 WHEN 'aborted' THEN 1 ELSE 2 END, "
+            "created_at, id"
+        )
+        parameters: tuple[object, ...] = ()
+        if max_transactions is not None:
+            query += " LIMIT ?"
+            parameters = (max_transactions,)
+        with self._connect() as database:
+            return [
+                (row["id"], row["state"], row["owner_pid"])
+                for row in database.execute(query, parameters)
+            ]
+
+    def _quarantine_dlp(self, transaction_id: str, exc: BaseException) -> None:
+        code = "dlp_content_blocked"
+        if isinstance(exc, DLPPolicyError):
+            code = "dlp_policy_error"
+        self._rollback_for_quarantine(transaction_id, code)
+
+    def _settle_transaction_failure(
+        self, transaction_id: str, exc: TransactionFailure
+    ) -> None:
+        if exc.code == "precondition_failed":
+            self._rollback_for_quarantine(transaction_id, exc.code)
+            return
+        self._set_transaction_state(transaction_id, exc.state, error_code=exc.code)
+
+    def _conflicted(self, transaction_id: str, code: str) -> TransactionRecord:
+        self._set_transaction_state(transaction_id, "conflicted", error_code=code)
+        return self._record(transaction_id)
+
+    def _before_mismatch_code(self, transaction_id: str) -> str:
+        create_conflict = any(
+            row["kind"] == "create" and self._operation_hash(row) != row["before_hash"]
+            for row in self._operation_rows(transaction_id)
+        )
+        if create_conflict:
+            return "before_hash_mismatch"
+        return "unknown_target_bytes"
+
+    def _conflicted_from_message(
+        self, transaction_id: str, exc: BaseException, message: str
+    ) -> TransactionRecord:
+        if "before state mismatch" in message:
+            return self._conflicted(
+                transaction_id, self._before_mismatch_code(transaction_id)
+            )
+        if "after state mismatch" in message:
+            return self._conflicted(transaction_id, "unknown_target_bytes")
+        raise exc
+
+    def _recovered_from_message(
+        self, transaction_id: str, exc: BaseException
+    ) -> TransactionRecord:
+        """Turn a known apply failure into the state it should settle in."""
+        message = str(exc)
+        if _is_target_boundary_error(exc):
+            self._set_transaction_state(
+                transaction_id, "quarantined", error_code="parent_identity_changed"
+            )
+            return self._record(transaction_id)
+        if "after-image is corrupt" in message or "plan hash mismatch" in message:
+            return self._recover_corrupt_after_image(transaction_id)
+        return self._conflicted_from_message(transaction_id, exc, message)
+
+    def _apply_recovered(
+        self, transaction_id: str, recovered: list[TransactionRecord]
+    ) -> None:
+        try:
+            recovered.append(self._apply_locked(transaction_id))
+        except (DLPContentBlocked, DLPPolicyError) as exc:
+            self._quarantine_dlp(transaction_id, exc)
+            recovered.append(self._record(transaction_id))
+        except TransactionFailure as exc:
+            self._settle_transaction_failure(transaction_id, exc)
+            recovered.append(self._record(transaction_id))
+        except (FileNotFoundError, RuntimeError, ValueError) as exc:
+            recovered.append(self._recovered_from_message(transaction_id, exc))
+
+    def _promoted_for_recovery(
+        self, transaction_id: str, recovered: list[TransactionRecord]
+    ) -> bool:
+        """False when the record settled here and needs no apply."""
+        record = self._record(transaction_id)
+        if record.state != "preparing":
+            return True
+        promotion = self._promote_preparing(record)
+        if promotion == "invalid":
+            self._set_transaction_state(transaction_id, "discarded")
+            self._remove_artifacts(self.transaction_root / transaction_id)
+            recovered.append(self._record(transaction_id))
+            return False
+        if promotion == "quarantined":
+            recovered.append(self._record(transaction_id))
+            return False
+        return True
+
+    def _recover_one(
+        self,
+        transaction_id: str,
+        selected_state: str,
+        owner_pid: object,
+        recovered: list[TransactionRecord],
+    ) -> None:
+        if selected_state == "aborting":
+            self._recover_aborting(transaction_id)
+            recovered.append(self._record(transaction_id))
+            return
+        if selected_state == "aborted":
+            self._validate_aborted(transaction_id)
+            recovered.append(self._record(transaction_id))
+            return
+        if _preparing_owner_alive(selected_state, owner_pid):
+            return
+        if not self._promoted_for_recovery(transaction_id, recovered):
+            return
+        self._apply_recovered(transaction_id, recovered)
+
+    def _recover_selected(
+        self,
+        max_transactions: int | None,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> list[TransactionRecord]:
+        rows = self._incomplete_transaction_rows(max_transactions)
+        self._local.recovery_deadline = deadline
+        self._local.recovery_cancelled = cancelled
+        recovered: list[TransactionRecord] = []
+        try:
+            for transaction_id, selected_state, owner_pid in rows:
+                if self._recovery_stopped(deadline, cancelled):
+                    break
+                self._recover_one(
+                    transaction_id, selected_state, owner_pid, recovered
+                )
+        finally:
+            self._local.recovery_deadline = None
+            self._local.recovery_cancelled = None
+        return recovered
 
     def recover(
         self,
@@ -4246,123 +5212,13 @@ class MarkdownCoordinator:
         cancelled: Callable[[], bool] | None = None,
     ) -> list[TransactionRecord]:
         """Converge every incomplete transaction without overwriting unknown bytes."""
-        if max_transactions is not None and (
-            isinstance(max_transactions, bool)
-            or not isinstance(max_transactions, int)
-            or max_transactions < 0
-        ):
-            raise ValueError("max_transactions must be a non-negative integer or None")
+        _require_recovery_bound(max_transactions)
         if max_transactions == 0 or self._recovery_stopped(deadline, cancelled):
             return []
-        recovered: list[TransactionRecord] = []
         with self.writer_gate(owner=owner, wait_seconds=writer_wait_seconds):
             if self._recovery_stopped(deadline, cancelled):
                 return []
-            query = (
-                'SELECT id, state, owner_pid FROM "transaction" '
-                "WHERE state IN ('aborting','aborted','preparing','prepared','applying') "
-                "ORDER BY CASE state WHEN 'aborting' THEN 0 WHEN 'aborted' THEN 1 ELSE 2 END, "
-                "created_at, id"
-            )
-            parameters: tuple[object, ...] = ()
-            if max_transactions is not None:
-                query += " LIMIT ?"
-                parameters = (max_transactions,)
-            with self._connect() as database:
-                rows = [
-                    (row["id"], row["state"], row["owner_pid"])
-                    for row in database.execute(query, parameters)
-                ]
-            self._local.recovery_deadline = deadline
-            self._local.recovery_cancelled = cancelled
-            try:
-                for transaction_id, selected_state, owner_pid in rows:
-                    if self._recovery_stopped(deadline, cancelled):
-                        break
-                    if selected_state == "aborting":
-                        self._recover_aborting(transaction_id)
-                        recovered.append(self._record(transaction_id))
-                        continue
-                    if selected_state == "aborted":
-                        self._validate_aborted(transaction_id)
-                        recovered.append(self._record(transaction_id))
-                        continue
-                    if (
-                        selected_state == "preparing"
-                        and owner_pid is not None
-                        and _pid_alive(owner_pid)
-                    ):
-                        continue
-                    record = self._record(transaction_id)
-                    if record.state == "preparing":
-                        promotion = self._promote_preparing(record)
-                        if promotion == "invalid":
-                            self._set_transaction_state(transaction_id, "discarded")
-                            self._remove_artifacts(self.transaction_root / transaction_id)
-                            recovered.append(self._record(transaction_id))
-                            continue
-                        if promotion == "quarantined":
-                            recovered.append(self._record(transaction_id))
-                            continue
-                        record = self._record(transaction_id)
-                    try:
-                        recovered.append(self._apply_locked(transaction_id))
-                    except (DLPContentBlocked, DLPPolicyError) as exc:
-                        code = (
-                            "dlp_policy_error"
-                            if isinstance(exc, DLPPolicyError)
-                            else "dlp_content_blocked"
-                        )
-                        self._rollback_for_quarantine(transaction_id, code)
-                        recovered.append(self._record(transaction_id))
-                    except TransactionFailure as exc:
-                        if exc.code == "precondition_failed":
-                            self._rollback_for_quarantine(transaction_id, exc.code)
-                        else:
-                            self._set_transaction_state(
-                                transaction_id, exc.state, error_code=exc.code
-                            )
-                        recovered.append(self._record(transaction_id))
-                    except (FileNotFoundError, RuntimeError, ValueError) as exc:
-                        message = str(exc)
-                        if _is_target_boundary_error(exc):
-                            self._set_transaction_state(
-                                transaction_id,
-                                "quarantined",
-                                error_code="parent_identity_changed",
-                            )
-                            recovered.append(self._record(transaction_id))
-                        elif "after-image is corrupt" in message or "plan hash mismatch" in message:
-                            recovered.append(self._recover_corrupt_after_image(transaction_id))
-                        elif "before state mismatch" in message:
-                            operation_rows = self._operation_rows(transaction_id)
-                            create_conflict = any(
-                                row["kind"] == "create"
-                                and self._operation_hash(row) != row["before_hash"]
-                                for row in operation_rows
-                            )
-                            code = (
-                                "before_hash_mismatch"
-                                if create_conflict
-                                else "unknown_target_bytes"
-                            )
-                            self._set_transaction_state(
-                                transaction_id, "conflicted", error_code=code
-                            )
-                            recovered.append(self._record(transaction_id))
-                        elif "after state mismatch" in message:
-                            self._set_transaction_state(
-                                transaction_id,
-                                "conflicted",
-                                error_code="unknown_target_bytes",
-                            )
-                            recovered.append(self._record(transaction_id))
-                        else:
-                            raise
-            finally:
-                self._local.recovery_deadline = None
-                self._local.recovery_cancelled = None
-        return recovered
+            return self._recover_selected(max_transactions, deadline, cancelled)
 
     def _recover_aborting(self, transaction_id: str) -> None:
         rows = self._operation_rows(transaction_id)
@@ -4458,165 +5314,229 @@ class MarkdownCoordinator:
     ) -> bool:
         return time.monotonic() >= deadline or bool(cancelled and cancelled())
 
-    def _promote_preparing(self, record: TransactionRecord) -> str:
-        artifact_root = self.transaction_root / record.id
-        try:
-            plan_bytes = (artifact_root / "plan.json").read_bytes()
-            plan = json.loads(plan_bytes)
-            validate_schema(plan, _SCHEMA)
-            if (
-                plan_bytes != canonical_json_bytes(plan)
-                or plan["transaction_id"] != record.id
-            ):
-                return "invalid"
-            self._verify_plan_artifacts(plan, artifact_root)
-            manifest_bytes = (artifact_root / "manifest.json").read_bytes()
-            manifest = json.loads(manifest_bytes)
-            if manifest_bytes != canonical_json_bytes(manifest):
-                return "invalid"
-            if set(manifest) != {
-                "schema_version",
-                "transaction_id",
-                "request_hash",
-                "plan_hash",
-                "operations",
-            }:
-                return "invalid"
-            if (
-                manifest["schema_version"] != "markdown-transaction-recovery/v1"
-                or manifest["transaction_id"] != record.id
-                or manifest["plan_hash"] != sha256_bytes(plan_bytes)
-            ):
-                return "invalid"
-            with self._connect() as database:
-                row = database.execute(
-                    'SELECT request_hash FROM "transaction" WHERE id = ?',
-                    (record.id,),
-                ).fetchone()
-            if row is None or manifest["request_hash"] != row["request_hash"]:
-                return "invalid"
-            plan_operations = plan["operations"]
-            manifest_operations = manifest["operations"]
-            if (
-                not isinstance(plan_operations, list)
-                or not isinstance(manifest_operations, list)
-                or len(plan_operations) != len(manifest_operations)
-            ):
-                return "invalid"
+    def _quarantine_parent_identity(self, record: TransactionRecord) -> str:
+        self._set_transaction_state(
+            record.id, "quarantined", error_code="parent_identity_changed"
+        )
+        return "quarantined"
 
-            operations: list[tuple[object, ...]] = []
-            request_changes: list[dict[str, object]] = []
-            seen_paths: set[str] = set()
-            parent_mismatch = False
-            for position, (operation, persisted) in enumerate(
-                zip(plan_operations, manifest_operations, strict=True)
-            ):
-                if not isinstance(operation, dict) or not isinstance(persisted, dict):
-                    return "invalid"
-                if set(persisted) != {
-                    "position",
-                    "before_hash",
-                    "after_hash",
-                    "parent_device",
-                    "parent_inode",
-                } or persisted["position"] != position:
-                    return "invalid"
-                if (
-                    type(persisted["position"]) is not int
-                    or type(persisted["parent_device"]) is not int
-                    or type(persisted["parent_inode"]) is not int
-                ):
-                    return "invalid"
-                try:
-                    encoded_parent_identity = _encode_parent_identity(
-                        (persisted["parent_device"], persisted["parent_inode"])
-                    )
-                except ValueError:
-                    return "invalid"
-                path = str(operation["path"])
-                try:
-                    self._target(path)
-                except (FileNotFoundError, ValueError) as exc:
-                    raise TargetBoundaryFailure from exc
-                normalized = unicodedata.normalize("NFC", path).casefold()
-                if normalized in seen_paths:
-                    return "invalid"
-                seen_paths.add(normalized)
-                before_hash = self._state_description_hash(operation["before"])
-                after_hash = self._state_description_hash(operation["after"])
-                kind = operation["kind"]
-                if (
-                    persisted["before_hash"] != before_hash
-                    or persisted["after_hash"] != after_hash
-                    or kind == "create"
-                    and (before_hash != ABSENT or after_hash == ABSENT)
-                    or kind == "replace"
-                    and (before_hash == ABSENT or after_hash == ABSENT)
-                    or kind == "delete"
-                    and (before_hash == ABSENT or after_hash != ABSENT)
-                ):
-                    return "invalid"
-                try:
-                    current_parent = self._parent_identity(self._target(path).parent)
-                except (FileNotFoundError, RuntimeError, ValueError) as exc:
-                    raise TargetBoundaryFailure from exc
-                parent_identity = (
-                    persisted["parent_device"],
-                    persisted["parent_inode"],
-                )
-                parent_mismatch = parent_mismatch or current_parent != parent_identity
-                operations.append(
-                    (
-                        record.id,
-                        position,
-                        kind,
-                        path,
-                        before_hash,
-                        after_hash,
-                        *encoded_parent_identity,
-                        0,
-                    )
-                )
-                request_changes.append(
-                    {
-                        "kind": kind,
-                        "path": path,
-                        "content_hash": after_hash,
-                    }
-                )
-            request = {
-                "changes": request_changes,
-                "preconditions": dict(record.preconditions),
-            }
-            if sha256_bytes(canonical_json_bytes(request)) != manifest["request_hash"]:
-                return "invalid"
-        except TargetBoundaryFailure:
-            self._set_transaction_state(
-                record.id, "quarantined", error_code="parent_identity_changed"
+    def _require_target_within_boundary(self, path: str) -> None:
+        try:
+            self._target(path)
+        except (FileNotFoundError, ValueError) as exc:
+            raise TargetBoundaryFailure from exc
+
+    def _current_parent_identity(self, path: str) -> tuple[int, int]:
+        try:
+            return self._parent_identity(self._target(path).parent)
+        except (FileNotFoundError, RuntimeError, ValueError) as exc:
+            raise TargetBoundaryFailure from exc
+
+    def _validated_plan_document(
+        self, record: TransactionRecord, artifact_root: Path
+    ) -> tuple[dict | None, bytes]:
+        plan_bytes = (artifact_root / "plan.json").read_bytes()
+        plan = json.loads(plan_bytes)
+        validate_schema(plan, _SCHEMA)
+        if plan_bytes != canonical_json_bytes(plan):
+            return None, plan_bytes
+        if plan["transaction_id"] != record.id:
+            return None, plan_bytes
+        return plan, plan_bytes
+
+    def _validated_manifest_document(
+        self, record: TransactionRecord, artifact_root: Path, plan_bytes: bytes
+    ) -> dict | None:
+        manifest_bytes = (artifact_root / "manifest.json").read_bytes()
+        manifest = json.loads(manifest_bytes)
+        if manifest_bytes != canonical_json_bytes(manifest):
+            return None
+        if set(manifest) != _RECOVERY_MANIFEST_FIELDS:
+            return None
+        if not _manifest_identity_matches(manifest, record.id, plan_bytes):
+            return None
+        return manifest
+
+    def _manifest_matches_request(
+        self, record: TransactionRecord, manifest: Mapping[str, object]
+    ) -> bool:
+        with self._connect() as database:
+            row = database.execute(
+                'SELECT request_hash FROM "transaction" WHERE id = ?',
+                (record.id,),
+            ).fetchone()
+        if row is None:
+            return False
+        return manifest["request_hash"] == row["request_hash"]
+
+    def _built_operation(
+        self,
+        record: TransactionRecord,
+        position: int,
+        operation: object,
+        persisted: object,
+        seen_paths: set[str],
+    ) -> _BuiltOperation | None:
+        encoded_parent_identity = _validated_persisted_operation(
+            persisted, position, operation
+        )
+        if encoded_parent_identity is None:
+            return None
+        path = str(operation["path"])
+        self._require_target_within_boundary(path)
+        normalized = unicodedata.normalize("NFC", path).casefold()
+        if normalized in seen_paths:
+            return None
+        seen_paths.add(normalized)
+        before_hash = self._state_description_hash(operation["before"])
+        after_hash = self._state_description_hash(operation["after"])
+        kind = operation["kind"]
+        if not _operation_hashes_consistent(persisted, kind, before_hash, after_hash):
+            return None
+        current_parent = self._current_parent_identity(path)
+        parent_identity = (persisted["parent_device"], persisted["parent_inode"])
+        return _BuiltOperation(
+            (
+                record.id,
+                position,
+                kind,
+                path,
+                before_hash,
+                after_hash,
+                *encoded_parent_identity,
+                0,
+            ),
+            {"kind": kind, "path": path, "content_hash": after_hash},
+            current_parent != parent_identity,
+        )
+
+    def _request_hash_matches(
+        self,
+        record: TransactionRecord,
+        request_changes: list[dict[str, object]],
+        manifest: Mapping[str, object],
+    ) -> bool:
+        request = {
+            "changes": request_changes,
+            "preconditions": dict(record.preconditions),
+        }
+        return sha256_bytes(canonical_json_bytes(request)) == manifest["request_hash"]
+
+    def _built_operations(
+        self,
+        record: TransactionRecord,
+        plan: Mapping[str, object],
+        manifest: Mapping[str, object],
+    ) -> _PromotionPlan | None:
+        plan_operations = plan["operations"]
+        manifest_operations = manifest["operations"]
+        if not _comparable_operation_lists(plan_operations, manifest_operations):
+            return None
+        built = self._all_built_operations(record, plan_operations, manifest_operations)
+        if built is None:
+            return None
+        operations = [item.row for item in built]
+        if not self._request_hash_matches(
+            record, [item.change for item in built], manifest
+        ):
+            return None
+        parent_mismatch = any(item.parent_mismatch for item in built)
+        return _PromotionPlan(dict(manifest), operations, parent_mismatch)
+
+    def _all_built_operations(
+        self,
+        record: TransactionRecord,
+        plan_operations: list,
+        manifest_operations: list,
+    ) -> list[_BuiltOperation] | None:
+        seen_paths: set[str] = set()
+        built: list[_BuiltOperation] = []
+        for position, (operation, persisted) in enumerate(
+            zip(plan_operations, manifest_operations, strict=True)
+        ):
+            item = self._built_operation(
+                record, position, operation, persisted, seen_paths
             )
-            return "quarantined"
+            if item is None:
+                return None
+            built.append(item)
+        return built
+
+    def _validated_promotion_plan(
+        self, record: TransactionRecord
+    ) -> _PromotionPlan | None:
+        """Everything the artifacts must agree on before a transaction promotes."""
+        artifact_root = self.transaction_root / record.id
+        plan, plan_bytes = self._validated_plan_document(record, artifact_root)
+        if plan is None:
+            return None
+        self._verify_plan_artifacts(plan, artifact_root)
+        manifest = self._validated_manifest_document(record, artifact_root, plan_bytes)
+        if manifest is None:
+            return None
+        if not self._manifest_matches_request(record, manifest):
+            return None
+        return self._built_operations(record, plan, manifest)
+
+    def _promotion_plan_or_verdict(self, record: TransactionRecord):
+        try:
+            plan = self._validated_promotion_plan(record)
+        except TargetBoundaryFailure:
+            return self._quarantine_parent_identity(record)
         except (AssertionError, KeyError, OSError, TypeError, ValueError):
             return "invalid"
+        if plan is None:
+            return "invalid"
+        return plan
 
+    def _bind_existing_reservation(
+        self, database: sqlite3.Connection, record: TransactionRecord
+    ) -> None:
+        reservation_row = database.execute(
+            "SELECT * FROM project_checkpoints WHERE operation_id = ?",
+            (record.operation_id,),
+        ).fetchone()
+        if reservation_row is None:
+            return
+        self._bind_project_reservation(
+            database,
+            self._project_reservation(reservation_row),
+            record.id,
+            record.preconditions,
+        )
+
+    def _quarantine_failed_promotion(
+        self, record: TransactionRecord, exc: TransactionFailure
+    ) -> str:
+        self._set_transaction_state(record.id, "quarantined", error_code=exc.code)
+        with self._connect() as database, begin_immediate(
+            database, before_commit=self._require_current_operation_active
+        ):
+            database.execute(
+                "UPDATE project_checkpoints SET state = 'quarantined' "
+                "WHERE operation_id = ?",
+                (record.operation_id,),
+            )
+            database.execute(
+                "UPDATE project_checkpoint_attempts SET state = 'quarantined' "
+                "WHERE operation_id = ?",
+                (record.operation_id,),
+            )
+        return "quarantined"
+
+    def _commit_promotion(
+        self, record: TransactionRecord, promotion: _PromotionPlan
+    ) -> str | None:
+        """The verdict when the promotion could not commit, otherwise None."""
         try:
             with self._connect() as database, begin_immediate(
                 database, before_commit=self._require_current_operation_active
             ):
-                reservation_row = database.execute(
-                    "SELECT * FROM project_checkpoints WHERE operation_id = ?",
-                    (record.operation_id,),
-                ).fetchone()
-                if reservation_row is not None:
-                    self._bind_project_reservation(
-                        database,
-                        self._project_reservation(reservation_row),
-                        record.id,
-                        record.preconditions,
-                    )
+                self._bind_existing_reservation(database, record)
                 cursor = database.execute(
                     'UPDATE "transaction" SET state = \'prepared\', plan_hash = ?, '
                     "updated_at = ?, owner_pid = NULL WHERE id = ? AND state = 'preparing'",
-                    (manifest["plan_hash"], _now(), record.id),
+                    (promotion.manifest["plan_hash"], _now(), record.id),
                 )
                 if cursor.rowcount != 1:
                     return "invalid"
@@ -4625,31 +5545,23 @@ class MarkdownCoordinator:
                     "(transaction_id, position, kind, path, before_hash, after_hash, "
                     "parent_device, parent_inode, applied) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    operations,
+                    promotion.operations,
                 )
         except ProjectPendingPriorError:
             return "invalid"
         except TransactionFailure as exc:
-            self._set_transaction_state(record.id, "quarantined", error_code=exc.code)
-            with self._connect() as database, begin_immediate(
-                database, before_commit=self._require_current_operation_active
-            ):
-                database.execute(
-                    "UPDATE project_checkpoints SET state = 'quarantined' "
-                    "WHERE operation_id = ?",
-                    (record.operation_id,),
-                )
-                database.execute(
-                    "UPDATE project_checkpoint_attempts SET state = 'quarantined' "
-                    "WHERE operation_id = ?",
-                    (record.operation_id,),
-                )
-            return "quarantined"
-        if parent_mismatch:
-            self._set_transaction_state(
-                record.id, "quarantined", error_code="parent_identity_changed"
-            )
-            return "quarantined"
+            return self._quarantine_failed_promotion(record, exc)
+        return None
+
+    def _promote_preparing(self, record: TransactionRecord) -> str:
+        promotion = self._promotion_plan_or_verdict(record)
+        if isinstance(promotion, str):
+            return promotion
+        verdict = self._commit_promotion(record, promotion)
+        if verdict is not None:
+            return verdict
+        if promotion.parent_mismatch:
+            return self._quarantine_parent_identity(record)
         return "promoted"
 
     def _state_description_hash(self, state: object) -> str:
@@ -4995,95 +5907,102 @@ class MarkdownCoordinator:
                 (state, error_code, _now(), transaction_id),
             )
 
-    @contextlib.contextmanager
-    def writer_gate(
-        self,
-        *,
-        owner: OwnerLease | None = None,
-        wait_seconds: float | None = None,
-    ) -> Iterator[OwnerLease]:
-        if owner is not None:
-            yield from self._nested_writer_gate(owner)
-            return
-        depth = getattr(self._local, "gate_depth", 0)
-        if depth:
-            self._local.gate_depth = depth + 1
-            try:
-                yield getattr(self._local, "gate_owner", None)
-            finally:
-                self._local.gate_depth -= 1
-            return
-        if getattr(self, "_database_contract", None) == _COORDINATOR_V3_CONTRACT:
-            yield from self._canonical_writer_gate(wait_seconds)
-            return
+    def _reentrant_writer_gate(self, depth: int) -> Iterator[OwnerLease]:
+        self._local.gate_depth = depth + 1
+        try:
+            yield getattr(self._local, "gate_owner", None)
+        finally:
+            self._local.gate_depth -= 1
 
-        if wait_seconds is not None and (
-            isinstance(wait_seconds, bool) or not isinstance(wait_seconds, (int, float))
-            or wait_seconds < 0
-        ):
-            raise ValueError("writer gate wait_seconds must be non-negative or None")
-        owner_token = uuid.uuid4().hex
-        deadline = time.monotonic() + (
-            _WRITER_WAIT_SECONDS if wait_seconds is None else wait_seconds
+    def _install_legacy_owner(
+        self, database: sqlite3.Connection, owner_token: str
+    ) -> int:
+        fence = database.execute(
+            "SELECT last_epoch FROM writer_fences WHERE gate_name = 'global'"
+        ).fetchone()
+        fencing_epoch = 1 if fence is None else fence["last_epoch"] + 1
+        database.execute(
+            "INSERT INTO writer_fences (gate_name, last_epoch) VALUES ('global', ?) "
+            "ON CONFLICT(gate_name) DO UPDATE SET last_epoch = excluded.last_epoch",
+            (fencing_epoch,),
         )
-        fencing_epoch = 0
+        heartbeat = _now()
+        expires = _future_timestamp(_WRITER_LEASE_SECONDS)
+        database.execute("DELETE FROM writer_owners WHERE gate_name = 'global'")
+        database.execute(
+            "INSERT INTO writer_owners "
+            "(gate_name, owner_token, process_id, thread_id, acquired_at, "
+            "heartbeat_at, expires_at, fencing_epoch) "
+            "VALUES ('global', ?, ?, ?, ?, ?, ?, ?)",
+            (
+                owner_token,
+                os.getpid(),
+                threading.get_ident(),
+                heartbeat,
+                heartbeat,
+                expires,
+                fencing_epoch,
+            ),
+        )
+        return fencing_epoch
+
+    def _try_claim_legacy_gate(
+        self, owner_token: str, deadline: float
+    ) -> int | None:
+        """The fencing epoch once claimed, or None while another owner holds it."""
+        remaining_ms = max(1, int((deadline - time.monotonic()) * 1_000))
+        with self._connect(busy_ms=remaining_ms) as database, begin_immediate(database):
+            row = database.execute(
+                "SELECT * FROM writer_owners WHERE gate_name = 'global'"
+            ).fetchone()
+            if row is not None and not self._writer_owner_reclaimable(row):
+                return None
+            return self._install_legacy_owner(database, owner_token)
+
+    def _acquire_legacy_gate(self, owner_token: str, deadline: float) -> int:
         acquisition_attempt = 0
         while True:
-            acquired = False
             try:
-                remaining_ms = max(1, int((deadline - time.monotonic()) * 1_000))
-                with self._connect(busy_ms=remaining_ms) as database, begin_immediate(
-                    database
-                ):
-                    row = database.execute(
-                        "SELECT * FROM writer_owners WHERE gate_name = 'global'"
-                    ).fetchone()
-                    if row is None or self._writer_owner_reclaimable(row):
-                        fence = database.execute(
-                            "SELECT last_epoch FROM writer_fences WHERE gate_name = 'global'"
-                        ).fetchone()
-                        fencing_epoch = 1 if fence is None else fence["last_epoch"] + 1
-                        database.execute(
-                            "INSERT INTO writer_fences (gate_name, last_epoch) VALUES ('global', ?) "
-                            "ON CONFLICT(gate_name) DO UPDATE SET last_epoch = excluded.last_epoch",
-                            (fencing_epoch,),
-                        )
-                        heartbeat = _now()
-                        expires = _future_timestamp(_WRITER_LEASE_SECONDS)
-                        database.execute("DELETE FROM writer_owners WHERE gate_name = 'global'")
-                        database.execute(
-                            "INSERT INTO writer_owners "
-                            "(gate_name, owner_token, process_id, thread_id, acquired_at, "
-                            "heartbeat_at, expires_at, fencing_epoch) "
-                            "VALUES ('global', ?, ?, ?, ?, ?, ?, ?)",
-                            (
-                                owner_token,
-                                os.getpid(),
-                                threading.get_ident(),
-                                heartbeat,
-                                heartbeat,
-                                expires,
-                                fencing_epoch,
-                            ),
-                        )
-                        acquired = True
+                fencing_epoch = self._try_claim_legacy_gate(owner_token, deadline)
             except (OSError, sqlite3.Error) as exc:
-                if not _is_transient_writer_contention(exc):
-                    raise
-                delay = _writer_retry_delay(acquisition_attempt, deadline)
-                if delay <= 0:
-                    raise TimeoutError(
-                        "timed out waiting for the global Markdown writer gate"
-                    ) from exc
-                time.sleep(delay)
-                acquisition_attempt += 1
+                acquisition_attempt = _retry_gate_or_fail(
+                    exc, acquisition_attempt, deadline
+                )
                 continue
-            if acquired:
-                break
+            if fencing_epoch is not None:
+                return fencing_epoch
             if time.monotonic() >= deadline:
-                raise TimeoutError("timed out waiting for the global Markdown writer gate")
+                raise TimeoutError(
+                    "timed out waiting for the global Markdown writer gate"
+                )
             time.sleep(0.01)
 
+    def _stop_legacy_gate(
+        self,
+        owner_token: str,
+        fencing_epoch: int,
+        heartbeat_stop: threading.Event,
+        heartbeat_thread: threading.Thread,
+        heartbeat_lost: threading.Event,
+    ) -> None:
+        heartbeat_stop.set()
+        heartbeat_thread.join(timeout=_WRITER_HEARTBEAT_SECONDS * 2)
+        try:
+            self._release_writer_gate(
+                owner_token, fencing_epoch, heartbeat_lost.is_set()
+            )
+        finally:
+            self._local.gate_depth = 0
+            self._local.gate_token = None
+            self._local.gate_fence = None
+
+    def _legacy_writer_gate(
+        self, wait_seconds: float | None
+    ) -> Iterator[OwnerLease]:
+        _require_gate_wait(wait_seconds)
+        owner_token = uuid.uuid4().hex
+        deadline = time.monotonic() + _gate_wait_seconds(wait_seconds)
+        fencing_epoch = self._acquire_legacy_gate(owner_token, deadline)
         self._local.gate_depth = 1
         self._local.gate_token = owner_token
         self._local.gate_fence = fencing_epoch
@@ -5099,16 +6018,32 @@ class MarkdownCoordinator:
         try:
             yield None
         finally:
-            heartbeat_stop.set()
-            heartbeat_thread.join(timeout=_WRITER_HEARTBEAT_SECONDS * 2)
-            try:
-                self._release_writer_gate(
-                    owner_token, fencing_epoch, heartbeat_lost.is_set()
-                )
-            finally:
-                self._local.gate_depth = 0
-                self._local.gate_token = None
-                self._local.gate_fence = None
+            self._stop_legacy_gate(
+                owner_token,
+                fencing_epoch,
+                heartbeat_stop,
+                heartbeat_thread,
+                heartbeat_lost,
+            )
+
+    @contextlib.contextmanager
+    def writer_gate(
+        self,
+        *,
+        owner: OwnerLease | None = None,
+        wait_seconds: float | None = None,
+    ) -> Iterator[OwnerLease]:
+        if owner is not None:
+            yield from self._nested_writer_gate(owner)
+            return
+        depth = getattr(self._local, "gate_depth", 0)
+        if depth:
+            yield from self._reentrant_writer_gate(depth)
+            return
+        if getattr(self, "_database_contract", None) == _COORDINATOR_V3_CONTRACT:
+            yield from self._canonical_writer_gate(wait_seconds)
+            return
+        yield from self._legacy_writer_gate(wait_seconds)
 
     def _canonical_writer_gate(
         self, wait_seconds: float | None
@@ -5161,11 +6096,13 @@ class MarkdownCoordinator:
             stop.set()
             heartbeat.join(timeout=lease.heartbeat_seconds * 2)
             try:
+                # A heartbeat that failed transiently is not a lost gate. What
+                # proves the loss is the projection row: reclaiming it deletes
+                # this owner's row and bumps the fence, so a delete that removes
+                # our row means nobody else ever took the gate.
                 with self._connect() as database, begin_immediate(database):
                     self._delete_writer_projection(database, lease)
                     registry._release_in_transaction(database, lease)
-                if lost.is_set():
-                    raise RuntimeError("Markdown writer gate ownership was lost")
             finally:
                 self._local.gate_depth = 0
                 self._local.gate_token = None
@@ -5216,7 +6153,7 @@ class MarkdownCoordinator:
             ),
         ).rowcount
         if deleted != 1:
-            raise RuntimeError("Markdown writer gate ownership was lost")
+            raise RuntimeError(_writer_gate_loss_message(heartbeat_lost=False))
 
     def _heartbeat_canonical_writer_gate(
         self,
@@ -5309,8 +6246,8 @@ class MarkdownCoordinator:
                             "AND owner_token = ? AND fencing_epoch = ?",
                             (owner_token, fencing_epoch),
                         )
-                if not still_owner or heartbeat_lost:
-                    raise RuntimeError("Markdown writer gate ownership was lost")
+                if not still_owner:
+                    raise RuntimeError(_writer_gate_loss_message(heartbeat_lost))
                 return
             except (OSError, sqlite3.Error) as exc:
                 if not _is_transient_writer_contention(exc):
@@ -5436,49 +6373,7 @@ class MarkdownCoordinator:
             )
         return change
 
-    def _target(self, value: str) -> Path:
-        relative = restricted_relative_path(
-            value, (*_ALLOWED_DIRECTORIES, *_ALLOWED_FILES)
-        )
-        if unicodedata.normalize("NFC", value) != value:
-            raise ValueError("path must use NFC Unicode normalization")
-        if len(value.encode("utf-8")) > MAX_KNOWLEDGE_PATH_BYTES:
-            raise ValueError("target path exceeds length limit")
-        if len(relative.parts) > MAX_KNOWLEDGE_DEPTH:
-            raise ValueError("target path depth exceeds limit")
-        if any(
-            len(part.encode("utf-8")) > MAX_KNOWLEDGE_COMPONENT_BYTES
-            for part in relative.parts
-        ):
-            raise ValueError("target path component exceeds length limit")
-        reserved = {"con", "prn", "aux", "nul"} | {
-            f"{prefix}{number}" for prefix in ("com", "lpt") for number in range(1, 10)
-        }
-        for part in relative.parts:
-            if (
-                part.endswith((" ", "."))
-                or any(character in '<>:"|?*' or ord(character) < 32 for character in part)
-                or part.rstrip(" .").split(".", 1)[0].casefold() in reserved
-            ):
-                raise ValueError("path contains a non-portable or reserved component")
-        normalized = relative.as_posix()
-        if normalized not in _ALLOWED_FILES and not any(
-            normalized.startswith(f"{root}/") for root in _ALLOWED_DIRECTORIES
-        ):
-            raise ValueError("path is outside every allowed Markdown root")
-        suffix = relative.suffix.casefold()
-        if suffix == ".md":
-            if normalized.startswith("knowledge/feedback/"):
-                raise ValueError("feedback candidates must use JSON")
-        elif suffix == ".json":
-            if _FEEDBACK_JSON_RE.fullmatch(normalized) is None:
-                raise ValueError("JSON targets must be feedback candidates")
-        elif suffix == ".jsonl":
-            if _BLACKBOARD_JSONL_RE.fullmatch(normalized) is None:
-                raise ValueError("JSONL targets must be project blackboard streams")
-        else:
-            raise ValueError("transaction targets must use an approved file type")
-        target = self.vault.joinpath(*relative.parts)
+    def _require_no_reparse_traversal(self, relative: Path, value: str) -> None:
         current = self.vault
         for part in relative.parts:
             current = current / part
@@ -5487,7 +6382,9 @@ class MarkdownCoordinator:
             if _is_reparse_point(current):
                 raise ValueError(f"target traverses a Windows reparse point: {value}")
             if not current.exists():
-                break
+                return
+
+    def _require_canonical_parent(self, target: Path, value: str) -> None:
         if target.parent.resolve(strict=False) != target.parent:
             raise ValueError(f"target has a non-canonical parent: {value}")
         try:
@@ -5496,132 +6393,73 @@ class MarkdownCoordinator:
             raise ValueError("target escapes the vault") from exc
         if not target.parent.is_dir():
             raise ValueError(f"target parent does not exist: {value}")
+
+    def _target(self, value: str) -> Path:
+        relative = restricted_relative_path(
+            value, (*_ALLOWED_DIRECTORIES, *_ALLOWED_FILES)
+        )
+        _require_normalized_path(value)
+        _require_bounded_path(value, relative)
+        _require_portable_components(relative)
+        normalized = relative.as_posix()
+        _require_allowed_root(normalized)
+        _require_approved_suffix(relative, normalized)
+        target = self.vault.joinpath(*relative.parts)
+        self._require_no_reparse_traversal(relative, value)
+        self._require_canonical_parent(target, value)
         return target
+
+    def _require_claim_target_identity(self, item: object) -> None:
+        if not isinstance(item, Mapping) or set(item) != _CLAIM_TARGET_FIELDS:
+            raise ValueError("claim_targets precondition has invalid fields")
+        self._target(str(item["page"]))
+        if not _is_filled_string(item["claim_id"]):
+            raise ValueError("claim_targets precondition has invalid claim id")
+
+    def _require_claim_target(self, item: object, identities: set) -> None:
+        self._require_claim_target_identity(item)
+        _require_claim_target_hashes(item)
+        identity = (str(item["page"]), item["claim_id"])
+        if identity in identities:
+            raise ValueError("claim_targets precondition contains duplicates")
+        identities.add(identity)
+
+    def _validated_claim_targets(self, expected: object) -> list[dict]:
+        _require_bounded_sequence(expected, "claim_targets")
+        targets: list[dict] = []
+        identities: set = set()
+        for item in expected:
+            self._require_claim_target(item, identities)
+            targets.append(dict(item))
+        return sorted(targets, key=lambda item: (item["page"], item["claim_id"]))
+
+    def _validated_fence_precondition(self, path: str, expected: object) -> object:
+        if path == "project_lease":
+            return _validated_project_lease(expected)
+        if path == "intent_fence":
+            return _validated_intent_fence(expected)
+        if path == "capture_binding":
+            return _validated_capture_binding(expected)
+        self._target(path)
+        _require_hash_or_absent(expected)
+        return expected
+
+    def _validated_precondition(self, path: str, expected: object) -> object:
+        """One precondition value, validated by the kind its key names."""
+        if path == "claim_targets":
+            return self._validated_claim_targets(expected)
+        if path == "claim_tree_manifest":
+            return validate_claim_tree_manifest(expected)
+        if path == "guardrails_source_manifest":
+            return validate_guardrail_source_manifest(expected)
+        return self._validated_fence_precondition(path, expected)
 
     def _validate_preconditions(self, preconditions: Mapping[str, object]) -> dict[str, object]:
         if not isinstance(preconditions, Mapping):
             raise TypeError("preconditions must be a mapping")
         result: dict[str, object] = {}
         for path, expected in preconditions.items():
-            if path == "claim_targets":
-                if not isinstance(expected, Sequence) or isinstance(expected, (str, bytes)):
-                    raise TypeError("claim_targets precondition must be an array")
-                if not 1 <= len(expected) <= 1000:
-                    raise ValueError("claim_targets precondition must be bounded")
-                targets = []
-                identities = set()
-                required = {
-                    "page", "claim_id", "fingerprint", "record_hash", "evidence_hash"
-                }
-                for item in expected:
-                    if not isinstance(item, Mapping) or set(item) != required:
-                        raise ValueError("claim_targets precondition has invalid fields")
-                    self._target(str(item["page"]))
-                    if not isinstance(item["claim_id"], str) or not item["claim_id"]:
-                        raise ValueError("claim_targets precondition has invalid claim id")
-                    for field in ("fingerprint", "record_hash", "evidence_hash"):
-                        value = item[field]
-                        if (
-                            not isinstance(value, str)
-                            or len(value) != 64
-                            or any(character not in "0123456789abcdef" for character in value)
-                        ):
-                            raise ValueError("claim_targets precondition has invalid hash")
-                    identity = (str(item["page"]), item["claim_id"])
-                    if identity in identities:
-                        raise ValueError("claim_targets precondition contains duplicates")
-                    identities.add(identity)
-                    targets.append(dict(item))
-                result[path] = sorted(
-                    targets, key=lambda item: (item["page"], item["claim_id"])
-                )
-                continue
-            if path == "claim_tree_manifest":
-                result[path] = validate_claim_tree_manifest(expected)
-                continue
-            if path == "guardrails_source_manifest":
-                result[path] = validate_guardrail_source_manifest(expected)
-                continue
-            if path == "project_lease":
-                if not isinstance(expected, Mapping):
-                    raise TypeError("project_lease precondition must be a mapping")
-                required = {"project", "lease_token", "fencing_epoch", "expires_at"}
-                if set(expected) != required:
-                    raise ValueError("project_lease precondition has invalid fields")
-                if (
-                    not isinstance(expected["project"], str)
-                    or not expected["project"]
-                    or not isinstance(expected["lease_token"], str)
-                    or not expected["lease_token"]
-                    or not isinstance(expected["fencing_epoch"], int)
-                    or expected["fencing_epoch"] < 1
-                    or not isinstance(expected["expires_at"], str)
-                ):
-                    raise ValueError("project_lease precondition has invalid values")
-                _parse_timestamp(expected["expires_at"])
-                result[path] = dict(expected)
-                continue
-            if path == "intent_fence":
-                if not isinstance(expected, Mapping):
-                    raise TypeError("intent_fence precondition must be a mapping")
-                required = {
-                    "intent_id",
-                    "mode",
-                    "token",
-                    "fencing_epoch",
-                    "expires_at",
-                }
-                if set(expected) != required:
-                    raise ValueError("intent_fence precondition has invalid fields")
-                if (
-                    re.fullmatch(r"[0-9a-f]{64}", str(expected["intent_id"]))
-                    is None
-                    or expected["mode"] not in {"capture", "worker", "operator"}
-                    or not isinstance(expected["token"], str)
-                    or not expected["token"]
-                    or not isinstance(expected["fencing_epoch"], int)
-                    or isinstance(expected["fencing_epoch"], bool)
-                    or expected["fencing_epoch"] < 1
-                    or not isinstance(expected["expires_at"], str)
-                ):
-                    raise ValueError("intent_fence precondition has invalid values")
-                _parse_timestamp(str(expected["expires_at"]))
-                result[path] = dict(expected)
-                continue
-            if path == "capture_binding":
-                if not isinstance(expected, Mapping):
-                    raise TypeError("capture_binding precondition must be a mapping")
-                required = {
-                    "intent_id",
-                    "task_id",
-                    "active_link_digest",
-                    "seal_digest",
-                }
-                if set(expected) != required:
-                    raise ValueError("capture_binding precondition has invalid fields")
-                if (
-                    re.fullmatch(r"[0-9a-f]{64}", str(expected["intent_id"]))
-                    is None
-                    or not isinstance(expected["task_id"], str)
-                    or not expected["task_id"]
-                    or re.fullmatch(
-                        r"[0-9a-f]{64}", str(expected["active_link_digest"])
-                    )
-                    is None
-                    or re.fullmatch(r"[0-9a-f]{64}", str(expected["seal_digest"]))
-                    is None
-                ):
-                    raise ValueError("capture_binding precondition has invalid values")
-                result[path] = dict(expected)
-                continue
-            self._target(path)
-            if expected != ABSENT and (
-                not isinstance(expected, str)
-                or len(expected) != 64
-                or any(character not in "0123456789abcdef" for character in expected)
-            ):
-                raise ValueError("precondition values must be 'absent' or SHA-256 hashes")
-            result[path] = expected
+            result[path] = self._validated_precondition(path, expected)
         canonical_json_bytes(result)
         return result
 

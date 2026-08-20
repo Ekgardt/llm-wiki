@@ -1181,6 +1181,31 @@ def test_lock_write_failure_is_typed_and_cleans_owned_lock(
     _assert_no_owned_scratch(state_root)
 
 
+def test_lock_that_cannot_be_retained_is_left_to_its_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Losing the lock we just created is contention, not a broken install.
+
+    A hosted runner produced `new Pyright install lock could not be retained`,
+    and the old code answered by deleting the lock file — one somebody else was
+    holding — and failing the installation. Backing off leaves the file alone
+    and lets the caller wait for it.
+    """
+    parent_path = tmp_path / "pyright"
+    parent_path.mkdir()
+    parent = installer_module._open_absolute_directory(parent_path, writable=True)
+    monkeypatch.setattr(installer_module, "_lock_handle_nonblocking", lambda _handle: False)
+
+    try:
+        owned = installer_module._create_owned_lock(parent, time.monotonic() + 5)
+    finally:
+        parent.close()
+
+    assert owned is None
+    assert (parent_path / installer_module._LOCK_NAME).is_file()
+
+
 def test_lock_metadata_is_canonical_and_durable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1313,9 +1338,26 @@ def test_concurrent_stale_lock_reclaimers_have_one_winner(
         raising=False,
     )
 
+    start = threading.Barrier(2)
+    acquired = threading.Event()
+
     def try_acquire() -> tuple[object, object | None]:
+        # Retry the way the installer does: losing one attempt means another
+        # reclaimer got there first, not that this one may never proceed. Both
+        # threads try at least once, and the loser stops as soon as the winner
+        # holds the lock rather than spinning out a deadline sized for the
+        # slowest supported machine.
         parent = installer_module._open_absolute_directory(parent_path, writable=True)
-        return parent, installer_module._try_create_lock(parent, time.monotonic() + 5)
+        deadline = time.monotonic() + 120
+        start.wait(timeout=120)
+        lock = None
+        while lock is None:
+            lock = installer_module._try_create_lock(parent, deadline)
+            if acquired.is_set() or time.monotonic() >= deadline:
+                break
+        if lock is not None:
+            acquired.set()
+        return parent, lock
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         attempts = list(executor.map(lambda _index: try_acquire(), range(2)))
@@ -2133,7 +2175,10 @@ def test_concurrent_installers_converge_on_one_valid_publication(
             executor.submit(install_pyright, state_root=state_root, artifact=artifact.path)
             for _ in range(2)
         ]
-        results = [future.result(timeout=10) for future in futures]
+        # Convergence is the claim, not speed: the loser waits for the winner's
+        # publication, and both together took longer than ten seconds on a
+        # loaded runner.
+        results = [future.result(timeout=120) for future in futures]
 
     assert results[0] == results[1]
     assert results[0].root == _root(state_root)

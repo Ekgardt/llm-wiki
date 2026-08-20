@@ -31,6 +31,50 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
+# Session start must answer from the projection instead of recomputing the
+# handoff or waiting for the Markdown writer gate. A four-core hosted Windows
+# runner needed seven seconds for that projected read, so a sub-second ceiling
+# measured the runner. The proof that survives load is the contrast with the
+# writer hold below: blocking on the gate would cost WRITER_HOLD_SECONDS.
+SESSION_START_BUDGET_SECONDS = 5.0
+WRITER_HOLD_SECONDS = 30.0
+
+
+def require_tool(name: str) -> str:
+    """Resolve an optional external runtime or skip the calling test.
+
+    Node and PowerShell 7 are optional for contributors (README: "Node 22 is
+    optional"), so a missing binary must skip rather than fail the suite.
+    """
+    path = shutil.which(name)
+    if path is None:
+        pytest.skip(f"{name} is unavailable")
+    return path
+
+
+def _ensure_scripts_on_path() -> None:
+    scripts = str(ROOT / "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+
+
+def _hook_handlers(merged: dict) -> list[dict]:
+    return [
+        handler
+        for groups in merged["hooks"].values()
+        for group in groups
+        for handler in group["hooks"]
+    ]
+
+
+def _codex_memory_handlers(merged: dict) -> list[dict]:
+    handlers = _hook_handlers(merged)
+    return [handler for handler in handlers if "codex_memory.py" in handler.get("command", "")]
+
+
+def _stop_hook_commands(merged: dict) -> list[str]:
+    groups = merged["hooks"]["Stop"]
+    return [handler.get("command") for group in groups for handler in group["hooks"]]
 
 
 @pytest.fixture
@@ -116,10 +160,10 @@ def test_opencode_roleless_user_message_is_forwarded_once(opencode_plugin_url: s
     )
 
     result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
+        [require_tool("node"), "--input-type=module", "-e", script],
         capture_output=True,
         text=True,
-        timeout=5,
+        timeout=180,
         check=False,
     )
 
@@ -133,6 +177,63 @@ def test_opencode_roleless_user_message_is_forwarded_once(opencode_plugin_url: s
         "prompt": "Preserve this request\nand this second part",
         "sessionID": "session-1",
     }
+
+
+def test_installed_plugin_captures_without_an_inherited_environment(tmp_path: Path):
+    """OpenCode from a desktop launcher has no `LLM_WIKI_ROOT`; the copy carries it."""
+    import sys as _sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in _sys.path:
+        _sys.path.insert(0, str(scripts))
+    from installer_config import plugin_with_embedded_root
+
+    root = tmp_path / "vault"
+    published = tmp_path / "installed-plugin.mjs"
+    source = (ROOT / "scripts" / "llm-wiki-memory-opencode.js").read_text(encoding="utf-8")
+    published.write_text(plugin_with_embedded_root(source, root), encoding="utf-8")
+    script = textwrap.dedent(
+        f"""
+        delete process.env.LLM_WIKI_ROOT;
+        const calls = [];
+        globalThis.Bun = {{ spawn(args) {{
+          const record = {{ args, stdin: "" }};
+          calls.push(record);
+          let finish;
+          const exited = new Promise((resolve) => {{ finish = resolve; }});
+          return {{
+            stdin: {{
+              write(value) {{ record.stdin += value; }},
+              end() {{ finish(0); }},
+            }},
+            stdout: new ReadableStream({{ start(controller) {{ controller.close(); }} }}),
+            exited,
+            kill() {{ finish(143); }},
+          }};
+        }} }};
+        const {{ LlmWikiMemoryPlugin }} = await import({json.dumps(published.resolve().as_uri())});
+        const hooks = await LlmWikiMemoryPlugin({{ client: {{}}, directory: {json.dumps(str(tmp_path / "project"))} }});
+        await hooks["chat.message"](
+          {{ sessionID: "session-1" }},
+          {{ message: {{ id: "message-1" }}, parts: [{{ type: "text", text: "capture me" }}] }},
+        );
+        console.log(JSON.stringify(calls));
+        """
+    )
+
+    result = subprocess.run(
+        [require_tool("node"), "--input-type=module", "-e", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = json.loads(result.stdout)
+    assert len(calls) == 1
+    # The plugin joins with a forward slash, which Windows accepts in a path.
+    assert f"{root}/scripts" in " ".join(calls[0]["args"])
 
 
 def test_user_prompt_ingestion_runs_prompt_and_feedback_capture_once(monkeypatch):
@@ -657,12 +758,28 @@ def test_failed_checkpoint_does_not_persist_event_dedupe_and_retry_succeeds(monk
     assert len(attempts) == 2
 
 
-def test_concurrent_distinct_events_are_each_journaled_exactly_once(monkeypatch, tmp_path):
-    import sys
+def _session_end_events(adapter, project_dir: Path, count: int) -> list:
+    return [
+        adapter.normalize_event(
+            "codex",
+            "session_end",
+            {
+                "session_id": "session-1",
+                "cwd": str(project_dir),
+                "event_id": f"event-{index}",
+            },
+        )
+        for index in range(count)
+    ]
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+
+def _journal_records(journal: str, header: str) -> list[dict]:
+    lines = journal.removeprefix(header).splitlines()
+    return [json.loads(line) for line in lines if line]
+
+
+def test_concurrent_distinct_events_are_each_journaled_exactly_once(monkeypatch, tmp_path):
+    _ensure_scripts_on_path()
     import integration_adapter
     from project_journal import JOURNAL_HEADER, ProjectStore
 
@@ -685,26 +802,13 @@ def test_concurrent_distinct_events_are_each_journaled_exactly_once(monkeypatch,
     monkeypatch.setattr(
         integration_adapter, "_project_context", lambda event: ("demo", project_dir)
     )
-    events = [
-        integration_adapter.normalize_event(
-            "codex",
-            "session_end",
-            {
-                "session_id": "session-1",
-                "cwd": str(project_dir),
-                "event_id": f"event-{index}",
-            },
-        )
-        for index in range(2)
-    ]
+    events = _session_end_events(integration_adapter, project_dir, 2)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         list(pool.map(integration_adapter._observe_project_checkpoint, events))
 
     journal = ProjectStore(vault, state_root).read_journal("demo")
-    records = [
-        json.loads(line) for line in journal.removeprefix(JOURNAL_HEADER).splitlines() if line
-    ]
+    records = _journal_records(journal, JOURNAL_HEADER)
     assert sorted(record["occurrence_id"] for record in records) == sorted(
         event.event_id for event in events
     )
@@ -1069,12 +1173,74 @@ def test_bypass_event_immediately_flushes_debounced_delta_once_after_restart(mon
     assert len(checkpoints) == 1
 
 
-def test_bypass_flush_batches_205_pending_events_across_failure_and_restart(monkeypatch):
-    import sys
+def _pending_delta(adapter, index: int) -> dict:
+    delta = adapter._empty_delta()
+    delta["current_task"] = {
+        "id": f"task-{index}",
+        "action": "upsert",
+        "value": f"Task {index}",
+    }
+    delta["decisions"] = [
+        {"id": f"decision-{index}", "action": "upsert", "value": f"Decision {index}"}
+    ]
+    return delta
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+
+def _batch_checkpoint_type(index: int, last: int) -> str:
+    if index == last:
+        return "decision"
+    return "correction"
+
+
+def _batch_offset_seconds(index: int, last: int) -> int:
+    if index == last:
+        return 2
+    return 1
+
+
+def _seed_pending_checkpoints(adapter, state: dict, started, total: int) -> list[str]:
+    last = total - 1
+    event_ids: list[str] = []
+    for index in range(total):
+        envelope = adapter.normalize_event(
+            "claude",
+            "post_tool_use",
+            {
+                "session_id": "s1",
+                "cwd": "C:/project",
+                "event_id": f"event-{index}",
+                "tool_name": "Read",
+                "tool_input": {"file_path": "src/app.py"},
+                "checkpoint_type": _batch_checkpoint_type(index, last),
+                "project_delta": _pending_delta(adapter, index),
+            },
+            occurred_at=started + timedelta(seconds=_batch_offset_seconds(index, last)),
+        )
+        event_ids.append(envelope.event_id)
+        state["project_checkpoint_pending"]["demo"].append(
+            adapter._pending_checkpoint(envelope, "demo", "demo:s1")
+        )
+    return event_ids
+
+
+def _evidence_lengths(checkpoints: list[dict]) -> list[int]:
+    return [len(item["evidence_event_ids"]) for item in checkpoints]
+
+
+def _task_operation_lengths(checkpoints: list[dict]) -> list[int]:
+    return [len(item["delta"]["current_task_operations"]) for item in checkpoints]
+
+
+def _decision_lengths(checkpoints: list[dict]) -> list[int]:
+    return [len(item["delta"]["decisions"]) for item in checkpoints]
+
+
+def _flat_evidence_ids(checkpoints: list[dict]) -> list[str]:
+    return [event_id for item in checkpoints for event_id in item["evidence_event_ids"]]
+
+
+def test_bypass_flush_batches_205_pending_events_across_failure_and_restart(monkeypatch):
+    _ensure_scripts_on_path()
     import integration_adapter
     from project_journal import CheckpointReducer
 
@@ -1087,7 +1253,6 @@ def test_bypass_flush_batches_205_pending_events_across_failure_and_restart(monk
     }
     attempts = 0
     checkpoints = []
-    event_ids = []
 
     def update(mutator, **kwargs):
         mutator(state)
@@ -1106,38 +1271,7 @@ def test_bypass_flush_batches_205_pending_events_across_failure_and_restart(monk
 
     monkeypatch.setattr(integration_adapter, "update_state", update)
     monkeypatch.setattr(integration_adapter, "ProjectStore", Store)
-    for index in range(205):
-        delta = integration_adapter._empty_delta()
-        delta["current_task"] = {
-            "id": f"task-{index}",
-            "action": "upsert",
-            "value": f"Task {index}",
-        }
-        delta["decisions"] = [
-            {
-                "id": f"decision-{index}",
-                "action": "upsert",
-                "value": f"Decision {index}",
-            }
-        ]
-        envelope = integration_adapter.normalize_event(
-            "claude",
-            "post_tool_use",
-            {
-                "session_id": "s1",
-                "cwd": "C:/project",
-                "event_id": f"event-{index}",
-                "tool_name": "Read",
-                "tool_input": {"file_path": "src/app.py"},
-                "checkpoint_type": "decision" if index == 204 else "correction",
-                "project_delta": delta,
-            },
-            occurred_at=started + timedelta(seconds=2 if index == 204 else 1),
-        )
-        event_ids.append(envelope.event_id)
-        state["project_checkpoint_pending"]["demo"].append(
-            integration_adapter._pending_checkpoint(envelope, "demo", "demo:s1")
-        )
+    event_ids = _seed_pending_checkpoints(integration_adapter, state, started, 205)
 
     with pytest.raises(RuntimeError, match="second batch interrupted"):
         integration_adapter._drain_project_checkpoints("demo", "demo")
@@ -1148,16 +1282,10 @@ def test_bypass_flush_batches_205_pending_events_across_failure_and_restart(monk
     state = json.loads(json.dumps(state))
     integration_adapter._drain_project_checkpoints("demo", "demo")
 
-    assert [len(item["evidence_event_ids"]) for item in checkpoints] == [100, 100, 5]
-    assert [len(item["delta"]["current_task_operations"]) for item in checkpoints] == [
-        100,
-        100,
-        5,
-    ]
-    assert all(len(item["delta"]["decisions"]) <= 100 for item in checkpoints)
-    assert [
-        event_id for item in checkpoints for event_id in item["evidence_event_ids"]
-    ] == event_ids
+    assert _evidence_lengths(checkpoints) == [100, 100, 5]
+    assert _task_operation_lengths(checkpoints) == [100, 100, 5]
+    assert max(_decision_lengths(checkpoints)) <= 100
+    assert _flat_evidence_ids(checkpoints) == event_ids
     assert state["project_checkpoint_pending"]["demo"] == []
 
     state = json.loads(json.dumps(state))
@@ -1418,7 +1546,7 @@ def test_opencode_node_injects_shared_bounded_legacy_handoff_for_unicode_slug(
     elapsed = time.perf_counter() - started
     shared = recover_project_handoff(ProjectStore(vault, state_root), slug, project_root=project)
 
-    assert elapsed < 0.75
+    assert elapsed < SESSION_START_BUDGET_SECONDS
     assert result["context"] == shared.context
     assert len(result["context"]) <= 2400
     assert "Preserve older handoff" in result["context"]
@@ -1454,7 +1582,7 @@ def test_opencode_node_injects_shared_bounded_legacy_handoff_for_unicode_slug(
     env["LLM_WIKI_ROOT"] = str(vault)
     node = subprocess.run(
         [
-            "node",
+            require_tool("node"),
             "--input-type=module",
             "--eval",
             script,
@@ -1464,7 +1592,7 @@ def test_opencode_node_injects_shared_bounded_legacy_handoff_for_unicode_slug(
         text=True,
         encoding="utf-8",
         check=False,
-        timeout=5,
+        timeout=180,
     )
     assert node.returncode == 0, node.stderr
     assert json.loads(node.stdout) == [result["context"]]
@@ -1525,10 +1653,12 @@ def test_opencode_session_start_writer_contention_is_bounded_and_degraded(monkey
     store = ProjectStore(vault, state_root)
     held = threading.Event()
 
+    release = threading.Event()
+
     def hold_writer():
         with store.coordinator.writer_gate():
             held.set()
-            time.sleep(1)
+            release.wait(WRITER_HOLD_SECONDS)
 
     monkeypatch.setattr(integration_adapter, "ROOT", vault)
     monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
@@ -1551,9 +1681,10 @@ def test_opencode_session_start_writer_contention_is_bounded_and_degraded(monkey
         started = time.perf_counter()
         result = integration_adapter.ingest_event(envelope)
         elapsed = time.perf_counter() - started
-        holder.result(timeout=5)
+        release.set()
+        holder.result(timeout=WRITER_HOLD_SECONDS)
 
-    assert elapsed < 0.75
+    assert elapsed < SESSION_START_BUDGET_SECONDS
     assert "# General memory" in result["context"]
     assert "Degraded" in result["context"]
     assert "project:demo" in result["context"]
@@ -1808,11 +1939,7 @@ def test_codex_official_hook_template_matches_supported_contract():
 
 
 def test_codex_hook_merge_preserves_user_hooks_and_is_idempotent(tmp_path):
-    import sys
-
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import codex_memory
 
     source = ROOT / "integrations" / "codex" / "hooks.json"
@@ -1851,27 +1978,27 @@ def test_codex_hook_merge_preserves_user_hooks_and_is_idempotent(tmp_path):
     assert destination.read_bytes() == first
     assert list(tmp_path.glob("hooks.json.bak-llm-wiki-*")) == backups
     assert merged["custom"] == {"preserved": True}
-    assert any(
-        hook.get("command") == "echo user"
-        for group in merged["hooks"]["Stop"]
-        for hook in group["hooks"]
-    )
-    ours = [
-        hook
-        for groups in merged["hooks"].values()
-        for group in groups
-        for hook in group["hooks"]
-        if "codex_memory.py" in hook.get("command", "")
-    ]
-    assert len(ours) == 4
+    assert "echo user" in _stop_hook_commands(merged)
+    assert len(_codex_memory_handlers(merged)) == 4
+
+
+def _owned_backup_mtime(now: float, index: int) -> float:
+    if index == 0:
+        return now - 91 * 24 * 60 * 60
+    return now - (11 - index)
+
+
+def _seed_owned_backups(tmp_path: Path, now: float, count: int) -> Path:
+    for index in range(count):
+        backup = tmp_path / f"hooks.json.bak-llm-wiki-20260801-000000-{index:06d}"
+        backup.write_bytes(str(index).encode("ascii"))
+        modified = _owned_backup_mtime(now, index)
+        os.utime(backup, (modified, modified))
+    return tmp_path / "hooks.json.bak-llm-wiki-20260801-000000-000000"
 
 
 def test_codex_hook_merge_prunes_owned_backups_but_keeps_newest_and_unrelated(tmp_path):
-    import sys
-
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import codex_memory
 
     source = ROOT / "integrations" / "codex" / "hooks.json"
@@ -1879,23 +2006,16 @@ def test_codex_hook_merge_prunes_owned_backups_but_keeps_newest_and_unrelated(tm
     original = b'{"hooks":{}}\n'
     destination.write_bytes(original)
     now = time.time()
-    old = None
-    for index in range(11):
-        backup = tmp_path / f"hooks.json.bak-llm-wiki-20260801-000000-{index:06d}"
-        backup.write_bytes(str(index).encode("ascii"))
-        modified = now - (91 * 24 * 60 * 60 if index == 0 else 11 - index)
-        os.utime(backup, (modified, modified))
-        if index == 0:
-            old = backup
+    old = _seed_owned_backups(tmp_path, now, 11)
     unrelated = tmp_path / "hooks.json.backup"
     unrelated.write_bytes(b"keep")
 
     codex_memory.merge_codex_hooks(source, destination)
 
     backups = list(tmp_path.glob("hooks.json.bak-llm-wiki-*"))
-    assert old is not None and not old.exists()
+    assert not old.exists()
     assert len(backups) <= 10
-    assert any(path.read_bytes() == original for path in backups)
+    assert original in [path.read_bytes() for path in backups]
     assert unrelated.read_bytes() == b"keep"
 
 
@@ -2256,7 +2376,8 @@ def _write_blocking_fake_uv(directory: Path) -> None:
         "stop_child() { : > child.stopped; exit 0; }\n"
         "trap stop_child HUP INT TERM\n"
         "i=0\n"
-        'while [ "$i" -lt 30 ]; do sleep 0.1; i=$((i + 1)); done\n'
+        # Long enough that the installer's own timer, not the loop, ends it.
+        'while [ "$i" -lt 600 ]; do sleep 0.1; i=$((i + 1)); done\n'
         ": > child.completed\n",
         encoding="utf-8",
     )
@@ -2297,26 +2418,35 @@ def _write_stubborn_fake_uv_tree(directory: Path) -> None:
     fake_uv.chmod(0o700)
 
 
+def _bash_search_paths() -> list[str | None]:
+    git = shutil.which("git")
+    if git is None:
+        return [None]
+    return [None, str(Path(git).resolve().parent.parent / "bin")]
+
+
+def _bash_runs(bash: str) -> bool:
+    try:
+        result = subprocess.run(
+            [bash, "--version"], capture_output=True, timeout=5, check=False
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
+def _working_bash_at(search_path: str | None) -> str | None:
+    bash = shutil.which("bash", path=search_path)
+    if bash is None or not _bash_runs(bash):
+        return None
+    return bash
+
+
 def _find_working_bash() -> str | None:
     if os.name == "nt":
         return None
-    search_paths = [None]
-    git = shutil.which("git")
-    if git:
-        search_paths.append(str(Path(git).resolve().parent.parent / "bin"))
-    for search_path in search_paths:
-        bash = shutil.which("bash", path=search_path)
-        if not bash:
-            continue
-        try:
-            result = subprocess.run(
-                [bash, "--version"], capture_output=True, timeout=5, check=False
-            )
-        except OSError:
-            continue
-        if result.returncode == 0:
-            return bash
-    return None
+    candidates = (_working_bash_at(path) for path in _bash_search_paths())
+    return next((bash for bash in candidates if bash is not None), None)
 
 
 @pytest.mark.parametrize(
@@ -2387,7 +2517,11 @@ def test_unix_installer_timeout_stops_tests_and_aborts(tmp_path):
         textwrap.dedent(
             f"""
             set -euo pipefail
-            export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS=1
+            # The timer must outlast the child's own startup: fired too early it
+            # kills the fake `uv` before its signal trap exists, and the marker
+            # the assertions read is never written. One second raced it, five
+            # raced it again under a full parallel load.
+            export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS=15
             PATH="$(dirname "$0")/bin:$PATH"
             export PATH
             info() {{ :; }}
@@ -2409,13 +2543,13 @@ def test_unix_installer_timeout_stops_tests_and_aborts(tmp_path):
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=10,
+        timeout=120,
         check=False,
     )
 
     assert result.returncode == 1, result.stderr
     assert (tmp_path / "failed.message").read_text() == (
-        "Production smoke timed out after 1s; installation aborted"
+        "Production smoke timed out after 15s; installation aborted"
     )
     assert (tmp_path / "child.stopped").exists()
     assert not (tmp_path / "child.completed").exists()
@@ -2459,6 +2593,13 @@ def test_unix_installer_signal_traps_cleanup_and_exit(tmp_path, signal_name, exp
         textwrap.dedent(
             f"""
             set -euo pipefail
+            # A shell without job control starts an asynchronous job with
+            # SIGINT ignored, and an ignored signal cannot be trapped. bash 5
+            # installs the trap here anyway, bash 3.2 on macOS does not, so
+            # the installer never saw the INT it traps. Job control gives the
+            # job its own process group with the default disposition, which is
+            # how a terminal delivers Ctrl-C to a real installation.
+            set -m
             ./installer-under-test.sh &
             installerPid=$!
             started=0
@@ -2595,7 +2736,7 @@ def test_unix_installer_initial_monitor_mode_cleans_stopped_test_tree(tmp_path):
             f"""
             set -euo pipefail
             set -m
-            export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS=30
+            export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS=3
             PATH="$(dirname "$0")/bin:$PATH"
             export PATH
             info() {{ :; }}
@@ -2683,7 +2824,7 @@ def test_unix_installer_initial_monitor_off_cleans_stopped_test_tree(tmp_path, s
             f"""
             set -euo pipefail
             set +m
-            export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS=30
+            export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS=3
             PATH="$(dirname "$0")/bin:$PATH"
             export PATH
             info() {{ :; }}
@@ -2724,7 +2865,10 @@ def test_unix_installer_initial_monitor_off_cleans_stopped_test_tree(tmp_path, s
             if [ "$started" -ne 1 ]; then exit 90; fi
             kill -s {stop_signal} "$(cat uv.pid)"
             finished=0
-            for ((attempt = 0; attempt < 300; attempt++)); do
+            # Bash reports a stopped job to `wait` only where job control does
+            # it; elsewhere the installer's own smoke timer ends the wait, so
+            # the poll has to outlast that timer.
+            for ((attempt = 0; attempt < 1000; attempt++)); do
               if ! kill -0 "$installerPid" 2>/dev/null; then finished=1; break; fi
               sleep 0.01
             done
@@ -3022,6 +3166,30 @@ def test_windows_installer_trusts_smoke_exit_status(
     assert fake_output in result.stdout
 
 
+def _windows_process_survived(pid_file: Path) -> bool:
+    import ctypes
+
+    pid = int(pid_file.read_text())
+    handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+    if not handle:
+        return False
+    exit_code = ctypes.c_ulong()
+    assert ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+    alive = exit_code.value == 259
+    if alive:
+        ctypes.windll.kernel32.TerminateProcess(handle, 1)
+    ctypes.windll.kernel32.CloseHandle(handle)
+    return alive
+
+
+def _windows_survivors(targets) -> list[str]:
+    return [
+        f"{label}:{pid_file.read_text()}"
+        for label, pid_file in targets
+        if _windows_process_survived(pid_file)
+    ]
+
+
 @pytest.mark.parametrize("powershell_name", ["powershell", "pwsh"])
 def test_windows_installer_error_stops_native_child_and_later_steps(
     tmp_path, windows_fake_uv, powershell_name
@@ -3094,7 +3262,7 @@ def test_windows_installer_error_stops_native_child_and_later_steps(
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=stderr,
-            timeout=30,
+            timeout=180,
             check=False,
         )
 
@@ -3103,20 +3271,8 @@ def test_windows_installer_error_stops_native_child_and_later_steps(
     assert started.exists()
     assert python_started.exists()
     assert not later.exists()
-    import ctypes
 
-    survivors = []
-    for label, pid_file in (("uv", uv_pid_file), ("python", python_pid_file)):
-        pid = int(pid_file.read_text())
-        process = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
-        if not process:
-            continue
-        exit_code = ctypes.c_ulong()
-        assert ctypes.windll.kernel32.GetExitCodeProcess(process, ctypes.byref(exit_code))
-        if exit_code.value == 259:
-            survivors.append(f"{label}:{pid}")
-            ctypes.windll.kernel32.TerminateProcess(process, 1)
-        ctypes.windll.kernel32.CloseHandle(process)
+    survivors = _windows_survivors((("uv", uv_pid_file), ("python", python_pid_file)))
     assert not survivors, f"native process tree survived installer cleanup: {survivors}"
 
 
@@ -3233,7 +3389,7 @@ def test_windows_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scena
     )
 
     result = subprocess.run(
-        ["pwsh", "-NoProfile", "-NonInteractive", "-Command", command],
+        [require_tool("pwsh"), "-NoProfile", "-NonInteractive", "-Command", command],
         capture_output=True,
         text=True,
         timeout=20,
@@ -3289,20 +3445,8 @@ def test_unix_installer_hook_function_executes_in_temp_home(tmp_path):
     assert result.returncode == 0, result.stderr
     merged = json.loads((codex_dir / "hooks.json").read_text(encoding="utf-8"))
     assert merged["custom"] is True
-    assert (
-        sum(
-            "codex_memory.py" in handler.get("command", "")
-            for groups in merged["hooks"].values()
-            for group in groups
-            for handler in group["hooks"]
-        )
-        == 4
-    )
-    assert any(
-        handler.get("command") == "echo user"
-        for group in merged["hooks"]["Stop"]
-        for handler in group["hooks"]
-    )
+    assert len(_codex_memory_handlers(merged)) == 4
+    assert "echo user" in _stop_hook_commands(merged)
 
 
 def test_unix_installer_preserves_json_when_unrelated_inline_hooks_exist(tmp_path):
@@ -3387,7 +3531,7 @@ def test_windows_installer_hook_function_executes_in_temp_home(tmp_path):
     )
 
     result = subprocess.run(
-        ["pwsh", "-NoProfile", "-NonInteractive", "-Command", command],
+        [require_tool("pwsh"), "-NoProfile", "-NonInteractive", "-Command", command],
         capture_output=True,
         text=True,
         timeout=20,
@@ -3397,20 +3541,8 @@ def test_windows_installer_hook_function_executes_in_temp_home(tmp_path):
     assert result.returncode == 0, result.stderr
     merged = json.loads((codex_dir / "hooks.json").read_text(encoding="utf-8"))
     assert merged["custom"] is True
-    assert (
-        sum(
-            "codex_memory.py" in handler.get("command", "")
-            for groups in merged["hooks"].values()
-            for group in groups
-            for handler in group["hooks"]
-        )
-        == 4
-    )
-    assert any(
-        handler.get("command") == "echo user"
-        for group in merged["hooks"]["Stop"]
-        for handler in group["hooks"]
-    )
+    assert len(_codex_memory_handlers(merged)) == 4
+    assert "echo user" in _stop_hook_commands(merged)
 
 
 def test_windows_installer_preserves_json_when_partial_inline_hooks_exist(tmp_path):
@@ -3447,7 +3579,7 @@ def test_windows_installer_preserves_json_when_partial_inline_hooks_exist(tmp_pa
     )
 
     result = subprocess.run(
-        ["pwsh", "-NoProfile", "-NonInteractive", "-Command", command],
+        [require_tool("pwsh"), "-NoProfile", "-NonInteractive", "-Command", command],
         capture_output=True,
         text=True,
         timeout=20,
@@ -3535,7 +3667,7 @@ def test_windows_installer_warns_and_preserves_json_when_hooks_feature_disabled(
     )
 
     result = subprocess.run(
-        ["pwsh", "-NoProfile", "-NonInteractive", "-Command", command],
+        [require_tool("pwsh"), "-NoProfile", "-NonInteractive", "-Command", command],
         capture_output=True,
         text=True,
         timeout=20,
@@ -3645,7 +3777,7 @@ def test_opencode_node_harness_forwards_bounded_tail_and_escaped_paths(
     )
 
     result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
+        [require_tool("node"), "--input-type=module", "-e", script],
         capture_output=True,
         text=True,
         timeout=10,
@@ -3710,7 +3842,7 @@ def test_opencode_node_harness_times_out_stalled_capture(tmp_path, opencode_plug
     )
 
     result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
+        [require_tool("node"), "--input-type=module", "-e", script],
         capture_output=True,
         text=True,
         timeout=2,
@@ -3758,10 +3890,10 @@ def test_opencode_forwards_known_mutation_and_dirty_idle_without_fake_progress_s
     )
 
     result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
+        [require_tool("node"), "--input-type=module", "-e", script],
         capture_output=True,
         text=True,
-        timeout=5,
+        timeout=30,
         check=False,
     )
 
@@ -3829,15 +3961,17 @@ def test_opencode_vault_guard_uses_resolved_path_boundary(opencode_plugin_url: s
         }} }};
         await sibling.event(created);
         await vault.event(created);
-        console.log(commands.length);
+        // A number goes through `util.inspect`, which colours it when
+        // FORCE_COLOR is set in the developer's shell; a string never does.
+        console.log(String(commands.length));
         """
     )
 
     result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
+        [require_tool("node"), "--input-type=module", "-e", script],
         capture_output=True,
         text=True,
-        timeout=5,
+        timeout=30,
         check=False,
     )
 
@@ -4038,10 +4172,11 @@ def test_install_scripts_generate_context(tmp_path):
     )
 
     result = subprocess.run(
-        ["pwsh", "-NoProfile", "-NonInteractive", "-Command", command],
+        [require_tool("pwsh"), "-NoProfile", "-NonInteractive", "-Command", command],
         capture_output=True,
         text=True,
-        timeout=10,
+        # pwsh startup alone can take ten seconds on a loaded hosted runner.
+        timeout=120,
         check=False,
     )
 
@@ -4091,10 +4226,11 @@ def test_windows_scheduler_payload_carries_exact_roots_and_uv(tmp_path):
     )
 
     result = subprocess.run(
-        ["pwsh", "-NoProfile", "-NonInteractive", "-Command", command],
+        [require_tool("pwsh"), "-NoProfile", "-NonInteractive", "-Command", command],
         capture_output=True,
         text=True,
-        timeout=10,
+        # pwsh startup alone can take ten seconds on a loaded hosted runner.
+        timeout=120,
         check=False,
     )
 
@@ -4193,10 +4329,11 @@ def test_windows_scheduler_status_accepts_only_the_registered_contract(tmp_path)
     )
 
     result = subprocess.run(
-        ["pwsh", "-NoProfile", "-NonInteractive", "-Command", command],
+        [require_tool("pwsh"), "-NoProfile", "-NonInteractive", "-Command", command],
         capture_output=True,
         text=True,
-        timeout=10,
+        # pwsh startup alone can take ten seconds on a loaded hosted runner.
+        timeout=120,
         check=False,
     )
 

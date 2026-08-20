@@ -267,23 +267,19 @@ def enrich_python_semantics(file_path: Path, calls: list[dict], workspace_root: 
     return enriched
 
 
-def analyze_co_changes(
-    directory: Path,
-    *,
-    min_shared_commits: int = 3,
-    max_commit_files: int = 50,
-    min_ochiai: float = 0.5,
-    timeout: float = 10,
-) -> list[dict]:
-    """Find statistically meaningful file-level logical coupling in git history."""
-    repo_root = _git_repo_root(directory, timeout) or directory.resolve()
+def _co_change_pathspec(directory: Path, repo_root: Path) -> str | None:
     try:
         pathspec = directory.resolve().relative_to(repo_root).as_posix()
     except ValueError:
-        return []
-    pathspec = pathspec or "."
+        return None
+    return pathspec or "."
+
+
+def _git_name_status_output(
+    repo_root: Path, pathspec: str, timeout: float
+) -> bytes | None:
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # noqa: S603, S607
             [
                 "git", "log", "--reverse", "--max-count=2000", "--no-merges",
                 "--name-status", "-z",
@@ -295,11 +291,82 @@ def analyze_co_changes(
             timeout=timeout,
         )
     except (OSError, subprocess.SubprocessError):
-        return []
+        return None
     if result.returncode != 0 or not result.stdout:
-        return []
+        return None
+    return result.stdout
 
-    commits, preferred = _parse_git_name_status(result.stdout)
+
+def _shared_commit_counts(normalized: list) -> Counter:
+    shared: Counter = Counter()
+    for files in normalized:
+        ordered = sorted(files)
+        for index, source in enumerate(ordered):
+            for target in ordered[index + 1:]:
+                shared[(source, target)] += 1
+    return shared
+
+
+def _co_change_measures(
+    together: int, source_count: int, target_count: int, total: int
+) -> tuple[float, float, float]:
+    """Ochiai, lift, and NPMI for one pair of files changed together."""
+    ochiai = together / math.sqrt(source_count * target_count)
+    support = together / total
+    lift = together * total / (source_count * target_count)
+    denominator = -math.log(support)
+    npmi = 0.0
+    if denominator:
+        npmi = math.log(lift) / denominator
+    return ochiai, lift, npmi
+
+
+def _co_change_edge(
+    source: str,
+    target: str,
+    together: int,
+    file_commits: Counter,
+    total: int,
+    preferred: dict,
+    min_ochiai: float,
+) -> dict | None:
+    source_count = file_commits[source]
+    target_count = file_commits[target]
+    ochiai, lift, npmi = _co_change_measures(
+        together, source_count, target_count, total
+    )
+    if ochiai < min_ochiai or lift <= 1 or npmi <= 0:
+        return None
+    return {
+        "source": preferred.get(source, source),
+        "target": preferred.get(target, target),
+        "type": CO_CHANGE_EDGE,
+        "weight": round(ochiai, 6),
+        "ochiai": round(ochiai, 6),
+        "npmi": round(npmi, 6),
+        "lift": round(lift, 6),
+        "support": round(together / total, 6),
+        "shared_commits": together,
+    }
+
+
+def analyze_co_changes(
+    directory: Path,
+    *,
+    min_shared_commits: int = 3,
+    max_commit_files: int = 50,
+    min_ochiai: float = 0.5,
+    timeout: float = 10,
+) -> list[dict]:
+    """Find statistically meaningful file-level logical coupling in git history."""
+    repo_root = _git_repo_root(directory, timeout) or directory.resolve()
+    pathspec = _co_change_pathspec(directory, repo_root)
+    if pathspec is None:
+        return []
+    stdout = _git_name_status_output(repo_root, pathspec, timeout)
+    if stdout is None:
+        return []
+    commits, preferred = _parse_git_name_status(stdout)
     normalized = [
         identities
         for identities in commits
@@ -307,41 +374,20 @@ def analyze_co_changes(
     ]
     if not normalized:
         return []
-
     file_commits = Counter(identity for files in normalized for identity in files)
-    shared = Counter()
-    for files in normalized:
-        ordered = sorted(files)
-        for index, source in enumerate(ordered):
-            for target in ordered[index + 1:]:
-                shared[(source, target)] += 1
-
     total = len(normalized)
     edges = []
-    for (source, target), together in shared.items():
+    for (source, target), together in _shared_commit_counts(normalized).items():
         if together < min_shared_commits:
             continue
-        source_count = file_commits[source]
-        target_count = file_commits[target]
-        ochiai = together / math.sqrt(source_count * target_count)
-        support = together / total
-        lift = together * total / (source_count * target_count)
-        denominator = -math.log(support)
-        npmi = math.log(lift) / denominator if denominator else 0.0
-        if ochiai < min_ochiai or lift <= 1 or npmi <= 0:
-            continue
-        edges.append({
-            "source": preferred.get(source, source),
-            "target": preferred.get(target, target),
-            "type": CO_CHANGE_EDGE,
-            "weight": round(ochiai, 6),
-            "ochiai": round(ochiai, 6),
-            "npmi": round(npmi, 6),
-            "lift": round(lift, 6),
-            "support": round(support, 6),
-            "shared_commits": together,
-        })
-    return sorted(edges, key=lambda edge: (-edge["weight"], edge["source"], edge["target"]))
+        edge = _co_change_edge(
+            source, target, together, file_commits, total, preferred, min_ochiai
+        )
+        if edge is not None:
+            edges.append(edge)
+    return sorted(
+        edges, key=lambda edge: (-edge["weight"], edge["source"], edge["target"])
+    )
 
 
 def _git_repo_root(directory: Path, timeout: float) -> Path | None:
@@ -559,61 +605,191 @@ def _parse_file(file_path: Path, registry: SymbolRegistry, workspace_root: Path)
     }
 
 
-def _extract_symbols(tree, language, lang: str, source: bytes) -> tuple | None:
-    """Execute the language query and return functions, classes, calls, imports."""
+def _query_matches(tree, language, lang: str):
+    """The query matches for this language, or None when it cannot run."""
     try:
         import tree_sitter as ts
 
         query_source = (QUERY_DIR / f"{lang}.scm").read_text(encoding="utf-8")
-        matches = ts.QueryCursor(ts.Query(language, query_source)).matches(tree.root_node)
+        return ts.QueryCursor(ts.Query(language, query_source)).matches(tree.root_node)
     except (OSError, UnicodeError, Exception):
         return None
 
-    groups = {name: [] for name in ("function", "class", "call", "import")}
-    seen = {name: set() for name in groups}
+
+def _as_node_list(value) -> list:
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _unquoted_import(text: str) -> str:
+    """An import path may arrive quoted or angle-bracketed; the name is inside."""
+    if len(text) < 2:
+        return text
+    if text[0] == text[-1] and text[0] in {"'", '"'}:
+        return text[1:-1]
+    if text[0] == "<" and text[-1] == ">":
+        return text[1:-1]
+    return text
+
+
+def _symbol_signature(kind: str, owner, source: bytes, text: str) -> dict:
+    if kind != "function":
+        return {}
+    declaration = source[owner.start_byte:owner.end_byte].decode(
+        "utf-8", errors="ignore"
+    )
+    signature = _declaration_signature(declaration, text)
+    if not signature:
+        return {}
+    return {"signature": signature}
+
+
+def _symbol_record(kind: str, node, owner, source: bytes) -> dict:
+    text = source[node.start_byte:node.end_byte].decode("utf-8", errors="ignore")
+    if kind == "import":
+        text = _unquoted_import(text)
+    return {
+        "name": text,
+        "line": owner.start_point[0] + 1,
+        "end_line": owner.end_point[0] + 1,
+        "column": owner.start_point[1],
+        "end_column": owner.end_point[1],
+        **_symbol_signature(kind, owner, source, text),
+    }
+
+
+def _collect_symbol_kind(
+    kind: str, captures: dict, source: bytes, group: list, seen: set
+) -> None:
+    nodes = _as_node_list(captures.get(f"{kind}.name", []))
+    owners = _as_node_list(captures.get(f"{kind}.node", nodes))
+    for index, node in enumerate(nodes):
+        owner = node
+        if owners:
+            owner = owners[min(index, len(owners) - 1)]
+        key = (node.start_byte, node.end_byte, kind)
+        if key in seen:
+            continue
+        seen.add(key)
+        group.append(_symbol_record(kind, node, owner, source))
+
+
+def _extract_symbols(tree, language, lang: str, source: bytes) -> tuple | None:
+    """Execute the language query and return functions, classes, calls, imports."""
+    matches = _query_matches(tree, language, lang)
+    if matches is None:
+        return None
+    kinds = ("function", "class", "call", "import")
+    groups = {name: [] for name in kinds}
+    seen = {name: set() for name in kinds}
     for _, captures in matches:
-        for kind in groups:
-            nodes = captures.get(f"{kind}.name", [])
-            owners = captures.get(f"{kind}.node", nodes)
-            if not isinstance(nodes, list):
-                nodes = [nodes]
-            if not isinstance(owners, list):
-                owners = [owners]
-            for index, node in enumerate(nodes):
-                owner = owners[min(index, len(owners) - 1)] if owners else node
-                key = (node.start_byte, node.end_byte, kind)
-                if key in seen[kind]:
-                    continue
-                seen[kind].add(key)
-                text = source[node.start_byte:node.end_byte].decode(
-                    "utf-8", errors="ignore"
-                )
-                if kind == "import" and len(text) >= 2 and (
-                    text[0] == text[-1] and text[0] in {"'", '"'}
-                    or text[0] == "<" and text[-1] == ">"
-                ):
-                    text = text[1:-1]
-                groups[kind].append({
-                    "name": text,
-                    "line": owner.start_point[0] + 1,
-                    "end_line": owner.end_point[0] + 1,
-                    "column": owner.start_point[1],
-                    "end_column": owner.end_point[1],
-                    **(
-                        {"signature": signature}
-                        if kind == "function"
-                        and (
-                            signature := _declaration_signature(
-                                source[owner.start_byte:owner.end_byte].decode(
-                                    "utf-8", errors="ignore"
-                                ),
-                                text,
-                            )
-                        )
-                        else {}
-                    ),
-                })
-    return tuple(groups[name] for name in ("function", "class", "call", "import"))
+        for kind in kinds:
+            _collect_symbol_kind(kind, captures, source, groups[kind], seen[kind])
+    return tuple(groups[name] for name in kinds)
+
+
+_PYTHON_CALL_KEYWORDS = {"if", "for", "while", "def", "class", "print"}
+_SCRIPT_CALL_KEYWORDS = {"if", "for", "while", "switch", "catch"}
+
+
+def _regex_parse_python_line(
+    line: str, number: int, functions: list, classes: list, calls: list, imports: list
+) -> None:
+    match = re.match(r"\s*def\s+(\w+)", line)
+    if match:
+        functions.append(_regex_function(match.group(1), line, number))
+    match = re.match(r"\s*class\s+(\w+)", line)
+    if match:
+        classes.append({"name": match.group(1), "line": number, "end_line": number})
+    match = re.match(r"\s*(\w+)\s*\(", line)
+    if match and match.group(1) not in _PYTHON_CALL_KEYWORDS:
+        calls.append({"name": match.group(1), "line": number})
+    match = re.match(r"\s*(?:from\s+\S+\s+)?import\s+(\w+)", line)
+    if match:
+        imports.append({"name": match.group(1), "line": number})
+
+
+def _regex_parse_python(
+    content: str,
+    file_path: Path,
+    registry: SymbolRegistry,
+    workspace_root: Path,
+    functions: list,
+    classes: list,
+) -> tuple[list, list]:
+    """Python calls and imports come from the resolver, not from the regex pass."""
+    calls: list = []
+    imports: list = []
+    for number, line in enumerate(content.splitlines(), 1):
+        _regex_parse_python_line(
+            line, number, functions, classes, calls, imports
+        )
+    imports, calls = resolve_python_imports_and_calls(
+        file_path, registry, workspace_root
+    )
+    return imports, enrich_python_semantics(file_path, calls, workspace_root)
+
+
+def _script_declared_names(line: str) -> set[str]:
+    return {
+        match.group(1)
+        for match in [
+            re.match(r"\s*(?:export\s+)?function\s+(\w+)", line),
+            re.match(r"\s*(?:async\s+)?(\w+)\s*\([^)]*\)\s*(?::[^{}]+)?\{", line),
+        ]
+        if match
+    }
+
+
+def _regex_parse_script_line(
+    line: str, number: int, functions: list, classes: list, calls: list
+) -> None:
+    match = re.match(r"\s*(?:export\s+)?function\s+(\w+)", line)
+    if match:
+        functions.append(_regex_function(match.group(1), line, number))
+    match = re.match(r"\s*(?:export\s+)?class\s+(\w+)", line)
+    if match:
+        classes.append({"name": match.group(1), "line": number, "end_line": number})
+    match = re.match(r"\s*(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?\(", line)
+    if match:
+        functions.append(_regex_function(match.group(1), line, number))
+    declared = _script_declared_names(line)
+    for call in re.finditer(r"\b(\w+)\s*\(", line):
+        name = call.group(1)
+        if name not in declared and name not in _SCRIPT_CALL_KEYWORDS:
+            calls.append({"name": name, "line": number})
+
+
+def _regex_parse_script(
+    content: str, functions: list, classes: list, calls: list
+) -> None:
+    for number, line in enumerate(content.splitlines(), 1):
+        _regex_parse_script_line(line, number, functions, classes, calls)
+
+
+def _regex_parse_by_language(
+    content: str,
+    file_path: Path,
+    lang: str,
+    registry: SymbolRegistry,
+    workspace_root: Path,
+    functions: list,
+    classes: list,
+    calls: list,
+    imports: list,
+) -> tuple[list, list]:
+    if lang == "python":
+        return _regex_parse_python(
+            content, file_path, registry, workspace_root, functions, classes
+        )
+    if lang in ("javascript", "typescript"):
+        _regex_parse_script(content, functions, classes, calls)
+        return imports, calls
+    _regex_parse_additional_languages(
+        content, lang, functions, classes, calls, imports
+    )
+    return imports, calls
 
 
 def _regex_parse(
@@ -621,55 +797,21 @@ def _regex_parse(
 ) -> dict:
     """Fallback: regex-based symbol extraction (no tree-sitter required)."""
     content = file_path.read_text(encoding="utf-8", errors="ignore")
-    functions = []
-    classes = []
-    calls = []
-    imports = []
-
-    if lang == "python":
-        for i, line in enumerate(content.splitlines(), 1):
-            m = re.match(r"\s*def\s+(\w+)", line)
-            if m:
-                functions.append(_regex_function(m.group(1), line, i))
-            m = re.match(r"\s*class\s+(\w+)", line)
-            if m:
-                classes.append({"name": m.group(1), "line": i, "end_line": i})
-            m = re.match(r"\s*(\w+)\s*\(", line)
-            if m and m.group(1) not in {"if", "for", "while", "def", "class", "print"}:
-                calls.append({"name": m.group(1), "line": i})
-            m = re.match(r"\s*(?:from\s+\S+\s+)?import\s+(\w+)", line)
-            if m:
-                imports.append({"name": m.group(1), "line": i})
-        imports, calls = resolve_python_imports_and_calls(file_path, registry, workspace_root)
-        calls = enrich_python_semantics(file_path, calls, workspace_root)
-    elif lang in ("javascript", "typescript"):
-        for i, line in enumerate(content.splitlines(), 1):
-            m = re.match(r"\s*(?:export\s+)?function\s+(\w+)", line)
-            if m:
-                functions.append(_regex_function(m.group(1), line, i))
-            m = re.match(r"\s*(?:export\s+)?class\s+(\w+)", line)
-            if m:
-                classes.append({"name": m.group(1), "line": i, "end_line": i})
-            m = re.match(r"\s*(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?\(", line)
-            if m:
-                functions.append(_regex_function(m.group(1), line, i))
-            declared = {
-                match.group(1)
-                for match in [
-                    re.match(r"\s*(?:export\s+)?function\s+(\w+)", line),
-                    re.match(r"\s*(?:async\s+)?(\w+)\s*\([^)]*\)\s*(?::[^{}]+)?\{", line),
-                ]
-                if match
-            }
-            for call in re.finditer(r"\b(\w+)\s*\(", line):
-                name = call.group(1)
-                if name not in declared and name not in {"if", "for", "while", "switch", "catch"}:
-                    calls.append({"name": name, "line": i})
-    else:
-        _regex_parse_additional_languages(
-            content, lang, functions, classes, calls, imports
-        )
-
+    functions: list = []
+    classes: list = []
+    calls: list = []
+    imports: list = []
+    imports, calls = _regex_parse_by_language(
+        content,
+        file_path,
+        lang,
+        registry,
+        workspace_root,
+        functions,
+        classes,
+        calls,
+        imports,
+    )
     git_info = _get_git_info(file_path)
     return {
         "file": str(file_path),
@@ -1033,6 +1175,58 @@ def _with_report(key: str, value, report: dict[str, object], enabled: bool):
     return {key: value, **report} if enabled else value
 
 
+def _stored_callers(
+    function_name: str, directory: Path, with_report: bool
+) -> list[dict] | dict | None:
+    if with_report:
+        return _store_find_callers(function_name, directory, with_report=True)
+    return _store_find_callers(function_name, directory)
+
+
+_SEARCH_SKIP_PARTS = {".git", "node_modules", "__pycache__", ".venv"}
+
+
+def _searchable_source(path: Path) -> bool:
+    if not path.is_file() or path.suffix.lower() not in set(LANGUAGE_MAP.keys()):
+        return False
+    return not any(skip in path.parts for skip in _SEARCH_SKIP_PARTS)
+
+
+def _named_function(result: dict, function_name: str) -> dict | None:
+    return next(
+        (item for item in result["functions"] if item["name"] == function_name), None
+    )
+
+
+def _callees_in_function(path: Path, result: dict, func_def: dict) -> list[dict]:
+    callees = []
+    for call in result["calls"]:
+        end_line = func_def.get("end_line", call["line"])
+        if func_def["line"] <= call["line"] <= end_line:
+            callees.append(
+                {"file": str(path), "line": call["line"], "callee": call["name"]}
+            )
+    return callees
+
+
+def _caller_edge(path: Path, call: dict, function_name: str) -> dict:
+    return {
+        "file": str(path),
+        "line": call["line"],
+        "function": function_name,
+        "qualified_name": call.get("qualified_name"),
+        "confidence": call.get("confidence", "heuristic"),
+    }
+
+
+def _call_names_target(call: dict, function_name: str, language: str) -> bool:
+    """Unknown Python calls are excluded; other languages fall back to the name."""
+    resolved = (call.get("qualified_name") or call["name"]).rsplit(".", 1)[-1]
+    if resolved != function_name:
+        return False
+    return call.get("confidence") == "confirmed" or language != "python"
+
+
 def find_callers(
     function_name: str,
     directory: Path,
@@ -1045,38 +1239,18 @@ def find_callers(
     Unknown Python calls are excluded. Returns caller edge dictionaries.
     """
     if not live:
-        stored = (
-            _store_find_callers(function_name, directory, with_report=True)
-            if with_report
-            else _store_find_callers(function_name, directory)
-        )
+        stored = _stored_callers(function_name, directory, with_report)
         if stored is not None:
             return stored
-    callers = []
-    extensions = set(LANGUAGE_MAP.keys())
+    callers: list[dict] = []
     registry = build_python_symbol_registry(directory)
-
     for path in sorted(directory.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in extensions:
+        if not _searchable_source(path):
             continue
-        if any(skip in path.parts for skip in {".git", "node_modules", "__pycache__", ".venv"}):
-            continue
-
         result = _parse_file(path, registry, directory)
         for call in result["calls"]:
-            resolved_name = (call.get("qualified_name") or call["name"]).rsplit(".", 1)[-1]
-            is_python = result["language"] == "python"
-            if resolved_name == function_name and (
-                call.get("confidence") == "confirmed" or not is_python
-            ):
-                callers.append({
-                    "file": str(path),
-                    "line": call["line"],
-                    "function": function_name,
-                    "qualified_name": call.get("qualified_name"),
-                    "confidence": call.get("confidence", "heuristic"),
-                })
-
+            if _call_names_target(call, function_name, result["language"]):
+                callers.append(_caller_edge(path, call, function_name))
     return _with_report("callers", callers, _live_report(directory), with_report)
 
 
@@ -1114,6 +1288,14 @@ def _store_find_callers(
         graph.close()
 
 
+def _stored_callees(
+    function_name: str, directory: Path, with_report: bool
+) -> list[dict] | dict | None:
+    if with_report:
+        return _store_find_callees(function_name, directory, with_report=True)
+    return _store_find_callees(function_name, directory)
+
+
 def find_callees(
     function_name: str,
     directory: Path,
@@ -1126,47 +1308,19 @@ def find_callees(
     Returns list of {file, line, callee}.
     """
     if not live:
-        stored = (
-            _store_find_callees(function_name, directory, with_report=True)
-            if with_report
-            else _store_find_callees(function_name, directory)
-        )
+        stored = _stored_callees(function_name, directory, with_report)
         if stored is not None:
             return stored
-    callees = []
-    extensions = set(LANGUAGE_MAP.keys())
+    callees: list[dict] = []
     registry = build_python_symbol_registry(directory)
-
     for path in sorted(directory.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in extensions:
+        if not _searchable_source(path):
             continue
-        if any(skip in path.parts for skip in {".git", "node_modules", "__pycache__", ".venv"}):
-            continue
-
         result = _parse_file(path, registry, directory)
-        # Find the function definition.
-        in_function = False
-        for func in result["functions"]:
-            if func["name"] == function_name:
-                in_function = True
-                break
-
-        if not in_function:
+        func_def = _named_function(result, function_name)
+        if func_def is None:
             continue
-
-        # Find calls within the function's line range.
-        func_def = next((f for f in result["functions"] if f["name"] == function_name), None)
-        if not func_def:
-            continue
-
-        for call in result["calls"]:
-            if func_def["line"] <= call["line"] <= func_def.get("end_line", call["line"]):
-                callees.append({
-                    "file": str(path),
-                    "line": call["line"],
-                    "callee": call["name"],
-                })
-
+        callees.extend(_callees_in_function(path, result, func_def))
     return _with_report("callees", callees, _live_report(directory), with_report)
 
 
@@ -1633,6 +1787,76 @@ def _find_live_paths(
     return paths
 
 
+_WORKSPACE_SKIP_PARTS = {".git", "node_modules", "__pycache__", ".venv", "venv"}
+
+
+def _parsable_workspace_file(path: Path) -> bool:
+    if not path.is_file() or path.suffix.lower() not in LANGUAGE_MAP:
+        return False
+    return not any(skip in path.parts for skip in _WORKSPACE_SKIP_PARTS)
+
+
+def _index_workspace_definitions(
+    path: Path,
+    result: dict,
+    directory: Path,
+    definitions: dict[str, dict],
+    by_name: dict[str, list[dict]],
+    by_qualified: dict[str, dict],
+) -> None:
+    for function in result["functions"]:
+        definition = {**function, "file": str(path), "language": result["language"]}
+        definitions[function["symbol_id"]] = definition
+        by_name.setdefault(function["name"], []).append(definition)
+        if result["language"] == "python":
+            qualified = _python_qualified_name(path, function, directory)
+            by_qualified[qualified] = definition
+
+
+def _resolved_call_target(
+    call: dict,
+    path: Path,
+    language: str,
+    by_name: dict[str, list[dict]],
+    by_qualified: dict[str, dict],
+) -> dict | None:
+    """The one definition this call can name, or None when it stays ambiguous."""
+    if language == "python":
+        if call.get("confidence") != "confirmed":
+            return None
+        confirmed = by_qualified.get(call.get("qualified_name"))
+        if confirmed is not None:
+            return confirmed
+    candidates = by_name.get(call["name"], [])
+    same_file = [item for item in candidates if item["file"] == str(path)]
+    if len(same_file) == 1:
+        return same_file[0]
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
+def _workspace_call_edges(
+    parsed: list[tuple[Path, dict]],
+    by_name: dict[str, list[dict]],
+    by_qualified: dict[str, dict],
+) -> list[dict]:
+    edges = []
+    for path, result in parsed:
+        for call in result["calls"]:
+            caller = _containing_function(result["functions"], call)
+            if caller is None:
+                continue
+            target = _resolved_call_target(
+                call, path, result["language"], by_name, by_qualified
+            )
+            if target is not None:
+                edges.append(
+                    {"source": caller["symbol_id"], "target": target["symbol_id"]}
+                )
+    return edges
+
+
 def _workspace_call_graph(
     directory: Path,
 ) -> tuple[list[tuple[Path, dict]], dict[str, dict], list[dict]]:
@@ -1644,43 +1868,15 @@ def _workspace_call_graph(
     by_name: dict[str, list[dict]] = {}
     by_qualified: dict[str, dict] = {}
     for path in sorted(directory.rglob("*")):
-        if (
-            not path.is_file()
-            or path.suffix.lower() not in LANGUAGE_MAP
-            or any(skip in path.parts for skip in {".git", "node_modules", "__pycache__", ".venv", "venv"})
-        ):
+        if not _parsable_workspace_file(path):
             continue
         result = _parse_file(path, registry, directory)
         _annotate_function_ids(path, result, directory)
         parsed.append((path, result))
-        for function in result["functions"]:
-            definition = {**function, "file": str(path), "language": result["language"]}
-            definitions[function["symbol_id"]] = definition
-            by_name.setdefault(function["name"], []).append(definition)
-            if result["language"] == "python":
-                by_qualified[_python_qualified_name(path, function, directory)] = definition
-
-    edges = []
-    for path, result in parsed:
-        for call in result["calls"]:
-            caller = _containing_function(result["functions"], call)
-            if caller is None:
-                continue
-            target = None
-            if result["language"] == "python":
-                if call.get("confidence") != "confirmed":
-                    continue
-                target = by_qualified.get(call.get("qualified_name"))
-            same_file = [
-                item for item in by_name.get(call["name"], []) if item["file"] == str(path)
-            ]
-            if target is None and len(same_file) == 1:
-                target = same_file[0]
-            if target is None and len(by_name.get(call["name"], [])) == 1:
-                target = by_name[call["name"]][0]
-            if target is not None:
-                edges.append({"source": caller["symbol_id"], "target": target["symbol_id"]})
-    return parsed, definitions, edges
+        _index_workspace_definitions(
+            path, result, directory, definitions, by_name, by_qualified
+        )
+    return parsed, definitions, _workspace_call_edges(parsed, by_name, by_qualified)
 
 
 def _annotate_function_ids(path: Path, result: dict, root: Path) -> None:
@@ -1735,6 +1931,76 @@ def _containing_function(functions: list[dict], call: dict) -> dict | None:
     return min(matches, key=_symbol_span) if matches else None
 
 
+def _best_louvain_target(
+    node: object,
+    weights: dict[object, float],
+    totals: dict[object, float],
+    degree: dict[object, float],
+    old: object,
+    m2: float,
+) -> object:
+    best = old
+    best_gain = 0.0
+    for target in sorted(weights, key=str):
+        gain = weights[target] - totals[target] * degree[node] / m2
+        if gain > best_gain + 1e-12:
+            best, best_gain = target, gain
+    return best
+
+
+def _neighbor_community_weights(
+    neighbors: dict[object, float], community: dict[object, object]
+) -> dict[object, float]:
+    weights: dict[object, float] = {}
+    for neighbor, weight in neighbors.items():
+        target = community[neighbor]
+        weights[target] = weights.get(target, 0.0) + weight
+    return weights
+
+
+def _move_one_node(
+    node: object,
+    current: dict,
+    community: dict[object, object],
+    totals: dict[object, float],
+    degree: dict[object, float],
+    m2: float,
+) -> bool:
+    """Move one node to its best community; True when it actually moved."""
+    old = community[node]
+    totals[old] -= degree[node]
+    weights = _neighbor_community_weights(current[node], community)
+    best = _best_louvain_target(node, weights, totals, degree, old, m2)
+    community[node] = best
+    totals[best] += degree[node]
+    return best != old
+
+
+def _local_louvain_pass(
+    nodes: list,
+    current: dict,
+    community: dict[object, object],
+    totals: dict[object, float],
+    degree: dict[object, float],
+    m2: float,
+) -> None:
+    moved = True
+    while moved:
+        moved = False
+        for node in nodes:
+            moved |= _move_one_node(node, current, community, totals, degree, m2)
+
+
+def _grouped_communities(nodes: list, community: dict[object, object]) -> list[list]:
+    groups: dict[object, list[object]] = {}
+    for node in nodes:
+        groups.setdefault(community[node], []).append(node)
+    return sorted(
+        (sorted(group, key=str) for group in groups.values()),
+        key=lambda group: str(group[0]),
+    )
+
+
 def _louvain_communities(graph: dict[str, dict[str, float]]) -> list[list[str]]:
     """Optimize modularity on a weighted undirected graph without dependencies."""
     current = {node: dict(neighbors) for node, neighbors in graph.items()}
@@ -1747,48 +2013,18 @@ def _louvain_communities(graph: dict[str, dict[str, float]]) -> list[list[str]]:
         m2 = sum(degree.values())
         if not m2:
             break
-
-        moved = True
-        while moved:
-            moved = False
-            for node in nodes:
-                old = community[node]
-                totals[old] -= degree[node]
-                weights: dict[object, float] = {}
-                for neighbor, weight in current[node].items():
-                    target = community[neighbor]
-                    weights[target] = weights.get(target, 0.0) + weight
-                choices = sorted(weights, key=str)
-                best = old
-                best_gain = 0.0
-                for target in choices:
-                    gain = weights[target] - totals[target] * degree[node] / m2
-                    if gain > best_gain + 1e-12:
-                        best, best_gain = target, gain
-                community[node] = best
-                totals[best] += degree[node]
-                moved |= best != old
-
-        groups: dict[object, list[object]] = {}
-        for node in nodes:
-            groups.setdefault(community[node], []).append(node)
-        ordered_groups = sorted(
-            (sorted(group, key=str) for group in groups.values()),
-            key=lambda group: str(group[0]),
-        )
+        _local_louvain_pass(nodes, current, community, totals, degree, m2)
+        ordered_groups = _grouped_communities(nodes, community)
         if len(ordered_groups) == len(nodes):
             break
-
         group_of = {
             node: index for index, group in enumerate(ordered_groups) for node in group
         }
-        next_members = {
+        members = {
             index: set().union(*(members[node] for node in group))
             for index, group in enumerate(ordered_groups)
         }
-        reduced = _aggregate_louvain_graph(current, group_of)
-        current, members = reduced, next_members
-
+        current = _aggregate_louvain_graph(current, group_of)
     communities = [sorted(group) for group in members.values() if len(group) >= 2]
     return sorted(communities, key=lambda group: group[0])
 

@@ -519,3 +519,82 @@ def test_retrieval_trace_schema_rejects_unknown_fields() -> None:
     }
     with pytest.raises(SchemaValidationError):
         validate_schema(payload, SCHEMAS / "retrieval-trace-v1.json")
+
+
+def test_typed_provenance_weighs_on_every_path_from_one_table():
+    """A stated fact outranks a guess in the hybrid path, not only in BM25.
+
+    The weights lived in `search_memory` and reached the lexical paths only, so
+    the fused path ranked `source_authority: user` and `inferred` alike while
+    the README promised typed-provenance ranking.
+    """
+    import provenance
+    import search_memory
+    from retrieval import fuse_rrf
+
+    # One table, imported by both paths: the lexical scorer and the fusion.
+    assert search_memory.authority_weight is provenance.authority_weight
+
+    lexical = [
+        {"path": "knowledge/notes/guess.md", "authority": "inferred", "score": 9.0},
+        {"path": "knowledge/notes/stated.md", "authority": "user", "score": 9.0},
+    ]
+    fused, meta = fuse_rrf(lexical=lexical, dense=None, graph=None)
+
+    by_path = {candidate.relative_path: candidate for candidate in fused}
+    stated = by_path["knowledge/notes/stated.md"]
+    guess = by_path["knowledge/notes/guess.md"]
+
+    assert stated.authority_weight == provenance.AUTHORITY_WEIGHTS["user"]
+    assert guess.authority_weight == provenance.AUTHORITY_WEIGHTS["inferred"]
+    # The guess is one rank ahead lexically and still loses on trust.
+    assert fused[0].relative_path == "knowledge/notes/stated.md"
+    assert stated.final_score > guess.final_score
+    assert stated.rrf_score < guess.rrf_score
+    assert meta[stated.candidate_id]["authority_weight"] == stated.authority_weight
+
+
+def test_an_unweighted_candidate_keeps_its_fused_score_unchanged():
+    from retrieval import fuse_rrf
+
+    fused, _meta = fuse_rrf(
+        lexical=[{"path": "knowledge/notes/plain.md", "score": 1.0}],
+        dense=None,
+        graph=None,
+    )
+
+    assert fused[0].authority_weight == 1.0
+    assert fused[0].final_score == fused[0].rrf_score
+
+
+def test_the_reranker_keeps_the_trust_weight_on_its_blended_score():
+    """A reranked list must not drop the prior fusion applied."""
+    import reranker
+
+    documents = [
+        {
+            "candidate_id": "a",
+            "path": "knowledge/notes/a.md",
+            "content": "alpha",
+            "rrf_score": 0.03,
+            "authority_weight": 0.8,
+        },
+        {
+            "candidate_id": "b",
+            "path": "knowledge/notes/b.md",
+            "content": "beta",
+            "rrf_score": 0.03,
+            "authority_weight": 1.35,
+        },
+    ]
+    ranked = reranker.rerank(
+        "query",
+        documents,
+        depth=2,
+        limit=2,
+        text_field="content",
+        scorer=lambda pairs: [0.5 for _pair in pairs],
+    )
+
+    weighted = {item["candidate_id"]: item["final_score"] for item in ranked}
+    assert weighted["b"] > weighted["a"]

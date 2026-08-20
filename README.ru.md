@@ -83,7 +83,7 @@ LLM Wiki даёт каждому AI-агенту, которым вы польз
 - **Triple-fusion при доступности**: BM25 (FTS5) + Vector (sentence-transformers) + evidence-backed Graph-neighbor RRF
 - **Взвешенный RRF**: BM25=2.0, Vector=1.0, Graph=0.5 — предотвращает регрессию на known-item запросах
 - **Title + filename boost** — точное совпадение имени файла даёт rank 1 сразу
-- **Typed-provenance ранжирование** — `source_authority: user` выше, чем `ai-derived` / `inferred`
+- **Typed-provenance ранжирование** — одна таблица весов (`user` 1.35, `web` 1.1, `ai-derived` 1.0, `inferred` 0.8) умножает балл, который определяет порядок, на каждом пути: BM25, слитый RRF и после реранкера
 - **Темпоральные запросы** — `--as-of YYYY-MM-DD` фильтрует по `valid_to` frontmatter
 - **Локальные режимы retrieval** — прямое чтение страниц на малом масштабе, всегда доступный SQLite FTS5 BM25 и опциональный hybrid с vectors/LanceDB + graph + reranker
 - **Grounded QA** — извлечённые source spans содержат citation ID, пути, хеши source/span, revision и byte/line ranges; при недостаточных, конфликтующих или не соответствующих времени данных система воздерживается от ответа
@@ -102,7 +102,7 @@ LLM Wiki даёт каждому AI-агенту, которым вы польз
 - **Agent timeline** — атрибуция: какой агент какое решение принял и когда
 
 ### Обслуживание
-- **14 lint-проверок (13 структурных + 1 LLM-оцениваемое противоречие)** — битые wikilinks, orphan'ы, missing frontmatter, невалидные supersede-цепочки, temporal validity, gap'ы, sparse pages, missing sources, противоречия
+- **16 lint-проверок (15 структурных + 1 LLM-оцениваемое противоречие)** — битые wikilinks, orphan'ы, несобранные дневники, отсутствующие обратные ссылки, sparse pages, missing frontmatter, отсутствующий или неверный type, missing sources, невалидные supersede-цепочки, orphan gap'ы, temporal validity, неразрешимые доказательства, невалидная схема claim, противоречия
 - **Type-aware архивация** — debugging 60 дн, patterns 180 дн, decisions никогда
 - **Nightly + weekly расписания** — компиляция, lint, архивация, OKF-миграция (Task Scheduler на Windows, LaunchAgent на macOS, пользовательский systemd на Linux; cron доступен только как явный degraded fallback)
 - **OKF v0.1 frontmatter** — поля `type`, `confidence`, `source_authority`, `supersede`; авто-миграция с legacy-страниц
@@ -269,6 +269,7 @@ Markdown остаётся авторитетным источником. Runtime
 ```bash
 uv run python scripts/doctor.py
 uv run python scripts/doctor.py --repair
+uv run python scripts/doctor.py --time-budget 60
 uv run python scripts/markdown_transaction.py recover
 uv run python scripts/markdown_transaction.py undo <transaction-id>
 uv run python scripts/markdown_transaction.py prune --retention-days 30
@@ -276,8 +277,11 @@ uv run python scripts/memory_queue.py migrate
 uv run python scripts/memory_queue.py work --max-tasks 20 --max-seconds 600 --idle-seconds 2 --lease-seconds 120 --heartbeat-seconds 40 --max-attempts 8 --retry-base-seconds 30 --retry-cap-seconds 3600
 uv run python scripts/memory_queue.py redrive <task-id>
 uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> --export <path>
+uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> --export <path> --include-dead
+uv run python scripts/memory_queue.py restore --export <path>
 uv run python scripts/archive_daily.py --commit --hot-days 90
 uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contradiction-v1.json
+uv run python benchmark/run_flush_classification.py --corpus benchmark/flush-classification-v1.json
 ```
 
 Доставка очереди выполняется как минимум один раз, поэтому handlers используют стабильные operation ID для идемпотентности. Архив переносит подходящие daily-логи старше 90-дневного hot window в проверенные несжатые BagIt-пакеты и сохраняет логическое разрешение evidence. Неуверенные или спорные для evaluators claims помещаются в quarantine; semantic supersession отключён до прохождения frozen benchmark gate. Процедуры recovery, retention и безопасного удаления описаны в [docs/USER-GUIDE.md](docs/USER-GUIDE.md).

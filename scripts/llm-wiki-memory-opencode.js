@@ -2,7 +2,12 @@
 
 import path from "node:path";
 
-const _LLM_WIKI_ROOT = process.env.LLM_WIKI_ROOT;
+// The installer rewrites the marked line with the vault root it installed. A
+// checkout keeps the null, so the public source never claims to be a vault.
+// An OpenCode started from a desktop launcher inherits no shell environment,
+// and without this fallback its capture was silently disabled.
+const _EMBEDDED_ROOT = null; // llm-wiki:embedded-root
+const _LLM_WIKI_ROOT = process.env.LLM_WIKI_ROOT || _EMBEDDED_ROOT;
 if (!_LLM_WIKI_ROOT) {
   console.warn("[llm-wiki-memory] LLM_WIKI_ROOT is not set; lifecycle capture is disabled.");
 }

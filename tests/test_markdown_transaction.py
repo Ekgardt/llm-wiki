@@ -20,6 +20,12 @@ import pytest
 from markdown_transaction import MarkdownChange, MarkdownCoordinator
 from reliable_memory import canonical_json_bytes, sha256_bytes
 
+# How long a coordination wait may take on the slowest supported machine: the
+# hosted four-vCPU Windows and macOS runners, where opening a SQLite database
+# and finishing one transaction has been measured well past two seconds under
+# load. These waits bound a hang, not the expected duration.
+_COORDINATION_BUDGET_SECONDS = 60.0
+
 
 @pytest.fixture
 def vault(tmp_path: Path) -> Path:
@@ -842,17 +848,17 @@ def test_global_writer_gate_serializes_coordinators(vault: Path, state_root: Pat
         with first.writer_gate():
             order.append("first")
             entered.set()
-            assert release.wait(5)
+            assert release.wait(_COORDINATION_BUDGET_SECONDS)
 
     def enter_second():
-        assert entered.wait(5)
+        assert entered.wait(_COORDINATION_BUDGET_SECONDS)
         with second.writer_gate():
             order.append("second")
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         one = pool.submit(hold_first)
         two = pool.submit(enter_second)
-        assert entered.wait(5)
+        assert entered.wait(_COORDINATION_BUDGET_SECONDS)
         time.sleep(0.1)
         assert order == ["first"]
         with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
@@ -1139,9 +1145,9 @@ def test_writer_heartbeat_retries_transient_contention_without_losing_fence(
         args=(token, 1, stop, lost),
     )
     thread.start()
-    assert connected.wait(2)
+    assert connected.wait(_COORDINATION_BUDGET_SECONDS)
     stop.set()
-    thread.join(timeout=2)
+    thread.join(timeout=_COORDINATION_BUDGET_SECONDS)
 
     assert not thread.is_alive()
     assert attempts >= 3
@@ -1181,6 +1187,54 @@ def test_writer_gate_exit_retries_locked_database_then_releases_owner(
     assert injected
     with sqlite3.connect(coordinator.database_path) as database:
         assert database.execute("SELECT * FROM writer_owners").fetchall() == []
+
+
+def test_a_heartbeat_that_failed_does_not_fail_a_write_this_owner_still_holds(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A busy database briefly starving the heartbeat is contention, not a loss.
+
+    Hosted runners produced `Markdown writer gate ownership was lost` while the
+    owner still held the gate row, which failed the caller's write for nothing.
+    Only a reclaim — which deletes this owner's row and bumps the fence — is a
+    real loss.
+    """
+    target = vault / "knowledge/notes/page.md"
+    target.write_bytes(b"before")
+    coordinator = MarkdownCoordinator(vault, state_root)
+    transaction = coordinator.prepare(
+        [MarkdownChange.replace("knowledge/notes/page.md", b"after")],
+        operation_id="heartbeat-starved",
+    )
+
+    def starved_heartbeat(owner_token, fencing_epoch, stop, lost):
+        lost.set()
+
+    monkeypatch.setattr(coordinator, "_heartbeat_writer_gate", starved_heartbeat)
+
+    coordinator.apply(transaction.id)
+
+    assert target.read_bytes() == b"after"
+    with sqlite3.connect(coordinator.database_path) as database:
+        assert database.execute("SELECT * FROM writer_owners").fetchall() == []
+
+
+def test_a_reclaimed_gate_still_reports_the_loss_and_names_the_heartbeat(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Losing the row to another owner remains a hard failure with a reason."""
+    coordinator = MarkdownCoordinator(vault, state_root)
+
+    def starved_heartbeat(owner_token, fencing_epoch, stop, lost):
+        lost.set()
+
+    monkeypatch.setattr(coordinator, "_heartbeat_writer_gate", starved_heartbeat)
+
+    with pytest.raises(RuntimeError, match="another owner reclaimed the gate"):
+        with coordinator.writer_gate():
+            with sqlite3.connect(coordinator.database_path) as database:
+                database.execute("DELETE FROM writer_owners WHERE gate_name = 'global'")
+                database.commit()
 
 
 def test_reclaimed_writer_fails_fence_before_filesystem_mutation(

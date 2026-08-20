@@ -14,6 +14,14 @@ This index catalogs durable memory distilled from AI agent sessions
 - [[knowledge/notes/provenance-rule-6]] — CLAUDE.md rule 6 — "mark uncertainty explicitly" — is the root constraint that justifies preliminary flagging, editorial notes, and every "inferred from…" caveat in this vault.
 
 ## Decisions
+- [[knowledge/notes/classification-measurement-stand-decision]] — Session classification is measured by a labelled corpus and three gates; the shipped corpus is public and small, and the real number needs real sessions.
+- [[knowledge/notes/citation-relevance-gate-decision]] — A citation that shares no content with the claim it is offered for is rejected; entailment itself is still not verified and is not claimed.
+- [[knowledge/notes/dead-task-retirement-and-restore-decision]] — A task whose attempts are exhausted is retired only when asked for by name, through the same verified export, and one command brings its work back.
+- [[knowledge/notes/one-trust-weight-across-retrieval-paths-decision]] — Typed provenance multiplies the score that decides the order on every retrieval path, from one shared table, and the weight is reported.
+- [[knowledge/notes/warm-navigation-overhead-threshold-decision]] — The warm navigation overhead gate is 30 ms p95, measured on the slowest supported machine class rather than on a quiet one.
+- [[knowledge/notes/baseline-environment-binding-decision]] — The frozen retrieval-v2 baseline is bound to the exact package versions the benchmark loads, not to the byte digest of the whole `uv.lock`.
+- [[knowledge/notes/system-symlink-ancestor-decision]] — A bounded read accepts a symlinked ancestor only when root owns both the link and the directory holding it.
+- [[knowledge/notes/observable-capture-and-bounded-maintenance-decision]] — Failed captures are recorded durably, maintenance output is bounded and pointed at, and the SessionStart payload has a hard character ceiling.
 - [[knowledge/notes/durable-capture-producer-activation-decision]] — SessionEnd and PreCompact capture publish durable Reliability V3 intent evidence before returning; detached work only wakes recovery and deletion requires terminal proof.
 - [[knowledge/notes/managed-ide-hooks-install-update-decision]] — Cursor and Antigravity user hooks use canonical lifecycle adapters and bounded structural fragments owned by one resumable install v2 update, rollback, and uninstall control plane.
 - [[knowledge/notes/install-ownership-control-plane-decision]] — Profile, user environment, and native scheduler mutations use one bounded `run/install` manifest and resumable transaction that fail closed on ambiguous ownership or external drift.

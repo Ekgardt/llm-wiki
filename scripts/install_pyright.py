@@ -1200,7 +1200,12 @@ def _create_owned_lock(parent: _Handle, deadline: float) -> _OwnedLock | None:
     owned = _OwnedLock(parent, _LOCK_NAME, handle, identity, nonce)
     try:
         if not _lock_handle_nonblocking(handle):
-            raise OSError("new Pyright install lock could not be retained")
+            # Another owner holds a lock on the file this call had just created,
+            # so the lock is theirs. Close ours and report the loss: the caller
+            # waits and retries until its deadline. Treating it as a failure
+            # deleted a lock this process does not own and aborted the install.
+            owned.close()
+            return None
         process_start = _process_start_identity(os.getpid())
         if process_start is None:
             raise OSError("current process identity was unavailable")
@@ -2381,6 +2386,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+MAX_CAUSE_DEPTH = 5
+
+
+def _print_cause_chain(error: BaseException) -> None:
+    """Print what actually failed, underneath the stable machine-readable code.
+
+    `main` printed only `str(exc)`, so the pyright CI jobs on all three
+    platforms failed with the single line `pyright_download_failed` and nothing
+    to act on: the `HTTPError`, `URLError` or `OSError` that explains it was
+    discarded with `__cause__`. The code stays the first line, so anything
+    parsing it is unaffected; the explanation follows it.
+    """
+    cause = error.__cause__ or error.__context__
+    for _ in range(MAX_CAUSE_DEPTH):
+        if cause is None:
+            return
+        print(f"  caused by: {type(cause).__name__}: {cause}", file=sys.stderr)
+        cause = cause.__cause__ or cause.__context__
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     options: dict[str, object] = {"state_root": args.state_root}
@@ -2390,6 +2415,7 @@ def main(argv: list[str] | None = None) -> int:
         result = install_pyright(**options)
     except (OSError, PyrightInstallError, TimeoutError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
+        _print_cause_chain(exc)
         return 1
     print(
         canonical_json_bytes(

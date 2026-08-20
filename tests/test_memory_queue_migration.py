@@ -19,7 +19,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import memory_queue  # noqa: E402
-from memory_queue import MemoryQueue, MigrationBusy, QueueFailure  # noqa: E402
+from memory_queue import DEFAULTS, MemoryQueue, MigrationBusy, QueueFailure  # noqa: E402
 from reliable_memory import (  # noqa: E402
     OperationalDatabaseContractError,
     canonical_json_bytes,
@@ -403,6 +403,26 @@ def test_migration_fence_loss_aborts_before_marker(
     assert not (tmp_path / "run" / "queue-migrated-v2").exists()
 
 
+def _await_file(path: Path, timeout: float) -> None:
+    """Wait for a child to signal through the filesystem."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"{path.name} never appeared")
+
+
+def _await_first_exit(processes: list[subprocess.Popen], timeout: float) -> None:
+    """Wait for the first contender to finish, whichever one it is."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if any(process.poll() is not None for process in processes):
+            return
+        time.sleep(0.01)
+    raise AssertionError("no contender finished before the deadline")
+
+
 def test_two_subprocess_contenders_over_stale_owner_run_exactly_one_migration(
     tmp_path: Path,
 ) -> None:
@@ -429,7 +449,7 @@ root, start, release, entered = map(Path, sys.argv[1:])
 real_scan = mq._scan_legacy_records
 def paused(path):
     entered.write_text(str(mq.os.getpid()), encoding="ascii")
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + 180
     while not release.exists() and time.monotonic() < deadline:
         time.sleep(0.01)
     return real_scan(path)
@@ -463,17 +483,17 @@ except mq.MigrationBusy as exc:
         for _ in range(2)
     ]
     start.write_text("go", encoding="ascii")
-    deadline = time.monotonic() + 10
-    while not entered.exists() and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert entered.exists()
-    while not any(process.poll() is not None for process in processes) and time.monotonic() < deadline:
-        time.sleep(0.01)
+    # Each wait gets its own budget sized for the slowest supported machine:
+    # spawning two interpreters that import the queue module is itself slow on
+    # a hosted Windows image, and the second wait must not inherit what the
+    # first one spent.
+    _await_file(entered, 120)
+    _await_first_exit(processes, 120)
     assert sum(process.poll() is not None for process in processes) == 1
     release.write_text("go", encoding="ascii")
     outputs = []
     for process in processes:
-        stdout, stderr = process.communicate(timeout=15)
+        stdout, stderr = process.communicate(timeout=180)
         assert process.returncode == 0, stderr
         outputs.append(json.loads(stdout))
 
@@ -495,7 +515,7 @@ def test_late_upgraded_legacy_write_cannot_recreate_queue_during_migration(
         assert path.name.startswith("queue-migration-")
         assert not (tmp_path / "run" / "queue").exists()
         renamed.set()
-        assert release.wait(5)
+        assert release.wait(180)
         return real_scan(path)
 
     monkeypatch.setattr(memory_queue, "_scan_legacy_records", paused_scan)
@@ -509,13 +529,13 @@ def test_late_upgraded_legacy_write_cannot_recreate_queue_during_migration(
 
     thread = threading.Thread(target=migrate)
     thread.start()
-    assert renamed.wait(5)
+    assert renamed.wait(120)
     with pytest.raises(memory_queue.LegacyBackendDisabled) as raised:
         memory_queue._legacy_enqueue_file("query", {"prompt": "late"}, tmp_path)
     assert raised.value.code == "legacy_migration_quiesced"
     assert not (tmp_path / "run" / "queue").exists()
     release.set()
-    thread.join(5)
+    thread.join(120)
     assert isinstance(outcome[0], memory_queue.MigrationReceipt)
 
 
@@ -968,3 +988,88 @@ def test_default_retention_excludes_recent_terminal_and_all_dead(tmp_path: Path)
     assert queue.get(succeeded).state == "succeeded"
     assert queue.get(dead).state == "dead"
     assert queue.retains_run_directory() is True
+
+
+def _dead_task(queue: MemoryQueue, now: datetime, prompt: str) -> str:
+    """Exhaust one task's attempts so it reaches the dead state."""
+    task_id = queue.enqueue("query", 1, {"prompt": prompt})
+    for _ in range(DEFAULTS.queue_max_attempts):
+        lease = queue.claim("worker")
+        if lease is None:
+            break
+        queue.fail(lease, QueueFailure("processor_failed"))
+    with sqlite3.connect(queue.db_path) as connection:
+        connection.execute(
+            "UPDATE tasks SET state='dead', error_code='attempts_exhausted', updated_at=? "
+            "WHERE id=?",
+            ((now - timedelta(days=31)).isoformat(timespec="microseconds"), task_id),
+        )
+    return task_id
+
+
+def test_a_dead_task_is_retained_by_default_and_purged_only_when_asked(
+    tmp_path: Path,
+) -> None:
+    """Attempts-exhausted work is evidence; retiring it is an explicit action."""
+    now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    queue = MemoryQueue(tmp_path, clock=lambda: now)
+    task_id = _dead_task(queue, now, "never finished")
+    cutoff = now - timedelta(days=30)
+
+    default_receipt = queue.purge(
+        terminal_before=cutoff, export_path=tmp_path / "exports" / "default"
+    )
+
+    assert default_receipt.purged == 0
+    assert queue.get(task_id).state == "dead"
+
+    export = tmp_path / "exports" / "with-dead"
+    receipt = queue.purge(
+        terminal_before=cutoff, export_path=export, include_dead=True
+    )
+
+    assert receipt.task_ids == (task_id,)
+    records = json.loads((export / "records.json").read_bytes())
+    assert [item["state"] for item in records] == ["dead"]
+    with pytest.raises(KeyError):
+        queue.get(task_id)
+
+
+def test_a_purged_task_can_be_restored_from_its_verified_export(tmp_path: Path) -> None:
+    """Deletion without a way back would lose the work, not just its record."""
+    now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    queue = MemoryQueue(tmp_path, clock=lambda: now)
+    task_id = _dead_task(queue, now, "restore me")
+    export = tmp_path / "exports" / "restorable"
+    queue.purge(
+        terminal_before=now - timedelta(days=30), export_path=export, include_dead=True
+    )
+
+    receipt = queue.restore(export_path=export)
+
+    assert receipt.restored == 1
+    exported_id, restored_id = receipt.task_ids[0]
+    assert exported_id == task_id
+    restored = queue.get(restored_id)
+    assert restored.state == "ready"
+    assert restored.kind == "query"
+    assert restored.payload == {"prompt": "restore me"}
+
+
+def test_a_tampered_export_restores_nothing(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    queue = MemoryQueue(tmp_path, clock=lambda: now)
+    _dead_task(queue, now, "tampered")
+    export = tmp_path / "exports" / "tampered"
+    queue.purge(
+        terminal_before=now - timedelta(days=30), export_path=export, include_dead=True
+    )
+    records = json.loads((export / "records.json").read_bytes())
+    records[0]["payload"] = {"prompt": "rewritten"}
+    (export / "records.json").write_bytes(canonical_json_bytes(records))
+
+    with pytest.raises(memory_queue.QueueOperationError) as raised:
+        queue.restore(export_path=export)
+
+    assert raised.value.code == "restore_verification_failed"
+    assert queue.list_tasks() == []

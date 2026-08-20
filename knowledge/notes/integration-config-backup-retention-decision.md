@@ -77,3 +77,5 @@ API is part of this contract.
 - [[knowledge/notes/audit-closure-security-recovery-control-plane-decision]]
 - [[knowledge/notes/reliable-memory-stage-2]]
 - [[knowledge/notes/agent-native-mcp-foundation]]
+- [[knowledge/notes/install-ownership-control-plane-decision]]
+- [[knowledge/notes/managed-ide-hooks-install-update-decision]]

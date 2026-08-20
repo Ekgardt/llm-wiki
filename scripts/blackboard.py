@@ -33,6 +33,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -92,6 +93,15 @@ class BlackboardConflictError(RuntimeError):
         self.conflict_id = conflict_id
         super().__init__("blackboard resources are already claimed")
 
+    def __reduce__(self):
+        """Rebuild from the arguments, not from the message.
+
+        Without this the default reduction calls `__init__` with the message
+        alone, and crossing a process boundary raises a TypeError about a
+        missing argument instead of delivering the failure.
+        """
+        return (self.__class__, (self.resources, self.conflict_id))
+
 
 class _ResourceBusy(RuntimeError):
     def __init__(self, rows: Sequence[sqlite3.Row]) -> None:
@@ -123,6 +133,23 @@ def _append_jsonl(
 ) -> None:
     block = (redact_secrets(json.dumps(record, ensure_ascii=False)) + "\n").encode("utf-8")
     append_knowledge(operation_id, path, block)
+
+
+def _append_once(
+    path: Path, record: dict, operation_id: str, *, key: str, value: str
+) -> None:
+    """Publish one record under a stable operation id, so a retry is a no-op.
+
+    The transaction layer binds an operation id to exact bytes, and these
+    records carry the moment they were written. A caller that retries after a
+    transient failure would otherwise re-stamp the record and be refused, even
+    though its first attempt already published the very act it is repeating.
+    """
+    try:
+        _append_jsonl(path, record, operation_id)
+    except ValueError:
+        if not any(item.get(key) == value for item in _read_jsonl(path)):
+            raise
 
 
 def _decode_jsonl(path: Path, content: bytes) -> str:
@@ -460,8 +487,43 @@ def claim_task(
         acquired = _acquire_claim(_coordinator(), claim)
     except _ResourceBusy as busy:
         _raise_conflict(slug, claim, busy)
-    _append_jsonl(tasks_file, _claim_active_record(acquired), f"blackboard-active:{claim.claim_id}")
+    _publish_active_claim(tasks_file, acquired)
     return acquired
+
+
+def _active_record_present(tasks_file: Path, claim_id: str) -> bool:
+    """Whether this claim's activation is already in the task stream."""
+    return any(
+        item.get("kind") == "claim-activated" and item.get("claim_id") == claim_id
+        for item in _read_jsonl(tasks_file)
+    )
+
+
+def _publish_active_claim(tasks_file: Path, acquired: BlackboardClaim) -> None:
+    """Record the acquired claim, releasing it if the record did not land.
+
+    The resource rows are inserted before the claim is announced. When the
+    announcement fails, the caller never learns that it holds the resources,
+    and its retry would meet its own rows as a conflict. Releasing here keeps
+    the operation atomic from the caller's side: either the claim is held and
+    recorded, or it is not held at all.
+
+    An append can also fail *after* its record is committed. Releasing then
+    would leave an activation nothing can ever complete, so a landed record
+    settles it: the claim stands and the caller is told it succeeded.
+    """
+    try:
+        _append_jsonl(
+            tasks_file,
+            _claim_active_record(acquired),
+            f"blackboard-active:{acquired.claim_id}",
+        )
+    except BaseException:
+        if _active_record_present(tasks_file, acquired.claim_id):
+            return
+        with contextlib.suppress(Exception):
+            _delete_exact_claim(_coordinator(), acquired)
+        raise
 
 
 def _row_epochs(rows: Sequence[sqlite3.Row]) -> tuple[tuple[str, int], ...]:
@@ -567,11 +629,12 @@ def complete_task(project: str, claim: BlackboardClaim) -> bool:
     current = _utc_now(None)
     coordinator = _coordinator()
     _load_live_claim(coordinator, claim, current)
-    record = _completion_record(claim, current)
-    _append_jsonl(
+    _append_once(
         _bb_dir(slug) / "completed.jsonl",
-        record,
+        _completion_record(claim, current),
         f"blackboard-complete:{claim.claim_id}",
+        key="id",
+        value=claim.claim_id,
     )
     _delete_exact_claim(coordinator, claim)
     return True
@@ -777,10 +840,12 @@ def resolve_conflict(
         "resolution": _bounded_text(resolution, "resolution", _MAX_TASK_BYTES),
         "at": _timestamp(_utc_now(None)),
     }
-    _append_jsonl(
+    _append_once(
         _bb_dir(slug) / "conflicts.jsonl",
         record,
         f"blackboard-resolution:{identity}",
+        key="conflict_id",
+        value=identity,
     )
 
 

@@ -1902,7 +1902,12 @@ def _write_posix_transient(
     try:
         directory_info = _validate_posix_parent_fd(directory_fd, parent_info)
         descriptor, name = _open_posix_transient(directory_fd, envelope.event_id)
-        opened = _write_open_posix_transient(
+        # Capture the identity at creation time. Taking it from the write result
+        # instead would leave `opened` unset whenever the write or the
+        # post-write parent validation fails, and the cleanup below would then
+        # skip an already-created transcript containing session content.
+        opened = os.fstat(descriptor)
+        _write_open_posix_transient(
             descriptor, directory_fd, name, text, state_root, parent, directory_info
         )
         succeeded = True
@@ -2182,18 +2187,25 @@ def _append_handoff_item(items: list[Any], handoff: Sequence[Any] | str, item_ty
     )
 
 
-def _compile_context(items: Sequence[Any]) -> str:
+def _compile_context(items: Sequence[Any], *, trailing_newline: bool = False) -> str:
+    """Pack SessionStart items under the shared budget and the char ceiling."""
     from context_budget import DEFAULT_CONTEXT_BUDGET, BudgetExceededError
     from context_compiler import compile_context_items
+    from session_start_context import fit_to_char_ceiling
 
-    try:
-        return compile_context_items(
-            items,
-            budget=DEFAULT_CONTEXT_BUDGET,
-            emergency_byte_cap=DEFAULT_CONTEXT_BUDGET.available_input_tokens,
-        ).text
-    except BudgetExceededError as error:
-        return error.failure.render()
+    tail = "\n" if trailing_newline else ""
+
+    def _render(kept: Sequence[Any]) -> str:
+        try:
+            return compile_context_items(
+                kept,
+                budget=DEFAULT_CONTEXT_BUDGET,
+                emergency_byte_cap=DEFAULT_CONTEXT_BUDGET.available_input_tokens,
+            ).text + tail
+        except BudgetExceededError as error:
+            return error.failure.render() + tail
+
+    return fit_to_char_ceiling(list(items), _render)
 
 
 def _append_context(
@@ -2208,10 +2220,7 @@ def _append_context(
     _append_handoff_item(items, handoff, ContextItem)
     if not items:
         return ""
-    rendered = _compile_context(items)
-    if trailing_newline:
-        return rendered + "\n"
-    return rendered
+    return _compile_context(items, trailing_newline=trailing_newline)
 
 
 def _ingest_result(slug: str | None, payload: Mapping[str, Any]) -> dict[str, Any]:

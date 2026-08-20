@@ -82,7 +82,7 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 - **Triple-fusion when available**: BM25 (FTS5) + Vector (sentence-transformers) + evidence-backed Graph-neighbor RRF
 - **Weighted RRF**: BM25=2.0, Vector=1.0, Graph=0.5 — prevents regression on known-item queries
 - **Title + filename boost** — exact filename match short-circuits to rank 1
-- **Typed-provenance ranking** — `source_authority: user` outranks `ai-derived` / `inferred`
+- **Typed-provenance ranking** — one weight table (`user` 1.35, `web` 1.1, `ai-derived` 1.0, `inferred` 0.8) multiplies the score that decides the order on every path: BM25, fused RRF, and reranked
 - **Temporal queries** — `--as-of YYYY-MM-DD` filters by `valid_to` frontmatter
 - **Local retrieval modes** — direct page reads at small scale, SQLite FTS5 BM25 as the always-available base, and optional vectors/LanceDB + graph + reranker for hybrid retrieval
 - **Grounded QA** — retrieved source spans carry citation IDs, paths, source/span hashes, revisions, and byte/line ranges; unsupported, conflicting, or out-of-scope answers abstain
@@ -101,7 +101,7 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 - **Agent timeline** — attribution: which agent decided what and when
 
 ### Maintenance
-- **14 lint checks (13 structural + 1 LLM-judged contradiction)** — broken wikilinks, orphans, missing frontmatter, invalid supersede chains, temporal validity, gaps, sparse pages, missing sources, contradictions
+- **16 lint checks (15 structural + 1 LLM-judged contradiction)** — broken wikilinks, orphans, stale compiles, missing backlinks, sparse pages, missing frontmatter, missing or invalid type, missing sources, invalid supersede chains, orphan gaps, temporal validity, unresolvable evidence, invalid claim schema, contradictions
 - **Type-aware archive** — debugging 60d, patterns 180d, decisions never
 - **Nightly + weekly schedules** — compile, lint, archive, OKF migration (Task Scheduler on Windows, LaunchAgent on macOS, user systemd on Linux; cron is an explicit degraded fallback)
 - **OKF v0.1 frontmatter** — `type`, `confidence`, `source_authority`, `supersede` fields; auto-migration from legacy pages
@@ -266,6 +266,7 @@ Markdown remains authoritative. Runtime SQLite coordinates recoverable writes an
 ```bash
 uv run python scripts/doctor.py
 uv run python scripts/doctor.py --repair
+uv run python scripts/doctor.py --time-budget 60
 uv run python scripts/markdown_transaction.py recover
 uv run python scripts/markdown_transaction.py undo <transaction-id>
 uv run python scripts/markdown_transaction.py prune --retention-days 30
@@ -273,8 +274,11 @@ uv run python scripts/memory_queue.py migrate
 uv run python scripts/memory_queue.py work --max-tasks 20 --max-seconds 600 --idle-seconds 2 --lease-seconds 120 --heartbeat-seconds 40 --max-attempts 8 --retry-base-seconds 30 --retry-cap-seconds 3600
 uv run python scripts/memory_queue.py redrive <task-id>
 uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> --export <path>
+uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> --export <path> --include-dead
+uv run python scripts/memory_queue.py restore --export <path>
 uv run python scripts/archive_daily.py --commit --hot-days 90
 uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contradiction-v1.json
+uv run python benchmark/run_flush_classification.py --corpus benchmark/flush-classification-v1.json
 ```
 
 Queue delivery is at least once, so handlers use stable operation IDs for idempotency. Archives move eligible daily logs older than the 90-day hot window into verified, uncompressed BagIt packages while preserving logical evidence resolution. Uncertain or evaluator-disputed claims are quarantined; semantic supersession stays disabled until the frozen benchmark gate is met. See [docs/USER-GUIDE.md](docs/USER-GUIDE.md) for recovery, retention, and deletion safety.

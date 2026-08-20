@@ -14,6 +14,14 @@ from pathlib import Path
 import pytest
 
 
+def _generation_directory(state_root: Path, result: dict) -> Path:
+    """The built generation, naming the whole result when there is none."""
+    assert result.get("generation_id"), result
+    return (
+        state_root / "cache" / "evidence-graph" / "generations" / result["generation_id"]
+    )
+
+
 def _vault(tmp_path: Path) -> tuple[Path, Path]:
     root = tmp_path / "vault"
     state = tmp_path / "state"
@@ -65,7 +73,7 @@ def test_production_opencode_plugin_progresses_through_generation_validation(tmp
     result = doctor.run_generation_maintenance(
         root=root,
         state_root=state,
-        time_budget_seconds=10,
+        time_budget_seconds=60,
         max_sources=10,
     )
 
@@ -171,7 +179,7 @@ def test_generation_check_reports_complete_v2_as_healthy(tmp_path):
 
     root, state = _vault(tmp_path)
     built = doctor.run_generation_maintenance(
-        root=root, state_root=state, time_budget_seconds=5, max_sources=10
+        root=root, state_root=state, time_budget_seconds=60, max_sources=10
     )
 
     result = doctor._generation_check(
@@ -195,7 +203,7 @@ def test_generation_check_reports_invalid_v2_search_index_as_error(tmp_path, dam
 
     root, state = _vault(tmp_path)
     built = doctor.run_generation_maintenance(
-        root=root, state_root=state, time_budget_seconds=5, max_sources=10
+        root=root, state_root=state, time_budget_seconds=60, max_sources=10
     )
     search = (
         state
@@ -399,7 +407,7 @@ def test_bounded_builder_builds_then_defers_when_source_limit_is_exceeded(tmp_pa
     built = doctor.run_generation_maintenance(
         root=root,
         state_root=state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
 
@@ -410,7 +418,7 @@ def test_bounded_builder_builds_then_defers_when_source_limit_is_exceeded(tmp_pa
     current = doctor.run_generation_maintenance(
         root=root,
         state_root=state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
 
@@ -424,7 +432,7 @@ def test_bounded_builder_builds_then_defers_when_source_limit_is_exceeded(tmp_pa
     deferred = doctor.run_generation_maintenance(
         root=root,
         state_root=state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=1,
     )
 
@@ -446,7 +454,7 @@ def test_maintenance_publishes_consumable_v2_search_without_legacy(tmp_path, mon
     )
 
     built = doctor.run_generation_maintenance(
-        root=root, state_root=state, time_budget_seconds=5, max_sources=10
+        root=root, state_root=state, time_budget_seconds=60, max_sources=10
     )
     active = GenerationCatalog(state).get_active()
     monkeypatch.setattr(search_memory, "ROOT", root)
@@ -473,7 +481,7 @@ def test_matching_hash_v2_with_missing_search_is_rebuilt(tmp_path):
 
     root, state = _vault(tmp_path)
     first = doctor.run_generation_maintenance(
-        root=root, state_root=state, time_budget_seconds=5, max_sources=10
+        root=root, state_root=state, time_budget_seconds=60, max_sources=10
     )
     first_path = (
         state
@@ -483,7 +491,7 @@ def test_matching_hash_v2_with_missing_search_is_rebuilt(tmp_path):
     (first_path / "search.sqlite3").unlink()
 
     rebuilt = doctor.run_generation_maintenance(
-        root=root, state_root=state, time_budget_seconds=5, max_sources=10
+        root=root, state_root=state, time_budget_seconds=60, max_sources=10
     )
 
     assert rebuilt["status"] == "built"
@@ -504,7 +512,7 @@ def test_fts_failure_preserves_prior_and_removes_candidate(tmp_path, monkeypatch
 
     root, state = _vault(tmp_path)
     prior = doctor.run_generation_maintenance(
-        root=root, state_root=state, time_budget_seconds=5, max_sources=10
+        root=root, state_root=state, time_budget_seconds=60, max_sources=10
     )
     (root / "knowledge/notes/new.md").write_text(
         "---\ntype: concept\n---\n# New\nnew term\n", encoding="utf-8"
@@ -549,13 +557,13 @@ def test_incremental_search_contains_new_chunks_and_no_old_text(tmp_path):
         "---\ntype: concept\n---\n# Changing\noldonlyterm\n", encoding="utf-8"
     )
     first = doctor.run_generation_maintenance(
-        root=root, state_root=state, time_budget_seconds=5, max_sources=10
+        root=root, state_root=state, time_budget_seconds=60, max_sources=10
     )
     page.write_text(
         "---\ntype: concept\n---\n# Changing\nnewonlyterm\n", encoding="utf-8"
     )
     second = doctor.run_generation_maintenance(
-        root=root, state_root=state, time_budget_seconds=5, max_sources=10
+        root=root, state_root=state, time_budget_seconds=60, max_sources=10
     )
 
     assert first["status"] == second["status"] == "built"
@@ -581,7 +589,7 @@ def test_source_drift_before_publication_preserves_prior_and_removes_candidate(
     page = root / "knowledge/notes/drift.md"
     page.write_text("---\ntype: concept\n---\n# Drift\nfirst\n", encoding="utf-8")
     prior = doctor.run_generation_maintenance(
-        root=root, state_root=state, time_budget_seconds=5, max_sources=10
+        root=root, state_root=state, time_budget_seconds=60, max_sources=10
     )
     page.write_text("---\ntype: concept\n---\n# Drift\nsecond\n", encoding="utf-8")
     before = {path.name for path in GenerationCatalog(state).generations_path.iterdir()}
@@ -618,7 +626,7 @@ def test_cancellation_after_registration_leaves_only_an_unregistered_orphan(
     page = root / "knowledge/notes/cancel.md"
     page.write_text("---\ntype: concept\n---\n# Cancel\nfirst\n", encoding="utf-8")
     prior = doctor.run_generation_maintenance(
-        root=root, state_root=state, time_budget_seconds=5, max_sources=10
+        root=root, state_root=state, time_budget_seconds=60, max_sources=10
     )
     page.write_text("---\ntype: concept\n---\n# Cancel\nsecond\n", encoding="utf-8")
     cancelled = False
@@ -666,7 +674,7 @@ def test_expired_deadline_after_registration_leaves_only_an_unregistered_orphan(
     page = root / "knowledge/notes/deadline.md"
     page.write_text("---\ntype: concept\n---\n# Deadline\nfirst\n", encoding="utf-8")
     prior = doctor.run_generation_maintenance(
-        root=root, state_root=state, time_budget_seconds=5, max_sources=10
+        root=root, state_root=state, time_budget_seconds=60, max_sources=10
     )
     page.write_text("---\ntype: concept\n---\n# Deadline\nsecond\n", encoding="utf-8")
 
@@ -824,13 +832,13 @@ def test_maintenance_scopes_same_basename_roots_and_repository_nodes(tmp_path):
     first = doctor.run_generation_maintenance(
         root=first_root,
         state_root=state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
     second = doctor.run_generation_maintenance(
         root=second_root,
         state_root=state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
 
@@ -866,7 +874,7 @@ def test_maintenance_extracts_python_and_records_current_extractor_inputs(tmp_pa
     result = doctor.run_generation_maintenance(
         root=root,
         state_root=state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
 
@@ -921,7 +929,7 @@ def test_maintenance_extracts_workspace_once_and_partitions_cross_file_ownership
     result = doctor.run_generation_maintenance(
         root=root,
         state_root=state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
 
@@ -989,15 +997,15 @@ def test_maintenance_cross_file_incremental_equals_clean_rebuild(tmp_path, initi
     root, incremental_state = _vault(tmp_path)
     _write_python_workspace(root, initial)
     first = doctor.run_generation_maintenance(
-        root=root, state_root=incremental_state, time_budget_seconds=5, max_sources=10
+        root=root, state_root=incremental_state, time_budget_seconds=60, max_sources=10
     )
     _write_python_workspace(root, updated)
     incremental = doctor.run_generation_maintenance(
-        root=root, state_root=incremental_state, time_budget_seconds=5, max_sources=10
+        root=root, state_root=incremental_state, time_budget_seconds=60, max_sources=10
     )
     clean_state = tmp_path / "clean-state"
     clean = doctor.run_generation_maintenance(
-        root=root, state_root=clean_state, time_budget_seconds=5, max_sources=10
+        root=root, state_root=clean_state, time_budget_seconds=60, max_sources=10
     )
 
     assert first["status"] == "built"
@@ -1029,7 +1037,7 @@ def test_package_init_relative_import_incremental_equals_clean_rebuild(tmp_path)
     doctor.run_generation_maintenance(
         root=root,
         state_root=incremental_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
     (package / "dep.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
@@ -1037,14 +1045,14 @@ def test_package_init_relative_import_incremental_equals_clean_rebuild(tmp_path)
     incremental = doctor.run_generation_maintenance(
         root=root,
         state_root=incremental_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
     clean = doctor.run_generation_maintenance(
         root=root,
         state_root=clean_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
 
@@ -1080,12 +1088,10 @@ def test_from_dot_import_dependency_invalidates_and_matches_clean_rebuild(
     first = doctor.run_generation_maintenance(
         root=root,
         state_root=incremental_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
-    first_generation = (
-        incremental_state / "cache/evidence-graph/generations" / first["generation_id"]
-    )
+    first_generation = _generation_directory(incremental_state, first)
     first_manifest = json.loads(
         (first_generation / "incremental-manifest.json").read_bytes()
     )
@@ -1103,14 +1109,14 @@ def test_from_dot_import_dependency_invalidates_and_matches_clean_rebuild(
     incremental = doctor.run_generation_maintenance(
         root=root,
         state_root=incremental_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
     clean = doctor.run_generation_maintenance(
         root=root,
         state_root=clean_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
 
@@ -1143,12 +1149,10 @@ def test_maintenance_ambiguous_candidates_invalidate_referencing_source(tmp_path
     first = doctor.run_generation_maintenance(
         root=root,
         state_root=incremental_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
-    first_generation = (
-        incremental_state / "cache/evidence-graph/generations" / first["generation_id"]
-    )
+    first_generation = _generation_directory(incremental_state, first)
     first_manifest = json.loads(
         (first_generation / "incremental-manifest.json").read_bytes()
     )
@@ -1170,14 +1174,14 @@ def test_maintenance_ambiguous_candidates_invalidate_referencing_source(tmp_path
     incremental = doctor.run_generation_maintenance(
         root=root,
         state_root=incremental_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
     clean = doctor.run_generation_maintenance(
         root=root,
         state_root=clean_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
 
@@ -1204,7 +1208,7 @@ def test_module_addition_rebuilds_unique_reference_into_ambiguity_and_matches_cl
     first = doctor.run_generation_maintenance(
         root=root,
         state_root=incremental_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
     tests_root = root / "tests"
@@ -1216,14 +1220,14 @@ def test_module_addition_rebuilds_unique_reference_into_ambiguity_and_matches_cl
     incremental = doctor.run_generation_maintenance(
         root=root,
         state_root=incremental_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
     clean = doctor.run_generation_maintenance(
         root=root,
         state_root=clean_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
 
@@ -1260,7 +1264,7 @@ def test_module_removal_rebuilds_ambiguous_reference_to_unique_and_matches_clean
     doctor.run_generation_maintenance(
         root=root,
         state_root=incremental_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
     alternate.unlink()
@@ -1268,14 +1272,14 @@ def test_module_removal_rebuilds_ambiguous_reference_to_unique_and_matches_clean
     incremental = doctor.run_generation_maintenance(
         root=root,
         state_root=incremental_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
     clean = doctor.run_generation_maintenance(
         root=root,
         state_root=clean_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
 
@@ -1307,12 +1311,10 @@ def test_module_file_package_collision_is_ambiguous_then_resolves_incrementally(
     first = doctor.run_generation_maintenance(
         root=root,
         state_root=incremental_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
-    first_generation = (
-        incremental_state / "cache/evidence-graph/generations" / first["generation_id"]
-    )
+    first_generation = _generation_directory(incremental_state, first)
     first_manifest = json.loads(
         (first_generation / "incremental-manifest.json").read_bytes()
     )
@@ -1337,14 +1339,14 @@ def test_module_file_package_collision_is_ambiguous_then_resolves_incrementally(
     incremental = doctor.run_generation_maintenance(
         root=root,
         state_root=incremental_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
     clean = doctor.run_generation_maintenance(
         root=root,
         state_root=clean_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
 
@@ -1375,12 +1377,10 @@ def test_duplicate_tables_are_ambiguous_and_incremental_matches_clean_rebuild(tm
     first = doctor.run_generation_maintenance(
         root=root,
         state_root=incremental_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
-    first_generation = (
-        incremental_state / "cache/evidence-graph/generations" / first["generation_id"]
-    )
+    first_generation = _generation_directory(incremental_state, first)
     first_manifest = json.loads(
         (first_generation / "incremental-manifest.json").read_bytes()
     )
@@ -1407,14 +1407,14 @@ def test_duplicate_tables_are_ambiguous_and_incremental_matches_clean_rebuild(tm
     incremental = doctor.run_generation_maintenance(
         root=root,
         state_root=incremental_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
     clean = doctor.run_generation_maintenance(
         root=root,
         state_root=clean_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
 
@@ -1443,7 +1443,7 @@ def test_missing_table_rechecks_when_existing_code_source_adds_definition(tmp_pa
     doctor.run_generation_maintenance(
         root=root,
         state_root=incremental_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
     (root / "scripts/models.py").write_text(
@@ -1453,14 +1453,14 @@ def test_missing_table_rechecks_when_existing_code_source_adds_definition(tmp_pa
     incremental = doctor.run_generation_maintenance(
         root=root,
         state_root=incremental_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
     clean = doctor.run_generation_maintenance(
         root=root,
         state_root=clean_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
 
@@ -1487,7 +1487,7 @@ def test_missing_python_symbol_rechecks_all_code_sources_on_module_addition(
     doctor.run_generation_maintenance(
         root=root,
         state_root=incremental_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
     (root / "scripts/future_dep.py").write_text(
@@ -1497,14 +1497,14 @@ def test_missing_python_symbol_rechecks_all_code_sources_on_module_addition(
     incremental = doctor.run_generation_maintenance(
         root=root,
         state_root=incremental_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
     clean = doctor.run_generation_maintenance(
         root=root,
         state_root=clean_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
 
@@ -1534,12 +1534,10 @@ def test_shared_structural_nodes_survive_owner_removal_and_match_clean_rebuild(
     first = doctor.run_generation_maintenance(
         root=root,
         state_root=incremental_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
-    first_generation = (
-        incremental_state / "cache/evidence-graph/generations" / first["generation_id"]
-    )
+    first_generation = _generation_directory(incremental_state, first)
     first_manifest = json.loads(
         (first_generation / "incremental-manifest.json").read_bytes()
     )
@@ -1554,14 +1552,14 @@ def test_shared_structural_nodes_survive_owner_removal_and_match_clean_rebuild(
     incremental = doctor.run_generation_maintenance(
         root=root,
         state_root=incremental_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
     clean = doctor.run_generation_maintenance(
         root=root,
         state_root=clean_state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
 
@@ -1685,7 +1683,7 @@ def test_workspace_partition_receives_generation_deadline_and_cancellation(
     built = doctor.run_generation_maintenance(
         root=root,
         state_root=state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
 
@@ -1737,7 +1735,7 @@ def test_maintenance_language_membership_change_forces_workspace_reresolution(
         },
     )
     first = doctor.run_generation_maintenance(
-        root=root, state_root=state, time_budget_seconds=5, max_sources=10
+        root=root, state_root=state, time_budget_seconds=60, max_sources=10
     )
     real_collect = corpus_snapshot.collect_corpus
 
@@ -1749,7 +1747,7 @@ def test_maintenance_language_membership_change_forces_workspace_reresolution(
 
     monkeypatch.setattr(corpus_snapshot, "collect_corpus", reclassified)
     second = doctor.run_generation_maintenance(
-        root=root, state_root=state, time_budget_seconds=5, max_sources=10
+        root=root, state_root=state, time_budget_seconds=60, max_sources=10
     )
 
     assert first["status"] == "built"
@@ -1768,7 +1766,7 @@ def test_maintenance_rebuilds_when_code_extractor_version_changes(tmp_path, monk
     first = doctor.run_generation_maintenance(
         root=root,
         state_root=state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
     monkeypatch.setattr(code_extractor, "EXTRACTOR_VERSION", "code-extractor/freshness-test")
@@ -1776,7 +1774,7 @@ def test_maintenance_rebuilds_when_code_extractor_version_changes(tmp_path, monk
     second = doctor.run_generation_maintenance(
         root=root,
         state_root=state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
 
@@ -1795,7 +1793,7 @@ def test_maintenance_rebuilds_when_classifier_identity_changes(tmp_path, monkeyp
     first = doctor.run_generation_maintenance(
         root=root,
         state_root=state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
     monkeypatch.setattr(
@@ -1807,7 +1805,7 @@ def test_maintenance_rebuilds_when_classifier_identity_changes(tmp_path, monkeyp
     second = doctor.run_generation_maintenance(
         root=root,
         state_root=state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
 
@@ -1832,7 +1830,7 @@ def test_maintenance_passes_budget_to_scope_resolution_and_defers(tmp_path, monk
     result = doctor.run_generation_maintenance(
         root=root,
         state_root=state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
 
@@ -1855,7 +1853,7 @@ def test_workspace_extraction_deadline_defers_without_replacing_prior_generation
     first = doctor.run_generation_maintenance(
         root=root,
         state_root=state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
     _write_python_workspace(root, {"app.py": "def app():\n    return 2\n"})
@@ -1875,7 +1873,7 @@ def test_workspace_extraction_deadline_defers_without_replacing_prior_generation
     second = doctor.run_generation_maintenance(
         root=root,
         state_root=state,
-        time_budget_seconds=5,
+        time_budget_seconds=60,
         max_sources=10,
     )
 

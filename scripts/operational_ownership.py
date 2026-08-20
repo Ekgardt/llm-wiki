@@ -80,6 +80,9 @@ class OperationalOwnershipError(RuntimeError):
         self.code = code
         super().__init__(message or code)
 
+    def __reduce__(self):
+        return (self.__class__, (self.code, str(self)))
+
 
 @dataclass(frozen=True)
 class ProcessIdentity:

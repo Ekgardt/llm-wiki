@@ -1,0 +1,127 @@
+{
+  "cases": [
+    {
+      "canned_response": "FLUSH_MAJOR\n\n- **Decisions made** — runtime databases use the rollback journal with synchronous=FULL; WAL needs shared memory and breaks on network paths.\n",
+      "case_id": "decision-sqlite-journal",
+      "content_classes": [
+        "decision"
+      ],
+      "event": "session-end",
+      "expected_tier": "major",
+      "language": "EN",
+      "required_markers": [
+        "rollback journal"
+      ],
+      "transcript": "user: WAL or rollback journal for the runtime databases?\nassistant: Rollback journal with synchronous=FULL. WAL needs shared memory, which breaks on the network paths some operators keep state on, and we never need concurrent readers during a write here.\nuser: agreed, do that\n"
+    },
+    {
+      "canned_response": "FLUSH_MAJOR\n\n- **Decisions made** — ночное обслуживание на linux запускает user systemd timer; cron остаётся явным деградированным вариантом.\n- **Commands / snippets** — `systemctl --user enable --now llm-wiki-nightly.timer`\n",
+      "case_id": "decision-ru-scheduler",
+      "content_classes": [
+        "decision",
+        "command"
+      ],
+      "event": "session-end",
+      "expected_tier": "major",
+      "language": "RU",
+      "required_markers": [
+        "systemd",
+        "llm-wiki-nightly.timer"
+      ],
+      "transcript": "user: чем запускать ночное обслуживание на linux?\nassistant: user systemd timer, не cron. cron остаётся явным деградированным вариантом, потому что он не передаёт окружение и не даёт статуса.\nassistant: включается так: systemctl --user enable --now llm-wiki-nightly.timer\n"
+    },
+    {
+      "canned_response": "FLUSH_MAJOR\n\n- **Lessons / patterns** — a spawned child on Windows inherits no stderr, so its traceback is invisible; report the exit code from the parent.\n",
+      "case_id": "lesson-spawn-stderr",
+      "content_classes": [
+        "lesson"
+      ],
+      "event": "pre-compact",
+      "expected_tier": "major",
+      "language": "EN",
+      "required_markers": [
+        "stderr"
+      ],
+      "transcript": "assistant: the child died with exit code 1 and printed nothing.\nassistant: that is because a spawned multiprocessing child on Windows inherits no stderr handle, so its traceback goes nowhere. Always report the exit code from the parent when a child produces no output.\n"
+    },
+    {
+      "canned_response": "FLUSH_MINOR\n\n- **Gotchas / debugging** — macOS reads failed because /var is a symlink to /private/var and the bounded reader refused symlinked ancestors.\n",
+      "case_id": "gotcha-symlink-macos",
+      "content_classes": [
+        "gotcha"
+      ],
+      "event": "session-end",
+      "expected_tier": "minor",
+      "language": "EN",
+      "required_markers": [
+        "/private/var"
+      ],
+      "transcript": "assistant: every temporary-file read failed on macOS.\nassistant: cause — /var is a symlink to /private/var, and the bounded reader refused any symlinked ancestor. Accepting a root-owned link fixed it.\n"
+    },
+    {
+      "canned_response": "FLUSH_MINOR\n\n- **Gotchas / debugging** — на windows `time.monotonic()` идёт шагами по 15.6 мс, поэтому перелёт дедлайна меньше одного тика не виден.\n",
+      "case_id": "gotcha-ru-timer-granularity",
+      "content_classes": [
+        "gotcha"
+      ],
+      "event": "session-end",
+      "expected_tier": "minor",
+      "language": "RU",
+      "required_markers": [
+        "15.6"
+      ],
+      "transcript": "assistant: тест засыпал на 10 мс после дедлайна и всё равно видел время внутри бюджета.\nassistant: причина — time.monotonic() на windows идёт шагами по 15.6 мс.\n"
+    },
+    {
+      "canned_response": "FLUSH_MINOR\n\n- **Open questions** — should the overhead threshold name a machine class or run only on the operator's machine?\n",
+      "case_id": "question-open-threshold",
+      "content_classes": [
+        "question"
+      ],
+      "event": "pre-compact",
+      "expected_tier": "minor",
+      "language": "EN",
+      "required_markers": [
+        "threshold"
+      ],
+      "transcript": "assistant: the overhead gate reads 22 ms on the runner and 14 locally.\nassistant: open question — should the threshold name a machine class, or should the gate only run on the operator's machine? Not resolved today.\n"
+    },
+    {
+      "canned_response": "FLUSH_OK\n",
+      "case_id": "status-progress-only",
+      "content_classes": [],
+      "event": "session-end",
+      "expected_tier": "ok",
+      "language": "EN",
+      "required_markers": [],
+      "transcript": "assistant: started the run.\nassistant: fixed the failing test.\nassistant: pushed. all green now.\n"
+    },
+    {
+      "canned_response": "FLUSH_OK\n",
+      "case_id": "status-ru-navigation",
+      "content_classes": [],
+      "event": "session-end",
+      "expected_tier": "ok",
+      "language": "RU",
+      "required_markers": [],
+      "transcript": "user: открой файл\nassistant: открыл, читаю\nuser: спасибо\n"
+    },
+    {
+      "canned_response": "FLUSH_OK\n",
+      "case_id": "status-empty-turnaround",
+      "content_classes": [],
+      "event": "pre-compact",
+      "expected_tier": "ok",
+      "language": "EN",
+      "required_markers": [],
+      "transcript": "assistant: continuing where we left off.\n"
+    }
+  ],
+  "corpus_id": "flush-classification/v1",
+  "schema_version": "flush-classification/v1",
+  "thresholds": {
+    "durable_content_recall": 0.9,
+    "false_promotion_rate": 0.1,
+    "tier_accuracy": 0.85
+  }
+}

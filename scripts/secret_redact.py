@@ -17,7 +17,7 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(?i)(password\s*[=:]\s*)(\S+)"), r"\1[REDACTED]"),
     (re.compile(r"(?i)(token\s*[=:]\s*)(\S+)"), r"\1[REDACTED]"),
     (re.compile(r"(?i)(entropy\s*[=:]\s*)(\S+)"), r"\1[REDACTED]"),
-    (re.compile(r"sk-[A-Za-z0-9]{20,}"), "[REDACTED_API_KEY]"),
+    (re.compile(r"sk-[A-Za-z0-9][A-Za-z0-9_-]{18,}"), "[REDACTED_API_KEY]"),
     (re.compile(r"ghp_[A-Za-z0-9]{20,}"), "[REDACTED_GITHUB_TOKEN]"),
     (re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"), "[REDACTED_SLACK_TOKEN]"),
     (re.compile(r"AKIA[0-9A-Z]{16}"), "[REDACTED_AWS_KEY]"),
@@ -31,6 +31,8 @@ _HIGH_ENTROPY_RE = re.compile(
 )
 _PURE_HEX_RE = re.compile(r"^[0-9a-f]+$")
 _ENTROPY_THRESHOLD = 4.0
+_MIN_BASE64_SEGMENT = 3
+_MIN_BASE64_RUN = 16
 
 
 def _shannon_entropy(data: str) -> float:
@@ -43,17 +45,58 @@ def _shannon_entropy(data: str) -> float:
     return -sum((f / n) * math.log2(f / n) for f in freq.values())
 
 
+def _redact_patterns(text: str) -> str:
+    out = text
+    for pattern, replacement in _PATTERNS:
+        out = pattern.sub(replacement, out)
+    return out
+
+
+def _looks_like_path(token: str) -> bool:
+    """Slash runs with a very short segment are filesystem paths, not blobs.
+
+    macOS temporary directories look exactly like base64 to an entropy test:
+    `5/zjnzxgh147qcg3bb5cg2wvqw0000gn/T/pytest` is 41 characters of
+    `[A-Za-z0-9/]` at entropy 4.46. Redacting it corrupts every stored path and
+    every log line that mentions one. A real blob does not contain one- or
+    two-character slash-separated pieces, and it carries at least one long
+    dense run between separators.
+    """
+    if "/" not in token:
+        return False
+    return _segment_shape_is_path(_token_segments(token))
+
+
+def _token_segments(token: str) -> list[str]:
+    return [segment for segment in token.split("/") if segment]
+
+
+def _segment_shape_is_path(segments: list[str]) -> bool:
+    if not segments:
+        return True
+    if min(len(segment) for segment in segments) < _MIN_BASE64_SEGMENT:
+        return True
+    return max(len(segment) for segment in segments) < _MIN_BASE64_RUN
+
+
+def _is_high_entropy(token: str) -> bool:
+    if _PURE_HEX_RE.match(token):
+        return False
+    if _looks_like_path(token):
+        return False
+    return _shannon_entropy(token) >= _ENTROPY_THRESHOLD
+
+
+def _redact_high_entropy(text: str) -> str:
+    out = text
+    for match in _HIGH_ENTROPY_RE.finditer(text):
+        if _is_high_entropy(match.group()):
+            out = out.replace(match.group(), "[REDACTED_TOKEN]")
+    return out
+
+
 def redact_secrets(text: str) -> str:
     """Return text with common secret patterns replaced."""
     if not text or not isinstance(text, str):
         return text
-    out = text
-    for pat, repl in _PATTERNS:
-        out = pat.sub(repl, out)
-    for m in _HIGH_ENTROPY_RE.finditer(out):
-        token = m.group()
-        if _PURE_HEX_RE.match(token):
-            continue
-        if _shannon_entropy(token) >= _ENTROPY_THRESHOLD:
-            out = out.replace(token, "[REDACTED_TOKEN]")
-    return out
+    return _redact_high_entropy(_redact_patterns(text))

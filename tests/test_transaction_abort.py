@@ -183,3 +183,88 @@ def test_recovery_flags_aborted_transaction_with_missing_receipt(tmp_path: Path)
     assert recovered[0].error_code == "abort_receipt_invalid"
     coordinator.release_intent_fence(fence)
     registry.release(owner)
+
+
+def test_abort_refuses_to_restore_a_corrupt_before_image(tmp_path: Path) -> None:
+    """A before-image that no longer hashes must never be written back."""
+    coordinator, registry, owner, fence, binding, record = _abort_fixture(tmp_path)
+    rows = coordinator._operation_rows(record.id)
+    replace_row = next(row for row in rows if str(row["path"]).endswith("replace.md"))
+    artifact = (
+        tmp_path
+        / "run"
+        / "transactions"
+        / record.id
+        / "before"
+        / f"{int(replace_row['position']):06d}.bin"
+    )
+    artifact.write_bytes(b"corrupted-before-image")
+
+    with pytest.raises(markdown_transaction.TransactionFailure) as error:
+        coordinator.abort_for_discard(
+            record.id,
+            intent_fence=fence,
+            active_link_digest=binding.active_digest,
+            actor_identity="posix-uid:1000",
+        )
+
+    assert error.value.code == "abort_before_image_corrupt"
+    target = tmp_path / "knowledge" / "notes" / "replace.md"
+    assert target.read_bytes() == b"replace-after"
+    with sqlite3.connect(coordinator.database_path) as database:
+        assert database.execute(
+            'SELECT state,error_code FROM "transaction" WHERE id=?', (record.id,)
+        ).fetchone() == ("aborting", "abort_before_image_corrupt")
+    assert not (
+        tmp_path / "run" / "transactions" / record.id / "abort-receipt.json"
+    ).exists()
+    coordinator.release_intent_fence(fence)
+    registry.release(owner)
+
+
+def test_abort_refuses_a_released_intent_fence(tmp_path: Path) -> None:
+    """Only a live operator fence may discard applied work."""
+    coordinator, registry, owner, fence, binding, record = _abort_fixture(tmp_path)
+    coordinator.release_intent_fence(fence)
+
+    with pytest.raises(markdown_transaction.TransactionFailure) as error:
+        coordinator.abort_for_discard(
+            record.id,
+            intent_fence=fence,
+            active_link_digest=binding.active_digest,
+            actor_identity="posix-uid:1000",
+        )
+
+    assert error.value.code == "intent_fence_lost"
+    assert (
+        tmp_path / "knowledge" / "notes" / "replace.md"
+    ).read_bytes() == b"replace-after"
+    with sqlite3.connect(coordinator.database_path) as database:
+        assert database.execute(
+            'SELECT state FROM "transaction" WHERE id=?', (record.id,)
+        ).fetchone() == ("applying",)
+    registry.release(owner)
+
+
+def test_abort_refuses_a_committed_transaction(tmp_path: Path) -> None:
+    """Committed bytes are the vault's history; abort must not touch them."""
+    coordinator, registry, owner, fence, binding, record = _abort_fixture(tmp_path)
+    with coordinator._connect() as database:
+        database.execute(
+            'UPDATE "transaction" SET state=\'committed\' WHERE id=?', (record.id,)
+        )
+
+    with pytest.raises(markdown_transaction.TransactionFailure) as error:
+        coordinator.abort_for_discard(
+            record.id,
+            intent_fence=fence,
+            active_link_digest=binding.active_digest,
+            actor_identity="posix-uid:1000",
+        )
+
+    assert error.value.code == "abort_committed"
+    assert (
+        tmp_path / "knowledge" / "notes" / "replace.md"
+    ).read_bytes() == b"replace-after"
+    coordinator.release_intent_fence(fence)
+    registry.release(owner)

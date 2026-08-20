@@ -1184,6 +1184,70 @@ def test_precompact_transcript_text_materializes_and_confirms_start(tmp_path, mo
     assert not Path(calls[0]["transcript_path"]).exists()
 
 
+def _private_transient_dir(state_root: Path) -> Path:
+    """Create cache/transient-transcripts with explicit owner-only modes.
+
+    `mkdir` applies the process umask, so a plain `mkdir(parents=True)` yields
+    0o775 under the umask 002 that Ubuntu and Debian use by default. The adapter
+    then rightly refuses a group-writable transient parent, which made this
+    fixture assert a different contract depending on the developer's umask.
+    """
+    transient_dir = state_root / "cache" / "transient-transcripts"
+    transient_dir.mkdir(parents=True, mode=0o700)
+    transient_dir.parent.chmod(0o700)
+    transient_dir.chmod(0o700)
+    return transient_dir
+
+
+def _assert_bounded_icacls(call: tuple, path: Path) -> None:
+    assert call[0] == [
+        "icacls",
+        str(path),
+        "/inheritance:r",
+        "/grant:r",
+        "Test User:(R,W)",
+    ]
+    assert call[1]["timeout"] > 0
+
+
+def _assert_unsafe_mode_is_refused(integration_adapter, monkeypatch, transient_dir, envelope):
+    transient_dir.chmod(0o733)
+    monkeypatch.setattr(integration_adapter.secrets, "token_hex", lambda _size: "unsafe")
+    with pytest.raises(PermissionError, match="private"):
+        integration_adapter._write_transient_transcript(envelope, "private")
+    transient_dir.chmod(0o700)
+
+
+def _assert_swapped_parent_keeps_no_transcript(
+    integration_adapter, monkeypatch, tmp_path: Path, envelope
+) -> None:
+    """A parent swapped away mid-write must leave no transcript behind."""
+    swap_state = tmp_path / "swap-state"
+    swap_parent = _private_transient_dir(swap_state)
+    moved_parent = tmp_path / "moved-transient"
+    external_parent = tmp_path / "external-transient"
+    external_parent.mkdir()
+    real_fsync = integration_adapter.os.fsync
+    swapped = []
+
+    def fsync_and_swap(descriptor):
+        real_fsync(descriptor)
+        if swapped:
+            return
+        swapped.append(True)
+        swap_parent.rename(moved_parent)
+        if not _try_symlink(swap_parent, external_parent, target_is_directory=True):
+            swap_parent.mkdir()
+
+    monkeypatch.setattr(integration_adapter, "STATE_ROOT", swap_state)
+    monkeypatch.setattr(integration_adapter.os, "fsync", fsync_and_swap)
+    monkeypatch.setattr(integration_adapter.secrets, "token_hex", lambda _size: "swap")
+    with pytest.raises(PermissionError, match="transient"):
+        integration_adapter._write_transient_transcript(envelope, "private")
+    assert not list(moved_parent.glob("*.txt"))
+    assert not list(external_parent.glob("*.txt"))
+
+
 def test_windows_transient_permissions_use_bounded_icacls(monkeypatch, tmp_path):
     import integration_adapter
 
@@ -1200,8 +1264,7 @@ def test_windows_transient_permissions_use_bounded_icacls(monkeypatch, tmp_path)
     assert not list(external_dir.rglob("*"))
 
     (state_root / "cache").unlink()
-    transient_dir = state_root / "cache" / "transient-transcripts"
-    transient_dir.mkdir(parents=True)
+    transient_dir = _private_transient_dir(state_root)
     external_file = tmp_path / "external.txt"
     external_file.write_text("untouched", encoding="utf-8")
     collision = transient_dir / f"{envelope.event_id}-collision.txt"
@@ -1222,38 +1285,13 @@ def test_windows_transient_permissions_use_bounded_icacls(monkeypatch, tmp_path)
     assert collision.read_text(encoding="utf-8") == "untouched"
 
     if os.name != "nt":
-        transient_dir.chmod(0o733)
-        monkeypatch.setattr(integration_adapter.secrets, "token_hex", lambda _size: "unsafe")
-        with pytest.raises(PermissionError, match="private"):
-            integration_adapter._write_transient_transcript(envelope, "private")
-        transient_dir.chmod(0o700)
+        _assert_unsafe_mode_is_refused(
+            integration_adapter, monkeypatch, transient_dir, envelope
+        )
 
-    swap_state = tmp_path / "swap-state"
-    swap_parent = swap_state / "cache" / "transient-transcripts"
-    swap_parent.mkdir(parents=True)
-    moved_parent = tmp_path / "moved-transient"
-    external_parent = tmp_path / "external-transient"
-    external_parent.mkdir()
-    real_fsync = integration_adapter.os.fsync
-    swapped = False
-
-    def fsync_and_swap(descriptor):
-        nonlocal swapped
-        real_fsync(descriptor)
-        if swapped:
-            return
-        swapped = True
-        swap_parent.rename(moved_parent)
-        if not _try_symlink(swap_parent, external_parent, target_is_directory=True):
-            swap_parent.mkdir()
-
-    monkeypatch.setattr(integration_adapter, "STATE_ROOT", swap_state)
-    monkeypatch.setattr(integration_adapter.os, "fsync", fsync_and_swap)
-    monkeypatch.setattr(integration_adapter.secrets, "token_hex", lambda _size: "swap")
-    with pytest.raises(PermissionError, match="transient"):
-        integration_adapter._write_transient_transcript(envelope, "private")
-    assert not list(moved_parent.glob("*.txt"))
-    assert not list(external_parent.glob("*.txt"))
+    _assert_swapped_parent_keeps_no_transcript(
+        integration_adapter, monkeypatch, tmp_path, envelope
+    )
 
     path = tmp_path / "transient.txt"
     path.write_text("safe", encoding="utf-8")
@@ -1263,26 +1301,26 @@ def test_windows_transient_permissions_use_bounded_icacls(monkeypatch, tmp_path)
     )
     monkeypatch.setattr(integration_adapter.os, "name", "nt")
     monkeypatch.setenv("USERNAME", "Test User")
-    monkeypatch.setattr(
-        integration_adapter.subprocess,
-        "run",
-        lambda args, **kwargs: calls.append((args, kwargs))
-        or SimpleNamespace(returncode=0),
-    )
+    def record_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(integration_adapter.subprocess, "run", record_run)
 
     integration_adapter._restrict_file_permissions(path)
 
-    assert calls[0][0] == [
-        "icacls",
-        str(path),
-        "/inheritance:r",
-        "/grant:r",
-        "Test User:(R,W)",
-    ]
-    assert calls[0][1]["timeout"] > 0
+    _assert_bounded_icacls(calls[0], path)
     if not file_link_available:
         pytest.skip("file symlink creation unavailable; regular collision verified")
     assert collision.is_symlink()
+
+
+def _assert_hook_contract(settings: dict, hook_name: str, timeouts: list, event_name: str) -> None:
+    hooks = settings["hooks"][hook_name][0]["hooks"]
+    commands = [hook["command"] for hook in hooks]
+    assert [hook["timeout"] for hook in hooks] == timeouts
+    assert all("scripts/integration_adapter.py" in command for command in commands)
+    assert all(f"--event {event_name}" in command for command in commands)
 
 
 def test_claude_hooks_route_through_shared_adapter_and_preserve_contract():
@@ -1300,12 +1338,8 @@ def test_claude_hooks_route_through_shared_adapter_and_preserve_contract():
         "PostToolUse": ([5], "post_tool_use"),
     }
     for hook_name, (timeouts, event_name) in expected.items():
-        hooks = settings["hooks"][hook_name][0]["hooks"]
-        assert [hook["timeout"] for hook in hooks] == timeouts
-        assert all("scripts/integration_adapter.py" in hook["command"] for hook in hooks)
-        assert all(f"--event {event_name}" in hook["command"] for hook in hooks)
-        if hook_name == "SessionStart":
-            assert "--delegate" not in hooks[0]["command"]
+        _assert_hook_contract(settings, hook_name, timeouts, event_name)
+    assert "--delegate" not in settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
 
 
 @pytest.mark.parametrize(

@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -2807,3 +2807,53 @@ def test_publication_rejects_expired_deadline_before_gate(monkeypatch):
             coordinator=Coordinator(),
             deadline=10.0,
         )
+
+
+def test_the_vector_path_boosts_a_project_match_by_one_and_a_half(monkeypatch, tmp_path):
+    """The lexical ladder doubles a project match; the vector path does not.
+
+    A refactor that shared one boost helper between them silently changed this,
+    and no test noticed.
+    """
+    import search_memory
+
+    rows = [
+        {"chunk_id": "a", "chunk_order": 0, "project": "demo"},
+        {"chunk_id": "b", "chunk_order": 1, "project": "other"},
+    ]
+
+    class _Rows(list):
+        def fetchall(self):
+            return list(self)
+
+    class _Connection:
+        row_factory = None
+
+        def execute(self, *_args, **_kwargs):
+            return _Rows(rows)
+
+    monkeypatch.setattr(search_memory, "_generation_filters", lambda **_kwargs: ("", ()))
+    monkeypatch.setattr(
+        search_memory,
+        "_generation_sqlite_guard",
+        lambda *_args, **_kwargs: nullcontext(),
+    )
+    monkeypatch.setattr(
+        search_memory, "_generation_result", lambda row, _gen: dict(row)
+    )
+
+    scored = search_memory._vector_scored_rows(
+        _Connection(),
+        [0.4, 0.4],
+        "gen-1",
+        scope="all",
+        since=None,
+        as_of=None,
+        project="demo",
+        deadline=None,
+        cancelled=None,
+    )
+
+    by_id = {item["chunk_id"]: item["score"] for item in scored}
+    assert by_id["a"] == round(0.4 * 1.5, 4)
+    assert by_id["b"] == round(0.4, 4)

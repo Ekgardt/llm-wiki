@@ -218,20 +218,22 @@ def read_transcript_tail(path: Path, max_chars: int = MAX_TRANSCRIPT_CHARS) -> s
     return data
 
 
-def summarize_with_llm(
-    transcript_excerpt: str, event: str, session_id: str = ""
-) -> str | None:
-    """Ask the LLM to classify + distill the transcript into a tier + body.
+CLASSIFICATION_SYSTEM_PROMPT = (
+    "You classify and distill Claude Code transcripts into a 3-tier "
+    "memory scale. Your default bias is toward FLUSH_OK — most "
+    "sessions are status chatter and should not pollute the daily "
+    "log. You only emit FLUSH_MAJOR when you can point to a concrete "
+    "decision or lesson in the transcript. No preamble, no apologies."
+)
 
-    Uses the unified llm_client (auto-detected backend — no separate API
-    key required on this machine). Returns None only after deferred work is
-    durably queued. Raises if neither immediate nor deferred persistence works.
+
+def build_classification_prompt(transcript_excerpt: str, event: str) -> str:
+    """The one prompt that decides a session's tier.
+
+    Extracted so the measurement stand in `benchmark/run_flush_classification.py`
+    scores the prompt the product actually sends, not a copy of it.
     """
-    if not transcript_excerpt.strip():
-        return ""
-    transcript_excerpt = redact_secrets(transcript_excerpt)
-
-    prompt = f"""You are classifying + distilling a Claude Code session transcript.
+    return f"""You are classifying + distilling a Claude Code session transcript.
 
 Event: {event}
 
@@ -293,13 +295,22 @@ non-blank line MUST be the tier token.
 --- END TRANSCRIPT EXCERPT ---
 """
 
-    system_prompt = (
-        "You classify and distill Claude Code transcripts into a 3-tier "
-        "memory scale. Your default bias is toward FLUSH_OK — most "
-        "sessions are status chatter and should not pollute the daily "
-        "log. You only emit FLUSH_MAJOR when you can point to a concrete "
-        "decision or lesson in the transcript. No preamble, no apologies."
-    )
+
+def summarize_with_llm(
+    transcript_excerpt: str, event: str, session_id: str = ""
+) -> str | None:
+    """Ask the LLM to classify + distill the transcript into a tier + body.
+
+    Uses the unified llm_client (auto-detected backend — no separate API
+    key required on this machine). Returns None only after deferred work is
+    durably queued. Raises if neither immediate nor deferred persistence works.
+    """
+    if not transcript_excerpt.strip():
+        return ""
+    transcript_excerpt = redact_secrets(transcript_excerpt)
+
+    prompt = build_classification_prompt(transcript_excerpt, event)
+    system_prompt = CLASSIFICATION_SYSTEM_PROMPT
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         from llm_client import call_llm

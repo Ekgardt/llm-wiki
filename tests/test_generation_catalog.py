@@ -2888,3 +2888,59 @@ def test_orphan_scan_stops_before_sorting_oversized_input(tmp_path, monkeypatch)
     with pytest.raises(ValueError, match="child count"):
         catalog.recover_orphans()
     assert yielded == 3
+
+
+def test_a_writer_without_a_deadline_waits_out_contention(tmp_path, monkeypatch):
+    """Two compare-and-swaps must not surface `database is locked`.
+
+    A full local run produced exactly that: the loser's five-second busy window
+    expired while the winner held the write lock, and the raw SQLite error
+    reached the caller instead of a decided race.
+    """
+    import generation_catalog
+
+    catalog = _catalog(tmp_path)
+    seen: list[int] = []
+    real_open = generation_catalog.open_operational_db
+
+    def record(path, *, busy_ms, **options):
+        seen.append(busy_ms)
+        return real_open(path, busy_ms=busy_ms, **options)
+
+    monkeypatch.setattr(generation_catalog, "open_operational_db", record)
+    catalog._connect(deadline=None).close()
+
+    assert seen == [generation_catalog.UNBOUNDED_BUSY_MS]
+    assert generation_catalog.UNBOUNDED_BUSY_MS > generation_catalog.BUSY_MS
+
+
+def test_a_reader_waits_out_an_exclusive_lock_instead_of_failing(tmp_path):
+    """A concurrent commit must delay a read, never turn it into an error."""
+    catalog = _catalog(tmp_path)
+    _publish(catalog, "gen-1")
+    catalog.register("gen-1")
+    catalog.activate("gen-1", expected_active=None)
+
+    locked = threading.Event()
+    released = threading.Event()
+
+    def hold_exclusive() -> None:
+        with closing(sqlite3.connect(str(catalog.catalog_path), isolation_level=None)) as holder:
+            holder.execute("BEGIN EXCLUSIVE")
+            locked.set()
+            time.sleep(0.5)
+            holder.execute("ROLLBACK")
+        released.set()
+
+    worker = threading.Thread(target=hold_exclusive)
+    worker.start()
+    try:
+        assert locked.wait(10)
+        assert not released.is_set()
+        active = catalog.get_active()
+    finally:
+        worker.join()
+
+    assert released.is_set()
+    assert active is not None
+    assert active["generation_id"] == "gen-1"
