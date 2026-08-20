@@ -1746,6 +1746,31 @@ def _task_source_link_statements(
         summary["task_source_links"] += 1
 
 
+def _source_failure_migrated(
+    database: sqlite3.Connection, expected: tuple[object, ...]
+) -> bool:
+    """Whether the migrated row carries exactly the values it was given."""
+    row = database.execute(
+        """SELECT error_code, producer, updated_at FROM source_failures
+           WHERE logical_path=? AND source_digest=?""",
+        expected[:2],
+    ).fetchone()
+    return tuple(row or ()) == tuple(expected[2:])
+
+
+def _source_failure_statement(values: tuple[object, ...]) -> MigrationStatement:
+    """The migration statement that carries one source failure row across."""
+    identity = sha256_bytes(canonical_json_bytes(list(values[:2])))[:16]
+    return MigrationStatement(
+        name=f"migrate_source_failure_{identity}",
+        sql="""INSERT OR IGNORE INTO source_failures(
+            logical_path, source_digest, error_code, producer, updated_at
+        ) VALUES (?, ?, ?, ?, ?)""",
+        parameters=values,
+        completed=partial(_source_failure_migrated, expected=values),
+    )
+
+
 def _source_failure_statements(
     source: sqlite3.Connection,
     tables: set[str],
@@ -1763,25 +1788,7 @@ def _source_failure_statements(
         "SELECT * FROM source_failures ORDER BY logical_path, source_digest"
     ):
         values = tuple(row[column] for column in _QUEUE_V2_FAILURE_COLUMNS)
-        identity = sha256_bytes(canonical_json_bytes(list(values[:2])))[:16]
-        statements.append(
-            MigrationStatement(
-                name=f"migrate_source_failure_{identity}",
-                sql="""INSERT OR IGNORE INTO source_failures(
-                    logical_path, source_digest, error_code, producer, updated_at
-                ) VALUES (?, ?, ?, ?, ?)""",
-                parameters=values,
-                completed=lambda database, expected=values: tuple(
-                    database.execute(
-                        """SELECT error_code, producer, updated_at FROM source_failures
-                           WHERE logical_path=? AND source_digest=?""",
-                        expected[:2],
-                    ).fetchone()
-                    or ()
-                )
-                == tuple(expected[2:]),
-            )
-        )
+        statements.append(_source_failure_statement(values))
         summary["source_failures"] += 1
 
 
@@ -1811,6 +1818,45 @@ def _queue_v2_migration_statements(
     return tuple(statements), summary
 
 
+# The tables a queue v2 migration fills, and the ones it must leave empty.
+_QUEUE_V2_MIGRATED_TABLES = (
+    "attempt_history",
+    "source_failures",
+    "source_fences",
+    "task_source_links",
+    "tasks",
+)
+_QUEUE_V3_ONLY_TABLES = (
+    "capture_intents",
+    "capture_task_link_resolutions",
+    "capture_task_link_seals",
+    "capture_task_links",
+    "corrupt_dispositions",
+    "corrupt_export_operations",
+    "corrupt_export_pages",
+    "corrupt_package_supersession_operations",
+    "corrupt_package_supersession_pages",
+    "corrupt_package_supersessions",
+    "corrupt_purge_operations",
+    "corrupt_purge_pages",
+    "queue_ownership",
+    "semantic_decisions",
+    "task_fence_epochs",
+    "task_fences",
+    "task_purge_authorizations",
+)
+
+
+def _tables_have_counts(
+    database: sqlite3.Connection, expected: Mapping[str, int]
+) -> bool:
+    """Whether every named table holds exactly the number of rows expected."""
+    return all(
+        database.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] == count
+        for table, count in expected.items()
+    )
+
+
 def _queue_v2_reconciliation_complete(
     database: sqlite3.Connection,
     statements: tuple[MigrationStatement, ...],
@@ -1818,38 +1864,10 @@ def _queue_v2_reconciliation_complete(
 ) -> bool:
     if not all(statement.completed(database) for statement in statements):
         return False
-    expected = {
-        "attempt_history": summary["attempt_history"],
-        "source_failures": summary["source_failures"],
-        "source_fences": summary["source_fences"],
-        "task_source_links": summary["task_source_links"],
-        "tasks": summary["tasks"],
-    }
-    return all(
-        database.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] == count
-        for table, count in expected.items()
-    ) and all(
-        database.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] == 0
-        for table in (
-            "capture_intents",
-            "capture_task_link_resolutions",
-            "capture_task_link_seals",
-            "capture_task_links",
-            "corrupt_dispositions",
-            "corrupt_export_operations",
-            "corrupt_export_pages",
-            "corrupt_package_supersession_operations",
-            "corrupt_package_supersession_pages",
-            "corrupt_package_supersessions",
-            "corrupt_purge_operations",
-            "corrupt_purge_pages",
-            "queue_ownership",
-            "semantic_decisions",
-            "task_fence_epochs",
-            "task_fences",
-            "task_purge_authorizations",
-        )
-    )
+    migrated = {table: summary[table] for table in _QUEUE_V2_MIGRATED_TABLES}
+    if not _tables_have_counts(database, migrated):
+        return False
+    return _tables_have_counts(database, dict.fromkeys(_QUEUE_V3_ONLY_TABLES, 0))
 
 
 def _queue_v3_row_counts(database: sqlite3.Connection) -> dict[str, int]:
@@ -2857,11 +2875,16 @@ def _same_enqueued_task(
     return existing_bytes == payload_bytes
 
 
+def _require_non_empty_string(value: object, message: str) -> None:
+    """Refuse anything that is not a non-empty string."""
+    if not isinstance(value, str) or not value:
+        raise ValueError(message)
+
+
 def _require_legacy_enqueue_arguments(
     kind: object, handler_version: object, priority: object, dedupe_key: object
 ) -> None:
-    if not isinstance(kind, str) or not kind:
-        raise ValueError("kind must be a non-empty string")
+    _require_non_empty_string(kind, "kind must be a non-empty string")
     _require_bounded_int(
         handler_version,
         1,
@@ -2873,8 +2896,7 @@ def _require_legacy_enqueue_arguments(
     )
     if dedupe_key is None:
         return
-    if not isinstance(dedupe_key, str) or not dedupe_key:
-        raise ValueError("dedupe_key must be a non-empty string")
+    _require_non_empty_string(dedupe_key, "dedupe_key must be a non-empty string")
 
 
 def _legacy_payload_bytes(row: sqlite3.Row) -> bytes:
@@ -3021,6 +3043,15 @@ def _semantic_seal_digest(
     )
 
 
+# The stored columns a semantic decision has to agree with, in argument order.
+_SEMANTIC_DECISION_FIELDS = (
+    "seal_digest",
+    "decision_path",
+    "decision_sha256",
+    "active_link_digest",
+)
+
+
 def _semantic_decision_matches(
     existing: sqlite3.Row,
     intent_id: str,
@@ -3034,13 +3065,8 @@ def _semantic_decision_matches(
         return False
     if existing["consumer_id"] != f"{intent_id}:{stage}":
         return False
-    if existing["seal_digest"] != seal_digest:
-        return False
-    if existing["decision_path"] != decision_path:
-        return False
-    if existing["decision_sha256"] != decision_sha256:
-        return False
-    return existing["active_link_digest"] == active_link_digest
+    expected = (seal_digest, decision_path, decision_sha256, active_link_digest)
+    return tuple(existing[field] for field in _SEMANTIC_DECISION_FIELDS) == expected
 
 
 def _purge_progress(
@@ -3278,7 +3304,7 @@ def _validate_worker_policy(
         ("lease_seconds", lease_seconds),
         ("heartbeat_seconds", heartbeat_seconds),
     ):
-        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        if not _is_positive_int(value):
             raise ValueError(f"{name} must be a positive integer")
     if heartbeat_seconds >= lease_seconds:
         raise ValueError("heartbeat_seconds must be less than lease_seconds")
@@ -4720,6 +4746,25 @@ def _require_leased_row(
     return row
 
 
+def _valid_source_failure_fields(error_code: object, producer: object) -> bool:
+    """Whether a source failure's own fields are inside contract."""
+    if not isinstance(error_code, str) or not 1 <= len(error_code) <= 200:
+        return False
+    if any(char in error_code for char in "\r\n"):
+        return False
+    return producer in {"compile", "queue"}
+
+
+def _require_dead_task(database: sqlite3.Connection, task_id: str) -> sqlite3.Row:
+    """The dead task row this redrive is allowed to copy."""
+    row = database.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if row is None:
+        raise KeyError(task_id)
+    if row["state"] != "dead":
+        raise QueueOperationError("redrive_requires_dead")
+    return row
+
+
 class MemoryQueue:
     """Durable priority queue with lease-token fencing and at-least-once delivery."""
 
@@ -5219,25 +5264,27 @@ class MemoryQueue:
             row = self._require_lease(connection, lease, now)
             digest = self._validated_result_digest(relative)
             if digest is None:
-                self._record_attempt(
-                    connection, row, now, "failed", "result_corrupt"
-                )
-                self._finish_lease(
-                    connection,
-                    lease.id,
-                    now,
-                    "dead",
-                    "result_corrupt",
-                    None,
-                    last_attempt_at=now,
-                )
-                return "corrupt"
+                return self._bury_corrupt_publication(connection, row, lease, now)
             connection.execute(
                 """UPDATE tasks SET result_reference=?, result_sha256=?,
                        result_operation_id=?, updated_at=? WHERE id=?""",
                 (relative, digest, operation_id, _timestamp(now), lease.id),
             )
             return "adopted"
+
+    def _bury_corrupt_publication(
+        self,
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+        lease: QueueLease,
+        now: datetime,
+    ) -> str:
+        """Kill the leased task whose published result no longer verifies."""
+        self._record_attempt(connection, row, now, "failed", "result_corrupt")
+        self._finish_lease(
+            connection, lease.id, now, "dead", "result_corrupt", None, last_attempt_at=now
+        )
+        return "corrupt"
 
     def heartbeat(
         self,
@@ -5582,6 +5629,29 @@ class MemoryQueue:
             ),
         )
 
+    def _settle_payload_failure(
+        self,
+        connection: sqlite3.Connection,
+        task_id: str,
+        now: datetime,
+        state: str,
+        error_code: str | None,
+    ) -> None:
+        """Record or clear the source failure this lease outcome implies."""
+        row = connection.execute(
+            "SELECT payload_json FROM tasks WHERE id=?", (task_id,)
+        ).fetchone()
+        if row is None:
+            return
+        payload_json = str(row["payload_json"])
+        if error_code is not None and state in {"ready", "dead"}:
+            self._record_payload_failure(
+                connection, payload_json, error_code, "queue", now
+            )
+            return
+        if state in {"succeeded", "cancelled"}:
+            self._clear_payload_failure(connection, payload_json)
+
     def _finish_lease(
         self,
         connection: sqlite3.Connection,
@@ -5593,17 +5663,7 @@ class MemoryQueue:
         *,
         last_attempt_at: datetime | None = None,
     ) -> None:
-        row = connection.execute(
-            "SELECT payload_json FROM tasks WHERE id=?", (task_id,)
-        ).fetchone()
-        if row is not None:
-            payload_json = str(row["payload_json"])
-            if error_code is not None and state in {"ready", "dead"}:
-                self._record_payload_failure(
-                    connection, payload_json, error_code, "queue", now
-                )
-            elif state in {"succeeded", "cancelled"}:
-                self._clear_payload_failure(connection, payload_json)
+        self._settle_payload_failure(connection, task_id, now, state, error_code)
         connection.execute(
             """UPDATE tasks SET state=?, updated_at=?, available_at=COALESCE(?, available_at),
                    last_attempt_at=COALESCE(?, last_attempt_at),
@@ -5785,12 +5845,7 @@ class MemoryQueue:
         producer: str,
     ) -> None:
         self._validate_failure_identity(logical_path, source_digest)
-        if (
-            not isinstance(error_code, str)
-            or not 1 <= len(error_code) <= 200
-            or any(char in error_code for char in "\r\n")
-            or producer not in {"compile", "queue"}
-        ):
+        if not _valid_source_failure_fields(error_code, producer):
             raise ValueError("source failure fields are invalid")
         with self._connect() as connection, begin_immediate(connection):
             self._record_source_failure_row(
@@ -6462,7 +6517,7 @@ def _record_acknowledged_attempt(
     )
 
 
-_LeaseAction = Callable[[sqlite3.Connection, sqlite3.Row, datetime], None]
+_LeaseAction = Callable[[sqlite3.Connection, sqlite3.Row, datetime], object]
 
 
 def _proved_lease_only(
@@ -10059,6 +10114,63 @@ class _QueueV3CandidateReader:
         except (OSError, PermissionError, ValueError):
             return None
 
+    def _bury_corrupt_result(
+        self, database: sqlite3.Connection, now: datetime, *, lease: QueueLease
+    ) -> None:
+        """Kill the task whose published result no longer verifies."""
+        database.execute(
+            """UPDATE tasks SET state='dead',error_code='result_corrupt',
+                   updated_at=?,lease_owner=NULL,lease_token=NULL,
+                   lease_expires_at=NULL,lease_heartbeat_at=NULL,
+                   attempt_started_at=NULL WHERE id=?""",
+            (_timestamp(now), lease.id),
+        )
+
+    def _rebind_adopted_result(
+        self,
+        database: sqlite3.Connection,
+        now: datetime,
+        *,
+        lease: QueueLease,
+        relative: str,
+        digest: str,
+        operation_id: str,
+    ) -> None:
+        """Point the leased task at the result it is adopting."""
+        changed = database.execute(
+            """UPDATE tasks SET result_reference=?,result_sha256=?,
+                   result_operation_id=?,updated_at=?
+               WHERE id=? AND lease_token=? AND state='leased'""",
+            (relative, digest, operation_id, _timestamp(now), lease.id, lease.token),
+        ).rowcount
+        if changed != 1:
+            raise LeaseFenceError(f"lease is stale or not owned: {lease.id}")
+
+    def _adopt_result_row(
+        self,
+        database: sqlite3.Connection,
+        row: sqlite3.Row,
+        now: datetime,
+        *,
+        lease: QueueLease,
+        relative: str,
+        operation_id: str,
+    ) -> str:
+        """Adopt the published result, or bury the task if it no longer verifies."""
+        digest = self._validated_result_digest(relative)
+        if digest is None:
+            self._bury_corrupt_result(database, now, lease=lease)
+            return "corrupt"
+        self._rebind_adopted_result(
+            database,
+            now,
+            lease=lease,
+            relative=relative,
+            digest=digest,
+            operation_id=operation_id,
+        )
+        return "adopted"
+
     def adopt_published_result(
         self, lease: QueueLease, *, operation_id: str
     ) -> str | None:
@@ -10068,57 +10180,27 @@ class _QueueV3CandidateReader:
         relative = f"run/queue-results/{result_name}"
         if not (self.state_root / relative).exists():
             return None
-        now = _utc_now()
-        mismatch = False
-        outcome: str | None = None
-        with closing(self._connect()) as database, begin_immediate(database):
-            row = self._require_lease_row(database, lease, now)
-            validation = self._require_valid_task_payload(
-                database, row, now=now, parse=True
-            )
-            mismatch = validation is None
-            if not mismatch:
-                digest = self._validated_result_digest(relative)
-                if digest is None:
-                    outcome = "corrupt"
-                    database.execute(
-                        """UPDATE tasks SET state='dead',error_code='result_corrupt',
-                               updated_at=?,lease_owner=NULL,lease_token=NULL,
-                               lease_expires_at=NULL,lease_heartbeat_at=NULL,
-                               attempt_started_at=NULL WHERE id=?""",
-                        (_timestamp(now), lease.id),
-                    )
-                else:
-                    changed = database.execute(
-                        """UPDATE tasks SET result_reference=?,result_sha256=?,
-                               result_operation_id=?,updated_at=?
-                           WHERE id=? AND lease_token=? AND state='leased'""",
-                        (
-                            relative,
-                            digest,
-                            operation_id,
-                            _timestamp(now),
-                            lease.id,
-                            lease.token,
-                        ),
-                    ).rowcount
-                    if changed != 1:
-                        raise LeaseFenceError(
-                            f"lease is stale or not owned: {lease.id}"
-                        )
-                    outcome = "adopted"
-        if mismatch:
-            self._raise_payload_mismatch()
-        return outcome
+        outcome = self._with_verified_lease(
+            lease,
+            partial(
+                self._adopt_result_row,
+                lease=lease,
+                relative=relative,
+                operation_id=operation_id,
+            ),
+        )
+        return str(outcome) if outcome is not None else None
 
-    def _with_verified_lease(self, lease: QueueLease, action: _LeaseAction) -> None:
+    def _with_verified_lease(self, lease: QueueLease, action: _LeaseAction) -> object:
         """Run `action` on the leased row, once the lease and payload hold.
 
         A payload mismatch demotes the task inside the transaction and must be
         reported to the caller afterwards, so the action is simply skipped and
-        the refusal raised once the transaction has closed.
+        the refusal raised once the transaction has closed. Whatever the action
+        answers is passed back.
         """
         now = _utc_now()
+        result: object = None
         with closing(self._connect()) as database, begin_immediate(database):
             row = self._require_lease_row(database, lease, now)
             verified = (
@@ -10126,9 +10208,10 @@ class _QueueV3CandidateReader:
                 is not None
             )
             if verified:
-                action(database, row, now)
+                result = action(database, row, now)
         if not verified:
             self._raise_payload_mismatch()
+        return result
 
     def _store_result_bytes(self, operation_id: str, result: bytes) -> tuple[str, str]:
         """Write the result file; answer its vault-relative path and digest."""
@@ -10302,42 +10385,56 @@ class _QueueV3CandidateReader:
             self._raise_payload_mismatch()
         return changed
 
+    def _insert_redriven_task(
+        self,
+        database: sqlite3.Connection,
+        row: sqlite3.Row,
+        now: datetime,
+        *,
+        replacement: str,
+        task_id: str,
+        validation: PayloadValidation,
+    ) -> None:
+        """Copy the dead task into a fresh ready one that points back at it."""
+        inserted = database.execute(
+            """INSERT INTO tasks(
+                   id,kind,handler_version,payload_blob,input_hash,state,
+                   priority,created_at,updated_at,available_at,redrive_of
+               ) VALUES (?,?,?,?,?,'ready',?,?,?,?,?)""",
+            (
+                replacement,
+                row["kind"],
+                row["handler_version"],
+                validation.raw,
+                validation.input_hash,
+                row["priority"],
+                _timestamp(now),
+                _timestamp(now),
+                _timestamp(now),
+                task_id,
+            ),
+        ).rowcount
+        if inserted != 1:
+            raise QueueOperationError("redrive_failed")
+
     def redrive(self, task_id: str) -> str:
         now = _utc_now()
-        mismatch = False
         replacement = uuid.uuid4().hex
         with closing(self._connect()) as database, begin_immediate(database):
-            row = database.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-            if row is None:
-                raise KeyError(task_id)
-            if row["state"] != "dead":
-                raise QueueOperationError("redrive_requires_dead")
+            row = _require_dead_task(database, task_id)
             validation = self._require_valid_task_payload(
                 database, row, now=now, parse=True
             )
-            mismatch = validation is None
-            if not mismatch:
-                inserted = database.execute(
-                    """INSERT INTO tasks(
-                           id,kind,handler_version,payload_blob,input_hash,state,
-                           priority,created_at,updated_at,available_at,redrive_of
-                       ) VALUES (?,?,?,?,?,'ready',?,?,?,?,?)""",
-                    (
-                        replacement,
-                        row["kind"],
-                        row["handler_version"],
-                        validation.raw,
-                        validation.input_hash,
-                        row["priority"],
-                        _timestamp(now),
-                        _timestamp(now),
-                        _timestamp(now),
-                        task_id,
-                    ),
-                ).rowcount
-                if inserted != 1:
-                    raise QueueOperationError("redrive_failed")
-        if mismatch:
+            if validation is not None:
+                self._insert_redriven_task(
+                    database,
+                    row,
+                    now,
+                    replacement=replacement,
+                    task_id=task_id,
+                    validation=validation,
+                )
+        if validation is None:
             self._raise_payload_mismatch()
         return replacement
 
