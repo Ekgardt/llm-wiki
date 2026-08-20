@@ -962,6 +962,242 @@ def _git_state_matches_revision(
     return True
 
 
+# The files whose contents change how git reads a tree.
+_SEMANTICS_NAMES = frozenset({".gitattributes", ".gitignore"})
+
+
+@dataclass
+class _RelevantScan:
+    """The bookkeeping one relevant-files walk carries across directories."""
+
+    root: Path
+    resolved_root: Path
+    directory_snapshots: dict[Path, _DirectorySnapshot]
+    entry_snapshots: dict[Path, _StrongIdentity] | None
+    prepared_files: dict[str, _FileSnapshot] | None
+    prepared_paths: set[str] | None
+    private_inventory_safe: list[bool] | None
+    relevant_paths: set[str] | None
+    deadline: float | None
+    cancelled: Callable[[], bool] | None
+    examined: int = 0
+    relevant_examined: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _ScannedEntry:
+    """One directory entry, with what the walk decided about it."""
+
+    entry: os.DirEntry
+    path: Path
+    relative: str
+    info: os.stat_result
+    unsafe: bool
+    relevant: bool
+
+
+def _directory_snapshot_for(scan: _RelevantScan, current: Path) -> _DirectorySnapshot:
+    """The snapshot for this directory, taken once and then remembered."""
+    snapshot = scan.directory_snapshots.get(current)
+    if snapshot is None:
+        snapshot = _directory_snapshot(
+            scan.root, current, resolved_root=scan.resolved_root
+        )
+        scan.directory_snapshots[current] = snapshot
+    snapshot.resolved.relative_to(scan.resolved_root)
+    return snapshot
+
+
+def _refuse_unsafe_entry(
+    entry: os.DirEntry, info: os.stat_result, relevant_name: bool
+) -> None:
+    """A link or reparse point where it matters stops the walk outright."""
+    try:
+        linked_directory = entry.is_dir(follow_symlinks=True)
+    except OSError:
+        linked_directory = False
+    if relevant_name or linked_directory or stat.S_ISDIR(info.st_mode):
+        raise PermissionError(
+            "workspace revision relevant path is a symlink or reparse directory"
+        )
+
+
+def _count_scanned_entry(scan: _RelevantScan, *, relevant: bool) -> None:
+    """Count this entry, and refuse a tree bigger than either ceiling."""
+    scan.examined += 1
+    if relevant:
+        scan.relevant_examined += 1
+    if scan.relevant_examined > MAX_REVISION_FILES:
+        raise ValueError("workspace revision exceeds the file-count ceiling")
+    if scan.examined > MAX_REVISION_FILES:
+        raise ValueError("workspace revision exceeds the examined-entry ceiling")
+
+
+def _scanned_entry(scan: _RelevantScan, entry: os.DirEntry) -> _ScannedEntry:
+    """Classify one directory entry, counting it against both ceilings."""
+    info = entry.stat(follow_symlinks=False)
+    path = Path(entry.path)
+    relative = path.relative_to(scan.root).as_posix()
+    unsafe = entry.is_symlink() or _is_reparse(info)
+    relevant_name = _is_relevant_path(relative)
+    if unsafe:
+        _refuse_unsafe_entry(entry, info, relevant_name)
+    relevant = not unsafe and stat.S_ISREG(info.st_mode) and relevant_name
+    _count_scanned_entry(scan, relevant=relevant)
+    return _ScannedEntry(entry, path, relative, info, unsafe, relevant)
+
+
+def _scanned_directory_entries(
+    scan: _RelevantScan, current: Path
+) -> list[_ScannedEntry]:
+    """Every entry of this directory, classified and counted."""
+    items: list[_ScannedEntry] = []
+    with os.scandir(current) as iterator:
+        for entry in iterator:
+            _check_stop(scan.deadline, scan.cancelled)
+            items.append(_scanned_entry(scan, entry))
+    return items
+
+
+def _prepared_parent_snapshots(
+    scan: _RelevantScan, current: Path
+) -> tuple[_DirectorySnapshot, ...]:
+    """Every snapshot from this directory up to the root, innermost first."""
+    parents: list[_DirectorySnapshot] = []
+    parent = current
+    while True:
+        snapshot = scan.directory_snapshots.get(parent)
+        if snapshot is None:
+            raise PermissionError("workspace revision parent snapshot is unavailable")
+        parents.append(snapshot)
+        if parent == scan.root:
+            return tuple(parents)
+        parent = parent.parent
+
+
+def _should_prepare(scan: _RelevantScan, item: _ScannedEntry) -> bool:
+    """Whether the private index has any reason to stage this file."""
+    if item.relevant or PurePosixPath(item.relative).name in _SEMANTICS_NAMES:
+        return True
+    return scan.prepared_paths is not None and item.relative in scan.prepared_paths
+
+
+def _prepared_file_wanted(scan: _RelevantScan, item: _ScannedEntry) -> bool:
+    """Whether this file is staged, the private index's text rules included."""
+    if not _should_prepare(scan, item):
+        return False
+    return item.relevant or _private_path_text_safe(item.relative)
+
+
+def _stage_prepared_file(
+    scan: _RelevantScan,
+    item: _ScannedEntry,
+    current_snapshot: _DirectorySnapshot,
+    prepared_parents: tuple[_DirectorySnapshot, ...],
+) -> None:
+    """Record this file under its normalized path, refusing a collision."""
+    assert scan.prepared_files is not None
+    normalized = _normalized_path(item.relative)
+    if normalized in scan.prepared_files:
+        raise ValueError(
+            "workspace revision contains a Unicode normalization collision"
+        )
+    scan.prepared_files[normalized] = _FileSnapshot(
+        item.path,
+        current_snapshot.resolved / item.entry.name,
+        _identity(item.info),
+        prepared_parents,
+    )
+
+
+def _mark_inventory_unsafe(scan: _RelevantScan, item: _ScannedEntry) -> None:
+    """A file the private index cannot name makes its inventory untrustworthy."""
+    if scan.private_inventory_safe is None:
+        return
+    if _private_path_text_safe(item.relative):
+        return
+    scan.private_inventory_safe[0] = False
+
+
+def _prepare_file(
+    scan: _RelevantScan,
+    item: _ScannedEntry,
+    current_snapshot: _DirectorySnapshot,
+    prepared_parents: tuple[_DirectorySnapshot, ...] | None,
+) -> None:
+    """Stage one file for the private index, or mark its inventory unsafe."""
+    if scan.prepared_files is None or not stat.S_ISREG(item.info.st_mode):
+        return
+    if prepared_parents is None:
+        raise AssertionError("workspace revision parent snapshots are unavailable")
+    if _prepared_file_wanted(scan, item):
+        _stage_prepared_file(scan, item, current_snapshot, prepared_parents)
+        return
+    _mark_inventory_unsafe(scan, item)
+
+
+def _collect_subdirectory(item: _ScannedEntry, directories: list[Path]) -> None:
+    """A subdirectory joins the walk unless it is the git marker itself."""
+    if item.entry.name != ".git":
+        directories.append(item.path)
+
+
+def _record_entry_identity(scan: _RelevantScan, item: _ScannedEntry) -> None:
+    """Remember what this entry looked like, if the pass tracks identities."""
+    if scan.entry_snapshots is not None:
+        scan.entry_snapshots[item.path] = _strong_identity(item.info)
+
+
+def _record_relevant_path(scan: _RelevantScan, item: _ScannedEntry) -> None:
+    """Remember a relevant file's normalized path, if the pass wants it."""
+    if scan.relevant_paths is not None:
+        scan.relevant_paths.add(_normalized_path(item.relative))
+
+
+def _visit_entry(
+    scan: _RelevantScan,
+    item: _ScannedEntry,
+    current_snapshot: _DirectorySnapshot,
+    prepared_parents: tuple[_DirectorySnapshot, ...] | None,
+    directories: list[Path],
+) -> Iterator[Path]:
+    """Handle one classified entry, yielding it when it is a relevant file."""
+    if item.unsafe:
+        return
+    if stat.S_ISDIR(item.info.st_mode):
+        _collect_subdirectory(item, directories)
+        return
+    _record_entry_identity(scan, item)
+    _prepare_file(scan, item, current_snapshot, prepared_parents)
+    if item.relevant:
+        _record_relevant_path(scan, item)
+        yield item.path
+
+
+def _entry_sort_key(item: _ScannedEntry) -> str:
+    """Directory entries are walked in normalized-name order."""
+    return unicodedata.normalize("NFC", item.entry.name)
+
+
+def _scan_directory(
+    scan: _RelevantScan, current: Path, directories: list[Path]
+) -> Iterator[Path]:
+    """Yield the relevant files in this directory; collect its subdirectories."""
+    current_snapshot = _directory_snapshot_for(scan, current)
+    items = _scanned_directory_entries(scan, current)
+    _validate_directory_snapshot(scan.root, current_snapshot)
+    prepared_parents = (
+        _prepared_parent_snapshots(scan, current)
+        if scan.prepared_files is not None
+        else None
+    )
+    for item in sorted(items, key=_entry_sort_key):
+        _check_stop(scan.deadline, scan.cancelled)
+        yield from _visit_entry(
+            scan, item, current_snapshot, prepared_parents, directories
+        )
+
+
 def _relevant_files(
     root: Path,
     *,
@@ -975,117 +1211,25 @@ def _relevant_files(
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
 ) -> Iterator[Path]:
-    examined = 0
-    relevant_examined = 0
+    """Every relevant file under the root, in a deterministic walk order."""
+    scan = _RelevantScan(
+        root=root,
+        resolved_root=resolved_root,
+        directory_snapshots=directory_snapshots,
+        entry_snapshots=entry_snapshots,
+        prepared_files=prepared_files,
+        prepared_paths=prepared_paths,
+        private_inventory_safe=private_inventory_safe,
+        relevant_paths=relevant_paths,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
     stack = [root]
     while stack:
         _check_stop(deadline, cancelled)
-        current = stack.pop()
-        current_snapshot = directory_snapshots.get(current)
-        if current_snapshot is None:
-            current_snapshot = _directory_snapshot(
-                root,
-                current,
-                resolved_root=resolved_root,
-            )
-            directory_snapshots[current] = current_snapshot
-        current_snapshot.resolved.relative_to(resolved_root)
-        entries = []
-        with os.scandir(current) as iterator:
-            for entry in iterator:
-                _check_stop(deadline, cancelled)
-                examined += 1
-                info = entry.stat(follow_symlinks=False)
-                path = Path(entry.path)
-                relative = path.relative_to(root).as_posix()
-                unsafe = entry.is_symlink() or _is_reparse(info)
-                relevant_name = _is_relevant_path(relative)
-                linked_directory = False
-                if unsafe:
-                    try:
-                        linked_directory = entry.is_dir(follow_symlinks=True)
-                    except OSError:
-                        linked_directory = False
-                    if relevant_name or linked_directory or stat.S_ISDIR(info.st_mode):
-                        raise PermissionError(
-                            "workspace revision relevant path is a symlink or reparse directory"
-                        )
-                relevant = (
-                    not unsafe
-                    and stat.S_ISREG(info.st_mode)
-                    and relevant_name
-                )
-                if relevant:
-                    relevant_examined += 1
-                    if relevant_examined > MAX_REVISION_FILES:
-                        raise ValueError("workspace revision exceeds the file-count ceiling")
-                if examined > MAX_REVISION_FILES:
-                    raise ValueError("workspace revision exceeds the examined-entry ceiling")
-                entries.append((entry, path, relative, info, unsafe, relevant))
-        _validate_directory_snapshot(root, current_snapshot)
-        directories = []
-        prepared_parents = None
-        if prepared_files is not None:
-            parents = []
-            parent = current
-            while True:
-                parent_snapshot = directory_snapshots.get(parent)
-                if parent_snapshot is None:
-                    raise PermissionError("workspace revision parent snapshot is unavailable")
-                parents.append(parent_snapshot)
-                if parent == root:
-                    break
-                parent = parent.parent
-            prepared_parents = tuple(parents)
-        for entry, path, relative, info, unsafe, relevant in sorted(
-            entries, key=lambda item: unicodedata.normalize("NFC", item[0].name)
-        ):
-            _check_stop(deadline, cancelled)
-            if unsafe:
-                continue
-            if stat.S_ISDIR(info.st_mode):
-                if entry.name != ".git":
-                    directories.append(path)
-                continue
-            if entry_snapshots is not None:
-                entry_snapshots[path] = _strong_identity(info)
-            if prepared_files is not None and stat.S_ISREG(info.st_mode):
-                if prepared_parents is None:
-                    raise AssertionError("workspace revision parent snapshots are unavailable")
-                semantics_name = PurePosixPath(relative).name in {
-                    ".gitattributes",
-                    ".gitignore",
-                }
-                should_prepare = (
-                    relevant
-                    or semantics_name
-                    or (prepared_paths is not None and relative in prepared_paths)
-                )
-                if should_prepare and (
-                    relevant or _private_path_text_safe(relative)
-                ):
-                    normalized = _normalized_path(relative)
-                    if normalized in prepared_files:
-                        raise ValueError(
-                            "workspace revision contains a Unicode normalization collision"
-                        )
-                    prepared_files[normalized] = _FileSnapshot(
-                        path,
-                        current_snapshot.resolved / entry.name,
-                        _identity(info),
-                        prepared_parents,
-                    )
-                elif (
-                    private_inventory_safe is not None
-                    and not _private_path_text_safe(relative)
-                ):
-                    private_inventory_safe[0] = False
-            if relevant:
-                if relevant_paths is not None:
-                    relevant_paths.add(_normalized_path(relative))
-                yield path
+        directories: list[Path] = []
+        yield from _scan_directory(scan, stack.pop(), directories)
         stack.extend(reversed(directories))
-
 
 def _hash_file_for_verification(
     path: Path,
