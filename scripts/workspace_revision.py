@@ -237,22 +237,30 @@ _INVENTORY_HINT_LOCK = threading.Lock()
 _INVENTORY_HINT: _RevisionInventoryHint | None = None
 
 
-def _publish_inventory_hint(hint: _RevisionInventoryHint) -> None:
-    global _INVENTORY_HINT
-
-    paths = (
+def _inventory_hint_paths(hint: _RevisionInventoryHint) -> tuple[Path, ...]:
+    """Every path this hint would keep alive."""
+    return (
         *(snapshot.path for snapshot in hint.directory_snapshots),
         *(path for path, _identity_value in hint.entry_snapshots),
     )
-    retained_path_bytes = sum(len(os.fsencode(path)) for path in paths)
+
+
+def _inventory_hint_within_bounds(hint: _RevisionInventoryHint) -> bool:
+    """Whether this hint is small enough to be worth holding in memory."""
+    paths = _inventory_hint_paths(hint)
+    if len(paths) > _MAX_INVENTORY_HINT_ENTRIES:
+        return False
+    retained = sum(len(os.fsencode(path)) for path in paths)
+    return retained <= _MAX_INVENTORY_HINT_PATH_BYTES
+
+
+def _publish_inventory_hint(hint: _RevisionInventoryHint) -> None:
+    """Keep this hint for the next verification, unless it is too big to hold."""
+    global _INVENTORY_HINT
+
+    keep = hint if _inventory_hint_within_bounds(hint) else None
     with _INVENTORY_HINT_LOCK:
-        if (
-            len(paths) > _MAX_INVENTORY_HINT_ENTRIES
-            or retained_path_bytes > _MAX_INVENTORY_HINT_PATH_BYTES
-        ):
-            _INVENTORY_HINT = None
-        else:
-            _INVENTORY_HINT = hint
+        _INVENTORY_HINT = keep
 
 
 def _matching_inventory_hint(
@@ -329,6 +337,23 @@ def _fresh_hint_identities(
     return fresh
 
 
+def _apply_hint_collections(
+    hint: _RevisionInventoryHint,
+    *,
+    fresh: list[tuple[Path, _StrongIdentity]],
+    entry_snapshots: dict[Path, _StrongIdentity] | None,
+    prepared_files: dict[str, _FileSnapshot] | None,
+    private_inventory_safe: list[bool] | None,
+) -> None:
+    """Copy the hint's optional collections into whichever the caller wants."""
+    if entry_snapshots is not None:
+        entry_snapshots.update(fresh)
+    if prepared_files is not None:
+        prepared_files.update(hint.prepared_files)
+    if private_inventory_safe is not None:
+        private_inventory_safe[0] = hint.private_inventory_safe
+
+
 def _restore_inventory_hint(
     hint: _RevisionInventoryHint,
     *,
@@ -354,12 +379,13 @@ def _restore_inventory_hint(
     directory_snapshots.update(
         (snapshot.path, snapshot) for snapshot in hint.directory_snapshots
     )
-    if entry_snapshots is not None:
-        entry_snapshots.update(fresh)
-    if prepared_files is not None:
-        prepared_files.update(hint.prepared_files)
-    if private_inventory_safe is not None:
-        private_inventory_safe[0] = hint.private_inventory_safe
+    _apply_hint_collections(
+        hint,
+        fresh=fresh,
+        entry_snapshots=entry_snapshots,
+        prepared_files=prepared_files,
+        private_inventory_safe=private_inventory_safe,
+    )
     current_relevant.update(path for path, _file_path in hint.relevant_files)
     current_relevant_paths.update(hint.relevant_files)
     return True
@@ -413,16 +439,21 @@ def _checked_digest(
     return digest.digest()
 
 
+def _acceptable_relative_path(normalized: str, path: PurePosixPath) -> bool:
+    """Whether this text is a relative POSIX path with no odd components."""
+    if not normalized or "\\" in normalized or path.is_absolute():
+        return False
+    return not any(part in {"", ".", ".."} for part in path.parts)
+
+
 def _normalized_path(raw: str) -> str:
+    """The path's canonical relative POSIX form, or a refusal."""
     normalized = unicodedata.normalize("NFC", raw)
     path = PurePosixPath(normalized)
-    if (
-        not normalized
-        or "\\" in normalized
-        or path.is_absolute()
-        or any(part in {"", ".", ".."} for part in path.parts)
-    ):
-        raise ValueError("workspace revision path must be normalized relative POSIX text")
+    if not _acceptable_relative_path(normalized, path):
+        raise ValueError(
+            "workspace revision path must be normalized relative POSIX text"
+        )
     return path.as_posix()
 
 
@@ -476,18 +507,69 @@ def _directory_snapshot(
     return _DirectorySnapshot(path, resolved, _identity(info), info.st_ctime_ns)
 
 
+def _directory_snapshot_matches(
+    info: os.stat_result, snapshot: _DirectorySnapshot
+) -> bool:
+    """Whether this directory is still exactly the one that was snapshotted."""
+    if _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
+        return False
+    return (
+        _identity(info) == snapshot.identity
+        and info.st_ctime_ns == snapshot.change_time_ns
+    )
+
+
 def _validate_directory_snapshot(root: Path, snapshot: _DirectorySnapshot) -> None:
+    """A directory that is no longer the snapshotted one invalidates the pass."""
     try:
         info = snapshot.path.lstat()
     except OSError as exc:
         raise PermissionError("workspace revision directory identity changed") from exc
-    if (
-        _is_reparse(info)
-        or not stat.S_ISDIR(info.st_mode)
-        or _identity(info) != snapshot.identity
-        or info.st_ctime_ns != snapshot.change_time_ns
-    ):
+    if not _directory_snapshot_matches(info, snapshot):
         raise PermissionError("workspace revision directory identity changed")
+
+
+def _file_parent_snapshots(
+    root: Path,
+    path: Path,
+    resolved_root: Path,
+    directory_snapshots: dict[Path, _DirectorySnapshot],
+) -> tuple[_DirectorySnapshot, ...]:
+    """Every directory snapshot from the file's own parent up to the root."""
+    parents: list[_DirectorySnapshot] = []
+    for parent in path.parents:
+        snapshot = directory_snapshots.get(parent)
+        if snapshot is None:
+            snapshot = _directory_snapshot(root, parent, resolved_root=resolved_root)
+            directory_snapshots[parent] = snapshot
+        parents.append(snapshot)
+        if parent == root:
+            return tuple(parents)
+    raise PermissionError("workspace revision source is outside checkout")
+
+
+def _contained_regular_file(
+    path: Path, resolved_root: Path
+) -> tuple[os.stat_result, Path]:
+    """The file's metadata and resolved path, refusing anything else.
+
+    A refusal raised inside the block is itself an `OSError`, so it is
+    reported with the containment message; that was true before this split
+    and is kept deliberately.
+    """
+    try:
+        info = path.lstat()
+        if _is_reparse(info) or not stat.S_ISREG(info.st_mode):
+            raise PermissionError(
+                "workspace revision source must be a regular non-symlink file"
+            )
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(resolved_root)
+    except (OSError, ValueError) as exc:
+        raise PermissionError(
+            "workspace revision source escapes checkout or changed"
+        ) from exc
+    return info, resolved
 
 
 def _file_snapshot(
@@ -498,31 +580,10 @@ def _file_snapshot(
     directory_snapshots: dict[Path, _DirectorySnapshot] | None = None,
 ) -> _FileSnapshot:
     resolved_root = resolved_root or root.resolve(strict=True)
-    directory_snapshots = directory_snapshots if directory_snapshots is not None else {}
-    parents = []
-    for parent in path.parents:
-        parent_snapshot = directory_snapshots.get(parent)
-        if parent_snapshot is None:
-            parent_snapshot = _directory_snapshot(
-                root,
-                parent,
-                resolved_root=resolved_root,
-            )
-            directory_snapshots[parent] = parent_snapshot
-        parents.append(parent_snapshot)
-        if parent == root:
-            break
-    else:
-        raise PermissionError("workspace revision source is outside checkout")
-    try:
-        info = path.lstat()
-        if _is_reparse(info) or not stat.S_ISREG(info.st_mode):
-            raise PermissionError("workspace revision source must be a regular non-symlink file")
-        resolved = path.resolve(strict=True)
-        resolved.relative_to(resolved_root)
-    except (OSError, ValueError) as exc:
-        raise PermissionError("workspace revision source escapes checkout or changed") from exc
-    return _FileSnapshot(path, resolved, _identity(info), tuple(parents))
+    snapshots = directory_snapshots if directory_snapshots is not None else {}
+    parents = _file_parent_snapshots(root, path, resolved_root, snapshots)
+    info, resolved = _contained_regular_file(path, resolved_root)
+    return _FileSnapshot(path, resolved, _identity(info), parents)
 
 
 def _validate_file_identity(snapshot: _FileSnapshot) -> os.stat_result:
@@ -698,13 +759,21 @@ class _GitRun:
         except OSError:
             pass
 
-    def output(self) -> bytes:
-        """The bytes read, once the reader thread has been joined."""
+    def _close_stdout_on_stop(self) -> None:
+        """A stopped run closes the pipe so the reader cannot block on it."""
         if self.stop_reason and self.process.stdout is not None:
             self.process.stdout.close()
-        self._reader.join(timeout=_PROCESS_CLEANUP_SECONDS)
+
+    def _reraise_read_error(self) -> None:
+        """A read failure belongs to the caller, unless the run was stopped."""
         if self._errors and not self.stop_reason:
             raise self._errors[0]
+
+    def output(self) -> bytes:
+        """The bytes read, once the reader thread has been joined."""
+        self._close_stdout_on_stop()
+        self._reader.join(timeout=_PROCESS_CLEANUP_SECONDS)
+        self._reraise_read_error()
         return self._output[0] if self._output else b""
 
     def reap_holding_fds(self) -> None:
@@ -834,16 +903,25 @@ def _git_status(
     )
 
 
+def _git_state_head_identity(output: bytes) -> bytes:
+    """The single HEAD identity git's status reported, or a refusal."""
+    prefix = b"# branch.oid "
+    identities = [
+        record[len(prefix) :]
+        for record in output.split(b"\0")
+        if record.startswith(prefix)
+    ]
+    if len(identities) != 1:
+        raise ValueError("Git state returned an invalid HEAD identity")
+    return identities[0]
+
+
 def _parse_git_state_output(
     output: bytes,
     *,
     allow_missing_head: bool,
 ) -> tuple[str | None, bytes]:
-    prefix = b"# branch.oid "
-    identities = [record[len(prefix) :] for record in output.split(b"\0") if record.startswith(prefix)]
-    if len(identities) != 1:
-        raise ValueError("Git state returned an invalid HEAD identity")
-    identity = identities[0]
+    identity = _git_state_head_identity(output)
     if identity == b"(initial)":
         if allow_missing_head:
             return None, output
@@ -992,20 +1070,27 @@ def _untracked_status_entry(record: bytes) -> list[tuple[str, str]]:
     return [(_decoded_status_path(record[2:]), "untracked")]
 
 
+# The status record markers whose entries come from that one record alone.
+_SINGLE_RECORD_STATUS_READERS = MappingProxyType(
+    {
+        b"1": _ordinary_status_entry,
+        b"u": _unmerged_status_entry,
+        b"?": _untracked_status_entry,
+    }
+)
+
+
 def _status_entries(
     records: list[bytes], index: int
 ) -> tuple[list[tuple[str, str]], int]:
     """The entries this record describes, and the index of the next record."""
     record = records[index]
     marker = record[:1]
-    if marker == b"1":
-        return _ordinary_status_entry(record), index + 1
     if marker == b"2":
         return _renamed_status_entries(record, records[index + 1]), index + 2
-    if marker == b"u":
-        return _unmerged_status_entry(record), index + 1
-    if marker == b"?":
-        return _untracked_status_entry(record), index + 1
+    reader = _SINGLE_RECORD_STATUS_READERS.get(marker)
+    if reader is not None:
+        return reader(record), index + 1
     if marker not in {b"#", b"!"}:
         raise ValueError("unknown Git status record")
     return [], index + 1
@@ -1053,6 +1138,13 @@ def _entry_status_agrees(entry: RevisionEntry, status: str | None) -> bool:
     return True
 
 
+def _status_paths_all_expected(
+    current_status: Mapping[str, str], entries: Mapping[str, RevisionEntry]
+) -> bool:
+    """Whether every path git reports as changed is one the revision recorded."""
+    return all(path in entries for path in current_status)
+
+
 def _git_state_matches_revision(
     current_head: str | None,
     git_state: bytes,
@@ -1064,7 +1156,7 @@ def _git_state_matches_revision(
     current_status = _normalized_status(git_state)
     if current_status is None:
         return False
-    if any(path not in entries for path in current_status):
+    if not _status_paths_all_expected(current_status, entries):
         return False
     return all(
         _entry_status_agrees(entry, current_status.get(path))
