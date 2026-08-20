@@ -424,40 +424,56 @@ class _OwnerDirectory:
             "LSP owner directories are unsupported on this platform"
         )
 
-    def create(self, deadline: float) -> None:
-        if os.name == "posix":
-            os.mkdir(self.owner_root.name, 0o700, dir_fd=self.parent_handle)
-            owner = os.open(
-                self.owner_root.name,
-                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
-                dir_fd=self.parent_handle,
-            )
-            self.owner_handle = owner
-            self.owner_identity = _identity_from_stat(os.fstat(owner))
-            _require_directory_identity(self.owner_identity, "LSP owner root")
-            os.fchmod(owner, 0o700)
-            _verify_descriptor(owner, self.owner_identity, mode=0o700, directory=True)
-            self.owner_permissions_verified = True
-            os.mkdir("cancellation", 0o700, dir_fd=owner)
-            cancellation = os.open(
-                "cancellation",
-                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
-                dir_fd=owner,
-            )
-            try:
-                cancellation_identity = _identity_from_stat(os.fstat(cancellation))
-                _require_directory_identity(cancellation_identity, "LSP cancellation root")
-                os.fchmod(cancellation, 0o700)
-                _verify_descriptor(
-                    cancellation, cancellation_identity, mode=0o700, directory=True
-                )
-                os.fsync(cancellation)
-            finally:
-                os.close(cancellation)
-            os.fsync(owner)
-            os.fsync(self.parent_handle)
-            return
+    def _create_owner_root_posix(self) -> int:
+        """Create and verify the owner root, returning its descriptor."""
+        os.mkdir(self.owner_root.name, 0o700, dir_fd=self.parent_handle)
+        owner = os.open(
+            self.owner_root.name,
+            os.O_RDONLY
+            | os.O_DIRECTORY
+            | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=self.parent_handle,
+        )
+        self.owner_handle = owner
+        self.owner_identity = _identity_from_stat(os.fstat(owner))
+        _require_directory_identity(self.owner_identity, "LSP owner root")
+        os.fchmod(owner, 0o700)
+        _verify_descriptor(owner, self.owner_identity, mode=0o700, directory=True)
+        self.owner_permissions_verified = True
+        return owner
 
+    @staticmethod
+    def _create_cancellation_posix(owner: int) -> None:
+        """Create and verify the cancellation directory inside the owner root."""
+        os.mkdir("cancellation", 0o700, dir_fd=owner)
+        cancellation = os.open(
+            "cancellation",
+            os.O_RDONLY
+            | os.O_DIRECTORY
+            | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=owner,
+        )
+        try:
+            identity = _identity_from_stat(os.fstat(cancellation))
+            _require_directory_identity(identity, "LSP cancellation root")
+            os.fchmod(cancellation, 0o700)
+            _verify_descriptor(
+                cancellation, identity, mode=0o700, directory=True
+            )
+            os.fsync(cancellation)
+        finally:
+            os.close(cancellation)
+
+    def _create_posix(self) -> None:
+        owner = self._create_owner_root_posix()
+        self._create_cancellation_posix(owner)
+        os.fsync(owner)
+        os.fsync(self.parent_handle)
+
+    def _create_owner_root_windows(self, deadline: float) -> int:
+        """Create the owner root and prove its ACL setup did not move it."""
         owner = _windows_workspace.create_writable_directory(
             self.parent_handle, self.owner_root.name
         )
@@ -465,24 +481,41 @@ class _OwnerDirectory:
         self.owner_identity = _windows_workspace.identity(owner, directory=True)
         _secure_windows_owner_root(self.owner_root, deadline)
         if _windows_workspace.identity(owner, directory=True) != self.owner_identity:
-            raise PermissionError("LSP owner root identity changed during ACL setup")
+            raise PermissionError(
+                "LSP owner root identity changed during ACL setup"
+            )
         self.owner_permissions_verified = True
+        return owner
+
+    def _create_cancellation_windows(self, owner: int) -> None:
         with self._child_handle_lock:
             self._retry_pending_child_handles()
-            cancellation = _windows_workspace.create_directory(owner, "cancellation")
+            cancellation = _windows_workspace.create_directory(
+                owner, "cancellation"
+            )
             try:
-                cancellation_identity = _windows_workspace.identity(
+                identity = _windows_workspace.identity(
                     cancellation, directory=True
                 )
                 if (
                     _windows_workspace.identity(cancellation, directory=True)
-                    != cancellation_identity
+                    != identity
                 ):
                     raise PermissionError(
                         "LSP cancellation root identity changed during ACL setup"
                     )
             finally:
                 self._close_child_handle(cancellation)
+
+    def _create_windows(self, deadline: float) -> None:
+        owner = self._create_owner_root_windows(deadline)
+        self._create_cancellation_windows(owner)
+
+    def create(self, deadline: float) -> None:
+        if os.name == "posix":
+            self._create_posix()
+            return
+        self._create_windows(deadline)
 
     def _publish_record_posix(
         self, temporary: str, name: str, payload: bytes
