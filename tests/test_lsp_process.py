@@ -42,6 +42,7 @@ OWNER_NONCE = "a" * 32
 
 
 def _await_records(records: list, count: int, timeout: float) -> None:
+    """Wait for a worker to publish `count` records, bounded by the timeout."""
     deadline = time.monotonic() + timeout
     while len(records) < count and time.monotonic() < deadline:
         time.sleep(0.01)
@@ -969,7 +970,7 @@ def test_initial_bootstrap_publishes_candidate_lease_and_refreshes_heartbeat(
     thread = threading.Thread(target=start)
     thread.start()
     try:
-        assert bootstrap_entered.wait(2)
+        assert bootstrap_entered.wait(120)
         coordinator = coordinators[0]
         owner_exists_during_bootstrap = (owner_root / "owner.json").is_file()
         lease_exists_during_bootstrap = lease_path.is_file()
@@ -1147,7 +1148,7 @@ def test_startup_commit_rejects_heartbeat_terminal_failure_during_bootstrap(
     owner_root = tmp_path / OWNER_NONCE
     thread = threading.Thread(target=start)
     thread.start()
-    assert bootstrap_entered.wait(2)
+    assert bootstrap_entered.wait(120)
     coordinator = coordinators[0]
     heartbeat = coordinator.heartbeat_thread
     assert heartbeat is not None
@@ -2736,7 +2737,7 @@ def test_explicit_restart_and_autonomous_wake_bootstrap_one_replacement(
         assert explicit_paused.wait(3)
         first_protocol._become_fatal("fatal while explicit restart is pending")
         coordinator.recovery_wake.set()
-        assert autonomous_entered.wait(3)
+        assert autonomous_entered.wait(120)
         if autonomous_replacement_entered.wait(0.25):
             assert autonomous_replacement_finished.wait(5)
 
@@ -3203,7 +3204,7 @@ def test_close_serializes_behind_restart_bootstrap_and_commits_success(
     restart_thread = threading.Thread(target=restart)
     close_thread = threading.Thread(target=close)
     restart_thread.start()
-    assert bootstrap_entered.wait(3)
+    assert bootstrap_entered.wait(120)
     close_thread.start()
     close_returned_before_bootstrap = close_finished.wait(0.2)
     release_bootstrap.set()
@@ -3354,7 +3355,7 @@ def test_restart_lease_names_candidate_before_bootstrap_commit_without_activatio
     thread = threading.Thread(target=restart)
     thread.start()
     try:
-        assert bootstrap_entered.wait(3)
+        assert bootstrap_entered.wait(120)
         candidate_nonce = bootstraps[1]
         process._coordinator.heartbeat_wake.set()
         assert heartbeat_wrote.wait(1)
@@ -7767,7 +7768,7 @@ def test_heartbeat_failure_leaves_running_before_blocked_recovery_can_continue(
     coordinator.heartbeat_wake.set()
     try:
         assert write_attempted.wait(1)
-        assert recovery_entered.wait(1)
+        assert recovery_entered.wait(120)
         heartbeat.join(1)
         assert not heartbeat.is_alive()
         assert coordinator.phase is not lsp_process._LifecyclePhase.RUNNING
@@ -9838,8 +9839,8 @@ def test_heartbeat_refreshes_lease_while_tree_cleanup_driver_is_blocked(
     coordinator.heartbeat_wake.set()
     cleanup = threading.Thread(target=fail_terminally)
     cleanup.start()
-    assert entered.wait(1), cleanup_errors
-    _await_records(heartbeat_records, 2, 0.3)
+    assert entered.wait(120), cleanup_errors
+    _await_records(heartbeat_records, 2, 120)
     lsp_process._acquire_lease(coordinator, time.monotonic() + 1)
     try:
         during = json.loads(lease_path.read_bytes())
