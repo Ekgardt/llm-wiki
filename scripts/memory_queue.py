@@ -12108,41 +12108,85 @@ def drain_with(
         lease = queue.claim(owner)
         if lease is None:
             break
-        adopted = queue.adopt_published_result(lease, operation_id=lease.id)
-        if adopted == "adopted":
-            _count_terminal(counts, queue.acknowledge(lease))
-            continue
-        if adopted == "corrupt":
-            _count_terminal(counts, queue.get(lease.id))
-            continue
-        heartbeat = _LeaseHeartbeat(queue, lease)
-        heartbeat.start()
-        try:
-            try:
-                outcome = processor(_compat_task(lease))
-                succeeded = bool(outcome)
-            except Exception:  # noqa: BLE001
-                print("processor_exception", file=sys.stderr)
-                succeeded = False
-        finally:
-            heartbeat.stop()
-        if heartbeat.error is not None:
-            counts["failed"] += 1
-            continue
-        try:
-            if succeeded:
-                result = outcome.data if isinstance(outcome, DeferredResult) else b""
-                queue.publish_result(lease, operation_id=lease.id, result=result)
-                _count_terminal(counts, queue.acknowledge(lease))
-            else:
-                queue.fail(lease, QueueFailure("processor_failed", retry_after=60))
-                _count_terminal(counts, queue.get(lease.id))
-        except (LeaseFenceError, ResultConflictError):
-            counts["failed"] += 1
-            task = queue.get(lease.id)
-            if task.state == "dead":
-                counts["dead"] += 1
+        _drain_one_lease(queue, processor, lease, counts)
     return counts
+
+
+def _drain_one_lease(
+    queue: MemoryQueue,
+    processor: Callable[[dict], bool | DeferredResult],
+    lease: QueueLease,
+    counts: dict[str, int],
+) -> None:
+    """Adopt, run and settle one leased task."""
+    adopted = queue.adopt_published_result(lease, operation_id=lease.id)
+    if adopted == "adopted":
+        _count_terminal(counts, queue.acknowledge(lease))
+        return
+    if adopted == "corrupt":
+        _count_terminal(counts, queue.get(lease.id))
+        return
+    outcome, heartbeat_lost = _run_compat_processor(queue, processor, lease)
+    if heartbeat_lost:
+        counts["failed"] += 1
+        return
+    _settle_compat_outcome(queue, lease, outcome, counts)
+
+
+def _run_compat_processor(
+    queue: MemoryQueue,
+    processor: Callable[[dict], bool | DeferredResult],
+    lease: QueueLease,
+) -> tuple[bool | DeferredResult, bool]:
+    """(what the processor returned, whether the lease heartbeat was lost)."""
+    heartbeat = _LeaseHeartbeat(queue, lease)
+    heartbeat.start()
+    try:
+        outcome: bool | DeferredResult = _compat_processor_outcome(processor, lease)
+    finally:
+        heartbeat.stop()
+    return outcome, heartbeat.error is not None
+
+
+def _compat_processor_outcome(
+    processor: Callable[[dict], bool | DeferredResult], lease: QueueLease
+) -> bool | DeferredResult:
+    """Run the handler; a raised exception is a plain failure here."""
+    try:
+        return processor(_compat_task(lease))
+    except Exception:  # noqa: BLE001 - a compat handler may raise anything
+        print("processor_exception", file=sys.stderr)
+        return False
+
+
+def _settle_compat_outcome(
+    queue: MemoryQueue,
+    lease: QueueLease,
+    outcome: bool | DeferredResult,
+    counts: dict[str, int],
+) -> None:
+    """Publish or fail the task, counting a lost fence as a failure."""
+    try:
+        _publish_compat_outcome(queue, lease, outcome, counts)
+    except (LeaseFenceError, ResultConflictError):
+        counts["failed"] += 1
+        if queue.get(lease.id).state == "dead":
+            counts["dead"] += 1
+
+
+def _publish_compat_outcome(
+    queue: MemoryQueue,
+    lease: QueueLease,
+    outcome: bool | DeferredResult,
+    counts: dict[str, int],
+) -> None:
+    if not outcome:
+        queue.fail(lease, QueueFailure("processor_failed", retry_after=60))
+        _count_terminal(counts, queue.get(lease.id))
+        return
+    result = outcome.data if isinstance(outcome, DeferredResult) else b""
+    queue.publish_result(lease, operation_id=lease.id, result=result)
+    _count_terminal(counts, queue.acknowledge(lease))
 
 
 def _run_processor_inline(
