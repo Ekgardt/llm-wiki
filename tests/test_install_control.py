@@ -2105,3 +2105,33 @@ def test_windows_task_v2_rejects_untrusted_historical_spec_root(
 
     with pytest.raises(Exception, match="task_spec_invalid"):
         resource.read_projections([untrusted])
+
+def test_a_half_registered_scheduler_can_still_be_removed(tmp_path: Path) -> None:
+    """Rollback exists for a half-applied resource; refusing to read one strands it."""
+    runner = _FakeSystemd()
+    unit_dir = tmp_path / "systemd"
+    vault = tmp_path / "vault"
+    state_root = tmp_path / "state"
+    uv_path = tmp_path / "uv"
+    resource = systemd_scheduler_resource(
+        root=vault,
+        state_root=state_root,
+        uv_path=uv_path,
+        unit_directory=unit_dir,
+        runner=runner,
+        systemctl="systemctl",
+    )
+    definitions = render_systemd_definitions(vault, state_root, uv_path)
+    installed = resource.desired
+
+    # Exactly what an interrupted install leaves behind: the unit files are on
+    # disk, but the running user manager never registered the timers.
+    unit_dir.mkdir(parents=True)
+    for name, value in definitions.items():
+        (unit_dir / name).write_bytes(value)
+    assert runner.enabled == set()
+
+    assert resource.write_projection is not None
+    resource.write_projection(installed, None, {})
+
+    assert _definition_directory_state(unit_dir) == {}
