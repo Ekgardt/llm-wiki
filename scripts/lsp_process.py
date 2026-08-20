@@ -3223,21 +3223,20 @@ def _retain_autonomous_cleanup_owners(instance: LspProcess) -> bool:
         _release_driver(coordinator)
 
 
-def _process_failure_intent(
-    instance: LspProcess,
+def _claim_driver_for_intent(
+    coordinator: _LifecycleCoordinator,
     intent: _FailureIntent,
     deadline: float,
-) -> str | None:
-    coordinator = instance._coordinator
+) -> bool:
+    """Take the driver in short attempts; False when the intent goes back."""
     while True:
         if coordinator.recovery_stop.is_set():
             coordinator.failure_queue.put(intent)
-            return None
+            return False
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            coordinator.failure_queue.put(intent)
-            coordinator.recovery_wake.set()
-            return None
+            _requeue_intent(coordinator, intent)
+            return False
         try:
             _acquire_driver(
                 coordinator,
@@ -3245,24 +3244,30 @@ def _process_failure_intent(
             )
         except TimeoutError:
             continue
-        else:
-            break
+        return True
+
+
+def _restart_after_intent(
+    instance: LspProcess, coordinator: _LifecycleCoordinator
+) -> str | None:
+    """Restart the generation the intent retired; the code when it could not."""
+    _, code = _restart_for_recovery(instance, coordinator)
+    return code
+
+
+def _process_failure_intent(
+    instance: LspProcess,
+    intent: _FailureIntent,
+    deadline: float,
+) -> str | None:
+    coordinator = instance._coordinator
+    if not _claim_driver_for_intent(coordinator, intent, deadline):
+        return None
     try:
         result, restart = _process_failure_intent_owned(instance, intent, deadline)
-        if restart:
-            try:
-                _restart_generation(instance, _fresh_bootstrap_deadline(coordinator))
-            except BaseException as restart_error:
-                _remember_background_restart_error(coordinator, restart_error)
-                _remember_mandatory_terminal_failure(
-                    instance,
-                    coordinator,
-                    "restart_failed",
-                )
-                if coordinator.cleanup_result.ownership_pending:
-                    _retain_autonomous_cleanup_owners(instance)
-                return "restart_failed"
-        return result
+        if not restart:
+            return result
+        return _restart_after_intent(instance, coordinator)
     finally:
         _release_driver(coordinator)
 
@@ -3829,18 +3834,14 @@ def _notify_lsp_process(
     protocol = generation.protocol
     process = generation.process
     assert protocol is not None and process is not None
-    expired = protocol.expired_drain_keys(time.monotonic())
-    if expired or process.poll() is not None or protocol.fatal:
-        _queue_generation_failure(
-            instance._coordinator,
-            generation,
-            "expired drain" if expired else _PROCESS_EXITED,
-        )
+    unusable = _generation_unusable(protocol, process)
+    if unusable is not None:
+        _queue_generation_failure(instance._coordinator, generation, unusable)
         raise ProtocolViolation("LSP generation is fatally unavailable")
     try:
         protocol.notify(method, params, deadline=deadline)
     except ProtocolViolation:
-        if protocol.fatal or process.poll() is not None:
+        if _generation_died_after_violation(generation):
             _queue_generation_failure(
                 instance._coordinator,
                 generation,
