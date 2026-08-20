@@ -531,6 +531,196 @@ def _terminate_process_tree(
             pass
 
 
+def _git_command(root: Path, arguments: list[str], executable: str) -> list[str]:
+    """The full argv for a git invocation that touches no optional locks."""
+    return [
+        executable,
+        "--no-optional-locks",
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        root.as_posix(),
+        *arguments,
+    ]
+
+
+def _git_popen_options(
+    environment: dict[str, str] | None, pass_fds: tuple[int, ...]
+) -> dict[str, object]:
+    """The Popen options for a bounded, session-isolated git invocation."""
+    options: dict[str, object] = dict(
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        shell=False,
+        close_fds=True,
+        env=environment or sanitized_git_environment(),
+    )
+    if os.name == "nt":
+        options["creationflags"] = _WINDOWS_NEW_PROCESS_GROUP
+        return options
+    options["start_new_session"] = True
+    if pass_fds:
+        options["pass_fds"] = pass_fds
+    return options
+
+
+class _GitRun:
+    """One bounded git invocation, the thread draining it, and why it stopped."""
+
+    def __init__(
+        self,
+        process: subprocess.Popen,
+        maximum_bytes: int,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> None:
+        self.process = process
+        self.maximum_bytes = maximum_bytes
+        self.deadline = deadline
+        self.cancelled = cancelled
+        self.stop_reason: list[str] = []
+        self._termination_started = threading.Event()
+        self._termination_lock = threading.Lock()
+        self._read_done = threading.Event()
+        self._output: list[bytes] = []
+        self._errors: list[BaseException] = []
+        self._reader = threading.Thread(target=self._read_output, daemon=True)
+        self._reader.start()
+
+    @property
+    def terminating(self) -> bool:
+        """Whether something has already started killing this process tree."""
+        return self._termination_started.is_set()
+
+    def terminate(self) -> None:
+        """Kill the process tree, once, however many callers ask for it."""
+        with self._termination_lock:
+            if self._termination_started.is_set():
+                return
+            self._termination_started.set()
+        _terminate_process_tree(self.process)
+
+    def _read_output(self) -> None:
+        try:
+            assert self.process.stdout is not None
+            self._output.append(self.process.stdout.read(self.maximum_bytes + 1))
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the owning thread
+            self._errors.append(exc)
+        finally:
+            self._read_done.set()
+
+    def _remaining(self) -> float:
+        """Seconds left before this run's deadline."""
+        return self.deadline - time.monotonic()
+
+    def _stop_because(self, remaining: float) -> bool:
+        """Whether to stop waiting now, recording why and killing the tree."""
+        if self.cancelled is not None and self.cancelled():
+            self.stop_reason.append("cancelled")
+            self.terminate()
+            return True
+        if remaining <= 0:
+            self.stop_reason.append("deadline")
+            self.terminate()
+            return True
+        return False
+
+    def wait_for_output(self) -> None:
+        """Let the reader drain the pipe, or stop it on cancellation or timeout."""
+        while not self._read_done.is_set():
+            remaining = self._remaining()
+            if self._stop_because(remaining):
+                return
+            self._read_done.wait(min(0.01, remaining))
+
+    def _close_stdout(self) -> None:
+        """Close the pipe, whether or not it is still usable."""
+        if self.process.stdout is None:
+            return
+        try:
+            self.process.stdout.close()
+        except OSError:
+            pass
+
+    def output(self) -> bytes:
+        """The bytes read, once the reader thread has been joined."""
+        if self.stop_reason and self.process.stdout is not None:
+            self.process.stdout.close()
+        self._reader.join(timeout=_PROCESS_CLEANUP_SECONDS)
+        if self._errors and not self.stop_reason:
+            raise self._errors[0]
+        return self._output[0] if self._output else b""
+
+    def reap_holding_fds(self) -> None:
+        """Wait for the child to exit without reaping it, so its fds stay held."""
+        wait_options = os.WEXITED | os.WNOHANG | os.WNOWAIT
+        while True:
+            remaining = self._remaining()
+            if self._stop_because(remaining):
+                return
+            waited = os.waitid(os.P_PID, self.process.pid, wait_options)
+            if waited is not None and waited.si_pid == self.process.pid:
+                self.terminate()
+                return
+            time.sleep(min(0.001, remaining))
+
+    def reap(self) -> None:
+        """Let the child finish; kill it if it will not."""
+        try:
+            self.process.wait(timeout=_PROCESS_CLEANUP_SECONDS)
+        except subprocess.TimeoutExpired:
+            self.terminate()
+
+    def release(self, *, holds_fds: bool) -> None:
+        """Release the process and its pipe, whatever happened."""
+        if holds_fds and not self.terminating:
+            self.terminate()
+        elif self.process.poll() is None:
+            self.terminate()
+        self._close_stdout()
+        self._reader.join(timeout=_PROCESS_CLEANUP_SECONDS)
+
+
+def _reap_git_run(run: _GitRun, *, holds_fds: bool) -> None:
+    """Wait for the child to finish, in whichever way this run requires."""
+    if run.terminating:
+        return
+    if holds_fds:
+        run.reap_holding_fds()
+        return
+    run.reap()
+
+
+def _git_stop_error(reason: str, label: str, deadline: float | None) -> Exception:
+    """The error for a run that was stopped rather than finished."""
+    message = f"workspace revision {reason} during {label}"
+    if reason == "cancelled":
+        return _RevisionStopped(message)
+    if deadline is not None and time.monotonic() >= deadline:
+        return _RevisionStopped(message)
+    return TimeoutError(message)
+
+
+def _git_run_outcome(
+    run: _GitRun,
+    command: list[str],
+    output: bytes,
+    *,
+    maximum_bytes: int,
+    label: str,
+    deadline: float | None,
+) -> bytes:
+    """The output this run produced, or the failure it has to report."""
+    if run.stop_reason:
+        raise _git_stop_error(run.stop_reason[0], label, deadline)
+    if len(output) > maximum_bytes:
+        raise ValueError(f"{label} output exceeds the byte ceiling")
+    if run.process.returncode != 0:
+        raise subprocess.CalledProcessError(run.process.returncode, command)
+    return output
+
+
 def _git_output(
     root: Path,
     arguments: list[str],
@@ -543,125 +733,29 @@ def _git_output(
     pass_fds: tuple[int, ...] = (),
     executable: str = "git",
 ) -> bytes:
+    """Run one bounded git command and answer its output, or refuse."""
     _check_stop(deadline, cancelled)
-    command = [
-        executable,
-        "--no-optional-locks",
-        "-c",
-        "core.fsmonitor=false",
-        "-C",
-        root.as_posix(),
-        *arguments,
-    ]
-    popen_options: dict[str, object] = dict(
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        shell=False,
-        close_fds=True,
-        env=environment or sanitized_git_environment(),
-    )
-    if os.name == "nt":
-        popen_options["creationflags"] = _WINDOWS_NEW_PROCESS_GROUP
-    else:
-        popen_options["start_new_session"] = True
-        if pass_fds:
-            popen_options["pass_fds"] = pass_fds
-    process = subprocess.Popen(command, **popen_options)
-    stop_reason: list[str] = []
-    termination_started = threading.Event()
-    termination_lock = threading.Lock()
+    command = _git_command(root, arguments, executable)
+    process = subprocess.Popen(command, **_git_popen_options(environment, pass_fds))
+    holds_fds = bool(pass_fds) and os.name != "nt"
     local_deadline = time.monotonic() + GIT_STATUS_TIMEOUT_SECONDS
-    effective_deadline = local_deadline if deadline is None else min(local_deadline, deadline)
-
-    def terminate() -> None:
-        with termination_lock:
-            if termination_started.is_set():
-                return
-            termination_started.set()
-        _terminate_process_tree(process)
-
-    output_parts: list[bytes] = []
-    read_errors: list[BaseException] = []
-    read_done = threading.Event()
-
-    def read_output() -> None:
-        try:
-            assert process.stdout is not None
-            output_parts.append(process.stdout.read(maximum_bytes + 1))
-        except BaseException as exc:  # noqa: BLE001 - re-raised on the owning thread
-            read_errors.append(exc)
-        finally:
-            read_done.set()
-
-    reader = threading.Thread(target=read_output, daemon=True)
-    reader.start()
+    run = _GitRun(
+        process,
+        maximum_bytes,
+        local_deadline if deadline is None else min(local_deadline, deadline),
+        cancelled,
+    )
     try:
-        while not read_done.is_set():
-            if cancelled is not None and cancelled():
-                stop_reason.append("cancelled")
-                terminate()
-                break
-            remaining = effective_deadline - time.monotonic()
-            if remaining <= 0:
-                stop_reason.append("deadline")
-                terminate()
-                break
-            read_done.wait(min(0.01, remaining))
-        if stop_reason and process.stdout is not None:
-            process.stdout.close()
-        reader.join(timeout=_PROCESS_CLEANUP_SECONDS)
-        if read_errors and not stop_reason:
-            raise read_errors[0]
-        output = output_parts[0] if output_parts else b""
+        run.wait_for_output()
+        output = run.output()
         if len(output) > maximum_bytes:
-            terminate()
-        if pass_fds and os.name != "nt" and not termination_started.is_set():
-            wait_options = os.WEXITED | os.WNOHANG | os.WNOWAIT
-            while True:
-                if cancelled is not None and cancelled():
-                    stop_reason.append("cancelled")
-                    terminate()
-                    break
-                remaining = effective_deadline - time.monotonic()
-                if remaining <= 0:
-                    stop_reason.append("deadline")
-                    terminate()
-                    break
-                waited = os.waitid(os.P_PID, process.pid, wait_options)
-                if waited is not None and waited.si_pid == process.pid:
-                    terminate()
-                    break
-                time.sleep(min(0.001, remaining))
-        elif not termination_started.is_set():
-            try:
-                process.wait(timeout=_PROCESS_CLEANUP_SECONDS)
-            except subprocess.TimeoutExpired:
-                terminate()
+            run.terminate()
+        _reap_git_run(run, holds_fds=holds_fds)
     finally:
-        if pass_fds and os.name != "nt" and not termination_started.is_set():
-            terminate()
-        elif process.poll() is None:
-            terminate()
-        if process.stdout is not None:
-            try:
-                process.stdout.close()
-            except OSError:
-                pass
-        reader.join(timeout=_PROCESS_CLEANUP_SECONDS)
-    if stop_reason:
-        message = f"workspace revision {stop_reason[0]} during {label}"
-        if stop_reason[0] == "cancelled" or (
-            deadline is not None and time.monotonic() >= deadline
-        ):
-            raise _RevisionStopped(message)
-        raise TimeoutError(message)
-    if len(output) > maximum_bytes:
-        raise ValueError(f"{label} output exceeds the byte ceiling")
-    if process.returncode != 0:
-        raise subprocess.CalledProcessError(process.returncode, command)
-    return output
-
+        run.release(holds_fds=holds_fds)
+    return _git_run_outcome(
+        run, command, output, maximum_bytes=maximum_bytes, label=label, deadline=deadline
+    )
 
 def _git_status(
     root: Path,
