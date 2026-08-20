@@ -1128,33 +1128,51 @@ class _CleanupError:
     error_code: int | None
 
 
-def _sanitized_cleanup_error(step: str, error: BaseException) -> _CleanupError:
-    error_type = "Exception"
-    for category in (
-        TimeoutError,
-        PermissionError,
-        FileNotFoundError,
-        OSError,
-        ValueError,
-        RuntimeError,
-    ):
+_REPORTABLE_ERROR_CATEGORIES = (
+    TimeoutError,
+    PermissionError,
+    FileNotFoundError,
+    OSError,
+    ValueError,
+    RuntimeError,
+)
+
+
+def _reportable_error_type(error: BaseException) -> str:
+    """The narrowest category we are willing to name in evidence."""
+    for category in _REPORTABLE_ERROR_CATEGORIES:
         if isinstance(error, category):
-            error_type = category.__name__
-            break
-    code: int | None = None
+            return category.__name__
+    return "Exception"
+
+
+def _reportable_error_code(error: BaseException) -> int | None:
+    """The platform error code, when it is a plain unsigned 32-bit integer."""
     for attribute in ("winerror", "errno"):
-        try:
-            candidate = getattr(error, attribute, None)
-        except BaseException:
-            continue
-        if (
-            isinstance(candidate, int)
-            and not isinstance(candidate, bool)
-            and 0 <= candidate <= 0xFFFFFFFF
-        ):
-            code = candidate
-            break
-    return _CleanupError(step, error_type, code)
+        candidate = _error_attribute(error, attribute)
+        if _is_reportable_code(candidate):
+            return candidate
+    return None
+
+
+def _error_attribute(error: BaseException, attribute: str) -> object:
+    """One attribute of an exception, where reading it may itself fail."""
+    try:
+        return getattr(error, attribute, None)
+    except BaseException:
+        return None
+
+
+def _is_reportable_code(candidate: object) -> bool:
+    if not isinstance(candidate, int) or isinstance(candidate, bool):
+        return False
+    return 0 <= candidate <= 0xFFFFFFFF
+
+
+def _sanitized_cleanup_error(step: str, error: BaseException) -> _CleanupError:
+    return _CleanupError(
+        step, _reportable_error_type(error), _reportable_error_code(error)
+    )
 
 
 def _protocol_startup_cleanup_in_chain(
@@ -6342,31 +6360,43 @@ def _drain_stderr(
     lock: threading.Lock,
 ) -> None:
     try:
-        while True:
-            chunk = stream.read(_STDERR_CHUNK_BYTES)
-            if not chunk:
-                return
-            with lock:
-                chunks.append(chunk)
-                size[0] += len(chunk)
-                excess = size[0] - MAX_STDERR_BYTES
-                while excess > 0:
-                    oldest = chunks[0]
-                    if len(oldest) <= excess:
-                        chunks.popleft()
-                        size[0] -= len(oldest)
-                        excess -= len(oldest)
-                    else:
-                        chunks[0] = oldest[excess:]
-                        size[0] -= excess
-                        excess = 0
+        _read_stderr_forever(stream, chunks, size, lock)
     except (OSError, ValueError):
         return
     finally:
-        try:
+        with contextlib.suppress(OSError, ValueError):
             stream.close()
-        except (OSError, ValueError):
-            pass
+
+
+def _read_stderr_forever(
+    stream: BinaryIO,
+    chunks: deque[bytes],
+    size: list[int],
+    lock: threading.Lock,
+) -> None:
+    """Append every chunk the server writes until its stream ends."""
+    while True:
+        chunk = stream.read(_STDERR_CHUNK_BYTES)
+        if not chunk:
+            return
+        with lock:
+            chunks.append(chunk)
+            size[0] += len(chunk)
+            _trim_stderr_chunks(chunks, size)
+
+
+def _trim_stderr_chunks(chunks: deque[bytes], size: list[int]) -> None:
+    """Drop the oldest bytes until the projection fits its bound."""
+    excess = size[0] - MAX_STDERR_BYTES
+    while excess > 0:
+        oldest = chunks[0]
+        if len(oldest) > excess:
+            chunks[0] = oldest[excess:]
+            size[0] -= excess
+            return
+        chunks.popleft()
+        size[0] -= len(oldest)
+        excess -= len(oldest)
 
 
 def _validated_deadline(deadline: float) -> float:
