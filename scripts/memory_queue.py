@@ -25,6 +25,7 @@ from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 if TYPE_CHECKING:
@@ -1834,6 +1835,160 @@ def _queue_v3_payloads_valid(database: sqlite3.Connection) -> bool:
     return True
 
 
+_EMPTY_QUEUE_V3_SUMMARY = MappingProxyType(
+    {
+        "attempt_history": 0,
+        "payload_hash_mismatches": 0,
+        "source_failures": 0,
+        "source_fences": 0,
+        "task_source_links": 0,
+        "tasks": 0,
+    }
+)
+
+
+def _open_queue_v2_source(
+    stack: ExitStack, candidate: Path, source_path: Path
+) -> sqlite3.Connection:
+    """Open the v2 source read-only, refusing one that aliases the candidate."""
+    _reject_queue_source_alias(candidate, source_path)
+    source = stack.enter_context(
+        closing(
+            open_readonly_operational_db(
+                source_path,
+                source_path.parent.parent,
+                max_bytes=1 << 50,
+                owner_only=True,
+            )
+        )
+    )
+    source.row_factory = sqlite3.Row
+    source.execute("BEGIN")
+    return source
+
+
+def _queue_v2_migration_plan(
+    stack: ExitStack, candidate: Path, source_path: Path | None
+) -> tuple[tuple[MigrationStatement, ...], dict[str, int]]:
+    """What the v2 source contributes, or nothing when there is no source."""
+    if source_path is None:
+        return (), dict(_EMPTY_QUEUE_V3_SUMMARY)
+    source = _open_queue_v2_source(stack, candidate, source_path)
+    statements, summary = _queue_v2_migration_statements(source)
+    _reject_queue_source_alias(candidate, source_path)
+    return statements, summary
+
+
+def _queue_v3_trigger_statements() -> tuple[MigrationStatement, ...]:
+    """Only the statements that create the v3 triggers."""
+    trigger_names = {name for name, _sql in _QUEUE_V3_TRIGGER_SQL}
+    return tuple(
+        statement
+        for statement in _queue_v3_statements()
+        if statement.name.startswith("create_")
+        and statement.name.removeprefix("create_") in trigger_names
+    )
+
+
+def _require_empty_queue_v3(database: sqlite3.Connection) -> None:
+    """A fresh initialization may not find rows already there."""
+    if any(_queue_v3_row_counts(database).values()):
+        raise _migration_error(
+            "queue_v3_source_conflict",
+            "fresh queue v3 initialization found existing rows",
+        )
+
+
+def _validate_queue_v3_candidate(database: sqlite3.Connection) -> None:
+    """The candidate has to be internally consistent before it is published."""
+    integrity = database.execute("PRAGMA integrity_check").fetchall()
+    if len(integrity) != 1 or integrity[0][0] != "ok":
+        raise _migration_error(
+            "queue_v3_validation_failed", "queue v3 candidate validation failed"
+        )
+    if database.execute("PRAGMA foreign_key_check").fetchall():
+        raise _migration_error(
+            "queue_v3_validation_failed", "queue v3 candidate validation failed"
+        )
+    if not _queue_v3_payloads_valid(database):
+        raise _migration_error(
+            "queue_v3_validation_failed", "queue v3 candidate validation failed"
+        )
+
+
+def _build_queue_v3_candidate(
+    stack: ExitStack,
+    candidate: Path,
+    source_path: Path | None,
+    killpoint: Callable[[str], None] | None,
+) -> dict[str, int]:
+    """Create or resume the candidate's schema and content, then validate it."""
+    migration_statements, summary = _queue_v2_migration_plan(
+        stack, candidate, source_path
+    )
+    database = stack.enter_context(
+        closing(open_operational_db(candidate, busy_ms=DEFAULTS.queue_busy_ms))
+    )
+    if source_path is not None:
+        _reject_queue_source_alias(candidate, source_path)
+    _repair_partial_queue_v3_schema(
+        database, allow_populated_rebuild=source_path is not None
+    )
+    run_resumable_migration(
+        database,
+        _queue_v3_statements(include_triggers=False),
+        final_invariant=lambda current: _queue_v3_schema_complete(
+            current, include_triggers=False
+        ),
+        killpoint=killpoint,
+    )
+    _apply_queue_v2_content(
+        database, migration_statements, summary, source_path, killpoint
+    )
+    run_resumable_migration(
+        database,
+        _queue_v3_trigger_statements(),
+        final_invariant=_queue_v3_schema_complete,
+        killpoint=killpoint,
+    )
+    _validate_queue_v3_candidate(database)
+    return summary
+
+
+def _apply_queue_v2_content(
+    database: sqlite3.Connection,
+    migration_statements: tuple[MigrationStatement, ...],
+    summary: Mapping[str, int],
+    source_path: Path | None,
+    killpoint: Callable[[str], None] | None,
+) -> None:
+    """Copy the v2 rows in, or prove the fresh candidate has none."""
+    if source_path is None:
+        _require_empty_queue_v3(database)
+        return
+    run_resumable_migration(
+        database,
+        migration_statements,
+        final_invariant=lambda current: _queue_v2_reconciliation_complete(
+            current, migration_statements, summary
+        ),
+        killpoint=killpoint,
+    )
+
+
+def _stamp_queue_v3_contract(candidate: Path) -> None:
+    """Write the contract row that marks the candidate as a v3 database."""
+    with closing(
+        open_operational_db(
+            candidate,
+            busy_ms=DEFAULTS.queue_busy_ms,
+            contract=_QUEUE_V3_CONTRACT,
+            initialize_contract=True,
+        )
+    ):
+        pass
+
+
 def initialize_queue_v3_candidate(
     path: Path,
     *,
@@ -1844,99 +1999,10 @@ def initialize_queue_v3_candidate(
     candidate = Path(path)
     source_path = Path(source_v2) if source_v2 is not None else None
     with ExitStack() as stack:
-        migration_statements: tuple[MigrationStatement, ...] = ()
-        summary = {
-            "attempt_history": 0,
-            "payload_hash_mismatches": 0,
-            "source_failures": 0,
-            "source_fences": 0,
-            "task_source_links": 0,
-            "tasks": 0,
-        }
-        if source_path is not None:
-            _reject_queue_source_alias(candidate, source_path)
-            source = stack.enter_context(
-                closing(
-                    open_readonly_operational_db(
-                        source_path,
-                        source_path.parent.parent,
-                        max_bytes=1 << 50,
-                        owner_only=True,
-                    )
-                )
-            )
-            source.row_factory = sqlite3.Row
-            source.execute("BEGIN")
-            migration_statements, summary = _queue_v2_migration_statements(source)
-            _reject_queue_source_alias(candidate, source_path)
-        database = stack.enter_context(
-            closing(
-                open_operational_db(
-                    candidate,
-                    busy_ms=DEFAULTS.queue_busy_ms,
-                )
-            )
+        summary = _build_queue_v3_candidate(
+            stack, candidate, source_path, killpoint
         )
-        if source_path is not None:
-            _reject_queue_source_alias(candidate, source_path)
-        _repair_partial_queue_v3_schema(
-            database, allow_populated_rebuild=source_v2 is not None
-        )
-        run_resumable_migration(
-            database,
-            _queue_v3_statements(include_triggers=False),
-            final_invariant=lambda current: _queue_v3_schema_complete(
-                current, include_triggers=False
-            ),
-            killpoint=killpoint,
-        )
-        if source_v2 is None:
-            if any(_queue_v3_row_counts(database).values()):
-                raise _migration_error(
-                    "queue_v3_source_conflict",
-                    "fresh queue v3 initialization found existing rows",
-                )
-        else:
-            run_resumable_migration(
-                database,
-                migration_statements,
-                final_invariant=lambda current: _queue_v2_reconciliation_complete(
-                    current, migration_statements, summary
-                ),
-                killpoint=killpoint,
-            )
-        run_resumable_migration(
-            database,
-            tuple(
-                statement
-                for statement in _queue_v3_statements()
-                if statement.name.startswith("create_")
-                and statement.name.removeprefix("create_")
-                in {name for name, _sql in _QUEUE_V3_TRIGGER_SQL}
-            ),
-            final_invariant=_queue_v3_schema_complete,
-            killpoint=killpoint,
-        )
-        integrity = database.execute("PRAGMA integrity_check").fetchall()
-        foreign_keys = database.execute("PRAGMA foreign_key_check").fetchall()
-        if (
-            len(integrity) != 1
-            or integrity[0][0] != "ok"
-            or foreign_keys
-            or not _queue_v3_payloads_valid(database)
-        ):
-            raise _migration_error(
-                "queue_v3_validation_failed", "queue v3 candidate validation failed"
-            )
-    with closing(
-        open_operational_db(
-            candidate,
-            busy_ms=DEFAULTS.queue_busy_ms,
-            contract=_QUEUE_V3_CONTRACT,
-            initialize_contract=True,
-        )
-    ):
-        pass
+    _stamp_queue_v3_contract(candidate)
     _harden_owner_only(candidate, 0o600)
     validate_queue_v3_database(candidate, state_root=candidate.parent.parent)
     return summary
