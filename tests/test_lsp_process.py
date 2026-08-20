@@ -1253,6 +1253,13 @@ def test_transparent_restart_bootstraps_fresh_generation_before_request_replay(
 BOOTSTRAP_BUDGET_SECONDS = 3.0
 
 
+# The live deadline a replacement generation is aimed at. It is a floor, not
+# the expected value: the wait that produces it can overshoot by a sizeable
+# fraction of a second on the slowest supported machine, and the measured
+# margin still has to stay clearly positive.
+_REPLACEMENT_MARGIN_FLOOR_SECONDS = 1.0
+
+
 def test_delayed_crash_restart_commits_with_a_short_live_deadline(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1280,7 +1287,11 @@ def test_delayed_crash_restart_commits_with_a_short_live_deadline(
     # interpreter costs far more on a loaded Windows runner than on a quiet
     # Linux one, so the target is derived from this machine's own measured
     # startup instead of a number that only holds on a fast host.
-    target_margin = [0.4]
+    #
+    # The floor also has to absorb the wait below overshooting: on a loaded
+    # macOS runner `Event().wait()` has been seen to return more than 150 ms
+    # late, which is what the measured margin loses.
+    target_margin = [_REPLACEMENT_MARGIN_FLOOR_SECONDS]
 
     def delayed_protocol(*args: object, **kwargs: object) -> lsp_protocol.LspProtocol:
         deadline = kwargs.get("_startup_deadline")
@@ -1329,7 +1340,10 @@ def test_delayed_crash_restart_commits_with_a_short_live_deadline(
         generation_bootstrap=bootstrap,
         bootstrap_timeout_seconds=BOOTSTRAP_BUDGET_SECONDS,
     )
-    target_margin[0] = min(2.0, max(0.4, (time.monotonic() - started) * 2))
+    target_margin[0] = min(
+        2.0,
+        max(_REPLACEMENT_MARGIN_FLOOR_SECONDS, (time.monotonic() - started) * 2),
+    )
     first_nonce = process.generation_nonce
     try:
         assert process.request(
