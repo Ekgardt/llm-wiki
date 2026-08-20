@@ -4128,6 +4128,32 @@ def _retry_after_from_text(value: str, now: datetime) -> float | None:
     return _bounded_retry_until(parsed, now)
 
 
+def _validated_listed_states(states: tuple[str, ...] | None) -> tuple[str, ...]:
+    """The states to list; every one of them has to be a real queue state."""
+    listed = states or _STATES
+    if not listed or any(state not in _STATES for state in listed):
+        raise ValueError("invalid queue state")
+    return listed
+
+
+def _attempt_histories(
+    connection: sqlite3.Connection, rows: Sequence[sqlite3.Row]
+) -> dict[str, list[sqlite3.Row]]:
+    """Every listed task's attempt history, read in one query."""
+    histories: dict[str, list[sqlite3.Row]] = {}
+    if not rows:
+        return histories
+    ids = [row["id"] for row in rows]
+    placeholders = ",".join("?" for _ in ids)
+    for history in connection.execute(
+        f"""SELECT * FROM attempt_history WHERE task_id IN ({placeholders})
+            ORDER BY sequence""",  # noqa: S608 - generated placeholders
+        ids,
+    ):
+        histories.setdefault(str(history["task_id"]), []).append(history)
+    return histories
+
+
 class MemoryQueue:
     """Durable priority queue with lease-token fencing and at-least-once delivery."""
 
@@ -5791,33 +5817,31 @@ class MemoryQueue:
     def list_tasks(
         self, *, states: tuple[str, ...] | None = None, max_age_days: int | None = None
     ) -> list[QueueTask]:
-        states = states or _STATES
-        if not states or any(state not in _STATES for state in states):
-            raise ValueError("invalid queue state")
+        states = _validated_listed_states(states)
         placeholders = ",".join("?" for _ in states)
         parameters: list[object] = list(states)
-        age_clause = ""
-        if max_age_days is not None:
-            cutoff = _as_utc(self._clock()) - timedelta(days=max_age_days)
-            age_clause = " AND created_at >= ?"
-            parameters.append(_timestamp(cutoff))
+        age_clause = self._age_clause(max_age_days, parameters)
         with self._connect() as connection:
             rows = connection.execute(
                 f"""SELECT * FROM tasks WHERE state IN ({placeholders}){age_clause}
                     ORDER BY created_at, rowid""",  # noqa: S608 - generated placeholders
                 parameters,
             ).fetchall()
-            histories: dict[str, list[sqlite3.Row]] = {}
-            if rows:
-                ids = [row["id"] for row in rows]
-                id_placeholders = ",".join("?" for _ in ids)
-                for history in connection.execute(
-                    f"""SELECT * FROM attempt_history WHERE task_id IN ({id_placeholders})
-                        ORDER BY sequence""",  # noqa: S608
-                    ids,
-                ):
-                    histories.setdefault(str(history["task_id"]), []).append(history)
-        return [self._task_from_row(row, histories.get(str(row["id"]), [])) for row in rows]
+            histories = _attempt_histories(connection, rows)
+        return [
+            self._task_from_row(row, histories.get(str(row["id"]), []))
+            for row in rows
+        ]
+
+    def _age_clause(
+        self, max_age_days: int | None, parameters: list[object]
+    ) -> str:
+        """The age filter, appending its parameter when there is one."""
+        if max_age_days is None:
+            return ""
+        cutoff = _as_utc(self._clock()) - timedelta(days=max_age_days)
+        parameters.append(_timestamp(cutoff))
+        return " AND created_at >= ?"
 
     def count_eligible(self, *, max_attempts: int = DEFAULTS.queue_max_attempts) -> int:
         _validate_retry_policy(
