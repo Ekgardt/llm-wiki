@@ -16,6 +16,7 @@ import threading
 import time
 import unicodedata
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -2266,6 +2267,323 @@ def _read_direct_head_fence(
     return _HeadFence(oid, head_read.fence, reference_fence)
 
 
+def _expected_deleted(
+    expected_entries: Mapping[str, RevisionEntry], path: str
+) -> bool:
+    """Whether the stored revision says this path was already deleted."""
+    entry = expected_entries.get(path)
+    return entry is not None and entry.kind == "deleted"
+
+
+def _regular_unmatched_size(
+    path: Path, info: os.stat_result, entry_snapshots: dict[Path, _StrongIdentity]
+) -> int | None:
+    """The size of an unmatched entry whose file still looks exactly the same."""
+    if _is_reparse(info) or not stat.S_ISREG(info.st_mode):
+        return None
+    if entry_snapshots.get(path) != _strong_identity(info):
+        return None
+    return info.st_size
+
+
+def _unmatched_entry_size(
+    root: Path,
+    entry: _GitIndexEntry,
+    expected_entries: Mapping[str, RevisionEntry],
+    entry_snapshots: dict[Path, _StrongIdentity],
+) -> int | None:
+    """What this entry adds to the tally, or None when it breaks a rule."""
+    path = root / PurePosixPath(entry.path)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        if _expected_deleted(expected_entries, entry.path):
+            return 0
+        return None
+    except OSError:
+        return None
+    return _regular_unmatched_size(path, info, entry_snapshots)
+
+
+def _unmatched_index_entries(
+    parsed: _ParsedGitIndex, hashes: Mapping[str, _VerificationHash]
+) -> tuple[_GitIndexEntry, ...] | None:
+    """The index entries this pass did not hash, or None if there are too many."""
+    unmatched = tuple(entry for entry in parsed.entries if entry.path not in hashes)
+    if len(unmatched) > _MAX_PRIVATE_UNMATCHED_TRACKED_FILES:
+        return None
+    return unmatched
+
+
+def _unmatched_entries_bounded(
+    root: Path,
+    parsed: _ParsedGitIndex,
+    hashes: Mapping[str, _VerificationHash],
+    expected: WorkspaceRevision,
+    entry_snapshots: dict[Path, _StrongIdentity],
+) -> bool:
+    """Whether the index files this pass did not hash stay inside both ceilings."""
+    unmatched = _unmatched_index_entries(parsed, hashes)
+    if unmatched is None:
+        return False
+    expected_entries = {entry.path: entry for entry in expected.entries}
+    total = 0
+    for entry in unmatched:
+        size = _unmatched_entry_size(root, entry, expected_entries, entry_snapshots)
+        if size is None:
+            return False
+        total += size
+        if total > _MAX_PRIVATE_UNMATCHED_TRACKED_BYTES:
+            return False
+    return True
+
+
+def _tracked_attributes_inert(
+    root: Path,
+    parsed: _ParsedGitIndex,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    """Whether every `.gitattributes` the index tracks leaves git's rules intact."""
+    return all(
+        _owned_attributes_are_inert(
+            root,
+            root / PurePosixPath(entry.path),
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+        for entry in parsed.entries
+        if PurePosixPath(entry.path).name == ".gitattributes"
+    )
+
+
+def _require_directory_unmoved(snapshot: _DirectorySnapshot) -> None:
+    """A directory that changed before the git read invalidates the whole pass."""
+    try:
+        current = snapshot.path.lstat()
+    except OSError as exc:
+        raise PermissionError(
+            "workspace revision directory changed before Git state"
+        ) from exc
+    if (
+        _identity(current) != snapshot.identity
+        or current.st_ctime_ns != snapshot.change_time_ns
+    ):
+        raise PermissionError("workspace revision directory changed before Git state")
+
+
+def _directory_change_times(
+    directory_snapshots: dict[Path, _DirectorySnapshot],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[tuple[_DirectorySnapshot, int]]:
+    """Each directory snapshot with its change time, refusing any that moved."""
+    times: list[tuple[_DirectorySnapshot, int]] = []
+    for snapshot in directory_snapshots.values():
+        _check_stop(deadline, cancelled)
+        _require_directory_unmoved(snapshot)
+        times.append((snapshot, snapshot.change_time_ns))
+    return times
+
+
+def _write_private_index(
+    descriptor: int,
+    content: bytes,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    """Write the whole private index to the descriptor, in bounded chunks."""
+    written = 0
+    view = memoryview(content)
+    try:
+        while written < len(view):
+            _check_stop(deadline, cancelled)
+            end = min(written + _PRIVATE_WRITE_CHUNK_BYTES, len(view))
+            amount = os.write(descriptor, view[written:end])
+            if amount <= 0:
+                raise OSError("private index write made no progress")
+            written += amount
+    finally:
+        view.release()
+
+
+def _private_index_fence_ns(hashes: Mapping[str, _VerificationHash]) -> int:
+    """A timestamp git must read as newer than every file it will compare."""
+    newest = max((value.info.st_mtime_ns for value in hashes.values()), default=0)
+    return max(time.time_ns(), newest + 1_000_000_000)
+
+
+def _seal_private_index(descriptor: int) -> bool:
+    """Whether the descriptor could be sealed against every further change."""
+    if _fcntl is None:
+        return False
+    required = (
+        _fcntl.F_SEAL_WRITE
+        | _fcntl.F_SEAL_GROW
+        | _fcntl.F_SEAL_SHRINK
+        | _fcntl.F_SEAL_SEAL
+    )
+    try:
+        _fcntl.fcntl(descriptor, _fcntl.F_ADD_SEALS, required)
+        applied = _fcntl.fcntl(descriptor, _fcntl.F_GET_SEALS)
+    except OSError:
+        return False
+    return applied & required == required
+
+
+def _prepared_sealed_index(
+    descriptor: int,
+    content: bytes,
+    hashes: Mapping[str, _VerificationHash],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> int | None:
+    """The descriptor, once the index is written, dated and sealed shut."""
+    os.fchmod(descriptor, 0o600)
+    _write_private_index(descriptor, content, deadline=deadline, cancelled=cancelled)
+    os.fsync(descriptor)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    fence_ns = _private_index_fence_ns(hashes)
+    os.utime(descriptor, ns=(fence_ns, fence_ns))
+    if not _seal_private_index(descriptor):
+        return None
+    return descriptor
+
+
+@contextmanager
+def _sealed_index_descriptor(
+    content: bytes,
+    hashes: Mapping[str, _VerificationHash],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> Iterator[int | None]:
+    """A sealed, rewound memfd holding the private index, or None."""
+    try:
+        descriptor = os.memfd_create(
+            "llm-wiki-index", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING
+        )
+    except OSError:
+        yield None
+        return
+    try:
+        yield _prepared_sealed_index(
+            descriptor, content, hashes, deadline=deadline, cancelled=cancelled
+        )
+    finally:
+        os.close(descriptor)
+
+
+def _read_git_state_privately(
+    root: Path,
+    parsed: _ParsedGitIndex,
+    hashes: Mapping[str, _VerificationHash],
+    *,
+    installation: _PrivateGitInstallation,
+    hash_name: str,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> tuple[str | None, object] | None:
+    """Git's head and status, read against a sealed copy of the index."""
+    content = _refresh_private_index(
+        parsed, hashes, hash_name=hash_name, deadline=deadline, cancelled=cancelled
+    )
+    with _sealed_index_descriptor(
+        content, hashes, deadline=deadline, cancelled=cancelled
+    ) as descriptor:
+        if descriptor is None:
+            return None
+        return _git_state_with_private_index(
+            root,
+            descriptor,
+            git_executable=installation.executable,
+            allow_missing_head=False,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+
+
+def _private_state_preconditions(
+    root: Path,
+    expected: WorkspaceRevision,
+    hashes: Mapping[str, _VerificationHash],
+    entry_snapshots: dict[Path, _StrongIdentity],
+    worktree_ignore_paths: tuple[Path, ...],
+    parsed: _ParsedGitIndex,
+    *,
+    installation: _PrivateGitInstallation,
+    hash_name: str,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> tuple[_RawSemanticsProof, _HeadFence] | None:
+    """The semantics proof and head fence, once every private-path rule holds."""
+    if not _unmatched_entries_bounded(root, parsed, hashes, expected, entry_snapshots):
+        return None
+    if not _tracked_attributes_inert(
+        root, parsed, deadline=deadline, cancelled=cancelled
+    ):
+        return None
+    raw_semantics = _private_raw_semantics_safe(
+        root,
+        hash_name=hash_name,
+        installation=installation,
+        worktree_ignore_paths=worktree_ignore_paths,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    if raw_semantics is None:
+        return None
+    head_fence = _read_direct_head_fence(
+        root, expected.git_head, deadline=deadline, cancelled=cancelled
+    )
+    if head_fence is None:
+        return None
+    return raw_semantics, head_fence
+
+
+def _private_git_proof(
+    index_read: _OwnedFileRead,
+    head_fence: _HeadFence,
+    raw_semantics: _RawSemanticsProof,
+    change_times: list[tuple[_DirectorySnapshot, int]],
+    hashes: Mapping[str, _VerificationHash],
+) -> _PrivateGitProof:
+    """The evidence a private read has to keep for later validation."""
+    return _PrivateGitProof(
+        index_read.fence,
+        head_fence,
+        raw_semantics,
+        tuple(change_times),
+        tuple((value.snapshot, value.change_time_ns) for value in hashes.values()),
+    )
+
+
+def _read_private_index(
+    root: Path,
+    index_path: Path,
+    *,
+    hash_name: str,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> tuple[_OwnedFileRead, _ParsedGitIndex] | None:
+    """The index file and its parse, when both are ones this reader trusts."""
+    index_read = _read_owned_file(
+        root, index_path, _MAX_PRIVATE_INDEX_BYTES, deadline=deadline, cancelled=cancelled
+    )
+    if index_read is None:
+        return None
+    parsed = _parse_git_index(
+        index_read.content, hash_name=hash_name, deadline=deadline, cancelled=cancelled
+    )
+    if parsed is None:
+        return None
+    return index_read, parsed
+
+
 def _try_private_git_state(
     root: Path,
     expected: WorkspaceRevision,
@@ -2280,162 +2598,49 @@ def _try_private_git_state(
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
 ) -> _PrivateGitState | None:
+    """Git's view of this checkout, read through a sealed private index."""
     if expected.git_head is None:
         return None
-    index_read = _read_owned_file(
-        root,
-        index_path,
-        _MAX_PRIVATE_INDEX_BYTES,
-        deadline=deadline,
-        cancelled=cancelled,
+    read = _read_private_index(
+        root, index_path, hash_name=hash_name, deadline=deadline, cancelled=cancelled
     )
-    if index_read is None:
+    if read is None:
         return None
-    parsed = _parse_git_index(
-        index_read.content,
-        hash_name=hash_name,
-        deadline=deadline,
-        cancelled=cancelled,
-    )
-    if parsed is None:
-        return None
-    expected_entries = {entry.path: entry for entry in expected.entries}
-    unmatched_count = 0
-    unmatched_bytes = 0
-    for entry in parsed.entries:
-        if entry.path in hashes:
-            continue
-        unmatched_count += 1
-        if unmatched_count > _MAX_PRIVATE_UNMATCHED_TRACKED_FILES:
-            return None
-        path = root / PurePosixPath(entry.path)
-        try:
-            info = path.lstat()
-        except FileNotFoundError:
-            expected_entry = expected_entries.get(entry.path)
-            if expected_entry is None or expected_entry.kind != "deleted":
-                return None
-            continue
-        except OSError:
-            return None
-        if _is_reparse(info) or not stat.S_ISREG(info.st_mode):
-            return None
-        if entry_snapshots.get(path) != _strong_identity(info):
-            return None
-        unmatched_bytes += info.st_size
-        if unmatched_bytes > _MAX_PRIVATE_UNMATCHED_TRACKED_BYTES:
-            return None
-    for entry in parsed.entries:
-        if PurePosixPath(entry.path).name != ".gitattributes":
-            continue
-        if not _owned_attributes_are_inert(
-            root,
-            root / PurePosixPath(entry.path),
-            deadline=deadline,
-            cancelled=cancelled,
-        ):
-            return None
-    raw_semantics = _private_raw_semantics_safe(
+    index_read, parsed = read
+    preconditions = _private_state_preconditions(
         root,
-        hash_name=hash_name,
+        expected,
+        hashes,
+        entry_snapshots,
+        worktree_ignore_paths,
+        parsed,
         installation=installation,
-        worktree_ignore_paths=worktree_ignore_paths,
+        hash_name=hash_name,
         deadline=deadline,
         cancelled=cancelled,
     )
-    if raw_semantics is None:
+    if preconditions is None:
         return None
-    head_fence = _read_direct_head_fence(
+    raw_semantics, head_fence = preconditions
+    change_times = _directory_change_times(
+        directory_snapshots, deadline=deadline, cancelled=cancelled
+    )
+    state = _read_git_state_privately(
         root,
-        expected.git_head,
-        deadline=deadline,
-        cancelled=cancelled,
-    )
-    if head_fence is None:
-        return None
-    directory_change_times = []
-    for snapshot in directory_snapshots.values():
-        _check_stop(deadline, cancelled)
-        try:
-            current = snapshot.path.lstat()
-        except OSError as exc:
-            raise PermissionError("workspace revision directory changed before Git state") from exc
-        if (
-            _identity(current) != snapshot.identity
-            or current.st_ctime_ns != snapshot.change_time_ns
-        ):
-            raise PermissionError("workspace revision directory changed before Git state")
-        directory_change_times.append((snapshot, snapshot.change_time_ns))
-    private_content = _refresh_private_index(
         parsed,
         hashes,
+        installation=installation,
         hash_name=hash_name,
         deadline=deadline,
         cancelled=cancelled,
     )
-    try:
-        descriptor = os.memfd_create(
-            "llm-wiki-index",
-            os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING,
-        )
-    except OSError:
+    if state is None:
         return None
-    try:
-        os.fchmod(descriptor, 0o600)
-        written = 0
-        private_view = memoryview(private_content)
-        try:
-            while written < len(private_view):
-                _check_stop(deadline, cancelled)
-                end = min(written + _PRIVATE_WRITE_CHUNK_BYTES, len(private_view))
-                amount = os.write(descriptor, private_view[written:end])
-                if amount <= 0:
-                    raise OSError("private index write made no progress")
-                written += amount
-        finally:
-            private_view.release()
-        os.fsync(descriptor)
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        fence_ns = max(
-            time.time_ns(),
-            max((value.info.st_mtime_ns for value in hashes.values()), default=0)
-            + 1_000_000_000,
-        )
-        os.utime(descriptor, ns=(fence_ns, fence_ns))
-        if _fcntl is None:
-            return None
-        required_seals = (
-            _fcntl.F_SEAL_WRITE
-            | _fcntl.F_SEAL_GROW
-            | _fcntl.F_SEAL_SHRINK
-            | _fcntl.F_SEAL_SEAL
-        )
-        try:
-            _fcntl.fcntl(descriptor, _fcntl.F_ADD_SEALS, required_seals)
-            applied_seals = _fcntl.fcntl(descriptor, _fcntl.F_GET_SEALS)
-        except OSError:
-            return None
-        if applied_seals & required_seals != required_seals:
-            return None
-        current_head, status = _git_state_with_private_index(
-            root,
-            descriptor,
-            git_executable=installation.executable,
-            allow_missing_head=False,
-            deadline=deadline,
-            cancelled=cancelled,
-        )
-    finally:
-        os.close(descriptor)
-    proof = _PrivateGitProof(
-        index_read.fence,
-        head_fence,
-        raw_semantics,
-        tuple(directory_change_times),
-        tuple((value.snapshot, value.change_time_ns) for value in hashes.values()),
+    current_head, status = state
+    proof = _private_git_proof(
+        index_read, head_fence, raw_semantics, change_times, hashes
     )
     return _PrivateGitState(current_head, status, proof)
-
 
 def _validate_private_git_proof(
     proof: _PrivateGitProof,
