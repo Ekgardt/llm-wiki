@@ -1658,10 +1658,8 @@ _KNOWN_GIT_PREFIXES = MappingProxyType(
 )
 
 
-def _private_git_installation() -> _PrivateGitInstallation | None:
-    candidate = shutil.which("git")
-    if candidate is None:
-        return None
+def _resolved_git_executable(candidate: str) -> tuple[Path, os.stat_result] | None:
+    """The resolved git binary and its metadata, if it is a plain file."""
     try:
         executable = Path(candidate).resolve(strict=True)
         info = executable.lstat()
@@ -1669,6 +1667,18 @@ def _private_git_installation() -> _PrivateGitInstallation | None:
         return None
     if _is_reparse(info) or not stat.S_ISREG(info.st_mode):
         return None
+    return executable, info
+
+
+def _private_git_installation() -> _PrivateGitInstallation | None:
+    """The git installation this machine offers, if its layout is a known one."""
+    candidate = shutil.which("git")
+    if candidate is None:
+        return None
+    resolved = _resolved_git_executable(candidate)
+    if resolved is None:
+        return None
+    executable, info = resolved
     prefixes = _KNOWN_GIT_PREFIXES.get(executable.as_posix())
     if prefixes is None:
         return None
@@ -1716,29 +1726,160 @@ def _strong_identity(info: os.stat_result) -> _StrongIdentity:
     )
 
 
-def _open_owned_file_parent(root: Path, path: Path) -> tuple[int, str]:
+_OWNED_DIRECTORY_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+)
+_OWNED_FILE_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_BINARY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+)
+
+
+def _owned_relative_parts(root: Path, path: Path) -> tuple[str, ...]:
+    """The path's components inside the repository, or a refusal."""
     try:
         relative = path.relative_to(root)
     except ValueError as exc:
-        raise PermissionError("workspace revision metadata escaped its repository") from exc
+        raise PermissionError(
+            "workspace revision metadata escaped its repository"
+        ) from exc
     if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
         raise PermissionError("workspace revision metadata path is invalid")
-    directory_flags = (
-        os.O_RDONLY
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-    descriptor = os.open(root, directory_flags)
+    return relative.parts
+
+
+def _walk_owned_directories(root: Path, parts: tuple[str, ...]) -> int:
+    """A descriptor on the directory holding the last component, opened stepwise."""
+    descriptor = os.open(root, _OWNED_DIRECTORY_FLAGS)
     try:
-        for component in relative.parts[:-1]:
-            child = os.open(component, directory_flags, dir_fd=descriptor)
+        for component in parts[:-1]:
+            child = os.open(component, _OWNED_DIRECTORY_FLAGS, dir_fd=descriptor)
             os.close(descriptor)
             descriptor = child
     except BaseException:
         os.close(descriptor)
         raise
-    return descriptor, relative.parts[-1]
+    return descriptor
+
+
+def _open_owned_file_parent(root: Path, path: Path) -> tuple[int, str]:
+    """A descriptor on the file's parent directory, and the file's own name."""
+    parts = _owned_relative_parts(root, path)
+    return _walk_owned_directories(root, parts), parts[-1]
+
+
+def _named_owned_file(
+    parent_descriptor: int, name: str, maximum_bytes: int
+) -> os.stat_result | None:
+    """The named entry's own metadata, if it is a plain file within the bound."""
+    try:
+        named = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except OSError:
+        return None
+    if _is_reparse(named) or not stat.S_ISREG(named.st_mode):
+        return None
+    return None if named.st_size > maximum_bytes else named
+
+
+def _open_owned_file(parent_descriptor: int, name: str) -> int:
+    """A descriptor on the named file itself, never on something it points at."""
+    try:
+        return os.open(name, _OWNED_FILE_FLAGS, dir_fd=parent_descriptor)
+    except OSError as exc:
+        raise PermissionError(
+            "workspace revision owned file changed before open"
+        ) from exc
+
+
+def _require_opened_owned_file(opened: os.stat_result, named: os.stat_result) -> None:
+    """The opened descriptor has to be the very entry the name resolved to."""
+    if not stat.S_ISREG(opened.st_mode):
+        raise PermissionError("workspace revision owned file changed before read")
+    if _strong_identity(opened) != _strong_identity(named):
+        raise PermissionError("workspace revision owned file changed before read")
+
+
+def _read_exact_bytes(
+    descriptor: int,
+    expected_size: int,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bytearray:
+    """Exactly this many bytes, refusing a file that shrank underneath the read."""
+    content = bytearray(expected_size)
+    size = 0
+    while size < expected_size:
+        _check_stop(deadline, cancelled)
+        chunk = os.read(descriptor, min(1024 * 1024, expected_size - size))
+        if not chunk:
+            raise PermissionError("workspace revision owned file changed during read")
+        content[size : size + len(chunk)] = chunk
+        size += len(chunk)
+    return content
+
+
+def _read_owned_descriptor(
+    descriptor: int,
+    named: os.stat_result,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> tuple[bytearray, os.stat_result]:
+    """The file's bytes, proved to be the named file and unchanged across the read."""
+    opened = os.fstat(descriptor)
+    _require_opened_owned_file(opened, named)
+    content = _read_exact_bytes(
+        descriptor, opened.st_size, deadline=deadline, cancelled=cancelled
+    )
+    _check_stop(deadline, cancelled)
+    if _strong_identity(os.fstat(descriptor)) != _strong_identity(opened):
+        raise PermissionError("workspace revision owned file changed during read")
+    return content, opened
+
+
+def _require_owned_file_stable(
+    parent_descriptor: int, name: str, opened: os.stat_result
+) -> None:
+    """The name has to still resolve to the very file that was just read."""
+    try:
+        final_named = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except OSError as exc:
+        raise PermissionError(
+            "workspace revision owned file changed after read"
+        ) from exc
+    if _strong_identity(final_named) != _strong_identity(opened):
+        raise PermissionError(
+            "workspace revision owned file identity changed after read"
+        )
+
+
+def _read_owned_content(
+    parent_descriptor: int,
+    name: str,
+    maximum_bytes: int,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> tuple[bytearray, os.stat_result] | None:
+    """The named file's bytes and the identity they were read under."""
+    named = _named_owned_file(parent_descriptor, name, maximum_bytes)
+    if named is None:
+        return None
+    descriptor = _open_owned_file(parent_descriptor, name)
+    try:
+        content, opened = _read_owned_descriptor(
+            descriptor, named, deadline=deadline, cancelled=cancelled
+        )
+    finally:
+        os.close(descriptor)
+    _require_owned_file_stable(parent_descriptor, name, opened)
+    return content, opened
 
 
 def _read_owned_file(
@@ -1749,62 +1890,25 @@ def _read_owned_file(
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
 ) -> _OwnedFileRead | None:
+    """One repository-owned file, read under a fence that proves it did not move."""
     _check_stop(deadline, cancelled)
     try:
         parent_descriptor, name = _open_owned_file_parent(root, path)
     except OSError:
         return None
     try:
-        try:
-            named = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
-        except OSError:
-            return None
-        if (
-            _is_reparse(named)
-            or not stat.S_ISREG(named.st_mode)
-            or named.st_size > maximum_bytes
-        ):
-            return None
-        flags = (
-            os.O_RDONLY
-            | getattr(os, "O_BINARY", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_NONBLOCK", 0)
+        read = _read_owned_content(
+            parent_descriptor,
+            name,
+            maximum_bytes,
+            deadline=deadline,
+            cancelled=cancelled,
         )
-        try:
-            descriptor = os.open(name, flags, dir_fd=parent_descriptor)
-        except OSError as exc:
-            raise PermissionError("workspace revision owned file changed before open") from exc
-        try:
-            opened = os.fstat(descriptor)
-            if (
-                not stat.S_ISREG(opened.st_mode)
-                or _strong_identity(opened) != _strong_identity(named)
-            ):
-                raise PermissionError("workspace revision owned file changed before read")
-            content = bytearray(opened.st_size)
-            size = 0
-            while size < opened.st_size:
-                _check_stop(deadline, cancelled)
-                chunk = os.read(descriptor, min(1024 * 1024, opened.st_size - size))
-                if not chunk:
-                    raise PermissionError("workspace revision owned file changed during read")
-                content[size : size + len(chunk)] = chunk
-                size += len(chunk)
-            _check_stop(deadline, cancelled)
-            after = os.fstat(descriptor)
-            if _strong_identity(after) != _strong_identity(opened):
-                raise PermissionError("workspace revision owned file changed during read")
-        finally:
-            os.close(descriptor)
-        try:
-            final_named = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
-        except OSError as exc:
-            raise PermissionError("workspace revision owned file changed after read") from exc
-        if _strong_identity(final_named) != _strong_identity(opened):
-            raise PermissionError("workspace revision owned file identity changed after read")
     finally:
         os.close(parent_descriptor)
+    if read is None:
+        return None
+    content, opened = read
     digest = _checked_digest(
         "sha256",
         content,
@@ -1813,9 +1917,19 @@ def _read_owned_file(
         cancelled=cancelled,
     ).hex()
     return _OwnedFileRead(
-        content,
-        _OwnedFileFence(path, digest, _strong_identity(opened)),
+        content, _OwnedFileFence(path, digest, _strong_identity(opened))
     )
+
+
+def _named_entry_present(parent_descriptor: int, name: str) -> bool:
+    """Whether the name resolves to something; an unreadable one counts as present."""
+    try:
+        os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return True
 
 
 def _owned_path_exists_or_is_uncertain(root: Path, path: Path) -> bool:
@@ -1826,46 +1940,35 @@ def _owned_path_exists_or_is_uncertain(root: Path, path: Path) -> bool:
     except OSError:
         return True
     try:
-        try:
-            os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
-        except FileNotFoundError:
-            return False
-        except OSError:
-            return True
-        return True
+        return _named_entry_present(parent_descriptor, name)
     finally:
         os.close(parent_descriptor)
 
 
-def _absolute_environment_path(value: str) -> Path | None:
-    """The path this environment value names, or None if it is not absolute."""
-    path = Path(value)
-    if not path.is_absolute():
-        return None
-    return path
+def _environment_paths_absolute(*values: str | None) -> bool:
+    """Whether every environment value that is set names an absolute path."""
+    return all(Path(value).is_absolute() for value in values if value)
 
 
 def _xdg_git_config_path(xdg_value: str | None, home_value: str | None) -> Path | None:
     """Where git looks for the XDG-located user config, if it looks anywhere."""
-    if not xdg_value:
-        return Path(home_value) / ".config/git/config" if home_value else None
-    xdg = _absolute_environment_path(xdg_value)
-    return None if xdg is None else xdg / "git/config"
+    if xdg_value:
+        return Path(xdg_value) / "git/config"
+    if home_value:
+        return Path(home_value) / ".config/git/config"
+    return None
 
 
 def _global_git_config_paths() -> tuple[Path, ...] | None:
     """Every user-level git config location, or None if one is not absolute."""
     home_value = os.environ.get("HOME")
     xdg_value = os.environ.get("XDG_CONFIG_HOME")
+    if not _environment_paths_absolute(home_value, xdg_value):
+        return None
     paths: list[Path] = []
     if home_value:
-        home = _absolute_environment_path(home_value)
-        if home is None:
-            return None
-        paths.append(home / ".gitconfig")
+        paths.append(Path(home_value) / ".gitconfig")
     xdg_config = _xdg_git_config_path(xdg_value, home_value)
-    if xdg_config is None and xdg_value:
-        return None
     if xdg_config is not None:
         paths.append(xdg_config)
     return tuple(paths)
@@ -1980,23 +2083,36 @@ def _private_config_setting_allowed(
     return _private_config_value_allowed(qualified, value, hash_name)
 
 
+def _config_section_header(line: str) -> str | None:
+    """The section this line opens, if it opens one the private read allows."""
+    match = re.fullmatch(r"\[(core|extensions|user)\]", line, flags=re.IGNORECASE)
+    return None if match is None else match.group(1).lower()
+
+
+def _private_config_lines_allowed(text: str, hash_name: str, seen: set[str]) -> bool:
+    """Whether every line of this config is one the private read tolerates."""
+    section: str | None = None
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        header = _config_section_header(line)
+        if header is not None:
+            section = header
+            continue
+        if not _private_config_setting_allowed(section, line, hash_name, seen):
+            return False
+    return True
+
+
 def _safe_private_git_config(content: bytes, *, hash_name: str) -> bool:
     """Whether the repository's own config leaves git's behaviour predictable."""
     text = _decoded_config(content)
     if text is None:
         return False
-    section: str | None = None
     seen: set[str] = set()
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        match = re.fullmatch(r"\[(core|extensions|user)\]", line, flags=re.IGNORECASE)
-        if match is not None:
-            section = match.group(1).lower()
-            continue
-        if not _private_config_setting_allowed(section, line, hash_name, seen):
-            return False
+    if not _private_config_lines_allowed(text, hash_name, seen):
+        return False
     return _REQUIRED_PRIVATE_CONFIG_KEYS <= seen
 
 
@@ -2010,15 +2126,17 @@ def _ignored_config_setting_allowed(line: str, in_user_section: bool) -> bool:
     return pair[0] in {"email", "name"}
 
 
-def _safe_ignored_git_config(content: bytes) -> bool:
-    """Whether an external git config sets nothing that changes what git reads."""
-    text = _decoded_config(content)
-    if text is None:
-        return False
+def _blank_or_comment(line: str) -> bool:
+    """Whether this config line carries nothing at all."""
+    return not line or line.startswith(("#", ";"))
+
+
+def _ignored_config_lines_allowed(text: str) -> bool:
+    """Whether every line of an external config is one the read can ignore."""
     in_user_section = False
     for raw_line in text.splitlines():
         line = raw_line.strip()
-        if not line or line.startswith(("#", ";")):
+        if _blank_or_comment(line):
             continue
         if re.fullmatch(r"\[user\]", line, flags=re.IGNORECASE) is not None:
             in_user_section = True
@@ -2026,6 +2144,14 @@ def _safe_ignored_git_config(content: bytes) -> bool:
         if not _ignored_config_setting_allowed(line, in_user_section):
             return False
     return True
+
+
+def _safe_ignored_git_config(content: bytes) -> bool:
+    """Whether an external git config sets nothing that changes what git reads."""
+    text = _decoded_config(content)
+    if text is None:
+        return False
+    return _ignored_config_lines_allowed(text)
 
 def _inert_git_attributes(content: bytes) -> bool:
     return all(not line.strip() or line.startswith(b"#") for line in content.splitlines())
@@ -2125,6 +2251,25 @@ def _deduplicated_ignore_paths(
     return tuple(unique)
 
 
+def _read_semantics_file(
+    owner_root: Path,
+    path: Path,
+    limit: int,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> _OwnedFileRead | None:
+    """This semantics file's fenced read, or None when it could not be read."""
+    try:
+        return _read_owned_file(
+            owner_root, path, limit, deadline=deadline, cancelled=cancelled
+        )
+    except _RevisionStopped:
+        raise
+    except OSError:
+        return None
+
+
 def _add_semantics_file(
     scan: _SemanticsScan,
     owner_root: Path,
@@ -2139,14 +2284,9 @@ def _add_semantics_file(
     if not _owned_path_exists_or_is_uncertain(owner_root, path):
         scan.absent.append((owner_root, path))
         return True
-    try:
-        read = _read_owned_file(
-            owner_root, path, limit, deadline=deadline, cancelled=cancelled
-        )
-    except _RevisionStopped:
-        raise
-    except OSError:
-        return False
+    read = _read_semantics_file(
+        owner_root, path, limit, deadline=deadline, cancelled=cancelled
+    )
     if read is None or not inert(read.content):
         return False
     scan.files.append(_SemanticsFileFence(owner_root, read.fence, limit))
@@ -2253,6 +2393,26 @@ def _fence_private_config(
     return True
 
 
+def _fence_all_semantics(
+    scan: _SemanticsScan,
+    groups: Iterable[tuple[Iterable[tuple[Path, Path]], int, Callable[[bytes], bool]]],
+    root: Path,
+    marker: Path,
+    hash_name: str,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    """Fence every semantics file, the repository's own config last."""
+    if not _fence_semantics_groups(
+        scan, groups, deadline=deadline, cancelled=cancelled
+    ):
+        return False
+    return _fence_private_config(
+        scan, root, marker, hash_name, deadline=deadline, cancelled=cancelled
+    )
+
+
 def _private_raw_semantics_safe(
     root: Path,
     *,
@@ -2275,12 +2435,8 @@ def _private_raw_semantics_safe(
     if groups is None:
         return None
     scan = _SemanticsScan()
-    if not _fence_semantics_groups(
-        scan, groups, deadline=deadline, cancelled=cancelled
-    ):
-        return None
-    if not _fence_private_config(
-        scan, root, marker, hash_name, deadline=deadline, cancelled=cancelled
+    if not _fence_all_semantics(
+        scan, groups, root, marker, hash_name, deadline=deadline, cancelled=cancelled
     ):
         return None
     return _RawSemanticsProof(
@@ -2399,6 +2555,15 @@ def _valid_index_path(path: str) -> bool:
     return not any(part in {"", ".", "..", ".git"} for part in pure.parts)
 
 
+def _index_entry_in_order(
+    scan: _IndexEntryScan, path: str, path_bytes: bytes
+) -> bool:
+    """Whether this path follows the previous one and collides with none of them."""
+    if path.casefold() in scan.seen_collisions:
+        return False
+    return scan.previous_path is None or path_bytes > scan.previous_path
+
+
 def _record_index_entry(
     scan: _IndexEntryScan,
     path_bytes: bytes,
@@ -2414,12 +2579,9 @@ def _record_index_entry(
         return False
     if not _valid_index_path(path):
         return False
-    collision = path.casefold()
-    if collision in scan.seen_collisions:
+    if not _index_entry_in_order(scan, path, path_bytes):
         return False
-    if scan.previous_path is not None and path_bytes <= scan.previous_path:
-        return False
-    scan.seen_collisions.add(collision)
+    scan.seen_collisions.add(path.casefold())
     scan.previous_path = path_bytes
     scan.entries.append(_GitIndexEntry(path, entry_offset, oid, mode))
     scan.offset = padded_end
@@ -2606,12 +2768,10 @@ def _fence_text(content: bytes | bytearray) -> str | None:
 def _safe_head_reference(value: str) -> PurePosixPath | None:
     """The ref this HEAD points at, if it names a plain path under `refs/`."""
     reference = value[5:]
+    if not reference.startswith("refs/"):
+        return None
     pure = PurePosixPath(reference)
-    if not reference.startswith("refs/") or "\\" in reference:
-        return None
-    if pure.is_absolute():
-        return None
-    return None if any(part in {"", ".", ".."} for part in pure.parts) else pure
+    return pure if _acceptable_relative_path(reference, pure) else None
 
 
 def _resolved_head_target(
@@ -2641,6 +2801,13 @@ def _resolved_head_target(
     return None if oid is None else (oid, reference_read.fence)
 
 
+def _head_fence_matches(oid: str, expected_head: str) -> bool:
+    """Whether this object id is a real commit and the one that was expected."""
+    if _GIT_COMMIT_RE.fullmatch(oid.encode("ascii")) is None:
+        return False
+    return oid == expected_head
+
+
 def _read_direct_head_fence(
     root: Path,
     expected_head: str,
@@ -2667,7 +2834,7 @@ def _read_direct_head_fence(
     if resolved is None:
         return None
     oid, reference_fence = resolved
-    if _GIT_COMMIT_RE.fullmatch(oid.encode("ascii")) is None or oid != expected_head:
+    if not _head_fence_matches(oid, expected_head):
         return None
     return _HeadFence(oid, head_read.fence, reference_fence)
 
@@ -3485,6 +3652,14 @@ def _expected_revision_digest(expected: WorkspaceRevision) -> str:
     return hashlib.sha256(canonical_json_bytes(values)).hexdigest()
 
 
+def _require_revision_types(repository: object, expected: object) -> None:
+    """Refuse arguments that are not a repository scope and a revision at all."""
+    if not isinstance(repository, RepositoryScope):
+        raise TypeError("repository must be a RepositoryScope")
+    if not isinstance(expected, WorkspaceRevision):
+        raise TypeError("expected must be a WorkspaceRevision")
+
+
 def _require_matching_revision(
     repository: RepositoryScope,
     expected: WorkspaceRevision,
@@ -3492,10 +3667,7 @@ def _require_matching_revision(
     cancelled: Callable[[], bool] | None,
 ) -> None:
     """Refuse a revision that is not a sound record of this very checkout."""
-    if not isinstance(repository, RepositoryScope):
-        raise TypeError("repository must be a RepositoryScope")
-    if not isinstance(expected, WorkspaceRevision):
-        raise TypeError("expected must be a WorkspaceRevision")
+    _require_revision_types(repository, expected)
     if (expected.repository_id, expected.checkout_id) != (
         repository.repository_id,
         repository.checkout_id,
@@ -3508,16 +3680,20 @@ def _require_matching_revision(
         raise ValueError("expected revision digest is invalid")
 
 
+def _valid_entry_digest(sha256: object) -> bool:
+    """Whether this is a lowercase hexadecimal SHA-256."""
+    if not isinstance(sha256, str):
+        return False
+    return re.fullmatch(r"[0-9a-f]{64}", sha256) is not None
+
+
 def _require_valid_entry_digest(entry: RevisionEntry) -> None:
     """A deleted entry carries nothing; every other one carries a real digest."""
     if entry.kind == "deleted":
         if entry.sha256 is not None or entry.size != 0:
             raise ValueError("expected deleted revision entry is invalid")
         return
-    if (
-        not isinstance(entry.sha256, str)
-        or re.fullmatch(r"[0-9a-f]{64}", entry.sha256) is None
-    ):
+    if not _valid_entry_digest(entry.sha256):
         raise ValueError("expected revision entry digest is invalid")
 
 
@@ -3718,15 +3894,25 @@ def _hash_direct_entry(
     )
 
 
+def _prepared_entry_snapshot(
+    plan: _PrivateIndexPlan, relative: str, entry: RevisionEntry
+) -> _FileSnapshot | None:
+    """The staged snapshot for this entry, if it still matches its recorded size."""
+    if plan.prepared_files is None:
+        raise AssertionError("private-index file snapshots are unavailable")
+    prepared = plan.prepared_files.get(relative)
+    if prepared is None or prepared.identity[3] != entry.size:
+        return None
+    return prepared
+
+
 def _hash_prepared_entry(
     relative: str, entry: RevisionEntry, context: _EntryHashContext, remaining: int
 ) -> _VerificationHash | None:
     """Hash one entry through the private index the pass prepared."""
     plan = context.plan
-    if plan.prepared_files is None:
-        raise AssertionError("private-index file snapshots are unavailable")
-    prepared = plan.prepared_files.get(relative)
-    if prepared is None or prepared.identity[3] != entry.size:
+    prepared = _prepared_entry_snapshot(plan, relative, entry)
+    if prepared is None:
         return None
     try:
         return _hash_file_for_verification(
@@ -3794,6 +3980,14 @@ def _hash_expected_entries(
     return gathered
 
 
+def _require_armed_private_plan(plan: _PrivateIndexPlan) -> None:
+    """An armed fast path carries every piece it needs, or the code itself is wrong."""
+    if plan.index_path is None:
+        raise AssertionError("private-index path is unavailable")
+    if plan.installation is None or plan.entry_snapshots is None:
+        raise AssertionError("private-index installation proof is unavailable")
+
+
 def _private_git_state(
     root: Path,
     expected: WorkspaceRevision,
@@ -3812,10 +4006,7 @@ def _private_git_state(
     """
     if plan.hash_name is None:
         return None
-    if plan.index_path is None:
-        raise AssertionError("private-index path is unavailable")
-    if plan.installation is None or plan.entry_snapshots is None:
-        raise AssertionError("private-index installation proof is unavailable")
+    _require_armed_private_plan(plan)
     try:
         state = _try_private_git_state(
             root,
