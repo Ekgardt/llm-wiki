@@ -3818,6 +3818,50 @@ def _notify_lsp_process_generation(
     raise outcome.protocol_error
 
 
+def _failure_generation(
+    coordinator: _LifecycleCoordinator,
+) -> _Generation | None:
+    """The generation the failure evidence should name."""
+    generation = coordinator.active or coordinator.candidate
+    if generation is not None:
+        return generation
+    if coordinator.retired:
+        return coordinator.retired[-1]
+    return None
+
+
+def _failure_generation_nonce(
+    instance: LspProcess | None,
+    coordinator: _LifecycleCoordinator,
+    generation: _Generation | None,
+) -> str | None:
+    """The generation nonce, from the generation, the instance, or the startup."""
+    if generation is not None:
+        return generation.nonce
+    if instance is not None:
+        return instance.generation_nonce
+    return coordinator.startup_generation_nonce
+
+
+def _failure_server_pid(
+    instance: LspProcess | None, generation: _Generation | None
+) -> int | None:
+    """The server PID this failure belongs to, from the closest thing that knows."""
+    if generation is None:
+        return instance.process.pid if instance is not None else None
+    if generation.process is not None:
+        return generation.process.pid
+    return generation.server_pid
+
+
+def _failure_owner_nonce(
+    instance: LspProcess | None, owner: _OwnerDirectory
+) -> str:
+    if instance is not None:
+        return instance.owner_nonce
+    return owner.owner_root.name
+
+
 def _failure_identity(
     instance: LspProcess | None,
     coordinator: _LifecycleCoordinator,
@@ -3826,35 +3870,15 @@ def _failure_identity(
     owner = coordinator.owner_directory
     if owner is None:
         return None
-    generation = coordinator.active or coordinator.candidate
-    if generation is None and coordinator.retired:
-        generation = coordinator.retired[-1]
-    generation_nonce = (
-        generation.nonce
-        if generation is not None
-        else (
-            instance.generation_nonce
-            if instance is not None
-            else coordinator.startup_generation_nonce
-        )
-    )
+    generation = _failure_generation(coordinator)
+    generation_nonce = _failure_generation_nonce(instance, coordinator, generation)
     if generation_nonce is None:
         return None
-    process = generation.process if generation is not None else None
-    server_pid = (
-        process.pid
-        if process is not None
-        else (
-            generation.server_pid
-            if generation is not None
-            else (instance.process.pid if instance is not None else None)
-        )
-    )
     return _FailureEvidenceIdentity(
         code,
-        instance.owner_nonce if instance is not None else owner.owner_root.name,
+        _failure_owner_nonce(instance, owner),
         generation_nonce,
-        server_pid,
+        _failure_server_pid(instance, generation),
     )
 
 
