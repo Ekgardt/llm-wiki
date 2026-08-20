@@ -4238,6 +4238,69 @@ def _failure_is_terminal(
     return int(row["attempts"]) >= attempt_limit
 
 
+def _check_claim_arguments(
+    owner: str, lease_seconds: int, max_attempts: int
+) -> None:
+    if not owner:
+        raise ValueError("owner must be non-empty")
+    if lease_seconds <= 0:
+        raise ValueError("lease must be positive")
+    _validate_retry_policy(
+        max_attempts, DEFAULTS.retry_base_seconds, DEFAULTS.retry_cap_seconds
+    )
+
+
+def _retire_exhausted_history(
+    database: sqlite3.Connection, row: sqlite3.Row, now: datetime
+) -> bool:
+    """Retire a task whose attempt history is full; True when it was retired."""
+    history_count = database.execute(
+        "SELECT COUNT(*) FROM attempt_history WHERE task_id=?",
+        (row["id"],),
+    ).fetchone()[0]
+    if int(history_count) < _MAX_RUNTIME_ATTEMPTS:
+        return False
+    changed = database.execute(
+        """UPDATE tasks SET state='dead',
+               error_code='attempt_history_exhausted',updated_at=?
+           WHERE id=? AND state='ready'""",
+        (_timestamp(now), row["id"]),
+    ).rowcount
+    if changed != 1:
+        raise QueueOperationError("attempt_history_demotion_failed")
+    return True
+
+
+def _take_task_lease(
+    database: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    owner: str,
+    token: str,
+    now: datetime,
+    expires_at: datetime,
+    max_attempts: int,
+) -> bool:
+    """Move the task into a lease; False when someone else got there first."""
+    changed = database.execute(
+        """UPDATE tasks SET state='leased', attempts=attempts+1,
+               lease_owner=?, lease_token=?, lease_expires_at=?,
+               lease_heartbeat_at=?, attempt_started_at=?, updated_at=?
+           WHERE id=? AND state='ready' AND attempts < ?""",
+        (
+            owner,
+            token,
+            _timestamp(expires_at),
+            _timestamp(now),
+            _timestamp(now),
+            _timestamp(now),
+            row["id"],
+            max_attempts,
+        ),
+    ).rowcount
+    return changed == 1
+
+
 class MemoryQueue:
     """Durable priority queue with lease-token fencing and at-least-once delivery."""
 
@@ -9380,65 +9443,26 @@ class _QueueV3CandidateReader:
         lease_seconds: int = DEFAULTS.queue_lease_seconds,
         max_attempts: int = DEFAULTS.queue_max_attempts,
     ) -> QueueLease | None:
-        if not owner:
-            raise ValueError("owner must be non-empty")
-        if lease_seconds <= 0:
-            raise ValueError("lease must be positive")
-        _validate_retry_policy(
-            max_attempts, DEFAULTS.retry_base_seconds, DEFAULTS.retry_cap_seconds
-        )
+        _check_claim_arguments(owner, lease_seconds, max_attempts)
         now = _utc_now()
         with closing(
             self._connect()
         ) as database, begin_immediate(database):
-            while True:
-                row = database.execute(
-                    """SELECT * FROM tasks
-                       WHERE state='ready' AND attempts < ? AND available_at <= ?
-                       ORDER BY priority DESC, available_at, created_at, id LIMIT 1""",
-                    (max_attempts, _timestamp(now)),
-                ).fetchone()
-                if row is None:
-                    return None
-                validation = self._require_valid_task_payload(
-                    database, row, now=now, parse=True
-                )
-                if validation is None:
-                    continue
-                history_count = database.execute(
-                    "SELECT COUNT(*) FROM attempt_history WHERE task_id=?",
-                    (row["id"],),
-                ).fetchone()[0]
-                if int(history_count) >= _MAX_RUNTIME_ATTEMPTS:
-                    changed = database.execute(
-                        """UPDATE tasks SET state='dead',
-                               error_code='attempt_history_exhausted',updated_at=?
-                           WHERE id=? AND state='ready'""",
-                        (_timestamp(now), row["id"]),
-                    ).rowcount
-                    if changed != 1:
-                        raise QueueOperationError("attempt_history_demotion_failed")
-                    continue
-                break
+            claimable = self._next_claimable_task(database, now, max_attempts)
+            if claimable is None:
+                return None
+            row, validation = claimable
             token = sha256_bytes(os.urandom(32))
             expires_at = now + timedelta(seconds=lease_seconds)
-            changed = database.execute(
-                """UPDATE tasks SET state='leased', attempts=attempts+1,
-                       lease_owner=?, lease_token=?, lease_expires_at=?,
-                       lease_heartbeat_at=?, attempt_started_at=?, updated_at=?
-                   WHERE id=? AND state='ready' AND attempts < ?""",
-                (
-                    owner,
-                    token,
-                    _timestamp(expires_at),
-                    _timestamp(now),
-                    _timestamp(now),
-                    _timestamp(now),
-                    row["id"],
-                    max_attempts,
-                ),
-            ).rowcount
-            if changed != 1:
+            if not _take_task_lease(
+                database,
+                row,
+                owner=owner,
+                token=token,
+                now=now,
+                expires_at=expires_at,
+                max_attempts=max_attempts,
+            ):
                 return None
         return QueueLease(
             id=str(row["id"]),
@@ -9454,6 +9478,27 @@ class _QueueV3CandidateReader:
             last_attempt_at=_parse_timestamp(row["last_attempt_at"]),
             prior_attempts=int(row["attempts"]),
         )
+
+    def _next_claimable_task(
+        self, database: sqlite3.Connection, now: datetime, max_attempts: int
+    ) -> tuple[sqlite3.Row, PayloadValidation] | None:
+        """The next ready task with a readable payload and attempts to spare."""
+        while True:
+            row = database.execute(
+                """SELECT * FROM tasks
+                   WHERE state='ready' AND attempts < ? AND available_at <= ?
+                   ORDER BY priority DESC, available_at, created_at, id LIMIT 1""",
+                (max_attempts, _timestamp(now)),
+            ).fetchone()
+            if row is None:
+                return None
+            validation = self._require_valid_task_payload(
+                database, row, now=now, parse=True
+            )
+            if validation is None:
+                continue
+            if not _retire_exhausted_history(database, row, now):
+                return row, validation
 
     @staticmethod
     def _validate_capture_claim(
