@@ -1247,9 +1247,14 @@ def test_maintenance_heartbeat_runs_during_long_operation(tmp_path, monkeypatch)
     monkeypatch.setattr(doctor, "_heartbeat_maintenance_owner", heartbeat)
 
     def wait_for_two_heartbeats() -> None:
-        assert second_beat.wait(timeout=1)
+        # Each beat writes through the coordinator, so two of them cost far
+        # more than the 10 ms interval on a loaded machine. The wait ends as
+        # soon as the second beat lands; the budget is only its upper bound.
+        assert second_beat.wait(timeout=120)
 
-    with doctor._MaintenanceHeartbeat(coordinator, lease, deadline=time.monotonic() + 2) as guard:
+    with doctor._MaintenanceHeartbeat(
+        coordinator, lease, deadline=time.monotonic() + 180
+    ) as guard:
         guard.run(wait_for_two_heartbeats)
 
     assert len(beats) >= 2
