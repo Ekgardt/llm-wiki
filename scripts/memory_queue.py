@@ -2992,39 +2992,57 @@ def _harden_owner_only(path: Path, mode: int) -> None:
         raise PermissionError(f"could not apply owner-only permissions to {path}")
 
 
-def _is_owner_only(path: Path) -> bool:
-    if os.name == "nt":
-        from markdown_transaction import (
-            _acl_output_text,
-            _run_acl_command,
-            _windows_acl_identity,
-        )
+def _windows_acl_lines(path: Path) -> list[str] | None:
+    """The access control entries icacls reports, or None when it refuses."""
+    from markdown_transaction import _acl_output_text, _run_acl_command
 
-        try:
-            verified = _run_acl_command(["icacls", str(path)])
-        except Exception:  # noqa: BLE001 - validation is fail-closed
-            return False
-        if verified.returncode != 0:
-            return False
-        identity = _windows_acl_identity()
-        acl_lines = [
-            line.strip()
-            for line in _acl_output_text(verified.stdout).splitlines()
-            if ":(" in line
-        ]
-        owner_lines = [
-            line for line in acl_lines if identity.casefold() in line.casefold()
-        ]
-        return (
-            len(owner_lines) == 1
-            and "(F)" in owner_lines[0]
-            and all(identity.casefold() in line.casefold() for line in acl_lines)
-        )
+    try:
+        verified = _run_acl_command(["icacls", str(path)])
+    except Exception:  # noqa: BLE001 - validation is fail-closed
+        return None
+    if verified.returncode != 0:
+        return None
+    return [
+        line.strip()
+        for line in _acl_output_text(verified.stdout).splitlines()
+        if ":(" in line
+    ]
+
+
+def _acl_owner_lines(acl_lines: list[str], folded: str) -> list[str]:
+    return [line for line in acl_lines if folded in line.casefold()]
+
+
+def _acl_is_owner_only(acl_lines: list[str], identity: str) -> bool:
+    """One full-control entry for us, and nothing else at all."""
+    folded = identity.casefold()
+    owner_lines = _acl_owner_lines(acl_lines, folded)
+    if len(owner_lines) != 1 or "(F)" not in owner_lines[0]:
+        return False
+    return len(owner_lines) == len(acl_lines)
+
+
+def _is_owner_only_windows(path: Path) -> bool:
+    from markdown_transaction import _windows_acl_identity
+
+    acl_lines = _windows_acl_lines(path)
+    if acl_lines is None:
+        return False
+    return _acl_is_owner_only(acl_lines, _windows_acl_identity())
+
+
+def _is_owner_only_posix(path: Path) -> bool:
     try:
         mode = stat.S_IMODE(path.stat().st_mode)
     except OSError:
         return False
     return mode & 0o077 == 0 and mode & 0o600 == 0o600
+
+
+def _is_owner_only(path: Path) -> bool:
+    if os.name == "nt":
+        return _is_owner_only_windows(path)
+    return _is_owner_only_posix(path)
 
 
 def _validate_retry_policy(
