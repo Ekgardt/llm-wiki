@@ -2706,6 +2706,31 @@ def _write_current_lease(instance: LspProcess, deadline: float) -> None:
         _release_lease(coordinator)
 
 
+def _report_drain_inspection_timeout(coordinator: _LifecycleCoordinator) -> None:
+    """A maintenance pass that cannot take the lock records why it gave up."""
+    bounded_error = TimeoutError(
+        "LSP expired-drain inspection exceeded its maintenance deadline"
+    )
+    if _queue_owner_failure(coordinator, str(bounded_error)):
+        _remember_background_cleanup_error(coordinator, bounded_error)
+
+
+def _running_generation_locked(
+    coordinator: _LifecycleCoordinator,
+) -> _Generation | None:
+    if coordinator.phase is not _LifecyclePhase.RUNNING:
+        return None
+    return coordinator.active
+
+
+def _generation_not_exiting(generation: _Generation) -> bool:
+    """Nothing has told us this generation is on its way out."""
+    with generation.failure_lock:
+        if generation._exit_observed or generation.failure_queued:
+            return False
+        return not generation.expected_exit.is_set()
+
+
 def _active_drain_generation(
     instance: LspProcess,
 ) -> tuple[_Generation, LspProtocol] | None:
@@ -2714,31 +2739,24 @@ def _active_drain_generation(
     try:
         _acquire_lifecycle(coordinator, deadline)
     except TimeoutError:
-        bounded_error = TimeoutError(
-            "LSP expired-drain inspection exceeded its maintenance deadline"
-        )
-        if _queue_owner_failure(coordinator, str(bounded_error)):
-            _remember_background_cleanup_error(coordinator, bounded_error)
+        _report_drain_inspection_timeout(coordinator)
         return None
     try:
-        generation = (
-            coordinator.active
-            if coordinator.phase is _LifecyclePhase.RUNNING
-            else None
-        )
-        protocol = generation.protocol if generation is not None else None
+        generation = _running_generation_locked(coordinator)
     finally:
         _release_lifecycle(coordinator)
-    if generation is None or protocol is None:
+    return _drainable_generation(generation)
+
+
+def _drainable_generation(
+    generation: _Generation | None,
+) -> tuple[_Generation, LspProtocol] | None:
+    """The generation and its protocol, when it is live and not on its way out."""
+    if generation is None or generation.protocol is None:
         return None
-    with generation.failure_lock:
-        if (
-            generation._exit_observed
-            or generation.failure_queued
-            or generation.expected_exit.is_set()
-        ):
-            return None
-    return generation, protocol
+    if not _generation_not_exiting(generation):
+        return None
+    return generation, generation.protocol
 
 
 def _next_drain_deadline(instance: LspProcess) -> float | None:
