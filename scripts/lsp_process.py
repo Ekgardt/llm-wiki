@@ -34,6 +34,7 @@ from interruption import (
 from interruption import (
     raise_collected_errors as _raise_cleanup_failures,
 )
+from interruption import walk_exception_chain
 from lsp_protocol import (
     CancellationToken,
     LspProtocol,
@@ -395,16 +396,19 @@ class _OwnerDirectory:
                 self._pending_child_handles.append(handle)
             raise
 
+    def _close_one_child_handle(self, handle: int | None) -> BaseException | None:
+        """Close one handle; the error it raised, if it raised one."""
+        if handle is None:
+            return None
+        try:
+            self._close_child_handle(handle)
+        except BaseException as error:
+            return error
+        return None
+
     def _close_child_handles(self, *handles: int | None) -> None:
-        first_error: BaseException | None = None
-        for handle in handles:
-            if handle is None:
-                continue
-            try:
-                self._close_child_handle(handle)
-            except BaseException as error:
-                if first_error is None:
-                    first_error = error
+        errors = [self._close_one_child_handle(handle) for handle in handles]
+        first_error = _first_error(errors)
         if first_error is not None:
             raise first_error
 
@@ -1110,14 +1114,16 @@ class _Generation:
 
     @property
     def released(self) -> bool:
-        return (
-            self.tree is None
-            and self.process is None
-            and self.windows_job is None
-            and self.protocol is None
-            and self.stderr_thread is None
-            and self.exit_thread is None
+        """Nothing of this generation is still held."""
+        held = (
+            self.tree,
+            self.process,
+            self.windows_job,
+            self.protocol,
+            self.stderr_thread,
+            self.exit_thread,
         )
+        return all(item is None for item in held)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1177,19 +1183,10 @@ def _sanitized_cleanup_error(step: str, error: BaseException) -> _CleanupError:
 def _protocol_startup_cleanup_in_chain(
     error: BaseException,
 ) -> _ProtocolStartupCleanupError | None:
-    pending: list[BaseException] = [error]
-    seen: set[int] = set()
-    while pending:
-        current = pending.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
+    """The retained protocol cleanup owner anywhere in the error's chain."""
+    for current in walk_exception_chain(error):
         if isinstance(current, _ProtocolStartupCleanupError):
             return current
-        if current.__context__ is not None:
-            pending.append(current.__context__)
-        if current.__cause__ is not None:
-            pending.append(current.__cause__)
     return None
 
 
@@ -1334,13 +1331,17 @@ def _atexit_cleanup_startups() -> None:
             pass
 
 
+def _check_environment_pair(name: object, value: object) -> None:
+    """One inherited name and value: a string without a NUL."""
+    if not isinstance(name, str) or not isinstance(value, str):
+        raise TypeError("environment names and values must be strings")
+    if "\0" in name or "\0" in value:
+        raise ValueError("environment names and values must not contain NUL")
+
+
 def _check_environment_pairs(values: Mapping[str, str]) -> None:
-    """Every inherited name and value is a string without a NUL."""
     for name, value in values.items():
-        if not isinstance(name, str) or not isinstance(value, str):
-            raise TypeError("environment names and values must be strings")
-        if "\0" in name or "\0" in value:
-            raise ValueError("environment names and values must not contain NUL")
+        _check_environment_pair(name, value)
 
 
 def _is_existing_directory(path: Path) -> bool:
@@ -4731,12 +4732,17 @@ def _generations_locked(coordinator: _LifecycleCoordinator) -> list[_Generation]
     return generations
 
 
+def _thread_never_started(thread: threading.Thread) -> bool:
+    """A thread object that was built but never handed to the scheduler."""
+    return thread.ident is None and thread not in threading.enumerate()
+
+
 def _join_owned_thread(thread: threading.Thread | None, deadline: float) -> bool:
     if thread is None:
         return True
     if thread is threading.current_thread():
         return False
-    if thread.ident is None and thread not in threading.enumerate():
+    if _thread_never_started(thread):
         return True
     remaining = deadline - time.monotonic()
     if remaining > 0:
@@ -5418,13 +5424,21 @@ def _release_ownership_lease_locked(run: _CleanupRun) -> None:
     coordinator = run.coordinator
     if not run.terminal or coordinator.owner_directory is not None:
         return
-    if coordinator.ownership_lease is None or coordinator.ownership_registry is None:
+    if not _registry_lease_held(coordinator):
         return
     try:
         coordinator.ownership_registry.release(coordinator.ownership_lease)
         coordinator.ownership_lease = None
     except BaseException as error:
         run.failed("lease_removal", error)
+
+
+def _registry_lease_held(coordinator: _LifecycleCoordinator) -> bool:
+    """A registry lease this coordinator can still hand back."""
+    return (
+        coordinator.ownership_lease is not None
+        and coordinator.ownership_registry is not None
+    )
 
 
 def _forget_lease_generation_locked(coordinator: _LifecycleCoordinator) -> None:

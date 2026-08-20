@@ -17,7 +17,7 @@ def _chained(current: BaseException) -> tuple[BaseException, ...]:
     return tuple(item for item in linked if item is not None)
 
 
-def _walk_chain(error: BaseException | None) -> Iterator[BaseException]:
+def walk_exception_chain(error: BaseException | None) -> Iterator[BaseException]:
     """Every exception reachable from this one, each visited exactly once."""
     pending = [error] if error is not None else []
     seen: set[int] = set()
@@ -34,7 +34,7 @@ def interruption_in_chain(
     error: BaseException,
 ) -> KeyboardInterrupt | SystemExit | None:
     """The interruption anywhere in the error's cause and context chain."""
-    for current in _walk_chain(error):
+    for current in walk_exception_chain(error):
         if isinstance(current, (KeyboardInterrupt, SystemExit)):
             return current
     return None
@@ -42,7 +42,7 @@ def interruption_in_chain(
 
 def exception_reaches(error: BaseException | None, target: BaseException) -> bool:
     """Whether the target is reachable from the error by cause or context."""
-    return any(current is target for current in _walk_chain(error))
+    return any(current is target for current in walk_exception_chain(error))
 
 
 def _first_interruption(
