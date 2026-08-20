@@ -14,6 +14,13 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, BinaryIO
 
+from interruption import (
+    exception_reaches as _exception_reaches,
+)
+from interruption import (
+    interruption_in_chain as _interruption_in_chain,
+)
+
 if os.name == "nt":
     import ctypes
     from ctypes import wintypes
@@ -459,43 +466,17 @@ def encode_frame(message: object) -> bytes:
     return f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body
 
 
-def _interruption_in_chain(
-    error: BaseException,
-) -> KeyboardInterrupt | SystemExit | None:
-    pending: list[BaseException] = [error]
-    seen: set[int] = set()
-    while pending:
-        current = pending.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        if isinstance(current, (KeyboardInterrupt, SystemExit)):
-            return current
-        if current.__context__ is not None:
-            pending.append(current.__context__)
-        if current.__cause__ is not None:
-            pending.append(current.__cause__)
-    return None
 
 
-def _exception_reaches(error: BaseException | None, target: BaseException) -> bool:
-    pending = [error] if error is not None else []
-    seen: set[int] = set()
-    while pending:
-        current = pending.pop()
-        if current is target:
-            return True
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        if current.__context__ is not None:
-            pending.append(current.__context__)
-        if current.__cause__ is not None:
-            pending.append(current.__cause__)
-    return False
 
 
 def _raise_collected_errors(errors: Sequence[BaseException]) -> None:
+    """Raise the interruption if one is travelling, otherwise the first error.
+
+    Unlike the shared helper this scrubs the whole chain of the secondary
+    error, not only its immediate cause and context, because a protocol
+    rollback can nest the interruption several links down.
+    """
     if not errors:
         return
     source: BaseException | None = None

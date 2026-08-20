@@ -23,6 +23,12 @@ import windows_workspace as _windows_workspace
 from bounded_io import read_stable_bytes
 from code_intelligence import PositionEncoding
 from compile_cache import _restrict_owner_only, _verify_owner_only
+from interruption import (
+    interruption_in_chain as _startup_interruption,
+)
+from interruption import (
+    raise_collected_errors as _raise_collected_errors,
+)
 from lsp_paths import lsp_owner_root
 from lsp_positions import (
     LspPosition,
@@ -372,144 +378,24 @@ def _startup_code(error: BaseException) -> str:
     return "pyright_startup_failed"
 
 
-def _startup_interruption(
-    error: BaseException,
-) -> KeyboardInterrupt | SystemExit | None:
-    pending: list[BaseException] = [error]
-    seen: set[int] = set()
-    while pending:
-        current = pending.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        if isinstance(current, (KeyboardInterrupt, SystemExit)):
-            return current
-        if current.__context__ is not None:
-            pending.append(current.__context__)
-        if current.__cause__ is not None:
-            pending.append(current.__cause__)
-    return None
 
 
-def _exception_reaches(error: BaseException | None, target: BaseException) -> bool:
-    pending = [error] if error is not None else []
-    seen: set[int] = set()
-    while pending:
-        current = pending.pop()
-        if current is target:
-            return True
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        if current.__context__ is not None:
-            pending.append(current.__context__)
-        if current.__cause__ is not None:
-            pending.append(current.__cause__)
-    return False
 
 
-def _first_interruption(
-    ordered: tuple[BaseException, ...],
-) -> tuple[BaseException | None, BaseException | None]:
-    """The first interruption among the errors, and the error carrying it."""
-    for error in ordered:
-        interruption = _startup_interruption(error)
-        if interruption is not None:
-            return interruption, error
-    return None, None
 
 
-def _other_error(
-    ordered: tuple[BaseException, ...],
-    source: BaseException | None,
-    interruption: BaseException,
-) -> BaseException | None:
-    """The first error that is neither the interruption nor its carrier."""
-    for error in ordered:
-        if error is not source and error is not interruption:
-            return error
-    return None
 
 
-def _detached_secondary(
-    secondary: BaseException, interruption: BaseException
-) -> BaseException | None:
-    """The secondary error with any chain back to the interruption cut."""
-    if _exception_reaches(secondary.__cause__, interruption):
-        secondary.__cause__ = None
-    if _exception_reaches(secondary.__context__, interruption):
-        secondary.__context__ = None
-    if _exception_reaches(secondary, interruption):
-        return None
-    return secondary
 
 
-def _secondary_error(
-    ordered: tuple[BaseException, ...],
-    source: BaseException | None,
-    interruption: BaseException,
-) -> BaseException | None:
-    """The error worth reporting alongside an interruption, if any."""
-    secondary = _other_error(ordered, source, interruption)
-    if secondary is None and source is not interruption:
-        secondary = source
-    if secondary is None:
-        return None
-    return _detached_secondary(secondary, interruption)
 
 
-def _cut_self_reference(interruption: BaseException) -> None:
-    """An exception must not end up as its own cause or context."""
-    if _exception_reaches(interruption.__cause__, interruption):
-        interruption.__cause__ = None
-    if _exception_reaches(interruption.__context__, interruption):
-        interruption.__context__ = None
-    if interruption.__context__ is interruption.__cause__:
-        interruption.__context__ = None
 
 
-def _raise_interruption(
-    interruption: BaseException, secondary: BaseException | None
-) -> None:
-    """Raise the interruption, reporting the secondary error without a loop."""
-    try:
-        if secondary is not None:
-            raise interruption.with_traceback(
-                interruption.__traceback__
-            ) from secondary
-        raise interruption.with_traceback(interruption.__traceback__)
-    except (KeyboardInterrupt, SystemExit) as raised:
-        if raised is not interruption:
-            raise
-        _cut_self_reference(interruption)
-        raise
 
 
-def _raise_first_error(
-    errors: tuple[BaseException, ...] | list[BaseException],
-    prior_error: BaseException | None,
-) -> None:
-    """Raise what was collected, chaining the prior error when there is one."""
-    if errors:
-        if prior_error is not None:
-            raise errors[0] from prior_error
-        raise errors[0]
-    if prior_error is not None:
-        raise prior_error
 
 
-def _raise_collected_errors(
-    errors: tuple[BaseException, ...] | list[BaseException],
-    *,
-    prior_error: BaseException | None = None,
-) -> None:
-    ordered = ((prior_error,) if prior_error is not None else ()) + tuple(errors)
-    interruption, source = _first_interruption(ordered)
-    if interruption is not None:
-        _raise_interruption(
-            interruption, _secondary_error(ordered, source, interruption)
-        )
-    _raise_first_error(errors, prior_error)
 
 
 def _lsp_coordinate(value: object) -> int | None:

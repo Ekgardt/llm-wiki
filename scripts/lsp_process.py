@@ -27,6 +27,12 @@ from typing import BinaryIO, NamedTuple, TypeVar
 import lsp_process_tree as _lsp_process_tree
 import windows_workspace as _windows_workspace
 from compile_cache import _acl_output_text, _acl_principal, _windows_acl_identity
+from interruption import (
+    interruption_in_chain as _interruption_in_chain,
+)
+from interruption import (
+    raise_collected_errors as _raise_cleanup_failures,
+)
 from lsp_protocol import (
     CancellationToken,
     LspProtocol,
@@ -943,97 +949,6 @@ def _sanitized_cleanup_error(step: str, error: BaseException) -> _CleanupError:
             code = candidate
             break
     return _CleanupError(step, error_type, code)
-
-
-def _interruption_in_chain(
-    error: BaseException,
-) -> KeyboardInterrupt | SystemExit | None:
-    pending: list[BaseException] = [error]
-    seen: set[int] = set()
-    while pending:
-        current = pending.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        if isinstance(current, (KeyboardInterrupt, SystemExit)):
-            return current
-        if current.__context__ is not None:
-            pending.append(current.__context__)
-        if current.__cause__ is not None:
-            pending.append(current.__cause__)
-    return None
-
-
-def _exception_reaches(error: BaseException | None, target: BaseException) -> bool:
-    pending = [error] if error is not None else []
-    seen: set[int] = set()
-    while pending:
-        current = pending.pop()
-        if current is target:
-            return True
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        if current.__context__ is not None:
-            pending.append(current.__context__)
-        if current.__cause__ is not None:
-            pending.append(current.__cause__)
-    return False
-
-
-def _raise_cleanup_failures(
-    errors: Sequence[BaseException],
-    *,
-    prior_error: BaseException | None = None,
-) -> None:
-    ordered = ((prior_error,) if prior_error is not None else ()) + tuple(errors)
-    source: BaseException | None = None
-    interruption: KeyboardInterrupt | SystemExit | None = None
-    for error in ordered:
-        interruption = _interruption_in_chain(error)
-        if interruption is not None:
-            source = error
-            break
-    if interruption is not None:
-        secondary = next(
-            (
-                error
-                for error in ordered
-                if error is not source and error is not interruption
-            ),
-            None,
-        )
-        if secondary is None and source is not interruption:
-            secondary = source
-        if secondary is not None:
-            if _exception_reaches(secondary.__cause__, interruption):
-                secondary.__cause__ = None
-            if _exception_reaches(secondary.__context__, interruption):
-                secondary.__context__ = None
-            if _exception_reaches(secondary, interruption):
-                secondary = None
-        try:
-            if secondary is not None:
-                raise interruption.with_traceback(
-                    interruption.__traceback__
-                ) from secondary
-            raise interruption.with_traceback(interruption.__traceback__)
-        except (KeyboardInterrupt, SystemExit) as raised:
-            if raised is not interruption:
-                raise
-            if _exception_reaches(interruption.__cause__, interruption):
-                interruption.__cause__ = None
-            if _exception_reaches(interruption.__context__, interruption):
-                interruption.__context__ = None
-            if interruption.__context__ is interruption.__cause__:
-                interruption.__context__ = None
-            raise
-    if errors:
-        if prior_error is not None:
-            raise errors[0] from prior_error
-        raise errors[0]
-    if prior_error is not None:
-        raise prior_error
 
 
 def _protocol_startup_cleanup_in_chain(
