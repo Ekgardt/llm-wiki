@@ -3746,6 +3746,116 @@ def _quarantined_corrupt_progress(
     )
 
 
+def _check_resolution_reason(reason: object) -> None:
+    if not isinstance(reason, str) or not 1 <= len(reason.encode("utf-8")) <= 4096:
+        raise ValueError("resolution reason is invalid")
+
+
+def _insert_link_resolution(
+    database: sqlite3.Connection,
+    *,
+    resolution_digest: str,
+    task_id: str,
+    supersedes_digest: str | None,
+    observed_json: bytes,
+    selected_id: str | None,
+    actor: str,
+    reason: str,
+    now: datetime,
+) -> None:
+    inserted = database.execute(
+        """INSERT INTO capture_task_link_resolutions(
+               resolution_digest,task_id,supersedes_digest,observed_json,
+               selected_intent_id,actor_identity,reason,created_at
+           ) VALUES (?,?,?,?,?,?,?,?)""",
+        (
+            resolution_digest,
+            task_id,
+            supersedes_digest,
+            observed_json,
+            selected_id,
+            actor,
+            reason,
+            _timestamp(now),
+        ),
+    ).rowcount
+    if inserted != 1:
+        raise QueueOperationError("capture_link_resolution_failed")
+
+
+def _capture_resolution_record(
+    *,
+    task_id: str,
+    supersedes_digest: str | None,
+    observed: Mapping[str, object],
+    selected_intent: Mapping[str, object] | None,
+    actor: str,
+    reason: str,
+    now: datetime,
+) -> dict[str, object]:
+    """The schema-valid record one link resolution appends."""
+    record = {
+        "schema_version": "capture-task-link-resolution/v1",
+        "task_id": task_id,
+        "supersedes_digest": supersedes_digest,
+        "observed": dict(observed),
+        "selected_intent": (
+            None if selected_intent is None else dict(selected_intent)
+        ),
+        "actor_identity": actor,
+        "reason": reason,
+        "created_at": _timestamp(now),
+    }
+    validate_schema(
+        record,
+        Path(__file__).with_name("schemas")
+        / "capture-task-link-resolution-v1.json",
+    )
+    return record
+
+
+def _require_repair_projection(
+    database: sqlite3.Connection, owner: OwnerLease, now: datetime
+) -> None:
+    """The queue still projects this repair owner at this exact epoch."""
+    projection = database.execute(
+        """SELECT 1 FROM queue_ownership WHERE owner_token=?
+           AND fencing_epoch=? AND canonical_role='repair' AND expires_at>?""",
+        (owner.token, owner.epoch, _timestamp(now)),
+    ).fetchone()
+    if projection is None:
+        raise QueueOperationError("queue_owner_fence_lost")
+
+
+def _require_unfenced_unsealed_task(
+    database: sqlite3.Connection, task_id: str
+) -> None:
+    """A fenced or sealed task's links may not be resolved."""
+    if database.execute(
+        "SELECT 1 FROM task_fences WHERE task_id=?", (task_id,)
+    ).fetchone() is not None:
+        raise QueueOperationError("task_fenced")
+    if database.execute(
+        "SELECT 1 FROM capture_task_link_seals WHERE task_id=?", (task_id,)
+    ).fetchone() is not None:
+        raise QueueOperationError("capture_link_sealed")
+
+
+def _selected_intent_id(
+    database: sqlite3.Connection, selected_intent: Mapping[str, object] | None
+) -> str | None:
+    """The intent this resolution selects, when it names one that matches."""
+    if selected_intent is None:
+        return None
+    selected_id = selected_intent["intent_id"]
+    intent = database.execute(
+        "SELECT * FROM capture_intents WHERE intent_id=?", (selected_id,)
+    ).fetchone()
+    if intent is None or intent["intent_sha256"] != selected_intent["intent_sha256"]:
+        raise QueueOperationError("capture_link_conflicted")
+    return selected_id
+
+
 class MemoryQueue:
     """Durable priority queue with lease-token fencing and at-least-once delivery."""
 
@@ -6249,24 +6359,17 @@ class _QueueV3CandidateReader:
 
         if not isinstance(owner, OwnerLease) or owner.role != "repair":
             raise ValueError("capture link resolution requires a repair owner")
-        if not isinstance(reason, str) or not 1 <= len(reason.encode("utf-8")) <= 4096:
-            raise ValueError("resolution reason is invalid")
+        _check_resolution_reason(reason)
         actor = current_actor_identity()
         now = _utc_now()
-        record = {
-            "schema_version": "capture-task-link-resolution/v1",
-            "task_id": task_id,
-            "supersedes_digest": supersedes_digest,
-            "observed": dict(observed),
-            "selected_intent": None if selected_intent is None else dict(selected_intent),
-            "actor_identity": actor,
-            "reason": reason,
-            "created_at": _timestamp(now),
-        }
-        validate_schema(
-            record,
-            Path(__file__).with_name("schemas")
-            / "capture-task-link-resolution-v1.json",
+        record = _capture_resolution_record(
+            task_id=task_id,
+            supersedes_digest=supersedes_digest,
+            observed=observed,
+            selected_intent=selected_intent,
+            actor=actor,
+            reason=reason,
+            now=now,
         )
         resolution_digest = sha256_bytes(canonical_json_bytes(record))
         observed_json = canonical_json_bytes(record["observed"])
@@ -6274,53 +6377,23 @@ class _QueueV3CandidateReader:
         with closing(registry._connect()) as coordinator_database:
             registry.require(coordinator_database, owner)
         with closing(self._connect()) as database, begin_immediate(database):
-            projection = database.execute(
-                """SELECT 1 FROM queue_ownership WHERE owner_token=?
-                   AND fencing_epoch=? AND canonical_role='repair' AND expires_at>?""",
-                (owner.token, owner.epoch, _timestamp(now)),
-            ).fetchone()
-            if projection is None:
-                raise QueueOperationError("queue_owner_fence_lost")
-            if database.execute(
-                "SELECT 1 FROM task_fences WHERE task_id=?", (task_id,)
-            ).fetchone() is not None:
-                raise QueueOperationError("task_fenced")
-            if database.execute(
-                "SELECT 1 FROM capture_task_link_seals WHERE task_id=?", (task_id,)
-            ).fetchone() is not None:
-                raise QueueOperationError("capture_link_sealed")
+            _require_repair_projection(database, owner, now)
+            _require_unfenced_unsealed_task(database, task_id)
             active = self.active_capture_binding(database, task_id)
             if supersedes_digest != active.active_digest:
                 raise QueueOperationError("capture_link_conflicted")
-            selected_id = None
-            if selected_intent is not None:
-                selected_id = selected_intent["intent_id"]
-                intent = database.execute(
-                    "SELECT * FROM capture_intents WHERE intent_id=?", (selected_id,)
-                ).fetchone()
-                if (
-                    intent is None
-                    or intent["intent_sha256"] != selected_intent["intent_sha256"]
-                ):
-                    raise QueueOperationError("capture_link_conflicted")
-            inserted = database.execute(
-                """INSERT INTO capture_task_link_resolutions(
-                       resolution_digest,task_id,supersedes_digest,observed_json,
-                       selected_intent_id,actor_identity,reason,created_at
-                   ) VALUES (?,?,?,?,?,?,?,?)""",
-                (
-                    resolution_digest,
-                    task_id,
-                    supersedes_digest,
-                    observed_json,
-                    selected_id,
-                    actor,
-                    reason,
-                    _timestamp(now),
-                ),
-            ).rowcount
-            if inserted != 1:
-                raise QueueOperationError("capture_link_resolution_failed")
+            selected_id = _selected_intent_id(database, selected_intent)
+            _insert_link_resolution(
+                database,
+                resolution_digest=resolution_digest,
+                task_id=task_id,
+                supersedes_digest=supersedes_digest,
+                observed_json=observed_json,
+                selected_id=selected_id,
+                actor=actor,
+                reason=reason,
+                now=now,
+            )
             return self.active_capture_binding(database, task_id)
 
     def seal_capture_binding(
