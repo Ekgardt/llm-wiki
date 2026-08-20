@@ -4154,6 +4154,72 @@ def _attempt_histories(
     return histories
 
 
+def _record_failed_attempt(
+    database: sqlite3.Connection,
+    lease: QueueLease,
+    row: sqlite3.Row,
+    failure: QueueFailure,
+    now: datetime,
+) -> None:
+    """Append the attempt this failure ends."""
+    outcome = "blocked" if failure.blocked_capability else "failed"
+    database.execute(
+        """INSERT INTO attempt_history(
+               task_id,attempt,started_at,finished_at,outcome,error_code
+           ) VALUES (?,?,?,?,?,?)""",
+        (
+            lease.id,
+            row["attempts"],
+            row["attempt_started_at"] or _timestamp(now),
+            _timestamp(now),
+            outcome,
+            failure.error_code,
+        ),
+    )
+
+
+def _failure_state(
+    row: sqlite3.Row, failure: QueueFailure
+) -> tuple[str, int]:
+    """Where a failed task goes, and what its attempt count becomes."""
+    attempts = int(row["attempts"])
+    if failure.blocked_capability:
+        return "blocked", attempts - 1
+    if failure.permanent or failure.error_code in _PERMANENT_CODES:
+        return "dead", attempts
+    return "ready", attempts
+
+
+def _apply_failure_state(
+    database: sqlite3.Connection,
+    lease: QueueLease,
+    row: sqlite3.Row,
+    failure: QueueFailure,
+    now: datetime,
+) -> None:
+    """Move the task out of its lease, under the lease's own fence."""
+    state, attempts = _failure_state(row, failure)
+    changed = database.execute(
+        """UPDATE tasks SET state=?,attempts=?,error_code=?,
+               blocked_capability=?,updated_at=?,available_at=?,
+               lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,
+               lease_heartbeat_at=NULL,attempt_started_at=NULL
+           WHERE id=? AND lease_token=? AND state='leased'""",
+        (
+            state,
+            attempts,
+            failure.error_code,
+            failure.blocked_capability,
+            _timestamp(now),
+            _timestamp(now),
+            lease.id,
+            lease.token,
+        ),
+    ).rowcount
+    if changed != 1:
+        raise LeaseFenceError(f"lease is stale or not owned: {lease.id}")
+
+
 class MemoryQueue:
     """Durable priority queue with lease-token fencing and at-least-once delivery."""
 
@@ -9659,48 +9725,8 @@ class _QueueV3CandidateReader:
                 is None
             )
             if not mismatch:
-                outcome = "blocked" if failure.blocked_capability else "failed"
-                database.execute(
-                    """INSERT INTO attempt_history(
-                           task_id,attempt,started_at,finished_at,outcome,error_code
-                       ) VALUES (?,?,?,?,?,?)""",
-                    (
-                        lease.id,
-                        row["attempts"],
-                        row["attempt_started_at"] or _timestamp(now),
-                        _timestamp(now),
-                        outcome,
-                        failure.error_code,
-                    ),
-                )
-                if failure.blocked_capability:
-                    state = "blocked"
-                    attempts = int(row["attempts"]) - 1
-                elif failure.permanent or failure.error_code in _PERMANENT_CODES:
-                    state = "dead"
-                    attempts = int(row["attempts"])
-                else:
-                    state = "ready"
-                    attempts = int(row["attempts"])
-                changed = database.execute(
-                    """UPDATE tasks SET state=?,attempts=?,error_code=?,
-                           blocked_capability=?,updated_at=?,available_at=?,
-                           lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,
-                           lease_heartbeat_at=NULL,attempt_started_at=NULL
-                       WHERE id=? AND lease_token=? AND state='leased'""",
-                    (
-                        state,
-                        attempts,
-                        failure.error_code,
-                        failure.blocked_capability,
-                        _timestamp(now),
-                        _timestamp(now),
-                        lease.id,
-                        lease.token,
-                    ),
-                ).rowcount
-                if changed != 1:
-                    raise LeaseFenceError(f"lease is stale or not owned: {lease.id}")
+                _record_failed_attempt(database, lease, row, failure, now)
+                _apply_failure_state(database, lease, row, failure, now)
         if mismatch:
             self._raise_payload_mismatch()
 
