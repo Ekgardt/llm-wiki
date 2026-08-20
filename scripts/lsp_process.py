@@ -3375,30 +3375,58 @@ def _take_background_restart_error(
     return RuntimeError(f"LSP replacement startup cause ({error.error_type}{code})")
 
 
+_TRANSITIONING_PHASES = frozenset(
+    {
+        _LifecyclePhase.STARTING,
+        _LifecyclePhase.RECOVERY_PENDING,
+        _LifecyclePhase.RESTARTING,
+    }
+)
+
+_FINISHING_PHASES = frozenset(
+    {
+        _LifecyclePhase.STOPPING_SUCCESS,
+        _LifecyclePhase.STOPPING_FAILURE,
+        _LifecyclePhase.CLEANUP_PENDING,
+        _LifecyclePhase.STOPPED_SUCCESS,
+        _LifecyclePhase.STOPPED_FAILURE,
+    }
+)
+
+
+def _await_stable_phase_locked(
+    coordinator: _LifecycleCoordinator, deadline: float
+) -> None:
+    """Wait out a transition; the caller holds the lifecycle lock."""
+    while coordinator.phase in _TRANSITIONING_PHASES:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not coordinator.condition.wait(remaining):
+            raise TimeoutError(
+                "LSP lifecycle transition did not finish before deadline"
+            )
+
+
+def _require_serving_lifecycle_locked(
+    instance: LspProcess, coordinator: _LifecycleCoordinator
+) -> None:
+    """A lifecycle that is ending cannot serve a request."""
+    if coordinator.terminal_outcome is None and coordinator.phase not in (
+        _FINISHING_PHASES
+    ):
+        return
+    if instance.state is ProcessState.FAILED:
+        raise RuntimeError("LSP process has exited")
+    raise RuntimeError("LSP process is closed")
+
+
 def _request_generation(instance: LspProcess, deadline: float) -> _Generation:
     coordinator = instance._coordinator
     _acquire_lifecycle(coordinator, deadline)
     try:
-        while coordinator.phase in {
-            _LifecyclePhase.STARTING,
-            _LifecyclePhase.RECOVERY_PENDING,
-            _LifecyclePhase.RESTARTING,
-        }:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 or not coordinator.condition.wait(remaining):
-                raise TimeoutError("LSP lifecycle transition did not finish before deadline")
-        if coordinator.terminal_outcome is not None or coordinator.phase in {
-            _LifecyclePhase.STOPPING_SUCCESS,
-            _LifecyclePhase.STOPPING_FAILURE,
-            _LifecyclePhase.CLEANUP_PENDING,
-            _LifecyclePhase.STOPPED_SUCCESS,
-            _LifecyclePhase.STOPPED_FAILURE,
-        }:
-            if instance.state is ProcessState.FAILED:
-                raise RuntimeError("LSP process has exited")
-            raise RuntimeError("LSP process is closed")
+        _await_stable_phase_locked(coordinator, deadline)
+        _require_serving_lifecycle_locked(instance, coordinator)
         generation = coordinator.active
-        if generation is None or generation.protocol is None or generation.process is None:
+        if generation is None or not _generation_has_channel(generation):
             raise RuntimeError("LSP process generation is unavailable")
         instance.last_used_monotonic = time.monotonic()
         return generation
