@@ -3486,9 +3486,7 @@ def _require_serving_lifecycle_locked(
     instance: LspProcess, coordinator: _LifecycleCoordinator
 ) -> None:
     """A lifecycle that is ending cannot serve a request."""
-    if coordinator.terminal_outcome is None and coordinator.phase not in (
-        _FINISHING_PHASES
-    ):
+    if not _lifecycle_finished(coordinator):
         return
     if instance.state is ProcessState.FAILED:
         raise RuntimeError("LSP process has exited")
@@ -3613,26 +3611,43 @@ def _wait_for_generation_change(
     _acquire_lifecycle(coordinator, deadline)
     try:
         while True:
-            active = coordinator.active
-            if coordinator.terminal_outcome is not None or coordinator.phase in {
-                _LifecyclePhase.STOPPING_SUCCESS,
-                _LifecyclePhase.STOPPING_FAILURE,
-                _LifecyclePhase.CLEANUP_PENDING,
-                _LifecyclePhase.STOPPED_FAILURE,
-                _LifecyclePhase.STOPPED_SUCCESS,
-            }:
-                return False, coordinator.terminal_code
-            if (
-                coordinator.phase is _LifecyclePhase.RUNNING
-                and active is not None
-                and active.nonce != generation_nonce
-            ):
-                return True, None
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 or not coordinator.condition.wait(remaining):
-                raise TimeoutError("LSP recovery did not finish before deadline")
+            settled = _generation_change_outcome_locked(coordinator, generation_nonce)
+            if settled is not None:
+                return settled
+            _await_lifecycle_change(coordinator, deadline)
     finally:
         _release_lifecycle(coordinator)
+
+
+def _await_lifecycle_change(
+    coordinator: _LifecycleCoordinator, deadline: float
+) -> None:
+    """Wait for a lifecycle notification; the caller holds the lock."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0 or not coordinator.condition.wait(remaining):
+        raise TimeoutError("LSP recovery did not finish before deadline")
+
+
+def _lifecycle_finished(coordinator: _LifecycleCoordinator) -> bool:
+    """The lifecycle has an outcome, or is on its way to resting."""
+    return (
+        coordinator.terminal_outcome is not None
+        or coordinator.phase in _FINISHING_PHASES
+    )
+
+
+def _generation_change_outcome_locked(
+    coordinator: _LifecycleCoordinator, generation_nonce: str
+) -> tuple[bool, str | None] | None:
+    """Whether the generation changed, or None while it is still the same one."""
+    if _lifecycle_finished(coordinator):
+        return False, coordinator.terminal_code
+    active = coordinator.active
+    if coordinator.phase is not _LifecyclePhase.RUNNING or active is None:
+        return None
+    if active.nonce != generation_nonce:
+        return True, None
+    return None
 
 
 def _generation_changed(
