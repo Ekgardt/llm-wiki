@@ -1999,33 +1999,24 @@ def _publish_generation_lease(
         raise RuntimeError("LSP owner directory is unavailable")
     _acquire_lease(coordinator, deadline)
     try:
-        _acquire_lifecycle(coordinator, deadline)
-        try:
-            if coordinator.candidate is not generation:
-                raise RuntimeError("LSP lease candidate lost lifecycle ownership")
-            coordinator.lease_generation = generation
-            _notify_lifecycle_locked(coordinator)
-        finally:
-            _release_lifecycle(coordinator)
-        if coordinator.ownership_lease is None:
-            _write_generation_lease(
-                owner,
-                generation,
-                instance.owner_nonce,
-                deadline,
-                coordinator.heartbeat_stop,
-            )
-        else:
-            _write_generation_lease(
-                owner,
-                generation,
-                instance.owner_nonce,
-                deadline,
-                coordinator.heartbeat_stop,
-                coordinator.ownership_lease,
-            )
+        _adopt_lease_generation(coordinator, generation, deadline)
+        _publish_current_lease(instance, coordinator, owner, generation, deadline)
     finally:
         _release_lease(coordinator)
+
+
+def _adopt_lease_generation(
+    coordinator: _LifecycleCoordinator, generation: _Generation, deadline: float
+) -> None:
+    """Point the lease at this candidate, if it is still the candidate."""
+    _acquire_lifecycle(coordinator, deadline)
+    try:
+        if coordinator.candidate is not generation:
+            raise RuntimeError("LSP lease candidate lost lifecycle ownership")
+        coordinator.lease_generation = generation
+        _notify_lifecycle_locked(coordinator)
+    finally:
+        _release_lifecycle(coordinator)
 
 
 def _run_generation_bootstrap(
@@ -4252,26 +4243,39 @@ def _restart_lsp_process(instance: LspProcess, deadline: float) -> None:
         )
 
 
+def _begin_caller_recovery_locked(
+    instance: LspProcess, coordinator: _LifecycleCoordinator
+) -> None:
+    """Ask for one recovery of the active generation."""
+    active = coordinator.active
+    if active is None:
+        raise RuntimeError("LSP process generation is unavailable")
+    coordinator.recovery_attempted = True
+    coordinator.recovery_request_nonce = active.nonce
+    coordinator.recovery_request_pending.set()
+    coordinator.phase = _LifecyclePhase.RECOVERY_PENDING
+    instance.state = ProcessState.DEGRADED
+    _mark_generation_expected_exit(active)
+    _notify_lifecycle_locked(coordinator)
+
+
+def _claim_caller_restart_locked(
+    instance: LspProcess, coordinator: _LifecycleCoordinator
+) -> bool:
+    """True when no restart is left and the lifecycle must end instead."""
+    if coordinator.terminal_outcome is not None:
+        raise RuntimeError("LSP process is closed")
+    if coordinator.recovery_attempted or instance.restart_count >= 1:
+        return True
+    _begin_caller_recovery_locked(instance, coordinator)
+    return False
+
+
 def _restart_lsp_process_owned(instance: LspProcess, deadline: float) -> None:
     coordinator = instance._coordinator
     _acquire_lifecycle(coordinator, deadline)
-    terminal = False
     try:
-        if coordinator.terminal_outcome is not None:
-            raise RuntimeError("LSP process is closed")
-        if coordinator.recovery_attempted or instance.restart_count >= 1:
-            terminal = True
-        else:
-            active = coordinator.active
-            if active is None:
-                raise RuntimeError("LSP process generation is unavailable")
-            coordinator.recovery_attempted = True
-            coordinator.recovery_request_nonce = active.nonce
-            coordinator.recovery_request_pending.set()
-            coordinator.phase = _LifecyclePhase.RECOVERY_PENDING
-            instance.state = ProcessState.DEGRADED
-            _mark_generation_expected_exit(active)
-            _notify_lifecycle_locked(coordinator)
+        terminal = _claim_caller_restart_locked(instance, coordinator)
     finally:
         _release_lifecycle(coordinator)
     if terminal:
