@@ -336,26 +336,36 @@ def _provider_supported(value: object, label: str) -> bool:
     raise _BootstrapDegradation(f"pyright_{label}_capability_invalid")
 
 
+_POSITION_ENCODINGS = MappingProxyType(
+    {
+        "utf-8": PositionEncoding.UTF8,
+        "utf-16": PositionEncoding.UTF16,
+        "utf-32": PositionEncoding.UTF32,
+    }
+)
+
+
+def _server_position_encoding(server: Mapping[str, object]) -> PositionEncoding:
+    """The encoding the server asked for, from the three we can serve."""
+    value = server.get("positionEncoding", "utf-16")
+    if not isinstance(value, str) or value not in _POSITION_ENCODINGS:
+        raise _BootstrapDegradation("pyright_position_encoding_unsupported")
+    return _POSITION_ENCODINGS[value]
+
+
 def _parse_server_capabilities(
     result: object,
 ) -> tuple[dict[str, bool], PositionEncoding]:
     if not isinstance(result, dict) or not isinstance(result.get("capabilities"), dict):
         raise _BootstrapDegradation("pyright_initialize_result_invalid")
     server = result["capabilities"]
-    encoding_value = server.get("positionEncoding", "utf-16")
-    encodings = {
-        "utf-8": PositionEncoding.UTF8,
-        "utf-16": PositionEncoding.UTF16,
-        "utf-32": PositionEncoding.UTF32,
-    }
-    if not isinstance(encoding_value, str) or encoding_value not in encodings:
-        raise _BootstrapDegradation("pyright_position_encoding_unsupported")
+    encoding = _server_position_encoding(server)
     capabilities = {
         name: _provider_supported(server.get(field), name)
         for name, field in _CAPABILITY_FIELDS.items()
     }
     capabilities["diagnostics"] = True
-    return dict(sorted(capabilities.items())), encodings[encoding_value]
+    return dict(sorted(capabilities.items())), encoding
 
 
 def _permission_startup_code(error: PermissionError) -> str | None:
@@ -1605,13 +1615,13 @@ class _LaunchServerGuard:
         if descriptor is None or state is None:
             raise RuntimeError("Pyright launch server guard is not open")
         _require_startup_deadline(self._deadline)
-        after = os.fstat(descriptor)
-        current = _path_identity(self._path)
-        if (
-            actual != self._expected_sha256
-            or _launch_file_state(after) != state
-            or _launch_file_state(current) != state
-        ):
+        if actual != self._expected_sha256:
+            raise _BootstrapDegradation("pyright_executable_digest_mismatch")
+        observed = (
+            _launch_file_state(os.fstat(descriptor)),
+            _launch_file_state(_path_identity(self._path)),
+        )
+        if observed != (state, state):
             raise _BootstrapDegradation("pyright_executable_digest_mismatch")
         _require_startup_deadline(self._deadline)
 
@@ -1862,18 +1872,19 @@ class PyrightSession:
             "Pyright session reservation state lock deadline expired",
         )
         try:
-            if (
-                self._closed
-                or self._closing
-                or self._starting
-                or self._active_operations != 0
-            ):
+            if not self._is_idle_locked():
                 return False
             self._closing = True
             self._condition.notify_all()
             return True
         finally:
             self._lock.release()
+
+    def _is_idle_locked(self) -> bool:
+        """Nothing is using this session and nothing is starting or stopping it."""
+        if self._closed or self._closing or self._starting:
+            return False
+        return self._active_operations == 0
 
     def _configuration(self, params: object) -> object:
         settings = thaw_pyright_profile_value(PYRIGHT_CONFIGURATION)
@@ -2928,28 +2939,27 @@ class PyrightSession:
         )
 
     def _reconcile_process_state_locked(self) -> None:
-        process = self._process
-        if process is None or process.state not in {
-            ProcessState.DEGRADED,
-            ProcessState.FAILED,
-        }:
+        if not self._process_state_needs_reconciling():
             return
-        if (
-            process.state is ProcessState.DEGRADED
-            and self._generation_nonce is not None
-            and self._generation_nonce != process.generation_nonce
-        ):
-            return
-        self._readiness = "not_ready"
-        self._readiness_evidence = ()
-        self._position_encoding = None
-        self._capabilities = {}
+        self._reset_readiness_locked()
         self._generation_nonce = None
         self._ready_uri_generations.clear()
         self._workspace_revision = None
         self._diagnostics.clear()
         self._diagnostic_bytes = 0
         self._clear_wire_state()
+
+    def _process_state_needs_reconciling(self) -> bool:
+        """The process has failed or degraded out from under this session."""
+        process = self._process
+        if process is None:
+            return False
+        if process.state is ProcessState.FAILED:
+            return True
+        if process.state is not ProcessState.DEGRADED:
+            return False
+        generation = self._generation_nonce
+        return generation is None or generation == process.generation_nonce
 
     def _demote_target_locked(self, target: str) -> None:
         """The target is open but could not be promoted to query-ready."""
@@ -4614,8 +4624,7 @@ class PyrightSessionManager:
             self._key_locks[key] = state
         remaining = deadline - time.monotonic()
         if remaining <= 0 or not state.reference_lock.acquire(timeout=remaining):
-            if state.references == 0 and self._key_locks.get(key) is state:
-                self._key_locks.pop(key, None)
+            self._forget_unreferenced_key_lock(key, state)
             raise TimeoutError(
                 "Pyright session key lock reference deadline expired"
             )
@@ -4624,6 +4633,12 @@ class PyrightSessionManager:
         finally:
             state.reference_lock.release()
         return state
+
+    def _forget_unreferenced_key_lock(
+        self, key: tuple[str, PyrightIdentity], state: _KeyLockState
+    ) -> None:
+        if state.references == 0 and self._key_locks.get(key) is state:
+            self._key_locks.pop(key, None)
 
     def _release_key_lock_reference(
         self,
@@ -4638,15 +4653,18 @@ class PyrightSessionManager:
         finally:
             self._lock.release()
 
+    def _key_locks_released(self, deadline: float) -> bool:
+        self._acquire_manager(deadline)
+        try:
+            self._prune_key_locks_locked()
+            return not self._key_locks and self._key_lock_releases.empty()
+        finally:
+            self._lock.release()
+
     def _wait_for_key_lock_releases(self, deadline: float) -> None:
         while True:
-            self._acquire_manager(deadline)
-            try:
-                self._prune_key_locks_locked()
-                if not self._key_locks and self._key_lock_releases.empty():
-                    return
-            finally:
-                self._lock.release()
+            if self._key_locks_released(deadline):
+                return
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError(
