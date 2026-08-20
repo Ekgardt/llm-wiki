@@ -1859,17 +1859,24 @@ def _queue_v3_row_counts(database: sqlite3.Connection) -> dict[str, int]:
     }
 
 
+def _names_the_same_file(candidate: Path, source: Path) -> bool:
+    """Whether an existing candidate resolves to the very same file."""
+    if not candidate.exists() and not candidate.is_symlink():
+        return False
+    return os.path.samefile(candidate, source)
+
+
 def _reject_queue_source_alias(candidate: Path, source: Path) -> None:
     if candidate.absolute() == source.absolute():
         raise ValueError("queue v3 candidate and v2 source are the same file")
     try:
-        candidate_present = candidate.exists() or candidate.is_symlink()
-        if candidate_present and os.path.samefile(candidate, source):
-            raise ValueError("queue v3 candidate and v2 source are the same file")
-    except ValueError:
-        raise
+        aliased = _names_the_same_file(candidate, source)
     except OSError as exc:
-        raise PermissionError("queue v3 candidate identity could not be verified") from exc
+        raise PermissionError(
+            "queue v3 candidate identity could not be verified"
+        ) from exc
+    if aliased:
+        raise ValueError("queue v3 candidate and v2 source are the same file")
 
 
 def _queue_v3_payloads_valid(database: sqlite3.Connection) -> bool:
@@ -3062,6 +3069,15 @@ def _blocked_or_pending(blocker_code: str | None) -> str:
     return "blocked"
 
 
+# Receipt field, and the disposition column it has to agree with.
+_RECEIPT_DISPOSITION_FIELDS = (
+    ("package_key", "disposition_key"),
+    ("manifest_sha256", "manifest_sha256"),
+    ("disposition_sha256", "disposition_sha256"),
+    ("original_frozen_root", "original_frozen_root"),
+)
+
+
 def _receipt_matches_disposition(
     receipt: dict,
     disposition: sqlite3.Row,
@@ -3069,15 +3085,12 @@ def _receipt_matches_disposition(
     operation_id: str,
     task_id: str,
 ) -> bool:
-    if receipt["operation_id"] != operation_id or receipt["task_id"] != task_id:
+    if (receipt["operation_id"], receipt["task_id"]) != (operation_id, task_id):
         return False
-    if receipt["package_key"] != disposition["disposition_key"]:
-        return False
-    if receipt["manifest_sha256"] != disposition["manifest_sha256"]:
-        return False
-    if receipt["disposition_sha256"] != disposition["disposition_sha256"]:
-        return False
-    if receipt["original_frozen_root"] != disposition["original_frozen_root"]:
+    if any(
+        receipt[field] != disposition[column]
+        for field, column in _RECEIPT_DISPOSITION_FIELDS
+    ):
         return False
     return _receipt_matches_operation(receipt, operation)
 
@@ -4686,6 +4699,27 @@ def _insert_source_fence(
         raise QueueOperationError("source_fenced") from exc
 
 
+def _lease_row_holds(
+    row: sqlite3.Row | None, lease: QueueLease, now: datetime
+) -> bool:
+    """Whether this row is still the leased task this lease owns, unexpired."""
+    if row is None or row["state"] != "leased":
+        return False
+    if (row["lease_owner"], row["lease_token"]) != (lease.owner, lease.token):
+        return False
+    return row["lease_expires_at"] > _timestamp(now)
+
+
+def _require_leased_row(
+    connection: sqlite3.Connection, lease: QueueLease, now: datetime
+) -> sqlite3.Row:
+    """The leased task row, or a fence refusal naming the lease."""
+    row = connection.execute("SELECT * FROM tasks WHERE id=?", (lease.id,)).fetchone()
+    if not _lease_row_holds(row, lease, now):
+        raise LeaseFenceError(f"lease is stale or not owned: {lease.id}")
+    return row
+
+
 class MemoryQueue:
     """Durable priority queue with lease-token fencing and at-least-once delivery."""
 
@@ -5590,16 +5624,7 @@ class MemoryQueue:
     def _require_lease(
         connection: sqlite3.Connection, lease: QueueLease, now: datetime
     ) -> sqlite3.Row:
-        row = connection.execute("SELECT * FROM tasks WHERE id=?", (lease.id,)).fetchone()
-        if (
-            row is None
-            or row["state"] != "leased"
-            or row["lease_owner"] != lease.owner
-            or row["lease_token"] != lease.token
-            or row["lease_expires_at"] <= _timestamp(now)
-        ):
-            raise LeaseFenceError(f"lease is stale or not owned: {lease.id}")
-        return row
+        return _require_leased_row(connection, lease, now)
 
     def cancel(
         self,
@@ -6506,16 +6531,7 @@ class _QueueV3CandidateReader:
     def _require_lease_row(
         database: sqlite3.Connection, lease: QueueLease, now: datetime
     ) -> sqlite3.Row:
-        row = database.execute("SELECT * FROM tasks WHERE id=?", (lease.id,)).fetchone()
-        if (
-            row is None
-            or row["state"] != "leased"
-            or row["lease_owner"] != lease.owner
-            or row["lease_token"] != lease.token
-            or row["lease_expires_at"] <= _timestamp(now)
-        ):
-            raise LeaseFenceError(f"lease is stale or not owned: {lease.id}")
-        return row
+        return _require_leased_row(database, lease, now)
 
     @staticmethod
     def _raise_payload_mismatch() -> None:
@@ -6998,6 +7014,74 @@ class _QueueV3CandidateReader:
         if mode not in allowed or owner.role not in allowed[mode]:
             raise ValueError("owner cannot acquire the requested task fence")
 
+    @staticmethod
+    def _require_owner_projection(
+        database: sqlite3.Connection, owner: OwnerLease, now: datetime
+    ) -> None:
+        """Refuse a fence whose owner is no longer projected into the queue."""
+        projection = database.execute(
+            """SELECT 1 FROM queue_ownership
+               WHERE actor_id=? AND canonical_role=? AND canonical_scope=?
+                 AND owner_token=? AND fencing_epoch=? AND process_id=?
+                 AND process_start_identity=? AND expires_at>?""",
+            (
+                owner.actor_id,
+                owner.role,
+                owner.scope,
+                owner.token,
+                owner.epoch,
+                owner.process.pid,
+                owner.process.start_identity,
+                _timestamp(now),
+            ),
+        ).fetchone()
+        if projection is None:
+            raise QueueOperationError("queue_owner_fence_lost")
+
+    @staticmethod
+    def _require_fenceable_task(
+        database: sqlite3.Connection, task_id: str
+    ) -> None:
+        """Refuse a fence over a task that is missing or already fenced."""
+        if database.execute(
+            "SELECT 1 FROM tasks WHERE id=?", (task_id,)
+        ).fetchone() is None:
+            raise KeyError(task_id)
+        if database.execute(
+            "SELECT 1 FROM task_fences WHERE task_id=?", (task_id,)
+        ).fetchone() is not None:
+            raise QueueOperationError("task_fenced")
+
+    @staticmethod
+    def _next_task_fence_epoch(database: sqlite3.Connection, task_id: str) -> int:
+        """The next fencing epoch for this task, taken atomically."""
+        return int(
+            database.execute(
+                """INSERT INTO task_fence_epochs(task_id,last_epoch) VALUES (?,1)
+                   ON CONFLICT(task_id) DO UPDATE
+                   SET last_epoch=task_fence_epochs.last_epoch+1
+                   RETURNING last_epoch""",
+                (task_id,),
+            ).fetchone()[0]
+        )
+
+    @staticmethod
+    def _insert_task_fence(
+        database: sqlite3.Connection, values: tuple[object, ...]
+    ) -> None:
+        """Record the fence row, refusing when it did not land."""
+        inserted = database.execute(
+            """INSERT INTO task_fences(
+                   task_id,mode,token,fencing_epoch,canonical_role,
+                   canonical_scope,canonical_actor_id,canonical_owner_token,
+                   canonical_fencing_epoch,process_id,process_start_identity,
+                   heartbeat_at,expires_at
+               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            values,
+        ).rowcount
+        if inserted != 1:
+            raise QueueOperationError("task_fence_failed")
+
     def acquire_task_fence(
         self,
         task_id: str,
@@ -7015,49 +7099,11 @@ class _QueueV3CandidateReader:
         expires_at = min(owner.expires_at, now + timedelta(seconds=120))
         token = uuid.uuid4().hex
         with closing(self._connect()) as database, begin_immediate(database):
-            projection = database.execute(
-                """SELECT 1 FROM queue_ownership
-                   WHERE actor_id=? AND canonical_role=? AND canonical_scope=?
-                     AND owner_token=? AND fencing_epoch=? AND process_id=?
-                     AND process_start_identity=? AND expires_at>?""",
-                (
-                    owner.actor_id,
-                    owner.role,
-                    owner.scope,
-                    owner.token,
-                    owner.epoch,
-                    owner.process.pid,
-                    owner.process.start_identity,
-                    _timestamp(now),
-                ),
-            ).fetchone()
-            if projection is None:
-                raise QueueOperationError("queue_owner_fence_lost")
-            if database.execute(
-                "SELECT 1 FROM tasks WHERE id=?", (task_id,)
-            ).fetchone() is None:
-                raise KeyError(task_id)
-            existing = database.execute(
-                "SELECT * FROM task_fences WHERE task_id=?", (task_id,)
-            ).fetchone()
-            if existing is not None:
-                raise QueueOperationError("task_fenced")
-            epoch = int(
-                database.execute(
-                    """INSERT INTO task_fence_epochs(task_id,last_epoch) VALUES (?,1)
-                       ON CONFLICT(task_id) DO UPDATE
-                       SET last_epoch=task_fence_epochs.last_epoch+1
-                       RETURNING last_epoch""",
-                    (task_id,),
-                ).fetchone()[0]
-            )
-            inserted = database.execute(
-                """INSERT INTO task_fences(
-                       task_id,mode,token,fencing_epoch,canonical_role,
-                       canonical_scope,canonical_actor_id,canonical_owner_token,
-                       canonical_fencing_epoch,process_id,process_start_identity,
-                       heartbeat_at,expires_at
-                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            self._require_owner_projection(database, owner, now)
+            self._require_fenceable_task(database, task_id)
+            epoch = self._next_task_fence_epoch(database, task_id)
+            self._insert_task_fence(
+                database,
                 (
                     task_id,
                     mode,
@@ -7073,9 +7119,7 @@ class _QueueV3CandidateReader:
                     _timestamp(now),
                     _timestamp(expires_at),
                 ),
-            ).rowcount
-            if inserted != 1:
-                raise QueueOperationError("task_fence_failed")
+            )
         return TaskFence(task_id, mode, token, epoch, owner, expires_at)
 
     def release_task_fence(self, fence: TaskFence) -> None:
@@ -12869,10 +12913,8 @@ def _tracked_descendant_pids(root_pid: int, platform_name: str) -> set[int] | No
     return _descendants_of(root_pid, pairs)
 
 
-def _process_group_alive(group_id: int) -> bool:
-    snapshot = _process_snapshot_posix()
-    if snapshot is not None:
-        return any(pgrp == group_id and state != "Z" for _pid, _ppid, pgrp, state in snapshot)
+def _process_group_alive_by_signal(group_id: int) -> bool:
+    """Whether signal 0 says the group still exists."""
     try:
         _kill_process_group(group_id, 0)
         return True
@@ -12880,6 +12922,15 @@ def _process_group_alive(group_id: int) -> bool:
         return False
     except PermissionError:
         return True
+
+
+def _process_group_alive(group_id: int) -> bool:
+    snapshot = _process_snapshot_posix()
+    if snapshot is None:
+        return _process_group_alive_by_signal(group_id)
+    return any(
+        pgrp == group_id and state != "Z" for _pid, _ppid, pgrp, state in snapshot
+    )
 
 
 def _descendants_alive_in_snapshot(
@@ -13083,19 +13134,23 @@ def _terminate_processor_child(
     return descendants
 
 
+# The whole-frame codes that carry a plain boolean outcome.
+_PROCESSOR_BOOLEAN_FRAMES = MappingProxyType({b"T": True, b"F": False})
+
+
+def _decode_deferred_frame(frame: bytes) -> DeferredResult:
+    """The deferred result a `D` frame carries."""
+    data = frame[1:]
+    if len(data) > _MAX_RESULT_BYTES:
+        raise QueueOperationError("processor_result_oversize")
+    return DeferredResult(data)
+
+
 def _decode_processor_frame(frame: bytes) -> bool | DeferredResult:
-    if not frame:
-        raise QueueOperationError("processor_result_malformed")
-    tag = frame[:1]
-    if tag == b"D":
-        data = frame[1:]
-        if len(data) > _MAX_RESULT_BYTES:
-            raise QueueOperationError("processor_result_oversize")
-        return DeferredResult(data)
-    if frame == b"T":
-        return True
-    if frame == b"F":
-        return False
+    if frame[:1] == b"D":
+        return _decode_deferred_frame(frame)
+    if frame in _PROCESSOR_BOOLEAN_FRAMES:
+        return _PROCESSOR_BOOLEAN_FRAMES[frame]
     if frame == b"E":
         raise QueueOperationError("processor_exception")
     raise QueueOperationError("processor_result_malformed")
@@ -13711,16 +13766,22 @@ def _manual_query(payload: Mapping[str, Any]) -> bool | DeferredResult:
     return DeferredResult(result.encode("utf-8"))
 
 
+def _round_trips_as_date(day: str) -> bool:
+    """Whether the text is a calendar date that survives `%Y-%m-%d` both ways."""
+    try:
+        return datetime.strptime(day, "%Y-%m-%d").strftime("%Y-%m-%d") == day
+    except ValueError:
+        return False
+
+
 def _valid_day(raw_day: object, now: datetime) -> str | None:
     """The day this flush belongs to, when it is a real calendar date."""
     day = now.strftime("%Y-%m-%d") if raw_day is None else raw_day
-    if not isinstance(day, str) or re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) is None:
+    if not isinstance(day, str):
         return None
-    try:
-        parsed = datetime.strptime(day, "%Y-%m-%d")
-    except ValueError:
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) is None:
         return None
-    return day if parsed.strftime("%Y-%m-%d") == day else None
+    return day if _round_trips_as_date(day) else None
 
 
 def _daily_log_path(day: str) -> Path | None:
