@@ -159,6 +159,16 @@ def _evidence_payload(record: Mapping[str, object]) -> bytes:
     return payload
 
 
+def _first_error(
+    errors: Sequence[BaseException | None],
+) -> BaseException | None:
+    """The first error among the results, if any of them failed."""
+    for error in errors:
+        if error is not None:
+            return error
+    return None
+
+
 def _lease_payload(record: Mapping[str, object]) -> bytes:
     """The lease as compact JSON bytes, within its evidence bound."""
     payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode(
@@ -903,34 +913,53 @@ class _OwnerDirectory:
             finally:
                 self._close_child_handles(named, parent)
 
+    def _close_native_handle(self, handle: int) -> None:
+        """Close one handle the way this platform closes handles."""
+        if os.name == "posix":
+            os.close(handle)
+            return
+        if os.name == "nt":
+            _windows_workspace.close_handle(handle)
+
+    def _forget_closed_handle(self, label: str, handle: int) -> None:
+        with self._close_lock:
+            if label == "owner" and self.owner_handle == handle:
+                self.owner_handle = None
+            elif label == "parent" and self.parent_handle == handle:
+                self.parent_handle = -1
+
+    def _release_handle(self, label: str, handle: int | None) -> BaseException | None:
+        """Close and forget one handle; the error it raised, if it raised one."""
+        if handle is None or handle < 0:
+            return None
+        try:
+            self._close_native_handle(handle)
+        except BaseException as exc:
+            return exc
+        self._forget_closed_handle(label, handle)
+        return None
+
+    def _claim_close(self) -> tuple[int | None, int] | None:
+        """The handles to close, or None when this directory is already closed."""
+        with self._close_lock:
+            if self._closed:
+                return None
+            return self.owner_handle, self.parent_handle
+
     def close(self) -> None:
         with self._child_handle_lock:
             self._retry_pending_temp_names()
-            with self._close_lock:
-                if self._closed:
-                    return
-                owner = self.owner_handle
-                parent = self.parent_handle
-            first_error: BaseException | None = None
-            for label, handle in (("owner", owner), ("parent", parent)):
-                if handle is None or handle < 0:
-                    continue
-                try:
-                    if os.name == "posix":
-                        os.close(handle)
-                    elif os.name == "nt":
-                        _windows_workspace.close_handle(handle)
-                except BaseException as exc:
-                    if first_error is None:
-                        first_error = exc
-                else:
-                    with self._close_lock:
-                        if label == "owner" and self.owner_handle == handle:
-                            self.owner_handle = None
-                        elif label == "parent" and self.parent_handle == handle:
-                            self.parent_handle = -1
+            claimed = self._claim_close()
+            if claimed is None:
+                return
+            owner, parent = claimed
+            errors = [
+                self._release_handle(label, handle)
+                for label, handle in (("owner", owner), ("parent", parent))
+            ]
             with self._close_lock:
                 self._closed = self.owner_handle is None and self.parent_handle < 0
+            first_error = _first_error(errors)
             if first_error is not None:
                 raise first_error
 
