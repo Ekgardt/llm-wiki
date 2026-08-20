@@ -148,6 +148,16 @@ class _ObjectIdentity:
     reparse_attributes: int
 
 
+def _evidence_payload(record: Mapping[str, object]) -> bytes:
+    """One evidence record as compact JSON bytes, within its bound."""
+    payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    if len(payload) > _MAX_EVIDENCE_BYTES:
+        raise ValueError("LSP evidence record exceeds its byte bound")
+    return payload
+
+
 def _lease_payload(record: Mapping[str, object]) -> bytes:
     """The lease as compact JSON bytes, within its evidence bound."""
     payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode(
@@ -393,6 +403,94 @@ class _OwnerDirectory:
             finally:
                 self._close_child_handle(cancellation)
 
+    def _publish_record_posix(
+        self, temporary: str, name: str, payload: bytes
+    ) -> None:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=self.owner_handle,
+        )
+        self._remember_temp_name(temporary)
+        try:
+            self._write_record_descriptor(descriptor, payload)
+        finally:
+            os.close(descriptor)
+        os.link(
+            temporary,
+            name,
+            src_dir_fd=self.owner_handle,
+            dst_dir_fd=self.owner_handle,
+            follow_symlinks=False,
+        )
+        os.unlink(temporary, dir_fd=self.owner_handle)
+        self._forget_temp_name(temporary)
+        self.sync_directory()
+
+    def _write_record_descriptor(self, descriptor: int, payload: bytes) -> None:
+        """Write and verify one evidence record through an owned descriptor."""
+        identity = _identity_from_stat(os.fstat(descriptor))
+        _require_file_identity(identity, "LSP evidence record")
+        _write_all_descriptor(descriptor, payload)
+        os.fchmod(descriptor, 0o600)
+        os.fsync(descriptor)
+        _verify_descriptor(descriptor, identity, mode=0o600, directory=False)
+
+    def _write_record_posix(self, temporary: str, name: str, payload: bytes) -> None:
+        try:
+            self._publish_record_posix(temporary, name, payload)
+        except BaseException as operation_error:
+            self._retry_temp_names_after(temporary, operation_error)
+            raise
+
+    def _publish_record_windows(
+        self, handle: object, name: str, payload: bytes
+    ) -> None:
+        """Write the record and publish it only if its identity never moved."""
+        identity = _windows_workspace.identity(handle, directory=False)
+        _windows_workspace.write_all(
+            handle, payload, chunk_bytes=_MAX_EVIDENCE_BYTES
+        )
+        _windows_workspace.flush_file(handle)
+        if _windows_workspace.identity(handle, directory=False) != identity:
+            raise PermissionError("LSP evidence identity changed during write")
+        _windows_workspace.publish_file(handle, self.owner_handle, name)
+
+    def _write_record_windows(
+        self, temporary: str, name: str, payload: bytes
+    ) -> None:
+        if not self.owner_permissions_verified:
+            raise PermissionError(
+                "LSP owner ACL was not verified before evidence creation"
+            )
+        self._remember_temp_name(temporary)
+        try:
+            handle = _windows_workspace.create_file(self.owner_handle, temporary)
+        except BaseException as operation_error:
+            self._retry_temp_names_always(operation_error)
+            raise
+        published = False
+        operation_error: BaseException | None = None
+        try:
+            self._publish_record_windows(handle, name, payload)
+            published = True
+            self.sync_directory()
+        except BaseException as error:
+            operation_error = error
+        self._finish_windows_temporary(
+            temporary,
+            handle,
+            moved=published,
+            operation_error=operation_error,
+        )
+        if not published:
+            raise OSError("LSP evidence publication did not complete")
+
     def write_record(
         self,
         name: str,
@@ -400,91 +498,14 @@ class _OwnerDirectory:
     ) -> None:
         if name not in {"owner.json", "failure.json"} or self.owner_handle is None:
             raise ValueError("LSP evidence name or owner handle is invalid")
-        payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        if len(payload) > _MAX_EVIDENCE_BYTES:
-            raise ValueError("LSP evidence record exceeds its byte bound")
+        payload = _evidence_payload(record)
         with self._child_handle_lock:
             self._retry_pending_temp_names()
             temporary = f".evidence-{secrets.token_hex(8)}.tmp"
             if os.name == "posix":
-                try:
-                    descriptor = os.open(
-                        temporary,
-                        os.O_WRONLY
-                        | os.O_CREAT
-                        | os.O_EXCL
-                        | os.O_NOFOLLOW
-                        | getattr(os, "O_CLOEXEC", 0),
-                        0o600,
-                        dir_fd=self.owner_handle,
-                    )
-                    self._remember_temp_name(temporary)
-                    try:
-                        identity = _identity_from_stat(os.fstat(descriptor))
-                        _require_file_identity(identity, "LSP evidence record")
-                        _write_all_descriptor(descriptor, payload)
-                        os.fchmod(descriptor, 0o600)
-                        os.fsync(descriptor)
-                        _verify_descriptor(
-                            descriptor, identity, mode=0o600, directory=False
-                        )
-                    finally:
-                        os.close(descriptor)
-                    os.link(
-                        temporary,
-                        name,
-                        src_dir_fd=self.owner_handle,
-                        dst_dir_fd=self.owner_handle,
-                        follow_symlinks=False,
-                    )
-                    os.unlink(temporary, dir_fd=self.owner_handle)
-                    self._forget_temp_name(temporary)
-                    self.sync_directory()
-                except BaseException as operation_error:
-                    if temporary in self._pending_temp_names:
-                        try:
-                            self._retry_pending_temp_names()
-                        except BaseException as cleanup_error:
-                            raise cleanup_error from operation_error
-                    raise
+                self._write_record_posix(temporary, name, payload)
                 return
-
-            if not self.owner_permissions_verified:
-                raise PermissionError(
-                    "LSP owner ACL was not verified before evidence creation"
-                )
-            self._remember_temp_name(temporary)
-            try:
-                handle = _windows_workspace.create_file(self.owner_handle, temporary)
-            except BaseException as operation_error:
-                try:
-                    self._retry_pending_temp_names()
-                except BaseException as cleanup_error:
-                    raise cleanup_error from operation_error
-                raise
-            published = False
-            operation_error: BaseException | None = None
-            try:
-                identity = _windows_workspace.identity(handle, directory=False)
-                _windows_workspace.write_all(
-                    handle, payload, chunk_bytes=_MAX_EVIDENCE_BYTES
-                )
-                _windows_workspace.flush_file(handle)
-                if _windows_workspace.identity(handle, directory=False) != identity:
-                    raise PermissionError("LSP evidence identity changed during write")
-                _windows_workspace.publish_file(handle, self.owner_handle, name)
-                published = True
-                self.sync_directory()
-            except BaseException as error:
-                operation_error = error
-            self._finish_windows_temporary(
-                temporary,
-                handle,
-                moved=published,
-                operation_error=operation_error,
-            )
-        if not published:
-            raise OSError("LSP evidence publication did not complete")
+            self._write_record_windows(temporary, name, payload)
 
     def _lease_retry_deadline(self, deadline: float | None) -> float:
         """How long a replace may keep retrying, never past our own lease."""
