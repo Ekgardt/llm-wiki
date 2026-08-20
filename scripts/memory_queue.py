@@ -3956,6 +3956,101 @@ def _write_purge_receipt(package: Path, receipt: Mapping[str, object]) -> bytes:
     return receipt_bytes
 
 
+_CONSUMER_KINDS = frozenset({"transaction", "terminal", "corrupt-disposition"})
+
+
+def _check_consumer_kind(consumer_kind: str) -> None:
+    if consumer_kind not in _CONSUMER_KINDS:
+        raise ValueError("consumer kind is invalid")
+
+
+def _check_consumer_id(consumer_id: object) -> None:
+    if not isinstance(consumer_id, str):
+        raise ValueError("consumer ID is invalid")
+    if not 1 <= len(consumer_id.encode("utf-8")) <= 4096:
+        raise ValueError("consumer ID is invalid")
+
+
+def _capture_seal_digest(
+    *,
+    task_id: str,
+    consumer_kind: str,
+    consumer_id: str,
+    active_link_digest: str,
+) -> str:
+    """One digest for exactly this consumer sealing exactly this link."""
+    return sha256_bytes(
+        canonical_json_bytes(
+            {
+                "active_digest": active_link_digest,
+                "consumer_id": consumer_id,
+                "consumer_kind": consumer_kind,
+                "task_id": task_id,
+            }
+        )
+    )
+
+
+def _require_identical_seal(
+    existing: sqlite3.Row,
+    *,
+    consumer_kind: str,
+    consumer_id: str,
+    active_link_digest: str,
+    seal_digest: str,
+) -> None:
+    """A second seal is a no-op only when it is the very same seal."""
+    stored = (
+        existing["active_digest"],
+        existing["consumer_kind"],
+        existing["consumer_id"],
+        existing["seal_digest"],
+    )
+    if stored != (active_link_digest, consumer_kind, consumer_id, seal_digest):
+        raise QueueOperationError("capture_link_sealed")
+
+
+def _record_capture_seal(
+    database: sqlite3.Connection,
+    *,
+    task_id: str,
+    consumer_kind: str,
+    consumer_id: str,
+    active_link_digest: str,
+    seal_digest: str,
+    now: datetime,
+) -> None:
+    """Seal the binding, accepting a repeat of the identical seal."""
+    existing = database.execute(
+        "SELECT * FROM capture_task_link_seals WHERE task_id=?", (task_id,)
+    ).fetchone()
+    if existing is not None:
+        _require_identical_seal(
+            existing,
+            consumer_kind=consumer_kind,
+            consumer_id=consumer_id,
+            active_link_digest=active_link_digest,
+            seal_digest=seal_digest,
+        )
+        return
+    inserted = database.execute(
+        """INSERT INTO capture_task_link_seals(
+               task_id,active_digest,consumer_kind,consumer_id,
+               seal_digest,sealed_at
+           ) VALUES (?,?,?,?,?,?)""",
+        (
+            task_id,
+            active_link_digest,
+            consumer_kind,
+            consumer_id,
+            seal_digest,
+            _timestamp(now),
+        ),
+    ).rowcount
+    if inserted != 1:
+        raise QueueOperationError("capture_link_seal_failed")
+
+
 class MemoryQueue:
     """Durable priority queue with lease-token fencing and at-least-once delivery."""
 
@@ -6505,53 +6600,28 @@ class _QueueV3CandidateReader:
         active_link_digest: str,
         before_side_effect: Callable[[], None] | None = None,
     ) -> CaptureTaskBinding:
-        if consumer_kind not in {"transaction", "terminal", "corrupt-disposition"}:
-            raise ValueError("consumer kind is invalid")
-        if not isinstance(consumer_id, str) or not 1 <= len(consumer_id.encode("utf-8")) <= 4096:
-            raise ValueError("consumer ID is invalid")
+        _check_consumer_kind(consumer_kind)
+        _check_consumer_id(consumer_id)
         now = _utc_now()
-        seal_digest = sha256_bytes(
-            canonical_json_bytes(
-                {
-                    "active_digest": active_link_digest,
-                    "consumer_id": consumer_id,
-                    "consumer_kind": consumer_kind,
-                    "task_id": task_id,
-                }
-            )
+        seal_digest = _capture_seal_digest(
+            task_id=task_id,
+            consumer_kind=consumer_kind,
+            consumer_id=consumer_id,
+            active_link_digest=active_link_digest,
         )
         with closing(self._connect()) as database, begin_immediate(database):
             active = self.active_capture_binding(database, task_id)
             if active.active_digest != active_link_digest:
                 raise QueueOperationError("capture_link_conflicted")
-            existing = database.execute(
-                "SELECT * FROM capture_task_link_seals WHERE task_id=?", (task_id,)
-            ).fetchone()
-            if existing is not None:
-                if (
-                    existing["active_digest"] != active_link_digest
-                    or existing["consumer_kind"] != consumer_kind
-                    or existing["consumer_id"] != consumer_id
-                    or existing["seal_digest"] != seal_digest
-                ):
-                    raise QueueOperationError("capture_link_sealed")
-            else:
-                inserted = database.execute(
-                    """INSERT INTO capture_task_link_seals(
-                           task_id,active_digest,consumer_kind,consumer_id,
-                           seal_digest,sealed_at
-                       ) VALUES (?,?,?,?,?,?)""",
-                    (
-                        task_id,
-                        active_link_digest,
-                        consumer_kind,
-                        consumer_id,
-                        seal_digest,
-                        _timestamp(now),
-                    ),
-                ).rowcount
-                if inserted != 1:
-                    raise QueueOperationError("capture_link_seal_failed")
+            _record_capture_seal(
+                database,
+                task_id=task_id,
+                consumer_kind=consumer_kind,
+                consumer_id=consumer_id,
+                active_link_digest=active_link_digest,
+                seal_digest=seal_digest,
+                now=now,
+            )
         if before_side_effect is not None:
             before_side_effect()
         return CaptureTaskBinding(
