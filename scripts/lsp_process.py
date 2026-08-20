@@ -2245,64 +2245,96 @@ def _start_heartbeat_worker(instance: LspProcess, deadline: float) -> None:
         _require_startup_deadline(deadline, "heartbeat thread start")
 
 
+def _recovery_thread_serving(coordinator: _LifecycleCoordinator) -> bool:
+    """A live recovery thread that has not been asked to stop."""
+    recovery = coordinator.recovery_thread
+    if recovery is None or not recovery.is_alive():
+        return False
+    return not coordinator.recovery_stop.is_set()
+
+
+def _wake_serving_recovery(coordinator: _LifecycleCoordinator) -> bool:
+    """Wake the live recovery thread; False when there is none to wake."""
+    if not _recovery_thread_serving(coordinator):
+        return False
+    coordinator.recovery_wake.set()
+    return True
+
+
+def _wake_serving_recovery_locked(
+    coordinator: _LifecycleCoordinator, deadline: float
+) -> bool:
+    """The same check again under the lifecycle lock."""
+    _acquire_lifecycle(coordinator, deadline)
+    try:
+        return _wake_serving_recovery(coordinator)
+    finally:
+        _release_lifecycle(coordinator)
+
+
+def _stop_previous_recovery(
+    coordinator: _LifecycleCoordinator, deadline: float
+) -> None:
+    """Ask a recovery thread that is not us to finish before replacing it."""
+    recovery = coordinator.recovery_thread
+    if recovery is None or recovery is threading.current_thread():
+        return
+    coordinator.recovery_stop.set()
+    coordinator.recovery_wake.set()
+    remaining = deadline - time.monotonic()
+    if remaining > 0:
+        recovery.join(remaining)
+
+
+def _adopt_recovery_thread_locked(
+    instance: LspProcess, coordinator: _LifecycleCoordinator
+) -> threading.Thread | None:
+    """The replacement thread to start, or None when one is already serving."""
+    if not coordinator.recovery_request_pending.is_set():
+        return None
+    current = coordinator.recovery_thread
+    if current is not None and current.is_alive():
+        coordinator.recovery_stop.clear()
+        coordinator.cleanup_result.recovery_join = "pending"
+        coordinator.recovery_wake.set()
+        return None
+    coordinator.recovery_stop.clear()
+    coordinator.recovery_wake.clear()
+    replacement = threading.Thread(
+        target=_recovery_loop,
+        args=(instance,),
+        name=f"lsp-recovery-{instance.owner_nonce}",
+        daemon=True,
+    )
+    coordinator.recovery_thread = replacement
+    coordinator.cleanup_result.recovery_join = "pending"
+    _notify_lifecycle_locked(coordinator)
+    return replacement
+
+
+def _adopt_recovery_thread(
+    instance: LspProcess, coordinator: _LifecycleCoordinator, deadline: float
+) -> threading.Thread | None:
+    _acquire_lifecycle(coordinator, deadline)
+    try:
+        return _adopt_recovery_thread_locked(instance, coordinator)
+    finally:
+        _release_lifecycle(coordinator)
+
+
 def _schedule_autonomous_recovery(instance: LspProcess) -> None:
     coordinator = instance._coordinator
     if not coordinator.recovery_request_pending.is_set():
         return
-    recovery = coordinator.recovery_thread
-    if (
-        recovery is not None
-        and recovery.is_alive()
-        and not coordinator.recovery_stop.is_set()
-    ):
-        coordinator.recovery_wake.set()
+    if _wake_serving_recovery(coordinator):
         return
-    maintenance_deadline = time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
-    _acquire_lifecycle(coordinator, maintenance_deadline)
-    try:
-        recovery = coordinator.recovery_thread
-        if (
-            recovery is not None
-            and recovery.is_alive()
-            and not coordinator.recovery_stop.is_set()
-        ):
-            coordinator.recovery_wake.set()
-            return
-    finally:
-        _release_lifecycle(coordinator)
-
-    if recovery is not None and recovery is not threading.current_thread():
-        coordinator.recovery_stop.set()
-        coordinator.recovery_wake.set()
-        remaining = maintenance_deadline - time.monotonic()
-        if remaining > 0:
-            recovery.join(remaining)
-
-    replacement: threading.Thread | None = None
-    _acquire_lifecycle(coordinator, maintenance_deadline)
-    try:
-        if not coordinator.recovery_request_pending.is_set():
-            return
-        current = coordinator.recovery_thread
-        if current is not None and current.is_alive():
-            coordinator.recovery_stop.clear()
-            coordinator.cleanup_result.recovery_join = "pending"
-            coordinator.recovery_wake.set()
-            return
-        coordinator.recovery_stop.clear()
-        coordinator.recovery_wake.clear()
-        replacement = threading.Thread(
-            target=_recovery_loop,
-            args=(instance,),
-            name=f"lsp-recovery-{instance.owner_nonce}",
-            daemon=True,
-        )
-        coordinator.recovery_thread = replacement
-        coordinator.cleanup_result.recovery_join = "pending"
-        _notify_lifecycle_locked(coordinator)
-    finally:
-        _release_lifecycle(coordinator)
-    assert replacement is not None
+    deadline = time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
+    if _wake_serving_recovery_locked(coordinator, deadline):
+        return
+    _stop_previous_recovery(coordinator, deadline)
+    replacement = _adopt_recovery_thread(instance, coordinator, deadline)
+    if replacement is None:
+        return
     replacement.start()
     coordinator.recovery_wake.set()
 
