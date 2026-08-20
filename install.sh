@@ -182,6 +182,7 @@ else
   exec bash "$VAULT_ROOT/install.sh" "$@"
 fi
 
+INHERITED_STATE_ROOT="${LLM_WIKI_STATE_ROOT:-}"
 STATE_ROOT_INPUT="${LLM_WIKI_STATE_ROOT:-$VAULT_ROOT}"
 mkdir -p "$STATE_ROOT_INPUT"
 STATE_ROOT="$(cd "$STATE_ROOT_INPUT" && pwd -P)"
@@ -199,6 +200,13 @@ fi
 cd "$VAULT_ROOT"
 info "Vault root: $VAULT_ROOT"
 info "State root: $STATE_ROOT"
+# A state root left over from another vault silently splits the installation
+# across two directories, so say so rather than letting it pass as a default.
+if [ -n "$INHERITED_STATE_ROOT" ] && [ "$STATE_ROOT" != "$VAULT_ROOT" ]; then
+  warn "Runtime state will live outside this vault, in $STATE_ROOT"
+  warn "That came from LLM_WIKI_STATE_ROOT in your environment, not from this vault."
+  warn "Unset it and re-run to keep run/, logs/ and cache/ inside $VAULT_ROOT"
+fi
 
 # ─── 2. Check prerequisites ────────────────────────────────────────
 
