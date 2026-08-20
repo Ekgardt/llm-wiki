@@ -4858,31 +4858,40 @@ class PyrightSessionManager:
 
         errors: list[BaseException] = []
         for key, session in sessions:
-            try:
-                session.close(deadline=deadline)
-            except BaseException as error:
+            error = self._close_one_session(key, session, deadline)
+            if error is not None:
                 errors.append(error)
-                continue
-
-            try:
-                self._acquire_manager(deadline)
-                try:
-                    closed, _closing, _starting, _active, _last_used = (
-                        self._session_state(session, deadline)
-                    )
-                    if not closed:
-                        raise RuntimeError(
-                            "Pyright close_all close did not release the session"
-                        )
-                    if self._sessions.get(key) is session:
-                        self._sessions.pop(key, None)
-                finally:
-                    self._lock.release()
-            except BaseException as error:
-                errors.append(error)
-
-        try:
-            self._wait_for_key_lock_releases(deadline)
-        except BaseException as error:
+        error = _released_error(
+            lambda: self._wait_for_key_lock_releases(deadline)
+        )
+        if error is not None:
             errors.append(error)
         _raise_collected_errors(errors)
+
+    def _forget_closed_session(
+        self, key: object, session: PyrightSession, deadline: float
+    ) -> None:
+        """Drop a session we just closed, refusing one that did not release."""
+        self._acquire_manager(deadline)
+        try:
+            closed, _closing, _starting, _active, _last_used = self._session_state(
+                session, deadline
+            )
+            if not closed:
+                raise RuntimeError(
+                    "Pyright close_all close did not release the session"
+                )
+            self._forget_session_locked(key, session)
+        finally:
+            self._lock.release()
+
+    def _close_one_session(
+        self, key: object, session: PyrightSession, deadline: float
+    ) -> BaseException | None:
+        """Close one session and forget it; the error worth reporting, if any."""
+        error = _released_error(lambda: session.close(deadline=deadline))
+        if error is not None:
+            return error
+        return _released_error(
+            lambda: self._forget_closed_session(key, session, deadline)
+        )
