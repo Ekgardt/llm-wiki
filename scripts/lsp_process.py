@@ -759,20 +759,12 @@ class _OwnerDirectory:
             return
         raise RuntimeError("LSP owner directories are unsupported on this platform")
 
-    def remove_lease(self) -> None:
-        if self.owner_handle is None:
-            if self._pending_temp_names:
-                raise RuntimeError("LSP pending temporary owner is closed")
-            return
-        self._retry_pending_temp_names()
-        if os.name == "posix":
-            try:
-                os.unlink("lease.json", dir_fd=self.owner_handle)
-                os.fsync(self.owner_handle)
-            except FileNotFoundError:
-                pass
-            self._lease_expires_monotonic = None
-            return
+    def _remove_lease_posix(self) -> None:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink("lease.json", dir_fd=self.owner_handle)
+            os.fsync(self.owner_handle)
+
+    def _remove_lease_windows(self) -> None:
         with self._child_handle_lock:
             self._retry_pending_child_handles()
             try:
@@ -780,13 +772,20 @@ class _OwnerDirectory:
                     self.owner_handle, "lease.json"
                 )
             except FileNotFoundError:
-                self._lease_expires_monotonic = None
                 return
-            try:
-                _windows_workspace.delete_handle(handle)
-            finally:
-                self._close_child_handle(handle)
-            self._lease_expires_monotonic = None
+            self._delete_temp_handle(handle)
+
+    def remove_lease(self) -> None:
+        if self.owner_handle is None:
+            if self._pending_temp_names:
+                raise RuntimeError("LSP pending temporary owner is closed")
+            return
+        self._retry_pending_temp_names()
+        if os.name == "posix":
+            self._remove_lease_posix()
+        else:
+            self._remove_lease_windows()
+        self._lease_expires_monotonic = None
 
     def _read_record_posix(self, name: str) -> bytes:
         descriptor = os.open(
@@ -2066,24 +2065,36 @@ def _generation_guard_context(
         yield None
         return
     guard = factory(generation_nonce, deadline)
-    guard_type = type(guard)
-    enter = getattr(guard_type, "__enter__", None)
-    exit_ = getattr(guard_type, "__exit__", None)
-    if not callable(enter) or not callable(exit_):
-        raise TypeError("generation_guard must return a context manager")
+    enter, exit_ = _guard_protocol(guard)
     entered = enter(guard)
     launch = entered if isinstance(entered, GenerationLaunch) else None
     try:
         yield launch
     except BaseException as error:
-        # Guard cleanup cannot suppress a failed generation and permit a commit.
-        try:
-            exit_(guard, type(error), error, error.__traceback__)
-        except BaseException as cleanup_error:
-            _raise_cleanup_failures((cleanup_error,), prior_error=error)
+        _exit_guard_after_failure(guard, exit_, error)
         raise
     else:
         exit_(guard, None, None, None)
+
+
+def _guard_protocol(guard: object) -> tuple[Callable, Callable]:
+    """The guard's enter and exit, refusing anything that is not a manager."""
+    guard_type = type(guard)
+    enter = getattr(guard_type, "__enter__", None)
+    exit_ = getattr(guard_type, "__exit__", None)
+    if not callable(enter) or not callable(exit_):
+        raise TypeError("generation_guard must return a context manager")
+    return enter, exit_
+
+
+def _exit_guard_after_failure(
+    guard: object, exit_: Callable, error: BaseException
+) -> None:
+    """Guard cleanup cannot suppress a failed generation and permit a commit."""
+    try:
+        exit_(guard, type(error), error, error.__traceback__)
+    except BaseException as cleanup_error:
+        _raise_cleanup_failures((cleanup_error,), prior_error=error)
 
 
 def _start_lsp_process(
