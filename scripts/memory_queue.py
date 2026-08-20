@@ -4301,6 +4301,54 @@ def _take_task_lease(
     return changed == 1
 
 
+def _next_unfenced_ready_task(
+    connection: sqlite3.Connection, now: datetime, attempt_limit: int
+) -> sqlite3.Row | None:
+    """The next ready task whose source nobody is finalizing."""
+    return connection.execute(
+        """SELECT * FROM tasks
+           WHERE state = 'ready' AND attempts < ? AND available_at <= ?
+             AND NOT EXISTS (
+                 SELECT 1 FROM source_fences f
+                 WHERE instr(tasks.payload_json, f.daily_id) > 0
+                    OR instr(tasks.payload_json, f.source_digest) > 0
+             )
+           ORDER BY priority DESC, available_at, created_at, rowid LIMIT 1""",
+        (attempt_limit, _timestamp(now)),
+    ).fetchone()
+
+
+def _take_v3_task_lease(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    owner: str,
+    token: str,
+    now: datetime,
+    expires: datetime,
+    attempt_limit: int,
+) -> bool:
+    """Move the task into a lease; False when someone else got there first."""
+    changed = connection.execute(
+        """UPDATE tasks SET state='leased', attempts=attempts+1,
+               lease_owner=?, lease_token=?, lease_expires_at=?, lease_heartbeat_at=?,
+               attempt_started_at=?, updated_at=?, error_code=NULL,
+               blocked_capability=NULL
+           WHERE id=? AND state='ready' AND attempts < ?""",
+        (
+            owner,
+            token,
+            _timestamp(expires),
+            _timestamp(now),
+            _timestamp(now),
+            _timestamp(now),
+            row["id"],
+            attempt_limit,
+        ),
+    ).rowcount
+    return changed == 1
+
+
 class MemoryQueue:
     """Durable priority queue with lease-token fencing and at-least-once delivery."""
 
@@ -4620,46 +4668,25 @@ class MemoryQueue:
             raise ValueError("owner must be non-empty")
         if lease_seconds <= 0:
             raise ValueError("lease must be positive")
-        attempt_limit = self._max_attempts if max_attempts is None else max_attempts
-        _validate_retry_policy(
-            attempt_limit, self._retry_base_seconds, self._retry_cap_seconds
-        )
+        attempt_limit, _base, _cap = self._retry_policy(max_attempts, None, None)
         now = _as_utc(self._clock())
         with self._connect() as connection, begin_immediate(connection):
             self._expire_leases(connection, now, attempt_limit)
             self._delete_stale_source_fences(connection)
-            row = connection.execute(
-                """SELECT * FROM tasks
-                   WHERE state = 'ready' AND attempts < ? AND available_at <= ?
-                     AND NOT EXISTS (
-                         SELECT 1 FROM source_fences f
-                         WHERE instr(tasks.payload_json, f.daily_id) > 0
-                            OR instr(tasks.payload_json, f.source_digest) > 0
-                     )
-                   ORDER BY priority DESC, available_at, created_at, rowid LIMIT 1""",
-                (attempt_limit, _timestamp(now)),
-            ).fetchone()
+            row = _next_unfenced_ready_task(connection, now, attempt_limit)
             if row is None:
                 return None
             token = f"{self._rng.getrandbits(256):064x}"
             expires = now + timedelta(seconds=lease_seconds)
-            changed = connection.execute(
-                """UPDATE tasks SET state='leased', attempts=attempts+1,
-                       lease_owner=?, lease_token=?, lease_expires_at=?, lease_heartbeat_at=?,
-                       attempt_started_at=?, updated_at=?, error_code=NULL, blocked_capability=NULL
-                   WHERE id=? AND state='ready' AND attempts < ?""",
-                (
-                    owner,
-                    token,
-                    _timestamp(expires),
-                    _timestamp(now),
-                    _timestamp(now),
-                    _timestamp(now),
-                    row["id"],
-                    attempt_limit,
-                ),
-            ).rowcount
-            if changed != 1:
+            if not _take_v3_task_lease(
+                connection,
+                row,
+                owner=owner,
+                token=token,
+                now=now,
+                expires=expires,
+                attempt_limit=attempt_limit,
+            ):
                 return None
             attempt = int(row["attempts"]) + 1
         return QueueLease(
