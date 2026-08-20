@@ -4499,6 +4499,28 @@ class PyrightSessionManager:
         if remaining <= 0 or not lock.acquire(timeout=remaining):
             raise TimeoutError("Pyright session key lock deadline expired")
 
+    def _drop_key_lock_reference(
+        self, key: tuple[str, PyrightIdentity], state: _KeyLockState
+    ) -> None:
+        """Give back one reference; the last one retires the lock."""
+        state.references -= 1
+        if state.references < 0:
+            raise RuntimeError("Pyright session key lock reference underflow")
+        if state.references == 0 and self._key_locks.get(key) is state:
+            self._key_locks.pop(key, None)
+
+    def _release_key_lock_reference_once(
+        self, key: tuple[str, PyrightIdentity], state: _KeyLockState
+    ) -> bool:
+        """False when another thread holds the reference lock right now."""
+        if not state.reference_lock.acquire(blocking=False):
+            return False
+        try:
+            self._drop_key_lock_reference(key, state)
+        finally:
+            state.reference_lock.release()
+        return True
+
     def _drain_key_lock_releases_locked(self) -> None:
         deferred: list[
             tuple[tuple[str, PyrightIdentity], _KeyLockState]
@@ -4508,19 +4530,8 @@ class PyrightSessionManager:
                 key, state = self._key_lock_releases.get_nowait()
             except queue.Empty:
                 break
-            if not state.reference_lock.acquire(blocking=False):
+            if not self._release_key_lock_reference_once(key, state):
                 deferred.append((key, state))
-                continue
-            try:
-                state.references -= 1
-                if state.references < 0:
-                    raise RuntimeError(
-                        "Pyright session key lock reference underflow"
-                    )
-                if state.references == 0 and self._key_locks.get(key) is state:
-                    self._key_locks.pop(key, None)
-            finally:
-                state.reference_lock.release()
         for release in deferred:
             self._key_lock_releases.put(release)
 
@@ -4617,11 +4628,27 @@ class PyrightSessionManager:
                 deadline,
             )
             if closed:
-                if self._sessions.get(key) is session:
-                    self._sessions.pop(key, None)
+                self._forget_session_locked(key, session)
                 continue
             live.append((key, session))
         return live
+
+    def _idle_entry(
+        self,
+        key: tuple[str, PyrightIdentity],
+        session: PyrightSession,
+        deadline: float,
+    ) -> tuple[float, tuple[str, PyrightIdentity], PyrightSession] | None:
+        """The session's last-used time, when it is idle enough to evict."""
+        closed, closing, starting, active, last_used = self._session_state(
+            session,
+            deadline,
+        )
+        if closed or closing or starting:
+            return None
+        if active != 0:
+            return None
+        return last_used, key, session
 
     def _reserve_lru_idle_locked(
         self,
@@ -4632,12 +4659,9 @@ class PyrightSessionManager:
             tuple[float, tuple[str, PyrightIdentity], PyrightSession]
         ] = []
         for key, session in live:
-            closed, closing, starting, active, last_used = self._session_state(
-                session,
-                deadline,
-            )
-            if not closed and not closing and not starting and active == 0:
-                idle.append((last_used, key, session))
+            entry = self._idle_entry(key, session, deadline)
+            if entry is not None:
+                idle.append(entry)
         for _last_used, key, session in sorted(idle, key=lambda item: item[0]):
             if session._reserve_idle_close(deadline):
                 return key, session
