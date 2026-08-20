@@ -3142,12 +3142,21 @@ def _validate_retry_policy(
         ("retry_base_seconds", retry_base_seconds),
         ("retry_cap_seconds", retry_cap_seconds),
     ):
-        if not isinstance(value, int) or isinstance(value, bool):
-            raise ValueError(f"{name} must be an integer")
+        _check_policy_integer(name, value)
     if not 1 <= max_attempts <= _MAX_RUNTIME_ATTEMPTS:
         raise ValueError(
             f"max_attempts must be between 1 and {_MAX_RUNTIME_ATTEMPTS}"
         )
+    _check_retry_window(retry_base_seconds, retry_cap_seconds)
+
+
+def _check_policy_integer(name: str, value: object) -> None:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer")
+
+
+def _check_retry_window(retry_base_seconds: int, retry_cap_seconds: int) -> None:
+    """Both ends of the backoff window are positive, and it is a window."""
     if retry_base_seconds <= 0:
         raise ValueError("retry_base_seconds must be positive")
     if retry_cap_seconds <= 0:
@@ -11306,41 +11315,39 @@ def _queue_owner_is_active(state_root: Path, role: str) -> bool:
     )
 
 
+def _marker_file_usable(marker: Path, metadata: os.stat_result) -> bool:
+    """The marker is a real, bounded, owner-only file and not a link."""
+    if marker.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+        return False
+    if metadata.st_size > _MAX_MARKER_BYTES:
+        return False
+    return _is_owner_only(marker)
+
+
+def _read_stable_marker(marker: Path, metadata: os.stat_result) -> bytes:
+    """The marker's bytes, read from the very file we measured."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(marker, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (metadata.st_dev, metadata.st_ino) != (opened.st_dev, opened.st_ino):
+            raise QueueOperationError("migration_marker_invalid")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            raw = handle.read(_MAX_MARKER_BYTES + 1)
+        if _descriptor_identity(opened) != _descriptor_identity(os.fstat(descriptor)):
+            raise QueueOperationError("migration_marker_invalid")
+    finally:
+        os.close(descriptor)
+    return raw
+
+
 def _validate_migration_marker(marker: Path) -> None:
     expected = canonical_json_bytes({"version": 2})
     try:
         metadata = marker.lstat()
-        if (
-            marker.is_symlink()
-            or not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_size > _MAX_MARKER_BYTES
-            or not _is_owner_only(marker)
-        ):
+        if not _marker_file_usable(marker, metadata):
             raise QueueOperationError("migration_marker_invalid")
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(marker, flags)
-        try:
-            opened = os.fstat(descriptor)
-            if (metadata.st_dev, metadata.st_ino) != (opened.st_dev, opened.st_ino):
-                raise QueueOperationError("migration_marker_invalid")
-            with os.fdopen(descriptor, "rb", closefd=False) as handle:
-                raw = handle.read(_MAX_MARKER_BYTES + 1)
-            after = os.fstat(descriptor)
-            if (
-                opened.st_dev,
-                opened.st_ino,
-                opened.st_size,
-                opened.st_mtime_ns,
-            ) != (
-                after.st_dev,
-                after.st_ino,
-                after.st_size,
-                after.st_mtime_ns,
-            ):
-                raise QueueOperationError("migration_marker_invalid")
-        finally:
-            os.close(descriptor)
-        if raw != expected:
+        if _read_stable_marker(marker, metadata) != expected:
             raise QueueOperationError("migration_marker_invalid")
     except QueueOperationError:
         raise
