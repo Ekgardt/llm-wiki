@@ -2904,6 +2904,73 @@ def _request_generation(instance: LspProcess, deadline: float) -> _Generation:
         _release_lifecycle(coordinator)
 
 
+def _promotion_lifecycle_ready(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    generation_nonce: str,
+) -> bool:
+    """The lifecycle is running, unfinished, and on this exact generation."""
+    if coordinator.phase is not _LifecyclePhase.RUNNING:
+        return False
+    if coordinator.terminal_outcome is not None:
+        return False
+    return instance.generation_nonce == generation_nonce
+
+
+def _promotable_generation_locked(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    generation_nonce: str,
+) -> _Generation | None:
+    """The live generation this promotion names, or None when it is not it."""
+    if not _promotion_lifecycle_ready(instance, coordinator, generation_nonce):
+        return None
+    generation = coordinator.active
+    if generation is None or generation.nonce != generation_nonce:
+        return None
+    return generation if _generation_has_channel(generation) else None
+
+
+def _generation_has_channel(generation: _Generation) -> bool:
+    """The generation still holds both ends of its channel."""
+    return generation.process is not None and generation.protocol is not None
+
+
+def _generation_still_healthy(generation: _Generation) -> bool:
+    """Nothing has told us this generation is finishing; caller holds its lock."""
+    if generation._exit_observed or generation.failure_queued:
+        return False
+    if generation.expected_exit.is_set():
+        return False
+    return generation.process.poll() is None and not generation.protocol.fatal
+
+
+def _terminal_outcome_uncommitted_locked(coordinator: _LifecycleCoordinator) -> bool:
+    """No terminal outcome is committed or owed; caller holds the state lock."""
+    if coordinator.success_committed:
+        return False
+    if coordinator.mandatory_failure_intent is not None:
+        return False
+    return coordinator.pending_failure_intents == 0
+
+
+def _promote_generation_locked(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    generation: _Generation,
+) -> bool:
+    """Mark the process workspace-ready, unless something is already ending it."""
+    with generation.failure_lock:
+        if not _generation_still_healthy(generation):
+            return False
+        with coordinator.terminal_state_lock:
+            if not _terminal_outcome_uncommitted_locked(coordinator):
+                return False
+            instance.state = ProcessState.WORKSPACE_READY
+    _notify_lifecycle_locked(coordinator)
+    return True
+
+
 def _promote_lsp_process_workspace_ready(
     instance: LspProcess,
     *,
@@ -2914,41 +2981,19 @@ def _promote_lsp_process_workspace_ready(
     if not isinstance(generation_nonce, str):
         raise TypeError("generation_nonce must be a string")
     if re.fullmatch(r"[0-9a-f]{32}", generation_nonce) is None:
-        raise ValueError("generation_nonce must be 32 lowercase hexadecimal characters")
+        raise ValueError(
+            "generation_nonce must be 32 lowercase hexadecimal characters"
+        )
 
     coordinator = instance._coordinator
     _acquire_lifecycle(coordinator, deadline)
     try:
-        generation = coordinator.active
-        if (
-            coordinator.phase is not _LifecyclePhase.RUNNING
-            or coordinator.terminal_outcome is not None
-            or generation is None
-            or generation.nonce != generation_nonce
-            or instance.generation_nonce != generation_nonce
-            or generation.process is None
-            or generation.protocol is None
-        ):
+        generation = _promotable_generation_locked(
+            instance, coordinator, generation_nonce
+        )
+        if generation is None:
             return False
-        with generation.failure_lock:
-            if (
-                generation._exit_observed
-                or generation.failure_queued
-                or generation.expected_exit.is_set()
-                or generation.process.poll() is not None
-                or generation.protocol.fatal
-            ):
-                return False
-            with coordinator.terminal_state_lock:
-                if (
-                    coordinator.success_committed
-                    or coordinator.mandatory_failure_intent is not None
-                    or coordinator.pending_failure_intents > 0
-                ):
-                    return False
-                instance.state = ProcessState.WORKSPACE_READY
-        _notify_lifecycle_locked(coordinator)
-        return True
+        return _promote_generation_locked(instance, coordinator, generation)
     finally:
         _release_lifecycle(coordinator)
 
