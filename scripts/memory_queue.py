@@ -4074,6 +4074,35 @@ def _record_capture_seal(
         raise QueueOperationError("capture_link_seal_failed")
 
 
+def _descriptor_identity(info: os.stat_result) -> tuple[int, int, int, int]:
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+
+def _read_stable_result(descriptor: int) -> bytes | None:
+    """The file's bytes, when it neither grew nor moved while we read it."""
+    opened = os.fstat(descriptor)
+    if not stat.S_ISREG(opened.st_mode) or opened.st_size > _MAX_RESULT_BYTES:
+        return None
+    with os.fdopen(descriptor, "rb", closefd=False) as handle:
+        data = handle.read(_MAX_RESULT_BYTES + 1)
+    if len(data) > _MAX_RESULT_BYTES:
+        return None
+    if _descriptor_identity(opened) != _descriptor_identity(os.fstat(descriptor)):
+        return None
+    return data
+
+
+def _stable_result_digest(path: Path) -> str | None:
+    """The digest of a result file read without following a link or a swap."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        data = _read_stable_result(descriptor)
+    finally:
+        os.close(descriptor)
+    return None if data is None else sha256_bytes(data)
+
+
 class MemoryQueue:
     """Durable priority queue with lease-token fencing and at-least-once delivery."""
 
@@ -4553,44 +4582,25 @@ class MemoryQueue:
             return False
         return self._validated_result_digest(reference) == digest
 
+    def _result_path_usable(self, path: Path) -> bool:
+        """The reference names a real, owner-only file directly in results."""
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(self.results_dir.resolve())
+        if path.parent.resolve() != self.results_dir.resolve() or path.is_symlink():
+            return False
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode):
+            return False
+        if metadata.st_size > _MAX_RESULT_BYTES:
+            return False
+        return _is_owner_only(path)
+
     def _validated_result_digest(self, reference: str) -> str | None:
         try:
             path = self.state_root / reference
-            resolved = path.resolve(strict=True)
-            resolved.relative_to(self.results_dir.resolve())
-            if path.parent.resolve() != self.results_dir.resolve() or path.is_symlink():
+            if not self._result_path_usable(path):
                 return None
-            metadata = path.lstat()
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > _MAX_RESULT_BYTES:
-                return None
-            if not _is_owner_only(path):
-                return None
-            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-            descriptor = os.open(path, flags)
-            try:
-                opened = os.fstat(descriptor)
-                if not stat.S_ISREG(opened.st_mode) or opened.st_size > _MAX_RESULT_BYTES:
-                    return None
-                with os.fdopen(descriptor, "rb", closefd=False) as handle:
-                    data = handle.read(_MAX_RESULT_BYTES + 1)
-                if len(data) > _MAX_RESULT_BYTES:
-                    return None
-                after = os.fstat(descriptor)
-                if (
-                    opened.st_dev,
-                    opened.st_ino,
-                    opened.st_size,
-                    opened.st_mtime_ns,
-                ) != (
-                    after.st_dev,
-                    after.st_ino,
-                    after.st_size,
-                    after.st_mtime_ns,
-                ):
-                    return None
-                return sha256_bytes(data)
-            finally:
-                os.close(descriptor)
+            return _stable_result_digest(path)
         except (OSError, ValueError):
             return None
 
