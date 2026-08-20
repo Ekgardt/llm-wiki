@@ -4571,6 +4571,64 @@ def _drain_terminal_failures(
         _acknowledge_failure_intent(coordinator)
 
 
+def _commit_mandatory_failure_locked(
+    instance: LspProcess | None,
+    coordinator: _LifecycleCoordinator,
+    mandatory_intent: _FailureEvidenceIdentity,
+) -> None:
+    """A mandatory failure names the terminal outcome and its evidence."""
+    coordinator.terminal_outcome = "failure"
+    coordinator.terminal_code = mandatory_intent.code
+    coordinator.failure_evidence_identity = mandatory_intent
+    if instance is not None and instance.state is not ProcessState.FAILED:
+        instance.state = ProcessState.DEGRADED
+    coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
+
+
+def _settle_terminal_outcome_locked(
+    instance: LspProcess | None, coordinator: _LifecycleCoordinator
+) -> bool:
+    """Fix the terminal outcome; True when generations must be marked exiting."""
+    mandatory_intent = coordinator.mandatory_failure_intent
+    if mandatory_intent is not None:
+        _commit_mandatory_failure_locked(instance, coordinator, mandatory_intent)
+        return True
+    if coordinator.pending_failure_intents <= 0:
+        return False
+    _select_terminal_failure_locked(
+        instance,
+        coordinator,
+        coordinator.pending_failure_code or _PROCESS_EXITED,
+    )
+    coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
+    return True
+
+
+def _commit_success_locked(
+    coordinator: _LifecycleCoordinator, *, commit_success: bool
+) -> None:
+    """Only an unopposed success may be committed."""
+    if not commit_success or coordinator.mandatory_failure_intent is not None:
+        return
+    if coordinator.terminal_outcome == "success":
+        coordinator.success_committed = True
+
+
+def _linearize_terminal_state_locked(
+    instance: LspProcess | None,
+    coordinator: _LifecycleCoordinator,
+    *,
+    commit_success: bool,
+) -> tuple[str | None, bool]:
+    """The outcome, and whether the generations still need marking."""
+    with coordinator.terminal_state_lock:
+        if coordinator.success_committed:
+            return "success", False
+        mark_failure_exits = _settle_terminal_outcome_locked(instance, coordinator)
+        _commit_success_locked(coordinator, commit_success=commit_success)
+    return coordinator.terminal_outcome, mark_failure_exits
+
+
 def _linearize_terminal_outcome_locked(
     instance: LspProcess | None,
     coordinator: _LifecycleCoordinator,
@@ -4584,40 +4642,13 @@ def _linearize_terminal_outcome_locked(
         allow_expired=not commit_success,
     )
     try:
-        mark_failure_exits = False
-        with coordinator.terminal_state_lock:
-            if coordinator.success_committed:
-                return "success"
-            mandatory_intent = coordinator.mandatory_failure_intent
-            if mandatory_intent is not None:
-                coordinator.terminal_outcome = "failure"
-                coordinator.terminal_code = mandatory_intent.code
-                coordinator.failure_evidence_identity = mandatory_intent
-                if instance is not None and instance.state is not ProcessState.FAILED:
-                    instance.state = ProcessState.DEGRADED
-                coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
-                mark_failure_exits = True
-            elif (
-                coordinator.pending_failure_intents > 0
-                and not coordinator.success_committed
-            ):
-                _select_terminal_failure_locked(
-                    instance,
-                    coordinator,
-                    coordinator.pending_failure_code or _PROCESS_EXITED,
-                )
-                coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
-                mark_failure_exits = True
-            if (
-                commit_success
-                and mandatory_intent is None
-                and coordinator.terminal_outcome == "success"
-            ):
-                coordinator.success_committed = True
+        outcome, mark_failure_exits = _linearize_terminal_state_locked(
+            instance, coordinator, commit_success=commit_success
+        )
         if mark_failure_exits:
             for generation in _generations_locked(coordinator):
                 _mark_generation_expected_exit(generation)
-        return coordinator.terminal_outcome
+        return outcome
     finally:
         _release_terminal_intent(coordinator)
 
