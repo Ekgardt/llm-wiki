@@ -3856,6 +3856,53 @@ def _selected_intent_id(
     return selected_id
 
 
+def _read_purge_receipt(package: Path) -> dict[str, object]:
+    """The schema-valid purge receipt the package holds."""
+    try:
+        receipt_bytes = _read_stable_owner_file(
+            package / "purge-receipt.json", 64 * 1024
+        )
+        receipt = json.loads(receipt_bytes.decode("utf-8", errors="strict"))
+        validate_schema(
+            receipt,
+            Path(__file__).with_name("schemas") / "corrupt-purge-v1.json",
+        )
+    except (OSError, PermissionError, ValueError, json.JSONDecodeError) as exc:
+        raise QueueOperationError("corrupt_purge_completion_invalid") from exc
+    return receipt
+
+
+def _require_matching_purge_receipt(
+    receipt: Mapping[str, object],
+    operation: sqlite3.Row,
+    disposition: sqlite3.Row,
+    task_id: str,
+) -> None:
+    """The receipt has to name exactly the purge the rows describe."""
+    observed = (
+        receipt["operation_id"],
+        receipt["task_id"],
+        receipt["package_key"],
+        receipt["manifest_sha256"],
+        receipt["disposition_sha256"],
+        receipt["purge_page_count"],
+        receipt["final_rolling_root"],
+        receipt["final_generation"],
+    )
+    expected = (
+        operation["operation_id"],
+        task_id,
+        disposition["disposition_key"],
+        disposition["manifest_sha256"],
+        disposition["disposition_sha256"],
+        operation["page_count"],
+        operation["rolling_root"],
+        operation["expected_generation"],
+    )
+    if observed != expected:
+        raise QueueOperationError("corrupt_purge_completion_invalid")
+
+
 class MemoryQueue:
     """Durable priority queue with lease-token fencing and at-least-once delivery."""
 
@@ -8805,6 +8852,27 @@ class _QueueV3CandidateReader:
     def _completed_corrupt_purge_progress(
         self, task_id: str
     ) -> CorruptPurgeProgress | None:
+        completed = self._completed_purge_rows(task_id)
+        if completed is None:
+            return None
+        operation, disposition, links_deleted = completed
+        package = self.results_dir / f"corrupt-{disposition['disposition_key']}"
+        receipt = _read_purge_receipt(package)
+        _require_matching_purge_receipt(receipt, operation, disposition, task_id)
+        return CorruptPurgeProgress(
+            task_id=task_id,
+            operation_id=str(operation["operation_id"]),
+            state="purged",
+            pages_written=int(operation["page_count"]),
+            links_deleted=links_deleted,
+            complete=True,
+            code=None,
+        )
+
+    def _completed_purge_rows(
+        self, task_id: str
+    ) -> tuple[sqlite3.Row, sqlite3.Row, int] | None:
+        """The purge rows for a task that is gone, or None while it is still here."""
         with closing(self._connect()) as database:
             task_exists = database.execute(
                 "SELECT 1 FROM tasks WHERE id=?", (task_id,)
@@ -8834,38 +8902,7 @@ class _QueueV3CandidateReader:
             )
         if disposition is None:
             raise QueueOperationError("corrupt_purge_completion_invalid")
-        package = self.results_dir / f"corrupt-{disposition['disposition_key']}"
-        try:
-            receipt_bytes = _read_stable_owner_file(
-                package / "purge-receipt.json", 64 * 1024
-            )
-            receipt = json.loads(receipt_bytes.decode("utf-8", errors="strict"))
-            validate_schema(
-                receipt,
-                Path(__file__).with_name("schemas") / "corrupt-purge-v1.json",
-            )
-        except (OSError, PermissionError, ValueError, json.JSONDecodeError) as exc:
-            raise QueueOperationError("corrupt_purge_completion_invalid") from exc
-        if (
-            receipt["operation_id"] != operation["operation_id"]
-            or receipt["task_id"] != task_id
-            or receipt["package_key"] != disposition["disposition_key"]
-            or receipt["manifest_sha256"] != disposition["manifest_sha256"]
-            or receipt["disposition_sha256"] != disposition["disposition_sha256"]
-            or receipt["purge_page_count"] != operation["page_count"]
-            or receipt["final_rolling_root"] != operation["rolling_root"]
-            or receipt["final_generation"] != operation["expected_generation"]
-        ):
-            raise QueueOperationError("corrupt_purge_completion_invalid")
-        return CorruptPurgeProgress(
-            task_id=task_id,
-            operation_id=str(operation["operation_id"]),
-            state="purged",
-            pages_written=int(operation["page_count"]),
-            links_deleted=links_deleted,
-            complete=True,
-            code=None,
-        )
+        return operation, disposition, links_deleted
 
     def _corrupt_package_purge_blocker(
         self, package: Path, disposition: sqlite3.Row
