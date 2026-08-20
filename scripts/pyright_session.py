@@ -1308,6 +1308,34 @@ _DID_OPEN_EVIDENCE = (*_PROTOCOL_EVIDENCE, "didOpen")
 _QUERY_READY_EVIDENCE = (*_DID_OPEN_EVIDENCE, "documentSymbol")
 
 
+def _released_error(release: Callable[[], object]) -> BaseException | None:
+    """Run one release step; the error it raised, if it raised one."""
+    try:
+        release()
+    except BaseException as error:
+        return error
+    return None
+
+
+def _unlink_error(path: Path | None) -> BaseException | None:
+    """Remove a file that may already be gone; the error worth reporting."""
+    if path is None:
+        return None
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        return None
+    except BaseException as error:
+        return error
+    return None
+
+
+def _closed_descriptor_error(descriptor: int | None) -> BaseException | None:
+    if descriptor is None:
+        return None
+    return _released_error(lambda: os.close(descriptor))
+
+
 class _LaunchServerGuard:
     def __init__(
         self,
@@ -1520,50 +1548,43 @@ class _LaunchServerGuard:
             raise _BootstrapDegradation("pyright_executable_digest_mismatch")
         _require_startup_deadline(self._deadline)
 
+    def _take_owned_resources(self) -> tuple[object, Path | None, int | None, int | None]:
+        """Hand over everything the guard holds, leaving it holding nothing."""
+        snapshot, self._snapshot = self._snapshot, None
+        snapshot_path, self._snapshot_path = self._snapshot_path, None
+        launch_descriptor, self._launch_descriptor = self._launch_descriptor, None
+        descriptor, self._descriptor = self._descriptor, None
+        return snapshot, snapshot_path, launch_descriptor, descriptor
+
     def close(self) -> None:
-        snapshot = self._snapshot
-        self._snapshot = None
-        snapshot_path = self._snapshot_path
-        self._snapshot_path = None
-        launch_descriptor = self._launch_descriptor
-        self._launch_descriptor = None
-        descriptor = self._descriptor
-        self._descriptor = None
-        errors: list[BaseException] = []
-        if snapshot is not None:
-            try:
-                snapshot.close()
-            except BaseException as error:
-                errors.append(error)
-        if snapshot_path is not None:
-            try:
-                os.unlink(snapshot_path)
-            except FileNotFoundError:
-                pass
-            except BaseException as error:
-                errors.append(error)
-        if launch_descriptor is not None:
-            try:
-                os.close(launch_descriptor)
-            except BaseException as error:
-                errors.append(error)
-        if descriptor is not None:
-            try:
-                os.close(descriptor)
-            except BaseException as error:
-                errors.append(error)
-        _raise_collected_errors(errors)
+        snapshot, snapshot_path, launch_descriptor, descriptor = (
+            self._take_owned_resources()
+        )
+        errors = [
+            _released_error(snapshot.close) if snapshot is not None else None,
+            _unlink_error(snapshot_path),
+            _closed_descriptor_error(launch_descriptor),
+            _closed_descriptor_error(descriptor),
+        ]
+        _raise_collected_errors([item for item in errors if item is not None])
+
+    def _verified_operation_error(
+        self, error_type: object, error_info: tuple[object, ...]
+    ) -> BaseException | None:
+        """The error the block carried, or the one verification found."""
+        for item in error_info:
+            if isinstance(item, BaseException):
+                return item
+        if error_type is not None:
+            return None
+        try:
+            self.verify()
+        except BaseException as error:
+            return error
+        return None
 
     def __exit__(self, error_type: object, *error_info: object) -> None:
-        operation_error = next(
-            (item for item in error_info if isinstance(item, BaseException)),
-            None,
-        )
-        if error_type is None:
-            try:
-                self.verify()
-            except BaseException as error:
-                operation_error = error
+        operation_error = self._verified_operation_error(error_type, error_info)
         try:
             self.close()
         except BaseException as cleanup_error:
@@ -1856,11 +1877,32 @@ class PyrightSession:
         notify: Callable[[], bool | None],
     ) -> bool:
         key = (generation_nonce, document.source.uri, document.version)
+        claimed = self._claim_did_open(key, generation_nonce, deadline)
+        if claimed is not None:
+            return claimed
+        sent = False
+        try:
+            sent = notify() is not False
+        except BaseException:
+            self._record_did_open_failure(key, generation_nonce)
+            raise
+        finally:
+            retained = self._release_did_open(key, generation_nonce, sent=sent)
+        return retained
+
+    def _await_did_open_gate_locked(self, key: tuple, deadline: float) -> None:
+        """Wait out another sender of the same key; caller holds the condition."""
+        while key in self._wire_sending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not self._wire_condition.wait(remaining):
+                raise TimeoutError("Pyright didOpen send gate deadline expired")
+
+    def _claim_did_open(
+        self, key: tuple, generation_nonce: str, deadline: float
+    ) -> bool | None:
+        """The settled answer for this key, or None when this call must send."""
         with self._wire_condition:
-            while key in self._wire_sending:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0 or not self._wire_condition.wait(remaining):
-                    raise TimeoutError("Pyright didOpen send gate deadline expired")
+            self._await_did_open_gate_locked(key, deadline)
             if self._wire_generation != generation_nonce:
                 return False
             if key in self._wire_opened:
@@ -1868,22 +1910,23 @@ class PyrightSession:
             if key in self._wire_failed:
                 return False
             self._wire_sending.add(key)
+        return None
 
-        sent = False
-        try:
-            sent = notify() is not False
-        except BaseException:
-            with self._wire_condition:
-                if self._wire_generation == generation_nonce:
-                    self._wire_failed.add(key)
-            raise
-        finally:
-            with self._wire_condition:
-                self._wire_sending.remove(key)
-                retained = sent and self._wire_generation == generation_nonce
-                if retained:
-                    self._wire_opened.add(key)
-                self._wire_condition.notify_all()
+    def _record_did_open_failure(self, key: tuple, generation_nonce: str) -> None:
+        with self._wire_condition:
+            if self._wire_generation == generation_nonce:
+                self._wire_failed.add(key)
+
+    def _release_did_open(
+        self, key: tuple, generation_nonce: str, *, sent: bool
+    ) -> bool:
+        """Leave the gate, recording the open only if it still belongs to us."""
+        with self._wire_condition:
+            self._wire_sending.remove(key)
+            retained = sent and self._wire_generation == generation_nonce
+            if retained:
+                self._wire_opened.add(key)
+            self._wire_condition.notify_all()
         return retained
 
     @staticmethod
