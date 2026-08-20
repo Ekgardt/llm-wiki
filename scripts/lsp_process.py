@@ -2689,6 +2689,122 @@ def _process_failure_intent(
         _release_driver(coordinator)
 
 
+class _IntentDecision(NamedTuple):
+    """What the locked pass decided about one failure intent."""
+
+    terminal: bool
+    restart: bool
+
+
+def _requeue_intent(coordinator: _LifecycleCoordinator, intent: _FailureIntent) -> None:
+    """Put the intent back and wake recovery to look at it again."""
+    coordinator.failure_queue.put(intent)
+    coordinator.recovery_wake.set()
+
+
+def _intent_is_stale_locked(
+    coordinator: _LifecycleCoordinator, intent: _FailureIntent
+) -> bool:
+    """A non-fatal intent for a generation that is no longer the active one."""
+    if intent.owner_fatal:
+        return False
+    active = coordinator.active
+    return active is None or active.nonce != intent.generation_nonce
+
+
+def _intent_exhausted(
+    instance: LspProcess, coordinator: _LifecycleCoordinator, intent: _FailureIntent
+) -> bool:
+    """No restart is left for this failure."""
+    return (
+        intent.owner_fatal
+        or coordinator.recovery_attempted
+        or instance.restart_count >= 1
+    )
+
+
+def _decide_failure_intent_locked(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    intent: _FailureIntent,
+) -> _IntentDecision:
+    """Whether this failure ends the lifecycle or asks for one restart."""
+    if _intent_exhausted(instance, coordinator, intent):
+        code = "heartbeat_failed" if intent.owner_fatal else _PROCESS_EXITED
+        terminal = _select_terminal_failure_locked(instance, coordinator, code)
+        if terminal:
+            coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
+        return _IntentDecision(terminal, False)
+    coordinator.recovery_attempted = True
+    coordinator.phase = _LifecyclePhase.RECOVERY_PENDING
+    instance.state = ProcessState.DEGRADED
+    active = coordinator.active
+    if active is not None:
+        _mark_generation_expected_exit(active)
+    return _IntentDecision(False, True)
+
+
+def _claim_failure_intent_locked(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    intent: _FailureIntent,
+    key: tuple[str, bool],
+) -> tuple[_IntentDecision | None, bool]:
+    """The decision to drive, and whether the intent should be acknowledged."""
+    if key in coordinator.seen_failures:
+        return None, True
+    if not coordinator.startup_complete:
+        _requeue_intent(coordinator, intent)
+        return None, False
+    if _intent_is_stale_locked(coordinator, intent):
+        coordinator.seen_failures.add(key)
+        return None, True
+    coordinator.seen_failures.add(key)
+    decision = _decide_failure_intent_locked(instance, coordinator, intent)
+    _notify_lifecycle_locked(coordinator)
+    return decision, True
+
+
+def _settle_failure_intent(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    intent: _FailureIntent,
+    key: tuple[str, bool],
+) -> _IntentDecision | None:
+    """Decide the intent under the lifecycle lock the caller holds, then release it."""
+    acknowledge = False
+    try:
+        decision, acknowledge = _claim_failure_intent_locked(
+            instance, coordinator, intent, key
+        )
+        return decision
+    finally:
+        _release_lifecycle(coordinator)
+        if acknowledge:
+            _acknowledge_failure_intent(coordinator)
+
+
+def _terminal_cleanup_code(
+    instance: LspProcess, coordinator: _LifecycleCoordinator, deadline: float
+) -> str | None:
+    """The code to report when terminal cleanup left ownership pending."""
+    try:
+        errors = _drive_cleanup(
+            instance,
+            deadline,
+            terminal=True,
+            failure_code=coordinator.terminal_code,
+        )
+    except BaseException as cleanup_error:
+        _remember_background_cleanup_error(coordinator, cleanup_error)
+    else:
+        if errors:
+            _remember_background_cleanup_error(coordinator, errors[0])
+    if coordinator.cleanup_result.ownership_pending:
+        return coordinator.terminal_code or _PROCESS_EXITED
+    return None
+
+
 def _process_failure_intent_owned(
     instance: LspProcess,
     intent: _FailureIntent,
@@ -2699,69 +2815,16 @@ def _process_failure_intent_owned(
     try:
         _acquire_lifecycle(coordinator, deadline)
     except TimeoutError:
-        coordinator.failure_queue.put(intent)
-        coordinator.recovery_wake.set()
+        _requeue_intent(coordinator, intent)
         return None, False
-
-    terminal = False
-    restart = False
-    acknowledge = False
-    try:
-        if key in coordinator.seen_failures:
-            acknowledge = True
-            return None, False
-        if not coordinator.startup_complete:
-            coordinator.failure_queue.put(intent)
-            coordinator.recovery_wake.set()
-            return None, False
-        active = coordinator.active
-        if not intent.owner_fatal and (
-            active is None or active.nonce != intent.generation_nonce
-        ):
-            coordinator.seen_failures.add(key)
-            acknowledge = True
-            return None, False
-        coordinator.seen_failures.add(key)
-        acknowledge = True
-        if intent.owner_fatal or coordinator.recovery_attempted or instance.restart_count >= 1:
-            terminal = _select_terminal_failure_locked(
-                instance,
-                coordinator,
-                "heartbeat_failed" if intent.owner_fatal else _PROCESS_EXITED,
-            )
-            if terminal:
-                coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
-        else:
-            coordinator.recovery_attempted = True
-            coordinator.phase = _LifecyclePhase.RECOVERY_PENDING
-            instance.state = ProcessState.DEGRADED
-            if active is not None:
-                _mark_generation_expected_exit(active)
-            restart = True
-        _notify_lifecycle_locked(coordinator)
-    finally:
-        _release_lifecycle(coordinator)
-        if acknowledge:
-            _acknowledge_failure_intent(coordinator)
-
-    if terminal:
-        try:
-            errors = _drive_cleanup(
-                instance,
-                deadline,
-                terminal=True,
-                failure_code=coordinator.terminal_code,
-            )
-        except BaseException as cleanup_error:
-            _remember_background_cleanup_error(coordinator, cleanup_error)
-            if coordinator.cleanup_result.ownership_pending:
-                return coordinator.terminal_code or _PROCESS_EXITED, False
-        else:
-            if errors:
-                _remember_background_cleanup_error(coordinator, errors[0])
-            if coordinator.cleanup_result.ownership_pending:
-                return coordinator.terminal_code or _PROCESS_EXITED, False
-    return None, restart
+    decision = _settle_failure_intent(instance, coordinator, intent, key)
+    if decision is None:
+        return None, False
+    if decision.terminal:
+        code = _terminal_cleanup_code(instance, coordinator, deadline)
+        if code is not None:
+            return code, False
+    return None, decision.restart
 
 
 def _remember_background_cleanup_error(
