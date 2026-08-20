@@ -1288,43 +1288,68 @@ def _queue_v2_columns(database: sqlite3.Connection, table: str) -> set[str]:
     return {str(row["name"]) for row in database.execute(f'PRAGMA table_info("{table}")')}
 
 
-def _queue_v3_source_links(payload_bytes: bytes) -> tuple[tuple[str, str], ...]:
-    try:
-        payload = json.loads(payload_bytes)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return ()
-    paths: set[str] = set()
-    digests: set[str] = set()
-    daily_ids: set[str] = set()
+# Which bucket each payload key contributes a source-identity string to.
+_SOURCE_IDENTITY_KEYS = MappingProxyType(
+    {
+        "source_path": "paths",
+        "logical_path": "paths",
+        "source_digest": "digests",
+        "digest": "digests",
+        "hash": "digests",
+        "daily_id": "daily_ids",
+    }
+)
 
-    def visit(value: object) -> None:
-        if isinstance(value, dict):
-            for key, item in value.items():
-                normalized = str(key).casefold()
-                if isinstance(item, str):
-                    if normalized in {"source_path", "logical_path"}:
-                        paths.add(item)
-                    elif normalized in {"source_digest", "digest", "hash"}:
-                        digests.add(item)
-                    elif normalized == "daily_id":
-                        daily_ids.add(item)
-                visit(item)
-        elif isinstance(value, list):
-            for item in value:
-                visit(item)
 
-    visit(payload)
-    if not paths and len(daily_ids) == 1:
-        paths.add(f"knowledge/daily/{next(iter(daily_ids))}.md")
-    if not paths and not digests:
-        return ()
-    if len(paths) != 1 or len(digests) != 1:
+def _collect_identity_from_mapping(
+    value: dict[object, object], found: dict[str, list[str]]
+) -> None:
+    """Take identity strings from one mapping, then walk into its values."""
+    for key, item in value.items():
+        bucket = _SOURCE_IDENTITY_KEYS.get(str(key).casefold())
+        if bucket is not None and isinstance(item, str):
+            found[bucket].append(item)
+        _collect_source_identity_strings(item, found)
+
+
+def _collect_source_identity_strings(
+    value: object, found: dict[str, list[str]]
+) -> None:
+    """Gather every source-identity string reachable from this payload value."""
+    if isinstance(value, dict):
+        _collect_identity_from_mapping(value, found)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _collect_source_identity_strings(item, found)
+
+
+def _source_identity_strings(payload: object) -> dict[str, list[str]]:
+    """The paths, digests and daily ids a payload names, in encounter order."""
+    found: dict[str, list[str]] = {"paths": [], "digests": [], "daily_ids": []}
+    _collect_source_identity_strings(payload, found)
+    return found
+
+
+def _distinct_source_identities(payload: object) -> dict[str, set[str]]:
+    """The distinct identity strings a payload names, daily id standing in."""
+    found = {
+        key: set(values) for key, values in _source_identity_strings(payload).items()
+    }
+    if not found["paths"] and len(found["daily_ids"]) == 1:
+        found["paths"].add(f"knowledge/daily/{next(iter(found['daily_ids']))}.md")
+    return found
+
+
+def _require_single_source_identity(found: dict[str, set[str]]) -> tuple[str, str]:
+    """The one path and digest this payload names, or a refusal."""
+    if len(found["paths"]) != 1 or len(found["digests"]) != 1:
         raise _migration_error(
             "queue_v2_source_identity_ambiguous",
             "queue v2 payload has an ambiguous source identity",
         )
-    logical_path = next(iter(paths))
-    source_digest = next(iter(digests))
+    logical_path = next(iter(found["paths"]))
+    source_digest = next(iter(found["digests"]))
     try:
         MemoryQueue._validate_failure_identity(logical_path, source_digest)
     except ValueError as exc:
@@ -1332,8 +1357,34 @@ def _queue_v3_source_links(payload_bytes: bytes) -> tuple[tuple[str, str], ...]:
             "queue_v2_source_identity_ambiguous",
             "queue v2 payload has an invalid source identity",
         ) from exc
-    return ((logical_path, source_digest),)
+    return (logical_path, source_digest)
 
+
+def _identity_paths_or_daily(found: dict[str, list[str]]) -> list[str]:
+    """The named paths, falling back to the page the first daily id names."""
+    if found["paths"] or not found["daily_ids"]:
+        return found["paths"]
+    return [f"knowledge/daily/{found['daily_ids'][0]}.md"]
+
+
+def _validated_failure_identity(path: str, digest: str) -> tuple[str, str] | None:
+    """The pair, or None when it is not a usable source failure identity."""
+    try:
+        MemoryQueue._validate_failure_identity(path, digest)
+    except ValueError:
+        return None
+    return path, digest
+
+
+def _queue_v3_source_links(payload_bytes: bytes) -> tuple[tuple[str, str], ...]:
+    try:
+        payload = json.loads(payload_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return ()
+    found = _distinct_source_identities(payload)
+    if not found["paths"] and not found["digests"]:
+        return ()
+    return (_require_single_source_identity(found),)
 
 def _queue_v3_row_matches(
     database: sqlite3.Connection,
@@ -5596,36 +5647,11 @@ class MemoryQueue:
             payload = json.loads(payload_json)
         except json.JSONDecodeError:
             return None
-        paths: list[str] = []
-        digests: list[str] = []
-        daily_ids: list[str] = []
-
-        def visit(value: object) -> None:
-            if isinstance(value, dict):
-                for key, item in value.items():
-                    normalized = str(key).casefold()
-                    if isinstance(item, str):
-                        if normalized in {"source_path", "logical_path"}:
-                            paths.append(item)
-                        elif normalized in {"source_digest", "digest", "hash"}:
-                            digests.append(item)
-                        elif normalized == "daily_id":
-                            daily_ids.append(item)
-                    visit(item)
-            elif isinstance(value, list):
-                for item in value:
-                    visit(item)
-
-        visit(payload)
-        if not paths and daily_ids:
-            paths.append(f"knowledge/daily/{daily_ids[0]}.md")
-        if not paths or not digests:
+        found = _source_identity_strings(payload)
+        paths = _identity_paths_or_daily(found)
+        if not paths or not found["digests"]:
             return None
-        try:
-            MemoryQueue._validate_failure_identity(paths[0], digests[0])
-        except ValueError:
-            return None
-        return paths[0], digests[0]
+        return _validated_failure_identity(paths[0], found["digests"][0])
 
     @staticmethod
     def _record_source_failure_row(
@@ -11544,8 +11570,8 @@ def _check_opened_legacy_source(
         raise QueueOperationError("legacy_source_changed")
 
 
-def _legacy_source_identity(status: os.stat_result) -> tuple[int, int, int, int]:
-    """What must not change underneath the file while it is being read."""
+def _file_identity(status: os.stat_result) -> tuple[int, int, int, int]:
+    """What must not change underneath a file while it is being read."""
     return (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns)
 
 
@@ -11555,7 +11581,7 @@ def _read_legacy_descriptor(descriptor: int, opened: os.stat_result) -> bytes:
         raw = handle.read(_MAX_LEGACY_RECORD_BYTES + 1)
     if len(raw) > _MAX_LEGACY_RECORD_BYTES:
         raise QueueOperationError("legacy_record_too_large")
-    if _legacy_source_identity(opened) != _legacy_source_identity(os.fstat(descriptor)):
+    if _file_identity(opened) != _file_identity(os.fstat(descriptor)):
         raise QueueOperationError("legacy_source_changed")
     return raw
 
@@ -11881,39 +11907,40 @@ def _write_durable_file(path: Path, data: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _read_stable_owner_file(path: Path, max_bytes: int) -> bytes:
-    metadata = path.lstat()
-    if (
-        path.is_symlink()
-        or not stat.S_ISREG(metadata.st_mode)
-        or metadata.st_size > max_bytes
-        or not _is_owner_only(path)
+def _check_owner_file_metadata(
+    path: Path, metadata: os.stat_result, max_bytes: int
+) -> None:
+    """Refuse anything that is not a plain, small, owner-only file."""
+    if path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+        raise QueueOperationError("export_verification_failed")
+    if metadata.st_size > max_bytes or not _is_owner_only(path):
+        raise QueueOperationError("export_verification_failed")
+
+
+def _read_stable_descriptor(
+    descriptor: int, metadata: os.stat_result, max_bytes: int
+) -> bytes:
+    """The bytes of the checked file, proved unchanged across the read."""
+    opened = os.fstat(descriptor)
+    if (metadata.st_dev, metadata.st_ino) != (opened.st_dev, opened.st_ino):
+        raise QueueOperationError("export_verification_failed")
+    with os.fdopen(descriptor, "rb", closefd=False) as handle:
+        data = handle.read(max_bytes + 1)
+    if len(data) > max_bytes or _file_identity(opened) != _file_identity(
+        os.fstat(descriptor)
     ):
         raise QueueOperationError("export_verification_failed")
+    return data
+
+
+def _read_stable_owner_file(path: Path, max_bytes: int) -> bytes:
+    metadata = path.lstat()
+    _check_owner_file_metadata(path, metadata, max_bytes)
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     try:
-        opened = os.fstat(descriptor)
-        if (metadata.st_dev, metadata.st_ino) != (opened.st_dev, opened.st_ino):
-            raise QueueOperationError("export_verification_failed")
-        with os.fdopen(descriptor, "rb", closefd=False) as handle:
-            data = handle.read(max_bytes + 1)
-        after = os.fstat(descriptor)
-        if len(data) > max_bytes or (
-            opened.st_dev,
-            opened.st_ino,
-            opened.st_size,
-            opened.st_mtime_ns,
-        ) != (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-        ):
-            raise QueueOperationError("export_verification_failed")
-        return data
+        return _read_stable_descriptor(descriptor, metadata, max_bytes)
     finally:
         os.close(descriptor)
-
 
 def _remove_export_staging(staging: Path) -> None:
     if not staging.exists():
