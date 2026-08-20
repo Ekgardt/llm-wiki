@@ -2053,34 +2053,59 @@ def _parse_payload_integer(value: str) -> int:
     return int(value)
 
 
+def _validate_payload_string(value: str, message: str) -> None:
+    if len(value.encode("utf-8", errors="strict")) > _MAX_QUEUE_STRING_BYTES:
+        raise ValueError(message)
+
+
+def _validate_payload_array(value: list[object], *, depth: int) -> None:
+    if len(value) > _MAX_QUEUE_CONTAINER_MEMBERS:
+        raise ValueError("payload array exceeds its member bound")
+    for item in value:
+        _validate_payload_value(item, depth=depth + 1)
+
+
+def _validate_payload_object(value: dict[object, object], *, depth: int) -> None:
+    if len(value) > _MAX_QUEUE_CONTAINER_MEMBERS:
+        raise ValueError("payload object exceeds its member bound")
+    for key, item in value.items():
+        _validate_payload_key(key)
+        _validate_payload_value(item, depth=depth + 1)
+
+
+def _validate_payload_key(key: object) -> None:
+    if not isinstance(key, str):
+        raise ValueError("payload keys must be strings")
+    _validate_payload_string(key, "payload key exceeds its byte bound")
+
+
+def _is_payload_integer(value: object) -> bool:
+    """A value JSON keeps exactly: null, a boolean, or an integer."""
+    return value is None or isinstance(value, (bool, int))
+
+
+def _validate_payload_scalar(value: object) -> bool:
+    """True when the value is a scalar we accept as it stands."""
+    if _is_payload_integer(value):
+        return True
+    if isinstance(value, float):
+        raise ValueError("payload floats are not permitted")
+    if not isinstance(value, str):
+        return False
+    _validate_payload_string(value, "payload string exceeds its byte bound")
+    return True
+
+
 def _validate_payload_value(value: object, *, depth: int) -> None:
     if depth > _MAX_QUEUE_DEPTH:
         raise ValueError("payload exceeds its depth bound")
-    if value is None or isinstance(value, bool):
-        return
-    if isinstance(value, int):
-        return
-    if isinstance(value, float):
-        raise ValueError("payload floats are not permitted")
-    if isinstance(value, str):
-        if len(value.encode("utf-8", errors="strict")) > _MAX_QUEUE_STRING_BYTES:
-            raise ValueError("payload string exceeds its byte bound")
+    if _validate_payload_scalar(value):
         return
     if isinstance(value, list):
-        if len(value) > _MAX_QUEUE_CONTAINER_MEMBERS:
-            raise ValueError("payload array exceeds its member bound")
-        for item in value:
-            _validate_payload_value(item, depth=depth + 1)
+        _validate_payload_array(value, depth=depth)
         return
     if isinstance(value, dict):
-        if len(value) > _MAX_QUEUE_CONTAINER_MEMBERS:
-            raise ValueError("payload object exceeds its member bound")
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise ValueError("payload keys must be strings")
-            if len(key.encode("utf-8", errors="strict")) > _MAX_QUEUE_STRING_BYTES:
-                raise ValueError("payload key exceeds its byte bound")
-            _validate_payload_value(item, depth=depth + 1)
+        _validate_payload_object(value, depth=depth)
         return
     raise ValueError("payload contains an unsupported value")
 
