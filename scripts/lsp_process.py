@@ -1615,24 +1615,21 @@ def _queue_owner_failure(
     )
 
 
-def _prepare_generation(
-    coordinator: _LifecycleCoordinator,
+def _spawn_generation_tree(
+    generation: _Generation,
     command: Sequence[str],
     *,
     cwd: Path,
     environment: Mapping[str, str],
     deadline: float,
-    generation_nonce: str,
-    owner_record: Mapping[str, object] | None = None,
-    pass_fds: Sequence[int] = (),
-) -> _Generation:
-    generation = _Generation(generation_nonce, None, None)
-    _assign_candidate(coordinator, generation, deadline)
+    pass_fds: Sequence[int],
+) -> ProcessTree:
+    """Spawn the server tree, keeping whatever a failed spawn still owns."""
+    spawn_options: dict[str, object] = {}
+    if pass_fds:
+        spawn_options["pass_fds"] = pass_fds
     try:
-        spawn_options: dict[str, object] = {}
-        if pass_fds:
-            spawn_options["pass_fds"] = pass_fds
-        tree = ProcessTree._spawn_with_deadline(
+        return ProcessTree._spawn_with_deadline(
             command,
             cwd=cwd,
             env=environment,
@@ -1641,11 +1638,17 @@ def _prepare_generation(
         )
     except _lsp_process_tree._ProcessTreeSpawnError as error:
         generation.tree = error.tree
-        if error.tree is not None:
-            generation.process = error.tree.process
-        else:
+        if error.tree is None:
             generation.windows_job = error.windows_job
+        else:
+            generation.process = error.tree.process
         raise
+
+
+def _adopt_generation_tree(
+    generation: _Generation, tree: ProcessTree, deadline: float
+) -> object:
+    """Take the spawned tree, and check it gave us all three pipes."""
     generation.tree = tree
     generation.process = tree.process
     process = tree.process
@@ -1653,7 +1656,12 @@ def _prepare_generation(
     _require_startup_deadline(deadline, "process-tree start")
     if process.stdin is None or process.stdout is None or process.stderr is None:
         raise RuntimeError("LSP process pipes were not created")
+    return process
 
+
+def _start_stderr_drain(
+    generation: _Generation, process: object, generation_nonce: str, deadline: float
+) -> None:
     stderr_thread = threading.Thread(
         target=_drain_stderr,
         args=(
@@ -1670,32 +1678,48 @@ def _prepare_generation(
     stderr_thread.start()
     _require_startup_deadline(deadline, "stderr thread start")
 
-    owner = coordinator.owner_directory
-    if owner is None:
-        raise RuntimeError("LSP owner directory is unavailable")
-    owner.verify_lexical_identity()
-    if owner_record is not None:
-        published_owner_record = dict(owner_record)
-        published_owner_record["owner_pid"] = process.pid
-        _write_owner_record(owner, published_owner_record)
-        owner.verify_lexical_identity()
 
-    handler_options = {}
-    if coordinator.generation_configuration.generation_bootstrap is not None:
-        handler_options = {
-            "server_request_handlers": (
-                {
-                    method: _wrap_protocol_callback(coordinator, handler)
-                    for method, handler in coordinator.generation_configuration.server_request_handlers.items()
-                }
-            ),
-            "server_notification_handlers": (
-                {
-                    method: _wrap_protocol_callback(coordinator, handler)
-                    for method, handler in coordinator.generation_configuration.server_notification_handlers.items()
-                }
-            ),
-        }
+def _publish_owner_record(
+    owner: _OwnerDirectory,
+    owner_record: Mapping[str, object] | None,
+    process: object,
+) -> None:
+    """Record who owns this generation, naming the process that serves it."""
+    if owner_record is None:
+        return
+    published_owner_record = dict(owner_record)
+    published_owner_record["owner_pid"] = process.pid
+    _write_owner_record(owner, published_owner_record)
+    owner.verify_lexical_identity()
+
+
+def _generation_handler_options(
+    coordinator: _LifecycleCoordinator,
+) -> dict[str, object]:
+    """Protocol handlers, wrapped so a callback failure reaches the lifecycle."""
+    configuration = coordinator.generation_configuration
+    if configuration.generation_bootstrap is None:
+        return {}
+    return {
+        "server_request_handlers": {
+            method: _wrap_protocol_callback(coordinator, handler)
+            for method, handler in configuration.server_request_handlers.items()
+        },
+        "server_notification_handlers": {
+            method: _wrap_protocol_callback(coordinator, handler)
+            for method, handler in configuration.server_notification_handlers.items()
+        },
+    }
+
+
+def _start_generation_protocol(
+    coordinator: _LifecycleCoordinator,
+    generation: _Generation,
+    process: object,
+    generation_nonce: str,
+    deadline: float,
+) -> LspProtocol:
+    """Start the protocol, keeping the owner a failed startup handed back."""
     try:
         protocol = LspProtocol(
             process.stdout,
@@ -1706,7 +1730,7 @@ def _prepare_generation(
             ),
             _startup_deadline=deadline,
             _drain_wake=coordinator.recovery_wake,
-            **handler_options,
+            **_generation_handler_options(coordinator),
         )  # type: ignore[arg-type]
     except BaseException as error:
         cleanup_owner = _protocol_startup_cleanup_in_chain(error)
@@ -1715,8 +1739,15 @@ def _prepare_generation(
         raise
     generation.protocol = protocol
     _require_startup_deadline(deadline, "protocol owner start")
-    owner.verify_lexical_identity()
+    return protocol
 
+
+def _start_exit_monitor(
+    coordinator: _LifecycleCoordinator,
+    generation: _Generation,
+    generation_nonce: str,
+    deadline: float,
+) -> None:
     exit_thread = threading.Thread(
         target=_monitor_generation_exit,
         args=(coordinator, generation),
@@ -1727,6 +1758,46 @@ def _prepare_generation(
     _require_startup_deadline(deadline, "exit thread preparation")
     exit_thread.start()
     _require_startup_deadline(deadline, "exit thread start")
+
+
+def _require_owner_directory(coordinator: _LifecycleCoordinator) -> _OwnerDirectory:
+    owner = coordinator.owner_directory
+    if owner is None:
+        raise RuntimeError("LSP owner directory is unavailable")
+    return owner
+
+
+def _prepare_generation(
+    coordinator: _LifecycleCoordinator,
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    environment: Mapping[str, str],
+    deadline: float,
+    generation_nonce: str,
+    owner_record: Mapping[str, object] | None = None,
+    pass_fds: Sequence[int] = (),
+) -> _Generation:
+    generation = _Generation(generation_nonce, None, None)
+    _assign_candidate(coordinator, generation, deadline)
+    tree = _spawn_generation_tree(
+        generation,
+        command,
+        cwd=cwd,
+        environment=environment,
+        deadline=deadline,
+        pass_fds=pass_fds,
+    )
+    process = _adopt_generation_tree(generation, tree, deadline)
+    _start_stderr_drain(generation, process, generation_nonce, deadline)
+    owner = _require_owner_directory(coordinator)
+    owner.verify_lexical_identity()
+    _publish_owner_record(owner, owner_record, process)
+    protocol = _start_generation_protocol(
+        coordinator, generation, process, generation_nonce, deadline
+    )
+    owner.verify_lexical_identity()
+    _start_exit_monitor(coordinator, generation, generation_nonce, deadline)
     if process.poll() is not None or protocol.fatal:
         raise RuntimeError("LSP process exited during generation startup")
     return generation
