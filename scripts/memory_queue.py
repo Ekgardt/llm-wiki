@@ -2179,24 +2179,47 @@ def _validate_payload_value(value: object, *, depth: int) -> None:
 def validate_payload_blob(
     raw: bytes, stored_hash: str, *, parse: bool
 ) -> PayloadValidation:
+    _check_payload_blob_arguments(raw, parse)
+    input_hash = _payload_digest(raw)
+    if not _payload_hash_matches(raw, stored_hash, input_hash):
+        return PayloadValidation(raw, input_hash, None, "payload_hash_mismatch")
+    if not parse:
+        return PayloadValidation(raw, input_hash, None, None)
+    payload = _parsed_canonical_payload(raw)
+    if payload is None:
+        return PayloadValidation(raw, input_hash, None, "payload_hash_mismatch")
+    return PayloadValidation(raw, input_hash, payload, None)
+
+
+def _check_payload_blob_arguments(raw: object, parse: object) -> None:
     if not isinstance(raw, bytes):
         raise TypeError("queue payload must be bytes")
     if not isinstance(parse, bool):
         raise TypeError("parse must be a boolean")
+
+
+def _payload_digest(raw: bytes) -> str:
+    """The payload's digest, read in bounded chunks."""
     digest = hashlib.sha256()
     view = memoryview(raw)
     for offset in range(0, len(view), 64 * 1024):
         digest.update(view[offset : offset + 64 * 1024])
-    input_hash = digest.hexdigest()
-    if (
-        len(raw) > _MAX_QUEUE_PAYLOAD_BYTES
-        or not isinstance(stored_hash, str)
-        or re.fullmatch(r"[0-9a-f]{64}", stored_hash) is None
-        or input_hash != stored_hash
-    ):
-        return PayloadValidation(raw, input_hash, None, "payload_hash_mismatch")
-    if not parse:
-        return PayloadValidation(raw, input_hash, None, None)
+    return digest.hexdigest()
+
+
+def _payload_hash_matches(raw: bytes, stored_hash: object, input_hash: str) -> bool:
+    """The payload is within bounds and hashes to the digest the row stored."""
+    if len(raw) > _MAX_QUEUE_PAYLOAD_BYTES:
+        return False
+    if not isinstance(stored_hash, str):
+        return False
+    if re.fullmatch(r"[0-9a-f]{64}", stored_hash) is None:
+        return False
+    return input_hash == stored_hash
+
+
+def _parsed_canonical_payload(raw: bytes) -> dict[str, object] | None:
+    """The payload object, when these bytes are its own canonical encoding."""
     try:
         payload = json.loads(
             raw.decode("utf-8", errors="strict"),
@@ -2215,8 +2238,8 @@ def validate_payload_blob(
         UnicodeError,
         ValueError,
     ):
-        return PayloadValidation(raw, input_hash, None, "payload_hash_mismatch")
-    return PayloadValidation(raw, input_hash, payload, None)
+        return None
+    return payload
 
 
 class MigrationBusy(QueueOperationError):
