@@ -209,6 +209,42 @@ def _lease_payload(record: Mapping[str, object]) -> bytes:
     return payload
 
 
+def _open_owner_parent_posix(parent: Path) -> tuple[int, object]:
+    """A no-follow descriptor on the owner's parent, and its identity."""
+    if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
+        raise RuntimeError(
+            "LSP ownership requires POSIX no-follow directory APIs"
+        )
+    try:
+        descriptor = os.open(
+            parent,
+            os.O_RDONLY
+            | os.O_DIRECTORY
+            | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+    except NotADirectoryError as exc:
+        raise ValueError("owner_root parent must be a no-follow directory") from exc
+    try:
+        identity = _identity_from_stat(os.fstat(descriptor))
+        _require_directory_identity(identity, "owner_root parent")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor, identity
+
+
+def _open_owner_parent_windows(parent: Path) -> tuple[int, object]:
+    """A handle on the owner's parent, and its identity."""
+    handle = _windows_workspace.open_directory_path(parent)
+    try:
+        identity = _windows_workspace.identity(handle, directory=True)
+    except BaseException:
+        _windows_workspace.close_handle(handle)
+        raise
+    return handle, identity
+
+
 @dataclass(slots=True)
 class _OwnerDirectory:
     owner_root: Path
@@ -375,36 +411,14 @@ class _OwnerDirectory:
     @classmethod
     def open(cls, owner_root: Path) -> _OwnerDirectory:
         if os.name == "posix":
-            if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
-                raise RuntimeError("LSP ownership requires POSIX no-follow directory APIs")
-            try:
-                descriptor = os.open(
-                    owner_root.parent,
-                    os.O_RDONLY
-                    | os.O_DIRECTORY
-                    | os.O_NOFOLLOW
-                    | getattr(os, "O_CLOEXEC", 0),
-                )
-            except NotADirectoryError as exc:
-                raise ValueError(
-                    "owner_root parent must be a no-follow directory"
-                ) from exc
-            try:
-                identity = _identity_from_stat(os.fstat(descriptor))
-                _require_directory_identity(identity, "owner_root parent")
-            except BaseException:
-                os.close(descriptor)
-                raise
+            descriptor, identity = _open_owner_parent_posix(owner_root.parent)
             return cls(owner_root, descriptor, identity)
         if os.name == "nt":
-            handle = _windows_workspace.open_directory_path(owner_root.parent)
-            try:
-                identity = _windows_workspace.identity(handle, directory=True)
-            except BaseException:
-                _windows_workspace.close_handle(handle)
-                raise
+            handle, identity = _open_owner_parent_windows(owner_root.parent)
             return cls(owner_root, handle, identity)
-        raise RuntimeError("LSP owner directories are unsupported on this platform")
+        raise RuntimeError(
+            "LSP owner directories are unsupported on this platform"
+        )
 
     def create(self, deadline: float) -> None:
         if os.name == "posix":
@@ -5885,17 +5899,28 @@ def _drive_cleanup_owned(
     return run.errors
 
 
+def _any_worker_alive(coordinator: _LifecycleCoordinator) -> bool:
+    """Either lifecycle worker is still running."""
+    workers = (coordinator.heartbeat_thread, coordinator.recovery_thread)
+    return any(thread is not None and thread.is_alive() for thread in workers)
+
+
+def _any_generation_held(coordinator: _LifecycleCoordinator) -> bool:
+    """Some generation still holds something of ours."""
+    return any(not item.released for item in _generations_locked(coordinator))
+
+
+def _owner_directory_open(coordinator: _LifecycleCoordinator) -> bool:
+    owner = coordinator.owner_directory
+    return owner is not None and not owner._closed
+
+
 def _coordinator_has_ownership_locked(coordinator: _LifecycleCoordinator) -> bool:
     if coordinator.ownership_lease is not None:
         return True
-    generations = _generations_locked(coordinator)
-    if any(not generation.released for generation in generations):
+    if _any_generation_held(coordinator) or _any_worker_alive(coordinator):
         return True
-    for thread in (coordinator.heartbeat_thread, coordinator.recovery_thread):
-        if thread is not None and thread.is_alive():
-            return True
-    owner = coordinator.owner_directory
-    return owner is not None and not owner._closed
+    return _owner_directory_open(coordinator)
 
 
 def _coordinator_has_ownership(coordinator: _LifecycleCoordinator) -> bool:
