@@ -972,6 +972,22 @@ class _WorkspaceQuery:
     epoch: int
 
 
+def _location_payload(result: object) -> list[object] | None:
+    """The list of raw locations a provider returned, in either shape."""
+    if isinstance(result, list):
+        return result
+    if isinstance(result, dict):
+        return [result]
+    return None
+
+
+def _call_item_range_value(value: Mapping[str, object]) -> object:
+    """A call item names its selection range, or falls back to its range."""
+    if _lsp_range(value.get("selectionRange")) is not None:
+        return value.get("selectionRange")
+    return value.get("range")
+
+
 def _location_fields(value: Mapping[str, object]) -> tuple[object, object] | None:
     """The URI and range of a location, in either of the protocol's two shapes."""
     if "targetUri" not in value and "targetSelectionRange" not in value:
@@ -1793,16 +1809,18 @@ class PyrightSession:
             return tuple(self._progress_events)
 
     def _sync_startup_atexit_locked(self) -> None:
+        """The exit hook is registered exactly while something is retained."""
         retained = (
             self._startup_cleanup_error is not None
             or self._startup_process is not None
         )
-        if retained and not self._startup_atexit_registered:
+        if retained == self._startup_atexit_registered:
+            return
+        if retained:
             atexit.register(self._atexit_cleanup)
-            self._startup_atexit_registered = True
-        elif not retained and self._startup_atexit_registered:
+        else:
             atexit.unregister(self._atexit_cleanup)
-            self._startup_atexit_registered = False
+        self._startup_atexit_registered = retained
 
     def _retain_startup_cleanup_locked(self, error: StartupCleanupError) -> None:
         self._startup_cleanup_error = error
@@ -2058,27 +2076,48 @@ class PyrightSession:
     ) -> bool:
         attempted: set[str] = set()
         while True:
-            with self._lock:
-                generation_nonce = self._generation_nonce
-            if generation_nonce is None or generation_nonce in attempted:
+            generation_nonce = self._next_untried_generation(attempted)
+            if generation_nonce is None:
                 return False
-            attempted.add(generation_nonce)
-            params = self._did_open_params(document)
-            if self._send_did_open_once(
-                document,
-                generation_nonce,
-                deadline=deadline,
-                notify=lambda: process.notify_generation(
-                    "textDocument/didOpen",
-                    params,
-                    generation_nonce=generation_nonce,
-                    deadline=deadline,
-                ),
+            if self._send_did_open_to_generation(
+                document, process, generation_nonce, deadline=deadline
             ):
                 return True
-            with self._lock:
-                if self._generation_nonce == generation_nonce:
-                    return False
+            if self._current_generation_nonce() == generation_nonce:
+                return False
+
+    def _next_untried_generation(self, attempted: set[str]) -> str | None:
+        """The current generation, unless we have already tried it."""
+        generation_nonce = self._current_generation_nonce()
+        if generation_nonce is None or generation_nonce in attempted:
+            return None
+        attempted.add(generation_nonce)
+        return generation_nonce
+
+    def _current_generation_nonce(self) -> str | None:
+        with self._lock:
+            return self._generation_nonce
+
+    def _send_did_open_to_generation(
+        self,
+        document: OpenDocument,
+        process: LspProcess,
+        generation_nonce: str,
+        *,
+        deadline: float,
+    ) -> bool:
+        params = self._did_open_params(document)
+        return self._send_did_open_once(
+            document,
+            generation_nonce,
+            deadline=deadline,
+            notify=lambda: process.notify_generation(
+                "textDocument/didOpen",
+                params,
+                generation_nonce=generation_nonce,
+                deadline=deadline,
+            ),
+        )
 
     def _progress(self, method: str, params: object) -> None:
         record = _progress_notification_record(method, params)
@@ -2540,15 +2579,14 @@ class PyrightSession:
         self._reconcile_process_state_locked()
         if not self._startup_needed_locked():
             return None
-        retained_cleanup = self._startup_cleanup_error
-        retained_process = self._startup_process
-        nothing_retained = retained_cleanup is None and retained_process is None
+        retained = (self._startup_cleanup_error, self._startup_process)
+        nothing_retained = retained == (None, None)
         if self._startup_attempted and nothing_retained:
             return None
         self._starting = True
         if nothing_retained:
             self._startup_attempted = True
-        return retained_cleanup, retained_process
+        return retained
 
     def _admit_startup(
         self, startup_deadline: float, bootstrap_timeout_seconds: float
@@ -3164,13 +3202,8 @@ class PyrightSession:
         with self._document_operation_lock(deadline), self._operation():
             return self._open_document_within_operation(path, deadline)
 
-    def _normalize_location(self, value: object) -> LspLocation | None:
-        if not isinstance(value, dict):
-            return None
-        located = _location_fields(value)
-        if located is None:
-            return None
-        uri, range_value = located
+    def _located_at(self, uri: object, range_value: object) -> LspLocation | None:
+        """One location from a URI this repository owns and a usable range."""
         if not isinstance(uri, str):
             return None
         range_ = _lsp_range(range_value)
@@ -3181,18 +3214,21 @@ class PyrightSession:
             return None
         return LspLocation(source.uri, range_)
 
+    def _normalize_location(self, value: object) -> LspLocation | None:
+        if not isinstance(value, dict):
+            return None
+        located = _location_fields(value)
+        if located is None:
+            return None
+        return self._located_at(located[0], located[1])
+
     def _normalize_locations(
         self,
         result: object,
     ) -> tuple[tuple[LspLocation, ...], bool]:
-        if result is None:
-            return (), False
-        if isinstance(result, dict):
-            raw = [result]
-        elif isinstance(result, list):
-            raw = result
-        else:
-            return (), True
+        raw = _location_payload(result)
+        if raw is None:
+            return (), result is not None
         partial = len(raw) > MAX_LOCATIONS
         collected = _BoundedLocations()
         for value in raw[:MAX_LOCATIONS]:
@@ -3534,17 +3570,9 @@ class PyrightSession:
         return item
 
     def _call_location(self, value: object) -> LspLocation | None:
-        if not isinstance(value, dict) or not isinstance(value.get("uri"), str):
+        if not isinstance(value, dict):
             return None
-        source = normalize_provider_uri(self._repository, value["uri"])
-        if source is None:
-            return None
-        range_ = _lsp_range(value.get("selectionRange"))
-        if range_ is None:
-            range_ = _lsp_range(value.get("range"))
-        if range_ is None:
-            return None
-        return LspLocation(source.uri, range_)
+        return self._located_at(value.get("uri"), _call_item_range_value(value))
 
     def _semantic_query_epoch(self) -> int | None:
         with self._lock:
@@ -4601,16 +4629,21 @@ class PyrightSessionManager:
         for release in deferred:
             self._key_lock_releases.put(release)
 
+    def _prune_one_key_lock(
+        self, key: tuple[str, PyrightIdentity], state: _KeyLockState
+    ) -> None:
+        """Retire an unreferenced key lock, if nobody is touching it now."""
+        if not state.reference_lock.acquire(blocking=False):
+            return
+        try:
+            self._forget_unreferenced_key_lock(key, state)
+        finally:
+            state.reference_lock.release()
+
     def _prune_key_locks_locked(self) -> None:
         self._drain_key_lock_releases_locked()
         for key, state in tuple(self._key_locks.items()):
-            if not state.reference_lock.acquire(blocking=False):
-                continue
-            try:
-                if state.references == 0 and self._key_locks.get(key) is state:
-                    self._key_locks.pop(key, None)
-            finally:
-                state.reference_lock.release()
+            self._prune_one_key_lock(key, state)
 
     def _retain_key_lock_locked(
         self,
