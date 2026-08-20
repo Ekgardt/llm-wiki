@@ -3612,6 +3612,140 @@ def _capture_binding_of(
     )
 
 
+def _corrupt_manifest(
+    operation: sqlite3.Row,
+    *,
+    operation_id: str,
+    task_id: str,
+    disposition_key: str,
+) -> dict[str, object]:
+    """The manifest describing everything the export produced."""
+    manifest = {
+        "schema_version": "corrupt-task-manifest/v1",
+        "operation_id": operation_id,
+        "task_id": task_id,
+        "package_key": disposition_key,
+        "package_path": f"run/queue-results/corrupt-{disposition_key}",
+        "raw_sha256": str(operation["raw_sha256"]),
+        "history_sha256": str(operation["history_sha256"]),
+        "metadata_sha256": str(operation["metadata_sha256"]),
+        "lineage_generation": int(operation["lineage_generation"]),
+        "link_count": int(operation["link_count"]),
+        "page_count": int(operation["page_count"]),
+        "rolling_root": str(operation["rolling_root"]),
+    }
+    validate_schema(
+        manifest,
+        Path(__file__).with_name("schemas") / "corrupt-task-manifest-v1.json",
+    )
+    return manifest
+
+
+def _corrupt_disposition_record(
+    *,
+    operation_id: str,
+    task_id: str,
+    disposition_key: str,
+    manifest_sha256: str,
+    active_link_digest: str,
+    actor: str,
+    reason: str,
+    disposed_at: str,
+) -> dict[str, object]:
+    """The record that retires the task and points at its evidence."""
+    record = {
+        "schema_version": "corrupt-task-disposition/v1",
+        "operation_id": operation_id,
+        "task_id": task_id,
+        "package_key": disposition_key,
+        "package_path": f"run/queue-results/corrupt-{disposition_key}",
+        "manifest_path": (
+            f"run/queue-results/corrupt-{disposition_key}/manifest.json"
+        ),
+        "manifest_sha256": manifest_sha256,
+        "active_link_digest": active_link_digest,
+        "actor_identity": actor,
+        "reason": reason,
+        "disposed_at": disposed_at,
+    }
+    validate_schema(
+        record,
+        Path(__file__).with_name("schemas") / "corrupt-task-disposition-v1.json",
+    )
+    return record
+
+
+def _verify_corrupt_package_bytes(
+    package: Path,
+    *,
+    raw: bytes,
+    history: bytes,
+    metadata: bytes,
+    disposition_bytes: bytes,
+) -> None:
+    """Every file in the package still holds exactly what we wrote."""
+    observed = (
+        _read_stable_owner_file(package / "payload.bin", _MAX_QUEUE_PAYLOAD_BYTES),
+        _read_stable_owner_file(
+            package / "attempt-history.json", _MAX_EXPORT_METADATA_BYTES
+        ),
+        _read_stable_owner_file(
+            package / "task-metadata.json", _MAX_EXPORT_METADATA_BYTES
+        ),
+        _read_stable_owner_file(package / "disposition.json", 64 * 1024),
+    )
+    if observed != (raw, history, metadata, disposition_bytes):
+        raise QueueOperationError("corrupt_export_verification_failed")
+
+
+def _require_disposable_rows(
+    current_task: sqlite3.Row, current_operation: sqlite3.Row, incoming_count: int
+) -> None:
+    """The task and its operation are in the exact states disposal needs."""
+    observed = (
+        current_task["state"],
+        current_operation["state"],
+        current_operation["lineage_generation"],
+        current_operation["link_count"],
+    )
+    expected = (
+        "quarantine_pending",
+        "manifested",
+        current_task["lineage_generation"],
+        incoming_count,
+    )
+    if observed != expected:
+        raise QueueOperationError("corrupt_export_verification_failed")
+
+
+def _blocked_corrupt_progress(
+    operation: sqlite3.Row, *, task_id: str, operation_id: str
+) -> CorruptExportProgress:
+    return CorruptExportProgress(
+        task_id=task_id,
+        operation_id=operation_id,
+        state="blocked",
+        pages_written=int(operation["page_count"]),
+        links_exported=int(operation["link_count"]),
+        complete=False,
+        code="capture_link_conflicted",
+    )
+
+
+def _quarantined_corrupt_progress(
+    operation: sqlite3.Row, *, task_id: str, operation_id: str
+) -> CorruptExportProgress:
+    return CorruptExportProgress(
+        task_id=task_id,
+        operation_id=operation_id,
+        state="quarantined",
+        pages_written=int(operation["page_count"]),
+        links_exported=int(operation["link_count"]),
+        complete=True,
+        code=None,
+    )
+
+
 class MemoryQueue:
     """Durable priority queue with lease-token fencing and at-least-once delivery."""
 
@@ -7194,35 +7328,16 @@ class _QueueV3CandidateReader:
         intent_fence: object,
     ) -> CorruptExportProgress:
         """Publish the manifest and disposition, then retire the task."""
-        manifest = {
-            "schema_version": "corrupt-task-manifest/v1",
-            "operation_id": operation_id,
-            "task_id": task_id,
-            "package_key": disposition_key,
-            "package_path": f"run/queue-results/corrupt-{disposition_key}",
-            "raw_sha256": str(operation["raw_sha256"]),
-            "history_sha256": str(operation["history_sha256"]),
-            "metadata_sha256": str(operation["metadata_sha256"]),
-            "lineage_generation": int(operation["lineage_generation"]),
-            "link_count": int(operation["link_count"]),
-            "page_count": int(operation["page_count"]),
-            "rolling_root": str(operation["rolling_root"]),
-        }
-        validate_schema(
-            manifest,
-            Path(__file__).with_name("schemas")
-            / "corrupt-task-manifest-v1.json",
+        manifest = _corrupt_manifest(
+            operation,
+            operation_id=operation_id,
+            task_id=task_id,
+            disposition_key=disposition_key,
         )
         _write_durable_file(package / "manifest.json", canonical_json_bytes(manifest))
         if capture_binding is None or intent_fence is None:
-            return CorruptExportProgress(
-                task_id=task_id,
-                operation_id=operation_id,
-                state="blocked",
-                pages_written=int(operation["page_count"]),
-                links_exported=int(operation["link_count"]),
-                complete=False,
-                code="capture_link_conflicted",
+            return _blocked_corrupt_progress(
+                operation, task_id=task_id, operation_id=operation_id
             )
         sealed = self.seal_capture_binding(
             task_id,
@@ -7230,95 +7345,64 @@ class _QueueV3CandidateReader:
             consumer_id=operation_id,
             active_link_digest=capture_binding.active_digest,
         )
-        manifest_bytes = _read_stable_owner_file(
-            package / "manifest.json", 64 * 1024
+        manifest_sha256 = sha256_bytes(
+            _read_stable_owner_file(package / "manifest.json", 64 * 1024)
         )
-        manifest_sha256 = sha256_bytes(manifest_bytes)
         disposed_at = str(operation["created_at"])
-        disposition_record = {
-            "schema_version": "corrupt-task-disposition/v1",
-            "operation_id": operation_id,
-            "task_id": task_id,
-            "package_key": disposition_key,
-            "package_path": f"run/queue-results/corrupt-{disposition_key}",
-            "manifest_path": (
-                f"run/queue-results/corrupt-{disposition_key}/manifest.json"
-            ),
-            "manifest_sha256": manifest_sha256,
-            "active_link_digest": sealed.active_digest,
-            "actor_identity": actor,
-            "reason": reason,
-            "disposed_at": disposed_at,
-        }
-        validate_schema(
-            disposition_record,
-            Path(__file__).with_name("schemas")
-            / "corrupt-task-disposition-v1.json",
+        disposition_record = _corrupt_disposition_record(
+            operation_id=operation_id,
+            task_id=task_id,
+            disposition_key=disposition_key,
+            manifest_sha256=manifest_sha256,
+            active_link_digest=sealed.active_digest,
+            actor=actor,
+            reason=reason,
+            disposed_at=disposed_at,
         )
         disposition_bytes = canonical_json_bytes(disposition_record)
         _write_durable_file(package / "disposition.json", disposition_bytes)
-        if (
-            _read_stable_owner_file(package / "payload.bin", _MAX_QUEUE_PAYLOAD_BYTES)
-            != raw
-            or _read_stable_owner_file(
-                package / "attempt-history.json", _MAX_EXPORT_METADATA_BYTES
-            )
-            != history
-            or _read_stable_owner_file(
-                package / "task-metadata.json", _MAX_EXPORT_METADATA_BYTES
-            )
-            != metadata
-            or _read_stable_owner_file(
-                package / "disposition.json", 64 * 1024
-            )
-            != disposition_bytes
-        ):
-            raise QueueOperationError("corrupt_export_verification_failed")
-        disposition_sha256 = sha256_bytes(disposition_bytes)
+        _verify_corrupt_package_bytes(
+            package,
+            raw=raw,
+            history=history,
+            metadata=metadata,
+            disposition_bytes=disposition_bytes,
+        )
+        self._commit_corrupt_disposition(
+            task_id=task_id,
+            operation_id=operation_id,
+            sealed=sealed,
+            task_fence=task_fence,
+            disposition_record=disposition_record,
+            manifest_sha256=manifest_sha256,
+            disposition_sha256=sha256_bytes(disposition_bytes),
+            disposed_at=disposed_at,
+        )
+        return _quarantined_corrupt_progress(
+            operation, task_id=task_id, operation_id=operation_id
+        )
+
+    def _commit_corrupt_disposition(
+        self,
+        *,
+        task_id: str,
+        operation_id: str,
+        sealed: object,
+        task_fence: object,
+        disposition_record: Mapping[str, object],
+        manifest_sha256: str,
+        disposition_sha256: str,
+        disposed_at: str,
+    ) -> None:
+        """Retire the task, once everything it depends on still holds."""
         with closing(self._connect()) as database, begin_immediate(database):
-            current_task = database.execute(
-                "SELECT * FROM tasks WHERE id=?", (task_id,)
-            ).fetchone()
-            current_operation = database.execute(
-                "SELECT * FROM corrupt_export_operations WHERE operation_id=?",
-                (operation_id,),
-            ).fetchone()
-            current_fence = database.execute(
-                """SELECT 1 FROM task_fences WHERE task_id=? AND token=?
-                   AND fencing_epoch=? AND expires_at>?""",
-                (
-                    task_id,
-                    task_fence.token,
-                    task_fence.epoch,
-                    _timestamp(_utc_now()),
-                ),
-            ).fetchone()
-            current_seal = database.execute(
-                """SELECT 1 FROM capture_task_link_seals
-                   WHERE task_id=? AND active_digest=? AND seal_digest=?
-                     AND consumer_kind='corrupt-disposition' AND consumer_id=?""",
-                (
-                    task_id,
-                    sealed.active_digest,
-                    sealed.seal_digest,
-                    operation_id,
-                ),
-            ).fetchone()
-            incoming_count = database.execute(
-                "SELECT COUNT(*) FROM tasks WHERE redrive_of=?", (task_id,)
-            ).fetchone()[0]
-            if (
-                current_task is None
-                or current_task["state"] != "quarantine_pending"
-                or current_operation is None
-                or current_operation["state"] != "manifested"
-                or current_operation["lineage_generation"]
-                != current_task["lineage_generation"]
-                or current_operation["link_count"] != incoming_count
-                or current_fence is None
-                or current_seal is None
-            ):
-                raise QueueOperationError("corrupt_export_verification_failed")
+            self._require_disposable_corrupt_state(
+                database,
+                task_id=task_id,
+                operation_id=operation_id,
+                sealed=sealed,
+                task_fence=task_fence,
+            )
             self._insert_corrupt_disposition(
                 database,
                 task_id=task_id,
@@ -7329,28 +7413,63 @@ class _QueueV3CandidateReader:
                 active_link_digest=sealed.active_digest,
                 disposed_at=disposed_at,
             )
-            changed = database.execute(
-                """UPDATE tasks SET state='quarantined',updated_at=?
-                   WHERE id=? AND state='quarantine_pending'""",
-                (_timestamp(_utc_now()), task_id),
-            ).rowcount
-            advanced = database.execute(
-                """UPDATE corrupt_export_operations
-                   SET state='disposed',updated_at=?
-                   WHERE operation_id=? AND state='manifested'""",
-                (_timestamp(_utc_now()), operation_id),
-            ).rowcount
-            if (changed, advanced) != (1, 1):
-                raise QueueOperationError("corrupt_disposition_failed")
-        return CorruptExportProgress(
-            task_id=task_id,
-            operation_id=operation_id,
-            state="quarantined",
-            pages_written=int(operation["page_count"]),
-            links_exported=int(operation["link_count"]),
-            complete=True,
-            code=None,
-        )
+            self._retire_quarantined_task(database, task_id, operation_id)
+
+    @staticmethod
+    def _require_disposable_corrupt_state(
+        database: sqlite3.Connection,
+        *,
+        task_id: str,
+        operation_id: str,
+        sealed: object,
+        task_fence: object,
+    ) -> None:
+        """The task, the operation, the fence and the seal all still agree."""
+        current_task = database.execute(
+            "SELECT * FROM tasks WHERE id=?", (task_id,)
+        ).fetchone()
+        current_operation = database.execute(
+            "SELECT * FROM corrupt_export_operations WHERE operation_id=?",
+            (operation_id,),
+        ).fetchone()
+        current_fence = database.execute(
+            """SELECT 1 FROM task_fences WHERE task_id=? AND token=?
+               AND fencing_epoch=? AND expires_at>?""",
+            (task_id, task_fence.token, task_fence.epoch, _timestamp(_utc_now())),
+        ).fetchone()
+        current_seal = database.execute(
+            """SELECT 1 FROM capture_task_link_seals
+               WHERE task_id=? AND active_digest=? AND seal_digest=?
+                 AND consumer_kind='corrupt-disposition' AND consumer_id=?""",
+            (task_id, sealed.active_digest, sealed.seal_digest, operation_id),
+        ).fetchone()
+        incoming_count = database.execute(
+            "SELECT COUNT(*) FROM tasks WHERE redrive_of=?", (task_id,)
+        ).fetchone()[0]
+        if current_task is None or current_operation is None:
+            raise QueueOperationError("corrupt_export_verification_failed")
+        if current_fence is None or current_seal is None:
+            raise QueueOperationError("corrupt_export_verification_failed")
+        _require_disposable_rows(current_task, current_operation, incoming_count)
+
+    @staticmethod
+    def _retire_quarantined_task(
+        database: sqlite3.Connection, task_id: str, operation_id: str
+    ) -> None:
+        """Both rows move together, or neither does."""
+        changed = database.execute(
+            """UPDATE tasks SET state='quarantined',updated_at=?
+               WHERE id=? AND state='quarantine_pending'""",
+            (_timestamp(_utc_now()), task_id),
+        ).rowcount
+        advanced = database.execute(
+            """UPDATE corrupt_export_operations
+               SET state='disposed',updated_at=?
+               WHERE operation_id=? AND state='manifested'""",
+            (_timestamp(_utc_now()), operation_id),
+        ).rowcount
+        if (changed, advanced) != (1, 1):
+            raise QueueOperationError("corrupt_disposition_failed")
 
     def _bounded_lineage_links(
         self,
