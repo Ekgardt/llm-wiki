@@ -3903,6 +3903,59 @@ def _require_matching_purge_receipt(
         raise QueueOperationError("corrupt_purge_completion_invalid")
 
 
+def _require_package_digests(package: Path, disposition: sqlite3.Row) -> None:
+    """The manifest and disposition still hash to what the row recorded."""
+    manifest_bytes = _read_stable_owner_file(package / "manifest.json", 64 * 1024)
+    disposition_bytes = _read_stable_owner_file(
+        package / "disposition.json", 64 * 1024
+    )
+    observed = (sha256_bytes(manifest_bytes), sha256_bytes(disposition_bytes))
+    expected = (disposition["manifest_sha256"], disposition["disposition_sha256"])
+    if observed != expected:
+        raise QueueOperationError("corrupt_package_invalid")
+
+
+def _purge_receipt_record(
+    operation: sqlite3.Row,
+    disposition: sqlite3.Row,
+    *,
+    operation_id: str,
+    task_id: str,
+) -> dict[str, object]:
+    """The schema-valid receipt that closes one purge."""
+    receipt = {
+        "schema_version": "corrupt-purge/v1",
+        "operation_id": operation_id,
+        "task_id": task_id,
+        "package_key": str(disposition["disposition_key"]),
+        "package_path": str(disposition["package_path"]),
+        "manifest_sha256": str(disposition["manifest_sha256"]),
+        "disposition_sha256": str(disposition["disposition_sha256"]),
+        "original_frozen_root": str(disposition["original_frozen_root"]),
+        "purge_page_count": int(operation["page_count"]),
+        "final_rolling_root": str(operation["rolling_root"]),
+        "final_generation": int(operation["expected_generation"]),
+        "observed_incoming_link_count": 0,
+    }
+    validate_schema(
+        receipt,
+        Path(__file__).with_name("schemas") / "corrupt-purge-v1.json",
+    )
+    return receipt
+
+
+def _write_purge_receipt(package: Path, receipt: Mapping[str, object]) -> bytes:
+    """Write the receipt and read it back to prove it landed."""
+    receipt_bytes = canonical_json_bytes(receipt)
+    if len(receipt_bytes) > 64 * 1024:
+        raise QueueOperationError("corrupt_purge_receipt_too_large")
+    _write_durable_file(package / "purge-receipt.json", receipt_bytes)
+    written = _read_stable_owner_file(package / "purge-receipt.json", 64 * 1024)
+    if written != receipt_bytes:
+        raise QueueOperationError("corrupt_purge_receipt_invalid")
+    return receipt_bytes
+
+
 class MemoryQueue:
     """Durable priority queue with lease-token fencing and at-least-once delivery."""
 
@@ -8442,71 +8495,60 @@ class _QueueV3CandidateReader:
             if operation is None or task is None or disposition is None:
                 raise QueueOperationError("corrupt_purge_lost")
             self._require_corrupt_task_fence(database, task_fence)
-            incoming_count = int(
-                database.execute(
-                    "SELECT COUNT(*) FROM tasks WHERE redrive_of=?", (task_id,)
-                ).fetchone()[0]
+            self._require_receipt_preconditions(database, task_id, task, operation)
+            _require_package_digests(package, disposition)
+            receipt_bytes = _write_purge_receipt(
+                package,
+                _purge_receipt_record(
+                    operation, disposition, operation_id=operation_id, task_id=task_id
+                ),
             )
-            if (
-                task["state"] != "purge_pending"
-                or int(task["lineage_generation"])
-                != int(operation["expected_generation"])
-                or incoming_count != 0
-            ):
-                raise QueueOperationError("corrupt_purge_receipt_precondition_failed")
-            manifest_bytes = _read_stable_owner_file(package / "manifest.json", 64 * 1024)
-            disposition_bytes = _read_stable_owner_file(
-                package / "disposition.json", 64 * 1024
-            )
-            if (
-                sha256_bytes(manifest_bytes) != disposition["manifest_sha256"]
-                or sha256_bytes(disposition_bytes) != disposition["disposition_sha256"]
-            ):
-                raise QueueOperationError("corrupt_package_invalid")
-            receipt = {
-                "schema_version": "corrupt-purge/v1",
-                "operation_id": operation_id,
-                "task_id": task_id,
-                "package_key": str(disposition["disposition_key"]),
-                "package_path": str(disposition["package_path"]),
-                "manifest_sha256": str(disposition["manifest_sha256"]),
-                "disposition_sha256": str(disposition["disposition_sha256"]),
-                "original_frozen_root": str(disposition["original_frozen_root"]),
-                "purge_page_count": int(operation["page_count"]),
-                "final_rolling_root": str(operation["rolling_root"]),
-                "final_generation": int(operation["expected_generation"]),
-                "observed_incoming_link_count": 0,
-            }
-            validate_schema(
-                receipt,
-                Path(__file__).with_name("schemas") / "corrupt-purge-v1.json",
-            )
-            receipt_bytes = canonical_json_bytes(receipt)
-            if len(receipt_bytes) > 64 * 1024:
-                raise QueueOperationError("corrupt_purge_receipt_too_large")
-            _write_durable_file(package / "purge-receipt.json", receipt_bytes)
-            if (
-                _read_stable_owner_file(package / "purge-receipt.json", 64 * 1024)
-                != receipt_bytes
-            ):
-                raise QueueOperationError("corrupt_purge_receipt_invalid")
-            if operation["state"] == "purging":
-                updated = database.execute(
-                    """UPDATE corrupt_purge_operations
-                       SET state='receipt-published',updated_at=?
-                       WHERE operation_id=? AND state='purging'
-                         AND expected_generation=? AND page_count=? AND rolling_root=?""",
-                    (
-                        _timestamp(_utc_now()),
-                        operation_id,
-                        operation["expected_generation"],
-                        operation["page_count"],
-                        operation["rolling_root"],
-                    ),
-                ).rowcount
-                if updated != 1:
-                    raise QueueOperationError("corrupt_purge_receipt_fence_lost")
+            self._advance_purge_receipt_state(database, operation, operation_id)
             return receipt_bytes
+
+    def _require_receipt_preconditions(
+        self,
+        database: sqlite3.Connection,
+        task_id: str,
+        task: sqlite3.Row,
+        operation: sqlite3.Row,
+    ) -> None:
+        """The task is pending purge, on the expected generation, with no children."""
+        incoming_count = int(
+            database.execute(
+                "SELECT COUNT(*) FROM tasks WHERE redrive_of=?", (task_id,)
+            ).fetchone()[0]
+        )
+        observed = (
+            task["state"],
+            int(task["lineage_generation"]),
+            incoming_count,
+        )
+        if observed != ("purge_pending", int(operation["expected_generation"]), 0):
+            raise QueueOperationError("corrupt_purge_receipt_precondition_failed")
+
+    @staticmethod
+    def _advance_purge_receipt_state(
+        database: sqlite3.Connection, operation: sqlite3.Row, operation_id: str
+    ) -> None:
+        """Move the operation to receipt-published, under its own fence."""
+        if operation["state"] != "purging":
+            return
+        updated = database.execute(
+            """UPDATE corrupt_purge_operations
+               SET state='receipt-published',updated_at=?
+               WHERE operation_id=? AND state='purging'
+                 AND expected_generation=? AND page_count=? AND rolling_root=?""",
+            (
+                _timestamp(_utc_now()),
+                operation_id,
+                operation["expected_generation"],
+                operation["page_count"],
+                operation["rolling_root"],
+            ),
+        ).rowcount
+        if updated != 1:
+            raise QueueOperationError("corrupt_purge_receipt_fence_lost")
 
     def _corrupt_parent_rows(
         self, database: sqlite3.Connection, task_id: str, operation_id: str
