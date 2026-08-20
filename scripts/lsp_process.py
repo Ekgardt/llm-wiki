@@ -4141,6 +4141,41 @@ def _prepare_restart_generation_owned(
     return candidate, generation_state
 
 
+def _check_commit_preconditions_locked(
+    coordinator: _LifecycleCoordinator, candidate: _Generation
+) -> None:
+    """Nothing may have moved between preparing the candidate and taking it."""
+    if coordinator.terminal_outcome is not None:
+        raise RuntimeError("LSP process became terminal during restart")
+    if coordinator.candidate is not candidate:
+        raise RuntimeError("LSP restart candidate lost lifecycle ownership")
+    if candidate.process.poll() is not None or candidate.protocol.fatal:
+        raise RuntimeError("LSP restart candidate failed before commit")
+
+
+def _adopt_candidate_locked(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    candidate: _Generation,
+    generation_state: ProcessState,
+) -> None:
+    """Make the candidate the running generation."""
+    coordinator.active = candidate
+    coordinator.candidate = None
+    coordinator.lease_generation = candidate
+    coordinator.phase = _LifecyclePhase.RUNNING
+    instance.process = candidate.process
+    instance.protocol = candidate.protocol
+    instance.generation_nonce = candidate.nonce
+    instance.restart_count += 1
+    instance.state = generation_state
+    instance._stderr_projection = candidate.stderr
+    instance._stderr_projection_lock = candidate.stderr_lock
+    coordinator.recovery_request_nonce = None
+    coordinator.recovery_request_pending.clear()
+    _notify_lifecycle_locked(coordinator)
+
+
 def _commit_restart_generation_owned(
     instance: LspProcess,
     candidate: _Generation,
@@ -4150,35 +4185,13 @@ def _commit_restart_generation_owned(
     coordinator = instance._coordinator
     if coordinator.owner_directory is None:
         raise RuntimeError("LSP owner directory is unavailable")
-    if (
-        candidate.process is None
-        or candidate.protocol is None
-        or candidate.process.poll() is not None
-        or candidate.protocol.fatal
-    ):
-        raise RuntimeError("LSP restart candidate failed before commit")
+    _require_live_candidate(candidate)
     _acquire_lifecycle(coordinator, deadline)
     try:
-        if coordinator.terminal_outcome is not None:
-            raise RuntimeError("LSP process became terminal during restart")
-        if coordinator.candidate is not candidate:
-            raise RuntimeError("LSP restart candidate lost lifecycle ownership")
-        if candidate.process.poll() is not None or candidate.protocol.fatal:
-            raise RuntimeError("LSP restart candidate failed before commit")
-        coordinator.active = candidate
-        coordinator.candidate = None
-        coordinator.lease_generation = candidate
-        coordinator.phase = _LifecyclePhase.RUNNING
-        instance.process = candidate.process
-        instance.protocol = candidate.protocol
-        instance.generation_nonce = candidate.nonce
-        instance.restart_count += 1
-        instance.state = generation_state
-        instance._stderr_projection = candidate.stderr
-        instance._stderr_projection_lock = candidate.stderr_lock
-        coordinator.recovery_request_nonce = None
-        coordinator.recovery_request_pending.clear()
-        _notify_lifecycle_locked(coordinator)
+        _check_commit_preconditions_locked(coordinator, candidate)
+        _adopt_candidate_locked(
+            instance, coordinator, candidate, generation_state
+        )
     finally:
         _release_lifecycle(coordinator)
 
@@ -4650,39 +4663,62 @@ def _stop_recovery_owner(
     return True
 
 
-def _drain_terminal_failures(
-    instance: LspProcess | None,
+def _take_queued_intents(
     coordinator: _LifecycleCoordinator,
-    deadline: float,
-) -> None:
+) -> list[_FailureIntent]:
+    """Everything the failure queue holds right now."""
     intents: list[_FailureIntent] = []
     while True:
         try:
             intents.append(coordinator.failure_queue.get_nowait())
         except queue.Empty:
-            break
+            return intents
+
+
+def _return_queued_intents(
+    coordinator: _LifecycleCoordinator, intents: list[_FailureIntent]
+) -> None:
+    """Put the intents back and wake recovery to take them again."""
+    for intent in intents:
+        coordinator.failure_queue.put(intent)
+    coordinator.recovery_wake.set()
+
+
+def _drained_failure_code(intents: list[_FailureIntent]) -> str:
+    """One code for the whole batch; an owner-fatal intent outranks an exit."""
+    if any(intent.owner_fatal for intent in intents):
+        return "heartbeat_failed"
+    return _PROCESS_EXITED
+
+
+def _select_drained_failure_locked(
+    instance: LspProcess | None,
+    coordinator: _LifecycleCoordinator,
+    intents: list[_FailureIntent],
+) -> None:
+    selected = _select_terminal_failure_locked(
+        instance, coordinator, _drained_failure_code(intents)
+    )
+    if selected:
+        coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
+        _notify_lifecycle_locked(coordinator)
+
+
+def _drain_terminal_failures(
+    instance: LspProcess | None,
+    coordinator: _LifecycleCoordinator,
+    deadline: float,
+) -> None:
+    intents = _take_queued_intents(coordinator)
     if not intents:
         return
     try:
         _acquire_lifecycle(coordinator, deadline, allow_expired=True)
     except BaseException:
-        for intent in intents:
-            coordinator.failure_queue.put(intent)
-        coordinator.recovery_wake.set()
+        _return_queued_intents(coordinator, intents)
         raise
     try:
-        selected = _select_terminal_failure_locked(
-            instance,
-            coordinator,
-            (
-                "heartbeat_failed"
-                if any(intent.owner_fatal for intent in intents)
-                else _PROCESS_EXITED
-            ),
-        )
-        if selected:
-            coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
-            _notify_lifecycle_locked(coordinator)
+        _select_drained_failure_locked(instance, coordinator, intents)
     finally:
         _release_lifecycle(coordinator)
     for _intent in intents:
