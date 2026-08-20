@@ -24,6 +24,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
+from functools import partial
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
@@ -6260,6 +6261,48 @@ class MemoryQueue:
         )
 
 
+# state, error_code, and attempt outcome for an acknowledgement, by whether the
+# published result was still intact when the lease was acknowledged.
+_ACKNOWLEDGED_OUTCOMES = {
+    True: ("succeeded", None, "succeeded"),
+    False: ("dead", "result_corrupt", "failed"),
+}
+
+
+def _record_acknowledged_attempt(
+    database: sqlite3.Connection,
+    row: sqlite3.Row,
+    now: datetime,
+    *,
+    lease: QueueLease,
+    outcome: str,
+    error_code: str | None,
+) -> None:
+    """Close the attempt history row this acknowledgement ends."""
+    database.execute(
+        """INSERT INTO attempt_history(
+               task_id,attempt,started_at,finished_at,outcome,error_code
+           ) VALUES (?,?,?,?,?,?)""",
+        (
+            lease.id,
+            row["attempts"],
+            row["attempt_started_at"] or _timestamp(now),
+            _timestamp(now),
+            outcome,
+            error_code,
+        ),
+    )
+
+
+_LeaseAction = Callable[[sqlite3.Connection, sqlite3.Row, datetime], None]
+
+
+def _proved_lease_only(
+    database: sqlite3.Connection, row: sqlite3.Row, now: datetime
+) -> None:
+    """The action of a pass that only proves the lease and its payload hold."""
+
+
 class _QueueV3CandidateReader:
     """Minimal claim seam for tests against an unpublished v3 candidate."""
 
@@ -9880,118 +9923,114 @@ class _QueueV3CandidateReader:
             self._raise_payload_mismatch()
         return outcome
 
-    def publish_result(
-        self, lease: QueueLease, *, operation_id: str, result: bytes
-    ) -> str:
-        if not operation_id:
-            raise ValueError("operation_id must be non-empty")
-        if not isinstance(result, bytes):
-            raise TypeError("result must be bytes")
-        if len(result) > _MAX_RESULT_BYTES:
-            raise ValueError("result exceeds maximum queue result size")
+    def _with_verified_lease(self, lease: QueueLease, action: _LeaseAction) -> None:
+        """Run `action` on the leased row, once the lease and payload hold.
+
+        A payload mismatch demotes the task inside the transaction and must be
+        reported to the caller afterwards, so the action is simply skipped and
+        the refusal raised once the transaction has closed.
+        """
         now = _utc_now()
-        mismatch = False
         with closing(self._connect()) as database, begin_immediate(database):
             row = self._require_lease_row(database, lease, now)
-            mismatch = (
-                self._require_valid_task_payload(
-                    database, row, now=now, parse=True
-                )
-                is None
+            verified = (
+                self._require_valid_task_payload(database, row, now=now, parse=True)
+                is not None
             )
-        if mismatch:
+            if verified:
+                action(database, row, now)
+        if not verified:
             self._raise_payload_mismatch()
+
+    def _store_result_bytes(self, operation_id: str, result: bytes) -> tuple[str, str]:
+        """Write the result file; answer its vault-relative path and digest."""
         self.results_dir.mkdir(parents=True, exist_ok=True)
         _harden_owner_only(self.results_dir, 0o700)
         result_name = f"{sha256_bytes(operation_id.encode('utf-8'))}.result"
-        target = self.results_dir / result_name
-        _write_durable_file(target, result)
-        relative = f"run/queue-results/{result_name}"
-        digest = sha256_bytes(result)
-        mismatch = False
-        with closing(self._connect()) as database, begin_immediate(database):
-            row = self._require_lease_row(database, lease, _utc_now())
-            mismatch = (
-                self._require_valid_task_payload(
-                    database, row, now=_utc_now(), parse=True
-                )
-                is None
-            )
-            if not mismatch:
-                existing_operation = row["result_operation_id"]
-                if existing_operation not in {None, operation_id}:
-                    raise ResultConflictError(
-                        "lease already published a different operation"
-                    )
-                existing_digest = self._validated_result_digest(relative)
-                if existing_digest != digest:
-                    raise ResultConflictError(
-                        "operation ID already has different result bytes"
-                    )
-                changed = database.execute(
-                    """UPDATE tasks SET result_reference=?,result_sha256=?,
-                           result_operation_id=?,updated_at=?
-                       WHERE id=? AND lease_token=? AND state='leased'""",
-                    (
-                        relative,
-                        digest,
-                        operation_id,
-                        _timestamp(_utc_now()),
-                        lease.id,
-                        lease.token,
-                    ),
-                ).rowcount
-                if changed != 1:
-                    raise LeaseFenceError(f"lease is stale or not owned: {lease.id}")
-        if mismatch:
-            self._raise_payload_mismatch()
+        _write_durable_file(self.results_dir / result_name, result)
+        return f"run/queue-results/{result_name}", sha256_bytes(result)
+
+    def _require_publication_is_new(
+        self, row: sqlite3.Row, operation_id: str, relative: str, digest: str
+    ) -> None:
+        """Refuse a publication that contradicts one this lease already made."""
+        _check_result_operation(row, operation_id)
+        if self._validated_result_digest(relative) != digest:
+            raise ResultConflictError("operation ID already has different result bytes")
+
+    def _bind_published_result(
+        self,
+        database: sqlite3.Connection,
+        row: sqlite3.Row,
+        now: datetime,
+        *,
+        lease: QueueLease,
+        operation_id: str,
+        relative: str,
+        digest: str,
+    ) -> None:
+        """Point the leased task at the result bytes already written."""
+        self._require_publication_is_new(row, operation_id, relative, digest)
+        changed = database.execute(
+            """UPDATE tasks SET result_reference=?,result_sha256=?,
+                   result_operation_id=?,updated_at=?
+               WHERE id=? AND lease_token=? AND state='leased'""",
+            (relative, digest, operation_id, _timestamp(now), lease.id, lease.token),
+        ).rowcount
+        if changed != 1:
+            raise LeaseFenceError(f"lease is stale or not owned: {lease.id}")
+
+    def publish_result(
+        self, lease: QueueLease, *, operation_id: str, result: bytes
+    ) -> str:
+        _check_result_request(operation_id, result)
+        self._with_verified_lease(lease, _proved_lease_only)
+        relative, digest = self._store_result_bytes(operation_id, result)
+        self._with_verified_lease(
+            lease,
+            partial(
+                self._bind_published_result,
+                lease=lease,
+                operation_id=operation_id,
+                relative=relative,
+                digest=digest,
+            ),
+        )
         return relative
 
+    def _result_is_intact(self, row: sqlite3.Row) -> bool:
+        """Whether the task's recorded result still hashes to what it claims."""
+        digest = row["result_sha256"]
+        reference = row["result_reference"]
+        if not isinstance(digest, str) or not isinstance(reference, str):
+            return False
+        return self._validated_result_digest(reference) == digest
+
+    def _settle_acknowledged(
+        self,
+        database: sqlite3.Connection,
+        row: sqlite3.Row,
+        now: datetime,
+        *,
+        lease: QueueLease,
+    ) -> None:
+        """Close the leased attempt, recording whether its result survived."""
+        state, error_code, outcome = _ACKNOWLEDGED_OUTCOMES[self._result_is_intact(row)]
+        _record_acknowledged_attempt(
+            database, row, now, lease=lease, outcome=outcome, error_code=error_code
+        )
+        changed = database.execute(
+            """UPDATE tasks SET state=?,error_code=?,updated_at=?,
+                   lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,
+                   lease_heartbeat_at=NULL,attempt_started_at=NULL
+               WHERE id=? AND lease_token=? AND state='leased'""",
+            (state, error_code, _timestamp(now), lease.id, lease.token),
+        ).rowcount
+        if changed != 1:
+            raise LeaseFenceError(f"lease is stale or not owned: {lease.id}")
+
     def acknowledge(self, lease: QueueLease) -> None:
-        now = _utc_now()
-        mismatch = False
-        with closing(self._connect()) as database, begin_immediate(database):
-            row = self._require_lease_row(database, lease, now)
-            mismatch = (
-                self._require_valid_task_payload(
-                    database, row, now=now, parse=True
-                )
-                is None
-            )
-            if not mismatch:
-                digest = row["result_sha256"]
-                reference = row["result_reference"]
-                valid_result = (
-                    isinstance(digest, str)
-                    and isinstance(reference, str)
-                    and self._validated_result_digest(reference) == digest
-                )
-                state = "succeeded" if valid_result else "dead"
-                error_code = None if valid_result else "result_corrupt"
-                database.execute(
-                    """INSERT INTO attempt_history(
-                           task_id,attempt,started_at,finished_at,outcome,error_code
-                       ) VALUES (?,?,?,?,?,?)""",
-                    (
-                        lease.id,
-                        row["attempts"],
-                        row["attempt_started_at"] or _timestamp(now),
-                        _timestamp(now),
-                        "succeeded" if valid_result else "failed",
-                        error_code,
-                    ),
-                )
-                changed = database.execute(
-                    """UPDATE tasks SET state=?,error_code=?,updated_at=?,
-                           lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,
-                           lease_heartbeat_at=NULL,attempt_started_at=NULL
-                       WHERE id=? AND lease_token=? AND state='leased'""",
-                    (state, error_code, _timestamp(now), lease.id, lease.token),
-                ).rowcount
-                if changed != 1:
-                    raise LeaseFenceError(f"lease is stale or not owned: {lease.id}")
-        if mismatch:
-            self._raise_payload_mismatch()
+        self._with_verified_lease(lease, partial(self._settle_acknowledged, lease=lease))
 
     def fail(self, lease: QueueLease, failure: QueueFailure) -> None:
         if not isinstance(failure, QueueFailure) or not failure.error_code:
