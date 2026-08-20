@@ -2988,6 +2988,82 @@ def _retry_autonomous_terminal_cleanup(
         _release_driver(coordinator)
 
 
+def _adopt_recovery_ownership_locked(
+    coordinator: _LifecycleCoordinator,
+) -> bool:
+    """Take recovery ownership for this thread; False when someone else has it."""
+    if not coordinator.cleanup_result.ownership_pending:
+        return False
+    current = threading.current_thread()
+    owner = coordinator.recovery_thread
+    if owner is not None and owner is not current and owner.is_alive():
+        return False
+    coordinator.recovery_thread = current
+    coordinator.recovery_stop.clear()
+    coordinator.cleanup_result.recovery_join = "pending"
+    return True
+
+
+def _adopt_heartbeat_locked(
+    instance: LspProcess, coordinator: _LifecycleCoordinator
+) -> threading.Thread | None:
+    """A replacement heartbeat thread to start, when the old one is gone."""
+    heartbeat_owner = coordinator.heartbeat_thread
+    if heartbeat_owner is not None and heartbeat_owner.is_alive():
+        return None
+    coordinator.heartbeat_stop.clear()
+    coordinator.heartbeat_wake.clear()
+    heartbeat = threading.Thread(
+        target=_heartbeat_loop,
+        args=(instance,),
+        name=f"lsp-heartbeat-{instance.owner_nonce}",
+        daemon=True,
+    )
+    coordinator.heartbeat_thread = heartbeat
+    coordinator.cleanup_result.heartbeat_join = "pending"
+    return heartbeat
+
+
+def _retain_cleanup_owners_locked(
+    instance: LspProcess, coordinator: _LifecycleCoordinator
+) -> tuple[bool, threading.Thread | None]:
+    """(retained, heartbeat to start) once the lifecycle lock is held."""
+    if not _adopt_recovery_ownership_locked(coordinator):
+        return False, None
+    heartbeat = _adopt_heartbeat_locked(instance, coordinator)
+    _notify_lifecycle_locked(coordinator)
+    return True, heartbeat
+
+
+def _retain_cleanup_owners_driven(
+    instance: LspProcess, coordinator: _LifecycleCoordinator, deadline: float
+) -> bool:
+    """Retain the owners while holding the driver; True when this thread owns them."""
+    try:
+        _acquire_lifecycle(coordinator, deadline)
+    except TimeoutError:
+        return True
+    try:
+        retained, heartbeat = _retain_cleanup_owners_locked(instance, coordinator)
+    finally:
+        _release_lifecycle(coordinator)
+    if not retained:
+        return False
+    _start_retained_heartbeat(coordinator, heartbeat)
+    return True
+
+
+def _start_retained_heartbeat(
+    coordinator: _LifecycleCoordinator, heartbeat: threading.Thread | None
+) -> None:
+    if heartbeat is None:
+        return
+    try:
+        heartbeat.start()
+    except BaseException as error:
+        _remember_background_cleanup_error(coordinator, error)
+
+
 def _retain_autonomous_cleanup_owners(instance: LspProcess) -> bool:
     coordinator = instance._coordinator
     deadline = time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
@@ -2995,43 +3071,8 @@ def _retain_autonomous_cleanup_owners(instance: LspProcess) -> bool:
         _acquire_driver(coordinator, deadline)
     except TimeoutError:
         return True
-    heartbeat: threading.Thread | None = None
     try:
-        try:
-            _acquire_lifecycle(coordinator, deadline)
-        except TimeoutError:
-            return True
-        try:
-            if not coordinator.cleanup_result.ownership_pending:
-                return False
-            current = threading.current_thread()
-            owner = coordinator.recovery_thread
-            if owner is not None and owner is not current and owner.is_alive():
-                return False
-            coordinator.recovery_thread = current
-            coordinator.recovery_stop.clear()
-            coordinator.cleanup_result.recovery_join = "pending"
-            heartbeat_owner = coordinator.heartbeat_thread
-            if heartbeat_owner is None or not heartbeat_owner.is_alive():
-                coordinator.heartbeat_stop.clear()
-                coordinator.heartbeat_wake.clear()
-                heartbeat = threading.Thread(
-                    target=_heartbeat_loop,
-                    args=(instance,),
-                    name=f"lsp-heartbeat-{instance.owner_nonce}",
-                    daemon=True,
-                )
-                coordinator.heartbeat_thread = heartbeat
-                coordinator.cleanup_result.heartbeat_join = "pending"
-            _notify_lifecycle_locked(coordinator)
-        finally:
-            _release_lifecycle(coordinator)
-        if heartbeat is not None:
-            try:
-                heartbeat.start()
-            except BaseException as error:
-                _remember_background_cleanup_error(coordinator, error)
-        return True
+        return _retain_cleanup_owners_driven(instance, coordinator, deadline)
     finally:
         _release_driver(coordinator)
 
