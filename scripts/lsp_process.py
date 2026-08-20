@@ -3915,34 +3915,60 @@ def _restart_generation(
             _release_driver(coordinator)
 
 
-def _prepare_restart_generation_owned(
-    instance: LspProcess,
-    deadline: float,
-) -> tuple[_Generation, ProcessState]:
+def _retire_active_generation_locked(coordinator: _LifecycleCoordinator) -> None:
+    """Move the running generation aside so a candidate can take its place."""
+    if coordinator.terminal_outcome is not None:
+        raise RuntimeError("LSP process is closed")
+    old = coordinator.active
+    if old is not None:
+        _mark_generation_expected_exit(old)
+        coordinator.retired.append(old)
+        coordinator.active = None
+    coordinator.phase = _LifecyclePhase.RESTARTING
+    _notify_lifecycle_locked(coordinator)
+
+
+def _retire_for_restart(instance: LspProcess, deadline: float) -> None:
     coordinator = instance._coordinator
     _acquire_lifecycle(coordinator, deadline)
     try:
-        if coordinator.terminal_outcome is not None:
-            raise RuntimeError("LSP process is closed")
-        old = coordinator.active
-        if old is not None:
-            _mark_generation_expected_exit(old)
-            coordinator.retired.append(old)
-            coordinator.active = None
-        coordinator.phase = _LifecyclePhase.RESTARTING
-        _notify_lifecycle_locked(coordinator)
+        _retire_active_generation_locked(coordinator)
     finally:
         _release_lifecycle(coordinator)
 
-    retirement_errors = _drive_cleanup(instance, deadline, terminal=False)
-    if retirement_errors or any(not item.released for item in coordinator.retired):
-        if retirement_errors:
-            _raise_cleanup_failures(retirement_errors)
-        raise TimeoutError("LSP retired generation cleanup is incomplete")
 
+def _require_retirement_complete(
+    coordinator: _LifecycleCoordinator, retirement_errors: list[BaseException]
+) -> None:
+    """A restart may only proceed once every retired generation has let go."""
+    released = all(item.released for item in coordinator.retired)
+    if not retirement_errors and released:
+        return
+    if retirement_errors:
+        _raise_cleanup_failures(retirement_errors)
+    raise TimeoutError("LSP retired generation cleanup is incomplete")
+
+
+def _require_restart_inputs(instance: LspProcess) -> None:
     if instance._cwd is None or not instance._command:
         raise RuntimeError("LSP restart inputs are unavailable")
-    generation_nonce = _new_generation_nonce()
+
+
+def _require_live_candidate(candidate: _Generation) -> None:
+    """A candidate that already died cannot be committed."""
+    if not _generation_has_channel(candidate):
+        raise RuntimeError("LSP restart candidate failed before commit")
+    if candidate.process.poll() is not None or candidate.protocol.fatal:
+        raise RuntimeError("LSP restart candidate failed before commit")
+
+
+def _launch_restart_candidate(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    generation_nonce: str,
+    deadline: float,
+) -> tuple[_Generation, ProcessState]:
+    """Start the replacement generation inside its guard and prove it is alive."""
     configuration = coordinator.generation_configuration
     with _generation_guard_context(
         configuration, generation_nonce, deadline
@@ -3961,21 +3987,25 @@ def _prepare_restart_generation_owned(
             generation_nonce=generation_nonce,
             pass_fds=pass_fds,
         )
-        if (
-            candidate.process is None
-            or candidate.protocol is None
-            or candidate.process.poll() is not None
-            or candidate.protocol.fatal
-        ):
-            raise RuntimeError("LSP restart candidate failed before commit")
+        _require_live_candidate(candidate)
         _publish_generation_lease(instance, candidate, deadline)
-        generation_state = ProcessState.PROCESS_RUNNING
-        if configuration.generation_bootstrap is not None:
-            generation_state = _run_generation_bootstrap(
-                configuration,
-                candidate,
-                deadline,
-            )
+        generation_state = _bootstrapped_state(configuration, candidate, deadline)
+    return candidate, generation_state
+
+
+def _prepare_restart_generation_owned(
+    instance: LspProcess,
+    deadline: float,
+) -> tuple[_Generation, ProcessState]:
+    coordinator = instance._coordinator
+    _retire_for_restart(instance, deadline)
+    _require_retirement_complete(
+        coordinator, _drive_cleanup(instance, deadline, terminal=False)
+    )
+    _require_restart_inputs(instance)
+    candidate, generation_state = _launch_restart_candidate(
+        instance, coordinator, _new_generation_nonce(), deadline
+    )
     _require_startup_deadline(deadline, "generation guard completion")
     return candidate, generation_state
 
