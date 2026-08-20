@@ -8771,15 +8771,7 @@ class _QueueV3CandidateReader:
         task_fence: TaskFence,
     ) -> tuple[sqlite3.Row, int, CorruptPurgeProgress | None]:
         """The operation row and prior link count, or the progress to return."""
-        operation = database.execute(
-            "SELECT * FROM corrupt_purge_operations WHERE operation_id=?",
-            (operation_id,),
-        ).fetchone()
-        parent = database.execute(
-            "SELECT * FROM tasks WHERE id=?", (task_id,)
-        ).fetchone()
-        if operation is None or parent is None:
-            raise QueueOperationError("corrupt_purge_lost")
+        operation, parent = _purge_operation_rows(database, task_id, operation_id)
         prior_links_deleted = int(
             database.execute(
                 """SELECT COALESCE(SUM(deleted_link_count),0)
@@ -13521,6 +13513,57 @@ def _settle_processor_outcome(
     _count_terminal(counts, queue.acknowledge(lease))
 
 
+def _purge_operation_rows(
+    database: sqlite3.Connection, task_id: str, operation_id: str
+) -> tuple[sqlite3.Row, sqlite3.Row]:
+    """The purge operation and its parent task, or a lost refusal."""
+    operation = database.execute(
+        "SELECT * FROM corrupt_purge_operations WHERE operation_id=?",
+        (operation_id,),
+    ).fetchone()
+    parent = database.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if operation is None or parent is None:
+        raise QueueOperationError("corrupt_purge_lost")
+    return operation, parent
+
+
+def _heartbeat_lost(heartbeat: _LeaseHeartbeat, result: _ProcessorOutcome) -> bool:
+    """Whether the lease heartbeat died without the cleanup already failing."""
+    return heartbeat.error is not None and not result.cleanup_failed
+
+
+def _count_dead_task(queue: MemoryQueue, lease: QueueLease, counts: dict[str, int]) -> None:
+    """A task the queue has already buried is counted dead as well as failed."""
+    if queue.get(lease.id).state == "dead":
+        counts["dead"] += 1
+
+
+def _settle_worker_outcome(
+    queue: MemoryQueue,
+    lease: QueueLease,
+    result: _ProcessorOutcome,
+    counts: dict[str, int],
+    *,
+    max_attempts: int,
+    retry_base_seconds: int,
+    retry_cap_seconds: int,
+) -> None:
+    """Settle the attempt; a lost fence counts as a failure, never a crash."""
+    try:
+        _settle_processor_outcome(
+            queue,
+            lease,
+            result,
+            counts,
+            max_attempts=max_attempts,
+            retry_base_seconds=retry_base_seconds,
+            retry_cap_seconds=retry_cap_seconds,
+        )
+    except (LeaseFenceError, ResultConflictError):
+        counts["failed"] += 1
+        _count_dead_task(queue, lease, counts)
+
+
 def _work_one(
     queue: MemoryQueue,
     processor: Callable[[dict], bool | DeferredResult],
@@ -13560,23 +13603,18 @@ def _work_one(
     result = _processor_result(
         processor, processor_runner, lease, heartbeat, deadline, monotonic
     )
-    if heartbeat.error is not None and not result.cleanup_failed:
+    if _heartbeat_lost(heartbeat, result):
         counts["failed"] += 1
         return counts
-    try:
-        _settle_processor_outcome(
-            queue,
-            lease,
-            result,
-            counts,
-            max_attempts=max_attempts,
-            retry_base_seconds=retry_base_seconds,
-            retry_cap_seconds=retry_cap_seconds,
-        )
-    except (LeaseFenceError, ResultConflictError):
-        counts["failed"] += 1
-        if queue.get(lease.id).state == "dead":
-            counts["dead"] += 1
+    _settle_worker_outcome(
+        queue,
+        lease,
+        result,
+        counts,
+        max_attempts=max_attempts,
+        retry_base_seconds=retry_base_seconds,
+        retry_cap_seconds=retry_cap_seconds,
+    )
     return counts
 
 
