@@ -13416,22 +13416,14 @@ def _manual_processor(task: dict[str, Any]) -> bool | DeferredResult:
     return False
 
 
-def _cli_error_code(error: BaseException) -> str:
-    if isinstance(error, QueueOperationError):
-        code = error.code
-        if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code):
-            return code
-        return "internal_error"
-    if isinstance(error, KeyError):
-        return "task_not_found"
-    if isinstance(error, PermissionError):
-        return "permission_denied"
-    if isinstance(error, sqlite3.Error):
-        return "sqlite_error"
-    if isinstance(error, (UnicodeError, json.JSONDecodeError)):
-        return "decode_error"
-    if isinstance(
-        error,
+# Order matters: the first matching entry wins, so the narrower exception
+# classes come before the broader ones they inherit from.
+_CLI_ERROR_CODES: tuple[tuple[type[BaseException] | tuple[type[BaseException], ...], str], ...] = (
+    (KeyError, "task_not_found"),
+    (PermissionError, "permission_denied"),
+    (sqlite3.Error, "sqlite_error"),
+    ((UnicodeError, json.JSONDecodeError), "decode_error"),
+    (
         (
             subprocess.SubprocessError,
             multiprocessing.ProcessError,
@@ -13439,14 +13431,28 @@ def _cli_error_code(error: BaseException) -> str:
             EOFError,
             ChildProcessError,
         ),
-    ):
-        return "process_error"
-    if isinstance(error, TimeoutError):
-        return "worker_timeout"
-    if isinstance(error, OSError):
-        return "os_error"
-    if isinstance(error, (TypeError, ValueError)):
-        return "invalid_input"
+        "process_error",
+    ),
+    (TimeoutError, "worker_timeout"),
+    (OSError, "os_error"),
+    ((TypeError, ValueError), "invalid_input"),
+)
+
+
+def _queue_operation_code(error: QueueOperationError) -> str:
+    """The operation's own code, when it is one we are willing to print."""
+    code = error.code
+    if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code):
+        return code
+    return "internal_error"
+
+
+def _cli_error_code(error: BaseException) -> str:
+    if isinstance(error, QueueOperationError):
+        return _queue_operation_code(error)
+    for kinds, code in _CLI_ERROR_CODES:
+        if isinstance(error, kinds):
+            return code
     return "internal_error"
 
 
