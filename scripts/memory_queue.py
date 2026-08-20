@@ -12274,6 +12274,164 @@ def _work_one(
     return counts
 
 
+@dataclass
+class _WorkerProgress:
+    """What a worker has done, and when it last had something to do."""
+
+    totals: dict[str, int]
+    processed: int = 0
+    idle_started: float | None = None
+
+    def advance(self, counts: Mapping[str, int]) -> str:
+        """`worked`, `halted` or `idle` after recording one turn."""
+        handled = counts["ok"] + counts["failed"]
+        for key in self.totals:
+            self.totals[key] += counts[key]
+        if not handled:
+            return "idle"
+        self.processed += handled
+        self.idle_started = None
+        return "halted" if counts.get("halted") else "worked"
+
+
+def _worker_exhausted(
+    *,
+    cancelled: Callable[[], bool] | None,
+    now: float,
+    deadline: float,
+    idle_started: float | None,
+    idle_seconds: int,
+) -> bool:
+    """The worker has run out of time, permission, or patience."""
+    if cancelled is not None and cancelled():
+        return True
+    if now >= deadline:
+        return True
+    return idle_started is not None and now - idle_started >= idle_seconds
+
+
+def _worker_idle_pause(
+    progress: _WorkerProgress,
+    *,
+    now: float,
+    idle_seconds: int,
+    deadline: float,
+    monotonic: Callable[[], float],
+    sleep: Callable[[float], None],
+) -> bool:
+    """Sleep out part of the idle window; False when the budget is gone."""
+    idle_remaining = idle_seconds - (now - progress.idle_started)
+    budget_remaining = deadline - monotonic()
+    if budget_remaining <= 0:
+        return False
+    sleep(min(1.0, idle_remaining, budget_remaining))
+    return True
+
+
+def _worker_idle_step(
+    progress: _WorkerProgress,
+    *,
+    now: float,
+    idle_seconds: int,
+    deadline: float,
+    monotonic: Callable[[], float],
+    sleep: Callable[[float], None],
+) -> bool:
+    """Wait out one idle turn; False when the worker should stop."""
+    if idle_seconds == 0:
+        return False
+    if progress.idle_started is None:
+        progress.idle_started = now
+    return _worker_idle_pause(
+        progress,
+        now=now,
+        idle_seconds=idle_seconds,
+        deadline=deadline,
+        monotonic=monotonic,
+        sleep=sleep,
+    )
+
+
+def _worker_turn(
+    queue: MemoryQueue,
+    processor: Callable[[dict], bool | DeferredResult],
+    processor_runner: Callable[..., bool | DeferredResult],
+    progress: _WorkerProgress,
+    *,
+    now: float,
+    owner: str,
+    deadline: float,
+    idle_seconds: int,
+    monotonic: Callable[[], float],
+    sleep: Callable[[float], None],
+    policy: Mapping[str, int],
+) -> bool:
+    """One turn of the worker loop; False when it should stop."""
+    counts = _work_one(
+        queue,
+        processor,
+        processor_runner,
+        owner=owner,
+        deadline=deadline,
+        monotonic=monotonic,
+        **policy,
+    )
+    outcome = progress.advance(counts)
+    if outcome == "halted":
+        return False
+    if outcome == "worked":
+        return True
+    return _worker_idle_step(
+        progress,
+        now=now,
+        idle_seconds=idle_seconds,
+        deadline=deadline,
+        monotonic=monotonic,
+        sleep=sleep,
+    )
+
+
+def _drive_worker(
+    queue: MemoryQueue,
+    processor: Callable[[dict], bool | DeferredResult],
+    processor_runner: Callable[..., bool | DeferredResult],
+    progress: _WorkerProgress,
+    *,
+    owner: str,
+    deadline: float,
+    max_tasks: int,
+    idle_seconds: int,
+    monotonic: Callable[[], float],
+    sleep: Callable[[float], None],
+    cancelled: Callable[[], bool] | None,
+    policy: Mapping[str, int],
+) -> None:
+    while progress.processed < max_tasks:
+        now = monotonic()
+        if _worker_exhausted(
+            cancelled=cancelled,
+            now=now,
+            deadline=deadline,
+            idle_started=progress.idle_started,
+            idle_seconds=idle_seconds,
+        ):
+            return
+        if not _worker_turn(
+            queue,
+            processor,
+            processor_runner,
+            progress,
+            now=now,
+            owner=owner,
+            deadline=deadline,
+            idle_seconds=idle_seconds,
+            monotonic=monotonic,
+            sleep=sleep,
+            policy=policy,
+        ):
+            return
+
+
 def run_worker(
     processor: Callable[[dict], bool | DeferredResult],
     *,
@@ -12296,6 +12454,13 @@ def run_worker(
     """Run a short-lived worker bounded by tasks, wall time, and idle time."""
     if max_tasks < 0 or max_seconds < 0 or idle_seconds < 0:
         raise ValueError("worker limits must be non-negative")
+    policy = {
+        "lease_seconds": lease_seconds,
+        "heartbeat_seconds": heartbeat_seconds,
+        "max_attempts": max_attempts,
+        "retry_base_seconds": retry_base_seconds,
+        "retry_cap_seconds": retry_cap_seconds,
+    }
     _validate_worker_policy(
         lease_seconds,
         heartbeat_seconds,
@@ -12303,62 +12468,32 @@ def run_worker(
         retry_base_seconds,
         retry_cap_seconds,
     )
-    started = monotonic()
-    idle_started: float | None = None
-    totals = {"ok": 0, "failed": 0, "dead": 0, "skipped": 0}
-    processed = 0
+    progress = _WorkerProgress({"ok": 0, "failed": 0, "dead": 0, "skipped": 0})
     queue = _queue(
         max_attempts=max_attempts,
         retry_base_seconds=retry_base_seconds,
         retry_cap_seconds=retry_cap_seconds,
     )
-    owner = f"worker-{os.getpid()}-{uuid.uuid4().hex}"
-    deadline = started + max_seconds
-    while processed < max_tasks:
-        if cancelled and cancelled():
-            break
-        now = monotonic()
-        if now >= deadline:
-            break
-        if idle_started is not None and now - idle_started >= idle_seconds:
-            break
-        counts = _work_one(
-            queue,
-            processor,
-            processor_runner,
-            owner=owner,
-            deadline=deadline,
-            monotonic=monotonic,
-            lease_seconds=lease_seconds,
-            heartbeat_seconds=heartbeat_seconds,
-            max_attempts=max_attempts,
-            retry_base_seconds=retry_base_seconds,
-            retry_cap_seconds=retry_cap_seconds,
-        )
-        handled = counts["ok"] + counts["failed"]
-        for key in totals:
-            totals[key] += counts[key]
-        if handled:
-            processed += handled
-            idle_started = None
-            if counts.get("halted"):
-                break
-            continue
-        if idle_seconds == 0:
-            break
-        if idle_started is None:
-            idle_started = now
-        idle_remaining = idle_seconds - (now - idle_started)
-        budget_remaining = deadline - monotonic()
-        if budget_remaining <= 0:
-            break
-        sleep(min(1.0, idle_remaining, budget_remaining))
+    _drive_worker(
+        queue,
+        processor,
+        processor_runner,
+        progress,
+        owner=f"worker-{os.getpid()}-{uuid.uuid4().hex}",
+        deadline=monotonic() + max_seconds,
+        max_tasks=max_tasks,
+        idle_seconds=idle_seconds,
+        monotonic=monotonic,
+        sleep=sleep,
+        cancelled=cancelled,
+        policy=policy,
+    )
     return WorkerSummary(
-        processed,
-        totals["ok"],
-        totals["failed"],
-        totals["dead"],
-        totals["skipped"],
+        progress.processed,
+        progress.totals["ok"],
+        progress.totals["failed"],
+        progress.totals["dead"],
+        progress.totals["skipped"],
         queue.count_eligible(max_attempts=max_attempts),
     )
 
