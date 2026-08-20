@@ -1923,6 +1923,208 @@ def _private_raw_semantics_safe(
         installation,
     )
 
+@dataclass(frozen=True, slots=True)
+class _GitIndexHeader:
+    """The fixed part of a git index that the entry loop works against."""
+
+    hash_size: int
+    count: int
+    checksum_offset: int
+
+
+@dataclass
+class _IndexEntryScan:
+    """What the entry loop remembers between one index entry and the next."""
+
+    offset: int
+    seen_collisions: set[str] = field(default_factory=set)
+    previous_path: bytes | None = None
+    entries: list[_GitIndexEntry] = field(default_factory=list)
+
+
+def _git_index_shape(content: bytes | bytearray, hash_size: int) -> tuple[int, int] | None:
+    """The entry count and checksum offset, if the header looks like an index."""
+    if len(content) < 12 + hash_size or content[:4] != b"DIRC":
+        return None
+    version, count = struct.unpack_from("!II", content, 4)
+    if version not in {2, 3} or count > MAX_REVISION_FILES:
+        return None
+    return count, len(content) - hash_size
+
+
+def _git_index_header(
+    content: bytes | bytearray,
+    *,
+    hash_name: str,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> _GitIndexHeader | None:
+    """The index's header, once its magic, version and checksum all agree."""
+    if hash_name not in {"sha1", "sha256"}:
+        return None
+    hash_size = hashlib.new(hash_name).digest_size
+    shape = _git_index_shape(content, hash_size)
+    if shape is None:
+        return None
+    count, checksum_offset = shape
+    digest = _checked_digest(
+        hash_name,
+        content,
+        length=checksum_offset,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    if digest != content[checksum_offset:]:
+        return None
+    return _GitIndexHeader(hash_size, count, checksum_offset)
+
+
+def _index_entry_fields(
+    content: bytes | bytearray, entry_offset: int, hash_size: int
+) -> tuple[int, bytes, int] | None:
+    """The mode, object id and flags of one entry, if they are usable."""
+    mode = struct.unpack_from("!I", content, entry_offset + 24)[0]
+    oid = bytes(content[entry_offset + 40 : entry_offset + 40 + hash_size])
+    flags = struct.unpack_from("!H", content, entry_offset + 40 + hash_size)[0]
+    if mode not in {0o100644, 0o100755} or flags & 0xF000 or not any(oid):
+        return None
+    return mode, oid, flags
+
+
+def _index_entry_path(
+    content: bytes | bytearray,
+    entry_offset: int,
+    fixed_end: int,
+    flags: int,
+    checksum_offset: int,
+) -> tuple[bytes, int] | None:
+    """The entry's raw path and the offset just past its padding."""
+    path_end = content.find(
+        b"\0",
+        fixed_end,
+        min(fixed_end + _MAX_PRIVATE_INDEX_PATH_BYTES + 1, checksum_offset),
+    )
+    if path_end < 0:
+        return None
+    path_bytes = bytes(content[fixed_end:path_end])
+    if flags & 0x0FFF != min(len(path_bytes), 0x0FFF):
+        return None
+    padded_end = entry_offset + ((path_end + 1 - entry_offset + 7) // 8) * 8
+    if padded_end > checksum_offset or any(content[path_end:padded_end]):
+        return None
+    return path_bytes, padded_end
+
+
+def _valid_index_path_shape(path: str, pure: PurePosixPath) -> bool:
+    """Whether the path is relative and shaped exactly like its posix form."""
+    if not path or "\\" in path:
+        return False
+    return not pure.is_absolute() and pure.as_posix() == path
+
+
+def _valid_index_path(path: str) -> bool:
+    """Whether this index path is one the private reader will accept."""
+    pure = PurePosixPath(path)
+    if not _valid_index_path_shape(path, pure):
+        return False
+    if unicodedata.normalize("NFC", path) != path:
+        return False
+    return not any(part in {"", ".", "..", ".git"} for part in pure.parts)
+
+
+def _record_index_entry(
+    scan: _IndexEntryScan,
+    path_bytes: bytes,
+    entry_offset: int,
+    oid: bytes,
+    mode: int,
+    padded_end: int,
+) -> bool:
+    """Accept one entry into the scan; False when it breaks the index's order."""
+    try:
+        path = path_bytes.decode("utf-8", errors="strict")
+    except UnicodeError:
+        return False
+    if not _valid_index_path(path):
+        return False
+    collision = path.casefold()
+    if collision in scan.seen_collisions:
+        return False
+    if scan.previous_path is not None and path_bytes <= scan.previous_path:
+        return False
+    scan.seen_collisions.add(collision)
+    scan.previous_path = path_bytes
+    scan.entries.append(_GitIndexEntry(path, entry_offset, oid, mode))
+    scan.offset = padded_end
+    return True
+
+
+def _parse_index_entry(
+    content: bytes | bytearray, header: _GitIndexHeader, scan: _IndexEntryScan
+) -> bool:
+    """Read one entry into the scan; False when the index is not acceptable."""
+    entry_offset = scan.offset
+    fixed_end = entry_offset + 40 + header.hash_size + 2
+    if fixed_end > header.checksum_offset:
+        return False
+    fields = _index_entry_fields(content, entry_offset, header.hash_size)
+    if fields is None:
+        return False
+    mode, oid, flags = fields
+    located = _index_entry_path(
+        content, entry_offset, fixed_end, flags, header.checksum_offset
+    )
+    if located is None:
+        return False
+    path_bytes, padded_end = located
+    return _record_index_entry(scan, path_bytes, entry_offset, oid, mode, padded_end)
+
+
+def _known_index_extension(signature: bytes) -> bool:
+    """Whether this signature names an optional extension that may be skipped."""
+    if signature in _UNSUPPORTED_INDEX_EXTENSIONS:
+        return False
+    if signature not in _SUPPORTED_INDEX_EXTENSIONS:
+        return False
+    return signature[:1].isalpha() and not signature[:1].islower()
+
+
+def _valid_index_extension(
+    signature: bytes, extension_end: int, checksum_offset: int, seen: set[bytes]
+) -> bool:
+    """Whether this trailing extension is one the private reader tolerates."""
+    if signature in seen or not _known_index_extension(signature):
+        return False
+    return signature != b"EOIE" or extension_end == checksum_offset
+
+
+def _skip_index_extensions(
+    content: bytes | bytearray,
+    header: _GitIndexHeader,
+    offset: int,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    """Whether every trailing extension is acceptable and the index ends exactly."""
+    seen: set[bytes] = set()
+    while offset < header.checksum_offset:
+        _check_stop(deadline, cancelled)
+        if offset + 8 > header.checksum_offset:
+            return False
+        signature = bytes(content[offset : offset + 4])
+        extension_end = offset + 8 + struct.unpack_from("!I", content, offset + 4)[0]
+        if extension_end > header.checksum_offset:
+            return False
+        if not _valid_index_extension(
+            signature, extension_end, header.checksum_offset, seen
+        ):
+            return False
+        seen.add(signature)
+        offset = extension_end
+    return offset == header.checksum_offset
+
+
 def _parse_git_index(
     content: bytes | bytearray,
     *,
@@ -1930,103 +2132,25 @@ def _parse_git_index(
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
 ) -> _ParsedGitIndex | None:
+    """The parsed index, or None when it is not one this reader will trust."""
     _check_stop(deadline, cancelled)
-    if hash_name not in {"sha1", "sha256"}:
+    header = _git_index_header(
+        content, hash_name=hash_name, deadline=deadline, cancelled=cancelled
+    )
+    if header is None:
         return None
-    hash_size = hashlib.new(hash_name).digest_size
-    if len(content) < 12 + hash_size or content[:4] != b"DIRC":
-        return None
-    version, count = struct.unpack_from("!II", content, 4)
-    if version not in {2, 3} or count > MAX_REVISION_FILES:
-        return None
-    checksum_offset = len(content) - hash_size
-    if (
-        _checked_digest(
-            hash_name,
-            content,
-            length=checksum_offset,
-            deadline=deadline,
-            cancelled=cancelled,
-        )
-        != content[checksum_offset:]
+    scan = _IndexEntryScan(offset=12)
+    for _index in range(header.count):
+        _check_stop(deadline, cancelled)
+        if not _parse_index_entry(content, header, scan):
+            return None
+    if not _skip_index_extensions(
+        content, header, scan.offset, deadline=deadline, cancelled=cancelled
     ):
         return None
-    entries: list[_GitIndexEntry] = []
-    seen_collisions: set[str] = set()
-    seen_extensions: set[bytes] = set()
-    previous_path: bytes | None = None
-    offset = 12
-    for _index in range(count):
-        _check_stop(deadline, cancelled)
-        entry_offset = offset
-        fixed_end = entry_offset + 40 + hash_size + 2
-        if fixed_end > checksum_offset:
-            return None
-        mode = struct.unpack_from("!I", content, entry_offset + 24)[0]
-        oid = bytes(content[entry_offset + 40 : entry_offset + 40 + hash_size])
-        flags = struct.unpack_from("!H", content, entry_offset + 40 + hash_size)[0]
-        if mode not in {0o100644, 0o100755} or flags & 0xF000 or not any(oid):
-            return None
-        path_end = content.find(
-            b"\0",
-            fixed_end,
-            min(fixed_end + _MAX_PRIVATE_INDEX_PATH_BYTES + 1, checksum_offset),
-        )
-        if path_end < 0:
-            return None
-        path_bytes = bytes(content[fixed_end:path_end])
-        stored_length = flags & 0x0FFF
-        if stored_length != min(len(path_bytes), 0x0FFF):
-            return None
-        padded_end = entry_offset + ((path_end + 1 - entry_offset + 7) // 8) * 8
-        if padded_end > checksum_offset or any(content[path_end:padded_end]):
-            return None
-        try:
-            path = path_bytes.decode("utf-8", errors="strict")
-        except UnicodeError:
-            return None
-        pure = PurePosixPath(path)
-        if (
-            not path
-            or "\\" in path
-            or pure.is_absolute()
-            or pure.as_posix() != path
-            or any(part in {"", ".", "..", ".git"} for part in pure.parts)
-            or unicodedata.normalize("NFC", path) != path
-        ):
-            return None
-        collision = path.casefold()
-        if collision in seen_collisions or (previous_path is not None and path_bytes <= previous_path):
-            return None
-        seen_collisions.add(collision)
-        previous_path = path_bytes
-        entries.append(_GitIndexEntry(path, entry_offset, oid, mode))
-        offset = padded_end
-    entries_end = offset
-    while offset < checksum_offset:
-        _check_stop(deadline, cancelled)
-        if offset + 8 > checksum_offset:
-            return None
-        signature = bytes(content[offset : offset + 4])
-        extension_size = struct.unpack_from("!I", content, offset + 4)[0]
-        extension_end = offset + 8 + extension_size
-        if extension_end > checksum_offset:
-            return None
-        if (
-            signature in _UNSUPPORTED_INDEX_EXTENSIONS
-            or signature not in _SUPPORTED_INDEX_EXTENSIONS
-            or signature in seen_extensions
-            or not signature[:1].isalpha()
-            or signature[:1].islower()
-            or (signature == b"EOIE" and extension_end != checksum_offset)
-        ):
-            return None
-        seen_extensions.add(signature)
-        offset = extension_end
-    if offset != checksum_offset:
-        return None
-    return _ParsedGitIndex(content, entries_end, checksum_offset, tuple(entries))
-
+    return _ParsedGitIndex(
+        content, scan.offset, header.checksum_offset, tuple(scan.entries)
+    )
 
 def _index_stat_words(info: os.stat_result) -> tuple[int, ...]:
     return (
