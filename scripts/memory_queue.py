@@ -2009,59 +2009,85 @@ def initialize_queue_v3_candidate(
     return summary
 
 
+def _require_inside_state_root(path: Path, state_root: Path) -> None:
+    """Refuse a database that does not live under the runtime root."""
+    try:
+        path.resolve(strict=True).relative_to(state_root.resolve(strict=True))
+    except (OSError, ValueError) as exc:
+        raise PermissionError("queue v3 database is outside the state root") from exc
+
+
+def _open_queue_v3_readonly(path: Path, state_root: Path) -> sqlite3.Connection:
+    """A read-only handle on a queue v3 database under the runtime root."""
+    return open_readonly_operational_db(
+        path,
+        state_root,
+        max_bytes=1 << 50,
+        owner_only=True,
+        busy_ms=DEFAULTS.queue_busy_ms,
+        contract=_QUEUE_V3_CONTRACT,
+    )
+
+
+def _queue_v3_payload_violations(database: sqlite3.Connection) -> int:
+    """How many task rows hold a payload or attempt count out of contract."""
+    return database.execute(
+        """SELECT COUNT(*) FROM tasks
+           WHERE typeof(payload_blob) != 'blob'
+              OR length(payload_blob) > ?
+              OR attempts NOT BETWEEN 0 AND 100""",
+        (_MAX_QUEUE_PAYLOAD_BYTES,),
+    ).fetchone()[0]
+
+
+def _queue_v3_structure_sound(database: sqlite3.Connection) -> bool:
+    """Whether SQLite itself reports the file and its references intact."""
+    integrity = database.execute("PRAGMA integrity_check").fetchall()
+    if len(integrity) != 1 or integrity[0][0] != "ok":
+        return False
+    return not database.execute("PRAGMA foreign_key_check").fetchall()
+
+
+def _queue_v3_invariants_hold(database: sqlite3.Connection) -> bool:
+    """Whether every invariant a queue v3 database has to keep still holds."""
+    if not _queue_v3_structure_sound(database):
+        return False
+    if _queue_v3_payload_violations(database):
+        return False
+    if not _queue_v3_purge_authorizations_valid(database):
+        return False
+    return _queue_v3_payloads_valid(database)
+
+
+def _queue_v3_report(database: sqlite3.Connection) -> dict[str, object]:
+    """The health record a validated queue v3 database answers with."""
+    return {
+        "application_id": database.execute("PRAGMA application_id").fetchone()[0],
+        "foreign_key_check": [],
+        "integrity_check": "ok",
+        "journal_mode": database.execute("PRAGMA journal_mode").fetchone()[0],
+        "row_counts": _queue_v3_row_counts(database),
+        "synchronous": database.execute("PRAGMA synchronous").fetchone()[0],
+        "trusted_schema": database.execute("PRAGMA trusted_schema").fetchone()[0],
+        "user_version": database.execute("PRAGMA user_version").fetchone()[0],
+    }
+
+
 def validate_queue_v3_database(
     path: Path, *, state_root: Path
 ) -> dict[str, object]:
     """Validate one unpublished or active queue v3 database fail-closed."""
-    try:
-        Path(path).resolve(strict=True).relative_to(Path(state_root).resolve(strict=True))
-    except (OSError, ValueError) as exc:
-        raise PermissionError("queue v3 database is outside the state root") from exc
-    with closing(
-        open_readonly_operational_db(
-            Path(path),
-            Path(state_root),
-            max_bytes=1 << 50,
-            owner_only=True,
-            busy_ms=DEFAULTS.queue_busy_ms,
-            contract=_QUEUE_V3_CONTRACT,
-        )
-    ) as database:
+    _require_inside_state_root(Path(path), Path(state_root))
+    with closing(_open_queue_v3_readonly(Path(path), Path(state_root))) as database:
         if not _queue_v3_schema_complete(database):
             raise _migration_error(
                 "queue_v3_schema_incomplete", "queue v3 schema is incomplete"
             )
-        integrity = database.execute("PRAGMA integrity_check").fetchall()
-        foreign_keys = database.execute("PRAGMA foreign_key_check").fetchall()
-        payload_violations = database.execute(
-            """SELECT COUNT(*) FROM tasks
-               WHERE typeof(payload_blob) != 'blob'
-                  OR length(payload_blob) > ?
-                  OR attempts NOT BETWEEN 0 AND 100""",
-            (_MAX_QUEUE_PAYLOAD_BYTES,),
-        ).fetchone()[0]
-        if (
-            len(integrity) != 1
-            or integrity[0][0] != "ok"
-            or foreign_keys
-            or payload_violations
-            or not _queue_v3_purge_authorizations_valid(database)
-            or not _queue_v3_payloads_valid(database)
-        ):
+        if not _queue_v3_invariants_hold(database):
             raise _migration_error(
                 "queue_v3_validation_failed", "queue v3 database invariant failed"
             )
-        return {
-            "application_id": database.execute("PRAGMA application_id").fetchone()[0],
-            "foreign_key_check": [],
-            "integrity_check": "ok",
-            "journal_mode": database.execute("PRAGMA journal_mode").fetchone()[0],
-            "row_counts": _queue_v3_row_counts(database),
-            "synchronous": database.execute("PRAGMA synchronous").fetchone()[0],
-            "trusted_schema": database.execute("PRAGMA trusted_schema").fetchone()[0],
-            "user_version": database.execute("PRAGMA user_version").fetchone()[0],
-        }
-
+        return _queue_v3_report(database)
 
 def _require_active(
     deadline: float, cancelled: Callable[[], bool] | None = None
@@ -4491,6 +4517,41 @@ class _ExportedRows:
     seal: sqlite3.Row | None
 
 
+# The attempt outcome, task state, and error code for a lease that expired after
+# its result was published, keyed by whether that result was still intact.
+_EXPIRED_PUBLISHED_OUTCOMES = {
+    True: ("succeeded", "succeeded", None),
+    False: ("failed", "dead", "result_corrupt"),
+}
+
+# The task state and error code for an expired lease, keyed by whether the task
+# has now used up every attempt it is allowed.
+_EXPIRED_LEASE_OUTCOMES = {
+    True: ("dead", "attempts_exhausted"),
+    False: ("ready", "lease_expired"),
+}
+
+# Which owner roles may project each queue role.
+_QUEUE_OWNER_PARENT_ROLES = {
+    "queue-worker": frozenset(
+        {"queue-worker", "compile", "doctor", "nightly", "weekly"}
+    ),
+    "queue-operator": frozenset({"queue-operator", "repair"}),
+}
+
+
+def _require_projectable_parent(registry: Any, parent: object, role: str) -> None:
+    """Refuse a parent lease that cannot project the requested queue role."""
+    from operational_ownership import OwnerLease
+
+    if not isinstance(parent, OwnerLease):
+        raise TypeError("parent must be an OwnerLease")
+    if parent.role not in _QUEUE_OWNER_PARENT_ROLES[role]:
+        raise ValueError("parent role cannot project the requested queue role")
+    with closing(registry._connect()) as database:
+        registry.require(database, parent)
+
+
 class MemoryQueue:
     """Durable priority queue with lease-token fencing and at-least-once delivery."""
 
@@ -4891,6 +4952,59 @@ class MemoryQueue:
             int(row["attempts"]),
         )
 
+    def _settle_published_expiry(
+        self, connection: sqlite3.Connection, row: sqlite3.Row, now: datetime
+    ) -> None:
+        """Close a lease that expired after its result had already been published."""
+        outcome, state, error_code = _EXPIRED_PUBLISHED_OUTCOMES[
+            self._stored_result_is_valid(row)
+        ]
+        self._record_attempt(connection, row, now, outcome, error_code)
+        self._finish_lease(
+            connection, row["id"], now, state, error_code, None, last_attempt_at=now
+        )
+
+    def _retire_expired_lease(
+        self,
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+        now: datetime,
+        max_attempts: int,
+    ) -> None:
+        """Return an expired lease to the queue, or bury it if it is out of tries."""
+        state, error_code = _EXPIRED_LEASE_OUTCOMES[
+            int(row["attempts"]) >= max_attempts
+        ]
+        self._record_attempt(connection, row, now, "lease_expired", error_code)
+        connection.execute(
+            """UPDATE tasks SET state=?, available_at=?, updated_at=?, last_attempt_at=?,
+                   lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL,
+                   lease_heartbeat_at=NULL, attempt_started_at=NULL, error_code=?
+               WHERE id=? AND state='leased' AND lease_token=?""",
+            (
+                state,
+                _timestamp(now),
+                _timestamp(now),
+                _timestamp(now),
+                error_code,
+                row["id"],
+                row["lease_token"],
+            ),
+        )
+
+    def _expire_one_lease(
+        self,
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+        now: datetime,
+        max_attempts: int,
+    ) -> None:
+        """Settle one lease whose expiry has passed."""
+        if row["result_reference"] is not None or row["result_sha256"] is not None:
+            self._settle_published_expiry(connection, row, now)
+            return
+        self._retire_expired_lease(connection, row, now, max_attempts)
+
     def _expire_leases(
         self, connection: sqlite3.Connection, now: datetime, max_attempts: int
     ) -> int:
@@ -4899,45 +5013,7 @@ class MemoryQueue:
             (_timestamp(now),),
         ).fetchall()
         for row in rows:
-            if row["result_reference"] is not None or row["result_sha256"] is not None:
-                valid = self._stored_result_is_valid(row)
-                error_code = None if valid else "result_corrupt"
-                self._record_attempt(
-                    connection,
-                    row,
-                    now,
-                    "succeeded" if valid else "failed",
-                    error_code,
-                )
-                self._finish_lease(
-                    connection,
-                    row["id"],
-                    now,
-                    "succeeded" if valid else "dead",
-                    error_code,
-                    None,
-                    last_attempt_at=now,
-                )
-                continue
-            exhausted = int(row["attempts"]) >= max_attempts
-            error_code = "attempts_exhausted" if exhausted else "lease_expired"
-            state = "dead" if exhausted else "ready"
-            self._record_attempt(connection, row, now, "lease_expired", error_code)
-            connection.execute(
-                """UPDATE tasks SET state=?, available_at=?, updated_at=?, last_attempt_at=?,
-                       lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL,
-                       lease_heartbeat_at=NULL, attempt_started_at=NULL, error_code=?
-                   WHERE id=? AND state='leased' AND lease_token=?""",
-                (
-                    state,
-                    _timestamp(now),
-                    _timestamp(now),
-                    _timestamp(now),
-                    error_code,
-                    row["id"],
-                    row["lease_token"],
-                ),
-            )
+            self._expire_one_lease(connection, row, now, max_attempts)
         return len(rows)
 
     def _stored_result_is_valid(self, row: sqlite3.Row) -> bool:
@@ -9506,6 +9582,24 @@ class _QueueV3CandidateReader:
             return "corrupt_package_invalid"
         return None
 
+    @staticmethod
+    def _release_unless_nested(
+        registry: Any, lease: OwnerLease, *, nested: bool
+    ) -> None:
+        """Release the lease unless it belongs to a caller further out."""
+        if nested:
+            return
+        registry.release(lease)
+
+    def _queue_owner_lease(
+        self, registry: Any, role: str, scope: str, parent: OwnerLease | None
+    ) -> OwnerLease:
+        """The lease this queue owner runs under, projected or freshly acquired."""
+        if parent is None:
+            return registry.acquire(role, scope=scope)
+        _require_projectable_parent(registry, parent, role)
+        return parent
+
     @contextmanager
     def queue_owner(
         self,
@@ -9514,38 +9608,21 @@ class _QueueV3CandidateReader:
         scope: str,
         parent: OwnerLease | None = None,
     ) -> Iterator[OwnerLease]:
-        from operational_ownership import OwnerLease
-
-        allowed = {
-            "queue-worker": {"queue-worker", "compile", "doctor", "nightly", "weekly"},
-            "queue-operator": {"queue-operator", "repair"},
-        }
-        if role not in allowed:
+        if role not in _QUEUE_OWNER_PARENT_ROLES:
             raise ValueError("queue owner role must be queue-worker or queue-operator")
         registry = self.ownership_registry()
         nested = parent is not None
-        if nested:
-            if not isinstance(parent, OwnerLease):
-                raise TypeError("parent must be an OwnerLease")
-            if parent.role not in allowed[role]:
-                raise ValueError("parent role cannot project the requested queue role")
-            with closing(registry._connect()) as database:
-                registry.require(database, parent)
-            lease = parent
-        else:
-            lease = registry.acquire(role, scope=scope)
+        lease = self._queue_owner_lease(registry, role, scope, parent)
         try:
             self._insert_queue_projection(lease, role=role, scope=scope)
         except BaseException:
-            if not nested:
-                registry.release(lease)
+            self._release_unless_nested(registry, lease, nested=nested)
             raise
         try:
             yield lease
         finally:
             self._remove_queue_projection(lease)
-            if not nested:
-                registry.release(lease)
+            self._release_unless_nested(registry, lease, nested=nested)
 
     def _insert_queue_projection(
         self,

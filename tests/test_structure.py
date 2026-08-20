@@ -801,3 +801,58 @@ def test_no_method_silently_lost_its_staticmethod_decorator() -> None:
             offenders[str(path.relative_to(ROOT))] = unbound
 
     assert offenders == {}
+
+
+def _decorator_name(node: ast.expr) -> str:
+    """The bare name of a decorator, whether or not it is called or dotted."""
+    target = node.func if isinstance(node, ast.Call) else node
+    if isinstance(target, ast.Attribute):
+        return target.attr
+    return getattr(target, "id", "")
+
+
+_GENERATOR_DECORATORS = frozenset({"contextmanager", "asynccontextmanager"})
+
+
+def _yields(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Whether this function body itself yields, ignoring nested functions."""
+    nested = tuple(
+        child
+        for child in ast.walk(node)
+        if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef) and child is not node
+    )
+    inner = {id(descendant) for holder in nested for descendant in ast.walk(holder)}
+    return any(
+        isinstance(child, ast.Yield | ast.YieldFrom) and id(child) not in inner
+        for child in ast.walk(node)
+    )
+
+
+def _context_managers_without_yield(source: str) -> list[str]:
+    """Functions a `@contextmanager` decorates that can never enter a `with`."""
+    offenders: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        names = {_decorator_name(item) for item in node.decorator_list}
+        if names & _GENERATOR_DECORATORS and not _yields(node):
+            offenders.append(node.name)
+    return offenders
+
+
+def test_a_context_manager_decorator_stayed_on_a_function_that_yields() -> None:
+    """A patch that lands a definition under the decorator breaks every `with`."""
+    misplaced = "@contextmanager\ndef f():\n    return 1\n"
+    kept = "@contextmanager\ndef f():\n    yield 1\n"
+    assert _context_managers_without_yield(misplaced) == ["f"]
+    assert _context_managers_without_yield(kept) == []
+    nested = "@contextmanager\ndef f():\n    def g():\n        yield 1\n    return g\n"
+    assert _context_managers_without_yield(nested) == ["f"]
+
+    offenders = {}
+    for path in _python_sources():
+        found = _context_managers_without_yield(path.read_text(encoding="utf-8"))
+        if found:
+            offenders[str(path.relative_to(ROOT))] = found
+
+    assert offenders == {}
