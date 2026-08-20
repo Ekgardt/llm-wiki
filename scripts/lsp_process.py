@@ -4390,33 +4390,49 @@ def _idle_expired_lsp_process(instance: LspProcess, now: float) -> bool:
         _release_lifecycle(coordinator)
 
 
-def _wait_for_lsp_exit(instance: LspProcess, deadline: float) -> int:
-    deadline = _validated_deadline(deadline)
-    coordinator = instance._coordinator
+def _exit_stream_owners(
+    instance: LspProcess, coordinator: _LifecycleCoordinator, deadline: float
+) -> tuple[threading.Thread | None, threading.Thread | None]:
+    """The stderr and exit threads of the projected generation."""
     _acquire_lifecycle(coordinator, deadline)
     try:
         generation = instance._projected_generation()
-        process = instance.process
-        stderr_thread = generation.stderr_thread if generation is not None else None
-        exit_thread = generation.exit_thread if generation is not None else None
+        if generation is None:
+            return None, None
+        return generation.stderr_thread, generation.exit_thread
     finally:
         _release_lifecycle(coordinator)
+
+
+def _await_process_exit(process: object, deadline: float) -> int:
+    """The exit code, refusing to wait past the deadline."""
     remaining = deadline - time.monotonic()
     if remaining <= 0 and process.poll() is None:
         raise TimeoutError("LSP process did not exit before deadline")
     try:
-        return_code = process.wait(timeout=max(0.0, remaining))
+        return process.wait(timeout=max(0.0, remaining))
     except subprocess.TimeoutExpired as exc:
         raise TimeoutError("LSP process did not exit before deadline") from exc
-    for owner in (stderr_thread, exit_thread):
-        if owner is None or owner is threading.current_thread():
-            continue
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("LSP process streams did not drain before deadline")
+
+
+def _await_stream_owner(owner: threading.Thread | None, deadline: float) -> None:
+    """Wait out one stream owner; our own thread is already accounted for."""
+    if owner is None or owner is threading.current_thread():
+        return
+    remaining = deadline - time.monotonic()
+    if remaining > 0:
         owner.join(remaining)
-        if owner.is_alive():
-            raise TimeoutError("LSP process streams did not drain before deadline")
+    if owner.is_alive():
+        raise TimeoutError("LSP process streams did not drain before deadline")
+
+
+def _wait_for_lsp_exit(instance: LspProcess, deadline: float) -> int:
+    deadline = _validated_deadline(deadline)
+    coordinator = instance._coordinator
+    stderr_thread, exit_thread = _exit_stream_owners(instance, coordinator, deadline)
+    return_code = _await_process_exit(instance.process, deadline)
+    for owner in (stderr_thread, exit_thread):
+        _await_stream_owner(owner, deadline)
     return return_code
 
 
@@ -5630,6 +5646,33 @@ def _coordinator_has_ownership(coordinator: _LifecycleCoordinator) -> bool:
         coordinator.lock.release()
 
 
+def _check_launch_command_bounds(arguments: tuple[str, ...]) -> None:
+    """A launch command stays within its argument and byte bounds."""
+    if len(arguments) > _MAX_GENERATION_LAUNCH_ARGUMENTS:
+        raise ValueError("generation launch command exceeds its argument bound")
+    try:
+        command_bytes = sum(
+            len(argument.encode("utf-8", errors="strict")) + 1
+            for argument in arguments
+        )
+    except UnicodeEncodeError as error:
+        raise ValueError(
+            "generation launch command must be valid UTF-8"
+        ) from error
+    if command_bytes > _MAX_GENERATION_LAUNCH_BYTES:
+        raise ValueError("generation launch command exceeds its byte bound")
+
+
+def _launch_pass_fds(launch: GenerationLaunch) -> tuple[int, ...]:
+    """The descriptors to inherit; only POSIX can inherit any."""
+    if not isinstance(launch.pass_fds, tuple):
+        raise TypeError("generation launch pass_fds must be a tuple")
+    pass_fds = tuple(launch.pass_fds)
+    if pass_fds and os.name != "posix":
+        raise ValueError("generation launch pass_fds are supported only on POSIX")
+    return pass_fds
+
+
 def _generation_launch(
     command: Sequence[str],
     launch: GenerationLaunch | None,
@@ -5641,25 +5684,12 @@ def _generation_launch(
     if not isinstance(launch.command, tuple):
         raise TypeError("generation launch command must be a tuple")
     arguments = tuple(_validated_command(launch.command, cwd))
-    if len(arguments) > _MAX_GENERATION_LAUNCH_ARGUMENTS:
-        raise ValueError("generation launch command exceeds its argument bound")
-    try:
-        command_bytes = sum(
-            len(argument.encode("utf-8", errors="strict")) + 1
-            for argument in arguments
-        )
-    except UnicodeEncodeError as error:
-        raise ValueError("generation launch command must be valid UTF-8") from error
-    if command_bytes > _MAX_GENERATION_LAUNCH_BYTES:
-        raise ValueError("generation launch command exceeds its byte bound")
+    _check_launch_command_bounds(arguments)
     if not arguments or arguments[0] != command[0]:
-        raise ValueError("generation launch cannot replace the configured executable")
-    if not isinstance(launch.pass_fds, tuple):
-        raise TypeError("generation launch pass_fds must be a tuple")
-    pass_fds = tuple(launch.pass_fds)
-    if pass_fds and os.name != "posix":
-        raise ValueError("generation launch pass_fds are supported only on POSIX")
-    return arguments, pass_fds
+        raise ValueError(
+            "generation launch cannot replace the configured executable"
+        )
+    return arguments, _launch_pass_fds(launch)
 
 
 def _check_argument_strings(arguments: Sequence[object]) -> None:
