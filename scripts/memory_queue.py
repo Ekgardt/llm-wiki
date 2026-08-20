@@ -4103,6 +4103,31 @@ def _stable_result_digest(path: Path) -> str | None:
     return None if data is None else sha256_bytes(data)
 
 
+def _bounded_retry_number(value: float) -> float | None:
+    """A retry delay in seconds, within its bound; a bad number is no delay."""
+    if not math.isfinite(value) or value < 0:
+        return None
+    return min(value, float(_MAX_RETRY_AFTER_SECONDS))
+
+
+def _bounded_retry_until(value: datetime, now: datetime) -> float:
+    """The wait until a moment, never negative and never past the bound."""
+    seconds = max(0.0, (_as_utc(value) - now).total_seconds())
+    return min(seconds, float(_MAX_RETRY_AFTER_SECONDS))
+
+
+def _retry_after_from_text(value: str, now: datetime) -> float | None:
+    """A Retry-After header: either a count of seconds or an HTTP date."""
+    stripped = value.strip()
+    if stripped.isdigit():
+        return _bounded_retry_number(float(stripped))
+    try:
+        parsed = email.utils.parsedate_to_datetime(stripped)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return _bounded_retry_until(parsed, now)
+
+
 class MemoryQueue:
     """Durable priority queue with lease-token fencing and at-least-once delivery."""
 
@@ -4914,31 +4939,14 @@ class MemoryQueue:
     def _retry_after_seconds(
         value: float | datetime | str | None, now: datetime
     ) -> float | None:
-        if isinstance(value, int) and not isinstance(value, bool):
-            if value < 0:
-                return None
-            return float(min(value, _MAX_RETRY_AFTER_SECONDS))
-        if isinstance(value, float):
-            if not math.isfinite(value) or value < 0:
-                return None
-            return min(value, float(_MAX_RETRY_AFTER_SECONDS))
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return _bounded_retry_number(float(value))
         if isinstance(value, datetime):
-            seconds = max(0.0, (_as_utc(value) - now).total_seconds())
-            return min(seconds, float(_MAX_RETRY_AFTER_SECONDS))
+            return _bounded_retry_until(value, now)
         if isinstance(value, str):
-            stripped = value.strip()
-            if stripped.isdigit():
-                try:
-                    seconds = int(stripped)
-                except ValueError:
-                    return None
-                return float(min(seconds, _MAX_RETRY_AFTER_SECONDS))
-            try:
-                parsed = email.utils.parsedate_to_datetime(stripped)
-            except (TypeError, ValueError, OverflowError):
-                return None
-            seconds = max(0.0, (_as_utc(parsed) - now).total_seconds())
-            return min(seconds, float(_MAX_RETRY_AFTER_SECONDS))
+            return _retry_after_from_text(value, now)
         return None
 
     @staticmethod
@@ -11308,22 +11316,35 @@ def _scan_legacy_records(
     return valid, malformed
 
 
+def _valid_legacy_id(value: object) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    return re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value) is not None
+
+
+def _valid_legacy_attempts(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return False
+    return value >= 0
+
+
+def _valid_legacy_body(record: Mapping[str, object]) -> bool:
+    """The record names a task type and carries an object payload."""
+    if not isinstance(record.get("type"), str) or not record["type"]:
+        return False
+    return isinstance(record.get("payload"), dict)
+
+
 def _valid_legacy_record(record: object) -> bool:
     if not isinstance(record, dict):
         return False
-    return (
-        isinstance(record.get("id"), str)
-        and bool(record["id"])
-        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", record["id"])
-        is not None
-        and isinstance(record.get("type"), str)
-        and bool(record["type"])
-        and isinstance(record.get("payload"), dict)
-        and isinstance(record.get("attempts", 0), int)
-        and not isinstance(record.get("attempts", 0), bool)
-        and int(record.get("attempts", 0)) >= 0
-        and _safe_legacy_timestamp(record.get("enqueued_at")) is not None
-    )
+    if not _valid_legacy_id(record.get("id")):
+        return False
+    if not _valid_legacy_body(record):
+        return False
+    if not _valid_legacy_attempts(record.get("attempts", 0)):
+        return False
+    return _safe_legacy_timestamp(record.get("enqueued_at")) is not None
 
 
 def _safe_legacy_timestamp(value: object) -> datetime | None:
