@@ -11319,6 +11319,44 @@ def _acquire_queue_owner(
     )
 
 
+def _owner_fence_lost_code(role: str) -> str:
+    """The refusal a role reports when its ownership fence no longer holds."""
+    if role == "migration":
+        return "migration_fence_lost"
+    return "legacy_owner_fence_lost"
+
+
+def _owner_row_holds(
+    row: sqlite3.Row | None, lease: QueueOwnerLease, expiry: datetime | None
+) -> bool:
+    """Whether the stored ownership row is still this lease's, and still alive."""
+    if row is None or expiry is None:
+        return False
+    stored = (row["token"], int(row["epoch"]), row["pid"])
+    if stored != (lease.token, lease.epoch, lease.pid):
+        return False
+    return _pid_is_alive(lease.pid)
+
+
+def _renew_queue_owner(
+    connection: sqlite3.Connection, lease: QueueOwnerLease, now: datetime
+) -> datetime:
+    """Push this lease's expiry out by its full ttl."""
+    expiry = now + timedelta(seconds=lease.ttl_seconds)
+    connection.execute(
+        """UPDATE queue_ownership SET heartbeat_at=?, expires_at=?
+           WHERE role=? AND token=? AND epoch=?""",
+        (
+            _timestamp(now),
+            _timestamp(expiry),
+            lease.role,
+            lease.token,
+            lease.epoch,
+        ),
+    )
+    return expiry
+
+
 def _require_queue_owner(
     connection: sqlite3.Connection,
     lease: QueueOwnerLease,
@@ -11330,31 +11368,11 @@ def _require_queue_owner(
         "SELECT * FROM queue_ownership WHERE role=?", (lease.role,)
     ).fetchone()
     expiry = _parse_timestamp(row["expires_at"]) if row is not None else None
-    if (
-        row is None
-        or row["token"] != lease.token
-        or int(row["epoch"]) != lease.epoch
-        or expiry is None
-        or row["pid"] != lease.pid
-        or not _pid_is_alive(lease.pid)
-    ):
-        code = "migration_fence_lost" if lease.role == "migration" else "legacy_owner_fence_lost"
-        raise QueueOperationError(code)
-    if heartbeat:
-        expiry = now + timedelta(seconds=lease.ttl_seconds)
-        connection.execute(
-            """UPDATE queue_ownership SET heartbeat_at=?, expires_at=?
-               WHERE role=? AND token=? AND epoch=?""",
-            (
-                _timestamp(now),
-                _timestamp(expiry),
-                lease.role,
-                lease.token,
-                lease.epoch,
-            ),
-        )
-    return expiry
-
+    if not _owner_row_holds(row, lease, expiry):
+        raise QueueOperationError(_owner_fence_lost_code(lease.role))
+    if not heartbeat:
+        return expiry
+    return _renew_queue_owner(connection, lease, now)
 
 def _heartbeat_queue_owner(
     lease: QueueOwnerLease, *, now: datetime | None = None
@@ -12489,6 +12507,33 @@ def _run_processor_inline(
     return processor(task)
 
 
+def _encode_processor_outcome(outcome: object) -> bytes:
+    """The wire frame that carries one processor outcome to the parent."""
+    if isinstance(outcome, DeferredResult):
+        return b"D" + outcome.data
+    if isinstance(outcome, bool):
+        return b"T" if outcome else b"F"
+    return b"?"
+
+
+def _processor_result_frame(
+    processor: Callable[[dict], bool | DeferredResult], task: dict[str, Any]
+) -> bytes:
+    """Run the task; a failure is reported as a stable code, never a traceback."""
+    try:
+        return _encode_processor_outcome(processor(task))
+    except Exception:  # noqa: BLE001 - parent receives a stable code only
+        return b"E"
+
+
+def _send_processor_frame(sender: Any, frame: bytes) -> None:
+    """Hand the frame over, but only once the parent says it is listening."""
+    sender.send_bytes(b"R")
+    if not sender.poll(5) or sender.recv_bytes(1) != b"A":
+        return
+    sender.send_bytes(frame)
+
+
 def _processor_child_entry(
     sender: Any,
     processor: Callable[[dict], bool | DeferredResult],
@@ -12497,25 +12542,11 @@ def _processor_child_entry(
     try:
         if os.name != "nt":
             os.setsid()
-        try:
-            outcome = processor(task)
-            if isinstance(outcome, DeferredResult):
-                frame = b"D" + outcome.data
-            elif isinstance(outcome, bool):
-                frame = b"T" if outcome else b"F"
-            else:
-                frame = b"?"
-        except Exception:  # noqa: BLE001 - parent receives a stable code only
-            frame = b"E"
-        sender.send_bytes(b"R")
-        if not sender.poll(5) or sender.recv_bytes(1) != b"A":
-            return
-        sender.send_bytes(frame)
+        _send_processor_frame(sender, _processor_result_frame(processor, task))
     except Exception:  # noqa: BLE001 - parent receives a stable code only
         pass
     finally:
         sender.close()
-
 
 def _kill_process_group(pid: int, sig: int) -> None:
     os.killpg(pid, sig)
@@ -12641,21 +12672,31 @@ def _process_group_alive(group_id: int) -> bool:
         return True
 
 
+def _descendants_alive_in_snapshot(
+    snapshot: Sequence[tuple[int, int, int, str]], descendants: set[int]
+) -> bool:
+    """Whether any tracked descendant is more than a zombie in this snapshot."""
+    states = {pid: state for pid, _ppid, _pgrp, state in snapshot}
+    return any(pid in states and states[pid] != "Z" for pid in descendants)
+
+
+def _descendant_alive(descendants: set[int], *, platform_name: str) -> bool:
+    """Whether any tracked descendant of the worker is still running."""
+    snapshot = _process_snapshot_posix() if platform_name != "nt" else None
+    if snapshot is None:
+        return any(_pid_is_alive(pid) for pid in descendants)
+    return _descendants_alive_in_snapshot(snapshot, descendants)
+
+
 def _cleanup_confirmed(
     process: multiprocessing.Process,
     descendants: set[int],
     *,
     platform_name: str,
 ) -> bool:
-    snapshot = _process_snapshot_posix() if platform_name != "nt" else None
-    if snapshot is None:
-        descendant_alive = any(_pid_is_alive(pid) for pid in descendants)
-    else:
-        states = {pid: state for pid, _ppid, _pgrp, state in snapshot}
-        descendant_alive = any(
-            pid in states and states[pid] != "Z" for pid in descendants
-        )
-    if process.is_alive() or descendant_alive:
+    if process.is_alive():
+        return False
+    if _descendant_alive(descendants, platform_name=platform_name):
         return False
     return platform_name == "nt" or not _process_group_alive(process.pid)
 
