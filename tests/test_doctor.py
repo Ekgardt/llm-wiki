@@ -4245,3 +4245,12 @@ def test_the_pyright_advice_names_what_would_change_the_outcome() -> None:
     assert doctor._pyright_recommended_action([]) == (
         "uv run python scripts/install_pyright.py --state-root <state-root>"
     )
+
+def test_a_vault_that_has_recorded_no_claim_is_healthy(tmp_path) -> None:
+    """A new vault has no claim index, and that is not something to repair."""
+    import doctor
+
+    result = doctor._claim_check(tmp_path, tmp_path)
+
+    assert result["status"] == "ok"
+    assert result["details"]["index"] == "missing"

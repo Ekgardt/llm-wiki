@@ -1938,7 +1938,13 @@ def _claim_check(root: Path, state_root: Path, deadline: float = float("inf")) -
     }
     kind = _safe_kind(path, state_root)[0]
     if kind == "missing":
-        return _result("claims", "degraded", "Claim index is missing.", details)
+        # Nothing has recorded a claim yet, which is what a new vault looks
+        # like. The generation check says the same about a generation that has
+        # not been built; calling this degraded left every fresh install
+        # permanently unhealthy for having done nothing wrong.
+        return _result(
+            "claims", "ok", "No claim has been recorded yet.", details
+        )
     if kind != "regular":
         details.update(index="invalid", read_error=True)
         return _result("claims", "error", "Claim index is unsafe.", details)
