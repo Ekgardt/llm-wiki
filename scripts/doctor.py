@@ -6210,6 +6210,44 @@ def _refreshed_generation(
         return result
 
 
+def _rebuild_after_corpus_change(
+    root_path: Path,
+    state_path: Path,
+    coordinator: object,
+    lease: object,
+    deadline: float,
+    max_sources: int,
+    repaired: list[dict],
+) -> dict:
+    """Capture the vault again, once. A second change defers to the next pass."""
+    try:
+        return _refreshed_generation(
+            root_path,
+            state_path,
+            coordinator,
+            lease,
+            deadline,
+            max_sources,
+            True,
+            repaired,
+        )
+    except _corpus_changed_error():
+        return _maintenance_outcome(
+            "deferred", "corpus_changed", partial=True, repairs=repaired
+        )
+    except TimeoutError:
+        return _maintenance_outcome(
+            "deferred", "time_limit", partial=True, repairs=repaired
+        )
+
+
+def _corpus_changed_error() -> type[BaseException]:
+    """The error a live vault raises when it was written to mid-capture."""
+    from corpus_snapshot import CorpusChanged
+
+    return CorpusChanged
+
+
 def run_generation_maintenance(
     root: Path | str | None = None,
     state_root: Path | str | None = None,
@@ -6252,6 +6290,13 @@ def run_generation_maintenance(
     except TimeoutError:
         return _maintenance_outcome(
             "deferred", "time_limit", partial=True, repairs=repaired
+        )
+    except _corpus_changed_error():
+        # The vault was written to while its snapshot was being validated. That
+        # is the normal state of a vault in use, so it is captured again rather
+        # than deferred: deferring would leave an active vault never refreshed.
+        return _rebuild_after_corpus_change(
+            root_path, state_path, coordinator, lease, deadline, max_sources, repaired
         )
     except ValueError as exc:
         return _value_error_outcome(exc, repaired)

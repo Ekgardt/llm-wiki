@@ -2062,7 +2062,58 @@ def validate_generation_database(
         database.close()
 
 
+# Which exact artifact bytes have already passed the structural pass in this
+# process. The caller proves every artifact against its manifest digest before
+# getting here, so the same bytes can only ever reach the same verdict — and
+# re-deciding it cost about twenty of the twenty-nine seconds a validation took
+# on a 146 MB artifact, four times per search. Tampering changes the digest,
+# which changes the key, so a changed artifact is validated in full again.
+_STRUCTURALLY_VALIDATED: set[str] = set()
+
+
+def _artifact_identity(manifest: Mapping[str, object]) -> str | None:
+    """The exact bytes this manifest binds, as one key, or None if it binds none."""
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list) or not artifacts:
+        return None
+    digests = []
+    for item in artifacts:
+        if not isinstance(item, Mapping):
+            return None
+        path, digest = item.get("path"), item.get("sha256")
+        if not isinstance(path, str) or not isinstance(digest, str):
+            return None
+        digests.append(f"{path}:{digest}")
+    schema = manifest.get("graph_schema_version")
+    return "|".join([str(schema), *sorted(digests)])
+
+
 def validate_generation_artifact(
+    generation_path: Path,
+    manifest: Mapping[str, object],
+    *,
+    state_root: Path,
+    deadline: float | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
+    """Validate one graph artifact already bound by the shared generation manifest."""
+    identity = _artifact_identity(manifest)
+    if identity is not None and identity in _STRUCTURALLY_VALIDATED:
+        return
+    _validate_generation_artifact_uncached(
+        generation_path,
+        manifest,
+        state_root=state_root,
+        deadline=deadline,
+        monotonic=monotonic,
+        cancelled=cancelled,
+    )
+    if identity is not None:
+        _STRUCTURALLY_VALIDATED.add(identity)
+
+
+def _validate_generation_artifact_uncached(
     generation_path: Path,
     manifest: Mapping[str, object],
     *,

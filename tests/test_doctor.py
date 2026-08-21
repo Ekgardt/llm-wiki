@@ -4123,3 +4123,28 @@ def test_a_vault_without_lost_captures_reports_the_capture_check_as_ok(tmp_path)
     assert check["status"] == "ok"
     assert check["details"]["lost"] == 0
     del home
+
+def test_a_vault_written_to_mid_capture_is_captured_again(tmp_path, monkeypatch):
+    """An active vault changes while it is read; deferring would never refresh it."""
+    import doctor
+    from corpus_snapshot import CorpusChanged
+
+    calls: list[bool] = []
+
+    def refresh(root, state, coordinator, lease, deadline, max_sources, force, repaired):
+        calls.append(force)
+        if len(calls) == 1:
+            raise CorpusChanged("live corpus membership or source hashes changed")
+        return {"status": "built", "generation_id": "gen-2"}
+
+    monkeypatch.setattr(doctor, "_refreshed_generation", refresh)
+    monkeypatch.setattr(
+        doctor, "_acquire_maintenance_owner", lambda *a, **k: (object(), object())
+    )
+    monkeypatch.setattr(doctor, "_release_maintenance_owner", lambda *a, **k: None)
+    monkeypatch.setattr(doctor, "_unusable_filesystem_outcome", lambda *a, **k: None)
+
+    result = doctor.run_generation_maintenance(tmp_path, tmp_path, time_budget_seconds=30)
+
+    assert result["status"] == "built"
+    assert calls == [False, True]

@@ -1240,3 +1240,32 @@ def test_database_is_opened_query_only_and_path_must_remain_in_state_root(tmp_pa
 
     with pytest.raises((PermissionError, ValueError)):
         evidence_graph.EvidenceGraph(tmp_path / "evidence.sqlite3", state_root=tmp_path / "other")
+
+def test_the_structural_pass_is_decided_once_per_exact_artifact(monkeypatch, tmp_path):
+    """The caller proves the bytes against the manifest digest before this runs."""
+    import evidence_graph
+
+    calls: list[str] = []
+    monkeypatch.setattr(evidence_graph, "_STRUCTURALLY_VALIDATED", set())
+    monkeypatch.setattr(
+        evidence_graph,
+        "_validate_generation_artifact_uncached",
+        lambda path, manifest, **kwargs: calls.append(str(path)),
+    )
+    manifest = {
+        "graph_schema_version": "evidence-graph/v2",
+        "artifacts": [{"path": "evidence.sqlite3", "sha256": "a" * 64, "size": 1}],
+    }
+
+    for _ in range(4):
+        evidence_graph.validate_generation_artifact(
+            tmp_path, manifest, state_root=tmp_path
+        )
+    assert len(calls) == 1
+
+    changed = {
+        **manifest,
+        "artifacts": [{"path": "evidence.sqlite3", "sha256": "b" * 64, "size": 1}],
+    }
+    evidence_graph.validate_generation_artifact(tmp_path, changed, state_root=tmp_path)
+    assert len(calls) == 2
