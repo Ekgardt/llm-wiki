@@ -120,7 +120,10 @@ def record_capture_failure(
 ) -> None:
     """Record one lost capture. Never raises — diagnostics never break a hook."""
     record = _failure_record(kind, reason, slug, session_id)
-    _append_failure_line(record)
+    try:
+        _append_failure_line(record)
+    except Exception:  # noqa: BLE001 - the counter still records the loss
+        pass
     try:
         update_state(
             lambda state: _bump_counter(state, record),
@@ -142,6 +145,19 @@ def capture_failure_totals(state: dict) -> dict[str, int]:
     }
 
 
+def _trail_pointer() -> str:
+    """Send the reader to the trail only when the trail is actually there.
+
+    The counters live in state.json and the trail is a separate best-effort
+    file. It can be absent — an unwritable reports directory, a state root that
+    moved, ordinary cleanup — and pointing at a file that is not there wastes
+    the one moment the operator is paying attention.
+    """
+    if FAILURE_LOG.is_file():
+        return "see `logs/capture-failures.jsonl`."
+    return "the trail at `logs/capture-failures.jsonl` is missing; reasons are in `run/state.json`."
+
+
 def capture_failure_line(state: dict) -> str:
     """One SessionStart line naming lost captures, empty when nothing was lost."""
     totals = capture_failure_totals(state)
@@ -149,10 +165,7 @@ def capture_failure_line(state: dict) -> str:
     if not lost:
         return ""
     detail = ", ".join(f"{kind} {count}" for kind, count in sorted(totals.items()))
-    return (
-        f"- **Capture**: ⚠️ {lost} capture(s) lost ({detail}) — "
-        f"see `logs/capture-failures.jsonl`."
-    )
+    return f"- **Capture**: ⚠️ {lost} capture(s) lost ({detail}) — {_trail_pointer()}"
 
 
 def _print_summary(state: dict) -> int:

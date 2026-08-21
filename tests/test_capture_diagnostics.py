@@ -145,3 +145,46 @@ def test_session_start_shows_lost_captures(monkeypatch):
     block = session_start_context.metacognitive_block()
 
     assert "2 capture(s) lost" in block
+
+
+def test_the_line_says_so_when_the_trail_is_missing(diagnostics):
+    """The counters live in state.json; the trail is separate and best effort.
+
+    This vault has counters and no trail. Pointing the operator at a file that
+    is not there wastes the one moment they are paying attention.
+    """
+    module, state = diagnostics
+    module.record_capture_failure("mcp_tool", "ValueError: bad path")
+    module.FAILURE_LOG.unlink()
+
+    line = module.capture_failure_line(state)
+
+    assert "is missing" in line
+    assert "run/state.json" in line
+
+
+def test_the_line_points_at_the_trail_when_it_is_there(diagnostics):
+    module, state = diagnostics
+    module.record_capture_failure("mcp_tool", "ValueError: bad path")
+
+    line = module.capture_failure_line(state)
+
+    assert "see `logs/capture-failures.jsonl`." in line
+    assert "missing" not in line
+
+
+def test_a_trail_writer_that_explodes_does_not_break_the_hook(
+    diagnostics, monkeypatch
+):
+    """`record_capture_failure` promises never to raise. The trail writer only
+    catches OSError, and it used to be called outside that promise."""
+    module, state = diagnostics
+
+    def exploding_append(_record):
+        raise RuntimeError("the trail writer itself failed")
+
+    monkeypatch.setattr(module, "_append_failure_line", exploding_append)
+
+    module.record_capture_failure("mcp_tool", "ValueError: bad path")
+
+    assert state["capture_failures"]["mcp_tool"]["count"] == 1
