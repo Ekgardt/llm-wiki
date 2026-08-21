@@ -1,7 +1,9 @@
 """Deterministic retrieval contract: query analysis, profiles, RRF fusion."""
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import queue
 import re
 import threading
@@ -1040,11 +1042,43 @@ _MERGEABLE_META_FIELDS = (
 )
 
 
+# What a citation carries when the digest of its source is genuinely unknown.
+# It satisfies the citation schema's shape, so it has to stay reachable, but it
+# identifies nothing and is only ever used when the file cannot be read.
+_UNKNOWN_DIGEST = "0" * 64
+
+
+def _vault_root() -> Path:
+    """Where the pages a retrieval row names actually live."""
+    configured = os.environ.get("LLM_WIKI_ROOT")
+    if configured:
+        return Path(configured)
+    return Path(__file__).resolve().parent.parent
+
+
+def _digest_of_page(relative_path: str) -> str | None:
+    """The real digest of this page, or None when it cannot be read."""
+    if not relative_path:
+        return None
+    path = _vault_root() / relative_path
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except (OSError, ValueError):
+        return None
+
+
 def _source_sha256(row: Mapping[str, Any]) -> str:
-    sha = row.get("source_sha256") or row.get("sha256") or ("0" * 64)
-    if not isinstance(sha, str) or len(sha) != 64:
-        return "0" * 64
-    return sha
+    """The digest of the row's source.
+
+    The legacy FTS index stores no digest, so a row from it carried sixty-four
+    zeros — a value that passes the citation schema while identifying nothing.
+    The page is right there, so it is hashed instead, and the placeholder is
+    left for the case where the file genuinely cannot be read.
+    """
+    sha = row.get("source_sha256") or row.get("sha256")
+    if isinstance(sha, str) and len(sha) == 64 and sha != _UNKNOWN_DIGEST:
+        return sha
+    return _digest_of_page(_hit_path(row)) or _UNKNOWN_DIGEST
 
 
 def _evidence_ids_of(row: Mapping[str, Any]) -> tuple[str, ...]:
@@ -2826,7 +2860,7 @@ def _base_hit(row: Mapping[str, Any], path: str, score_key: str) -> dict[str, An
         "relative_path": path,
         "path": path,
         "heading_path": _first_present(row, ("heading_path", "heading_ancestry"), ()),
-        "source_sha256": _first_present(row, ("source_sha256",), "0" * 64),
+        "source_sha256": _source_sha256(row),
         "byte_start": int(_first_present(row, ("byte_start",), 0)),
         "byte_end": int(_first_present(row, ("byte_end",), 0)),
         "score": float(_first_present(row, (score_key, "score"), 0.0)),

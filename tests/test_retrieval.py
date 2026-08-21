@@ -598,3 +598,25 @@ def test_the_reranker_keeps_the_trust_weight_on_its_blended_score():
 
     weighted = {item["candidate_id"]: item["final_score"] for item in ranked}
     assert weighted["b"] > weighted["a"]
+
+def test_a_row_without_a_digest_is_hashed_rather_than_given_zeros(tmp_path, monkeypatch):
+    """A citation carrying sixty-four zeros passes the schema and identifies nothing."""
+    import hashlib
+
+    import retrieval
+
+    page = tmp_path / "knowledge" / "notes" / "page.md"
+    page.parent.mkdir(parents=True)
+    page.write_bytes(b"# Page\nBody.\n")
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
+
+    row = {"path": "knowledge/notes/page.md"}
+    assert retrieval._source_sha256(row) == hashlib.sha256(page.read_bytes()).hexdigest()
+
+    # A digest the row already carries is trusted as it stands.
+    carried = {"path": "knowledge/notes/page.md", "source_sha256": "a" * 64}
+    assert retrieval._source_sha256(carried) == "a" * 64
+
+    # A page that cannot be read is the one case the placeholder is for.
+    missing = {"path": "knowledge/notes/gone.md"}
+    assert retrieval._source_sha256(missing) == "0" * 64
