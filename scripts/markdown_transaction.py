@@ -634,6 +634,16 @@ def _repair_partial_coordinator_v3_schema(
 ) -> None:
     if _coordinator_v3_schema_complete(database):
         return
+    _require_unpublished_coordinator(database)
+    objects = _coordinator_schema_objects(database)
+    if not objects or _coordinator_schema_exact(database, objects):
+        return
+    _require_rebuildable_schema(database, objects, allow_populated_rebuild)
+    _drop_coordinator_objects(database, objects)
+
+
+def _require_unpublished_coordinator(database: sqlite3.Connection) -> None:
+    """A published database is never repaired in place."""
     application_id = int(database.execute("PRAGMA application_id").fetchone()[0])
     user_version = int(database.execute("PRAGMA user_version").fetchone()[0])
     if (application_id, user_version) != (0, 0):
@@ -641,236 +651,250 @@ def _repair_partial_coordinator_v3_schema(
             "coordinator_v3_schema_conflict",
             "published coordinator v3 database has an incomplete schema",
         )
-    objects = database.execute(
+
+
+def _coordinator_schema_objects(
+    database: sqlite3.Connection,
+) -> list[tuple[str, str]]:
+    return database.execute(
         """SELECT type, name FROM sqlite_schema
            WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"""
     ).fetchall()
-    if not objects:
-        return
+
+
+def _coordinator_schema_exact(
+    database: sqlite3.Connection, objects: list[tuple[str, str]]
+) -> bool:
     expected = {name: sql for name, sql in _COORDINATOR_V3_TABLE_SQL}
-    exact = all(
+    return all(
         kind == "table"
         and name in expected
         and _coordinator_v3_object_matches(database, str(name), expected[str(name)])
         for kind, name in objects
     )
-    if exact:
+
+
+def _require_rebuildable_schema(
+    database: sqlite3.Connection,
+    objects: list[tuple[str, str]],
+    allow_populated_rebuild: bool,
+) -> None:
+    if allow_populated_rebuild:
         return
-    populated = False
-    for kind, name in objects:
-        if kind != "table":
-            continue
-        try:
-            if database.execute(f'SELECT 1 FROM "{name}" LIMIT 1').fetchone() is not None:
-                populated = True
-                break
-        except sqlite3.DatabaseError:
-            populated = True
-            break
-    if populated and not allow_populated_rebuild:
+    if _coordinator_schema_populated(database, objects):
         raise _coordinator_migration_error(
             "coordinator_v3_source_conflict",
             "fresh coordinator v3 initialization found existing rows",
         )
+
+
+def _coordinator_schema_populated(
+    database: sqlite3.Connection, objects: list[tuple[str, str]]
+) -> bool:
+    """A table that cannot even be read counts as populated: it is not ours."""
+    return any(
+        _table_has_rows(database, str(name)) for kind, name in objects if kind == "table"
+    )
+
+
+def _table_has_rows(database: sqlite3.Connection, name: str) -> bool:
+    try:
+        return (
+            database.execute(f'SELECT 1 FROM "{name}" LIMIT 1').fetchone() is not None
+        )
+    except sqlite3.DatabaseError:
+        return True
+
+
+def _drop_coordinator_objects(
+    database: sqlite3.Connection, objects: list[tuple[str, str]]
+) -> None:
     database.execute("PRAGMA foreign_keys=OFF")
     try:
-        for kind in ("trigger", "index", "view"):
-            keyword = kind.upper()
-            for object_kind, name in reversed(objects):
-                if object_kind == kind:
-                    with begin_immediate(database):
-                        database.execute(f'DROP {keyword} "{name}"')
-        for object_kind, name in reversed(objects):
-            if object_kind == "table":
-                with begin_immediate(database):
-                    database.execute(f'DROP TABLE "{name}"')
+        for kind in ("trigger", "index", "view", "table"):
+            _drop_objects_of_kind(database, objects, kind)
     finally:
-        database.execute("PRAGMA foreign_keys=ON")
-        if database.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
-            raise _coordinator_migration_error(
-                "coordinator_v3_validation_failed",
-                "coordinator v3 candidate did not restore foreign keys",
-            )
+        _restore_foreign_keys(database)
+
+
+def _drop_objects_of_kind(
+    database: sqlite3.Connection, objects: list[tuple[str, str]], kind: str
+) -> None:
+    keyword = kind.upper()
+    for name in _object_names_of_kind(objects, kind):
+        with begin_immediate(database):
+            database.execute(f'DROP {keyword} "{name}"')
+
+
+def _object_names_of_kind(objects: list[tuple[str, str]], kind: str) -> list[str]:
+    return [str(name) for object_kind, name in reversed(objects) if object_kind == kind]
+
+
+def _restore_foreign_keys(database: sqlite3.Connection) -> None:
+    database.execute("PRAGMA foreign_keys=ON")
+    if database.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
+        raise _coordinator_migration_error(
+            "coordinator_v3_validation_failed",
+            "coordinator v3 candidate did not restore foreign keys",
+        )
 
 
 def _coordinator_v2_project_history(
     source: sqlite3.Connection,
 ) -> tuple[list[tuple[object, ...]], list[tuple[object, ...]]]:
-    checkpoint_exists = _coordinator_table_exists(source, "project_checkpoints")
-    attempt_exists = _coordinator_table_exists(source, "project_checkpoint_attempts")
-    checkpoints: list[tuple[object, ...]] = []
-    attempts: list[tuple[object, ...]] = []
-    if checkpoint_exists:
-        expected = _COORDINATOR_V2_COLUMNS["project_checkpoints"]
-        if not set(expected).issubset(_coordinator_table_columns(source, "project_checkpoints")):
-            raise _coordinator_migration_error(
-                "coordinator_v2_checkpoint_history_incomplete",
-                "coordinator v2 checkpoint schema is incomplete",
-            )
-        checkpoints = [
-            tuple(row[column] for column in expected)
-            for row in source.execute(
-                "SELECT * FROM project_checkpoints ORDER BY project, sequence"
-            )
-        ]
-    if attempt_exists:
-        expected = _COORDINATOR_V2_COLUMNS["project_checkpoint_attempts"]
-        if not set(expected).issubset(
-            _coordinator_table_columns(source, "project_checkpoint_attempts")
-        ):
-            raise _coordinator_migration_error(
-                "coordinator_v2_checkpoint_history_incomplete",
-                "coordinator v2 checkpoint attempt schema is incomplete",
-            )
-        attempts = [
-            tuple(row[column] for column in expected)
-            for row in source.execute(
-                """SELECT * FROM project_checkpoint_attempts
-                   ORDER BY project, sequence, attempt_number"""
-            )
-        ]
+    checkpoints = _coordinator_v2_checkpoint_rows(source)
+    attempts = _coordinator_v2_attempt_rows(source)
     if bool(checkpoints) != bool(attempts):
         raise _coordinator_migration_error(
             "coordinator_v2_checkpoint_history_incomplete",
             "coordinator v2 checkpoint and attempt history are incomplete",
         )
-    attempts_by_checkpoint: dict[tuple[object, object], list[tuple[object, ...]]] = {}
+    _require_complete_checkpoint_history(checkpoints, attempts)
+    return checkpoints, attempts
+
+
+def _coordinator_v2_checkpoint_rows(
+    source: sqlite3.Connection,
+) -> list[tuple[object, ...]]:
+    if not _coordinator_table_exists(source, "project_checkpoints"):
+        return []
+    expected = _require_v2_history_columns(
+        source, "project_checkpoints", "coordinator v2 checkpoint schema is incomplete"
+    )
+    return [
+        tuple(row[column] for column in expected)
+        for row in source.execute(
+            "SELECT * FROM project_checkpoints ORDER BY project, sequence"
+        )
+    ]
+
+
+def _coordinator_v2_attempt_rows(
+    source: sqlite3.Connection,
+) -> list[tuple[object, ...]]:
+    if not _coordinator_table_exists(source, "project_checkpoint_attempts"):
+        return []
+    expected = _require_v2_history_columns(
+        source,
+        "project_checkpoint_attempts",
+        "coordinator v2 checkpoint attempt schema is incomplete",
+    )
+    return [
+        tuple(row[column] for column in expected)
+        for row in source.execute(
+            """SELECT * FROM project_checkpoint_attempts
+               ORDER BY project, sequence, attempt_number"""
+        )
+    ]
+
+
+def _require_v2_history_columns(
+    source: sqlite3.Connection, table: str, message: str
+) -> tuple[str, ...]:
+    expected = _COORDINATOR_V2_COLUMNS[table]
+    if not set(expected).issubset(_coordinator_table_columns(source, table)):
+        raise _coordinator_migration_error(
+            "coordinator_v2_checkpoint_history_incomplete", message
+        )
+    return expected
+
+
+def _require_complete_checkpoint_history(
+    checkpoints: list[tuple[object, ...]], attempts: list[tuple[object, ...]]
+) -> None:
+    """Every checkpoint owns its whole attempt lineage, and nothing is orphaned."""
+    by_checkpoint: dict[tuple[object, object], list[tuple[object, ...]]] = {}
     for attempt in attempts:
-        attempts_by_checkpoint.setdefault((attempt[0], attempt[1]), []).append(attempt)
+        by_checkpoint.setdefault((attempt[0], attempt[1]), []).append(attempt)
     for checkpoint in checkpoints:
-        history = attempts_by_checkpoint.pop((checkpoint[0], checkpoint[1]), [])
-        current_attempt = checkpoint[8]
-        if (
-            type(current_attempt) is not int
-            or current_attempt < 1
-            or [attempt[2] for attempt in history] != list(range(1, current_attempt + 1))
-        ):
-            raise _coordinator_migration_error(
-                "coordinator_v2_checkpoint_history_incomplete",
-                "coordinator v2 checkpoint attempts are not complete",
-            )
-        for position, attempt in enumerate(history):
-            if not isinstance(attempt[9], str) or not attempt[9]:
-                raise _coordinator_migration_error(
-                    "coordinator_v2_checkpoint_history_incomplete",
-                    "coordinator v2 checkpoint attempt lacks its original timestamp",
-                )
-            expected_parent = None if position == 0 else history[position - 1][3]
-            if attempt[4] != expected_parent or (
-                position < len(history) - 1 and attempt[8] != "quarantined"
-            ):
-                raise _coordinator_migration_error(
-                    "coordinator_v2_checkpoint_history_incomplete",
-                    "coordinator v2 checkpoint attempt lineage is inconsistent",
-                )
-        latest = history[-1]
-        if (
-            checkpoint[7],
-            checkpoint[9],
-            checkpoint[5],
-            checkpoint[6],
-            checkpoint[10],
-            checkpoint[11],
-        ) != (latest[3], latest[4], latest[5], latest[6], latest[7], latest[8]):
-            raise _coordinator_migration_error(
-                "coordinator_v2_checkpoint_history_incomplete",
-                "coordinator v2 checkpoint does not match its latest attempt",
-            )
-    if attempts_by_checkpoint:
+        history = by_checkpoint.pop((checkpoint[0], checkpoint[1]), [])
+        _require_checkpoint_attempts(checkpoint, history)
+    if by_checkpoint:
         raise _coordinator_migration_error(
             "coordinator_v2_checkpoint_history_incomplete",
             "coordinator v2 attempt history has no checkpoint",
         )
-    return checkpoints, attempts
+
+
+def _require_checkpoint_attempts(
+    checkpoint: tuple[object, ...], history: list[tuple[object, ...]]
+) -> None:
+    _require_attempt_numbering(checkpoint, history)
+    for position, attempt in enumerate(history):
+        _require_attempt_lineage(position, attempt, history)
+    _require_checkpoint_matches_latest(checkpoint, history[-1])
+
+
+def _require_attempt_numbering(
+    checkpoint: tuple[object, ...], history: list[tuple[object, ...]]
+) -> None:
+    current_attempt = checkpoint[8]
+    if (
+        type(current_attempt) is not int
+        or current_attempt < 1
+        or [attempt[2] for attempt in history] != list(range(1, current_attempt + 1))
+    ):
+        raise _coordinator_migration_error(
+            "coordinator_v2_checkpoint_history_incomplete",
+            "coordinator v2 checkpoint attempts are not complete",
+        )
+
+
+def _require_attempt_lineage(
+    position: int, attempt: tuple[object, ...], history: list[tuple[object, ...]]
+) -> None:
+    _require_attempt_timestamp(attempt)
+    expected_parent = None if position == 0 else history[position - 1][3]
+    if attempt[4] != expected_parent or _unquarantined_middle(position, attempt, history):
+        raise _coordinator_migration_error(
+            "coordinator_v2_checkpoint_history_incomplete",
+            "coordinator v2 checkpoint attempt lineage is inconsistent",
+        )
+
+
+def _require_attempt_timestamp(attempt: tuple[object, ...]) -> None:
+    if not isinstance(attempt[9], str) or not attempt[9]:
+        raise _coordinator_migration_error(
+            "coordinator_v2_checkpoint_history_incomplete",
+            "coordinator v2 checkpoint attempt lacks its original timestamp",
+        )
+
+
+def _unquarantined_middle(
+    position: int, attempt: tuple[object, ...], history: list[tuple[object, ...]]
+) -> bool:
+    """Every attempt but the last must have been quarantined."""
+    return position < len(history) - 1 and attempt[8] != "quarantined"
+
+
+def _require_checkpoint_matches_latest(
+    checkpoint: tuple[object, ...], latest: tuple[object, ...]
+) -> None:
+    if (
+        checkpoint[7],
+        checkpoint[9],
+        checkpoint[5],
+        checkpoint[6],
+        checkpoint[10],
+        checkpoint[11],
+    ) != (latest[3], latest[4], latest[5], latest[6], latest[7], latest[8]):
+        raise _coordinator_migration_error(
+            "coordinator_v2_checkpoint_history_incomplete",
+            "coordinator v2 checkpoint does not match its latest attempt",
+        )
 
 
 def _coordinator_v2_rows(
     source: sqlite3.Connection,
 ) -> tuple[dict[str, list[tuple[object, ...]]], dict[str, int]]:
-    for table in ("project_leases", "writer_owners", "maintenance_owners"):
-        if _coordinator_table_exists(source, table) and source.execute(
-            f'SELECT 1 FROM "{table}" LIMIT 1'
-        ).fetchone() is not None:
-            raise _coordinator_migration_error(
-                "coordinator_v2_ambiguous_ownership",
-                "coordinator v2 contains ownership that cannot be canonicalized",
-            )
-    transaction_columns = _coordinator_table_columns(source, "transaction")
-    required_transactions = _COORDINATOR_V2_COLUMNS["transaction"][:8]
-    if not set(required_transactions).issubset(transaction_columns):
-        raise _coordinator_migration_error(
-            "coordinator_v2_schema_incomplete",
-            "coordinator v2 transaction schema is incomplete",
-        )
-    transaction_select = tuple(
-        column if column in transaction_columns else f"NULL AS {column}"
-        for column in _COORDINATOR_V2_COLUMNS["transaction"]
-    )
-    transaction_rows = [
-        tuple(row)
-        for row in source.execute(
-            f'SELECT {", ".join(transaction_select)} FROM "transaction" ORDER BY id'
-        )
-    ]
-    allowed_states = {
-        "preparing",
-        "prepared",
-        "applying",
-        "committed",
-        "discarded",
-        "conflicted",
-        "quarantined",
-    }
-    if any(row[3] not in allowed_states for row in transaction_rows):
-        raise _coordinator_migration_error(
-            "coordinator_v2_transaction_invalid",
-            "coordinator v2 transaction state is invalid",
-        )
-    operation_columns = _COORDINATOR_V2_COLUMNS["operation"]
-    if not set(operation_columns).issubset(
-        _coordinator_table_columns(source, "operation")
-    ):
-        raise _coordinator_migration_error(
-            "coordinator_v2_schema_incomplete",
-            "coordinator v2 operation schema is incomplete",
-        )
-    operation_rows = [
-        tuple(row[column] for column in operation_columns)
-        for row in source.execute(
-            'SELECT * FROM "operation" ORDER BY transaction_id, position'
-        )
-    ]
+    _require_no_v2_ownership(source)
+    transaction_rows = _coordinator_v2_transaction_rows(source)
+    operation_rows = _coordinator_v2_operation_rows(source)
     transaction_ids = {row[0] for row in transaction_rows}
-    if any(
-        row[0] not in transaction_ids
-        or row[2] not in {"create", "replace", "delete"}
-        or row[6] is None
-        or row[7] is None
-        or row[8] not in {0, 1}
-        for row in operation_rows
-    ):
-        raise _coordinator_migration_error(
-            "coordinator_v2_operation_invalid",
-            "coordinator v2 operation history is incomplete",
-        )
+    _require_v2_operations_bound(operation_rows, transaction_ids)
     checkpoints, attempts = _coordinator_v2_project_history(source)
-    if any(row[10] is not None and row[10] not in transaction_ids for row in checkpoints):
-        raise _coordinator_migration_error(
-            "coordinator_v2_checkpoint_history_incomplete",
-            "coordinator v2 checkpoint transaction is missing",
-        )
-    writer_fences: list[tuple[object, ...]] = []
-    if _coordinator_table_exists(source, "writer_fences"):
-        columns = _COORDINATOR_V2_COLUMNS["writer_fences"]
-        if not set(columns).issubset(_coordinator_table_columns(source, "writer_fences")):
-            raise _coordinator_migration_error(
-                "coordinator_v2_schema_incomplete",
-                "coordinator v2 writer fence schema is incomplete",
-            )
-        writer_fences = [
-            tuple(row[column] for column in columns)
-            for row in source.execute("SELECT * FROM writer_fences ORDER BY gate_name")
-        ]
+    _require_v2_checkpoint_transactions(checkpoints, transaction_ids)
+    writer_fences = _coordinator_v2_fence_rows(source)
     rows = {
         "transaction": transaction_rows,
         "operation": operation_rows,
@@ -886,6 +910,136 @@ def _coordinator_v2_rows(
         "writer_fences": len(writer_fences),
     }
     return rows, summary
+
+
+_V2_OWNERSHIP_TABLES = ("project_leases", "writer_owners", "maintenance_owners")
+
+_V2_TRANSACTION_STATES = frozenset(
+    {
+        "preparing",
+        "prepared",
+        "applying",
+        "committed",
+        "discarded",
+        "conflicted",
+        "quarantined",
+    }
+)
+
+
+def _require_no_v2_ownership(source: sqlite3.Connection) -> None:
+    """Live ownership cannot be canonicalized, so it must not be carried over."""
+    if any(_v2_table_populated(source, table) for table in _V2_OWNERSHIP_TABLES):
+        raise _coordinator_migration_error(
+            "coordinator_v2_ambiguous_ownership",
+            "coordinator v2 contains ownership that cannot be canonicalized",
+        )
+
+
+def _v2_table_populated(source: sqlite3.Connection, table: str) -> bool:
+    if not _coordinator_table_exists(source, table):
+        return False
+    return source.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone() is not None
+
+
+def _coordinator_v2_transaction_rows(
+    source: sqlite3.Connection,
+) -> list[tuple[object, ...]]:
+    columns = _coordinator_table_columns(source, "transaction")
+    if not set(_COORDINATOR_V2_COLUMNS["transaction"][:8]).issubset(columns):
+        raise _coordinator_migration_error(
+            "coordinator_v2_schema_incomplete",
+            "coordinator v2 transaction schema is incomplete",
+        )
+    select = ", ".join(_v2_transaction_select(columns))
+    rows = [
+        tuple(row)
+        for row in source.execute(f'SELECT {select} FROM "transaction" ORDER BY id')
+    ]
+    _require_v2_transaction_states(rows)
+    return rows
+
+
+def _v2_transaction_select(columns: object) -> list[str]:
+    """A column the source never had is selected as NULL, not skipped."""
+    return [
+        column if column in columns else f"NULL AS {column}"
+        for column in _COORDINATOR_V2_COLUMNS["transaction"]
+    ]
+
+
+def _require_v2_transaction_states(rows: list[tuple[object, ...]]) -> None:
+    if any(row[3] not in _V2_TRANSACTION_STATES for row in rows):
+        raise _coordinator_migration_error(
+            "coordinator_v2_transaction_invalid",
+            "coordinator v2 transaction state is invalid",
+        )
+
+
+def _coordinator_v2_operation_rows(
+    source: sqlite3.Connection,
+) -> list[tuple[object, ...]]:
+    columns = _COORDINATOR_V2_COLUMNS["operation"]
+    if not set(columns).issubset(_coordinator_table_columns(source, "operation")):
+        raise _coordinator_migration_error(
+            "coordinator_v2_schema_incomplete",
+            "coordinator v2 operation schema is incomplete",
+        )
+    return [
+        tuple(row[column] for column in columns)
+        for row in source.execute(
+            'SELECT * FROM "operation" ORDER BY transaction_id, position'
+        )
+    ]
+
+
+def _require_v2_operations_bound(
+    rows: list[tuple[object, ...]], transaction_ids: set[object]
+) -> None:
+    if any(_v2_operation_invalid(row, transaction_ids) for row in rows):
+        raise _coordinator_migration_error(
+            "coordinator_v2_operation_invalid",
+            "coordinator v2 operation history is incomplete",
+        )
+
+
+def _v2_operation_invalid(
+    row: tuple[object, ...], transaction_ids: set[object]
+) -> bool:
+    if row[0] not in transaction_ids:
+        return True
+    if row[2] not in {"create", "replace", "delete"}:
+        return True
+    return row[6] is None or row[7] is None or row[8] not in {0, 1}
+
+
+def _require_v2_checkpoint_transactions(
+    checkpoints: list[tuple[object, ...]], transaction_ids: set[object]
+) -> None:
+    if any(
+        row[10] is not None and row[10] not in transaction_ids for row in checkpoints
+    ):
+        raise _coordinator_migration_error(
+            "coordinator_v2_checkpoint_history_incomplete",
+            "coordinator v2 checkpoint transaction is missing",
+        )
+
+
+def _coordinator_v2_fence_rows(
+    source: sqlite3.Connection,
+) -> list[tuple[object, ...]]:
+    if not _coordinator_table_exists(source, "writer_fences"):
+        return []
+    columns = _COORDINATOR_V2_COLUMNS["writer_fences"]
+    if not set(columns).issubset(_coordinator_table_columns(source, "writer_fences")):
+        raise _coordinator_migration_error(
+            "coordinator_v2_schema_incomplete",
+            "coordinator v2 writer fence schema is incomplete",
+        )
+    return [
+        tuple(row[column] for column in columns)
+        for row in source.execute("SELECT * FROM writer_fences ORDER BY gate_name")
+    ]
 
 
 def _coordinator_v3_insert_statement(
@@ -2203,6 +2357,75 @@ def _require_bytes(content: bytes) -> bytes:
     if not isinstance(content, bytes):
         raise TypeError("Markdown content must be bytes")
     return content
+
+
+class _TargetBoundaryChanged(Exception):
+    """A target's parent identity changed; recovery stops and quarantines."""
+
+
+_UNAVAILABLE = object()
+
+
+def _inverse_kind(before_hash: str, after_hash: str) -> str:
+    """Undoing a create is a delete, and undoing a delete is a create."""
+    if before_hash == ABSENT:
+        return "delete"
+    if after_hash == ABSENT:
+        return "create"
+    return "replace"
+
+
+def _before_artifact(root: Path, transaction_id: str, position: object) -> Path:
+    return root / transaction_id / "before" / f"{int(position):06d}.bin"
+
+
+def _before_state(root: Path, transaction_id: str, row: sqlite3.Row) -> object:
+    """The undo image for one operation; ABSENT when there was nothing there."""
+    if row["before_hash"] == ABSENT:
+        return ABSENT
+    content = _before_artifact(root, transaction_id, row["position"]).read_bytes()
+    if sha256_bytes(content) != row["before_hash"]:
+        raise RuntimeError(
+            f"transaction before-image is corrupt for {row['path']}"
+        )
+    return {
+        "sha256": row["before_hash"],
+        "artifact": f"before/{int(row['position']):06d}.bin",
+    }
+
+
+def _optional_before_state(
+    root: Path, transaction_id: str, row: sqlite3.Row
+) -> object:
+    """_UNAVAILABLE means the undo image is missing or corrupt, so skip it."""
+    try:
+        return _before_state(root, transaction_id, row)
+    except (OSError, RuntimeError):
+        return _UNAVAILABLE
+
+
+def _inverse_operation(transaction_id: str, row: sqlite3.Row) -> dict[str, object]:
+    return {
+        "transaction_id": transaction_id,
+        "position": row["position"],
+        "kind": _inverse_kind(row["before_hash"], row["after_hash"]),
+        "path": row["path"],
+        "before_hash": row["after_hash"],
+        "after_hash": row["before_hash"],
+        "parent_device": row["parent_device"],
+        "parent_inode": row["parent_inode"],
+    }
+
+
+def _undoable(
+    row: sqlite3.Row,
+    before_states: dict[int, object],
+    current_hashes: dict[int, str],
+) -> bool:
+    position = row["position"]
+    if not row["applied"] or position not in before_states:
+        return False
+    return current_hashes[position] == row["after_hash"]
 
 
 def _is_transient_writer_contention(error: BaseException) -> bool:
@@ -4701,28 +4924,10 @@ class MarkdownCoordinator:
         for row in reversed(changed):
             if self._operation_hash(row) != row["after_hash"]:
                 continue
-            before_state: object = ABSENT
-            if row["before_hash"] != ABSENT:
-                artifact = (
-                    self.transaction_root
-                    / transaction_id
-                    / "before"
-                    / f"{row['position']:06d}.bin"
-                )
-                content = artifact.read_bytes()
-                if sha256_bytes(content) != row["before_hash"]:
-                    raise RuntimeError(f"transaction before-image is corrupt for {row['path']}")
-                before_state = {
-                    "sha256": row["before_hash"],
-                    "artifact": f"before/{row['position']:06d}.bin",
-                }
+            before_state = _before_state(self.transaction_root, transaction_id, row)
             inverse = dict(row)
             inverse.update(
-                kind="delete"
-                if row["before_hash"] == ABSENT
-                else "create"
-                if row["after_hash"] == ABSENT
-                else "replace",
+                kind=_inverse_kind(row["before_hash"], row["after_hash"]),
                 before_hash=row["after_hash"],
                 after_hash=row["before_hash"],
             )
@@ -5221,50 +5426,40 @@ class MarkdownCoordinator:
             return self._recover_selected(max_transactions, deadline, cancelled)
 
     def _recover_aborting(self, transaction_id: str) -> None:
-        rows = self._operation_rows(transaction_id)
         error_code = "abort_receipt_pending"
-        for operation in reversed(rows):
-            current = self._operation_hash(operation)
-            if current == operation["before_hash"]:
-                continue
-            if current != operation["after_hash"]:
-                error_code = "abort_target_conflict"
+        for operation in reversed(self._operation_rows(transaction_id)):
+            outcome = self._restore_aborted_operation(transaction_id, operation)
+            if outcome is not None:
+                error_code = outcome
                 break
-            before_state: object = ABSENT
-            if operation["before_hash"] != ABSENT:
-                artifact = (
-                    self.transaction_root
-                    / transaction_id
-                    / "before"
-                    / f"{int(operation['position']):06d}.bin"
-                )
-                try:
-                    content = artifact.read_bytes()
-                except OSError:
-                    error_code = "abort_before_image_corrupt"
-                    break
-                if sha256_bytes(content) != operation["before_hash"]:
-                    error_code = "abort_before_image_corrupt"
-                    break
-                before_state = {
-                    "sha256": operation["before_hash"],
-                    "artifact": f"before/{int(operation['position']):06d}.bin",
-                }
-            inverse = dict(operation)
-            inverse.update(
-                kind="delete"
-                if operation["before_hash"] == ABSENT
-                else "create"
-                if operation["after_hash"] == ABSENT
-                else "replace",
-                before_hash=operation["after_hash"],
-                after_hash=operation["before_hash"],
-            )
-            self._apply_operation(inverse, {"after": before_state})
-            self._require_operation_state(
-                inverse, operation["before_hash"], "restored state"
-            )
         self._set_transaction_state(transaction_id, "aborting", error_code=error_code)
+
+    def _restore_aborted_operation(
+        self, transaction_id: str, operation: sqlite3.Row
+    ) -> str | None:
+        """None means this operation is settled; a code means recovery stopped."""
+        current = self._operation_hash(operation)
+        if current == operation["before_hash"]:
+            return None
+        if current != operation["after_hash"]:
+            return "abort_target_conflict"
+        try:
+            before_state = _before_state(
+                self.transaction_root, transaction_id, operation
+            )
+        except (OSError, RuntimeError):
+            return "abort_before_image_corrupt"
+        inverse = dict(operation)
+        inverse.update(
+            kind=_inverse_kind(operation["before_hash"], operation["after_hash"]),
+            before_hash=operation["after_hash"],
+            after_hash=operation["before_hash"],
+        )
+        self._apply_operation(inverse, {"after": before_state})
+        self._require_operation_state(
+            inverse, operation["before_hash"], "restored state"
+        )
+        return None
 
     def _validate_aborted(self, transaction_id: str) -> None:
         with self._connect() as database:
@@ -5575,76 +5770,64 @@ class MarkdownCoordinator:
         return value
 
     def _rollback_for_quarantine(self, transaction_id: str, error_code: str) -> None:
-        for row in self._operation_rows(transaction_id):
-            if not row["applied"]:
-                continue
-            try:
-                current = self._operation_hash(row)
-            except (OSError, RuntimeError, ValueError) as exc:
-                if _is_target_boundary_error(exc):
-                    self._set_transaction_state(
-                        transaction_id,
-                        "quarantined",
-                        error_code="parent_identity_changed",
-                    )
-                    return
-                raise
-            if current != row["after_hash"]:
-                continue
-            before_state: object = ABSENT
-            if row["before_hash"] != ABSENT:
-                artifact = (
-                    self.transaction_root
-                    / transaction_id
-                    / "before"
-                    / f"{row['position']:06d}.bin"
-                )
-                try:
-                    content = artifact.read_bytes()
-                except OSError:
-                    continue
-                if sha256_bytes(content) != row["before_hash"]:
-                    continue
-                before_state = {
-                    "sha256": row["before_hash"],
-                    "artifact": f"before/{row['position']:06d}.bin",
-                }
-            inverse = {
-                "transaction_id": transaction_id,
-                "position": row["position"],
-                "kind": "delete"
-                if row["before_hash"] == ABSENT
-                else "create"
-                if row["after_hash"] == ABSENT
-                else "replace",
-                "path": row["path"],
-                "before_hash": row["after_hash"],
-                "after_hash": row["before_hash"],
-                "parent_device": row["parent_device"],
-                "parent_inode": row["parent_inode"],
-            }
-            try:
-                self._apply_inverse_under_fence(inverse, before_state)
-            except (OSError, RuntimeError, ValueError) as exc:
-                if _is_target_boundary_error(exc):
-                    self._set_transaction_state(
-                        transaction_id,
-                        "quarantined",
-                        error_code="parent_identity_changed",
-                    )
-                    return
-                continue
-            with self._connect() as database, begin_immediate(
-                database, before_commit=self._require_current_operation_active
-            ):
-                database.execute(
-                    'UPDATE "operation" SET applied = 0 '
-                    "WHERE transaction_id = ? AND position = ?",
-                    (transaction_id, row["position"]),
-                )
+        try:
+            for row in self._operation_rows(transaction_id):
+                if row["applied"]:
+                    self._rollback_one_operation(transaction_id, row)
+        except _TargetBoundaryChanged:
+            self._set_transaction_state(
+                transaction_id, "quarantined", error_code="parent_identity_changed"
+            )
+            return
         self._set_transaction_state(
             transaction_id, "quarantined", error_code=error_code
         )
+
+    def _rollback_one_operation(self, transaction_id: str, row: sqlite3.Row) -> None:
+        """An operation that cannot be rolled back is left as it stands."""
+        current = self._boundary_checked_hash(row)
+        if current != row["after_hash"]:
+            return
+        before_state = _optional_before_state(
+            self.transaction_root, transaction_id, row
+        )
+        if before_state is _UNAVAILABLE:
+            return
+        if not self._try_apply_inverse(transaction_id, row, before_state):
+            return
+        self._mark_operation_unapplied(transaction_id, row["position"])
+
+    def _boundary_checked_hash(self, row: sqlite3.Row) -> str:
+        try:
+            return self._operation_hash(row)
+        except (OSError, RuntimeError, ValueError) as exc:
+            if not _is_target_boundary_error(exc):
+                raise
+            raise _TargetBoundaryChanged from exc
+
+    def _try_apply_inverse(
+        self, transaction_id: str, row: sqlite3.Row, before_state: object
+    ) -> bool:
+        """False means this one could not be undone; the parent changing raises."""
+        try:
+            self._apply_inverse_under_fence(
+                _inverse_operation(transaction_id, row), before_state
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            if _is_target_boundary_error(exc):
+                raise _TargetBoundaryChanged from exc
+            return False
+        return True
+
+    def _mark_operation_unapplied(self, transaction_id: str, position: int) -> None:
+        with self._connect() as database, begin_immediate(
+            database, before_commit=self._require_current_operation_active
+        ):
+            database.execute(
+                'UPDATE "operation" SET applied = 0 '
+                "WHERE transaction_id = ? AND position = ?",
+                (transaction_id, position),
+            )
 
     def _apply_inverse_under_fence(
         self, inverse: Mapping[str, object], before_state: object
@@ -5656,92 +5839,78 @@ class MarkdownCoordinator:
             self._apply_operation(inverse, {"after": before_state})
 
     def _recover_corrupt_after_image(self, transaction_id: str) -> TransactionRecord:
+        """Undo what can be explained; anything else leaves the transaction dirty."""
         rows = self._operation_rows(transaction_id)
-        before_states: dict[int, object] = {}
-        current_hashes: dict[int, str] = {}
-        ambiguous = False
-        for row in rows:
-            try:
-                current = self._operation_hash(row)
-            except (OSError, RuntimeError, ValueError) as exc:
-                if _is_target_boundary_error(exc):
-                    self._set_transaction_state(
-                        transaction_id,
-                        "quarantined",
-                        error_code="parent_identity_changed",
-                    )
-                    return self._record(transaction_id)
-                raise
-            current_hashes[row["position"]] = current
-            if current not in {row["before_hash"], row["after_hash"]}:
-                ambiguous = True
-                continue
-            if not row["applied"]:
-                if current == row["after_hash"]:
-                    ambiguous = True
-                continue
-            if current == row["before_hash"]:
-                continue
-            if row["before_hash"] == ABSENT:
-                before_states[row["position"]] = ABSENT
-                continue
-            artifact = (
-                self.transaction_root
-                / transaction_id
-                / "before"
-                / f"{row['position']:06d}.bin"
+        try:
+            before_states, current_hashes, ambiguous = self._undo_images(
+                transaction_id, rows
             )
-            try:
-                content = artifact.read_bytes()
-            except OSError:
-                content = b""
-            if sha256_bytes(content) != row["before_hash"]:
-                ambiguous = True
-                continue
-            before_states[row["position"]] = {
-                "sha256": row["before_hash"],
-                "artifact": f"before/{row['position']:06d}.bin",
-            }
-
-        for row in rows:
-            position = row["position"]
-            if (
-                not row["applied"]
-                or current_hashes[position] != row["after_hash"]
-                or position not in before_states
-            ):
-                continue
-            inverse = {
-                "transaction_id": transaction_id,
-                "position": row["position"],
-                "kind": "delete"
-                if row["before_hash"] == ABSENT
-                else "create"
-                if row["after_hash"] == ABSENT
-                else "replace",
-                "path": row["path"],
-                "before_hash": row["after_hash"],
-                "after_hash": row["before_hash"],
-                "parent_device": row["parent_device"],
-                "parent_inode": row["parent_inode"],
-            }
-            try:
-                self._apply_inverse_under_fence(inverse, before_states[position])
-            except (OSError, RuntimeError, ValueError) as exc:
-                if _is_target_boundary_error(exc):
-                    self._set_transaction_state(
-                        transaction_id,
-                        "quarantined",
-                        error_code="parent_identity_changed",
-                    )
-                    return self._record(transaction_id)
-                ambiguous = True
+            ambiguous = self._undo_applied_operations(
+                transaction_id, rows, before_states, current_hashes, ambiguous
+            )
+        except _TargetBoundaryChanged:
+            self._set_transaction_state(
+                transaction_id, "quarantined", error_code="parent_identity_changed"
+            )
+            return self._record(transaction_id)
         self._set_transaction_state(
             transaction_id,
             "quarantined" if ambiguous else "discarded",
             error_code="after_image_corrupt",
         )
         return self._record(transaction_id)
+
+    def _undo_images(
+        self, transaction_id: str, rows: Sequence[sqlite3.Row]
+    ) -> tuple[dict[int, object], dict[int, str], bool]:
+        before_states: dict[int, object] = {}
+        current_hashes: dict[int, str] = {}
+        ambiguous = False
+        for row in rows:
+            current = self._boundary_checked_hash(row)
+            current_hashes[row["position"]] = current
+            if not self._collect_undo_image(
+                transaction_id, row, current, before_states
+            ):
+                ambiguous = True
+        return before_states, current_hashes, ambiguous
+
+    def _collect_undo_image(
+        self,
+        transaction_id: str,
+        row: sqlite3.Row,
+        current: str,
+        before_states: dict[int, object],
+    ) -> bool:
+        """False marks an operation whose current state cannot be explained."""
+        if current not in {row["before_hash"], row["after_hash"]}:
+            return False
+        if not row["applied"]:
+            return current != row["after_hash"]
+        if current == row["before_hash"]:
+            return True
+        state = _optional_before_state(self.transaction_root, transaction_id, row)
+        if state is _UNAVAILABLE:
+            return False
+        before_states[row["position"]] = state
+        return True
+
+    def _undo_applied_operations(
+        self,
+        transaction_id: str,
+        rows: Sequence[sqlite3.Row],
+        before_states: dict[int, object],
+        current_hashes: dict[int, str],
+        ambiguous: bool,
+    ) -> bool:
+        for row in rows:
+            if not _undoable(row, before_states, current_hashes):
+                continue
+            if not self._try_apply_inverse(
+                transaction_id, row, before_states[row["position"]]
+            ):
+                ambiguous = True
+        return ambiguous
 
     def undo(
         self,
