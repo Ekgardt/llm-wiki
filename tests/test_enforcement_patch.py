@@ -54,9 +54,18 @@ def installed_gate():
     return CHECKERS.read_text(encoding="utf-8"), POLICY.read_text(encoding="utf-8")
 
 
-def test_the_anchor_still_matches_the_installed_checkers(patcher, installed_gate):
+@pytest.fixture(scope="module")
+def unpatched_gate(installed_gate):
+    """The gate before the change. Skips once the change is in place."""
+    checkers_text, policy_text = installed_gate
+    if "_bash_write_targets" in checkers_text:
+        pytest.skip("the change is already applied")
+    return checkers_text, policy_text
+
+
+def test_the_anchor_still_matches_the_installed_checkers(patcher, unpatched_gate):
     """A patch written against a different version must refuse, not half-apply."""
-    checkers_text, _policy_text = installed_gate
+    checkers_text, _policy_text = unpatched_gate
 
     patched = patcher._patched_checkers(checkers_text)
 
@@ -64,9 +73,9 @@ def test_the_anchor_still_matches_the_installed_checkers(patcher, installed_gate
     ast.parse(patched)
 
 
-def test_the_patched_checkers_carry_the_resolver(patcher, installed_gate):
+def test_the_patched_checkers_carry_the_resolver(patcher, unpatched_gate):
     """Widening the policy alone changes nothing without a target for Bash."""
-    checkers_text, _policy_text = installed_gate
+    checkers_text, _policy_text = unpatched_gate
 
     patched = patcher._patched_checkers(checkers_text)
 
@@ -74,11 +83,15 @@ def test_the_patched_checkers_carry_the_resolver(patcher, installed_gate):
 
 
 def test_applying_twice_is_refused(patcher, installed_gate):
-    """Running it again must not stack a second copy of the resolver."""
-    checkers_text, _policy_text = installed_gate
-    patched = patcher._patched_checkers(checkers_text)
+    """Running it again must not stack a second copy of the resolver.
 
-    assert patcher._patched_checkers(patched or "") is None
+    Holds from either side: against the gate as it stands once the change is
+    applied, and against the patched text before it is.
+    """
+    checkers_text, _policy_text = installed_gate
+    once = patcher._patched_checkers(checkers_text) or checkers_text
+
+    assert patcher._patched_checkers(once) is None
 
 
 def test_the_three_rules_take_bash(patcher, installed_gate):
