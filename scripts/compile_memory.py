@@ -408,6 +408,19 @@ def _subset_compile_inputs(
     return CompileInputs(selected, tuple(sorted((*selected_sources, *context), key=lambda item: item.logical_path)), inputs.targets)
 
 
+def _record_oversized_daily(logical_path: str) -> None:
+    """Leave a durable trace of a daily log the compiler cannot take as one piece."""
+    try:
+        from capture_diagnostics import record_capture_failure
+
+        record_capture_failure(
+            "compile_oversized_daily",
+            f"{logical_path} exceeds the compile input budget and was not compiled",
+        )
+    except Exception:  # noqa: BLE001 - diagnostics never break a compile
+        pass
+
+
 def pack_compile_batches(
     inputs: CompileInputs,
     *,
@@ -437,7 +450,11 @@ def pack_compile_batches(
     for daily in inputs.dailies:
         singleton = {daily.logical_path}
         if measured(singleton) > budget.available_input_tokens:
-            raise ValueError("daily source exceeds compile input budget")
+            # One oversized log used to fail the whole pass, so a single long
+            # session left every other day uncompiled too. It is left where it
+            # is, recorded, and the rest of the vault still compiles.
+            _record_oversized_daily(daily.logical_path)
+            continue
         prospective = {*current_paths, daily.logical_path}
         if current_paths and measured(prospective) > budget.available_input_tokens:
             batches.append(_compile_batch(inputs, current_paths, budget, model, token_adapters))
@@ -2108,6 +2125,22 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+# A daily log is `YYYY-MM-DD.md`. The directory also ships a README, and the
+# lint and the session-start context already filter on this name; compile did
+# not, so that one file entered the candidate list and failed the whole pass
+# on `logical_path must name a canonical daily source`.
+DAILY_LOG_NAME = re.compile(r"\d{4}-\d{2}-\d{2}\.md")
+
+
+def _canonical_dailies() -> list[Path]:
+    """Every daily log in the vault, and nothing else that lives beside them."""
+    return sorted(
+        path
+        for path in DAILY_DIR.glob("*.md")
+        if DAILY_LOG_NAME.fullmatch(path.name) is not None
+    )
+
+
 def select_dailies(
     args: argparse.Namespace,
     state: dict,
@@ -2131,7 +2164,7 @@ def select_dailies(
             logical_path, sha256_bytes(content), coordinator
         )
         return [] if receipt is not None else [path]
-    all_dailies = sorted(DAILY_DIR.glob("*.md"))
+    all_dailies = _canonical_dailies()
     changed: list[Path] = []
     compiled_hashes = state.get("compiled_daily_hashes", {})
     if not isinstance(compiled_hashes, dict):

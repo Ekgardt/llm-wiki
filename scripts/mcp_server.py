@@ -1036,7 +1036,10 @@ def _trigger_compile(*, deadline: float | None = None) -> dict:
         deadline=operation_deadline,
         cancelled=_operation_cancelled(),
     )
-    return {"status": "completed", "returncode": returncode}
+    # A non-zero return code is a compile that did not happen. Reporting it as
+    # completed told the caller the opposite of what occurred.
+    status = "completed" if returncode == 0 else "failed"
+    return {"status": status, "returncode": returncode}
 
 
 def _find_dead_code(
@@ -2614,8 +2617,27 @@ def _degrade_quality(
     return quality
 
 
-def _safe_exception_text(error: BaseException) -> str:
+def _record_tool_failure(operation: str, error: BaseException) -> None:
+    """Leave the operator a trace of a failure the caller only sees a code for.
+
+    The agent is told `operation_failed` and nothing else on purpose: exception
+    text is untrusted and can carry paths or secrets. Dropping it entirely left
+    nobody able to find out why, so it goes to the bounded, redacted failure
+    trail that doctor already counts, under its own kind.
+    """
+    try:
+        from capture_diagnostics import record_capture_failure
+
+        record_capture_failure(
+            "mcp_tool", f"{operation}: {type(error).__name__}: {error}"
+        )
+    except Exception:  # noqa: BLE001 - diagnostics never break a tool call
+        pass
+
+
+def _safe_exception_text(error: BaseException, operation: str = "mcp") -> str:
     """Return a bounded stable code without exposing untrusted exception details."""
+    _record_tool_failure(operation, error)
     code = "operation_timeout" if isinstance(error, TimeoutError) else "operation_failed"
     return " ".join(redact_secrets(code).split())[:MAX_MCP_ERROR_CHARS]
 

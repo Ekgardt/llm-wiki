@@ -222,3 +222,26 @@ class TestSignificanceBudget:
     def test_budget_empty_returns_empty(self):
         from impact_analysis import apply_significance_budget
         assert apply_significance_budget([]) == []
+
+def test_a_daily_that_does_not_fit_is_skipped_not_fatal(tmp_path, monkeypatch) -> None:
+    """One long session used to leave every other day uncompiled as well."""
+    import compile_memory
+
+    recorded: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        compile_memory,
+        "_record_oversized_daily",
+        lambda path: recorded.append(("skipped", path)),
+    )
+
+    compile_memory._record_oversized_daily("knowledge/daily/2026-08-21.md")
+
+    assert recorded == [("skipped", "knowledge/daily/2026-08-21.md")]
+
+
+def test_compile_only_reads_canonical_daily_logs() -> None:
+    """The directory ships a README, and it is not a day."""
+    import compile_memory
+
+    assert compile_memory.DAILY_LOG_NAME.fullmatch("2026-08-21.md") is not None
+    assert compile_memory.DAILY_LOG_NAME.fullmatch("README.md") is None
