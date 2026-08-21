@@ -192,6 +192,25 @@ def test_the_new_triggers_and_the_research_predicate(patcher, tmp_path):
     assert finished.returncode == 0, finished.stderr[-2000:]
 
 
+def test_the_installed_gate_repeats_its_refusal(tmp_path):
+    """The property, checked on the gate this machine actually runs.
+
+    Everything above grades the patch and skips once it is applied, which
+    proves nothing about the guard a month from now. This one keeps holding:
+    it drives the installed `gate_stop.py` against a temporary log directory
+    and fails if the refusal ever stops repeating.
+    """
+    if not ENFORCEMENT.is_dir() or not GATE_PYTHON.exists():
+        pytest.skip("the enforcement gate is not installed on this machine")
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    _audit(log_dir, "Edit", str(Path(__file__).resolve()))
+
+    codes = [_run_gate(ENFORCEMENT, log_dir).returncode for _ in range(2)]
+
+    assert codes == [2, 2], "the turn-end gate stopped refusing while work stood unverified"
+
+
 def test_applying_twice_is_refused(patcher, tmp_path):
     """Running it again must not stack a second copy of any change."""
     tree = _patched_tree(patcher, tmp_path)
