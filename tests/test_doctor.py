@@ -4148,3 +4148,40 @@ def test_a_vault_written_to_mid_capture_is_captured_again(tmp_path, monkeypatch)
 
     assert result["status"] == "built"
     assert calls == [False, True]
+
+def test_losing_the_maintenance_fence_is_reported_not_raised(tmp_path, monkeypatch):
+    """The nightly timer and a manual run collide; the loser reports, not crashes."""
+    import doctor
+
+    def refresh(*_args, **_kwargs):
+        raise RuntimeError("maintenance_owner_fence_lost")
+
+    monkeypatch.setattr(doctor, "_refreshed_generation", refresh)
+    monkeypatch.setattr(
+        doctor, "_acquire_maintenance_owner", lambda *a, **k: (object(), object())
+    )
+    monkeypatch.setattr(doctor, "_release_maintenance_owner", lambda *a, **k: None)
+    monkeypatch.setattr(doctor, "_unusable_filesystem_outcome", lambda *a, **k: None)
+
+    result = doctor.run_generation_maintenance(tmp_path, tmp_path, time_budget_seconds=30)
+
+    assert result["status"] == "deferred"
+    assert result["reason"] == "maintenance_owner_lost"
+
+
+def test_an_unrelated_runtime_error_still_escapes(tmp_path, monkeypatch):
+    """Only the fence loss is an outcome; anything else is still a defect."""
+    import doctor
+
+    def refresh(*_args, **_kwargs):
+        raise RuntimeError("something else went wrong")
+
+    monkeypatch.setattr(doctor, "_refreshed_generation", refresh)
+    monkeypatch.setattr(
+        doctor, "_acquire_maintenance_owner", lambda *a, **k: (object(), object())
+    )
+    monkeypatch.setattr(doctor, "_release_maintenance_owner", lambda *a, **k: None)
+    monkeypatch.setattr(doctor, "_unusable_filesystem_outcome", lambda *a, **k: None)
+
+    with pytest.raises(RuntimeError, match="something else"):
+        doctor.run_generation_maintenance(tmp_path, tmp_path, time_budget_seconds=30)

@@ -6298,6 +6298,15 @@ def run_generation_maintenance(
         return _rebuild_after_corpus_change(
             root_path, state_path, coordinator, lease, deadline, max_sources, repaired
         )
+    except RuntimeError as exc:
+        # Another maintenance owner took the fence while this pass was working.
+        # Losing that race is an ordinary outcome — the nightly timer and a
+        # manual run collide — and belongs in the report, not in a traceback.
+        if str(exc) != "maintenance_owner_fence_lost":
+            raise
+        return _maintenance_outcome(
+            "deferred", "maintenance_owner_lost", partial=True, repairs=repaired
+        )
     except ValueError as exc:
         return _value_error_outcome(exc, repaired)
     except (OSError, PermissionError, sqlite3.Error) as exc:
