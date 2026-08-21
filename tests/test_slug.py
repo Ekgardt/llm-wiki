@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
 from session_start_project_state import (
     _base_slug,
     _compute_slug,
@@ -210,7 +211,10 @@ def test_rendered_template_has_no_placeholders_and_preserves_slug_ownership(tmp_
     (state_dir / "state.md").write_text(rendered, encoding="utf-8")
 
     assert "<project-slug>" not in rendered
-    assert "project: my-project" in rendered
+    # Quoted, so a slug that redaction left looking like `[redacted-api-key]`
+    # still reads back as a string rather than a YAML list.
+    assert 'project: "my-project"' in rendered
+    assert yaml.safe_load(rendered.split("---")[1])["project"] == "my-project"
     assert f"- Project root: `{project}`" in rendered
     assert _compute_slug(project, projects) == "my-project"
 
