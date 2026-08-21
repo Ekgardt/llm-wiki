@@ -300,6 +300,32 @@ def _indexed(md: Path, index_text: str) -> bool:
     return md.stem in index_text or relative in index_text
 
 
+RETIRED_STATUSES = {"superseded", "archived"}
+STATUS_FIELD_RE = re.compile(r"^status:\s*(.+?)\s*$", re.MULTILINE)
+
+
+def _is_retired(md: Path) -> bool:
+    """Retired pages stay in git and out of the navigation map, by design.
+
+    `rebuild_memory_index` removes superseded and archived pages from
+    `index.md`, so requiring them to appear there would make the two rules
+    unsatisfiable at once.
+    """
+    frontmatter = _frontmatter_of(md)
+    if frontmatter is None:
+        return False
+    match = STATUS_FIELD_RE.search(frontmatter)
+    if match is None:
+        return False
+    return match.group(1).strip().strip("`\"'") in RETIRED_STATUSES
+
+
+def _expects_an_index_entry(md: Path) -> bool:
+    if md.name in EDITORIAL_NAMES:
+        return False
+    return not _is_retired(md)
+
+
 def check_orphans_against_index(pages: list[Path], index: Path) -> list[str]:
     if not index.exists():
         return []
@@ -307,7 +333,7 @@ def check_orphans_against_index(pages: list[Path], index: Path) -> list[str]:
     return [
         _rel(md)
         for md in pages
-        if md.name not in EDITORIAL_NAMES and not _indexed(md, index_text)
+        if _expects_an_index_entry(md) and not _indexed(md, index_text)
     ]
 
 
