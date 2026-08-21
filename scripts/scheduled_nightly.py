@@ -39,13 +39,21 @@ from operational_ownership import (  # noqa: E402
     heartbeat_owner,
 )
 
+# How long the nightly pass will spend rebuilding the evidence generation.
+# The interactive default is one minute, which is the right bound for a doctor
+# run someone is waiting on. A nightly window is not that: on this vault a full
+# build of 762 sources takes 98 seconds, so a one-minute bound deferred every
+# night and the generation was never rebuilt at all. The unit itself has no
+# start timeout, so the only bound that matters is this one.
+NIGHTLY_GENERATION_BUDGET_SECONDS = 15 * 60
+
 
 def _refresh_generation(log, *, ownership: OwnerLease | None = None) -> int:
     """Run the shared bounded builder under its fenced maintenance owner."""
     arguments = {
         "root": ROOT,
         "state_root": STATE_ROOT,
-        "time_budget_seconds": 60,
+        "time_budget_seconds": NIGHTLY_GENERATION_BUDGET_SECONDS,
         "max_sources": DEFAULT_GENERATION_SOURCE_LIMIT,
     }
     if ownership is not None and _accepts_ownership(run_generation_maintenance):

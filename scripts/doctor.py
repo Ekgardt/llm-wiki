@@ -6239,6 +6239,15 @@ def _rebuild_after_corpus_change(
         return _maintenance_outcome(
             "deferred", "time_limit", partial=True, repairs=repaired
         )
+    except RuntimeError as exc:
+        # This runs inside the caller's `except`, so the caller's own handlers
+        # can no longer see what happens here. The fence can be lost during the
+        # recapture just as easily as during the first pass.
+        if str(exc) != "maintenance_owner_fence_lost":
+            raise
+        return _maintenance_outcome(
+            "deferred", "maintenance_owner_lost", partial=True, repairs=repaired
+        )
 
 
 def _corpus_changed_error() -> type[BaseException]:

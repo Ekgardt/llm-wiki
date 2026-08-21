@@ -4185,3 +4185,29 @@ def test_an_unrelated_runtime_error_still_escapes(tmp_path, monkeypatch):
 
     with pytest.raises(RuntimeError, match="something else"):
         doctor.run_generation_maintenance(tmp_path, tmp_path, time_budget_seconds=30)
+
+def test_losing_the_fence_during_the_recapture_is_also_reported(tmp_path, monkeypatch):
+    """The recapture runs inside an except block, out of reach of its handlers."""
+    import doctor
+    from corpus_snapshot import CorpusChanged
+
+    calls: list[bool] = []
+
+    def refresh(root, state, coordinator, lease, deadline, max_sources, force, repaired):
+        calls.append(force)
+        if len(calls) == 1:
+            raise CorpusChanged("live corpus membership or source hashes changed")
+        raise RuntimeError("maintenance_owner_fence_lost")
+
+    monkeypatch.setattr(doctor, "_refreshed_generation", refresh)
+    monkeypatch.setattr(
+        doctor, "_acquire_maintenance_owner", lambda *a, **k: (object(), object())
+    )
+    monkeypatch.setattr(doctor, "_release_maintenance_owner", lambda *a, **k: None)
+    monkeypatch.setattr(doctor, "_unusable_filesystem_outcome", lambda *a, **k: None)
+
+    result = doctor.run_generation_maintenance(tmp_path, tmp_path, time_budget_seconds=30)
+
+    assert result["status"] == "deferred"
+    assert result["reason"] == "maintenance_owner_lost"
+    assert calls == [False, True]
