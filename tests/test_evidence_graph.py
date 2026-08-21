@@ -1241,25 +1241,29 @@ def test_database_is_opened_query_only_and_path_must_remain_in_state_root(tmp_pa
     with pytest.raises((PermissionError, ValueError)):
         evidence_graph.EvidenceGraph(tmp_path / "evidence.sqlite3", state_root=tmp_path / "other")
 
-def test_the_structural_pass_is_decided_once_per_exact_artifact(monkeypatch, tmp_path):
-    """The caller proves the bytes against the manifest digest before this runs."""
+def test_the_closed_format_pass_is_decided_once_per_exact_artifact(monkeypatch):
+    """It reads the database and the manifest, so the same pair repeats a verdict."""
     import evidence_graph
 
     calls: list[str] = []
-    monkeypatch.setattr(evidence_graph, "_STRUCTURALLY_VALIDATED", set())
+    monkeypatch.setattr(evidence_graph, "_FORMAT_VALIDATED", set())
     monkeypatch.setattr(
         evidence_graph,
-        "_validate_generation_artifact_uncached",
-        lambda path, manifest, **kwargs: calls.append(str(path)),
+        "_validate_connection",
+        lambda database, **kwargs: calls.append("ran"),
     )
     manifest = {
-        "graph_schema_version": "evidence-graph/v2",
+        "generation_id": "gen-1",
+        "source_manifest_sha256": "c" * 64,
+        "repository_scope": {},
         "artifacts": [{"path": "evidence.sqlite3", "sha256": "a" * 64, "size": 1}],
     }
+    schema = evidence_graph.GraphSchema.V2
 
     for _ in range(4):
-        evidence_graph.validate_generation_artifact(
-            tmp_path, manifest, state_root=tmp_path
+        evidence_graph._validate_connection_once(
+            None, manifest, schema=schema, deadline=None,
+            monotonic=lambda: 0.0, cancelled=None,
         )
     assert len(calls) == 1
 
@@ -1267,5 +1271,8 @@ def test_the_structural_pass_is_decided_once_per_exact_artifact(monkeypatch, tmp
         **manifest,
         "artifacts": [{"path": "evidence.sqlite3", "sha256": "b" * 64, "size": 1}],
     }
-    evidence_graph.validate_generation_artifact(tmp_path, changed, state_root=tmp_path)
+    evidence_graph._validate_connection_once(
+        None, changed, schema=schema, deadline=None,
+        monotonic=lambda: 0.0, cancelled=None,
+    )
     assert len(calls) == 2

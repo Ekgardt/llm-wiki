@@ -2062,58 +2062,77 @@ def validate_generation_database(
         database.close()
 
 
-# Which exact artifact bytes have already passed the structural pass in this
-# process. The caller proves every artifact against its manifest digest before
-# getting here, so the same bytes can only ever reach the same verdict — and
-# re-deciding it cost about twenty of the twenty-nine seconds a validation took
-# on a 146 MB artifact, four times per search. Tampering changes the digest,
-# which changes the key, so a changed artifact is validated in full again.
-_STRUCTURALLY_VALIDATED: set[str] = set()
+# Which exact evidence.sqlite3 bytes have already passed the closed-format pass
+# in this process. That pass reads nothing but the database and values the
+# manifest carries, so the same bytes and the same manifest can only reach the
+# same verdict — and re-deciding it cost about twenty seconds per read of a
+# 146 MB artifact, four times per search. Everything that consults the live
+# corpus stays outside this and still runs every time.
+_FORMAT_VALIDATED: set[str] = set()
 
 
-def _artifact_identity(manifest: Mapping[str, object]) -> str | None:
-    """The exact bytes this manifest binds, as one key, or None if it binds none."""
-    artifacts = manifest.get("artifacts")
-    if not isinstance(artifacts, list) or not artifacts:
+def _evidence_artifact_digest(manifest: Mapping[str, object]) -> str | None:
+    """The digest the manifest binds evidence.sqlite3 to, if it binds one."""
+    for item in manifest.get("artifacts", []):
+        if isinstance(item, Mapping) and item.get("path") == "evidence.sqlite3":
+            digest = item.get("sha256")
+            return digest if isinstance(digest, str) else None
+    return None
+
+
+def _format_validation_key(
+    manifest: Mapping[str, object], schema: GraphSchema
+) -> str | None:
+    """One key for the bytes and every manifest value the closed-format pass reads."""
+    digest = _evidence_artifact_digest(manifest)
+    if digest is None:
         return None
-    digests = []
-    for item in artifacts:
-        if not isinstance(item, Mapping):
-            return None
-        path, digest = item.get("path"), item.get("sha256")
-        if not isinstance(path, str) or not isinstance(digest, str):
-            return None
-        digests.append(f"{path}:{digest}")
-    schema = manifest.get("graph_schema_version")
-    return "|".join([str(schema), *sorted(digests)])
+    parts = [
+        digest,
+        schema.value,
+        str(manifest.get("generation_id")),
+        str(manifest.get("source_manifest_sha256")),
+        canonical_json_bytes(manifest.get("repository_scope") or {}).decode("utf-8"),
+    ]
+    return "|".join(parts)
 
 
-def validate_generation_artifact(
-    generation_path: Path,
+def _validate_connection_once(
+    database: sqlite3.Connection,
     manifest: Mapping[str, object],
     *,
-    state_root: Path,
-    deadline: float | None = None,
-    monotonic: Callable[[], float] = time.monotonic,
-    cancelled: Callable[[], bool] | None = None,
+    schema: GraphSchema,
+    deadline: float | None,
+    monotonic: Callable[[], float],
+    cancelled: Callable[[], bool] | None,
 ) -> None:
-    """Validate one graph artifact already bound by the shared generation manifest."""
-    identity = _artifact_identity(manifest)
-    if identity is not None and identity in _STRUCTURALLY_VALIDATED:
+    """Validate the closed file format, deciding it once per exact artifact."""
+    key = _format_validation_key(manifest, schema)
+    if key is not None and key in _FORMAT_VALIDATED:
         return
-    _validate_generation_artifact_uncached(
-        generation_path,
-        manifest,
-        state_root=state_root,
+    _validate_connection(
+        database,
+        schema=schema,
         deadline=deadline,
         monotonic=monotonic,
         cancelled=cancelled,
+        publication_generation_id=(
+            manifest.get("generation_id") if schema is GraphSchema.V3 else None
+        ),
+        repository_scope=(
+            RepositoryScope.from_dict(manifest.get("repository_scope"))
+            if schema is GraphSchema.V3
+            else None
+        ),
+        source_manifest_sha256=(
+            manifest.get("source_manifest_sha256") if schema is GraphSchema.V3 else None
+        ),
     )
-    if identity is not None:
-        _STRUCTURALLY_VALIDATED.add(identity)
+    if key is not None:
+        _FORMAT_VALIDATED.add(key)
 
 
-def _validate_generation_artifact_uncached(
+def validate_generation_artifact(
     generation_path: Path,
     manifest: Mapping[str, object],
     *,
@@ -2199,23 +2218,13 @@ def _validate_generation_artifact_uncached(
         database.row_factory = sqlite3.Row
         database.execute("PRAGMA query_only=ON")
         database.execute("PRAGMA trusted_schema=OFF")
-        _validate_connection(
+        _validate_connection_once(
             database,
+            manifest,
             schema=schema,
             deadline=deadline,
             monotonic=monotonic,
             cancelled=cancelled,
-            publication_generation_id=(
-                manifest.get("generation_id") if schema is GraphSchema.V3 else None
-            ),
-            repository_scope=(
-                RepositoryScope.from_dict(manifest.get("repository_scope"))
-                if schema is GraphSchema.V3
-                else None
-            ),
-            source_manifest_sha256=(
-                manifest.get("source_manifest_sha256") if schema is GraphSchema.V3 else None
-            ),
         )
         stored_sources = _stored_shared_source_membership(
             database,
