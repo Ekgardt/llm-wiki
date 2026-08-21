@@ -1,6 +1,6 @@
 ---
 type: decision
-status: proposed
+status: accepted
 confidence: medium
 source_authority: web
 ---
@@ -55,9 +55,24 @@ exists and can be measured.
 
 ## Status
 
-Proposed, not implemented. It changes the compile input model, which the
-transactional compile tests pin, so it needs the owner's sign-off first. Until
-then the pass still refuses, and now records which file did not fit.
+Accepted 2026-08-21 and implemented.
+
+The split is by bytes, not tokens, and that is deliberate: the same file has to
+split the same way every time, because that is what lets an interrupted run
+resume from the parts it already committed. The token budget still decides how
+many parts travel together in one batch, which is the packing that already
+existed. A part that still will not fit the budget refuses as before, and names
+the file.
+
+Resumability falls out of the existing receipts rather than a new marker. A
+part is a source in its own right, so it gets its own receipt keyed by its own
+digest; a day counts as compiled when every one of its parts does. A run that
+dies halfway leaves receipts for what committed, and the next run is offered
+only the rest.
+
+Verified on the installed vault: the 70063-byte daily splits into five parts,
+contiguous and each inside the bound, and the compile pass no longer fails on
+it.
 
 ## Source
 

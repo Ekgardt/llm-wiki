@@ -223,6 +223,21 @@ class DailySnapshot:
     logical_path: str
     content: bytes
     sha256: str
+    # Where this snapshot sits inside the day it came from. A day that fits the
+    # compile budget is one part covering the whole file; a longer one is split
+    # at entry boundaries, and every part still names the byte range it is, so
+    # anything compiled from it points back at a real span of a real file.
+    part_index: int = 0
+    part_count: int = 1
+    byte_start: int = 0
+    byte_end: int = 0
+
+    @property
+    def part_key(self) -> str:
+        """What identifies this part while batching; the path when there is one."""
+        if self.part_count == 1:
+            return self.logical_path
+        return f"{self.logical_path}@{self.byte_start}-{self.byte_end}"
 
 
 @dataclass(frozen=True)
@@ -318,8 +333,17 @@ def _snapshot(path: Path, *, label: str = "compile source") -> SourceSnapshot:
     return SourceSnapshot(_logical_path(path), content, sha256_bytes(content))
 
 
-def snapshot_compile_inputs(paths: Sequence[Path]) -> CompileInputs:
-    """Capture every compile input once, before any model call."""
+def snapshot_compile_inputs(
+    paths: Sequence[Path],
+    *,
+    compiled: Callable[[str, str], bool] | None = None,
+) -> CompileInputs:
+    """Capture every compile input once, before any model call.
+
+    `compiled` answers whether one part of a day already has its receipt. A run
+    interrupted partway leaves receipts for the parts that committed, and those
+    parts are not offered again.
+    """
     dailies: list[DailySnapshot] = []
     sources: list[SourceSnapshot] = []
     targets: list[TargetSnapshot] = []
@@ -338,7 +362,7 @@ def snapshot_compile_inputs(paths: Sequence[Path]) -> CompileInputs:
         content = read_stable_bytes(path, MAX_SOURCE_BYTES, label="daily source")
         logical = _logical_path(path)
         digest = sha256_bytes(content)
-        dailies.append(DailySnapshot(logical, content, digest))
+        dailies.extend(_daily_parts(logical, content, compiled))
         add_source(SourceSnapshot(logical, content, digest))
     for path in (AGENTS, INDEX, LOG):
         if path.exists():
@@ -369,6 +393,77 @@ def compile_receipt_path(source_identity: str) -> Path:
     return DAILY_DIR / "receipts" / f"v3-{source_identity}.md"
 
 
+# How much of one day the compiler takes at a time. A day longer than this is
+# split at entry boundaries: a single long session used to fail the whole pass,
+# leaving every other day uncompiled with it. The bound is bytes rather than
+# tokens so the same file always splits the same way, which is what lets a run
+# interrupted halfway resume from the parts it already committed.
+MAX_DAILY_PART_BYTES = 16 * 1024
+
+# What separates one captured entry from the next in a daily log.
+_DAILY_ENTRY_MARKER = b"<!-- llm-wiki-operation:"
+
+
+def _daily_entry_offsets(content: bytes) -> list[int]:
+    """Where each entry starts, the first one covering whatever precedes it."""
+    offsets = [0]
+    position = content.find(_DAILY_ENTRY_MARKER)
+    while position != -1:
+        if position != 0:
+            offsets.append(position)
+        position = content.find(_DAILY_ENTRY_MARKER, position + 1)
+    return offsets
+
+
+def _daily_part_bounds(content: bytes) -> list[tuple[int, int]]:
+    """The byte ranges this day is compiled in, split only where an entry ends."""
+    if len(content) <= MAX_DAILY_PART_BYTES:
+        return [(0, len(content))]
+    offsets = [*_daily_entry_offsets(content), len(content)]
+    bounds: list[tuple[int, int]] = []
+    start = 0
+    for index in range(1, len(offsets)):
+        if offsets[index] - start > MAX_DAILY_PART_BYTES and offsets[index - 1] > start:
+            bounds.append((start, offsets[index - 1]))
+            start = offsets[index - 1]
+    bounds.append((start, len(content)))
+    return bounds
+
+
+def _daily_parts(
+    logical_path: str,
+    content: bytes,
+    compiled: Callable[[str, str], bool] | None = None,
+) -> list[DailySnapshot]:
+    """This day as the one or more parts the compiler still has to take."""
+    bounds = _daily_part_bounds(content)
+    parts = [
+        DailySnapshot(
+            logical_path,
+            content[start:end],
+            sha256_bytes(content[start:end]),
+            part_index=index,
+            part_count=len(bounds),
+            byte_start=start,
+            byte_end=end,
+        )
+        for index, (start, end) in enumerate(bounds)
+    ]
+    if compiled is None:
+        return parts
+    return [part for part in parts if not compiled(part.logical_path, part.sha256)]
+
+
+def daily_is_compiled(
+    logical_path: str, content: bytes, compiled: Callable[[str, str], bool]
+) -> bool:
+    """Whether every part of this day already has a receipt."""
+    return all(
+        compiled(logical_path, sha256_bytes(content[start:end]))
+        for start, end in _daily_part_bounds(content)
+    )
+
+
 def _source_descriptor(snapshot: DailySnapshot) -> SourceDescriptor:
     return SourceDescriptor(
         snapshot.logical_path,
@@ -393,19 +488,30 @@ def _subset_compile_inputs(
 ) -> CompileInputs:
     optional_paths = optional_paths or set()
     all_daily_paths = {item.logical_path for item in inputs.dailies}
-    selected = tuple(
-        item for item in inputs.dailies if item.logical_path in daily_paths
-    )
+    selected = tuple(item for item in inputs.dailies if item.part_key in daily_paths)
     context = tuple(
         item
         for item in inputs.sources
         if item.logical_path not in all_daily_paths
         and item.logical_path in optional_paths
     )
-    selected_sources = tuple(
-        SourceSnapshot(item.logical_path, item.content, item.sha256) for item in selected
+    # Two parts of the same day would otherwise appear twice under one path.
+    seen_paths: set[str] = set()
+    selected_sources: list[SourceSnapshot] = []
+    for item in selected:
+        if item.logical_path in seen_paths:
+            continue
+        seen_paths.add(item.logical_path)
+        selected_sources.append(
+            SourceSnapshot(item.logical_path, item.content, item.sha256)
+        )
+    return CompileInputs(
+        selected,
+        tuple(
+            sorted((*selected_sources, *context), key=lambda item: item.logical_path)
+        ),
+        inputs.targets,
     )
-    return CompileInputs(selected, tuple(sorted((*selected_sources, *context), key=lambda item: item.logical_path)), inputs.targets)
 
 
 def _record_oversized_daily(logical_path: str) -> None:
@@ -448,11 +554,15 @@ def pack_compile_batches(
         return count.tokens
 
     for daily in inputs.dailies:
-        singleton = {daily.logical_path}
+        singleton = {daily.part_key}
         if measured(singleton) > budget.available_input_tokens:
+            # A day is already split by bytes before it gets here, so one part
+            # that still will not fit means the budget cannot take this day at
+            # all. That is the refusal the transactional tests pin, and it now
+            # names the file.
             _record_oversized_daily(daily.logical_path)
             raise ValueError("daily source exceeds compile input budget")
-        prospective = {*current_paths, daily.logical_path}
+        prospective = {*current_paths, daily.part_key}
         if current_paths and measured(prospective) > budget.available_input_tokens:
             batches.append(_compile_batch(inputs, current_paths, budget, model, token_adapters))
             current_paths = singleton
@@ -463,7 +573,7 @@ def pack_compile_batches(
 
     packed: list[CompileBatch] = []
     for batch in batches:
-        paths = {item.logical_path for item in batch.inputs.dailies}
+        paths = {item.part_key for item in batch.inputs.dailies}
         optional_paths: set[str] = set()
         for source in optional_sources:
             prospective = {*optional_paths, source.logical_path}
@@ -2138,6 +2248,20 @@ def _canonical_dailies() -> list[Path]:
     )
 
 
+def _receipt_predicate(
+    coordinator: MarkdownCoordinator,
+) -> Callable[[str, str], bool]:
+    """Whether a source of this identity already carries a committed receipt."""
+
+    def compiled(logical_path: str, source_sha256: str) -> bool:
+        return (
+            read_compile_receipt_v3(logical_path, source_sha256, coordinator)
+            is not None
+        )
+
+    return compiled
+
+
 def select_dailies(
     args: argparse.Namespace,
     state: dict,
@@ -2157,10 +2281,9 @@ def select_dailies(
             raise SystemExit(f"compile_memory: --file must be an existing .md daily log: {path}")
         content = read_stable_bytes(path, MAX_SOURCE_BYTES, label="daily source")
         logical_path = path.relative_to(ROOT).as_posix()
-        receipt = read_compile_receipt_v3(
-            logical_path, sha256_bytes(content), coordinator
-        )
-        return [] if receipt is not None else [path]
+        if daily_is_compiled(logical_path, content, _receipt_predicate(coordinator)):
+            return []
+        return [path]
     all_dailies = _canonical_dailies()
     changed: list[Path] = []
     compiled_hashes = state.get("compiled_daily_hashes", {})
@@ -2170,8 +2293,9 @@ def select_dailies(
         content = read_stable_bytes(p, MAX_SOURCE_BYTES, label="daily source")
         digest = sha256_bytes(content)
         logical_path = p.relative_to(ROOT).as_posix()
-        receipt = read_compile_receipt_v3(logical_path, digest, coordinator)
-        if receipt is not None:
+        if daily_is_compiled(
+            logical_path, content, _receipt_predicate(coordinator)
+        ):
             continue
         key = p.name
         if (
@@ -3003,7 +3127,7 @@ def _run(
     for p in dailies:
         print(f"  - {p.relative_to(ROOT).as_posix()}")
 
-    inputs = snapshot_compile_inputs(dailies)
+    inputs = snapshot_compile_inputs(dailies, compiled=_receipt_predicate(coordinator))
     try:
         batches = pack_compile_batches(inputs, model=None)
     except Exception as exc:  # noqa: BLE001 - provider/cache boundary is fail-closed

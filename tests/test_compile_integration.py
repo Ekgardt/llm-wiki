@@ -245,3 +245,68 @@ def test_compile_only_reads_canonical_daily_logs() -> None:
 
     assert compile_memory.DAILY_LOG_NAME.fullmatch("2026-08-21.md") is not None
     assert compile_memory.DAILY_LOG_NAME.fullmatch("README.md") is None
+
+def _daily_bytes(entries: int, filler: int) -> bytes:
+    body = [b"# Daily Session Memory - 2026-08-21\n"]
+    for index in range(entries):
+        body.append(b"\n<!-- llm-wiki-operation:" + (b"%064x" % index) + b" -->\n\n")
+        body.append(b"- `[00:0%d] tool` " % (index % 10) + b"x" * filler + b"\n")
+    return b"".join(body)
+
+
+def test_a_day_inside_the_budget_is_one_part_covering_the_whole_file() -> None:
+    """Splitting is for the exception; an ordinary day must be untouched."""
+    import compile_memory
+
+    content = _daily_bytes(3, 40)
+    parts = compile_memory._daily_parts("knowledge/daily/2026-08-21.md", content)
+
+    assert len(parts) == 1
+    assert parts[0].content == content
+    assert parts[0].part_count == 1
+    assert parts[0].part_key == "knowledge/daily/2026-08-21.md"
+
+
+def test_a_long_day_splits_at_entry_boundaries_and_covers_every_byte() -> None:
+    """Every part has to be a real span of the file, and together all of it."""
+    import compile_memory
+
+    content = _daily_bytes(60, 2048)
+    assert len(content) > compile_memory.MAX_DAILY_PART_BYTES
+
+    parts = compile_memory._daily_parts("knowledge/daily/2026-08-21.md", content)
+
+    assert len(parts) > 1
+    assert parts[0].byte_start == 0
+    assert parts[-1].byte_end == len(content)
+    for earlier, later in zip(parts, parts[1:], strict=False):
+        assert earlier.byte_end == later.byte_start
+    for part in parts:
+        assert content[part.byte_start : part.byte_end] == part.content
+        assert part.logical_path == "knowledge/daily/2026-08-21.md"
+        # Every split lands where one captured entry ends and the next begins.
+        assert part.byte_start == 0 or content[part.byte_start :].startswith(
+            b"<!-- llm-wiki-operation:"
+        )
+    assert len({part.part_key for part in parts}) == len(parts)
+
+
+def test_a_part_that_already_committed_is_not_offered_again() -> None:
+    """A run interrupted halfway resumes from the parts it already wrote."""
+    import compile_memory
+
+    content = _daily_bytes(60, 2048)
+    path = "knowledge/daily/2026-08-21.md"
+    everything = compile_memory._daily_parts(path, content)
+    done = {everything[0].sha256}
+
+    remaining = compile_memory._daily_parts(
+        path, content, lambda _path, digest: digest in done
+    )
+
+    assert len(remaining) == len(everything) - 1
+    assert everything[0].sha256 not in {part.sha256 for part in remaining}
+    assert not compile_memory.daily_is_compiled(
+        path, content, lambda _path, digest: digest in done
+    )
+    assert compile_memory.daily_is_compiled(path, content, lambda _path, _digest: True)
