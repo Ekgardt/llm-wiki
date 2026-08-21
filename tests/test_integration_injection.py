@@ -2371,10 +2371,15 @@ def _write_blocking_fake_uv(directory: Path) -> None:
     fake_uv = directory / "uv"
     fake_uv.write_text(
         "#!/bin/sh\n"
-        "printf '%s' \"$$\" > child.pid\n"
-        ": > child.started\n"
+        # The trap comes first, before anything that can block or be
+        # descheduled. Everything between exec and this line is a window in
+        # which the installer's timer kills the child before it can record
+        # having been stopped, and the test then fails for the machine being
+        # busy rather than for the installer being wrong.
         "stop_child() { : > child.stopped; exit 0; }\n"
         "trap stop_child HUP INT TERM\n"
+        "printf '%s' \"$$\" > child.pid\n"
+        ": > child.started\n"
         "i=0\n"
         # Long enough that the installer's own timer, not the loop, ends it.
         'while [ "$i" -lt 600 ]; do sleep 0.1; i=$((i + 1)); done\n'
@@ -2517,10 +2522,10 @@ def test_unix_installer_timeout_stops_tests_and_aborts(tmp_path):
         textwrap.dedent(
             f"""
             set -euo pipefail
-            # The timer must outlast the child's own startup: fired too early it
-            # kills the fake `uv` before its signal trap exists, and the marker
-            # the assertions read is never written. One second raced it, five
-            # raced it again under a full parallel load.
+            # The timer must outlast the child reaching its signal trap. The
+            # fake `uv` now installs that trap as its first statement, so the
+            # window is one fork and exec; one second raced it and five raced it
+            # again while the trap sat behind two writes.
             export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS=15
             PATH="$(dirname "$0")/bin:$PATH"
             export PATH
