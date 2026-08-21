@@ -62,7 +62,10 @@ def _refresh_generation(log, *, ownership: OwnerLease | None = None) -> int:
         result = run_generation_maintenance(**arguments)
     status = result["status"]
     generation = result.get("generation_id") or "none"
-    log(f"  generation: {status} (id={generation}, partial={bool(result.get('partial'))})")
+    log(
+        f"  generation: {status} (id={generation}, "
+        f"partial={bool(result.get('partial'))}, reason={result.get('reason') or 'none'})"
+    )
     return 0 if status in {"built", "current"} else 1
 
 

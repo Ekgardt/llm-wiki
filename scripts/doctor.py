@@ -3333,6 +3333,7 @@ def _maintenance_extractor_identity() -> str:
 class _GenerationFacts(NamedTuple):
     delta: int
     unresolved: int
+    extraction_faults: int
     scope_state: str
     corpus_extraction_state: str
     graph_extraction_state: str
@@ -3460,18 +3461,48 @@ def _source_delta(source_manifest: dict, snapshot: object) -> int:
     )
 
 
-def _unresolved_observations(
-    generation_path: Path, state_root: Path, deadline: float
+# What an observation's reason says about who is at fault. A reference the
+# language cannot resolve statically, or a dependency the repository does not
+# vendor, is the normal outcome of indexing real code and says nothing about
+# the health of the generation. A parse error is the extractor failing at its
+# own job, and is the one that should be surfaced.
+_UNRESOLVED_REASONS = ("missing_dependency", "unresolved_reference")
+_EXTRACTION_FAULT_REASONS = ("parse_error",)
+
+
+def _count_observations(
+    generation_path: Path, state_root: Path, deadline: float, reasons: Sequence[str]
 ) -> int:
+    """How many observations carry one of these reasons, up to the row bound."""
     graph = generation_path / "evidence.sqlite3"
+    placeholders = ",".join("?" for _ in reasons)
     with _readonly_database(
         graph, state_root, max_bytes=16 * 1024 * 1024 * 1024, deadline=deadline
     ) as database:
         database.set_progress_handler(lambda: int(_deadline_reached(deadline)), 1000)
         return database.execute(
-            "SELECT COUNT(*) FROM (SELECT 1 FROM observation LIMIT ?)",
-            (MAX_OPERATIONAL_ROWS + 1,),
+            "SELECT COUNT(*) FROM (SELECT 1 FROM observation "  # noqa: S608
+            f"WHERE reason IN ({placeholders}) LIMIT ?)",
+            (*reasons, MAX_OPERATIONAL_ROWS + 1),
         ).fetchone()[0]
+
+
+def _unresolved_observations(
+    generation_path: Path, state_root: Path, deadline: float
+) -> int:
+    """References the graph could not resolve. Reported, never a health failure."""
+    return _count_observations(
+        generation_path, state_root, deadline, _UNRESOLVED_REASONS
+    )
+
+
+def _extraction_faults(
+    generation_path: Path, state_root: Path, deadline: float
+) -> int:
+    """Files the extractor could not parse: its own failure, not the language's."""
+    return _count_observations(
+        generation_path, state_root, deadline, _EXTRACTION_FAULT_REASONS
+    )
 
 
 def _generation_facts(
@@ -3511,6 +3542,7 @@ def _generation_facts(
     return _GenerationFacts(
         delta=_source_delta(source_manifest, snapshot),
         unresolved=_unresolved_observations(generation_path, state_root, deadline),
+        extraction_faults=_extraction_faults(generation_path, state_root, deadline),
         scope_state=_scope_state(manifest, repository_scope),
         corpus_extraction_state=_corpus_extraction_state(
             manifest, COLLECTOR_VERSION, EXTRACTOR_VERSION
@@ -3556,6 +3588,15 @@ def _generation_search_fields(complete_v2: bool) -> dict:
     }
 
 
+def _generation_message(degraded: bool, extraction_faults: int) -> str:
+    """What this generation's state is, saying so when files would not parse."""
+    if degraded:
+        return "Evidence generation requires refresh."
+    if extraction_faults:
+        return f"Evidence generation is healthy; {extraction_faults} file(s) did not parse."
+    return "Evidence generation is healthy."
+
+
 def _generation_health_result(
     active: str,
     manifest: dict,
@@ -3572,10 +3613,16 @@ def _generation_health_result(
         or age > GENERATION_FRESH_SECONDS
         or _identity_stale(facts, complete_v2)
     )
-    degraded = stale or vector_state == "stale" or bool(facts.unresolved)
-    message = "Evidence generation is healthy."
-    if degraded:
-        message = "Evidence generation requires refresh."
+    # What this status answers is whether the generation is usable and current,
+    # so it degrades on the things a refresh fixes. An unresolved reference is
+    # what indexing real code looks like — this repository alone has 21199 of
+    # them and 5481 missing dependencies — and a file that will not parse is
+    # usually one the repository keeps deliberately broken. Counting either as
+    # ill health left every real vault permanently degraded and pointed the
+    # operator at a refresh that changes nothing. Both are still reported, and
+    # a parse error is named rather than buried.
+    degraded = stale or vector_state == "stale"
+    message = _generation_message(degraded, facts.extraction_faults)
     return _generation_result(
         "degraded" if degraded else "ok",
         message,
@@ -3594,6 +3641,7 @@ def _generation_health_result(
         corpus_extraction_identity=facts.corpus_extraction_state,
         unindexed_delta=facts.delta,
         unresolved_observations=facts.unresolved,
+        extraction_faults=facts.extraction_faults,
         age_seconds=age,
         age_source=age_source,
         repairable=degraded,

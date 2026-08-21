@@ -4254,3 +4254,16 @@ def test_a_vault_that_has_recorded_no_claim_is_healthy(tmp_path) -> None:
 
     assert result["status"] == "ok"
     assert result["details"]["index"] == "missing"
+
+def test_a_file_that_will_not_parse_is_named_not_treated_as_ill_health() -> None:
+    """A refresh cannot fix a file the repository keeps deliberately broken."""
+    import doctor
+
+    assert doctor._generation_message(False, 0) == "Evidence generation is healthy."
+    assert "1 file(s) did not parse" in doctor._generation_message(False, 1)
+    assert doctor._generation_message(True, 0) == (
+        "Evidence generation requires refresh."
+    )
+    assert doctor._generation_message(True, 3) == (
+        "Evidence generation requires refresh."
+    )
