@@ -1042,25 +1042,21 @@ def _coordinator_v2_fence_rows(
     ]
 
 
+_V3_KEY_COLUMNS = {
+    "transaction": ("id",),
+    "operation": ("transaction_id", "position"),
+    "project_checkpoints": ("project", "sequence"),
+    "project_checkpoint_attempts": ("project", "sequence", "attempt_number"),
+}
+
+
 def _coordinator_v3_insert_statement(
     *, table: str, columns: tuple[str, ...], values: tuple[object, ...], identity: object
 ) -> MigrationStatement:
     placeholders = ", ".join("?" for _column in columns)
     column_sql = ", ".join(f'"{column}"' for column in columns)
-    if table == "transaction":
-        key_columns = ("id",)
-        key_values = (values[0],)
-    elif table == "operation":
-        key_columns = ("transaction_id", "position")
-        key_values = values[:2]
-    elif table in {"project_checkpoints", "project_checkpoint_attempts"}:
-        key_columns = ("project", "sequence") + (
-            ("attempt_number",) if table == "project_checkpoint_attempts" else ()
-        )
-        key_values = values[: len(key_columns)]
-    else:
-        key_columns = ("gate_name",)
-        key_values = (values[0],)
+    key_columns = _V3_KEY_COLUMNS.get(table, ("gate_name",))
+    key_values = values[: len(key_columns)]
     where = " AND ".join(f'"{column}"=?' for column in key_columns)
     digest = sha256_bytes(repr(identity).encode("utf-8"))[:16]
 
@@ -1472,12 +1468,16 @@ def upgrade_coordinator_v3_candidate(
 def _reject_coordinator_source_alias(candidate: Path, source: Path) -> None:
     if candidate.absolute() == source.absolute():
         raise ValueError("coordinator v3 candidate and v2 source are the same file")
+    if _same_existing_file(candidate, source):
+        raise ValueError("coordinator v3 candidate and v2 source are the same file")
+
+
+def _same_existing_file(candidate: Path, source: Path) -> bool:
+    """An unverifiable identity is refused rather than assumed distinct."""
     try:
-        candidate_present = candidate.exists() or candidate.is_symlink()
-        if candidate_present and os.path.samefile(candidate, source):
-            raise ValueError("coordinator v3 candidate and v2 source are the same file")
-    except ValueError:
-        raise
+        if not (candidate.exists() or candidate.is_symlink()):
+            return False
+        return os.path.samefile(candidate, source)
     except OSError as exc:
         raise PermissionError(
             "coordinator v3 candidate identity could not be verified"
@@ -1493,30 +1493,29 @@ def initialize_coordinator_v3_candidate(
     """Create or resume an unpublished coordinator v3 candidate database."""
     candidate = Path(path)
     source_path = Path(source_v2) if source_v2 is not None else None
+    summary = _build_coordinator_v3_candidate(candidate, source_path, killpoint)
+    _publish_coordinator_v3_candidate(candidate)
+    return summary
+
+
+_EMPTY_V3_SUMMARY = {
+    "operations": 0,
+    "project_checkpoint_attempts": 0,
+    "project_checkpoints": 0,
+    "transactions": 0,
+    "writer_fences": 0,
+}
+
+
+def _build_coordinator_v3_candidate(
+    candidate: Path,
+    source_path: Path | None,
+    killpoint: Callable[[str], None] | None,
+) -> dict[str, int]:
     with contextlib.ExitStack() as stack:
-        migration: tuple[MigrationStatement, ...] = ()
-        summary = {
-            "operations": 0,
-            "project_checkpoint_attempts": 0,
-            "project_checkpoints": 0,
-            "transactions": 0,
-            "writer_fences": 0,
-        }
-        if source_path is not None:
-            _reject_coordinator_source_alias(candidate, source_path)
-            source = stack.enter_context(
-                contextlib.closing(
-                    open_readonly_operational_db(
-                        source_path,
-                        source_path.parent.parent,
-                        max_bytes=1 << 50,
-                    )
-                )
-            )
-            source.row_factory = sqlite3.Row
-            source.execute("BEGIN")
-            migration, summary = _coordinator_v2_migration_statements(source)
-            _reject_coordinator_source_alias(candidate, source_path)
+        migration, summary = _coordinator_v2_source_migration(
+            stack, candidate, source_path
+        )
         database = stack.enter_context(
             contextlib.closing(
                 open_operational_db(candidate, busy_ms=DEFAULTS.markdown_busy_ms)
@@ -1525,7 +1524,7 @@ def initialize_coordinator_v3_candidate(
         if source_path is not None:
             _reject_coordinator_source_alias(candidate, source_path)
         _repair_partial_coordinator_v3_schema(
-            database, allow_populated_rebuild=source_v2 is not None
+            database, allow_populated_rebuild=source_path is not None
         )
         run_resumable_migration(
             database,
@@ -1533,35 +1532,78 @@ def initialize_coordinator_v3_candidate(
             final_invariant=_coordinator_v3_schema_complete,
             killpoint=killpoint,
         )
-        if source_v2 is None:
-            if any(_coordinator_v3_row_counts(database).values()):
-                raise _coordinator_migration_error(
-                    "coordinator_v3_source_conflict",
-                    "fresh coordinator v3 initialization found existing rows",
-                )
-        else:
-            run_resumable_migration(
-                database,
-                migration,
-                final_invariant=lambda current: (
-                    _coordinator_v2_reconciliation_complete(
-                        current, migration, summary
-                    )
-                ),
-                killpoint=killpoint,
+        _apply_coordinator_v2_rows(
+            database, source_path, migration, summary, killpoint
+        )
+        _require_candidate_valid(database)
+    return summary
+
+
+def _coordinator_v2_source_migration(
+    stack: contextlib.ExitStack, candidate: Path, source_path: Path | None
+) -> tuple[tuple[MigrationStatement, ...], dict[str, int]]:
+    """The source is checked for aliasing before and after it is read."""
+    if source_path is None:
+        return (), dict(_EMPTY_V3_SUMMARY)
+    _reject_coordinator_source_alias(candidate, source_path)
+    source = stack.enter_context(
+        contextlib.closing(
+            open_readonly_operational_db(
+                source_path, source_path.parent.parent, max_bytes=1 << 50
             )
-        integrity = database.execute("PRAGMA integrity_check").fetchall()
-        foreign_keys = database.execute("PRAGMA foreign_key_check").fetchall()
-        if (
-            len(integrity) != 1
-            or integrity[0][0] != "ok"
-            or foreign_keys
-            or not _coordinator_v3_cross_table_invariant(database)
-        ):
-            raise _coordinator_migration_error(
-                "coordinator_v3_validation_failed",
-                "coordinator v3 candidate validation failed",
-            )
+        )
+    )
+    source.row_factory = sqlite3.Row
+    source.execute("BEGIN")
+    migration, summary = _coordinator_v2_migration_statements(source)
+    _reject_coordinator_source_alias(candidate, source_path)
+    return migration, summary
+
+
+def _apply_coordinator_v2_rows(
+    database: sqlite3.Connection,
+    source_path: Path | None,
+    migration: tuple[MigrationStatement, ...],
+    summary: dict[str, int],
+    killpoint: Callable[[str], None] | None,
+) -> None:
+    if source_path is None:
+        _require_fresh_candidate(database)
+        return
+    run_resumable_migration(
+        database,
+        migration,
+        final_invariant=lambda current: _coordinator_v2_reconciliation_complete(
+            current, migration, summary
+        ),
+        killpoint=killpoint,
+    )
+
+
+def _require_fresh_candidate(database: sqlite3.Connection) -> None:
+    if any(_coordinator_v3_row_counts(database).values()):
+        raise _coordinator_migration_error(
+            "coordinator_v3_source_conflict",
+            "fresh coordinator v3 initialization found existing rows",
+        )
+
+
+def _require_candidate_valid(database: sqlite3.Connection) -> None:
+    integrity = database.execute("PRAGMA integrity_check").fetchall()
+    foreign_keys = database.execute("PRAGMA foreign_key_check").fetchall()
+    if (
+        len(integrity) != 1
+        or integrity[0][0] != "ok"
+        or foreign_keys
+        or not _coordinator_v3_cross_table_invariant(database)
+    ):
+        raise _coordinator_migration_error(
+            "coordinator_v3_validation_failed",
+            "coordinator v3 candidate validation failed",
+        )
+
+
+def _publish_coordinator_v3_candidate(candidate: Path) -> None:
     with contextlib.closing(
         open_operational_db(
             candidate,
@@ -1572,20 +1614,54 @@ def initialize_coordinator_v3_candidate(
     ):
         pass
     _harden_owner_only(candidate, 0o600)
-    validate_coordinator_v3_database(
-        candidate, state_root=candidate.parent.parent
-    )
-    return summary
+    validate_coordinator_v3_database(candidate, state_root=candidate.parent.parent)
+
+
+def _require_inside_state_root(path: Path, state_root: Path) -> None:
+    try:
+        path.resolve(strict=True).relative_to(state_root.resolve(strict=True))
+    except (OSError, ValueError) as exc:
+        raise PermissionError(
+            "coordinator v3 database is outside the state root"
+        ) from exc
+
+
+def _require_v3_invariants(database: sqlite3.Connection) -> None:
+    _require_v3_integrity(database)
+    if _v3_operation_violations(database) or not _coordinator_v3_cross_table_invariant(
+        database
+    ):
+        raise _coordinator_migration_error(
+            "coordinator_v3_validation_failed",
+            "coordinator v3 database invariant failed",
+        )
+
+
+def _require_v3_integrity(database: sqlite3.Connection) -> None:
+    integrity = database.execute("PRAGMA integrity_check").fetchall()
+    foreign_keys = database.execute("PRAGMA foreign_key_check").fetchall()
+    if len(integrity) != 1 or integrity[0][0] != "ok" or foreign_keys:
+        raise _coordinator_migration_error(
+            "coordinator_v3_validation_failed",
+            "coordinator v3 database invariant failed",
+        )
+
+
+def _v3_operation_violations(database: sqlite3.Connection) -> int:
+    return database.execute(
+        """SELECT COUNT(*) FROM "operation"
+           WHERE position < 0
+              OR parent_device IS NULL
+              OR parent_inode IS NULL
+              OR applied NOT IN (0,1)"""
+    ).fetchone()[0]
 
 
 def validate_coordinator_v3_database(
     path: Path, *, state_root: Path
 ) -> dict[str, object]:
     """Validate one unpublished or active coordinator v3 database fail-closed."""
-    try:
-        Path(path).resolve(strict=True).relative_to(Path(state_root).resolve(strict=True))
-    except (OSError, ValueError) as exc:
-        raise PermissionError("coordinator v3 database is outside the state root") from exc
+    _require_inside_state_root(Path(path), Path(state_root))
     with contextlib.closing(
         open_readonly_operational_db(
             Path(path),
@@ -1601,26 +1677,7 @@ def validate_coordinator_v3_database(
                 "coordinator_v3_schema_incomplete",
                 "coordinator v3 schema is incomplete",
             )
-        integrity = database.execute("PRAGMA integrity_check").fetchall()
-        foreign_keys = database.execute("PRAGMA foreign_key_check").fetchall()
-        operation_violations = database.execute(
-            """SELECT COUNT(*) FROM "operation"
-               WHERE position < 0
-                  OR parent_device IS NULL
-                  OR parent_inode IS NULL
-                  OR applied NOT IN (0,1)"""
-        ).fetchone()[0]
-        if (
-            len(integrity) != 1
-            or integrity[0][0] != "ok"
-            or foreign_keys
-            or operation_violations
-            or not _coordinator_v3_cross_table_invariant(database)
-        ):
-            raise _coordinator_migration_error(
-                "coordinator_v3_validation_failed",
-                "coordinator v3 database invariant failed",
-            )
+        _require_v3_invariants(database)
         return {
             "application_id": database.execute("PRAGMA application_id").fetchone()[0],
             "foreign_key_check": [],
@@ -2430,17 +2487,26 @@ def _undoable(
 
 def _is_transient_writer_contention(error: BaseException) -> bool:
     if isinstance(error, sqlite3.OperationalError):
-        code = getattr(error, "sqlite_errorcode", None)
-        if isinstance(code, int) and code & 0xFF in {
-            sqlite3.SQLITE_BUSY,
-            sqlite3.SQLITE_LOCKED,
-        }:
-            return True
-        message = str(error).casefold()
-        return "busy" in message or "locked" in message
+        return _sqlite_contention(error)
     if isinstance(error, OSError):
-        return getattr(error, "winerror", None) in {32, 33} or error.errno in {32, 33}
+        return _windows_sharing_violation(error)
     return False
+
+
+def _sqlite_contention(error: sqlite3.OperationalError) -> bool:
+    """The driver's code decides when it has one; otherwise the message does."""
+    code = getattr(error, "sqlite_errorcode", None)
+    if isinstance(code, int) and code & 0xFF in {
+        sqlite3.SQLITE_BUSY,
+        sqlite3.SQLITE_LOCKED,
+    }:
+        return True
+    message = str(error).casefold()
+    return "busy" in message or "locked" in message
+
+
+def _windows_sharing_violation(error: OSError) -> bool:
+    return getattr(error, "winerror", None) in {32, 33} or error.errno in {32, 33}
 
 
 def _writer_gate_loss_message(heartbeat_lost: bool) -> str:
@@ -2671,12 +2737,18 @@ def _prepared_changes(
     for relative, content in relative_changes.items():
         before = captured[relative]
         captured_hash = ABSENT if before is None else sha256_bytes(before)
-        caller_expected = expected.get(relative)
-        if caller_expected is not None and caller_expected != captured_hash:
-            raise ValueError(f"caller precondition does not match target: {relative}")
+        _require_caller_precondition(expected, relative, captured_hash)
         expected[relative] = captured_hash
         prepared.append(_prepared_change(relative, content, before))
     return prepared, expected
+
+
+def _require_caller_precondition(
+    expected: Mapping[str, object], relative: str, captured_hash: str
+) -> None:
+    caller_expected = expected.get(relative)
+    if caller_expected is not None and caller_expected != captured_hash:
+        raise ValueError(f"caller precondition does not match target: {relative}")
 
 
 def _recovered_duplicate(
@@ -2855,24 +2927,33 @@ def _append_request_matches(
     relative: str,
     block: bytes,
 ) -> bool:
-    if len(record.operations) != 1 or record.operations[0].path != relative:
+    if not _single_operation_on(record, relative):
         return False
-    plan = coordinator._load_verified_plan(record)
-    operation = plan["operations"][0]
-    after = operation["after"]
-    if not isinstance(after, dict):
-        return False
-    content = (coordinator.transaction_root / record.id / after["artifact"]).read_bytes()
-    if not content.endswith(block):
+    content = _append_after_bytes(coordinator, record)
+    if content is None or not content.endswith(block):
         return False
     prefix = content[: len(content) - len(block)] if block else content
-    expected_before = record.operations[0].before_hash
-    actual_before = (
-        ABSENT
-        if record.operations[0].kind == "create"
-        else sha256_bytes(prefix)
-    )
-    return actual_before == expected_before
+    return _append_before_hash(record, prefix) == record.operations[0].before_hash
+
+
+def _single_operation_on(record: TransactionRecord, relative: str) -> bool:
+    return len(record.operations) == 1 and record.operations[0].path == relative
+
+
+def _append_after_bytes(
+    coordinator: MarkdownCoordinator, record: TransactionRecord
+) -> bytes | None:
+    plan = coordinator._load_verified_plan(record)
+    after = plan["operations"][0]["after"]
+    if not isinstance(after, dict):
+        return None
+    return (coordinator.transaction_root / record.id / after["artifact"]).read_bytes()
+
+
+def _append_before_hash(record: TransactionRecord, prefix: bytes) -> str:
+    if record.operations[0].kind == "create":
+        return ABSENT
+    return sha256_bytes(prefix)
 
 
 _AppendAttemptResult = TransactionRecord | Literal["advance", "retry"]
@@ -3298,25 +3379,31 @@ def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
     if sys.platform == "win32":
-        process_query_limited_information = 0x1000
-        still_active = 259
-        handle = ctypes.windll.kernel32.OpenProcess(
-            process_query_limited_information, False, pid
-        )
-        if not handle:
-            return False
-        try:
-            exit_code = ctypes.c_ulong()
-            if not ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
-                return False
-            return exit_code.value == still_active
-        finally:
-            ctypes.windll.kernel32.CloseHandle(handle)
+        return _windows_pid_alive(pid)
     try:
         os.kill(pid, 0)
     except (OSError, OverflowError, ValueError):
         return False
     return True
+
+
+def _windows_pid_alive(pid: int) -> bool:
+    process_query_limited_information = 0x1000
+    still_active = 259
+    handle = ctypes.windll.kernel32.OpenProcess(
+        process_query_limited_information, False, pid
+    )
+    if not handle:
+        return False
+    try:
+        exit_code = ctypes.c_ulong()
+        if not ctypes.windll.kernel32.GetExitCodeProcess(
+            handle, ctypes.byref(exit_code)
+        ):
+            return False
+        return exit_code.value == still_active
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)
 
 
 def _is_reparse_point(path: Path) -> bool:
@@ -3581,13 +3668,7 @@ class MarkdownCoordinator:
         try:
             # Preserve this legacy context manager's implicit commit/rollback API.
             database.isolation_level = "DEFERRED"
-            schema = database.execute(
-                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'transaction'"
-            ).fetchone()
-            if schema is not None and "conflicted" not in (schema["sql"] or ""):
-                # Stage 2 Task 2 shipped a narrower state constraint. Preserve those
-                # databases while allowing their rows to enter recovery-only states.
-                database.execute("PRAGMA ignore_check_constraints = ON")
+            _relax_legacy_state_constraint(database)
             with database:
                 yield database
         finally:
@@ -7226,14 +7307,8 @@ class MarkdownCoordinator:
             )
 
     def _killpoint(self, name: str, parent_transaction_id: str | None = None) -> None:
-        prefix = "undo_" if parent_transaction_id is not None else ""
-        aliases = {name, f"{name[:6]}{prefix}{name[6:]}" if name.startswith("after_") else name}
-        if name == "after_each_target" and parent_transaction_id is not None:
-            aliases.add("after_each_undo_target")
-        if name == "before_commit" and parent_transaction_id is not None:
-            aliases.add("before_undo_commit")
         configured = os.environ.get("LLM_WIKI_TRANSACTION_KILLPOINT")
-        if configured in aliases:
+        if configured in _killpoint_aliases(name, parent_transaction_id):
             os._exit(86)
 
     def _reconcile_operation_states(
@@ -7636,22 +7711,68 @@ def _bounded_transaction_id(value: object) -> str | None:
     return value
 
 
+def _relax_legacy_state_constraint(database: sqlite3.Connection) -> None:
+    """Stage 2 Task 2 shipped a narrower state constraint.
+
+    Preserve those databases while allowing their rows to enter recovery-only
+    states.
+    """
+    schema = database.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'transaction'"
+    ).fetchone()
+    if schema is not None and "conflicted" not in (schema["sql"] or ""):
+        database.execute("PRAGMA ignore_check_constraints = ON")
+
+
+_CLI_MESSAGE_CODES = (
+    ("at least 30", "retention_too_short"),
+    ("undo precondition", "undo_precondition_failed"),
+    ("undo window", "undo_window_expired"),
+    ("only a committed transaction", "transaction_not_committed"),
+    ("before-image is corrupt", "before_image_corrupt"),
+)
+
+
+_UNDO_KILLPOINT_ALIASES = {
+    "after_each_target": "after_each_undo_target",
+    "before_commit": "before_undo_commit",
+}
+
+
+def _killpoint_aliases(name: str, parent_transaction_id: str | None) -> set[str]:
+    """An undo transaction answers to its own killpoint names as well."""
+    aliases = {name, _undo_killpoint_alias(name, parent_transaction_id)}
+    if parent_transaction_id is None:
+        return aliases
+    extra = _UNDO_KILLPOINT_ALIASES.get(name)
+    if extra is not None:
+        aliases.add(extra)
+    return aliases
+
+
+def _undo_killpoint_alias(name: str, parent_transaction_id: str | None) -> str:
+    if not name.startswith("after_"):
+        return name
+    prefix = "undo_" if parent_transaction_id is not None else ""
+    return f"{name[:6]}{prefix}{name[6:]}"
+
+
 def _cli_error_code(error: Exception) -> str:
     if isinstance(error, TransactionFailure):
         return error.code
     if isinstance(error, KeyError):
         return "unknown_transaction"
-    message = str(error)
-    if "at least 30" in message:
-        return "retention_too_short"
-    if "undo precondition" in message:
-        return "undo_precondition_failed"
-    if "undo window" in message:
-        return "undo_window_expired"
-    if "only a committed transaction" in message:
-        return "transaction_not_committed"
-    if "before-image is corrupt" in message:
-        return "before_image_corrupt"
+    return _cli_message_code(str(error)) or _cli_type_code(error)
+
+
+def _cli_message_code(message: str) -> str | None:
+    for fragment, code in _CLI_MESSAGE_CODES:
+        if fragment in message:
+            return code
+    return None
+
+
+def _cli_type_code(error: Exception) -> str:
     if isinstance(error, TimeoutError):
         return "writer_busy"
     if isinstance(error, ValueError):
@@ -7660,60 +7781,96 @@ def _cli_error_code(error: Exception) -> str:
 
 
 def _main() -> int:
+    args = _parse_cli_args()
+    coordinator: MarkdownCoordinator | None = None
+    try:
+        coordinator = _cli_coordinator()
+        payload, exit_code = _run_cli_command(coordinator, args)
+    except Exception as error:  # noqa: BLE001 - the CLI answers with one envelope
+        _print_canonical_json(_cli_failure(coordinator, args, error))
+        return 2
+    _print_canonical_json(payload)
+    return exit_code
+
+
+def _parse_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("recover", help="recover incomplete transactions")
     undo_parser = subparsers.add_parser("undo", help="undo a committed transaction")
     undo_parser.add_argument("transaction_id")
-    prune_parser = subparsers.add_parser("prune", help="prune expired transaction images")
+    prune_parser = subparsers.add_parser(
+        "prune", help="prune expired transaction images"
+    )
     prune_parser.add_argument("--retention-days", type=int, default=30)
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    coordinator: MarkdownCoordinator | None = None
-    exit_code = 0
+
+def _cli_coordinator() -> MarkdownCoordinator:
+    vault = Path(
+        os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent)
+    ).resolve()
+    state_root = Path(os.environ.get("LLM_WIKI_STATE_ROOT", vault)).resolve()
+    return MarkdownCoordinator(vault, state_root)
+
+
+def _run_cli_command(
+    coordinator: MarkdownCoordinator, args: argparse.Namespace
+) -> tuple[object, int]:
+    if args.command == "recover":
+        return _cli_recover(coordinator)
+    if args.command == "undo":
+        return _cli_undo(coordinator, args.transaction_id), 0
+    return {"pruned": coordinator.prune(retention_days=args.retention_days)}, 0
+
+
+def _cli_recover(coordinator: MarkdownCoordinator) -> tuple[object, int]:
+    """A transaction that needs attention is reported by the exit code."""
+    records = coordinator.recover()
+    payload = [_redacted_record(record) for record in records]
+    needs_attention = any(
+        record.state in {"conflicted", "quarantined"} for record in records
+    )
+    return payload, 2 if needs_attention else 0
+
+
+def _cli_undo(
+    coordinator: MarkdownCoordinator, transaction_id: str
+) -> dict[str, object]:
+    undo = coordinator.undo(transaction_id)
+    committed = coordinator.apply(undo.id)
+    return {
+        **_redacted_record(committed),
+        "parent_transaction_id": committed.parent_transaction_id,
+    }
+
+
+def _cli_failure(
+    coordinator: MarkdownCoordinator | None,
+    args: argparse.Namespace,
+    error: Exception,
+) -> dict[str, object]:
+    transaction_id = _bounded_transaction_id(getattr(args, "transaction_id", None))
+    return {
+        "code": _cli_error_code(error),
+        "state": _cli_transaction_state(coordinator, transaction_id),
+        "transaction_id": transaction_id,
+    }
+
+
+def _cli_transaction_state(
+    coordinator: MarkdownCoordinator | None, transaction_id: str | None
+) -> str | None:
+    """A lookup that fails must not replace the error being reported."""
+    if coordinator is None or transaction_id is None:
+        return None
     try:
-        vault = Path(
-            os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent)
-        ).resolve()
-        state_root = Path(os.environ.get("LLM_WIKI_STATE_ROOT", vault)).resolve()
-        coordinator = MarkdownCoordinator(vault, state_root)
-        if args.command == "recover":
-            records = coordinator.recover()
-            payload: object = [_redacted_record(record) for record in records]
-            if any(
-                record.state in {"conflicted", "quarantined"} for record in records
-            ):
-                exit_code = 2
-        elif args.command == "undo":
-            undo = coordinator.undo(args.transaction_id)
-            committed = coordinator.apply(undo.id)
-            payload = {
-                **_redacted_record(committed),
-                "parent_transaction_id": committed.parent_transaction_id,
-            }
-        else:
-            payload = {"pruned": coordinator.prune(retention_days=args.retention_days)}
-    except Exception as error:
-        transaction_id = _bounded_transaction_id(
-            getattr(args, "transaction_id", None)
-        )
-        state: str | None = None
-        if coordinator is not None and transaction_id is not None:
-            try:
-                record = coordinator._record_if_present(transaction_id)
-            except Exception:
-                record = None
-            state = None if record is None else record.state
-        _print_canonical_json(
-            {
-                "code": _cli_error_code(error),
-                "state": state,
-                "transaction_id": transaction_id,
-            }
-        )
-        return 2
-    _print_canonical_json(payload)
-    return exit_code
+        record = coordinator._record_if_present(transaction_id)
+    except Exception:  # noqa: BLE001 - diagnosis is best effort here
+        return None
+    if record is None:
+        return None
+    return record.state
 
 
 if __name__ == "__main__":
