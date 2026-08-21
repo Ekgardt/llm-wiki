@@ -2485,6 +2485,176 @@ def _undoable(
     return current_hashes[position] == row["after_hash"]
 
 
+_CAPTURE_OPEN_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_BINARY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+)
+
+_PRECONDITION_METHODS = {
+    "claim_targets": "_check_claim_targets_precondition",
+    "claim_tree_manifest": "_check_claim_tree_precondition",
+    "guardrails_source_manifest": "_check_guardrails_precondition",
+    "project_lease": "_check_lease_precondition",
+    "intent_fence": "_check_capture_precondition",
+    "capture_binding": "_check_capture_precondition",
+}
+
+
+def _lstat_or_none(target: Path) -> os.stat_result | None:
+    try:
+        return os.lstat(target)
+    except FileNotFoundError:
+        return None
+
+
+def _stat_at_or_none(parent_descriptor: int, name: str) -> os.stat_result | None:
+    try:
+        return os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def _open_capture_descriptor(
+    target: object, label: object, dir_fd: int | None = None
+) -> int:
+    try:
+        if dir_fd is None:
+            return os.open(target, _CAPTURE_OPEN_FLAGS)
+        return os.open(target, _CAPTURE_OPEN_FLAGS, dir_fd=dir_fd)
+    except (OSError, ValueError) as exc:
+        raise ValueError(
+            f"transaction target cannot be opened safely: {label}"
+        ) from exc
+
+
+def _is_reparse_metadata(metadata: os.stat_result) -> bool:
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+
+def _require_regular_file(metadata: os.stat_result, target: Path) -> None:
+    if stat.S_ISLNK(metadata.st_mode) or _is_reparse_metadata(metadata):
+        raise ValueError(f"transaction target is a link: {target}")
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError(f"transaction target is not a regular file: {target}")
+
+
+def _bounded_chunks(descriptor: int, remaining: int) -> Iterator[bytes]:
+    """One byte past the bound is read, so the caller can see the overflow."""
+    while remaining:
+        chunk = os.read(descriptor, min(remaining, 1024 * 1024))
+        if not chunk:
+            return
+        yield chunk
+        remaining -= len(chunk)
+
+
+def _descriptor_bytes(descriptor: int, max_bytes: int | None) -> bytes:
+    if max_bytes is None:
+        with os.fdopen(os.dup(descriptor), "rb") as handle:
+            return handle.read()
+    return b"".join(_bounded_chunks(descriptor, max_bytes + 1))
+
+
+def _require_read_size(
+    content: bytes, after: os.stat_result, target: Path, max_bytes: int | None
+) -> None:
+    if len(content) != after.st_size:
+        raise ValueError(f"transaction target changed while reading: {target}")
+    if max_bytes is not None and len(content) > max_bytes:
+        raise ValueError(f"transaction target exceeds {max_bytes} bytes: {target}")
+
+
+def _bounded_digest(descriptor: int, target: Path) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    total = 0
+    for chunk in _bounded_chunks(descriptor, MAX_KNOWLEDGE_TARGET_BYTES + 1):
+        total += len(chunk)
+        _require_hash_size(total, target)
+        digest.update(chunk)
+    return digest.hexdigest(), total
+
+
+def _require_hash_size(total: int, target: Path) -> None:
+    if total > MAX_KNOWLEDGE_TARGET_BYTES:
+        raise TargetTooLargeError(
+            f"transaction target exceeds {MAX_KNOWLEDGE_TARGET_BYTES} bytes: {target}"
+        )
+
+
+def _reconciled_target(
+    operation_state: tuple[str, str] | None, expected: object, current: str
+) -> bool:
+    """The target may already hold the after state this transaction will write."""
+    if operation_state is None:
+        return False
+    return expected == operation_state[0] and current == operation_state[1]
+
+
+def _guardrail_sources_or_fail(vault: Path) -> object:
+    try:
+        return snapshot_guardrail_sources(vault)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise TransactionFailure(
+            "persisted guardrails source manifest precondition failed",
+            "precondition_failed",
+            "quarantined",
+        ) from exc
+
+
+def _sole_claim_record(
+    ledger: Mapping[str, object] | None, claim_id: object
+) -> Mapping[str, object]:
+    records = (
+        []
+        if ledger is None
+        else [
+            record for record in ledger["claims"] if str(record["id"]) == claim_id
+        ]
+    )
+    if len(records) != 1:
+        raise ValueError("claim target is missing or ambiguous")
+    return records[0]
+
+
+def _claim_record_matches(
+    record: Mapping[str, object], item: Mapping[str, object]
+) -> bool:
+    if record["fingerprint"] != item["fingerprint"]:
+        return False
+    if sha256_bytes(canonical_json_bytes(record)) != item["record_hash"]:
+        return False
+    return record["evidence"]["sha256"] == item["evidence_hash"]
+
+
+def _manifest_entries(manifest: Mapping[str, object]) -> dict[str, str]:
+    return {str(item["path"]): str(item["sha256"]) for item in manifest["entries"]}
+
+
+def _entry_matches(
+    before: str, now: str, operation: tuple[str, str] | None
+) -> bool:
+    if operation is None:
+        return now == before
+    return before == operation[0] and now in operation
+
+
+def _lease_row_matches(row: object, expected: Mapping[str, object]) -> bool:
+    if row is None:
+        return False
+    if row["lease_token"] != expected["lease_token"]:
+        return False
+    if row["fencing_epoch"] != expected["fencing_epoch"]:
+        return False
+    now = datetime.now(timezone.utc)
+    return (
+        _parse_timestamp(row["expires_at"]) > now
+        and _parse_timestamp(str(expected["expires_at"])) > now
+    )
+
+
 def _is_transient_writer_contention(error: BaseException) -> bool:
     if isinstance(error, sqlite3.OperationalError):
         return _sqlite_contention(error)
@@ -6798,31 +6968,16 @@ class MarkdownCoordinator:
             os.close(descriptor)
 
     def _read_bounded_target(self, target: Path, max_bytes: int | None) -> bytes | None:
-        try:
-            before = os.lstat(target)
-        except FileNotFoundError:
+        before = _lstat_or_none(target)
+        if before is None:
             return None
         self._validate_capture_metadata(before, target, max_bytes)
-        flags = (
-            os.O_RDONLY
-            | getattr(os, "O_BINARY", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_NONBLOCK", 0)
-        )
-        try:
-            descriptor = os.open(target, flags)
-        except (OSError, ValueError) as exc:
-            raise ValueError(f"transaction target cannot be opened safely: {target}") from exc
+        descriptor = _open_capture_descriptor(target, target)
         try:
             content, after = self._read_stable_descriptor(
                 descriptor, before, target, max_bytes
             )
-            try:
-                current = os.lstat(target)
-            except FileNotFoundError as exc:
-                raise ValueError(f"transaction target changed while reading: {target}") from exc
-            if not self._same_capture_snapshot(after, current):
-                raise ValueError(f"transaction target changed while reading: {target}")
+            self._require_unchanged_read(after, _lstat_or_none(target), target)
             return content
         finally:
             os.close(descriptor)
@@ -6830,35 +6985,18 @@ class MarkdownCoordinator:
     def _read_bounded_from_parent(
         self, parent_descriptor: int, name: str, max_bytes: int | None
     ) -> bytes | None:
-        try:
-            before = os.stat(
-                name, dir_fd=parent_descriptor, follow_symlinks=False
-            )
-        except FileNotFoundError:
+        before = _stat_at_or_none(parent_descriptor, name)
+        if before is None:
             return None
         self._validate_capture_metadata(before, Path(name), max_bytes)
-        flags = (
-            os.O_RDONLY
-            | getattr(os, "O_BINARY", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_NONBLOCK", 0)
-        )
-        try:
-            descriptor = os.open(name, flags, dir_fd=parent_descriptor)
-        except (OSError, ValueError) as exc:
-            raise ValueError(f"transaction target cannot be opened safely: {name}") from exc
+        descriptor = _open_capture_descriptor(name, name, dir_fd=parent_descriptor)
         try:
             content, after = self._read_stable_descriptor(
                 descriptor, before, Path(name), max_bytes
             )
-            try:
-                current = os.stat(
-                    name, dir_fd=parent_descriptor, follow_symlinks=False
-                )
-            except FileNotFoundError as exc:
-                raise ValueError(f"transaction target changed while reading: {name}") from exc
-            if not self._same_capture_snapshot(after, current):
-                raise ValueError(f"transaction target changed while reading: {name}")
+            self._require_unchanged_read(
+                after, _stat_at_or_none(parent_descriptor, name), name
+            )
             return content
         finally:
             os.close(descriptor)
@@ -6867,14 +7005,7 @@ class MarkdownCoordinator:
     def _validate_capture_metadata(
         metadata: os.stat_result, target: Path, max_bytes: int | None
     ) -> None:
-        attributes = getattr(metadata, "st_file_attributes", 0)
-        is_reparse = bool(
-            attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-        )
-        if stat.S_ISLNK(metadata.st_mode) or is_reparse:
-            raise ValueError(f"transaction target is a link: {target}")
-        if not stat.S_ISREG(metadata.st_mode):
-            raise ValueError(f"transaction target is not a regular file: {target}")
+        _require_regular_file(metadata, target)
         if max_bytes is not None and metadata.st_size > max_bytes:
             raise TargetTooLargeError(
                 f"transaction target exceeds {max_bytes} bytes: {target}"
@@ -6891,24 +7022,11 @@ class MarkdownCoordinator:
         if not self._same_capture_identity(before, opened):
             raise ValueError(f"transaction target changed before open: {target}")
         self._validate_capture_metadata(opened, target, max_bytes)
-        if max_bytes is None:
-            with os.fdopen(os.dup(descriptor), "rb") as handle:
-                content = handle.read()
-        else:
-            chunks: list[bytes] = []
-            remaining = max_bytes + 1
-            while remaining:
-                chunk = os.read(descriptor, min(remaining, 1024 * 1024))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                remaining -= len(chunk)
-            content = b"".join(chunks)
+        content = _descriptor_bytes(descriptor, max_bytes)
         after = os.fstat(descriptor)
-        if not self._same_capture_snapshot(opened, after) or len(content) != after.st_size:
+        if not self._same_capture_snapshot(opened, after):
             raise ValueError(f"transaction target changed while reading: {target}")
-        if max_bytes is not None and len(content) > max_bytes:
-            raise ValueError(f"transaction target exceeds {max_bytes} bytes: {target}")
+        _require_read_size(content, after, target, max_bytes)
         return content, after
 
     @staticmethod
@@ -6997,66 +7115,69 @@ class MarkdownCoordinator:
                 raise close_error
 
     def _hash_bounded_target(self, target: Path) -> str:
-        try:
-            before = os.lstat(target)
-        except FileNotFoundError:
+        before = _lstat_or_none(target)
+        if before is None:
             return ABSENT
-        try:
-            self._validate_capture_metadata(
-                before, target, MAX_KNOWLEDGE_TARGET_BYTES
-            )
-        except TargetTooLargeError:
+        if not self._within_capture_bound(before, target):
             return _OVERSIZED_TARGET
-        flags = (
-            os.O_RDONLY
-            | getattr(os, "O_BINARY", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_NONBLOCK", 0)
-        )
-        descriptor = os.open(target, flags)
+        descriptor = os.open(target, _CAPTURE_OPEN_FLAGS)
         try:
-            try:
-                digest, after = self._hash_stable_descriptor(descriptor, before, target)
-            except TargetTooLargeError:
+            hashed = self._hashed_or_none(descriptor, before, target)
+            if hashed is None:
                 return _OVERSIZED_TARGET
-            current = os.lstat(target)
-            if not self._same_capture_snapshot(after, current):
-                raise ValueError(f"transaction target changed while hashing: {target}")
-            return digest
+            self._require_unchanged_hash(hashed[1], _lstat_or_none(target), target)
+            return hashed[0]
         finally:
             os.close(descriptor)
 
     def _hash_bounded_from_parent(self, parent_descriptor: int, name: str) -> str:
-        try:
-            before = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
-        except FileNotFoundError:
+        before = _stat_at_or_none(parent_descriptor, name)
+        if before is None:
             return ABSENT
-        try:
-            self._validate_capture_metadata(
-                before, Path(name), MAX_KNOWLEDGE_TARGET_BYTES
-            )
-        except TargetTooLargeError:
+        if not self._within_capture_bound(before, Path(name)):
             return _OVERSIZED_TARGET
-        flags = (
-            os.O_RDONLY
-            | getattr(os, "O_BINARY", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_NONBLOCK", 0)
-        )
-        descriptor = os.open(name, flags, dir_fd=parent_descriptor)
+        descriptor = os.open(name, _CAPTURE_OPEN_FLAGS, dir_fd=parent_descriptor)
         try:
-            try:
-                digest, after = self._hash_stable_descriptor(
-                    descriptor, before, Path(name)
-                )
-            except TargetTooLargeError:
+            hashed = self._hashed_or_none(descriptor, before, Path(name))
+            if hashed is None:
                 return _OVERSIZED_TARGET
-            current = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
-            if not self._same_capture_snapshot(after, current):
-                raise ValueError(f"transaction target changed while hashing: {name}")
-            return digest
+            self._require_unchanged_hash(
+                hashed[1], _stat_at_or_none(parent_descriptor, name), name
+            )
+            return hashed[0]
         finally:
             os.close(descriptor)
+
+    def _within_capture_bound(self, metadata: os.stat_result, target: Path) -> bool:
+        """False means the target is too large to be captured at all."""
+        try:
+            self._validate_capture_metadata(
+                metadata, target, MAX_KNOWLEDGE_TARGET_BYTES
+            )
+        except TargetTooLargeError:
+            return False
+        return True
+
+    def _hashed_or_none(
+        self, descriptor: int, before: os.stat_result, target: Path
+    ) -> tuple[str, os.stat_result] | None:
+        """None means the target grew past the bound while it was open."""
+        try:
+            return self._hash_stable_descriptor(descriptor, before, target)
+        except TargetTooLargeError:
+            return None
+
+    def _require_unchanged_read(
+        self, after: os.stat_result, current: os.stat_result | None, label: object
+    ) -> None:
+        if current is None or not self._same_capture_snapshot(after, current):
+            raise ValueError(f"transaction target changed while reading: {label}")
+
+    def _require_unchanged_hash(
+        self, after: os.stat_result, current: os.stat_result | None, label: object
+    ) -> None:
+        if current is None or not self._same_capture_snapshot(after, current):
+            raise ValueError(f"transaction target changed while hashing: {label}")
 
     def _hash_stable_descriptor(
         self, descriptor: int, before: os.stat_result, target: Path
@@ -7067,23 +7188,11 @@ class MarkdownCoordinator:
         self._validate_capture_metadata(
             opened, target, MAX_KNOWLEDGE_TARGET_BYTES
         )
-        digest = hashlib.sha256()
-        total = 0
-        while True:
-            chunk = os.read(descriptor, 1024 * 1024)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > MAX_KNOWLEDGE_TARGET_BYTES:
-                raise TargetTooLargeError(
-                    f"transaction target exceeds {MAX_KNOWLEDGE_TARGET_BYTES} bytes: "
-                    f"{target}"
-                )
-            digest.update(chunk)
+        digest, total = _bounded_digest(descriptor, target)
         after = os.fstat(descriptor)
         if not self._same_capture_snapshot(opened, after) or total != after.st_size:
             raise ValueError(f"transaction target changed while hashing: {target}")
-        return digest.hexdigest(), after
+        return digest, after
 
     def _hash_operation_target(
         self, target: Path, parent_descriptor: int | None
@@ -7107,71 +7216,110 @@ class MarkdownCoordinator:
         database: sqlite3.Connection | None = None,
     ) -> None:
         for path, expected in preconditions.items():
-            if path == "claim_targets":
-                assert isinstance(expected, Sequence)
-                self._check_claim_targets(expected, operation_states)
-                continue
-            if path == "claim_tree_manifest":
-                assert isinstance(expected, Mapping)
-                current_manifest = snapshot_claim_tree(self.vault)
-                if not self._claim_tree_matches(
-                    expected, current_manifest, operation_states
-                ):
-                    raise TransactionFailure(
-                        "persisted claim tree manifest precondition failed",
-                        "precondition_failed",
-                        "quarantined",
-                    )
-                continue
-            if path == "guardrails_source_manifest":
-                assert isinstance(expected, Mapping)
-                try:
-                    current_manifest = snapshot_guardrail_sources(self.vault)
-                except (OSError, RuntimeError, ValueError) as exc:
-                    raise TransactionFailure(
-                        "persisted guardrails source manifest precondition failed",
-                        "precondition_failed",
-                        "quarantined",
-                    ) from exc
-                if expected != current_manifest:
-                    raise TransactionFailure(
-                        "persisted guardrails source manifest precondition failed",
-                        "precondition_failed",
-                        "quarantined",
-                    )
-                continue
-            if path == "project_lease":
-                assert isinstance(expected, Mapping)
-                if database is not None:
-                    self._check_project_lease(database, expected)
-                else:
-                    with self._connect() as lease_database:
-                        self._check_project_lease(lease_database, expected)
-                continue
-            if path in {"intent_fence", "capture_binding"}:
-                if database is None:
-                    with self._connect() as precondition_database:
-                        self._check_capture_preconditions(
-                            precondition_database, preconditions
-                        )
-                else:
-                    self._check_capture_preconditions(database, preconditions)
-                continue
-            current = self._current_hash(path)
-            if current == expected:
-                continue
-            operation_state = operation_states.get(path)
-            if (
-                operation_state is not None
-                and expected == operation_state[0]
-                and current == operation_state[1]
-            ):
-                continue
+            self._check_one_precondition(
+                path, expected, preconditions, operation_states, database
+            )
+
+    def _check_one_precondition(
+        self,
+        path: str,
+        expected: object,
+        preconditions: Mapping[str, object],
+        operation_states: Mapping[str, tuple[str, str]],
+        database: sqlite3.Connection | None,
+    ) -> None:
+        """A named precondition has its own checker; anything else is a target."""
+        checker = getattr(self, _PRECONDITION_METHODS.get(path, ""), None)
+        if checker is not None:
+            checker(expected, preconditions, operation_states, database)
+            return
+        self._check_target_precondition(path, expected, operation_states)
+
+    def _check_claim_targets_precondition(
+        self,
+        expected: object,
+        preconditions: Mapping[str, object],
+        operation_states: Mapping[str, tuple[str, str]],
+        database: sqlite3.Connection | None,
+    ) -> None:
+        assert isinstance(expected, Sequence)
+        self._check_claim_targets(expected, operation_states)
+
+    def _check_claim_tree_precondition(
+        self,
+        expected: object,
+        preconditions: Mapping[str, object],
+        operation_states: Mapping[str, tuple[str, str]],
+        database: sqlite3.Connection | None,
+    ) -> None:
+        assert isinstance(expected, Mapping)
+        if not self._claim_tree_matches(
+            expected, snapshot_claim_tree(self.vault), operation_states
+        ):
             raise TransactionFailure(
-                f"persisted precondition failed for {path}",
+                "persisted claim tree manifest precondition failed",
                 "precondition_failed",
                 "quarantined",
             )
+
+    def _check_guardrails_precondition(
+        self,
+        expected: object,
+        preconditions: Mapping[str, object],
+        operation_states: Mapping[str, tuple[str, str]],
+        database: sqlite3.Connection | None,
+    ) -> None:
+        assert isinstance(expected, Mapping)
+        if expected != _guardrail_sources_or_fail(self.vault):
+            raise TransactionFailure(
+                "persisted guardrails source manifest precondition failed",
+                "precondition_failed",
+                "quarantined",
+            )
+
+    def _check_lease_precondition(
+        self,
+        expected: object,
+        preconditions: Mapping[str, object],
+        operation_states: Mapping[str, tuple[str, str]],
+        database: sqlite3.Connection | None,
+    ) -> None:
+        assert isinstance(expected, Mapping)
+        if database is not None:
+            self._check_project_lease(database, expected)
+            return
+        with self._connect() as lease_database:
+            self._check_project_lease(lease_database, expected)
+
+    def _check_capture_precondition(
+        self,
+        expected: object,
+        preconditions: Mapping[str, object],
+        operation_states: Mapping[str, tuple[str, str]],
+        database: sqlite3.Connection | None,
+    ) -> None:
+        if database is not None:
+            self._check_capture_preconditions(database, preconditions)
+            return
+        with self._connect() as precondition_database:
+            self._check_capture_preconditions(precondition_database, preconditions)
+
+    def _check_target_precondition(
+        self,
+        path: str,
+        expected: object,
+        operation_states: Mapping[str, tuple[str, str]],
+    ) -> None:
+        current = self._current_hash(path)
+        if current == expected:
+            return
+        if _reconciled_target(operation_states.get(path), expected, current):
+            return
+        raise TransactionFailure(
+            f"persisted precondition failed for {path}",
+            "precondition_failed",
+            "quarantined",
+        )
 
     @staticmethod
     def _check_capture_preconditions(
@@ -7219,43 +7367,40 @@ class MarkdownCoordinator:
         expected: Sequence[object],
         operation_states: Mapping[str, tuple[str, str]],
     ) -> None:
-        from claims import MAX_CLAIM_PAGE_BYTES, parse_claim_ledger
-
         for item in expected:
             assert isinstance(item, Mapping)
-            path = str(item["page"])
-            operation = operation_states.get(path)
-            if operation is not None and self._current_hash(path) == operation[1]:
-                continue
-            try:
-                content = read_stable_bytes(
-                    self._target(path),
-                    MAX_CLAIM_PAGE_BYTES,
-                    label="claim target precondition page",
-                )
-                ledger = parse_claim_ledger(content)
-                records = [] if ledger is None else [
-                    record
-                    for record in ledger["claims"]
-                    if str(record["id"]) == item["claim_id"]
-                ]
-                if len(records) != 1:
-                    raise ValueError("claim target is missing or ambiguous")
-                record = records[0]
-                evidence = record["evidence"]
-                matches = (
-                    record["fingerprint"] == item["fingerprint"]
-                    and sha256_bytes(canonical_json_bytes(record)) == item["record_hash"]
-                    and evidence["sha256"] == item["evidence_hash"]
-                )
-            except (OSError, TypeError, ValueError):
-                matches = False
-            if not matches:
-                raise TransactionFailure(
-                    f"persisted claim target precondition failed for {path}#{item['claim_id']}",
-                    "precondition_failed",
-                    "quarantined",
-                )
+            self._check_one_claim_target(item, operation_states)
+
+    def _check_one_claim_target(
+        self,
+        item: Mapping[str, object],
+        operation_states: Mapping[str, tuple[str, str]],
+    ) -> None:
+        path = str(item["page"])
+        operation = operation_states.get(path)
+        if operation is not None and self._current_hash(path) == operation[1]:
+            return
+        if not self._claim_target_matches(path, item):
+            raise TransactionFailure(
+                f"persisted claim target precondition failed for {path}#{item['claim_id']}",
+                "precondition_failed",
+                "quarantined",
+            )
+
+    def _claim_target_matches(self, path: str, item: Mapping[str, object]) -> bool:
+        """Anything that cannot be read or parsed is a failed precondition."""
+        from claims import MAX_CLAIM_PAGE_BYTES, parse_claim_ledger
+
+        try:
+            content = read_stable_bytes(
+                self._target(path),
+                MAX_CLAIM_PAGE_BYTES,
+                label="claim target precondition page",
+            )
+            record = _sole_claim_record(parse_claim_ledger(content), item["claim_id"])
+            return _claim_record_matches(record, item)
+        except (OSError, TypeError, ValueError):
+            return False
 
     @staticmethod
     def _claim_tree_matches(
@@ -7263,26 +7408,16 @@ class MarkdownCoordinator:
         current: Mapping[str, object],
         operation_states: Mapping[str, tuple[str, str]],
     ) -> bool:
-        expected_entries = {
-            str(item["path"]): str(item["sha256"])
-            for item in expected["entries"]
-        }
-        current_entries = {
-            str(item["path"]): str(item["sha256"])
-            for item in current["entries"]
-        }
-        all_paths = set(expected_entries) | set(current_entries)
-        for path in all_paths:
-            before = expected_entries.get(path, ABSENT)
-            now = current_entries.get(path, ABSENT)
-            operation = operation_states.get(path)
-            if operation is None:
-                if now != before:
-                    return False
-                continue
-            if before != operation[0] or now not in operation:
-                return False
-        return True
+        expected_entries = _manifest_entries(expected)
+        current_entries = _manifest_entries(current)
+        return all(
+            _entry_matches(
+                expected_entries.get(path, ABSENT),
+                current_entries.get(path, ABSENT),
+                operation_states.get(path),
+            )
+            for path in set(expected_entries) | set(current_entries)
+        )
 
     @staticmethod
     def _check_project_lease(
@@ -7292,14 +7427,7 @@ class MarkdownCoordinator:
             "SELECT * FROM project_leases WHERE project = ?",
             (expected["project"],),
         ).fetchone()
-        now = datetime.now(timezone.utc)
-        if (
-            row is None
-            or row["lease_token"] != expected["lease_token"]
-            or row["fencing_epoch"] != expected["fencing_epoch"]
-            or _parse_timestamp(row["expires_at"]) <= now
-            or _parse_timestamp(str(expected["expires_at"])) <= now
-        ):
+        if not _lease_row_matches(row, expected):
             raise TransactionFailure(
                 "persisted project lease precondition failed",
                 "precondition_failed",
@@ -7316,17 +7444,23 @@ class MarkdownCoordinator:
     ) -> set[str]:
         reconciled_after: set[str] = set()
         for row in rows:
-            current = self._operation_hash(row)
-            if row["applied"]:
-                if current != row["after_hash"]:
-                    raise RuntimeError(f"after state mismatch for {row['path']}")
+            if self._reconcile_one_operation(transaction_id, row):
                 reconciled_after.add(row["path"])
-            elif current == row["after_hash"]:
-                self._mark_operation_applied(transaction_id, row["position"])
-                reconciled_after.add(row["path"])
-            elif current != row["before_hash"]:
-                raise RuntimeError(f"before state mismatch for {row['path']}")
         return reconciled_after
+
+    def _reconcile_one_operation(self, transaction_id: str, row: sqlite3.Row) -> bool:
+        """True when the target already holds this operation's after state."""
+        current = self._operation_hash(row)
+        if row["applied"]:
+            if current != row["after_hash"]:
+                raise RuntimeError(f"after state mismatch for {row['path']}")
+            return True
+        if current == row["after_hash"]:
+            self._mark_operation_applied(transaction_id, row["position"])
+            return True
+        if current != row["before_hash"]:
+            raise RuntimeError(f"before state mismatch for {row['path']}")
+        return False
 
     def _mark_operation_applied(self, transaction_id: str, position: int) -> None:
         active_database = getattr(self._local, "mutation_database", None)
