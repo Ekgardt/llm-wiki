@@ -2502,6 +2502,423 @@ _PRECONDITION_METHODS = {
 }
 
 
+_COORDINATOR_V2_SCHEMA_SQL = """
+                    CREATE TABLE IF NOT EXISTS "transaction" (
+                        id TEXT PRIMARY KEY,
+                        operation_id TEXT NOT NULL UNIQUE,
+                        request_hash TEXT NOT NULL,
+                        state TEXT NOT NULL CHECK (state IN (
+                            'preparing', 'prepared', 'applying', 'committed',
+                            'discarded', 'conflicted', 'quarantined'
+                        )),
+                        preconditions_json TEXT NOT NULL,
+                        plan_hash TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        parent_transaction_id TEXT,
+                        error_code TEXT,
+                        artifacts_pruned_at TEXT,
+                        owner_pid INTEGER
+                    );
+                    CREATE TABLE IF NOT EXISTS "operation" (
+                        transaction_id TEXT NOT NULL REFERENCES "transaction"(id) ON DELETE CASCADE,
+                        position INTEGER NOT NULL,
+                        kind TEXT NOT NULL CHECK (kind IN ('create', 'replace', 'delete')),
+                        path TEXT NOT NULL,
+                        before_hash TEXT NOT NULL,
+                        after_hash TEXT NOT NULL,
+                        parent_device INTEGER NOT NULL,
+                        parent_inode INTEGER NOT NULL,
+                        applied INTEGER NOT NULL DEFAULT 0 CHECK (applied IN (0, 1)),
+                        PRIMARY KEY (transaction_id, position),
+                        UNIQUE (transaction_id, path)
+                    );
+                    CREATE TABLE IF NOT EXISTS project_leases (
+                        project TEXT PRIMARY KEY,
+                        lease_token TEXT NOT NULL,
+                        fencing_epoch INTEGER NOT NULL,
+                        owner TEXT NOT NULL,
+                        expires_at TEXT NOT NULL,
+                        heartbeat_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS project_checkpoints (
+                        project TEXT NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        occurrence_id TEXT NOT NULL,
+                        idempotency_key TEXT NOT NULL,
+                        event_json TEXT NOT NULL,
+                        lease_token TEXT NOT NULL,
+                        fencing_epoch INTEGER NOT NULL,
+                        operation_id TEXT NOT NULL UNIQUE,
+                        attempt_number INTEGER NOT NULL DEFAULT 1,
+                        parent_operation_id TEXT,
+                        transaction_id TEXT,
+                        state TEXT NOT NULL CHECK (state IN (
+                            'reserved', 'prepared', 'committed', 'quarantined'
+                        )),
+                        PRIMARY KEY (project, sequence),
+                        UNIQUE (project, occurrence_id),
+                        UNIQUE (project, idempotency_key)
+                    );
+                    CREATE TABLE IF NOT EXISTS project_checkpoint_attempts (
+                        project TEXT NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        attempt_number INTEGER NOT NULL,
+                        operation_id TEXT NOT NULL UNIQUE,
+                        parent_operation_id TEXT,
+                        lease_token TEXT NOT NULL,
+                        fencing_epoch INTEGER NOT NULL,
+                        transaction_id TEXT,
+                        state TEXT NOT NULL CHECK (state IN (
+                            'reserved', 'prepared', 'committed', 'quarantined'
+                        )),
+                        created_at TEXT NOT NULL,
+                        PRIMARY KEY (project, sequence, attempt_number)
+                    );
+                    CREATE TABLE IF NOT EXISTS writer_owners (
+                        gate_name TEXT PRIMARY KEY,
+                        owner_token TEXT NOT NULL,
+                        process_id INTEGER NOT NULL,
+                        thread_id INTEGER NOT NULL,
+                        acquired_at TEXT NOT NULL,
+                        heartbeat_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL,
+                        fencing_epoch INTEGER NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS writer_fences (
+                        gate_name TEXT PRIMARY KEY,
+                        last_epoch INTEGER NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS maintenance_owners (
+                        owner_name TEXT PRIMARY KEY,
+                        owner_token TEXT NOT NULL,
+                        process_id INTEGER NOT NULL,
+                        acquired_at TEXT NOT NULL
+                    );
+                    """
+
+
+def _table_column_names(database: sqlite3.Connection, table: str) -> set[str]:
+    return {row["name"] for row in database.execute(f"PRAGMA table_info({table})")}
+
+
+def _add_column_if_missing(
+    database: sqlite3.Connection, table: str, name: str, declaration: str
+) -> None:
+    """Databases from earlier stages are widened in place, never rebuilt."""
+    if name in _table_column_names(database, table):
+        return
+    database.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+
+
+def _add_writer_owner_columns(database: sqlite3.Connection) -> None:
+    for name, declaration in (
+        ("heartbeat_at", "TEXT"),
+        ("expires_at", "TEXT"),
+        ("fencing_epoch", "INTEGER"),
+    ):
+        _add_column_if_missing(database, "writer_owners", name, declaration)
+
+
+def _add_operation_columns(database: sqlite3.Connection) -> None:
+    for name in ("parent_device", "parent_inode"):
+        _add_column_if_missing(database, '"operation"', name, "INTEGER")
+
+
+def _add_transaction_columns(database: sqlite3.Connection) -> None:
+    for name in ("parent_transaction_id", "error_code", "artifacts_pruned_at"):
+        _add_column_if_missing(database, '"transaction"', name, "TEXT")
+    _add_column_if_missing(database, '"transaction"', "owner_pid", "INTEGER")
+
+
+def _add_checkpoint_columns(database: sqlite3.Connection) -> None:
+    _add_column_if_missing(
+        database,
+        "project_checkpoints",
+        "attempt_number",
+        "INTEGER NOT NULL DEFAULT 1",
+    )
+    _add_column_if_missing(
+        database, "project_checkpoints", "parent_operation_id", "TEXT"
+    )
+
+
+def _backfill_checkpoint_operations(database: sqlite3.Connection) -> None:
+    """Rows written before operation identity existed get a derived one."""
+    if "operation_id" in _table_column_names(database, "project_checkpoints"):
+        return
+    database.execute("ALTER TABLE project_checkpoints ADD COLUMN operation_id TEXT")
+    for row in database.execute(
+        "SELECT project, sequence, event_json FROM project_checkpoints"
+    ).fetchall():
+        _set_migrated_operation_id(database, row)
+    database.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS project_checkpoint_operation "
+        "ON project_checkpoints(operation_id)"
+    )
+
+
+def _set_migrated_operation_id(
+    database: sqlite3.Connection, row: sqlite3.Row
+) -> None:
+    event_hash = sha256_bytes(row["event_json"].encode("utf-8"))
+    database.execute(
+        "UPDATE project_checkpoints SET operation_id = ? "
+        "WHERE project = ? AND sequence = ?",
+        (
+            f"project:{row['project']}:{row['sequence']}:migrated:{event_hash}",
+            row["project"],
+            row["sequence"],
+        ),
+    )
+
+
+def _require_matching_intent(binding: object, intent_fence: object) -> None:
+    if (
+        not isinstance(intent_fence, IntentFence)
+        or binding.intent_id != intent_fence.intent_id
+    ):
+        raise ValueError("intent fence does not match capture binding")
+
+
+def _require_live_intent_fence(
+    database: sqlite3.Connection, intent_fence: object, now: datetime
+) -> None:
+    row = database.execute(
+        """SELECT 1 FROM intent_fences WHERE intent_id=? AND mode=?
+           AND token=? AND fencing_epoch=? AND expires_at>?""",
+        (
+            intent_fence.intent_id,
+            intent_fence.mode,
+            intent_fence.token,
+            intent_fence.epoch,
+            now.isoformat().replace("+00:00", "Z"),
+        ),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("intent_fence_lost")
+
+
+def _project_binding_row(
+    database: sqlite3.Connection,
+    binding: object,
+    intent_fence: object,
+    now: datetime,
+) -> None:
+    """Projecting the same binding twice is a no-op; a different one conflicts."""
+    expected = _binding_projection(binding, intent_fence)
+    existing = database.execute(
+        "SELECT * FROM capture_binding_projections WHERE intent_id=?",
+        (binding.intent_id,),
+    ).fetchone()
+    if existing is not None:
+        _require_same_binding(existing, expected)
+        return
+    _insert_binding_projection(database, binding, intent_fence, now)
+
+
+def _binding_projection(binding: object, intent_fence: object) -> tuple[object, ...]:
+    return (
+        binding.task_id,
+        binding.active_digest,
+        binding.seal_digest,
+        intent_fence.token,
+        intent_fence.epoch,
+    )
+
+
+def _require_same_binding(
+    existing: sqlite3.Row, expected: tuple[object, ...]
+) -> None:
+    current = (
+        existing["task_id"],
+        existing["active_link_digest"],
+        existing["seal_digest"],
+        existing["intent_fence_token"],
+        existing["intent_fence_epoch"],
+    )
+    if current != expected:
+        raise RuntimeError("capture_binding_conflict")
+
+
+def _insert_binding_projection(
+    database: sqlite3.Connection,
+    binding: object,
+    intent_fence: object,
+    now: datetime,
+) -> None:
+    inserted = database.execute(
+        """INSERT INTO capture_binding_projections(
+               intent_id,task_id,active_link_digest,seal_digest,
+               projected_at,intent_fence_token,intent_fence_epoch
+           ) VALUES (?,?,?,?,?,?,?)""",
+        (
+            binding.intent_id,
+            binding.task_id,
+            binding.active_digest,
+            binding.seal_digest,
+            now.isoformat().replace("+00:00", "Z"),
+            intent_fence.token,
+            intent_fence.epoch,
+        ),
+    ).rowcount
+    if inserted != 1:
+        raise RuntimeError("capture_binding_projection_failed")
+
+
+def _require_checkpoint_key(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"checkpoint {label} must be a non-empty string")
+    return value
+
+
+def _checkpoint_event_json(
+    base: Mapping[str, object], project: str, sequence: int, row: sqlite3.Row
+) -> str:
+    full_event = dict(base)
+    full_event.update(
+        project=project,
+        sequence=sequence,
+        last_applied_sequence=int(row["last_applied_sequence"]),
+    )
+    return canonical_json_bytes(full_event).decode("utf-8")
+
+
+def _insert_checkpoint(
+    database: sqlite3.Connection,
+    project: str,
+    sequence: int,
+    occurrence_id: str,
+    idempotency_key: str,
+    event_json: str,
+    precondition: Mapping[str, object],
+    operation_id: str,
+) -> None:
+    database.execute(
+        "INSERT INTO project_checkpoints "
+        "(project, sequence, occurrence_id, idempotency_key, event_json, "
+        "lease_token, fencing_epoch, operation_id, attempt_number, state) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'reserved')",
+        (
+            project,
+            sequence,
+            occurrence_id,
+            idempotency_key,
+            event_json,
+            precondition["lease_token"],
+            precondition["fencing_epoch"],
+            operation_id,
+        ),
+    )
+    database.execute(
+        "INSERT INTO project_checkpoint_attempts "
+        "(project, sequence, attempt_number, operation_id, lease_token, "
+        "fencing_epoch, state, created_at) "
+        "VALUES (?, ?, 1, ?, ?, ?, 'reserved', ?)",
+        (
+            project,
+            sequence,
+            operation_id,
+            precondition["lease_token"],
+            precondition["fencing_epoch"],
+            _now(),
+        ),
+    )
+
+
+def _operation_states(
+    rows: Sequence[sqlite3.Row],
+) -> dict[str, tuple[str, str]]:
+    return {row["path"]: (row["before_hash"], row["after_hash"]) for row in rows}
+
+
+def _dlp_code(exc: Exception) -> str:
+    if isinstance(exc, DLPPolicyError):
+        return "dlp_policy_error"
+    return "dlp_content_blocked"
+
+
+def _conflicted_failure(message: str) -> TransactionFailure | None:
+    """The two mismatches a caller can act on; anything else is not ours to name."""
+    if "after state mismatch" in message:
+        return TransactionFailure(message, "unknown_target_bytes", "conflicted")
+    if "before state mismatch" in message:
+        return TransactionFailure(message, "before_hash_mismatch", "conflicted")
+    return None
+
+
+def _abort_receipt_matches(
+    receipt: Mapping[str, object],
+    receipt_bytes: bytes,
+    transaction_id: str,
+    row: sqlite3.Row,
+) -> bool:
+    if canonical_json_bytes(receipt) != receipt_bytes:
+        return False
+    if receipt["transaction_id"] != transaction_id:
+        return False
+    if receipt["abort_operation_id"] != row["abort_operation_id"]:
+        return False
+    if receipt["before_manifest_sha256"] != row["abort_manifest_sha256"]:
+        return False
+    return sha256_bytes(receipt_bytes) == row["abort_receipt_sha256"]
+
+
+def _required_parent_identity(row: sqlite3.Row) -> object:
+    persisted = (row["parent_device"], row["parent_inode"])
+    if None in persisted:
+        raise RuntimeError(
+            f"transaction lacks parent identity for {row['path']}"
+        )
+    return _decode_parent_identity(persisted)
+
+
+def _close_windows_handles(handles: list[int]) -> None:
+    """Every handle is closed; the first failure is raised after the last close."""
+    close_error: OSError | None = None
+    for handle in reversed(handles):
+        close_error = close_error or _closed_windows_handle(handle)
+    if close_error is not None:
+        raise close_error
+
+
+def _closed_windows_handle(handle: int) -> OSError | None:
+    try:
+        _close_windows_handle(handle)
+    except OSError as exc:
+        return exc
+    return None
+
+
+def _link_or_replace(
+    kind: str,
+    temporary_name: str,
+    name: str,
+    parent_descriptor: int,
+    path: str,
+) -> None:
+    """A create must not clobber; a replace must be atomic."""
+    if kind != "create":
+        os.replace(
+            temporary_name,
+            name,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
+        return
+    try:
+        os.link(
+            temporary_name,
+            name,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+    except FileExistsError as exc:
+        raise RuntimeError(f"before state mismatch for {path}") from exc
+    os.unlink(temporary_name, dir_fd=parent_descriptor)
+
+
 def _require_wait_seconds(wait_seconds: object) -> None:
     if wait_seconds is None:
         return
@@ -4118,237 +4535,21 @@ class MarkdownCoordinator:
 
         if not isinstance(binding, CaptureTaskBinding) or binding.seal_digest is None:
             raise ValueError("capture binding must be sealed")
-        if (
-            not isinstance(intent_fence, IntentFence)
-            or binding.intent_id != intent_fence.intent_id
-        ):
-            raise ValueError("intent fence does not match capture binding")
+        _require_matching_intent(binding, intent_fence)
         now = datetime.now(timezone.utc)
         with self._connect() as database, begin_immediate(database):
-            row = database.execute(
-                """SELECT 1 FROM intent_fences WHERE intent_id=? AND mode=?
-                   AND token=? AND fencing_epoch=? AND expires_at>?""",
-                (
-                    intent_fence.intent_id,
-                    intent_fence.mode,
-                    intent_fence.token,
-                    intent_fence.epoch,
-                    now.isoformat().replace("+00:00", "Z"),
-                ),
-            ).fetchone()
-            if row is None:
-                raise RuntimeError("intent_fence_lost")
-            existing = database.execute(
-                "SELECT * FROM capture_binding_projections WHERE intent_id=?",
-                (binding.intent_id,),
-            ).fetchone()
-            expected = (
-                binding.task_id,
-                binding.active_digest,
-                binding.seal_digest,
-                intent_fence.token,
-                intent_fence.epoch,
-            )
-            if existing is not None:
-                current = (
-                    existing["task_id"],
-                    existing["active_link_digest"],
-                    existing["seal_digest"],
-                    existing["intent_fence_token"],
-                    existing["intent_fence_epoch"],
-                )
-                if current != expected:
-                    raise RuntimeError("capture_binding_conflict")
-                return
-            inserted = database.execute(
-                """INSERT INTO capture_binding_projections(
-                       intent_id,task_id,active_link_digest,seal_digest,
-                       projected_at,intent_fence_token,intent_fence_epoch
-                   ) VALUES (?,?,?,?,?,?,?)""",
-                (
-                    binding.intent_id,
-                    binding.task_id,
-                    binding.active_digest,
-                    binding.seal_digest,
-                    now.isoformat().replace("+00:00", "Z"),
-                    intent_fence.token,
-                    intent_fence.epoch,
-                ),
-            ).rowcount
-            if inserted != 1:
-                raise RuntimeError("capture_binding_projection_failed")
+            _require_live_intent_fence(database, intent_fence, now)
+            _project_binding_row(database, binding, intent_fence, now)
 
     def _initialize_database(self) -> None:
         with self._connect() as database:
             with begin_immediate(database):
-                database.executescript(
-                    """
-                    CREATE TABLE IF NOT EXISTS "transaction" (
-                        id TEXT PRIMARY KEY,
-                        operation_id TEXT NOT NULL UNIQUE,
-                        request_hash TEXT NOT NULL,
-                        state TEXT NOT NULL CHECK (state IN (
-                            'preparing', 'prepared', 'applying', 'committed',
-                            'discarded', 'conflicted', 'quarantined'
-                        )),
-                        preconditions_json TEXT NOT NULL,
-                        plan_hash TEXT NOT NULL,
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL,
-                        parent_transaction_id TEXT,
-                        error_code TEXT,
-                        artifacts_pruned_at TEXT,
-                        owner_pid INTEGER
-                    );
-                    CREATE TABLE IF NOT EXISTS "operation" (
-                        transaction_id TEXT NOT NULL REFERENCES "transaction"(id) ON DELETE CASCADE,
-                        position INTEGER NOT NULL,
-                        kind TEXT NOT NULL CHECK (kind IN ('create', 'replace', 'delete')),
-                        path TEXT NOT NULL,
-                        before_hash TEXT NOT NULL,
-                        after_hash TEXT NOT NULL,
-                        parent_device INTEGER NOT NULL,
-                        parent_inode INTEGER NOT NULL,
-                        applied INTEGER NOT NULL DEFAULT 0 CHECK (applied IN (0, 1)),
-                        PRIMARY KEY (transaction_id, position),
-                        UNIQUE (transaction_id, path)
-                    );
-                    CREATE TABLE IF NOT EXISTS project_leases (
-                        project TEXT PRIMARY KEY,
-                        lease_token TEXT NOT NULL,
-                        fencing_epoch INTEGER NOT NULL,
-                        owner TEXT NOT NULL,
-                        expires_at TEXT NOT NULL,
-                        heartbeat_at TEXT NOT NULL
-                    );
-                    CREATE TABLE IF NOT EXISTS project_checkpoints (
-                        project TEXT NOT NULL,
-                        sequence INTEGER NOT NULL,
-                        occurrence_id TEXT NOT NULL,
-                        idempotency_key TEXT NOT NULL,
-                        event_json TEXT NOT NULL,
-                        lease_token TEXT NOT NULL,
-                        fencing_epoch INTEGER NOT NULL,
-                        operation_id TEXT NOT NULL UNIQUE,
-                        attempt_number INTEGER NOT NULL DEFAULT 1,
-                        parent_operation_id TEXT,
-                        transaction_id TEXT,
-                        state TEXT NOT NULL CHECK (state IN (
-                            'reserved', 'prepared', 'committed', 'quarantined'
-                        )),
-                        PRIMARY KEY (project, sequence),
-                        UNIQUE (project, occurrence_id),
-                        UNIQUE (project, idempotency_key)
-                    );
-                    CREATE TABLE IF NOT EXISTS project_checkpoint_attempts (
-                        project TEXT NOT NULL,
-                        sequence INTEGER NOT NULL,
-                        attempt_number INTEGER NOT NULL,
-                        operation_id TEXT NOT NULL UNIQUE,
-                        parent_operation_id TEXT,
-                        lease_token TEXT NOT NULL,
-                        fencing_epoch INTEGER NOT NULL,
-                        transaction_id TEXT,
-                        state TEXT NOT NULL CHECK (state IN (
-                            'reserved', 'prepared', 'committed', 'quarantined'
-                        )),
-                        created_at TEXT NOT NULL,
-                        PRIMARY KEY (project, sequence, attempt_number)
-                    );
-                    CREATE TABLE IF NOT EXISTS writer_owners (
-                        gate_name TEXT PRIMARY KEY,
-                        owner_token TEXT NOT NULL,
-                        process_id INTEGER NOT NULL,
-                        thread_id INTEGER NOT NULL,
-                        acquired_at TEXT NOT NULL,
-                        heartbeat_at TEXT NOT NULL,
-                        expires_at TEXT NOT NULL,
-                        fencing_epoch INTEGER NOT NULL
-                    );
-                    CREATE TABLE IF NOT EXISTS writer_fences (
-                        gate_name TEXT PRIMARY KEY,
-                        last_epoch INTEGER NOT NULL
-                    );
-                    CREATE TABLE IF NOT EXISTS maintenance_owners (
-                        owner_name TEXT PRIMARY KEY,
-                        owner_token TEXT NOT NULL,
-                        process_id INTEGER NOT NULL,
-                        acquired_at TEXT NOT NULL
-                    );
-                    """
-                )
-                columns = {
-                    row["name"] for row in database.execute("PRAGMA table_info(writer_owners)")
-                }
-                for name, declaration in (
-                    ("heartbeat_at", "TEXT"),
-                    ("expires_at", "TEXT"),
-                    ("fencing_epoch", "INTEGER"),
-                ):
-                    if name not in columns:
-                        database.execute(
-                            f"ALTER TABLE writer_owners ADD COLUMN {name} {declaration}"
-                        )
-                operation_columns = {
-                    row["name"] for row in database.execute('PRAGMA table_info("operation")')
-                }
-                for name in ("parent_device", "parent_inode"):
-                    if name not in operation_columns:
-                        database.execute(
-                            f'ALTER TABLE "operation" ADD COLUMN {name} INTEGER'
-                        )
-                transaction_columns = {
-                    row["name"]
-                    for row in database.execute('PRAGMA table_info("transaction")')
-                }
-                for name in (
-                    "parent_transaction_id",
-                    "error_code",
-                    "artifacts_pruned_at",
-                ):
-                    if name not in transaction_columns:
-                        database.execute(
-                            f'ALTER TABLE "transaction" ADD COLUMN {name} TEXT'
-                        )
-                if "owner_pid" not in transaction_columns:
-                    database.execute(
-                        'ALTER TABLE "transaction" ADD COLUMN owner_pid INTEGER'
-                    )
-                checkpoint_columns = {
-                    row["name"]
-                    for row in database.execute("PRAGMA table_info(project_checkpoints)")
-                }
-                if "operation_id" not in checkpoint_columns:
-                    database.execute(
-                        "ALTER TABLE project_checkpoints ADD COLUMN operation_id TEXT"
-                    )
-                    rows = database.execute(
-                        "SELECT project, sequence, event_json FROM project_checkpoints"
-                    ).fetchall()
-                    for row in rows:
-                        event_hash = sha256_bytes(row["event_json"].encode("utf-8"))
-                        database.execute(
-                            "UPDATE project_checkpoints SET operation_id = ? "
-                            "WHERE project = ? AND sequence = ?",
-                            (
-                                f"project:{row['project']}:{row['sequence']}:migrated:{event_hash}",
-                                row["project"],
-                                row["sequence"],
-                            ),
-                        )
-                    database.execute(
-                        "CREATE UNIQUE INDEX IF NOT EXISTS project_checkpoint_operation "
-                        "ON project_checkpoints(operation_id)"
-                    )
-                if "attempt_number" not in checkpoint_columns:
-                    database.execute(
-                        "ALTER TABLE project_checkpoints "
-                        "ADD COLUMN attempt_number INTEGER NOT NULL DEFAULT 1"
-                    )
-                if "parent_operation_id" not in checkpoint_columns:
-                    database.execute(
-                        "ALTER TABLE project_checkpoints ADD COLUMN parent_operation_id TEXT"
-                    )
+                database.executescript(_COORDINATOR_V2_SCHEMA_SQL)
+                _add_writer_owner_columns(database)
+                _add_operation_columns(database)
+                _add_transaction_columns(database)
+                _backfill_checkpoint_operations(database)
+                _add_checkpoint_columns(database)
                 database.execute(
                     "INSERT OR IGNORE INTO project_checkpoint_attempts "
                     "(project, sequence, attempt_number, operation_id, "
@@ -4369,145 +4570,187 @@ class MarkdownCoordinator:
     ) -> ProjectCheckpointReservation:
         """Atomically fence and reserve one idempotent project sequence."""
         base = self.normalize_project_checkpoint(project, event)
-        allocated = {"project", "sequence", "last_applied_sequence"}
-        occurrence_id = base.get("occurrence_id")
-        idempotency_key = base.get("idempotency_key")
-        if not isinstance(occurrence_id, str) or not occurrence_id:
-            raise ValueError("checkpoint occurrence_id must be a non-empty string")
-        if not isinstance(idempotency_key, str) or not idempotency_key:
-            raise ValueError("checkpoint idempotency_key must be a non-empty string")
+        occurrence_id = _require_checkpoint_key(
+            base.get("occurrence_id"), "occurrence_id"
+        )
+        idempotency_key = _require_checkpoint_key(
+            base.get("idempotency_key"), "idempotency_key"
+        )
+        precondition = self._checkpoint_lease(project, lease)
+        with self._connect() as database, begin_immediate(database):
+            self._check_project_lease(database, precondition)
+            existing = self._existing_checkpoint(
+                database, project, base, occurrence_id, idempotency_key
+            )
+            if existing is not None:
+                return self._reserved_or_retried(
+                    database, project, existing, precondition
+                )
+            return self._reserve_new_checkpoint(
+                database, project, base, occurrence_id, idempotency_key, precondition
+            )
+
+    def _checkpoint_lease(
+        self, project: str, lease: Mapping[str, object]
+    ) -> Mapping[str, object]:
         precondition = self._validate_preconditions({"project_lease": lease})[
             "project_lease"
         ]
         assert isinstance(precondition, Mapping)
         if precondition["project"] != project:
             raise ValueError("project lease does not match checkpoint project")
-        with self._connect() as database, begin_immediate(database):
-            self._check_project_lease(database, precondition)
-            occurrence = database.execute(
-                "SELECT * FROM project_checkpoints "
-                "WHERE project = ? AND occurrence_id = ?",
-                (project, occurrence_id),
-            ).fetchone()
-            deduplicated = database.execute(
-                "SELECT * FROM project_checkpoints "
-                "WHERE project = ? AND idempotency_key = ?",
-                (project, idempotency_key),
-            ).fetchone()
-            if occurrence is not None and occurrence["idempotency_key"] != idempotency_key:
-                raise ValueError("occurrence_id is already bound to another idempotency key")
-            if occurrence is not None:
-                self._require_same_checkpoint_event(occurrence, base, allocated)
-            if deduplicated is not None:
-                self._require_same_checkpoint_event(
-                    deduplicated, base, allocated | {"occurrence_id"}
+        return precondition
+
+    def _existing_checkpoint(
+        self,
+        database: sqlite3.Connection,
+        project: str,
+        base: Mapping[str, object],
+        occurrence_id: str,
+        idempotency_key: str,
+    ) -> sqlite3.Row | None:
+        """The row this reservation has already been made under, if any."""
+        occurrence = database.execute(
+            "SELECT * FROM project_checkpoints "
+            "WHERE project = ? AND occurrence_id = ?",
+            (project, occurrence_id),
+        ).fetchone()
+        deduplicated = database.execute(
+            "SELECT * FROM project_checkpoints "
+            "WHERE project = ? AND idempotency_key = ?",
+            (project, idempotency_key),
+        ).fetchone()
+        self._require_consistent_checkpoint(
+            occurrence, deduplicated, base, idempotency_key
+        )
+        return occurrence or deduplicated
+
+    def _require_consistent_checkpoint(
+        self,
+        occurrence: sqlite3.Row | None,
+        deduplicated: sqlite3.Row | None,
+        base: Mapping[str, object],
+        idempotency_key: str,
+    ) -> None:
+        allocated = {"project", "sequence", "last_applied_sequence"}
+        if occurrence is not None:
+            if occurrence["idempotency_key"] != idempotency_key:
+                raise ValueError(
+                    "occurrence_id is already bound to another idempotency key"
                 )
-            existing = occurrence or deduplicated
-            if existing is not None:
-                if existing["state"] == "quarantined":
-                    attempt_number = int(existing["attempt_number"]) + 1
-                    parent_operation_id = str(existing["operation_id"])
-                    operation_id = self._project_attempt_operation_id(
-                        project,
-                        int(existing["sequence"]),
-                        attempt_number,
-                        int(precondition["fencing_epoch"]),
-                        str(existing["event_json"]),
-                    )
-                    database.execute(
-                        "UPDATE project_checkpoints SET lease_token = ?, "
-                        "fencing_epoch = ?, operation_id = ?, attempt_number = ?, "
-                        "parent_operation_id = ?, transaction_id = NULL, state = 'reserved' "
-                        "WHERE project = ? AND sequence = ? AND state = 'quarantined'",
-                        (
-                            precondition["lease_token"],
-                            precondition["fencing_epoch"],
-                            operation_id,
-                            attempt_number,
-                            parent_operation_id,
-                            project,
-                            existing["sequence"],
-                        ),
-                    )
-                    database.execute(
-                        "INSERT INTO project_checkpoint_attempts "
-                        "(project, sequence, attempt_number, operation_id, "
-                        "parent_operation_id, lease_token, fencing_epoch, state, created_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, 'reserved', ?)",
-                        (
-                            project,
-                            existing["sequence"],
-                            attempt_number,
-                            operation_id,
-                            parent_operation_id,
-                            precondition["lease_token"],
-                            precondition["fencing_epoch"],
-                            _now(),
-                        ),
-                    )
-                    advanced = database.execute(
-                        "SELECT * FROM project_checkpoints "
-                        "WHERE project = ? AND sequence = ?",
-                        (project, existing["sequence"]),
-                    ).fetchone()
-                    return self._project_reservation(advanced)
-                return self._project_reservation(existing, duplicate=True)
-            row = database.execute(
-                "SELECT COALESCE(MAX(sequence), 0) AS last_sequence, "
-                "COALESCE(MAX(CASE WHEN state = 'committed' THEN sequence END), 0) "
-                "AS last_applied_sequence FROM project_checkpoints WHERE project = ?",
-                (project,),
-            ).fetchone()
-            sequence = int(row["last_sequence"]) + 1
-            full_event = dict(base)
-            full_event.update(
-                project=project,
-                sequence=sequence,
-                last_applied_sequence=int(row["last_applied_sequence"]),
+            self._require_same_checkpoint_event(occurrence, base, allocated)
+        if deduplicated is not None:
+            self._require_same_checkpoint_event(
+                deduplicated, base, allocated | {"occurrence_id"}
             )
-            event_json = canonical_json_bytes(full_event).decode("utf-8")
-            operation_id = self._project_attempt_operation_id(
+
+    def _reserved_or_retried(
+        self,
+        database: sqlite3.Connection,
+        project: str,
+        existing: sqlite3.Row,
+        precondition: Mapping[str, object],
+    ) -> ProjectCheckpointReservation:
+        if existing["state"] != "quarantined":
+            return self._project_reservation(existing, duplicate=True)
+        return self._retry_quarantined_checkpoint(
+            database, project, existing, precondition
+        )
+
+    def _retry_quarantined_checkpoint(
+        self,
+        database: sqlite3.Connection,
+        project: str,
+        existing: sqlite3.Row,
+        precondition: Mapping[str, object],
+    ) -> ProjectCheckpointReservation:
+        """A quarantined sequence is retried as a new attempt, not a new row."""
+        attempt_number = int(existing["attempt_number"]) + 1
+        parent_operation_id = str(existing["operation_id"])
+        operation_id = self._project_attempt_operation_id(
+            project,
+            int(existing["sequence"]),
+            attempt_number,
+            int(precondition["fencing_epoch"]),
+            str(existing["event_json"]),
+        )
+        database.execute(
+            "UPDATE project_checkpoints SET lease_token = ?, "
+            "fencing_epoch = ?, operation_id = ?, attempt_number = ?, "
+            "parent_operation_id = ?, transaction_id = NULL, state = 'reserved' "
+            "WHERE project = ? AND sequence = ? AND state = 'quarantined'",
+            (
+                precondition["lease_token"],
+                precondition["fencing_epoch"],
+                operation_id,
+                attempt_number,
+                parent_operation_id,
                 project,
-                sequence,
-                1,
-                int(precondition["fencing_epoch"]),
-                event_json,
-            )
-            database.execute(
-                "INSERT INTO project_checkpoints "
-                "(project, sequence, occurrence_id, idempotency_key, event_json, "
-                "lease_token, fencing_epoch, operation_id, attempt_number, state) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'reserved')",
-                (
-                    project,
-                    sequence,
-                    occurrence_id,
-                    idempotency_key,
-                    event_json,
-                    precondition["lease_token"],
-                    precondition["fencing_epoch"],
-                    operation_id,
-                ),
-            )
-            database.execute(
-                "INSERT INTO project_checkpoint_attempts "
-                "(project, sequence, attempt_number, operation_id, lease_token, "
-                "fencing_epoch, state, created_at) "
-                "VALUES (?, ?, 1, ?, ?, ?, 'reserved', ?)",
-                (
-                    project,
-                    sequence,
-                    operation_id,
-                    precondition["lease_token"],
-                    precondition["fencing_epoch"],
-                    _now(),
-                ),
-            )
-            reserved = database.execute(
-                "SELECT * FROM project_checkpoints WHERE project = ? AND sequence = ?",
-                (project, sequence),
-            ).fetchone()
-        return self._project_reservation(reserved)
+                existing["sequence"],
+            ),
+        )
+        database.execute(
+            "INSERT INTO project_checkpoint_attempts "
+            "(project, sequence, attempt_number, operation_id, "
+            "parent_operation_id, lease_token, fencing_epoch, state, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'reserved', ?)",
+            (
+                project,
+                existing["sequence"],
+                attempt_number,
+                operation_id,
+                parent_operation_id,
+                precondition["lease_token"],
+                precondition["fencing_epoch"],
+                _now(),
+            ),
+        )
+        return self._project_reservation(
+            self._checkpoint_row(database, project, int(existing["sequence"]))
+        )
+
+    @staticmethod
+    def _checkpoint_row(
+        database: sqlite3.Connection, project: str, sequence: int
+    ) -> sqlite3.Row | None:
+        return database.execute(
+            "SELECT * FROM project_checkpoints WHERE project = ? AND sequence = ?",
+            (project, sequence),
+        ).fetchone()
+
+    def _reserve_new_checkpoint(
+        self,
+        database: sqlite3.Connection,
+        project: str,
+        base: Mapping[str, object],
+        occurrence_id: str,
+        idempotency_key: str,
+        precondition: Mapping[str, object],
+    ) -> ProjectCheckpointReservation:
+        row = database.execute(
+            "SELECT COALESCE(MAX(sequence), 0) AS last_sequence, "
+            "COALESCE(MAX(CASE WHEN state = 'committed' THEN sequence END), 0) "
+            "AS last_applied_sequence FROM project_checkpoints WHERE project = ?",
+            (project,),
+        ).fetchone()
+        sequence = int(row["last_sequence"]) + 1
+        event_json = _checkpoint_event_json(base, project, sequence, row)
+        operation_id = self._project_attempt_operation_id(
+            project, sequence, 1, int(precondition["fencing_epoch"]), event_json
+        )
+        _insert_checkpoint(
+            database,
+            project,
+            sequence,
+            occurrence_id,
+            idempotency_key,
+            event_json,
+            precondition,
+            operation_id,
+        )
+        return self._project_reservation(
+            self._checkpoint_row(database, project, sequence)
+        )
 
     @staticmethod
     def _project_attempt_operation_id(
@@ -5125,67 +5368,75 @@ class MarkdownCoordinator:
         self._require_operation_active(deadline, cancelled)
         with self.writer_gate(wait_seconds=writer_wait_seconds):
             self._require_operation_active(deadline, cancelled)
-            previous_deadline = getattr(self._local, "recovery_deadline", None)
-            previous_cancelled = getattr(self._local, "recovery_cancelled", None)
-            self._local.recovery_deadline = deadline
-            self._local.recovery_cancelled = cancelled
+            previous = self._enter_recovery_scope(deadline, cancelled)
             try:
                 return self._apply_locked(transaction_id)
             except (DLPContentBlocked, DLPPolicyError) as exc:
-                code = (
-                    "dlp_policy_error"
-                    if isinstance(exc, DLPPolicyError)
-                    else "dlp_content_blocked"
-                )
-                self._rollback_for_quarantine(transaction_id, code)
-                raise TransactionFailure(
-                    "model output publication was blocked",
-                    code,
-                    "quarantined",
-                ) from exc
+                self._quarantine_blocked_publication(transaction_id, exc)
             except TransactionFailure as exc:
-                if exc.code == "precondition_failed":
-                    self._rollback_for_quarantine(transaction_id, exc.code)
-                else:
-                    self._set_transaction_state(
-                        transaction_id, exc.state, error_code=exc.code
-                    )
+                self._record_transaction_failure(transaction_id, exc)
                 raise
             except (FileNotFoundError, RuntimeError, ValueError) as exc:
-                message = str(exc)
-                if _is_target_boundary_error(exc):
-                    self._set_transaction_state(
-                        transaction_id,
-                        "quarantined",
-                        error_code="parent_identity_changed",
-                    )
-                    raise TransactionFailure(
-                        "target parent identity changed",
-                        "parent_identity_changed",
-                        "quarantined",
-                    ) from exc
-                if "after-image is corrupt" in message or "plan hash mismatch" in message:
-                    recovered = self._recover_corrupt_after_image(transaction_id)
-                    raise TransactionFailure(
-                        message, "after_image_corrupt", recovered.state
-                    ) from exc
-                elif "after state mismatch" in message:
-                    failure = TransactionFailure(
-                        message, "unknown_target_bytes", "conflicted"
-                    )
-                elif "before state mismatch" in message:
-                    failure = TransactionFailure(
-                        message, "before_hash_mismatch", "conflicted"
-                    )
-                else:
-                    raise
-                self._set_transaction_state(
-                    transaction_id, failure.state, error_code=failure.code
-                )
-                raise failure from exc
+                self._translate_apply_error(transaction_id, exc)
             finally:
-                self._local.recovery_deadline = previous_deadline
-                self._local.recovery_cancelled = previous_cancelled
+                self._leave_recovery_scope(previous)
+
+    def _enter_recovery_scope(
+        self, deadline: float, cancelled: Callable[[], bool] | None
+    ) -> tuple[object, object]:
+        """Install this call's deadline, returning the one it displaced."""
+        previous = (
+            getattr(self._local, "recovery_deadline", None),
+            getattr(self._local, "recovery_cancelled", None),
+        )
+        self._local.recovery_deadline = deadline
+        self._local.recovery_cancelled = cancelled
+        return previous
+
+    def _leave_recovery_scope(self, previous: tuple[object, object]) -> None:
+        self._local.recovery_deadline, self._local.recovery_cancelled = previous
+
+    def _quarantine_blocked_publication(
+        self, transaction_id: str, exc: Exception
+    ) -> None:
+        code = _dlp_code(exc)
+        self._rollback_for_quarantine(transaction_id, code)
+        raise TransactionFailure(
+            "model output publication was blocked", code, "quarantined"
+        ) from exc
+
+    def _record_transaction_failure(
+        self, transaction_id: str, exc: TransactionFailure
+    ) -> None:
+        if exc.code == "precondition_failed":
+            self._rollback_for_quarantine(transaction_id, exc.code)
+            return
+        self._set_transaction_state(transaction_id, exc.state, error_code=exc.code)
+
+    def _translate_apply_error(self, transaction_id: str, exc: Exception) -> None:
+        """Name what went wrong, or re-raise what this layer cannot name."""
+        if _is_target_boundary_error(exc):
+            self._set_transaction_state(
+                transaction_id, "quarantined", error_code="parent_identity_changed"
+            )
+            raise TransactionFailure(
+                "target parent identity changed",
+                "parent_identity_changed",
+                "quarantined",
+            ) from exc
+        message = str(exc)
+        if "after-image is corrupt" in message or "plan hash mismatch" in message:
+            recovered = self._recover_corrupt_after_image(transaction_id)
+            raise TransactionFailure(
+                message, "after_image_corrupt", recovered.state
+            ) from exc
+        failure = _conflicted_failure(message)
+        if failure is None:
+            raise
+        self._set_transaction_state(
+            transaction_id, failure.state, error_code=failure.code
+        )
+        raise failure from exc
 
     def _apply_locked(self, transaction_id: str) -> TransactionRecord:
         record = self._record(transaction_id)
@@ -5196,50 +5447,63 @@ class MarkdownCoordinator:
         plan = self._load_verified_plan(record)
         content_guard = self._content_guard(record, plan)
         rows = self._operation_rows(transaction_id)
-        operation_states = {
-            row["path"]: (row["before_hash"], row["after_hash"]) for row in rows
-        }
+        operation_states = _operation_states(rows)
         if "project_lease" in record.preconditions:
             return self._apply_project_locked(record, plan, rows, operation_states)
         self._check_preconditions(record.preconditions, operation_states)
         self._reconcile_operation_states(transaction_id, rows)
-        rows = self._operation_rows(transaction_id)
-        self._require_current_operation_active()
-        with self._connect() as database, begin_immediate(
-            database, before_commit=self._require_current_operation_active
-        ):
-            database.execute(
-                'UPDATE "transaction" SET state = \'applying\', updated_at = ? WHERE id = ?',
-                (_now(), transaction_id),
-            )
+        self._mark_transaction_state(transaction_id, "applying")
         self._killpoint("after_applying", record.parent_transaction_id)
-
-        for row, operation_plan in zip(rows, plan["operations"], strict=True):
-            self._require_current_operation_active()
-            self._check_preconditions(record.preconditions, operation_states)
-            if row["applied"]:
-                self._require_operation_state(row, row["after_hash"], "after state")
-                continue
-            self._mutate_and_mark(
-                transaction_id, row, operation_plan, content_guard=content_guard
-            )
-            self._killpoint("after_each_target", record.parent_transaction_id)
-
+        self._mutate_all(record, plan, operation_states, content_guard)
         self._check_preconditions(record.preconditions, operation_states)
-        for row in self._operation_rows(transaction_id):
-            self._require_operation_state(row, row["after_hash"], "after state")
+        self._require_all_after_state(transaction_id)
         self._killpoint("before_commit", record.parent_transaction_id)
-        self._require_current_operation_active()
-        with self._connect() as database, begin_immediate(
-            database, before_commit=self._require_current_operation_active
-        ):
-            database.execute(
-                'UPDATE "transaction" SET state = \'committed\', updated_at = ? WHERE id = ?',
-                (_now(), transaction_id),
-            )
+        self._mark_transaction_state(transaction_id, "committed")
         result = self._record(transaction_id)
         self._killpoint("after_commit", record.parent_transaction_id)
         return result
+
+    def _mutate_all(
+        self,
+        record: TransactionRecord,
+        plan: Mapping[str, object],
+        operation_states: Mapping[str, tuple[str, str]],
+        content_guard: object,
+    ) -> None:
+        rows = self._operation_rows(record.id)
+        for row, operation_plan in zip(rows, plan["operations"], strict=True):
+            self._require_current_operation_active()
+            self._check_preconditions(record.preconditions, operation_states)
+            self._mutate_one(record, row, operation_plan, content_guard)
+
+    def _mutate_one(
+        self,
+        record: TransactionRecord,
+        row: sqlite3.Row,
+        operation_plan: Mapping[str, object],
+        content_guard: object,
+    ) -> None:
+        if row["applied"]:
+            self._require_operation_state(row, row["after_hash"], "after state")
+            return
+        self._mutate_and_mark(
+            record.id, row, operation_plan, content_guard=content_guard
+        )
+        self._killpoint("after_each_target", record.parent_transaction_id)
+
+    def _require_all_after_state(self, transaction_id: str) -> None:
+        for row in self._operation_rows(transaction_id):
+            self._require_operation_state(row, row["after_hash"], "after state")
+
+    def _mark_transaction_state(self, transaction_id: str, state: str) -> None:
+        self._require_current_operation_active()
+        with self._connect() as database, begin_immediate(
+            database, before_commit=self._require_current_operation_active
+        ):
+            database.execute(
+                'UPDATE "transaction" SET state = ?, updated_at = ? WHERE id = ?',
+                (state, _now(), transaction_id),
+            )
 
     def _apply_project_locked(
         self,
@@ -5252,6 +5516,16 @@ class MarkdownCoordinator:
         self._check_preconditions(record.preconditions, operation_states)
         self._reconcile_operation_states(record.id, rows)
         rows = self._operation_rows(record.id)
+        self._mark_project_applying(record)
+        self._killpoint("after_applying", record.parent_transaction_id)
+        self._commit_project_operations(
+            record, plan, rows, operation_states, content_guard
+        )
+        result = self._record(record.id)
+        self._killpoint("after_commit", record.parent_transaction_id)
+        return result
+
+    def _mark_project_applying(self, record: TransactionRecord) -> None:
         self._require_current_operation_active()
         with self._connect() as database, begin_immediate(
             database, before_commit=self._require_current_operation_active
@@ -5262,8 +5536,17 @@ class MarkdownCoordinator:
                 "WHERE id = ?",
                 (_now(), record.id),
             )
-        self._killpoint("after_applying", record.parent_transaction_id)
 
+    def _commit_project_operations(
+        self,
+        record: TransactionRecord,
+        plan: Mapping[str, object],
+        rows: Sequence[sqlite3.Row],
+        operation_states: Mapping[str, tuple[str, str]],
+        content_guard: object,
+    ) -> None:
+        """Every project target moves inside the database transaction that
+        commits its checkpoint, so a failure rewinds both together."""
         changed: list[sqlite3.Row] = []
         with self._connect() as database, begin_immediate(
             database, before_commit=self._require_current_operation_active
@@ -5275,62 +5558,96 @@ class MarkdownCoordinator:
             self._check_project_transaction_head(database, record.id)
             self._local.mutation_database = database
             try:
-                operations = plan["operations"]
-                assert isinstance(operations, list)
-                for row, operation_plan in zip(rows, operations, strict=True):
-                    self._require_current_operation_active()
-                    self._check_preconditions(
-                        record.preconditions, operation_states, database=database
-                    )
-                    if row["applied"]:
-                        self._require_operation_state(row, row["after_hash"], "after state")
-                        continue
-                    assert isinstance(operation_plan, Mapping)
-                    self._mutate_and_mark(
-                        record.id,
-                        row,
-                        operation_plan,
-                        content_guard=content_guard,
-                    )
-                    changed.append(row)
-                    self._check_preconditions(
-                        record.preconditions, operation_states, database=database
-                    )
-                    self._killpoint("after_each_target", record.parent_transaction_id)
-
-                self._check_preconditions(
-                    record.preconditions, operation_states, database=database
+                self._mutate_project_operations(
+                    database, record, plan, rows, operation_states,
+                    content_guard, changed,
                 )
-                for row in rows:
-                    self._require_operation_state(row, row["after_hash"], "after state")
-                self._killpoint("before_commit", record.parent_transaction_id)
-                self._require_current_operation_active()
-                self._check_preconditions(
-                    record.preconditions, operation_states, database=database
-                )
-                database.execute(
-                    'UPDATE "transaction" SET state = \'committed\', updated_at = ? '
-                    "WHERE id = ?",
-                    (_now(), record.id),
-                )
-                database.execute(
-                    "UPDATE project_checkpoints SET state = 'committed' "
-                    "WHERE transaction_id = ? AND state = 'prepared'",
-                    (record.id,),
-                )
-                database.execute(
-                    "UPDATE project_checkpoint_attempts SET state = 'committed' "
-                    "WHERE transaction_id = ? AND state = 'prepared'",
-                    (record.id,),
+                self._commit_project_checkpoint(
+                    database, record, rows, operation_states
                 )
             except BaseException:
                 self._restore_inflight_operations(record.id, changed)
                 raise
             finally:
                 self._local.mutation_database = None
-        result = self._record(record.id)
-        self._killpoint("after_commit", record.parent_transaction_id)
-        return result
+
+    def _mutate_project_operations(
+        self,
+        database: sqlite3.Connection,
+        record: TransactionRecord,
+        plan: Mapping[str, object],
+        rows: Sequence[sqlite3.Row],
+        operation_states: Mapping[str, tuple[str, str]],
+        content_guard: object,
+        changed: list[sqlite3.Row],
+    ) -> None:
+        operations = plan["operations"]
+        assert isinstance(operations, list)
+        for row, operation_plan in zip(rows, operations, strict=True):
+            self._require_current_operation_active()
+            self._check_preconditions(
+                record.preconditions, operation_states, database=database
+            )
+            if not self._mutate_project_one(
+                record, row, operation_plan, content_guard, changed
+            ):
+                continue
+            self._check_preconditions(
+                record.preconditions, operation_states, database=database
+            )
+
+    def _mutate_project_one(
+        self,
+        record: TransactionRecord,
+        row: sqlite3.Row,
+        operation_plan: object,
+        content_guard: object,
+        changed: list[sqlite3.Row],
+    ) -> bool:
+        """True when this call moved the target; False when it was already applied."""
+        if row["applied"]:
+            self._require_operation_state(row, row["after_hash"], "after state")
+            return False
+        assert isinstance(operation_plan, Mapping)
+        self._mutate_and_mark(
+            record.id, row, operation_plan, content_guard=content_guard
+        )
+        changed.append(row)
+        self._killpoint("after_each_target", record.parent_transaction_id)
+        return True
+
+    def _commit_project_checkpoint(
+        self,
+        database: sqlite3.Connection,
+        record: TransactionRecord,
+        rows: Sequence[sqlite3.Row],
+        operation_states: Mapping[str, tuple[str, str]],
+    ) -> None:
+        self._check_preconditions(
+            record.preconditions, operation_states, database=database
+        )
+        for row in rows:
+            self._require_operation_state(row, row["after_hash"], "after state")
+        self._killpoint("before_commit", record.parent_transaction_id)
+        self._require_current_operation_active()
+        self._check_preconditions(
+            record.preconditions, operation_states, database=database
+        )
+        database.execute(
+            'UPDATE "transaction" SET state = \'committed\', updated_at = ? '
+            "WHERE id = ?",
+            (_now(), record.id),
+        )
+        database.execute(
+            "UPDATE project_checkpoints SET state = 'committed' "
+            "WHERE transaction_id = ? AND state = 'prepared'",
+            (record.id,),
+        )
+        database.execute(
+            "UPDATE project_checkpoint_attempts SET state = 'committed' "
+            "WHERE transaction_id = ? AND state = 'prepared'",
+            (record.id,),
+        )
 
     def _restore_inflight_operations(
         self, transaction_id: str, changed: Sequence[sqlite3.Row]
@@ -5880,42 +6197,36 @@ class MarkdownCoordinator:
             row = database.execute(
                 'SELECT * FROM "transaction" WHERE id=?', (transaction_id,)
             ).fetchone()
-        invalid = row is None
-        if row is not None:
-            receipt_path = (
-                self.transaction_root / transaction_id / "abort-receipt.json"
-            )
-            try:
-                receipt_bytes = read_runtime_bytes(
-                    receipt_path,
-                    self.state_root,
-                    max_bytes=64 * 1024,
-                    owner_only=True,
-                )
-                receipt = json.loads(receipt_bytes)
-                validate_schema(
-                    receipt,
-                    Path(__file__).with_name("schemas")
-                    / "transaction-abort-v1.json",
-                )
-                invalid = (
-                    canonical_json_bytes(receipt) != receipt_bytes
-                    or receipt["transaction_id"] != transaction_id
-                    or receipt["abort_operation_id"] != row["abort_operation_id"]
-                    or receipt["before_manifest_sha256"]
-                    != row["abort_manifest_sha256"]
-                    or sha256_bytes(receipt_bytes) != row["abort_receipt_sha256"]
-                    or any(
-                        self._operation_hash(operation) != operation["before_hash"]
-                        for operation in self._operation_rows(transaction_id)
-                    )
-                )
-            except (OSError, TypeError, ValueError):
-                invalid = True
-        if invalid:
+        if row is None or not self._abort_receipt_valid(transaction_id, row):
             self._set_transaction_state(
                 transaction_id, "aborted", error_code="abort_receipt_invalid"
             )
+
+    def _abort_receipt_valid(self, transaction_id: str, row: sqlite3.Row) -> bool:
+        """An unreadable, unparsable or unmatched receipt is simply not valid."""
+        try:
+            receipt_bytes = read_runtime_bytes(
+                self.transaction_root / transaction_id / "abort-receipt.json",
+                self.state_root,
+                max_bytes=64 * 1024,
+                owner_only=True,
+            )
+            receipt = json.loads(receipt_bytes)
+            validate_schema(
+                receipt,
+                Path(__file__).with_name("schemas") / "transaction-abort-v1.json",
+            )
+        except (OSError, TypeError, ValueError):
+            return False
+        return _abort_receipt_matches(
+            receipt, receipt_bytes, transaction_id, row
+        ) and self._targets_hold_before_state(transaction_id)
+
+    def _targets_hold_before_state(self, transaction_id: str) -> bool:
+        return all(
+            self._operation_hash(operation) == operation["before_hash"]
+            for operation in self._operation_rows(transaction_id)
+        )
 
     @staticmethod
     def _recovery_stopped(
@@ -6345,41 +6656,12 @@ class MarkdownCoordinator:
         deadline: float,
         cancelled: Callable[[], bool] | None,
     ) -> TransactionRecord:
-        original = self._record(transaction_id)
-        if original.state != "committed":
-            raise RuntimeError("only a committed transaction can be undone")
-        if _parse_timestamp(original.updated_at) < datetime.now(timezone.utc) - timedelta(
-            days=30
-        ):
-            raise RuntimeError("transaction is outside the 30-day undo window")
-        if not (self.transaction_root / transaction_id).is_dir():
-            raise RuntimeError("transaction undo images are no longer retained")
+        self._require_undoable(transaction_id)
         rows = self._operation_rows(transaction_id)
-        for row in rows:
-            self._require_operation_active(deadline, cancelled)
-            if self._operation_hash(row) != row["after_hash"]:
-                raise RuntimeError("undo precondition failed: current target changed")
-
-        changes: list[MarkdownChange] = []
-        preconditions: dict[str, object] = {}
-        for row in rows:
-            self._require_operation_active(deadline, cancelled)
-            preconditions[row["path"]] = row["after_hash"]
-            if row["before_hash"] == ABSENT:
-                changes.append(MarkdownChange.delete(row["path"]))
-                continue
-            before = (
-                self.transaction_root
-                / transaction_id
-                / "before"
-                / f"{row['position']:06d}.bin"
-            ).read_bytes()
-            if sha256_bytes(before) != row["before_hash"]:
-                raise RuntimeError("transaction before-image is corrupt")
-            if row["after_hash"] == ABSENT:
-                changes.append(MarkdownChange.create(row["path"], before))
-            else:
-                changes.append(MarkdownChange.replace(row["path"], before))
+        self._require_targets_unchanged(rows, deadline, cancelled)
+        changes, preconditions = self._undo_changes(
+            transaction_id, rows, deadline, cancelled
+        )
         return self.prepare(
             changes,
             operation_id=f"undo:{transaction_id}:{uuid.uuid4().hex}",
@@ -7068,15 +7350,27 @@ class MarkdownCoordinator:
         assert isinstance(operations, list)
         for operation in operations:
             assert isinstance(operation, dict)
-            for state_name in ("before", "after"):
-                state = operation[state_name]
-                if state == ABSENT:
-                    continue
-                assert isinstance(state, dict)
-                relative = restricted_relative_path(str(state["artifact"]), (state_name,))
-                artifact = artifact_root.joinpath(*relative.parts)
-                if sha256_bytes(artifact.read_bytes()) != state["sha256"]:
-                    raise RuntimeError(f"transaction artifact hash mismatch: {relative}")
+            self._verify_operation_artifacts(operation, artifact_root)
+
+    def _verify_operation_artifacts(
+        self, operation: Mapping[str, object], artifact_root: Path
+    ) -> None:
+        for state_name in ("before", "after"):
+            self._verify_artifact_state(
+                operation[state_name], state_name, artifact_root
+            )
+
+    @staticmethod
+    def _verify_artifact_state(
+        state: object, state_name: str, artifact_root: Path
+    ) -> None:
+        if state == ABSENT:
+            return
+        assert isinstance(state, dict)
+        relative = restricted_relative_path(str(state["artifact"]), (state_name,))
+        artifact = artifact_root.joinpath(*relative.parts)
+        if sha256_bytes(artifact.read_bytes()) != state["sha256"]:
+            raise RuntimeError(f"transaction artifact hash mismatch: {relative}")
 
     def _write_new_file(self, path: Path, content: bytes, *, owner_only: bool = True) -> None:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
@@ -7211,46 +7505,50 @@ class MarkdownCoordinator:
     @contextlib.contextmanager
     def _stable_parent(self, row: sqlite3.Row) -> Iterator[tuple[Path, int | None]]:
         target = self._target(row["path"])
-        persisted = (row["parent_device"], row["parent_inode"])
-        if None in persisted:
-            raise RuntimeError(f"transaction lacks parent identity for {row['path']}")
-        expected = _decode_parent_identity(persisted)
+        expected = _required_parent_identity(row)
         if not _use_posix_dir_fd():
-            with self._hold_windows_parent(target.parent):
-                if self._parent_identity(target.parent) != expected:
-                    raise RuntimeError(f"parent identity mismatch for {row['path']}")
-                try:
-                    yield target, None
-                finally:
-                    if self._parent_identity(target.parent) != expected:
-                        raise RuntimeError(f"parent identity mismatch for {row['path']}")
+            yield from self._windows_stable_parent(target, expected, row["path"])
             return
+        yield from self._posix_stable_parent(target, expected, row["path"])
 
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    def _windows_stable_parent(
+        self, target: Path, expected: object, path: str
+    ) -> Iterator[tuple[Path, int | None]]:
+        with self._hold_windows_parent(target.parent):
+            self._require_parent_identity(target.parent, expected, path)
+            try:
+                yield target, None
+            finally:
+                self._require_parent_identity(target.parent, expected, path)
+
+    def _posix_stable_parent(
+        self, target: Path, expected: object, path: str
+    ) -> Iterator[tuple[Path, int | None]]:
+        flags = (
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        )
         descriptor = os.open(target.parent, flags)
         try:
-            metadata = os.fstat(descriptor)
-            if _stat_identity(metadata) != expected:
-                raise RuntimeError(f"parent identity mismatch for {row['path']}")
+            if _stat_identity(os.fstat(descriptor)) != expected:
+                raise RuntimeError(f"parent identity mismatch for {path}")
             yield target, descriptor
-            if self._parent_identity(target.parent) != expected:
-                raise RuntimeError(f"parent identity mismatch for {row['path']}")
+            self._require_parent_identity(target.parent, expected, path)
         finally:
             os.close(descriptor)
+
+    def _require_parent_identity(
+        self, parent: Path, expected: object, path: str
+    ) -> None:
+        if self._parent_identity(parent) != expected:
+            raise RuntimeError(f"parent identity mismatch for {path}")
 
     @contextlib.contextmanager
     def _hold_windows_parent(self, parent: Path) -> Iterator[None]:
         if os.name != "nt":
-            raise RuntimeError("safe non-POSIX mutation requires Windows directory handles")
-        try:
-            relative = parent.relative_to(self.vault)
-        except ValueError as exc:
-            raise RuntimeError("target parent is outside the vault") from exc
-        paths = [self.vault]
-        current = self.vault
-        for part in relative.parts:
-            current = current / part
-            paths.append(current)
+            raise RuntimeError(
+                "safe non-POSIX mutation requires Windows directory handles"
+            )
+        paths = self._vault_chain(parent)
         handles: list[int] = []
         previous_parent_handle = getattr(self._local, "windows_parent_handle", None)
         try:
@@ -7260,14 +7558,20 @@ class MarkdownCoordinator:
             yield
         finally:
             self._local.windows_parent_handle = previous_parent_handle
-            close_error: OSError | None = None
-            for handle in reversed(handles):
-                try:
-                    _close_windows_handle(handle)
-                except OSError as exc:
-                    close_error = close_error or exc
-            if close_error is not None:
-                raise close_error
+            _close_windows_handles(handles)
+
+    def _vault_chain(self, parent: Path) -> list[Path]:
+        """Every directory from the vault down to the parent, vault first."""
+        try:
+            relative = parent.relative_to(self.vault)
+        except ValueError as exc:
+            raise RuntimeError("target parent is outside the vault") from exc
+        paths = [self.vault]
+        current = self.vault
+        for part in relative.parts:
+            current = current / part
+            paths.append(current)
+        return paths
 
     def _hash_bounded_target(self, target: Path) -> str:
         before = _lstat_or_none(target)
@@ -7355,6 +7659,61 @@ class MarkdownCoordinator:
         if parent_descriptor is None:
             return self._hash_bounded_target(target)
         return self._hash_bounded_from_parent(parent_descriptor, target.name)
+
+    def _require_undoable(self, transaction_id: str) -> None:
+        original = self._record(transaction_id)
+        if original.state != "committed":
+            raise RuntimeError("only a committed transaction can be undone")
+        if _parse_timestamp(original.updated_at) < datetime.now(
+            timezone.utc
+        ) - timedelta(days=30):
+            raise RuntimeError("transaction is outside the 30-day undo window")
+        if not (self.transaction_root / transaction_id).is_dir():
+            raise RuntimeError("transaction undo images are no longer retained")
+
+    def _require_targets_unchanged(
+        self,
+        rows: Sequence[sqlite3.Row],
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> None:
+        for row in rows:
+            self._require_operation_active(deadline, cancelled)
+            if self._operation_hash(row) != row["after_hash"]:
+                raise RuntimeError(
+                    "undo precondition failed: current target changed"
+                )
+
+    def _undo_changes(
+        self,
+        transaction_id: str,
+        rows: Sequence[sqlite3.Row],
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> tuple[list[MarkdownChange], dict[str, object]]:
+        changes: list[MarkdownChange] = []
+        preconditions: dict[str, object] = {}
+        for row in rows:
+            self._require_operation_active(deadline, cancelled)
+            preconditions[row["path"]] = row["after_hash"]
+            changes.append(self._undo_change(transaction_id, row))
+        return changes, preconditions
+
+    def _undo_change(self, transaction_id: str, row: sqlite3.Row) -> MarkdownChange:
+        """The inverse of one committed operation, read back from its before-image."""
+        if row["before_hash"] == ABSENT:
+            return MarkdownChange.delete(row["path"])
+        before = (
+            self.transaction_root
+            / transaction_id
+            / "before"
+            / f"{row['position']:06d}.bin"
+        ).read_bytes()
+        if sha256_bytes(before) != row["before_hash"]:
+            raise RuntimeError("transaction before-image is corrupt")
+        if row["after_hash"] == ABSENT:
+            return MarkdownChange.create(row["path"], before)
+        return MarkdownChange.replace(row["path"], before)
 
     def _operation_hash(self, row: sqlite3.Row) -> str:
         with self._stable_parent(row) as (target, parent_descriptor):
@@ -7754,60 +8113,77 @@ class MarkdownCoordinator:
 
     def _apply_operation(self, row: sqlite3.Row, operation_plan: Mapping[str, object]) -> None:
         with self._stable_parent(row) as (target, parent_descriptor):
-            current_hash = self._hash_operation_target(target, parent_descriptor)
-            if current_hash != row["before_hash"]:
-                raise RuntimeError(f"before state mismatch for {row['path']}")
+            self._require_operation_target_state(
+                target, parent_descriptor, row, "before"
+            )
             if parent_descriptor is None:
                 self._apply_windows_operation(row, operation_plan, target)
                 return
             self._before_target_mutation(target)
-
             if row["kind"] == "delete":
                 os.unlink(target.name, dir_fd=parent_descriptor)
                 os.fsync(parent_descriptor)
                 return
+            content = self._verified_after_content(row, operation_plan)
+            self._publish_at_parent(row, target, parent_descriptor, content)
 
-            after = operation_plan["after"]
-            if not isinstance(after, dict):
-                raise RuntimeError("transaction after-image is absent")
-            artifact = self.transaction_root / row["transaction_id"] / str(after["artifact"])
-            content = artifact.read_bytes()
-            if sha256_bytes(content) != row["after_hash"]:
-                raise RuntimeError(f"transaction after-image is corrupt for {row['path']}")
-            if getattr(self._local, "content_guard", None) == "model_output":
-                require_safe_publication(content)
-            temporary_name = f".{target.name}.{uuid.uuid4().hex}.tmp"
-            try:
-                self._write_new_file_at(parent_descriptor, temporary_name, content)
-                current_hash = self._hash_operation_target(target, parent_descriptor)
-                if current_hash != row["before_hash"]:
-                    raise RuntimeError(f"before state mismatch for {row['path']}")
-                if row["kind"] == "create":
-                    try:
-                        os.link(
-                            temporary_name,
-                            target.name,
-                            src_dir_fd=parent_descriptor,
-                            dst_dir_fd=parent_descriptor,
-                            follow_symlinks=False,
-                        )
-                    except FileExistsError as exc:
-                        raise RuntimeError(f"before state mismatch for {row['path']}") from exc
-                    os.unlink(temporary_name, dir_fd=parent_descriptor)
-                else:
-                    os.replace(
-                        temporary_name,
-                        target.name,
-                        src_dir_fd=parent_descriptor,
-                        dst_dir_fd=parent_descriptor,
-                    )
-                os.fsync(parent_descriptor)
-                actual_hash = self._hash_operation_target(target, parent_descriptor)
-                if actual_hash != row["after_hash"]:
-                    raise RuntimeError(f"after state mismatch for {row['path']}")
-            finally:
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(temporary_name, dir_fd=parent_descriptor)
+    def _require_operation_target_state(
+        self,
+        target: Path,
+        parent_descriptor: int | None,
+        row: sqlite3.Row,
+        state_name: str,
+    ) -> None:
+        current = self._hash_operation_target(target, parent_descriptor)
+        if current != row[f"{state_name}_hash"]:
+            raise RuntimeError(f"{state_name} state mismatch for {row['path']}")
+
+    def _verified_after_content(
+        self, row: sqlite3.Row, operation_plan: Mapping[str, object]
+    ) -> bytes:
+        """The staged after-image, refused unless it hashes and publishes clean."""
+        after = operation_plan["after"]
+        if not isinstance(after, dict):
+            raise RuntimeError("transaction after-image is absent")
+        artifact = (
+            self.transaction_root / row["transaction_id"] / str(after["artifact"])
+        )
+        content = artifact.read_bytes()
+        if sha256_bytes(content) != row["after_hash"]:
+            raise RuntimeError(
+                f"transaction after-image is corrupt for {row['path']}"
+            )
+        if getattr(self._local, "content_guard", None) == "model_output":
+            require_safe_publication(content)
+        return content
+
+    def _publish_at_parent(
+        self,
+        row: sqlite3.Row,
+        target: Path,
+        parent_descriptor: int,
+        content: bytes,
+    ) -> None:
+        temporary_name = f".{target.name}.{uuid.uuid4().hex}.tmp"
+        try:
+            self._write_new_file_at(parent_descriptor, temporary_name, content)
+            self._require_operation_target_state(
+                target, parent_descriptor, row, "before"
+            )
+            _link_or_replace(
+                row["kind"],
+                temporary_name,
+                target.name,
+                parent_descriptor,
+                row["path"],
+            )
+            os.fsync(parent_descriptor)
+            self._require_operation_target_state(
+                target, parent_descriptor, row, "after"
+            )
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temporary_name, dir_fd=parent_descriptor)
 
     def _apply_windows_operation(
         self,
@@ -7815,28 +8191,26 @@ class MarkdownCoordinator:
         operation_plan: Mapping[str, object],
         target: Path,
     ) -> None:
-        parent_handle = getattr(self._local, "windows_parent_handle", None)
-        if parent_handle is None:
+        if getattr(self._local, "windows_parent_handle", None) is None:
             raise RuntimeError("Windows parent handle is not held at mutation")
         if row["kind"] == "delete":
-            target_handle = _open_windows_file_for_mutation(target)
-            try:
-                self._before_target_mutation(target)
-                _delete_windows_handle(target_handle)
-            finally:
-                _close_windows_handle(target_handle)
-            fsync_directory(target.parent)
+            self._delete_windows_target(target)
             return
+        content = self._verified_after_content(row, operation_plan)
+        self._publish_windows_target(row, target, content)
 
-        after = operation_plan["after"]
-        if not isinstance(after, dict):
-            raise RuntimeError("transaction after-image is absent")
-        artifact = self.transaction_root / row["transaction_id"] / str(after["artifact"])
-        content = artifact.read_bytes()
-        if sha256_bytes(content) != row["after_hash"]:
-            raise RuntimeError(f"transaction after-image is corrupt for {row['path']}")
-        if getattr(self._local, "content_guard", None) == "model_output":
-            require_safe_publication(content)
+    def _delete_windows_target(self, target: Path) -> None:
+        target_handle = _open_windows_file_for_mutation(target)
+        try:
+            self._before_target_mutation(target)
+            _delete_windows_handle(target_handle)
+        finally:
+            _close_windows_handle(target_handle)
+        fsync_directory(target.parent)
+
+    def _publish_windows_target(
+        self, row: sqlite3.Row, target: Path, content: bytes
+    ) -> None:
         temporary = target.parent / f".{target.name}.{uuid.uuid4().hex}.tmp"
         self._write_new_file(temporary, content, owner_only=False)
         self._before_target_mutation(target)
