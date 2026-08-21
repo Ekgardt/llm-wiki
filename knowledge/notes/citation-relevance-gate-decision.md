@@ -60,8 +60,18 @@ sharing not one content word with its evidence.
 - Regressions: `tests/test_grounded_qa.py` — an unrelated citation is rejected,
   a real paraphrase is kept.
 
+## Narrowed 2026-08-21
+
+This decision stands for a claim and a span written in the same script, which is
+what it was measured on. It does not stand across scripts: a correct English span
+cited under a Russian claim shares no token at all, and this rule failed it. See
+[[knowledge/notes/cross-lingual-citation-relevance-decision|Cross-Lingual Citation Relevance]]
+for what replaces it there. Kept `active` rather than `superseded` because the
+rule below is still the one that runs within one language.
+
 ## Related
 
+- [[cross-lingual-citation-relevance-decision]]
 - [[one-trust-weight-across-retrieval-paths-decision]]
 - [[reliable-memory-stage-2]]
 - [[classification-measurement-stand-decision]]

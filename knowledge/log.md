@@ -57,3 +57,5 @@ This log is vault metadata — an append-only editorial changelog of compile pas
 > Entries dated otherwise (e.g. 2026-04-12, 2026-04-14, 2026-04-18,
 > 2026-07-03) reference private daily files that exist only in the
 > installed vault (`$LLM_WIKI_ROOT`), not in the public clone.
+
+- 2026-08-21 — Narrowed the citation relevance gate after it was found refusing correct answers in this vault's own configuration. Notes are English by project rule and questions arrive in Russian, so a correct English span cited under a Russian claim shared no token and failed the whole answer. Word overlap now decides only within one script; across scripts the gate looks for tokens that survive translation — figures, versions, counts and kept identifiers — and abstains when the claim carries none. Named entities are not treated as anchors because they are transliterated rather than translated. Recorded in `cross-lingual-citation-relevance-decision.md`; the 2026-08-19 decision stays active for same-script pairs. The four functions in `scripts/query_memory.py` that the complexity gate refused were split in the same pass.

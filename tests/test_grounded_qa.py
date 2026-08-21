@@ -434,3 +434,48 @@ def test_a_claim_that_shares_a_term_with_its_citation_is_kept(vault: Path) -> No
     ]
 
     assert verify_grounded_answer(answer, context, vault=vault)["status"] == "answered"
+
+
+# --- citation relevance across two languages ---------------------------------
+#
+# The vault's notes are English by project rule and questions arrive in Russian,
+# so a correct English span under a Russian claim shares no word at all. The
+# first version of this gate failed the whole answer for that, which is every
+# correct answer in a mixed-language vault rather than an edge case.
+
+_RU_CLAIM = "Сторож повторяет отказ, пока обязательство не выполнено."
+_EN_SPAN = "The gate repeats its refusal while the obligation stands."
+
+
+def test_a_correct_citation_in_another_language_is_kept() -> None:
+    """Word overlap is a within-language signal and must not refuse across scripts."""
+    from query_memory import _require_citation_touches_claim
+
+    _require_citation_touches_claim(_RU_CLAIM, _EN_SPAN)
+
+
+def test_an_identifier_the_claim_keeps_must_still_appear() -> None:
+    """`gate_stop` is not translated, so it is evidence the span has to carry."""
+    from query_memory import _require_citation_touches_claim
+
+    _require_citation_touches_claim("Файл gate_stop меняет поведение.", "The gate_stop module changed.")
+
+    with pytest.raises(GroundedQAError, match="shares no content"):
+        _require_citation_touches_claim("Файл gate_stop меняет поведение.", "Alpha is enabled.")
+
+
+def test_within_one_language_the_original_rule_is_unchanged() -> None:
+    """The audited behaviour must survive: no shared word still fails the answer."""
+    from query_memory import _require_citation_touches_claim
+
+    _require_citation_touches_claim("Alpha has been switched on.", "Alpha is enabled.")
+
+    with pytest.raises(GroundedQAError, match="shares no content"):
+        _require_citation_touches_claim("Restic snapshots are encrypted.", "Alpha is enabled.")
+
+
+def test_an_unspaced_script_still_matches_on_bigrams() -> None:
+    """Chinese and Japanese were covered by bigrams and must stay covered."""
+    from query_memory import _require_citation_touches_claim
+
+    _require_citation_touches_claim("守卫重复拒绝直到义务完成", "守卫重复拒绝")
