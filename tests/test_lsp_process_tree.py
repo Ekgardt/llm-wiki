@@ -25,24 +25,46 @@ def _command(*arguments: str) -> list[str]:
 
 def _pid_alive(pid: int) -> bool:
     if os.name == "nt":
-        import ctypes
+        return _windows_pid_alive(pid)
+    if _linux_pid_is_reaped(pid):
+        return False
+    return _posix_pid_alive(pid)
 
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        handle = kernel32.OpenProcess(0x00100000, False, pid)
-        if not handle:
-            return False
-        try:
-            return kernel32.WaitForSingleObject(handle, 0) == 0x00000102
-        finally:
-            kernel32.CloseHandle(handle)
-    if sys.platform.startswith("linux"):
-        try:
-            payload = (Path("/proc") / str(pid) / "stat").read_text(encoding="ascii")
-        except (FileNotFoundError, OSError):
-            return False
-        closing = payload.rfind(")")
-        if closing >= 0 and payload[closing + 2 :].split()[0] in {"Z", "X", "x"}:
-            return False
+
+def _windows_pid_alive(pid: int) -> bool:
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.OpenProcess(0x00100000, False, pid)
+    if not handle:
+        return False
+    try:
+        return kernel32.WaitForSingleObject(handle, 0) == 0x00000102
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _linux_pid_is_reaped(pid: int) -> bool:
+    """A zombie still answers signal 0, so on Linux /proc decides."""
+    if not sys.platform.startswith("linux"):
+        return False
+    payload = _proc_stat(pid)
+    if payload is None:
+        return True
+    closing = payload.rfind(")")
+    if closing < 0:
+        return False
+    return payload[closing + 2 :].split()[0] in {"Z", "X", "x"}
+
+
+def _proc_stat(pid: int) -> str | None:
+    try:
+        return (Path("/proc") / str(pid) / "stat").read_text(encoding="ascii")
+    except (FileNotFoundError, OSError):
+        return None
+
+
+def _posix_pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -81,6 +103,41 @@ def _install_windows_job_queries(
     accounting_values = iter(accounting)
     calls: list[int] = []
 
+    def fill_accounting(address: int) -> bool:
+        value = next(accounting_values)
+        if value is None:
+            ctypes.set_last_error(5)
+            return False
+        total, active = value
+        information = lsp_process_tree._BasicAccountingInformation.from_address(address)
+        information.total_processes = total
+        information.active_processes = active
+        return True
+
+    def fill_process_ids(address: int) -> bool:
+        if pids is None:
+            ctypes.set_last_error(5)
+            return False
+        information = lsp_process_tree._BasicProcessIdList.from_address(address)
+        information.number_of_assigned_processes = assigned
+        information.number_of_process_ids_in_list = len(pids)
+        identifiers = (ctypes.c_size_t * len(pids)).from_address(
+            address + lsp_process_tree._BasicProcessIdList.process_id_list.offset
+        )
+        for index, pid in enumerate(pids):
+            identifiers[index] = pid
+        return True
+
+    def fill(information_class: int, address: int) -> bool:
+        """False means the query failed and left its reason in the last error."""
+        if information_class == lsp_process_tree._JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION:
+            return fill_accounting(address)
+        if information_class == lsp_process_tree._JOB_OBJECT_BASIC_PROCESS_ID_LIST:
+            return fill_process_ids(address)
+        raise AssertionError(  # pragma: no cover - assertion boundary
+            f"unexpected Job information class: {information_class}"
+        )
+
     class Kernel:
         @staticmethod
         def QueryInformationJobObject(
@@ -93,31 +150,8 @@ def _install_windows_job_queries(
             calls.append(information_class)
             address = ctypes.cast(pointer, ctypes.c_void_p).value
             assert address is not None
-            if information_class == lsp_process_tree._JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION:
-                value = next(accounting_values)
-                if value is None:
-                    ctypes.set_last_error(5)
-                    return 0
-                total, active = value
-                information = lsp_process_tree._BasicAccountingInformation.from_address(
-                    address
-                )
-                information.total_processes = total
-                information.active_processes = active
-            elif information_class == lsp_process_tree._JOB_OBJECT_BASIC_PROCESS_ID_LIST:
-                if pids is None:
-                    ctypes.set_last_error(5)
-                    return 0
-                information = lsp_process_tree._BasicProcessIdList.from_address(address)
-                information.number_of_assigned_processes = assigned
-                information.number_of_process_ids_in_list = len(pids)
-                identifiers = (ctypes.c_size_t * len(pids)).from_address(
-                    address + lsp_process_tree._BasicProcessIdList.process_id_list.offset
-                )
-                for index, pid in enumerate(pids):
-                    identifiers[index] = pid
-            else:  # pragma: no cover - assertion boundary
-                raise AssertionError(f"unexpected Job information class: {information_class}")
+            if not fill(information_class, address):
+                return 0
             ctypes.cast(returned, ctypes.POINTER(wintypes.DWORD)).contents.value = _size
             return 1
 
@@ -141,13 +175,84 @@ def _write_proc_stat(
     )
 
 
+def _await_pid_gone(pid: int, timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    while _pid_alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+
+def _terminate_and_close(tree: ProcessTree) -> None:
+    """Terminate a tree that still owns something, then close it either way."""
+    if tree.process_group is not None or tree.windows_job is not None:
+        tree.terminate(deadline=time.monotonic() + 5)
+    tree.close()
+
+
+def _force_cleanup(tree: ProcessTree, descendant_pid: int) -> None:
+    """Whatever the test did not reach, done bluntly, so nothing outlives it."""
+    if tree.process.poll() is None:
+        _ask_fixture_to_clean(tree)
+        _wait_or_kill(tree)
+    if _pid_alive(descendant_pid):
+        os.kill(descendant_pid, signal.SIGKILL)
+    if tree.process_group is not None:
+        tree.close()
+
+
+def _ask_fixture_to_clean(tree: ProcessTree) -> None:
+    if tree.process.stdin is None:
+        return
+    try:
+        tree.process.stdin.write(b"cleanup\n")
+        tree.process.stdin.flush()
+    except (BrokenPipeError, OSError):
+        pass
+
+
+def _wait_or_kill(tree: ProcessTree) -> None:
+    try:
+        tree.process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        tree.process.kill()
+        tree.process.wait(timeout=3)
+
+
+def _fixture_death(tree: ProcessTree) -> str:
+    """Why the fixture stopped talking, in words a CI log can be read by."""
+    code = tree.process.poll()
+    if code is None:
+        return "process-tree fixture closed stdout while still running"
+    return (
+        f"process-tree fixture exited (code {code}) before it reported"
+        f"{_fixture_stderr(tree)}"
+    )
+
+
+def _fixture_stderr(tree: ProcessTree) -> str:
+    """Whatever the dead fixture left on the stderr pipe nobody drains.
+
+    `ProcessTree` gives every child a stderr pipe and no reader, so a fixture
+    that died of a traceback used to report an exit code and throw the reason
+    away. Reading is only safe once the process is gone, which is the only
+    case this is called in.
+    """
+    if tree.process.stderr is None:
+        return ""
+    reported = tree.process.stderr.read().decode("utf-8", "replace").strip()
+    if not reported:
+        return ""
+    return f"; stderr:\n{reported}"
+
+
 def _fixture_line(tree: ProcessTree, line: bytes) -> dict[str, object]:
     """One record from the fixture, or a readable failure when it died first.
 
     An empty line means end of stream, which `select` also reports as readable;
     decoding it produced a JSON error that said nothing about the real cause.
+    The message is only built when the assertion fails, so the healthy path
+    never touches the pipe.
     """
-    assert line, f"process-tree fixture exited (code {tree.process.poll()}) before it reported"
+    assert line, _fixture_death(tree)
     record = json.loads(line)
     assert isinstance(record, dict)
     return record
@@ -163,6 +268,29 @@ def _process_record(tree: ProcessTree, timeout: float = 10.0) -> dict[str, objec
     readable, _, _ = select.select([tree.process.stdout], [], [], timeout)
     assert readable, "timed out waiting for process-tree fixture record"
     return _fixture_line(tree, tree.process.stdout.readline())
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX fixture spawn")
+def test_a_dead_fixture_reports_why_it_died(tmp_path: Path) -> None:
+    """`ProcessTree` gives every child an undrained stderr pipe.
+
+    Without this, a fixture that died of a traceback reported an exit code and
+    threw the reason away, which is unactionable in a CI log.
+    """
+    tree = ProcessTree.spawn(
+        [sys.executable, "-c", "raise SystemExit('fixture refused to start')"],
+        cwd=tmp_path,
+        env=dict(os.environ),
+    )
+    try:
+        tree.process.wait(timeout=10)
+        with pytest.raises(AssertionError) as failure:
+            _fixture_line(tree, b"")
+    finally:
+        tree.close()
+
+    assert "exited (code 1)" in str(failure.value)
+    assert "fixture refused to start" in str(failure.value)
 
 
 def test_public_process_tree_shape_is_exact() -> None:
@@ -543,14 +671,10 @@ def test_terminate_cleans_descendant_after_direct_leader_already_exited(
         assert _pid_alive(descendant_pid)
         assert tree.has_live_descendants() is True
         tree.terminate(deadline=time.monotonic() + 5)
-        deadline = time.monotonic() + 2
-        while _pid_alive(descendant_pid) and time.monotonic() < deadline:
-            time.sleep(0.02)
+        _await_pid_gone(descendant_pid, 2.0)
         assert not _pid_alive(descendant_pid)
     finally:
-        if tree.process_group is not None or tree.windows_job is not None:
-            tree.terminate(deadline=time.monotonic() + 5)
-        tree.close()
+        _terminate_and_close(tree)
 
 
 def test_close_retains_group_until_descendant_after_exited_leader_is_gone(
@@ -606,22 +730,7 @@ def test_setsid_escape_is_outside_posix_process_group_containment(
         tree.process.wait(timeout=5)
         tree.close()
     finally:
-        if tree.process.poll() is None:
-            if tree.process.stdin is not None:
-                try:
-                    tree.process.stdin.write(b"cleanup\n")
-                    tree.process.stdin.flush()
-                except (BrokenPipeError, OSError):
-                    pass
-            try:
-                tree.process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                tree.process.kill()
-                tree.process.wait(timeout=3)
-        if _pid_alive(descendant_pid):
-            os.kill(descendant_pid, signal.SIGKILL)
-        if tree.process_group is not None:
-            tree.close()
+        _force_cleanup(tree, descendant_pid)
 
     assert descendant_survived_group_signal is True
     assert cleanup_record == {"descendant_reaped": True}
