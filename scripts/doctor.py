@@ -19,10 +19,11 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, NamedTuple
 
 import reliable_memory
@@ -2265,6 +2266,38 @@ def _valid_lsp_failure(record: dict[str, Any], owner_nonce: str) -> bool:
     )
 
 
+# What actually fixes each way Pyright can fail to qualify. Reinstalling is the
+# answer only when the installation itself is wrong; telling an operator to
+# reinstall because the repository declares no Pyright settings sends them to
+# a command that cannot change the outcome.
+_PYRIGHT_ACTIONS = MappingProxyType(
+    {
+        "pyright_repository_config_ancestor_search": (
+            "declare [tool.pyright] in the repository's pyproject.toml so "
+            "settings are not read from outside the checkout"
+        ),
+        "pyright_repository_config_malformed": (
+            "fix the repository's [tool.pyright] settings"
+        ),
+        "pyright_repository_config_too_deep": (
+            "flatten the repository's [tool.pyright] settings"
+        ),
+    }
+)
+_PYRIGHT_INSTALL_ACTION = (
+    "uv run python scripts/install_pyright.py --state-root <state-root>"
+)
+
+
+def _pyright_recommended_action(codes: Sequence[str]) -> str:
+    """The one thing that would change this outcome."""
+    for code in codes:
+        action = _PYRIGHT_ACTIONS.get(code)
+        if action is not None:
+            return action
+    return _PYRIGHT_INSTALL_ACTION
+
+
 def _pyright_check(
     root: Path,
     state_root: Path,
@@ -2340,9 +2373,7 @@ def _pyright_check(
                     codes.append(code)
             if identity.version != "1.1.411" and "pyright_version_mismatch" not in codes:
                 codes.append("pyright_version_mismatch")
-        details["recommended_action"] = (
-            "uv run python scripts/install_pyright.py --state-root <state-root>"
-        )
+        details["recommended_action"] = _pyright_recommended_action(codes)
         return _result(
             "pyright",
             "degraded",

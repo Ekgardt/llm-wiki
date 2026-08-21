@@ -4231,3 +4231,17 @@ def test_the_host_markers_are_ones_the_shipped_templates_actually_write() -> Non
                 missing[name] = absent
 
     assert missing == {}
+
+def test_the_pyright_advice_names_what_would_change_the_outcome() -> None:
+    """Reinstalling cannot fix a repository that declares no Pyright settings."""
+    import doctor
+
+    assert "pyproject.toml" in doctor._pyright_recommended_action(
+        ["pyright_repository_config_ancestor_search"]
+    )
+    assert doctor._pyright_recommended_action(["pyright_missing"]) == (
+        "uv run python scripts/install_pyright.py --state-root <state-root>"
+    )
+    assert doctor._pyright_recommended_action([]) == (
+        "uv run python scripts/install_pyright.py --state-root <state-root>"
+    )
