@@ -450,11 +450,8 @@ def pack_compile_batches(
     for daily in inputs.dailies:
         singleton = {daily.logical_path}
         if measured(singleton) > budget.available_input_tokens:
-            # One oversized log used to fail the whole pass, so a single long
-            # session left every other day uncompiled too. It is left where it
-            # is, recorded, and the rest of the vault still compiles.
             _record_oversized_daily(daily.logical_path)
-            continue
+            raise ValueError("daily source exceeds compile input budget")
         prospective = {*current_paths, daily.logical_path}
         if current_paths and measured(prospective) > budget.available_input_tokens:
             batches.append(_compile_batch(inputs, current_paths, budget, model, token_adapters))

@@ -223,8 +223,8 @@ class TestSignificanceBudget:
         from impact_analysis import apply_significance_budget
         assert apply_significance_budget([]) == []
 
-def test_a_daily_that_does_not_fit_is_skipped_not_fatal(tmp_path, monkeypatch) -> None:
-    """One long session used to leave every other day uncompiled as well."""
+def test_a_daily_that_does_not_fit_leaves_a_trace(tmp_path, monkeypatch) -> None:
+    """Refusing the pass is the contract; refusing it silently was not."""
     import compile_memory
 
     recorded: list[tuple[str, str]] = []
