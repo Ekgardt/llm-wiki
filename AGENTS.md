@@ -211,48 +211,50 @@ the vault under gitignored `cache/logs/run/`.
 
 ---
 
-## 2. Public source vs installed instance
+## 2. One directory, two audiences
 
-This repository is the **public source** (dev). The **installed, running**
-memory system — with real user data — lives at `$LLM_WIKI_ROOT` on the
-operator's machine (a separate clone, pull-only).
+This repository is **both** the public source and the installed, running
+vault. `$LLM_WIKI_ROOT` and `$LLM_WIKI_STATE_ROOT` point **here**. The owner
+merged the two directories on 2026-08-21; the second one was uninstalled and
+removed first. See `knowledge/notes/single-directory-vault-decision.md`.
 
-**These two locations are completely separate entities. Never mix them.**
+**What keeps private knowledge out of a public repository is `.gitignore`, not
+a directory boundary.** Read that sentence again before you commit anything.
 
-| Signal | Public source (HERE) | Installed tool (runtime) |
+| Zone | Tracked? | What lives there |
 |---|---|---|
-| Role | Dev: edit code, run tests, commit, push | Runtime: capture, compile, search |
-| Push | `git@github.com:Ekgardt/llm-wiki.git` | `no-push` (blocked) |
-| User data | NONE (clean examples + fixtures only) | YOUR memory, daily logs, state |
-| `$LLM_WIKI_ROOT` | Does NOT point here | Points here |
+| `scripts/ tests/ docs/ skills/ rules/ integrations/ benchmark/` | yes | the product |
+| `knowledge/daily/*.md`, `knowledge/notes/*` | **denied by default** | your real memory |
+| the `!` allowlist inside those denials | yes | published example and decision pages |
+| `cache/ logs/ run/` | never | runtime state |
 
-If unsure: `git remote get-url --push origin`. Real GitHub URL → public source.
-`no-push` → installed instance.
+`knowledge/index.md` and `knowledge/log.md` are the exception: the runtime
+rewrites them and they are tracked. `tests/test_structure.py::test_the_vault_index_and_log_name_only_published_notes`
+holds the line — every page they name by path must be published.
 
-### What you may do here
-- Edit source code (`scripts/`, `tests/`, `install.sh`, etc.)
-- Edit public docs (`README.md`, `docs/`, `CONTRIBUTING.md`)
-- Run tests: `uv run pytest -q`
-- Commit and push to `Ekgardt/llm-wiki` (public repo)
+### What this changes in practice
+- Writing a knowledge page here is **normal runtime behaviour**, not a
+  violation. It stays private because its directory is denied by default.
+- **Publishing** a page is a deliberate, separate act: adding an explicit `!`
+  line for it in `.gitignore`. Do that only for pages about the product —
+  architecture decisions, conventions, public examples — never for pages about
+  the owner's other projects, debugging notes, or personal rules.
+- Running `compile_memory.py`, `flush_memory.py` or any pipeline script here is
+  **correct**, because here is the vault. It was forbidden when a second,
+  private directory existed to run them against.
 
-### What you must NEVER do here
-- **NEVER create personal knowledge pages** in `knowledge/notes/` or
-  `knowledge/daily/` — those dirs hold PUBLIC EXAMPLES only (enforced by
-  `.gitignore` allowlist). Personal knowledge goes in `$LLM_WIKI_ROOT`.
-- **NEVER write daily logs, session state, or project state here.** The
-  running system writes those to `$LLM_WIKI_ROOT`, not here.
-- **NEVER run `compile_memory.py`, `flush_memory.py`, or any memory pipeline
-  script against this folder.** These scripts operate on `$LLM_WIKI_ROOT`.
-- **NEVER commit user data** (decisions about your projects, debugging notes,
-  personal design rules) to this repo. It is PUBLIC.
-- **NEVER commit runtime dirs** (`cache/`, `logs/`, `run/`).
-  They are gitignored; keep them out of the index.
+### Before every commit
+- `git status --short` — nothing from `cache/`, `logs/`, `run/`.
+- `git diff --cached --name-only -- knowledge/` — every path must be one you
+  can defend publishing.
+- If a knowledge page appears staged that you did not deliberately publish, the
+  allowlist is wrong. Fix `.gitignore`, do not commit the page.
 
 ### When asked to "work on the memory system"
-- "Improve the system" → develop HERE (edit code, run tests, commit, push).
-  The installed instance picks up updates via `git pull` at `$LLM_WIKI_ROOT`.
-- "Show me my memory / what do I know about X" → that's the INSTALLED
-  instance at `$LLM_WIKI_ROOT`, not here.
+- "Improve the system" → edit code, run tests, commit, push to
+  `Ekgardt/llm-wiki`.
+- "Show me my memory / what do I know about X" → read the vault: the same
+  directory, in `knowledge/` and the runtime databases.
 
 ---
 
