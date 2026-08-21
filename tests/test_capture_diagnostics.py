@@ -188,3 +188,34 @@ def test_a_trail_writer_that_explodes_does_not_break_the_hook(
     module.record_capture_failure("mcp_tool", "ValueError: bad path")
 
     assert state["capture_failures"]["mcp_tool"]["count"] == 1
+
+
+def test_the_line_says_when_it_last_happened(diagnostics):
+    """Nothing clears these counters, so an old loss must read as old."""
+    module, state = diagnostics
+    module.record_capture_failure("compile_oversized_daily", "too big")
+
+    line = module.capture_failure_line(state)
+    recorded = state["capture_failures"]["compile_oversized_daily"]["last_at"]
+
+    assert f"last at {recorded}" in line
+    assert "--clear" in line
+
+
+def test_clearing_retires_the_counters_and_names_them(diagnostics):
+    module, state = diagnostics
+    module.record_capture_failure("mcp_tool", "one")
+    module.record_capture_failure("mcp_tool", "two")
+    module.record_capture_failure("post_tool_append", "three")
+
+    retired = module.clear_capture_failures()
+
+    assert retired == {"mcp_tool": 2, "post_tool_append": 1}
+    assert module.capture_failure_totals(state) == {}
+    assert module.capture_failure_line(state) == ""
+
+
+def test_clearing_an_empty_counter_reports_nothing(diagnostics):
+    module, _state = diagnostics
+
+    assert module.clear_capture_failures() == {}
