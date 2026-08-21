@@ -1241,7 +1241,7 @@ def test_database_is_opened_query_only_and_path_must_remain_in_state_root(tmp_pa
     with pytest.raises((PermissionError, ValueError)):
         evidence_graph.EvidenceGraph(tmp_path / "evidence.sqlite3", state_root=tmp_path / "other")
 
-def test_the_closed_format_pass_is_decided_once_per_exact_artifact(monkeypatch):
+def test_the_closed_format_pass_is_decided_once_per_exact_artifact(monkeypatch, tmp_path):
     """It reads the database and the manifest, so the same pair repeats a verdict."""
     import evidence_graph
 
@@ -1252,6 +1252,8 @@ def test_the_closed_format_pass_is_decided_once_per_exact_artifact(monkeypatch):
         "_validate_connection",
         lambda database, **kwargs: calls.append("ran"),
     )
+    generations = tmp_path / "generations" / "gen-1"
+    generations.mkdir(parents=True)
     manifest = {
         "generation_id": "gen-1",
         "source_manifest_sha256": "c" * 64,
@@ -1260,19 +1262,25 @@ def test_the_closed_format_pass_is_decided_once_per_exact_artifact(monkeypatch):
     }
     schema = evidence_graph.GraphSchema.V2
 
-    for _ in range(4):
+    def validate(current: dict) -> None:
         evidence_graph._validate_connection_once(
-            None, manifest, schema=schema, deadline=None,
+            None, current, generations, schema=schema, deadline=None,
             monotonic=lambda: 0.0, cancelled=None,
         )
+
+    for _ in range(4):
+        validate(manifest)
     assert len(calls) == 1
 
     changed = {
         **manifest,
         "artifacts": [{"path": "evidence.sqlite3", "sha256": "b" * 64, "size": 1}],
     }
-    evidence_graph._validate_connection_once(
-        None, changed, schema=schema, deadline=None,
-        monotonic=lambda: 0.0, cancelled=None,
-    )
+    validate(changed)
+    assert len(calls) == 2
+
+    # A fresh process starts with an empty memo and must not pay for the pass
+    # again, which is what the receipt beside the generations is for.
+    monkeypatch.setattr(evidence_graph, "_FORMAT_VALIDATED", set())
+    validate(manifest)
     assert len(calls) == 2

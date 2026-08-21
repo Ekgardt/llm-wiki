@@ -2097,9 +2097,59 @@ def _format_validation_key(
     return "|".join(parts)
 
 
+# Where this installation remembers which exact artifact bytes already passed
+# the closed-format pass. Without it every fresh process pays for the pass
+# again: about twenty seconds of a 146 MB artifact, on every CLI query. The
+# file lives beside the generations, never inside one, so an activated
+# generation stays byte-for-byte immutable.
+_FORMAT_RECEIPT_NAME = "format-validated.json"
+_MAX_FORMAT_RECEIPTS = 32
+_MAX_FORMAT_RECEIPT_BYTES = 64 * 1024
+
+
+def _format_receipt_path(generation_path: Path) -> Path:
+    """The receipt file that belongs to this generation's catalog directory."""
+    return Path(generation_path).parent.parent / _FORMAT_RECEIPT_NAME
+
+
+def _stored_format_receipts(path: Path) -> list[str]:
+    """The keys this installation has already validated, or none it can trust."""
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return []
+    if len(raw) > _MAX_FORMAT_RECEIPT_BYTES:
+        return []
+    try:
+        value = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        return []
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)][:_MAX_FORMAT_RECEIPTS]
+
+
+def _remember_format_receipt(path: Path, key: str) -> None:
+    """Keep this verdict for the next process; failing to keep it costs only time."""
+    keys = [item for item in _stored_format_receipts(path) if item != key]
+    keys.insert(0, key)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(keys[:_MAX_FORMAT_RECEIPTS]), encoding="utf-8"
+        )
+        os.replace(temporary, path)
+    except OSError:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+
+
 def _validate_connection_once(
     database: sqlite3.Connection,
     manifest: Mapping[str, object],
+    generation_path: Path,
     *,
     schema: GraphSchema,
     deadline: float | None,
@@ -2109,6 +2159,10 @@ def _validate_connection_once(
     """Validate the closed file format, deciding it once per exact artifact."""
     key = _format_validation_key(manifest, schema)
     if key is not None and key in _FORMAT_VALIDATED:
+        return
+    receipt = _format_receipt_path(generation_path)
+    if key is not None and key in _stored_format_receipts(receipt):
+        _FORMAT_VALIDATED.add(key)
         return
     _validate_connection(
         database,
@@ -2130,6 +2184,7 @@ def _validate_connection_once(
     )
     if key is not None:
         _FORMAT_VALIDATED.add(key)
+        _remember_format_receipt(receipt, key)
 
 
 def validate_generation_artifact(
@@ -2221,6 +2276,7 @@ def validate_generation_artifact(
         _validate_connection_once(
             database,
             manifest,
+            Path(generation_path),
             schema=schema,
             deadline=deadline,
             monotonic=monotonic,
