@@ -50,6 +50,13 @@ Deny by default, publish by exception:
 So publishing is a deliberate act — adding an allowlist line — and the default
 for anything the runtime writes is private.
 
+The index generator reads that same allowlist, so a private page's title never
+reaches `knowledge/index.md` in the first place. Before 2026-08-21 it listed
+every page it found, and the structure test was the only thing between that and
+a push. It reads `.gitignore` directly rather than asking git, because the index
+rebuild is an automatic writer and the writer suite requires that none of them
+shell out to git.
+
 ## What follows from it
 
 - Writing a knowledge page in this directory is normal runtime behaviour, not
