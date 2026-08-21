@@ -861,15 +861,24 @@ def test_a_context_manager_decorator_stayed_on_a_function_that_yields() -> None:
 _VAULT_METADATA_FILES = ("knowledge/index.md", "knowledge/log.md")
 
 
-def _tracked_note_paths() -> set[str]:
-    """Every note this repository actually publishes."""
+def _unpublished_notes(paths: set[str]) -> set[str]:
+    """Which of these note paths this repository keeps out of git.
+
+    Membership is decided by the ignore rules rather than by what is currently
+    tracked: a page added in the same change as the index that names it is
+    published, it has just not been committed yet.
+    """
+    if not paths:
+        return set()
+    ordered = sorted(paths)
     result = subprocess.run(
-        ["git", "ls-files", "-z", "knowledge/notes"],
+        ["git", "check-ignore", "--stdin"],
+        input="\n".join(ordered),
         capture_output=True,
-        check=True,
+        text=True,
         cwd=ROOT,
     )
-    return {path for path in result.stdout.decode("utf-8").split("\0") if path}
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
 
 
 def _linked_note_paths(text: str) -> set[str]:
@@ -887,11 +896,10 @@ def test_the_vault_index_and_log_name_only_published_notes() -> None:
     sample = "- [[knowledge/notes/private-thing]] — a page this repo does not ship.\n"
     assert _linked_note_paths(sample) == {"knowledge/notes/private-thing.md"}
 
-    tracked = _tracked_note_paths()
     leaked = {}
     for name in _VAULT_METADATA_FILES:
         linked = _linked_note_paths((ROOT / name).read_text(encoding="utf-8"))
-        unpublished = sorted(linked - tracked)
+        unpublished = sorted(_unpublished_notes(linked))
         if unpublished:
             leaked[name] = unpublished
 

@@ -14,35 +14,35 @@ This index catalogs durable memory distilled from AI agent sessions
 - [[knowledge/notes/provenance-rule-6]] — CLAUDE.md rule 6 — "mark uncertainty explicitly" — is the root constraint that justifies preliminary flagging, editorial notes, and every "inferred from…" caveat in this vault.
 
 ## Decisions
-- [[knowledge/notes/classification-measurement-stand-decision]] — Session classification is measured by a labelled corpus and three gates; the shipped corpus is public and small, and the real number needs real sessions.
-- [[knowledge/notes/citation-relevance-gate-decision]] — A citation that shares no content with the claim it is offered for is rejected; entailment itself is still not verified and is not claimed.
-- [[knowledge/notes/dead-task-retirement-and-restore-decision]] — A task whose attempts are exhausted is retired only when asked for by name, through the same verified export, and one command brings its work back.
-- [[knowledge/notes/one-trust-weight-across-retrieval-paths-decision]] — Typed provenance multiplies the score that decides the order on every retrieval path, from one shared table, and the weight is reported.
-- [[knowledge/notes/warm-navigation-overhead-threshold-decision]] — The warm navigation overhead gate is 30 ms p95, measured on the slowest supported machine class rather than on a quiet one.
-- [[knowledge/notes/baseline-environment-binding-decision]] — The frozen retrieval-v2 baseline is bound to the exact package versions the benchmark loads, not to the byte digest of the whole `uv.lock`.
-- [[knowledge/notes/system-symlink-ancestor-decision]] — A bounded read accepts a symlinked ancestor only when root owns both the link and the directory holding it.
-- [[knowledge/notes/observable-capture-and-bounded-maintenance-decision]] — Failed captures are recorded durably, maintenance output is bounded and pointed at, and the SessionStart payload has a hard character ceiling.
-- [[knowledge/notes/durable-capture-producer-activation-decision]] — SessionEnd and PreCompact capture publish durable Reliability V3 intent evidence before returning; detached work only wakes recovery and deletion requires terminal proof.
-- [[knowledge/notes/managed-ide-hooks-install-update-decision]] — Cursor and Antigravity user hooks use canonical lifecycle adapters and bounded structural fragments owned by one resumable install v2 update, rollback, and uninstall control plane.
-- [[knowledge/notes/install-ownership-control-plane-decision]] — Profile, user environment, and native scheduler mutations use one bounded `run/install` manifest and resumable transaction that fail closed on ambiguous ownership or external drift.
-- [[knowledge/notes/blackboard-fenced-resource-claims-decision]] — Blackboard coordination uses two bounded tables in the existing coordinator-v3 database for atomic resource claims while immutable coordination history remains authoritative Markdown.
-- [[knowledge/notes/audit-closure-security-recovery-control-plane-decision]] — Audit closure retires the unsupported Cognee bridge and adds one fail-closed DLP, recovery, install, scheduling, coordination, and evidence contract without another daemon, database, or MCP tool.
-- [[knowledge/notes/integration-config-backup-retention-decision]] — Claude and Codex configuration merges create verified byte-exact sibling preimages and retain only bounded LLM-Wiki-owned backups.
-- [[knowledge/notes/reliability-v3-runtime-adoption-implementation-decision]] — Reliability V3 runtime database adoption is approved for implementation with explicit offline confirmation and retained v2 evidence.
-- [[knowledge/notes/v4-reliability-contracts-decision]] — Approved V4 reliability target uses path-bound compile receipts, truthful queue serialization, durable capture intents, fenced operational ownership, and bounded execution.
-- [[knowledge/notes/lsp-process-containment-decision]] — Windows Job Objects own assigned LSP trees, while POSIX process groups cover only pinned Pyright descendants that remain in the group.
-- [[knowledge/notes/lsp-live-lease-decision]] — Live LSP lifecycle ownership uses a bounded mutable lease anchored inside the immutable owner directory.
-- [[knowledge/notes/read-only-lsp-navigation-engine-decision]] — LLM Wiki will keep its structural Evidence Graph and add an owned read-only LSP engine for precise live navigation, starting with production-quality Python support.
-- [[knowledge/notes/persistent-code-intelligence-kernel-decision]] — Superseded after completed Tasks 1-5 by the read-only LSP navigation decision.
-- [[knowledge/notes/solo-operator-superset-product-decision]] — LLM Wiki is the single local-first memory, code-intelligence, and agent-control product for one operator managing many agents and sessions.
-- [[knowledge/notes/derived-evidence-generation-decision]] — Evidence retrieval uses disposable immutable cache generations while Markdown, Git, and project journals remain authoritative.
-- [[knowledge/notes/reliable-memory-stage-2]] — Stage 2 keeps Markdown authoritative while adding recoverable transactions, durable checkpoints, safe archives, versioned compile caching, a fenced priority queue, and evidence-backed claims.
 - [[knowledge/notes/agent-native-mcp-foundation]] — LLM Wiki uses MCP as the common read/action interface for every agent while host-specific hooks remain thin lifecycle-event adapters.
+- [[knowledge/notes/audit-closure-security-recovery-control-plane-decision]] — Audit closure retires the unsupported Cognee bridge and adds one fail-closed DLP, recovery, install, scheduling, coordination, and evidence contract without another daemon, database, or MCP tool.
+- [[knowledge/notes/baseline-environment-binding-decision]] — The frozen retrieval-v2 baseline is bound to the exact
+- [[knowledge/notes/blackboard-fenced-resource-claims-decision]] — Blackboard coordination uses two bounded tables in the existing coordinator-v3 database for atomic resource claims while immutable coordination history remains authoritative Markdown.
 - [[knowledge/notes/centralized-memory-subsystem]] — The memory subsystem (`run/state.json`, `knowledge/daily/`, `knowledge/notes/`) resolves to a single canonical location regardless of whether Claude Code runs from the main checkout or a git worktree.
+- [[knowledge/notes/citation-relevance-gate-decision]] — A citation that shares no content with the claim it is offered for is rejected; entailment itself is still not verified and is not claimed.
+- [[knowledge/notes/classification-measurement-stand-decision]] — Session classification is measured by a labelled corpus and three gates; the shipped corpus is public and small, and the real number needs real sessions.
+- [[knowledge/notes/dead-task-retirement-and-restore-decision]] — A task whose attempts are exhausted is retired only when asked for by name, through the same verified export, and one command brings its work back.
+- [[knowledge/notes/derived-evidence-generation-decision]] — Evidence retrieval uses disposable immutable cache generations while Markdown, Git, and project journals remain authoritative.
+- [[knowledge/notes/durable-capture-producer-activation-decision]] — SessionEnd and PreCompact capture publish durable Reliability V3 intent evidence before returning; detached work only wakes recovery and deletion requires terminal proof.
 - [[knowledge/notes/flag-inferred-content-as-preliminary]] — When writing a wiki page about a topic that has no corresponding `knowledge/raw/` or `knowledge/inbox/` source, mark the inferred sections as **preliminary** rather than omitting them or presenting them as settled.
 - [[knowledge/notes/hook-scripts-defense-in-depth]] — Two hardening decisions made 2026-04-19 to prevent silent failures in session hook scripts: a `_resolve_state_root()` fallback when `LLM_WIKI_STATE_ROOT` is unset, and an explicit guard mapping `.`, `..`, or empty slugs to `"root"`.
+- [[knowledge/notes/install-ownership-control-plane-decision]] — Profile, user environment, and native scheduler mutations use one bounded `run/install` manifest and resumable transaction that fail closed on ambiguous ownership or external drift.
+- [[knowledge/notes/integration-config-backup-retention-decision]] — Claude and Codex configuration merges create verified byte-exact sibling preimages and retain only bounded LLM-Wiki-owned backups without claiming filesystem metadata preservation.
+- [[knowledge/notes/lsp-live-lease-decision]] — Live LSP lifecycle ownership is represented by one bounded mutable lease anchored inside the immutable owner directory.
+- [[knowledge/notes/lsp-process-containment-decision]] — Windows Job Objects own assigned LSP trees, while POSIX process groups cover only pinned Pyright descendants that remain in the group.
+- [[knowledge/notes/managed-ide-hooks-install-update-decision]] — Cursor and Antigravity user hooks use canonical lifecycle adapters and bounded structural fragments owned by one resumable install v2 update, rollback, and uninstall control plane.
 - [[knowledge/notes/no-gitkeep-in-inbox-articles]] — Do not add `.gitkeep` to `knowledge/inbox/articles/` — the directory will be created on demand by scripts at first use.
+- [[knowledge/notes/observable-capture-and-bounded-maintenance-decision]] — A failed capture is recorded durably instead of vanishing,
+- [[knowledge/notes/one-trust-weight-across-retrieval-paths-decision]] — Typed provenance multiplies the score that decides the order on every retrieval path, from one shared table, and the weight is reported.
+- [[knowledge/notes/oversized-daily-compile-decision]] — a daily log larger than the compile input budget should be
+- [[knowledge/notes/read-only-lsp-navigation-engine-decision]] — LLM Wiki will keep its structural Evidence Graph and add an owned read-only LSP engine for precise live navigation, starting with production-quality Python support.
+- [[knowledge/notes/reliability-v3-runtime-adoption-implementation-decision]] — The approved Reliability V3 operational database pair may now be implemented with explicit offline adoption, retained v2 evidence, immutable tombstones, and no change to Markdown authority or runtime roots.
+- [[knowledge/notes/reliable-memory-stage-2]] — Stage 2 keeps Markdown authoritative while adding recoverable transactions, durable checkpoints, safe archives, versioned compile caching, a fenced priority queue, and evidence-backed claims.
+- [[knowledge/notes/solo-operator-superset-product-decision]] — LLM Wiki is the single local-first memory, code-intelligence, and agent-control product for one operator managing many agents and sessions.
 - [[knowledge/notes/state-md-exempt-from-lint]] — `state.md` files under `knowledge/projects/<slug>/` are added to `EDITORIAL_NAMES` in `lint_memory.py` and exempted from backlink-obligation and sparse-floor checks, for the same reason that `index.md` and `log.md` are exempt.
+- [[knowledge/notes/system-symlink-ancestor-decision]] — A bounded read accepts a symlinked ancestor only when
+- [[knowledge/notes/v4-reliability-contracts-decision]] — The approved, not-yet-implemented V4 reliability target would add path-bound compile receipts, truthful queue serialization, durable capture intents, unified fenced ownership, and bounded execution while preserving Markdown authority and the 12-tool local runtime.
+- [[knowledge/notes/warm-navigation-overhead-threshold-decision]] — The warm navigation overhead gate is 30 ms p95, measured on the slowest supported machine class rather than on a quiet one.
 
 ## Patterns
 - [[knowledge/notes/add-reciprocal-backlinks-at-creation]] — When creating a new synthesis, concept, or decision page that references existing pages, add all reciprocal backlinks to the related pages in the same editing pass — never defer them to a future cleanup round.
@@ -63,7 +63,7 @@ This index catalogs durable memory distilled from AI agent sessions
 
 ## Entities
 - [[knowledge/notes/Andrej Karpathy]] — AI researcher and educator; source author of the April 2026 X thread that this vault's operating pattern is modeled on.
-- [[knowledge/notes/Obsidian]] — Markdown-based note app used as the human-facing viewer for an LLM-maintained vault.
+- [[knowledge/notes/Obsidian]] — Obsidian is a Markdown-based note app used here only as an optional human-facing viewer for an LLM-maintained vault.
 
 ## Syntheses
 - [[knowledge/notes/2026-04-13 Three Conventions One Root]] — [[knowledge/notes/editorial-notes-pattern|Editorial Notes Pattern]], [[Preliminary Flagging]], and [[knowledge/notes/pipeline-mirroring|Pipeline Mirroring]] all emerged from the same memory-review session and are three orthogonal operationalizations of a single CLAUDE.md rule — rule 6, *mark uncertainty explicitly*.
