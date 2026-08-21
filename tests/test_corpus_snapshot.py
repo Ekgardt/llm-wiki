@@ -958,3 +958,17 @@ def test_strict_utf8_and_symlink_escape_are_rejected(vault: Path):
         pytest.skip("symlink creation is unavailable")
     with pytest.raises(PermissionError, match="unsafe corpus path"):
         collect_corpus(vault)
+
+def test_one_binary_under_a_code_root_does_not_fail_the_whole_corpus(vault: Path):
+    """Every vault that has run Python has compiled caches under its code roots."""
+    write(vault / "scripts/app.py", "print('hello')\n")
+    cache = vault / "scripts" / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "app.cpython-312.pyc").write_bytes(b"\x00\x00\r\n\xff\xfe\x80")
+    (vault / "scripts" / "logo.bin").write_bytes(b"\x89PNG\r\n\x1a\n\xff\xfe")
+
+    snapshot = collect_corpus(vault, code_roots=("scripts",))
+
+    paths = {source.record.relative_path for source in snapshot.sources}
+    assert "scripts/app.py" in paths
+    assert not [path for path in paths if path.endswith((".pyc", ".bin"))]

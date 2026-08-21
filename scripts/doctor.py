@@ -6145,11 +6145,32 @@ def _unusable_filesystem_outcome(state_path: Path, deadline: float) -> dict | No
     return _maintenance_outcome("error", "unsupported_filesystem", partial=False)
 
 
+# Which bound a bounded refusal actually hit. Collapsing all of them into
+# "source_limit" told an operator to shrink a corpus that was not the problem.
+_BOUNDED_REASONS = (
+    ("incremental manifest", "manifest_byte_ceiling"),
+    ("total byte limit", "corpus_byte_limit"),
+    ("entry limit", "corpus_entry_limit"),
+    ("directory limit", "corpus_directory_limit"),
+    ("depth limit", "corpus_depth_limit"),
+)
+
+
+def _bounded_reason(message: str) -> str:
+    """The name of the bound this refusal names, or the generic source limit."""
+    lowered = message.casefold()
+    for fragment, reason in _BOUNDED_REASONS:
+        if fragment in lowered:
+            return reason
+    return "source_limit"
+
+
 def _value_error_outcome(exc: ValueError, repaired: list[dict]) -> dict:
-    lowered = str(exc).casefold()
+    message = str(exc)
+    lowered = message.casefold()
     if "limit" in lowered or "ceiling" in lowered:
         return _maintenance_outcome(
-            "deferred", "source_limit", partial=True, repairs=repaired
+            "deferred", _bounded_reason(message), partial=True, repairs=repaired
         )
     return _maintenance_outcome(
         "error", type(exc).__name__, partial=False, repairs=repaired
