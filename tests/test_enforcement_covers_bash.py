@@ -58,8 +58,23 @@ def test_a_heredoc_that_writes_a_file_now_has_a_target(checkers, tmp_path):
     assert checkers._target_path(payload) == written
 
 
+def _shell_parses() -> bool:
+    """Whether the parser works in this process, not just on the gate.
+
+    Telling a read from a write needs bashlex, which is installed for the
+    gate's own interpreter and not for this one. Without it the resolver falls
+    back to naming every path, which is the fail-closed answer and not the
+    behaviour this checks.
+    """
+    import shell_ast
+
+    return shell_ast.parse_groups("true") is not None
+
+
 def test_a_command_that_only_reads_has_no_target(checkers, tmp_path):
     """Reading is not changing code, and gating it would make the gate a nuisance."""
+    if not _shell_parses():
+        pytest.skip("bashlex is not importable here, so the fallback would be graded")
     read_only = tmp_path / "module.py"
     read_only.write_text("x = 1\n", encoding="utf-8")
     payload = {
