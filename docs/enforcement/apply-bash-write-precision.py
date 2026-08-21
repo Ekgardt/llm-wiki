@@ -23,7 +23,9 @@ docs/research/2026-08-21-applying-a-policy-change-safely.md: copy aside,
 patch, prove the gate still answers *and still decides correctly*, restore on
 any failure.
 
-    sudo python3 /home/user/llm-wiki/docs/enforcement/apply-bash-write-precision.py
+    sudo python3 "$LLM_WIKI_ROOT/docs/enforcement/apply-bash-write-precision.py"
+
+    ($LLM_WIKI_ROOT on this machine: /home/user/llm-wiki)
 """
 
 from __future__ import annotations

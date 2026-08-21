@@ -13,8 +13,10 @@ happens without that — a self-recursive write once made every call raise, the
 gate blocked all thirteen cases at once, and nobody could repair it. Research:
 docs/research/2026-08-21-applying-a-policy-change-safely.md
 
-    sudo /home/user/llm-wiki/.venv/bin/python \
-        /home/user/llm-wiki/docs/enforcement/apply-rules-1-2-cover-bash.py
+    sudo "$LLM_WIKI_ROOT/.venv/bin/python" \
+        "$LLM_WIKI_ROOT/docs/enforcement/apply-rules-1-2-cover-bash.py"
+
+    ($LLM_WIKI_ROOT on this machine: /home/user/llm-wiki)
 """
 
 from __future__ import annotations

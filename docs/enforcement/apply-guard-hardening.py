@@ -23,7 +23,9 @@ Four changes, all deterministic, none of which asks the model anything.
 Same shape as the two scripts before it: copy aside, patch, prove the gate
 still decides correctly, restore everything on any failure.
 
-    sudo python3 /home/user/llm-wiki/docs/enforcement/apply-guard-hardening.py
+    sudo python3 "$LLM_WIKI_ROOT/docs/enforcement/apply-guard-hardening.py"
+
+    ($LLM_WIKI_ROOT on this machine: /home/user/llm-wiki)
 """
 
 from __future__ import annotations
