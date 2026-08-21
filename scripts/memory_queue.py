@@ -11469,7 +11469,7 @@ def capture_task_fences(
 def _state_root() -> Path:
     env = os.environ.get("LLM_WIKI_STATE_ROOT")
     if env:
-        return Path(env)
+        return Path(env).resolve()
     try:
         from memory_state import STATE_ROOT
 

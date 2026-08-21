@@ -2331,14 +2331,6 @@ def _require_abortable_state(row: sqlite3.Row, transaction_id: str) -> None:
         )
 
 
-def _inverse_kind(before_hash: str, after_hash: str) -> str:
-    if before_hash == ABSENT:
-        return "delete"
-    if after_hash == ABSENT:
-        return "create"
-    return "replace"
-
-
 def _abort_identity(
     transaction_id: str,
     intent_fence: IntentFence,
@@ -3377,7 +3369,7 @@ def _default_coordinator() -> MarkdownCoordinator:
     vault = Path(
         os.environ.get("LLM_WIKI_ROOT", str(Path(__file__).resolve().parent.parent))
     ).resolve(strict=True)
-    state_root = Path(os.environ.get("LLM_WIKI_STATE_ROOT", str(vault)))
+    state_root = Path(os.environ.get("LLM_WIKI_STATE_ROOT", str(vault))).resolve()
     if _reliability_v3_records_present(state_root):
         return active_markdown_coordinator(vault, state_root)
     return MarkdownCoordinator(vault, state_root)
