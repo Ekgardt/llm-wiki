@@ -2502,6 +2502,157 @@ _PRECONDITION_METHODS = {
 }
 
 
+def _require_wait_seconds(wait_seconds: object) -> None:
+    if wait_seconds is None:
+        return
+    if isinstance(wait_seconds, bool) or not isinstance(wait_seconds, (int, float)):
+        raise ValueError("writer gate wait_seconds must be non-negative or None")
+    if wait_seconds < 0:
+        raise ValueError("writer gate wait_seconds must be non-negative or None")
+
+
+def _writer_wait_window(wait_seconds: float | None) -> float:
+    if wait_seconds is None:
+        return _WRITER_WAIT_SECONDS
+    return wait_seconds
+
+
+def _owns_writer_gate(
+    row: object, owner_token: str, fencing_epoch: int
+) -> bool:
+    return bool(
+        row is not None
+        and row["owner_token"] == owner_token
+        and row["fencing_epoch"] == fencing_epoch
+    )
+
+
+def _retry_or_raise(exc: BaseException, attempt: int, deadline: float) -> int:
+    """Wait out transient contention; anything else belongs to the caller."""
+    if not _is_transient_writer_contention(exc):
+        raise exc
+    delay = _writer_retry_delay(attempt, deadline)
+    if delay <= 0:
+        raise exc
+    time.sleep(delay)
+    return attempt + 1
+
+
+def _heartbeat_retry(
+    exc: BaseException, attempt: int, lease_deadline: float, stop: threading.Event
+) -> int | None:
+    """None means the gate is lost: the wait ran out or the stop event fired."""
+    if not _is_transient_writer_contention(exc):
+        return None
+    delay = _writer_retry_delay(attempt, lease_deadline)
+    if delay <= 0 or stop.wait(delay):
+        return None
+    return attempt + 1
+
+
+def _ensure_safe_directory(current: Path, value: str) -> None:
+    if current.exists():
+        _require_safe_parent(
+            current,
+            f"target traverses an unsafe parent: {value}",
+            f"target parent is not a directory: {value}",
+        )
+        return
+    _make_directory(current)
+    _require_safe_parent(
+        current,
+        f"created target parent is unsafe: {value}",
+        f"created target parent is not a directory: {value}",
+    )
+    fsync_directory(current.parent)
+
+
+def _make_directory(current: Path) -> None:
+    try:
+        current.mkdir()
+    except FileExistsError:
+        pass
+
+
+def _require_safe_parent(
+    current: Path, unsafe_message: str, not_directory_message: str
+) -> None:
+    if current.is_symlink() or _is_reparse_point(current):
+        raise ValueError(unsafe_message)
+    if not current.is_dir():
+        raise ValueError(not_directory_message)
+
+
+def _require_change_content(change: MarkdownChange) -> None:
+    if change.kind == "delete":
+        if change.content is not None:
+            raise ValueError("delete content must be absent")
+        return
+    if not isinstance(change.content, bytes):
+        raise TypeError("create and replace content must be bytes")
+    if len(change.content) > MAX_KNOWLEDGE_TARGET_BYTES:
+        raise ValueError("transaction target size exceeds limit")
+
+
+def _require_before_bound(max_before_bytes: object) -> None:
+    if max_before_bytes is None:
+        return
+    if isinstance(max_before_bytes, bool) or not isinstance(max_before_bytes, int):
+        raise ValueError("max_before_bytes must be a non-negative integer or None")
+    if max_before_bytes < 0:
+        raise ValueError("max_before_bytes must be a non-negative integer or None")
+
+
+def _deletion_blocker_code(row: sqlite3.Row, now: datetime) -> str | None:
+    """None means this transaction does not stand in the way of deletion."""
+    if row["state"] in {"preparing", "prepared", "applying"}:
+        return "nonterminal_transaction"
+    if row["state"] in {"conflicted", "quarantined"}:
+        return row["error_code"] or "transaction_requires_attention"
+    if _within_undo_retention(row, now):
+        return "undo_retention"
+    return None
+
+
+def _within_undo_retention(row: sqlite3.Row, now: datetime) -> bool:
+    if row["state"] != "committed" or row["artifacts_pruned_at"] is not None:
+        return False
+    return _parse_timestamp(row["updated_at"]) >= now - timedelta(days=30)
+
+
+def _require_same_lease_fence(
+    previous: object, refreshed: Mapping[str, object]
+) -> None:
+    if not isinstance(previous, dict) or any(
+        previous.get(field) != refreshed[field]
+        for field in ("project", "lease_token", "fencing_epoch")
+    ):
+        raise TransactionFailure(
+            "project lease changed before transaction refresh",
+            "precondition_failed",
+            "quarantined",
+        )
+
+
+def _promotion_plan(
+    manifest: Mapping[str, object], built: Sequence[object]
+) -> _PromotionPlan:
+    return _PromotionPlan(
+        dict(manifest),
+        [item.row for item in built],
+        any(item.parent_mismatch for item in built),
+    )
+
+
+def _prune_cutoff(retention_days: int, now: datetime | None) -> datetime:
+    if retention_days < 30:
+        raise ValueError("retention_days must be at least 30")
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    return current - timedelta(days=retention_days)
+
+
 def _lstat_or_none(target: Path) -> os.stat_result | None:
     try:
         return os.lstat(target)
@@ -4887,45 +5038,57 @@ class MarkdownCoordinator:
         with self._connect() as database, begin_immediate(
             database, before_commit=self._require_current_operation_active
         ):
-            row = database.execute(
-                'SELECT state, preconditions_json FROM "transaction" WHERE id = ?',
-                (transaction_id,),
-            ).fetchone()
-            if row is None or row["state"] != "prepared":
-                raise TransactionFailure(
-                    "project lease refresh requires a prepared transaction",
-                    "precondition_failed",
-                    "quarantined",
-                )
-            preconditions = json.loads(row["preconditions_json"])
-            previous = preconditions.get("project_lease")
-            if not isinstance(previous, dict) or any(
-                previous.get(field) != refreshed[field]
-                for field in ("project", "lease_token", "fencing_epoch")
-            ):
-                raise TransactionFailure(
-                    "project lease changed before transaction refresh",
-                    "precondition_failed",
-                    "quarantined",
-                )
+            preconditions = self._prepared_preconditions(
+                database, transaction_id, refreshed
+            )
             self._check_project_lease(database, refreshed)
             preconditions["project_lease"] = dict(refreshed)
-            updated = database.execute(
-                'UPDATE "transaction" SET preconditions_json = ?, updated_at = ? '
-                "WHERE id = ? AND state = 'prepared'",
-                (
-                    canonical_json_bytes(preconditions).decode("utf-8"),
-                    _now(),
-                    transaction_id,
-                ),
+            self._store_refreshed_preconditions(
+                database, transaction_id, preconditions
             )
-            if updated.rowcount != 1:
-                raise TransactionFailure(
-                    "project transaction changed during lease refresh",
-                    "precondition_failed",
-                    "quarantined",
-                )
         return self._record(transaction_id)
+
+    def _prepared_preconditions(
+        self,
+        database: sqlite3.Connection,
+        transaction_id: str,
+        refreshed: Mapping[str, object],
+    ) -> dict[str, object]:
+        row = database.execute(
+            'SELECT state, preconditions_json FROM "transaction" WHERE id = ?',
+            (transaction_id,),
+        ).fetchone()
+        if row is None or row["state"] != "prepared":
+            raise TransactionFailure(
+                "project lease refresh requires a prepared transaction",
+                "precondition_failed",
+                "quarantined",
+            )
+        preconditions = json.loads(row["preconditions_json"])
+        _require_same_lease_fence(preconditions.get("project_lease"), refreshed)
+        return preconditions
+
+    def _store_refreshed_preconditions(
+        self,
+        database: sqlite3.Connection,
+        transaction_id: str,
+        preconditions: Mapping[str, object],
+    ) -> None:
+        updated = database.execute(
+            'UPDATE "transaction" SET preconditions_json = ?, updated_at = ? '
+            "WHERE id = ? AND state = 'prepared'",
+            (
+                canonical_json_bytes(preconditions).decode("utf-8"),
+                _now(),
+                transaction_id,
+            ),
+        )
+        if updated.rowcount != 1:
+            raise TransactionFailure(
+                "project transaction changed during lease refresh",
+                "precondition_failed",
+                "quarantined",
+            )
 
     @staticmethod
     def _check_project_head(
@@ -5881,13 +6044,11 @@ class MarkdownCoordinator:
         built = self._all_built_operations(record, plan_operations, manifest_operations)
         if built is None:
             return None
-        operations = [item.row for item in built]
         if not self._request_hash_matches(
             record, [item.change for item in built], manifest
         ):
             return None
-        parent_mismatch = any(item.parent_mismatch for item in built)
-        return _PromotionPlan(dict(manifest), operations, parent_mismatch)
+        return _promotion_plan(manifest, built)
 
     def _all_built_operations(
         self,
@@ -6237,54 +6398,64 @@ class MarkdownCoordinator:
         cancelled: Callable[[], bool] | None = None,
     ) -> int:
         self._require_operation_active(deadline, cancelled)
-        if retention_days < 30:
-            raise ValueError("retention_days must be at least 30")
-        current = now or datetime.now(timezone.utc)
-        if current.tzinfo is None:
-            raise ValueError("now must be timezone-aware")
-        cutoff = current - timedelta(days=retention_days)
+        cutoff = _prune_cutoff(retention_days, now)
         pruned = 0
         with self.writer_gate():
-            with self._connect() as database:
-                rows = list(
-                    database.execute(
-                        'SELECT id, updated_at FROM "transaction" '
-                        "WHERE state IN ('committed', 'discarded') "
-                        "AND artifacts_pruned_at IS NULL"
-                    )
-                )
-            for row in rows:
+            for row in self._prunable_rows():
                 self._require_operation_active(deadline, cancelled)
-                if _parse_timestamp(row["updated_at"]) >= cutoff:
-                    continue
-                artifact_root = self.transaction_root / row["id"]
-                if not artifact_root.exists():
-                    continue
-                staged_root = self.transaction_root / (
-                    f".{row['id']}.pruning-{uuid.uuid4().hex}"
-                )
-                artifact_root.replace(staged_root)
-                try:
-                    self._require_operation_active(deadline, cancelled)
-                    with self._connect() as database, begin_immediate(
-                        database,
-                        before_commit=lambda: self._require_operation_active(
-                            deadline, cancelled
-                        ),
-                    ):
-                        database.execute(
-                            'UPDATE "transaction" SET artifacts_pruned_at = ? WHERE id = ?',
-                            (_now(), row["id"]),
-                        )
-                except BaseException:
-                    staged_root.replace(artifact_root)
-                    raise
-                self._remove_artifacts(staged_root)
-                pruned += 1
+                if _parse_timestamp(row["updated_at"]) < cutoff:
+                    pruned += self._prune_one(row, deadline, cancelled)
         return pruned
 
+    def _prunable_rows(self) -> list[sqlite3.Row]:
+        with self._connect() as database:
+            return list(
+                database.execute(
+                    'SELECT id, updated_at FROM "transaction" '
+                    "WHERE state IN ('committed', 'discarded') "
+                    "AND artifacts_pruned_at IS NULL"
+                )
+            )
+
+    def _prune_one(
+        self,
+        row: sqlite3.Row,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> int:
+        """The images are staged aside first, so a failure can put them back."""
+        artifact_root = self.transaction_root / row["id"]
+        if not artifact_root.exists():
+            return 0
+        staged_root = self.transaction_root / (
+            f".{row['id']}.pruning-{uuid.uuid4().hex}"
+        )
+        artifact_root.replace(staged_root)
+        try:
+            self._require_operation_active(deadline, cancelled)
+            self._mark_artifacts_pruned(row["id"], deadline, cancelled)
+        except BaseException:
+            staged_root.replace(artifact_root)
+            raise
+        self._remove_artifacts(staged_root)
+        return 1
+
+    def _mark_artifacts_pruned(
+        self,
+        transaction_id: str,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> None:
+        with self._connect() as database, begin_immediate(
+            database,
+            before_commit=lambda: self._require_operation_active(deadline, cancelled),
+        ):
+            database.execute(
+                'UPDATE "transaction" SET artifacts_pruned_at = ? WHERE id = ?',
+                (_now(), transaction_id),
+            )
+
     def deletion_blockers(self) -> list[dict[str, str]]:
-        blockers: list[dict[str, str]] = []
         now = datetime.now(timezone.utc)
         with self._connect() as database:
             rows = list(
@@ -6293,27 +6464,12 @@ class MarkdownCoordinator:
                     'FROM "transaction" ORDER BY created_at, id'
                 )
             )
-        for row in rows:
-            code: str | None = None
-            if row["state"] in {"preparing", "prepared", "applying"}:
-                code = "nonterminal_transaction"
-            elif row["state"] in {"conflicted", "quarantined"}:
-                code = row["error_code"] or "transaction_requires_attention"
-            elif (
-                row["state"] == "committed"
-                and row["artifacts_pruned_at"] is None
-                and _parse_timestamp(row["updated_at"]) >= now - timedelta(days=30)
-            ):
-                code = "undo_retention"
-            if code is not None:
-                blockers.append(
-                    {
-                        "transaction_id": row["id"],
-                        "state": row["state"],
-                        "code": code,
-                    }
-                )
-        return blockers
+        coded = ((row, _deletion_blocker_code(row, now)) for row in rows)
+        return [
+            {"transaction_id": row["id"], "state": row["state"], "code": code}
+            for row, code in coded
+            if code is not None
+        ]
 
     def _set_transaction_state(
         self, transaction_id: str, state: str, *, error_code: str | None = None
@@ -6468,25 +6624,26 @@ class MarkdownCoordinator:
     def _canonical_writer_gate(
         self, wait_seconds: float | None
     ) -> Iterator[OwnerLease]:
-        if wait_seconds is not None and (
-            isinstance(wait_seconds, bool)
-            or not isinstance(wait_seconds, (int, float))
-            or wait_seconds < 0
-        ):
-            raise ValueError("writer gate wait_seconds must be non-negative or None")
+        _require_wait_seconds(wait_seconds)
         registry = self._ownership_registry()
-        deadline = time.monotonic() + (
-            _WRITER_WAIT_SECONDS if wait_seconds is None else wait_seconds
-        )
+        lease = self._acquire_canonical_lease(registry, wait_seconds)
+        self._enter_gate(lease)
+        stop = threading.Event()
+        lost = threading.Event()
+        heartbeat = self._start_canonical_heartbeat(registry, lease, stop, lost)
+        try:
+            yield lease
+        finally:
+            self._leave_canonical_gate(registry, lease, stop, heartbeat)
+
+    def _acquire_canonical_lease(
+        self, registry: object, wait_seconds: float | None
+    ) -> OwnerLease:
+        deadline = time.monotonic() + _writer_wait_window(wait_seconds)
         attempt = 0
         while True:
             try:
-                with self._connect() as database, begin_immediate(database):
-                    lease = registry._acquire_in_transaction(
-                        database, "markdown-writer", scope="global"
-                    )
-                    self._insert_writer_projection(database, lease)
-                break
+                return self._claim_canonical_lease(registry)
             except Exception as exc:
                 if getattr(exc, "code", None) != "owner_busy":
                     raise
@@ -6497,12 +6654,34 @@ class MarkdownCoordinator:
                     ) from exc
                 time.sleep(delay)
                 attempt += 1
+
+    def _claim_canonical_lease(self, registry: object) -> OwnerLease:
+        with self._connect() as database, begin_immediate(database):
+            lease = registry._acquire_in_transaction(
+                database, "markdown-writer", scope="global"
+            )
+            self._insert_writer_projection(database, lease)
+        return lease
+
+    def _enter_gate(self, lease: OwnerLease) -> None:
         self._local.gate_depth = 1
         self._local.gate_token = lease.token
         self._local.gate_fence = lease.epoch
         self._local.gate_owner = lease
-        stop = threading.Event()
-        lost = threading.Event()
+
+    def _clear_gate(self) -> None:
+        self._local.gate_depth = 0
+        self._local.gate_token = None
+        self._local.gate_fence = None
+        self._local.gate_owner = None
+
+    def _start_canonical_heartbeat(
+        self,
+        registry: object,
+        lease: OwnerLease,
+        stop: threading.Event,
+        lost: threading.Event,
+    ) -> threading.Thread:
         heartbeat = threading.Thread(
             target=self._heartbeat_canonical_writer_gate,
             args=(registry, lease, stop, lost),
@@ -6510,24 +6689,27 @@ class MarkdownCoordinator:
             daemon=True,
         )
         heartbeat.start()
+        return heartbeat
+
+    def _leave_canonical_gate(
+        self,
+        registry: object,
+        lease: OwnerLease,
+        stop: threading.Event,
+        heartbeat: threading.Thread,
+    ) -> None:
+        stop.set()
+        heartbeat.join(timeout=lease.heartbeat_seconds * 2)
         try:
-            yield lease
+            # A heartbeat that failed transiently is not a lost gate. What
+            # proves the loss is the projection row: reclaiming it deletes
+            # this owner's row and bumps the fence, so a delete that removes
+            # our row means nobody else ever took the gate.
+            with self._connect() as database, begin_immediate(database):
+                self._delete_writer_projection(database, lease)
+                registry._release_in_transaction(database, lease)
         finally:
-            stop.set()
-            heartbeat.join(timeout=lease.heartbeat_seconds * 2)
-            try:
-                # A heartbeat that failed transiently is not a lost gate. What
-                # proves the loss is the projection row: reclaiming it deletes
-                # this owner's row and bumps the fence, so a delete that removes
-                # our row means nobody else ever took the gate.
-                with self._connect() as database, begin_immediate(database):
-                    self._delete_writer_projection(database, lease)
-                    registry._release_in_transaction(database, lease)
-            finally:
-                self._local.gate_depth = 0
-                self._local.gate_token = None
-                self._local.gate_fence = None
-                self._local.gate_owner = None
+            self._clear_gate()
 
     @staticmethod
     def _insert_writer_projection(database: sqlite3.Connection, owner: OwnerLease) -> None:
@@ -6611,34 +6793,31 @@ class MarkdownCoordinator:
             raise TypeError("owner must be an OwnerLease")
         if getattr(self, "_database_contract", None) != _COORDINATOR_V3_CONTRACT:
             raise RuntimeError("canonical writer projection requires a v3 coordinator")
-        depth = getattr(self._local, "gate_depth", 0)
-        if depth:
-            if getattr(self._local, "gate_owner", None) != owner:
-                raise RuntimeError("nested writer owner changed")
-            self._local.gate_depth = depth + 1
-            try:
-                yield owner
-            finally:
-                self._local.gate_depth -= 1
+        if getattr(self._local, "gate_depth", 0):
+            yield from self._reentered_writer_gate(owner)
             return
 
         registry = self._ownership_registry()
         with self._connect() as database, begin_immediate(database):
             registry.require(database, owner)
             self._insert_writer_projection(database, owner)
-        self._local.gate_depth = 1
-        self._local.gate_token = owner.token
-        self._local.gate_fence = owner.epoch
-        self._local.gate_owner = owner
+        self._enter_gate(owner)
         try:
             yield owner
         finally:
             with self._connect() as database, begin_immediate(database):
                 self._delete_writer_projection(database, owner)
-            self._local.gate_depth = 0
-            self._local.gate_token = None
-            self._local.gate_fence = None
-            self._local.gate_owner = None
+            self._clear_gate()
+
+    def _reentered_writer_gate(self, owner: OwnerLease) -> Iterator[OwnerLease]:
+        """A nested gate belongs to the same owner or it is not the same gate."""
+        if getattr(self._local, "gate_owner", None) != owner:
+            raise RuntimeError("nested writer owner changed")
+        self._local.gate_depth = getattr(self._local, "gate_depth", 0) + 1
+        try:
+            yield owner
+        finally:
+            self._local.gate_depth -= 1
 
     def _release_writer_gate(
         self, owner_token: str, fencing_epoch: int, heartbeat_lost: bool
@@ -6647,36 +6826,32 @@ class MarkdownCoordinator:
         attempt = 0
         while True:
             try:
-                remaining_ms = max(1, int((deadline - time.monotonic()) * 1_000))
-                with self._connect(busy_ms=remaining_ms) as database, begin_immediate(
-                    database
-                ):
-                    row = database.execute(
-                        "SELECT owner_token, fencing_epoch FROM writer_owners "
-                        "WHERE gate_name = 'global'"
-                    ).fetchone()
-                    still_owner = bool(
-                        row is not None
-                        and row["owner_token"] == owner_token
-                        and row["fencing_epoch"] == fencing_epoch
-                    )
-                    if still_owner:
-                        database.execute(
-                            "DELETE FROM writer_owners WHERE gate_name = 'global' "
-                            "AND owner_token = ? AND fencing_epoch = ?",
-                            (owner_token, fencing_epoch),
-                        )
-                if not still_owner:
+                if not self._delete_writer_owner(owner_token, fencing_epoch, deadline):
                     raise RuntimeError(_writer_gate_loss_message(heartbeat_lost))
                 return
             except (OSError, sqlite3.Error) as exc:
-                if not _is_transient_writer_contention(exc):
-                    raise
-                delay = _writer_retry_delay(attempt, deadline)
-                if delay <= 0:
-                    raise
-                time.sleep(delay)
-                attempt += 1
+                attempt = _retry_or_raise(exc, attempt, deadline)
+
+    def _delete_writer_owner(
+        self, owner_token: str, fencing_epoch: int, deadline: float
+    ) -> bool:
+        """False means somebody else holds the gate, so nothing was deleted."""
+        remaining_ms = max(1, int((deadline - time.monotonic()) * 1_000))
+        with self._connect(busy_ms=remaining_ms) as database, begin_immediate(
+            database
+        ):
+            row = database.execute(
+                "SELECT owner_token, fencing_epoch FROM writer_owners "
+                "WHERE gate_name = 'global'"
+            ).fetchone()
+            if not _owns_writer_gate(row, owner_token, fencing_epoch):
+                return False
+            database.execute(
+                "DELETE FROM writer_owners WHERE gate_name = 'global' "
+                "AND owner_token = ? AND fencing_epoch = ?",
+                (owner_token, fencing_epoch),
+            )
+        return True
 
     def _writer_owner_reclaimable(self, row: sqlite3.Row) -> bool:
         expires_at = row["expires_at"]
@@ -6694,38 +6869,43 @@ class MarkdownCoordinator:
         attempt = 0
         while not stop.wait(_WRITER_HEARTBEAT_SECONDS):
             try:
-                remaining = min(
-                    _WRITER_HEARTBEAT_SECONDS,
-                    lease_deadline - time.monotonic(),
-                )
-                remaining_ms = max(1, int(remaining * 1_000))
-                with self._connect(busy_ms=remaining_ms) as database, begin_immediate(
-                    database
+                if not self._refresh_writer_owner(
+                    owner_token, fencing_epoch, lease_deadline
                 ):
-                    heartbeat = _now()
-                    cursor = database.execute(
-                        "UPDATE writer_owners SET heartbeat_at = ?, expires_at = ? "
-                        "WHERE gate_name = 'global' AND owner_token = ? AND fencing_epoch = ?",
-                        (
-                            heartbeat,
-                            _future_timestamp(_WRITER_LEASE_SECONDS),
-                            owner_token,
-                            fencing_epoch,
-                        ),
-                    )
-                    if cursor.rowcount != 1:
-                        lost.set()
-                        return
-                lease_deadline = time.monotonic() + _WRITER_LEASE_SECONDS
-                attempt = 0
+                    lost.set()
+                    return
             except (OSError, sqlite3.Error) as exc:
-                if _is_transient_writer_contention(exc):
-                    delay = _writer_retry_delay(attempt, lease_deadline)
-                    if delay > 0 and not stop.wait(delay):
-                        attempt += 1
-                        continue
-                lost.set()
-                return
+                retried = _heartbeat_retry(exc, attempt, lease_deadline, stop)
+                if retried is None:
+                    lost.set()
+                    return
+                attempt = retried
+                continue
+            lease_deadline = time.monotonic() + _WRITER_LEASE_SECONDS
+            attempt = 0
+
+    def _refresh_writer_owner(
+        self, owner_token: str, fencing_epoch: int, lease_deadline: float
+    ) -> bool:
+        """False means the row is gone: this owner no longer holds the gate."""
+        remaining = min(
+            _WRITER_HEARTBEAT_SECONDS, lease_deadline - time.monotonic()
+        )
+        remaining_ms = max(1, int(remaining * 1_000))
+        with self._connect(busy_ms=remaining_ms) as database, begin_immediate(
+            database
+        ):
+            cursor = database.execute(
+                "UPDATE writer_owners SET heartbeat_at = ?, expires_at = ? "
+                "WHERE gate_name = 'global' AND owner_token = ? AND fencing_epoch = ?",
+                (
+                    _now(),
+                    _future_timestamp(_WRITER_LEASE_SECONDS),
+                    owner_token,
+                    fencing_epoch,
+                ),
+            )
+            return cursor.rowcount == 1
 
     def writer_gate_held(self) -> bool:
         return bool(getattr(self._local, "gate_depth", 0))
@@ -6748,21 +6928,7 @@ class MarkdownCoordinator:
         current = self.vault
         for part in relative.parts[:-1]:
             current = current / part
-            if current.exists():
-                if current.is_symlink() or _is_reparse_point(current):
-                    raise ValueError(f"target traverses an unsafe parent: {value}")
-                if not current.is_dir():
-                    raise ValueError(f"target parent is not a directory: {value}")
-                continue
-            try:
-                current.mkdir()
-            except FileExistsError:
-                pass
-            if current.is_symlink() or _is_reparse_point(current):
-                raise ValueError(f"created target parent is unsafe: {value}")
-            if not current.is_dir():
-                raise ValueError(f"created target parent is not a directory: {value}")
-            fsync_directory(current.parent)
+            _ensure_safe_directory(current, value)
         return self._target(value)
 
     def _validate_change(self, change: MarkdownChange) -> MarkdownChange:
@@ -6770,19 +6936,8 @@ class MarkdownCoordinator:
             raise TypeError("changes must contain MarkdownChange values")
         if change.kind not in {"create", "replace", "delete"}:
             raise ValueError(f"unsupported change kind: {change.kind}")
-        if change.kind == "delete":
-            if change.content is not None:
-                raise ValueError("delete content must be absent")
-        elif not isinstance(change.content, bytes):
-            raise TypeError("create and replace content must be bytes")
-        elif len(change.content) > MAX_KNOWLEDGE_TARGET_BYTES:
-            raise ValueError("transaction target size exceeds limit")
-        if change.max_before_bytes is not None and (
-            isinstance(change.max_before_bytes, bool)
-            or not isinstance(change.max_before_bytes, int)
-            or change.max_before_bytes < 0
-        ):
-            raise ValueError("max_before_bytes must be a non-negative integer or None")
+        _require_change_content(change)
+        _require_before_bound(change.max_before_bytes)
         self._target(change.path)
         if change.max_before_bytes is None:
             return MarkdownChange(
