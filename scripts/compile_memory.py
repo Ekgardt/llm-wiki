@@ -1044,14 +1044,17 @@ CITED EVIDENCE
 {canonical_json_bytes(sorted(cited, key=lambda item: (str(item['logical_path']), str(item['quote_sha256'])))).decode('utf-8')}"""
 
 
-def _parse_json_object(text: str) -> dict[str, object]:
+def _require_bounded_response(text: str) -> None:
+    """Refuse a response too large to parse, measured as text and as bytes."""
     if len(text) > MAX_PROVIDER_RESPONSE_BYTES:
         raise ValueError("provider response exceeds byte limit")
-    encoded = text.encode("utf-8", errors="strict")
-    if len(encoded) > MAX_PROVIDER_RESPONSE_BYTES:
+    if len(text.encode("utf-8", errors="strict")) > MAX_PROVIDER_RESPONSE_BYTES:
         raise ValueError("provider response exceeds byte limit")
-    raw = _extract_json_block(text)
-    value = json.loads(raw)
+
+
+def _parse_json_object(text: str) -> dict[str, object]:
+    _require_bounded_response(text)
+    value = json.loads(_extract_json_block(text))
     if not isinstance(value, dict):
         raise ValueError("provider output must be a JSON object")
     return value
@@ -1376,32 +1379,37 @@ def _render_page(
     return text.encode("utf-8")
 
 
-def _with_claim_ledger(page: bytes, records: Sequence[Mapping[str, object]]) -> bytes:
-    if not records:
-        return page
-    ledger = {
-        "schema_version": "claim-ledger/v1",
-        "claims": [json.loads(canonical_json_bytes(item)) for item in records],
-    }
-    encoded = canonical_json_bytes(ledger)
-    marker = re.compile(
-        rb"(?ms)(^## Claims[ \t]*\r?\n```json[ \t]*\r?\n)([^\r\n]+)(\r?\n```[ \t]*(?=\r?\n(?:## |\Z)|\Z))"
-    )
-    match = marker.search(page)
-    if match is None:
-        return page.rstrip() + b"\n\n## Claims\n```json\n" + encoded + b"\n```\n"
-    existing = json.loads(match[2])
-    existing_ids = [str(item["id"]) for item in existing["claims"]]
-    if len(existing_ids) != len(set(existing_ids)):
+_CLAIM_LEDGER = re.compile(
+    rb"(?ms)(^## Claims[ \t]*\r?\n```json[ \t]*\r?\n)([^\r\n]+)(\r?\n```[ \t]*(?=\r?\n(?:## |\Z)|\Z))"
+)
+
+
+def _ledger_bytes(claims: list) -> bytes:
+    return canonical_json_bytes({"schema_version": "claim-ledger/v1", "claims": claims})
+
+
+def _merged_claims(existing: list, additions: list) -> list:
+    """Existing claims plus the new ones. A repeated id is a conflict."""
+    by_id = {str(item["id"]): item for item in existing}
+    if len(by_id) != len(existing):
         raise ValueError("target ledger contains a duplicate claim id")
-    by_id = {str(item["id"]): item for item in existing["claims"]}
-    for record in ledger["claims"]:
+    for record in additions:
         if str(record["id"]) in by_id:
             raise ValueError("compile claim id already exists in target ledger")
         by_id[str(record["id"])] = record
-    merged = canonical_json_bytes(
-        {"schema_version": "claim-ledger/v1", "claims": list(by_id.values())}
-    )
+    return list(by_id.values())
+
+
+def _with_claim_ledger(page: bytes, records: Sequence[Mapping[str, object]]) -> bytes:
+    if not records:
+        return page
+    additions = [json.loads(canonical_json_bytes(item)) for item in records]
+    match = _CLAIM_LEDGER.search(page)
+    if match is None:
+        opening = b"\n\n## Claims\n```json\n"
+        return page.rstrip() + opening + _ledger_bytes(additions) + b"\n```\n"
+    existing = json.loads(match[2])["claims"]
+    merged = _ledger_bytes(_merged_claims(existing, additions))
     return page[: match.start(2)] + merged + page[match.end(2) :]
 
 
@@ -2308,31 +2316,38 @@ def select_dailies(
     return changed
 
 
-def _extract_title_and_summary(path: Path) -> tuple[str, str]:
-    """Parse first H1 and `One-sentence summary:` line from a knowledge page.
-
-    Used to give the compiler enough context to detect semantic overlap,
-    not just filename collisions. Falls back to (filename-stem, '') when
-    the page lacks the conventional headers.
-    """
+def _page_text(path: Path) -> str | None:
+    """A page's text, or None when it cannot be read at all."""
     try:
-        text = path.read_text(encoding="utf-8", errors="ignore")
+        return path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
-        return path.stem, ""
-    title = ""  # empty until we find an H1
-    summary = ""
+        return None
+
+
+def _first_h1(text: str) -> str:
     for line in text.splitlines():
         stripped = line.strip()
-        if not title and stripped.startswith("# ") and not stripped.startswith("## "):
-            title = stripped[2:].strip()
-        elif stripped.lower().startswith("one-sentence summary:"):
-            summary = stripped.split(":", 1)[1].strip()
-        if title and summary:
-            break
-    # Fall back to filename stem if no H1 was found
-    if not title:
-        title = path.stem
-    return title, summary
+        if stripped.startswith("# "):
+            return stripped[2:].strip()
+    return ""
+
+
+def _first_summary(text: str) -> str:
+    for line in text.splitlines():
+        if line.strip().lower().startswith("one-sentence summary:"):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
+def _extract_title_and_summary(path: Path) -> tuple[str, str]:
+    """First H1 and `One-sentence summary:` line from a knowledge page.
+
+    Gives the compiler enough to detect semantic overlap rather than only
+    filename collisions. Falls back to the filename stem when the page has
+    no H1, and to an empty summary when it has no summary line.
+    """
+    text = _page_text(path) or ""
+    return _first_h1(text) or path.stem, _first_summary(text)
 
 
 def existing_knowledge_snapshot() -> str:
@@ -2352,56 +2367,69 @@ def existing_knowledge_snapshot() -> str:
         - summary only (no H1)          → — <summary>
         - neither                       → bare filename
     """
-    lines: list[str] = []
+    entries = [
+        _dedup_entry(page) for page in _knowledge_pages() if _is_dedup_candidate(page)
+    ]
+    return "\n".join(entries) or "(no pages yet)"
+
+
+def _knowledge_pages() -> list[Path]:
+    """Every knowledge page outside the archive subtree, in a stable order.
+
+    A flat scan of the whole tree: pages living outside the legacy category
+    directories are still surfaced. Archived pages are not merge targets.
+    """
     if not KNOWLEDGE.exists():
-        return "(no pages yet)"
-    # Flat scan of the entire knowledge tree so pages living outside the
-    # legacy category dirs (flat-OKF layout) are still surfaced for dedup.
-    for md in sorted(KNOWLEDGE.rglob("*.md")):
-        # Skip the archive subtree (archived pages are not dedup candidates).
-        if "archive" in md.parts:
-            continue
-        try:
-            content = md.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        if "status: superseded" in content or "status: archived" in content:
-            continue
-        title, summary = _extract_title_and_summary(md)
-        rel = md.relative_to(KNOWLEDGE).as_posix()
-        head = f"- {rel}"
-        # Use «» around title to visually distinguish from summary
-        # and to give the LLM a clear "title goes here" anchor.
-        if title and title != md.stem and summary:
-            head += f" — «{title}»: {summary}"
-        elif title and title != md.stem:
-            head += f" — «{title}»"
-        elif summary:
-            head += f" — {summary}"
-        lines.append(head)
-    return "\n".join(lines) or "(no pages yet)"
+        return []
+    return [
+        path for path in sorted(KNOWLEDGE.rglob("*.md")) if "archive" not in path.parts
+    ]
+
+
+def _is_dedup_candidate(page: Path) -> bool:
+    """Live pages only: a superseded or archived page is not a merge target."""
+    text = _page_text(page)
+    if text is None:
+        return False
+    return "status: superseded" not in text and "status: archived" not in text
+
+
+def _summary_tail(summary: str) -> str:
+    return f" — {summary}" if summary else ""
+
+
+def _dedup_entry(page: Path) -> str:
+    """One line naming a page, carrying whatever title and summary it has.
+
+    The guillemets separate title from summary and give the model a clear
+    "title goes here" anchor.
+    """
+    title, summary = _extract_title_and_summary(page)
+    head = f"- {page.relative_to(KNOWLEDGE).as_posix()}"
+    named = title if title != page.stem else ""
+    if named and summary:
+        return f"{head} — «{named}»: {summary}"
+    return head + (f" — «{named}»" if named else _summary_tail(summary))
+
+
+def _without_fences(text: str) -> str:
+    """The body of a fenced block, or the text unchanged when it is not fenced."""
+    if not text.startswith("```"):
+        return text
+    lines = text.splitlines()[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
 
 
 def _extract_json_block(text: str) -> str:
-    """Pull the JSON object out of a possibly-fenced response."""
-    s = text.strip()
-    # Strip markdown code fences if present.
-    if s.startswith("```"):
-        lines = s.splitlines()
-        # Remove first fence line.
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        # Remove trailing fence line.
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        s = "\n".join(lines).strip()
-    # Find the outermost { ... } block.
-    if "{" in s:
-        start = s.index("{")
-        end = s.rindex("}")
-        if end > start:
-            return s[start : end + 1]
-    return ""
+    """Pull the outermost JSON object out of a possibly-fenced response."""
+    body = _without_fences(text.strip())
+    start = body.find("{")
+    end = body.rfind("}")
+    if start < 0 or end <= start:
+        return ""
+    return body[start : end + 1]
 
 
 def parse_compile_audit(raw: str) -> dict:
@@ -2421,32 +2449,39 @@ def parse_compile_audit(raw: str) -> dict:
     """
     if not raw or not raw.strip():
         return {}
-    audit_line = ""
-    for line in raw.splitlines()[::-1]:
-        stripped = line.strip()
-        if stripped.startswith("COMPILE_AUDIT:"):
-            audit_line = stripped
-            break
-    if not audit_line:
+    line = _audit_line(raw)
+    if not line:
         return {}
-    body = audit_line.split(":", 1)[1]
-    out: dict[str, int] = {}
-    # Format emitted by the new prompt (number comes BEFORE the descriptor):
-    #   "verified 7 evidence citations; 12 dedup checks performed; 2 stubs
-    #    skipped; 1 contradictions handled; 0 pages rejected as below-threshold"
-    mappings = [
-        ("verified", r"verified\s+(\d+)\s+evidence"),
-        ("dedup", r"(\d+)\s+dedup checks"),
-        ("stubs", r"(\d+)\s+stubs skipped"),
-        ("contradictions", r"(\d+)\s+contradictions handled"),
-        ("rejected", r"(\d+)\s+pages rejected"),
-    ]
+    return _audit_counts(line.split(":", 1)[1])
 
-    for key, pattern in mappings:
-        m = re.search(pattern, body, re.IGNORECASE)
-        if m:
-            out[key] = int(m.group(1))
-    return out
+
+# The number comes BEFORE the descriptor in the emitted line:
+#   "verified 7 evidence citations; 12 dedup checks performed; 2 stubs
+#    skipped; 1 contradictions handled; 0 pages rejected as below-threshold"
+_AUDIT_COUNTS = (
+    ("verified", r"verified\s+(\d+)\s+evidence"),
+    ("dedup", r"(\d+)\s+dedup checks"),
+    ("stubs", r"(\d+)\s+stubs skipped"),
+    ("contradictions", r"(\d+)\s+contradictions handled"),
+    ("rejected", r"(\d+)\s+pages rejected"),
+)
+
+
+def _audit_line(raw: str) -> str:
+    """The last COMPILE_AUDIT line, or empty when the run emitted none."""
+    for line in reversed(raw.splitlines()):
+        if line.strip().startswith("COMPILE_AUDIT:"):
+            return line.strip()
+    return ""
+
+
+def _audit_counts(body: str) -> dict[str, int]:
+    """Every count the line carries; a missing one is simply absent."""
+    found = (
+        (key, re.search(pattern, body, re.IGNORECASE))
+        for key, pattern in _AUDIT_COUNTS
+    )
+    return {key: int(match.group(1)) for key, match in found if match}
 
 
 def _compile_succeeded(raw: str) -> bool:
