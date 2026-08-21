@@ -545,8 +545,18 @@ if command -v claude &>/dev/null || [ -d "$HOME/.claude" ] || [ -f "$HOME/.claud
     printf '%s\n' '{"mcpServers":{"llm-wiki":{"command":"uv","args":["run","--locked","--no-sync","--directory",'"$VAULT_JSON"',"python","scripts/mcp_server.py"]}}}' > "$CLAUDE_MCP"
     ok "Claude MCP config: ~/.claude.json"
   elif ! grep -q '"llm-wiki"' "$CLAUDE_MCP" 2>/dev/null; then
-    warn "Existing ~/.claude.json found without llm-wiki; merge this under top-level mcpServers:"
-    warn '  "llm-wiki":{"command":"uv","args":["run","--locked","--no-sync","--directory",'"$VAULT_JSON"',"python","scripts/mcp_server.py"]}'
+    # `~/.claude.json` is Claude Code's live state file and it writes to it
+    # while running, so this must not read-modify-write it. Its own CLI adds
+    # the entry safely; without the CLI the only honest option is to say what
+    # to add.
+    if command -v claude &>/dev/null && claude mcp add --scope user llm-wiki \
+        -- uv run --locked --no-sync --directory "$VAULT_ROOT" python scripts/mcp_server.py \
+        >/dev/null 2>&1; then
+      ok "Claude MCP server registered: llm-wiki"
+    else
+      warn "Existing ~/.claude.json found without llm-wiki; add it with:"
+      warn "  claude mcp add --scope user llm-wiki -- uv run --locked --no-sync --directory $VAULT_ROOT python scripts/mcp_server.py"
+    fi
   fi
   if [ "$CLAUDE_AUTOMATIC" -eq 1 ]; then
     AGENT_STATUSES+=("Claude Code: active automatic")

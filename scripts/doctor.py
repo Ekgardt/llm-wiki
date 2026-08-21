@@ -4586,7 +4586,12 @@ def _integration_host_configs(
     return {
         "claude": (
             home / ".claude",
-            [(home / ".claude" / "settings.json", ("LLM_WIKI_ROOT", "session_start_context.py"))],
+            [
+                (
+                    home / ".claude" / "settings.json",
+                    ("LLM_WIKI_ROOT", "integration_adapter.py"),
+                )
+            ],
         ),
         "opencode": (
             home / ".config" / "opencode",

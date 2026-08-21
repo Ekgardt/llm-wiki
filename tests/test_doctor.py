@@ -635,7 +635,7 @@ def test_integrations_use_injected_home_and_skip_absent_optional_hosts(tmp_path)
     root, state_root, home = _build_root(tmp_path)
     (home / ".claude").mkdir()
     (home / ".claude" / "settings.json").write_text(
-        "LLM_WIKI_ROOT session_start_context.py", encoding="utf-8"
+        "LLM_WIKI_ROOT integration_adapter.py", encoding="utf-8"
     )
 
     check = _check(run_doctor(root=root, state_root=state_root, home=home), "integrations")
@@ -2219,7 +2219,7 @@ def test_unrelated_installed_configs_are_not_false_positives(tmp_path):
 @pytest.mark.parametrize(
     ("host", "relative", "marker"),
     [
-        ("claude", ".claude/settings.json", "LLM_WIKI_ROOT session_start_context.py"),
+        ("claude", ".claude/settings.json", "LLM_WIKI_ROOT integration_adapter.py"),
         (
             "opencode",
             ".config/opencode/plugins/llm-wiki-memory.js",
@@ -4211,3 +4211,23 @@ def test_losing_the_fence_during_the_recapture_is_also_reported(tmp_path, monkey
     assert result["status"] == "deferred"
     assert result["reason"] == "maintenance_owner_lost"
     assert calls == [False, True]
+
+def test_the_host_markers_are_ones_the_shipped_templates_actually_write() -> None:
+    """A marker naming a script the installer no longer writes fails every install."""
+    import doctor
+
+    root = Path(__file__).resolve().parent.parent
+    shipped = {
+        "claude": root / "integrations" / "claude-code" / "settings.json",
+    }
+    configs = doctor._integration_host_configs(Path.home())
+    missing: dict[str, list[str]] = {}
+    for name, template in shipped.items():
+        text = template.read_text(encoding="utf-8")
+        _host_dir, files = configs[name]
+        for _path, markers in files:
+            absent = [marker for marker in markers if marker not in text]
+            if absent:
+                missing[name] = absent
+
+    assert missing == {}
