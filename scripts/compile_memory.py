@@ -730,60 +730,7 @@ def _receipt_path(digest: str) -> Path:
 def parse_compile_receipt_v2(raw_bytes: bytes, digest: str) -> dict[str, object]:
     """Validate canonical receipt bytes without requiring live transaction state."""
     try:
-        text = raw_bytes.decode("utf-8", errors="strict")
-        frontmatter, body = text.split("---\n", 2)[1:]
-        fields = {}
-        for line in frontmatter.splitlines():
-            key, separator, value = line.partition(": ")
-            if not separator or key in fields:
-                raise ValueError("compile receipt frontmatter is invalid")
-            fields[key] = value
-        if set(fields) != {
-            "type", "source_digest", "action_key", "status", "timestamp",
-            "confidence", "source_authority"
-        }:
-            raise ValueError("compile receipt frontmatter fields are invalid")
-        timestamp = datetime.fromisoformat(fields["timestamp"].replace("Z", "+00:00"))
-        if timestamp.tzinfo is None:
-            raise ValueError("compile receipt timestamp must include a timezone")
-        prefix = "\n# Compile Receipt\n\nOne-sentence summary: This immutable receipt proves completion of a snapshot compile.\n\n## Record\n```json\n"
-        if not body.startswith(prefix) or not body.endswith("\n```\n"):
-            raise ValueError("compile receipt body is invalid")
-        canonical = body[len(prefix) : -5]
-        record = json.loads(canonical)
-        validate_schema(record, COMPILE_RECEIPT_SCHEMA)
-        if canonical_json_bytes(record).decode() != canonical:
-            raise ValueError("compile receipt record is not canonical")
-        if fields != {
-            "type": "compile-receipt",
-            "source_digest": digest,
-            "action_key": record["action_key"],
-            "status": record["state"],
-            "timestamp": record["completed_at"],
-            "confidence": "high",
-            "source_authority": "ai-derived",
-        } or record["source_digest"] != digest:
-            raise ValueError("compile receipt frontmatter and record disagree")
-        input_digests = record["input_digests"]
-        if input_digests != sorted(set(input_digests)) or digest not in input_digests:
-            raise ValueError("compile receipt input digests are invalid")
-        expected_operation_id = "compile:" + sha256_bytes(
-            canonical_json_bytes(
-                {"action_key": record["action_key"], "source_digests": input_digests}
-            )
-        )
-        if record["operation_id"] != expected_operation_id:
-            raise ValueError("compile receipt operation identity is invalid")
-        operation_paths = [operation["path"] for operation in record["operations"]]
-        if len(operation_paths) != len(set(operation_paths)):
-            raise ValueError("compile receipt operation paths are duplicated")
-        for evidence in record["evidence"]:
-            if (
-                evidence["source_digest"] != digest
-                or evidence["operation_path"] not in set(operation_paths)
-            ):
-                raise ValueError("compile receipt evidence scope is invalid")
-        return record
+        return _parsed_receipt_v2(raw_bytes, digest)
     except (
         IndexError,
         KeyError,
@@ -793,6 +740,100 @@ def parse_compile_receipt_v2(raw_bytes: bytes, digest: str) -> dict[str, object]
         json.JSONDecodeError,
     ) as exc:
         raise ValueError("compile receipt is corrupt") from exc
+
+
+def _parsed_receipt_v2(raw_bytes: bytes, digest: str) -> dict[str, object]:
+    text = raw_bytes.decode("utf-8", errors="strict")
+    frontmatter, body = text.split("---\n", 2)[1:]
+    prefix = "\n# Compile Receipt\n\nOne-sentence summary: This immutable receipt proves completion of a snapshot compile.\n\n## Record\n```json\n"
+    fields = _receipt_frontmatter(frontmatter)
+    _require_v2_frontmatter(fields)
+    record = _receipt_record(body, prefix, COMPILE_RECEIPT_SCHEMA)
+    _require_v2_agreement(fields, record, digest)
+    _require_v2_identity(record, digest)
+    _require_v2_evidence_scope(record, digest)
+    return record
+
+
+def _receipt_frontmatter(frontmatter: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for line in frontmatter.splitlines():
+        key, separator, value = line.partition(": ")
+        if not separator or key in fields:
+            raise ValueError("compile receipt frontmatter is invalid")
+        fields[key] = value
+    return fields
+
+
+def _receipt_record(body: str, prefix: str, schema: object) -> dict[str, object]:
+    """The one canonical JSON record a receipt body is allowed to carry."""
+    if not body.startswith(prefix) or not body.endswith("\n```\n"):
+        raise ValueError("compile receipt body is invalid")
+    canonical = body[len(prefix) : -5]
+    record = json.loads(canonical)
+    validate_schema(record, schema)
+    if canonical_json_bytes(record).decode() != canonical:
+        raise ValueError("compile receipt record is not canonical")
+    return record
+
+
+def _require_v2_frontmatter(fields: Mapping[str, str]) -> None:
+    if set(fields) != {
+        "type", "source_digest", "action_key", "status", "timestamp",
+        "confidence", "source_authority"
+    }:
+        raise ValueError("compile receipt frontmatter fields are invalid")
+    timestamp = datetime.fromisoformat(fields["timestamp"].replace("Z", "+00:00"))
+    if timestamp.tzinfo is None:
+        raise ValueError("compile receipt timestamp must include a timezone")
+
+
+def _require_v2_agreement(
+    fields: Mapping[str, str], record: Mapping[str, object], digest: str
+) -> None:
+    expected = {
+        "type": "compile-receipt",
+        "source_digest": digest,
+        "action_key": record["action_key"],
+        "status": record["state"],
+        "timestamp": record["completed_at"],
+        "confidence": "high",
+        "source_authority": "ai-derived",
+    }
+    if fields != expected or record["source_digest"] != digest:
+        raise ValueError("compile receipt frontmatter and record disagree")
+
+
+def _require_v2_identity(record: Mapping[str, object], digest: str) -> None:
+    input_digests = record["input_digests"]
+    if input_digests != sorted(set(input_digests)) or digest not in input_digests:
+        raise ValueError("compile receipt input digests are invalid")
+    expected_operation_id = "compile:" + sha256_bytes(
+        canonical_json_bytes(
+            {"action_key": record["action_key"], "source_digests": input_digests}
+        )
+    )
+    if record["operation_id"] != expected_operation_id:
+        raise ValueError("compile receipt operation identity is invalid")
+
+
+def _require_v2_evidence_scope(record: Mapping[str, object], digest: str) -> None:
+    operation_paths = [operation["path"] for operation in record["operations"]]
+    known = set(operation_paths)
+    if len(operation_paths) != len(known):
+        raise ValueError("compile receipt operation paths are duplicated")
+    for evidence in record["evidence"]:
+        _require_v2_evidence_entry(evidence, known, digest)
+
+
+def _require_v2_evidence_entry(
+    evidence: Mapping[str, str], operation_paths: set[str], digest: str
+) -> None:
+    if (
+        evidence["source_digest"] != digest
+        or evidence["operation_path"] not in operation_paths
+    ):
+        raise ValueError("compile receipt evidence scope is invalid")
 
 
 def read_compile_receipt_v2(
@@ -810,23 +851,7 @@ def read_compile_receipt_v2(
         return None
     try:
         record = parse_compile_receipt_v2(raw_bytes, digest)
-        expected_operation_id = str(record["operation_id"])
-        transaction = coordinator._record_for_operation_id(expected_operation_id)
-        if transaction is None or transaction.state != "committed":
-            raise ValueError("compile receipt has no committed transaction authority")
-        transaction_operations = {item.path: item for item in transaction.operations}
-        relative = path.relative_to(vault).as_posix()
-        receipt_operation = transaction_operations.get(relative)
-        if receipt_operation is None or receipt_operation.after_hash != sha256_bytes(raw_bytes):
-            raise ValueError("compile receipt bytes are not transaction-authoritative")
-        for operation in record["operations"]:
-            authoritative = transaction_operations.get(operation["path"])
-            if (
-                authoritative is None
-                or authoritative.kind != operation["kind"]
-                or authoritative.after_hash != operation["after_sha256"]
-            ):
-                raise ValueError("compile receipt operation integrity failed")
+        _require_transaction_authority(record, coordinator, path, vault, raw_bytes)
         return record
     except (
         IndexError,
@@ -837,6 +862,43 @@ def read_compile_receipt_v2(
         json.JSONDecodeError,
     ) as exc:
         raise ValueError("compile receipt is corrupt") from exc
+
+
+def _require_transaction_authority(
+    record: Mapping[str, object],
+    coordinator: MarkdownCoordinator,
+    path: Path,
+    vault: Path,
+    raw_bytes: bytes,
+) -> None:
+    """A receipt is evidence only when a committed transaction wrote those bytes."""
+    transaction = coordinator._record_for_operation_id(str(record["operation_id"]))
+    if transaction is None or transaction.state != "committed":
+        raise ValueError("compile receipt has no committed transaction authority")
+    operations = _transaction_operations(transaction)
+    receipt_operation = operations.get(path.relative_to(vault).as_posix())
+    if receipt_operation is None or receipt_operation.after_hash != sha256_bytes(
+        raw_bytes
+    ):
+        raise ValueError("compile receipt bytes are not transaction-authoritative")
+    _require_operation_integrity(record, operations)
+
+
+def _transaction_operations(transaction: object) -> dict[str, object]:
+    return {item.path: item for item in transaction.operations}
+
+
+def _require_operation_integrity(
+    record: Mapping[str, object], operations: Mapping[str, object]
+) -> None:
+    for operation in record["operations"]:
+        authoritative = operations.get(operation["path"])
+        if (
+            authoritative is None
+            or authoritative.kind != operation["kind"]
+            or authoritative.after_hash != operation["after_sha256"]
+        ):
+            raise ValueError("compile receipt operation integrity failed")
 
 
 # Historical compatibility only. Selection and archive authority use v3 readers.
@@ -856,144 +918,239 @@ def resolve_compile_plan(
     _assert_external_work_allowed(coordinator)
     if batch is not None and batch.inputs != inputs:
         raise ValueError("compile batch inputs disagree")
+    attempt = _CompileAttempt(inputs, cache, batch, token_adapters)
     forced = os.environ.get("MEMORY_LLM_PROVIDER", "").strip().lower()
-    source_descriptors = tuple(
-        SourceDescriptor(item.logical_path, len(item.content), item.sha256)
-        for item in inputs.sources
-    )
-
-    def validator(plan: dict[str, object]) -> bool:
-        return validate_compile_plan(plan, inputs)
-
-    lineage: tuple[str, ...] = ()
     for candidate in provider_candidates(forced, max_tokens=4000):
-        descriptor = replace(candidate, fallback_from=lineage)
-        if not probe_candidate(descriptor):
-            failure = descriptor.resolution_failure or "unavailable"
-            lineage += (_failure_lineage("probe", descriptor, failure),)
-            continue
-        mode = (
-            "native"
-            if descriptor.capabilities.get("structured_output") == "native"
-            else "prompt"
+        resolved = attempt.resolve(candidate)
+        if resolved is not None:
+            return resolved
+    raise RuntimeError("no LLM provider produced a validated compile plan")
+
+
+class _ProviderStageFailure(Exception):
+    """A provider failed inside a stage, which is lineage rather than a defect."""
+
+    def __init__(self, failure: str) -> None:
+        super().__init__(failure)
+        self.failure = failure
+
+
+class _CompileAttempt:
+    """One pass down the provider chain, accumulating the failure lineage.
+
+    Every stage answers with a plan or with None; None means this provider did
+    not produce one and the caller should try the next.
+    """
+
+    def __init__(
+        self,
+        inputs: CompileInputs,
+        cache: CompileCache,
+        batch: CompileBatch | None,
+        token_adapters: Mapping[str, TokenCounter] | None,
+    ) -> None:
+        self.inputs = inputs
+        self.cache = cache
+        self.batch = batch
+        self.token_adapters = token_adapters
+        self.lineage: tuple[str, ...] = ()
+        self.source_descriptors = tuple(
+            SourceDescriptor(item.logical_path, len(item.content), item.sha256)
+            for item in inputs.sources
         )
+
+    def resolve(self, candidate: object) -> ResolvedCompilePlan | None:
+        descriptor = replace(candidate, fallback_from=self.lineage)
+        if not probe_candidate(descriptor):
+            return self._record(
+                "probe", descriptor, descriptor.resolution_failure or "unavailable"
+            )
+        actions = self._actions(descriptor)
+        cached = self._cached(actions, descriptor)
+        if cached is not None:
+            return cached
+        return self._drafted(descriptor, actions)
+
+    def _record(
+        self, stage: str, descriptor: object, failure: str
+    ) -> ResolvedCompilePlan | None:
+        """Remember why this stage yielded nothing, and yield nothing."""
+        self.lineage += (_failure_lineage(stage, descriptor, failure),)
+        return None
+
+    def _actions(self, descriptor: object) -> tuple[object, object]:
+        mode = _structured_output_mode(descriptor)
         draft_call = _call_descriptor(descriptor, DRAFT_PROGRAM_HASH, mode)
         critique_call = _call_descriptor(descriptor, CRITIQUE_PROGRAM_HASH, mode)
-        without_critique = _action_descriptor(
-            source_descriptors, draft_call, (), critique=False
+        return (
+            _action_descriptor(self.source_descriptors, draft_call, (), critique=False),
+            _action_descriptor(
+                self.source_descriptors, draft_call, (critique_call,), critique=True
+            ),
         )
-        with_critique = _action_descriptor(
-            source_descriptors, draft_call, (critique_call,), critique=True
-        )
-        for action in (without_critique, with_critique):
-            cached = cache.get(action, validator)
-            if cached is not None:
-                key = cache.key(action)
-                assert key is not None
-                return ResolvedCompilePlan(
-                    cached,
-                    action,
-                    key,
-                    True,
-                    _provider_budget(descriptor),
-                )
 
-        draft_prompt = _draft_prompt(inputs)
-        if batch is not None and not _compile_prompt_fits(
-            draft_prompt,
-            system=DRAFT_SYSTEM,
-            schema=RAW_PLAN_SCHEMA,
-            model=descriptor.model,
-            token_adapters=token_adapters,
-        ):
-            lineage += (_failure_lineage("draft", descriptor, "input_budget"),)
-            continue
+    def _validator(self, plan: dict[str, object]) -> bool:
+        return validate_compile_plan(plan, self.inputs)
 
-        draft = call_candidate(
-            descriptor,
-            draft_prompt,
-            DRAFT_SYSTEM,
-            max_tokens=4000,
-            schema=RAW_PLAN_SCHEMA,
-            available=True,
-            token_adapters=token_adapters,
-        )
-        if draft.text is None:
-            failure = draft.failure_class or "provider_error"
-            lineage += (_failure_lineage("draft", descriptor, failure),)
-            continue
-        validation_stage = "draft"
-        try:
-            raw_plan = _parse_json_object(draft.text)
-            _validate_rule(raw_plan, RAW_PLAN_SCHEMA, "$draft")
-            if set(raw_plan) - {"operations", "audit"}:
-                raise ValueError("draft output has unsupported fields")
-            operations = raw_plan.get("operations")
-            if not isinstance(operations, list):
-                raise ValueError("draft operations must be an array")
-            action = without_critique
-            if operations:
-                validation_stage = "critique"
-                critique_prompt = _critique_prompt(inputs, operations)
-                if batch is not None and not _compile_prompt_fits(
-                    critique_prompt,
-                    system=CRITIQUE_SYSTEM,
-                    schema=CRITIQUE_SCHEMA,
-                    model=descriptor.model,
-                    token_adapters=token_adapters,
-                ):
-                    raise ValueError("compile critique exceeds input budget")
-                critique = call_candidate(
-                    descriptor,
-                    critique_prompt,
-                    CRITIQUE_SYSTEM,
-                    max_tokens=4000,
-                    schema=CRITIQUE_SCHEMA,
-                    available=True,
-                    token_adapters=token_adapters,
-                )
-                if critique.text is None:
-                    failure = critique.failure_class or "provider_error"
-                    lineage += (_failure_lineage("critique", descriptor, failure),)
-                    continue
-                critique_plan = _parse_json_object(critique.text)
-                _validate_rule(critique_plan, CRITIQUE_SCHEMA, "$critique")
-                if set(critique_plan) != {"reviews"}:
-                    raise ValueError("critique output has unsupported fields")
-                reviews = critique_plan.get("reviews")
-                if not isinstance(reviews, list):
-                    raise ValueError("critique reviews must be an array")
-                dropped = {
-                    item.get("slug")
-                    for item in reviews
-                    if isinstance(item, dict) and item.get("verdict") == "drop"
-                }
-                operations = [
-                    item
-                    for item in operations
-                    if isinstance(item, dict) and item.get("slug") not in dropped
-                ]
-                action = with_critique
-                validation_stage = "normalize"
-            normalized = _normalize_plan(operations, inputs)
-            validate_compile_plan(normalized, inputs)
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-            lineage += (
-                _failure_lineage(validation_stage, descriptor, "validation_error"),
+    def _cached(
+        self, actions: tuple[object, object], descriptor: object
+    ) -> ResolvedCompilePlan | None:
+        for action in actions:
+            cached = self.cache.get(action, self._validator)
+            if cached is None:
+                continue
+            key = self.cache.key(action)
+            assert key is not None
+            return ResolvedCompilePlan(
+                cached, action, key, True, _provider_budget(descriptor)
             )
-            continue
-        key = cache.key(action)
+        return None
+
+    def _drafted(
+        self, descriptor: object, actions: tuple[object, object]
+    ) -> ResolvedCompilePlan | None:
+        prompt = _draft_prompt(self.inputs)
+        if not self._fits(prompt, DRAFT_SYSTEM, RAW_PLAN_SCHEMA, descriptor):
+            return self._record("draft", descriptor, "input_budget")
+        draft = self._call(descriptor, prompt, DRAFT_SYSTEM, RAW_PLAN_SCHEMA)
+        if draft.text is None:
+            return self._record(
+                "draft", descriptor, draft.failure_class or "provider_error"
+            )
+        return self._planned(descriptor, actions, draft.text)
+
+    def _planned(
+        self, descriptor: object, actions: tuple[object, object], draft_text: str
+    ) -> ResolvedCompilePlan | None:
+        try:
+            operations = _draft_operations(draft_text)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return self._record("draft", descriptor, "validation_error")
+        return self._critiqued(descriptor, actions, operations)
+
+    def _critiqued(
+        self,
+        descriptor: object,
+        actions: tuple[object, object],
+        operations: list[object],
+    ) -> ResolvedCompilePlan | None:
+        without_critique, with_critique = actions
+        if not operations:
+            return self._normalized(descriptor, without_critique, operations, "draft")
+        try:
+            reviewed = self._review(descriptor, operations)
+        except _ProviderStageFailure as stage_failure:
+            return self._record("critique", descriptor, stage_failure.failure)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return self._record("critique", descriptor, "validation_error")
+        return self._normalized(descriptor, with_critique, reviewed, "normalize")
+
+    def _review(self, descriptor: object, operations: list[object]) -> list[object]:
+        prompt = _critique_prompt(self.inputs, operations)
+        if not self._fits(prompt, CRITIQUE_SYSTEM, CRITIQUE_SCHEMA, descriptor):
+            raise ValueError("compile critique exceeds input budget")
+        critique = self._call(descriptor, prompt, CRITIQUE_SYSTEM, CRITIQUE_SCHEMA)
+        if critique.text is None:
+            raise _ProviderStageFailure(critique.failure_class or "provider_error")
+        return _without_dropped(operations, _dropped_slugs(critique.text))
+
+    def _normalized(
+        self,
+        descriptor: object,
+        action: object,
+        operations: list[object],
+        stage: str,
+    ) -> ResolvedCompilePlan | None:
+        try:
+            plan = _normalize_plan(operations, self.inputs)
+            validate_compile_plan(plan, self.inputs)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return self._record(stage, descriptor, "validation_error")
+        return self._published(descriptor, action, plan)
+
+    def _published(
+        self, descriptor: object, action: object, plan: dict[str, object]
+    ) -> ResolvedCompilePlan:
+        key = self.cache.key(action)
         action_key = key or sha256_bytes(canonical_json_bytes(action.canonical()))
         if key is not None:
-            cache.put(action, normalized)
+            self.cache.put(action, plan)
         return ResolvedCompilePlan(
-            normalized,
-            action,
-            action_key,
-            False,
-            _provider_budget(descriptor),
+            plan, action, action_key, False, _provider_budget(descriptor)
         )
-    raise RuntimeError("no LLM provider produced a validated compile plan")
+
+    def _fits(
+        self, prompt: str, system: str, schema: object, descriptor: object
+    ) -> bool:
+        """Without a batch there is no declared input budget to respect."""
+        if self.batch is None:
+            return True
+        return _compile_prompt_fits(
+            prompt,
+            system=system,
+            schema=schema,
+            model=descriptor.model,
+            token_adapters=self.token_adapters,
+        )
+
+    def _call(
+        self, descriptor: object, prompt: str, system: str, schema: object
+    ) -> object:
+        return call_candidate(
+            descriptor,
+            prompt,
+            system,
+            max_tokens=4000,
+            schema=schema,
+            available=True,
+            token_adapters=self.token_adapters,
+        )
+
+
+def _structured_output_mode(descriptor: object) -> str:
+    if descriptor.capabilities.get("structured_output") == "native":
+        return "native"
+    return "prompt"
+
+
+def _draft_operations(draft_text: str) -> list[object]:
+    raw_plan = _parse_json_object(draft_text)
+    _validate_rule(raw_plan, RAW_PLAN_SCHEMA, "$draft")
+    if set(raw_plan) - {"operations", "audit"}:
+        raise ValueError("draft output has unsupported fields")
+    operations = raw_plan.get("operations")
+    if not isinstance(operations, list):
+        raise ValueError("draft operations must be an array")
+    return operations
+
+
+def _dropped_slugs(critique_text: str) -> set[object]:
+    critique_plan = _parse_json_object(critique_text)
+    _validate_rule(critique_plan, CRITIQUE_SCHEMA, "$critique")
+    if set(critique_plan) != {"reviews"}:
+        raise ValueError("critique output has unsupported fields")
+    reviews = critique_plan.get("reviews")
+    if not isinstance(reviews, list):
+        raise ValueError("critique reviews must be an array")
+    return _dropped_from_reviews(reviews)
+
+
+def _dropped_from_reviews(reviews: list[object]) -> set[object]:
+    return {
+        item.get("slug")
+        for item in reviews
+        if isinstance(item, dict) and item.get("verdict") == "drop"
+    }
+
+
+def _without_dropped(
+    operations: list[object], dropped: set[object]
+) -> list[object]:
+    return [
+        item
+        for item in operations
+        if isinstance(item, dict) and item.get("slug") not in dropped
+    ]
 
 
 def _compile_prompt_fits(
@@ -1248,7 +1405,20 @@ def _target_snapshot(inputs: CompileInputs, path: str) -> TargetSnapshot | None:
 def _validate_semantic_operation(
     operation: dict[str, object], inputs: CompileInputs
 ) -> tuple[dict[str, object], list[dict[str, str]]]:
-    required = {
+    _require_semantic_shape(operation)
+    _require_semantic_strings(operation)
+    _require_semantic_links(operation)
+    evidence = operation["evidence"]
+    _require_evidence_shape(evidence)
+    bindings = [_evidence_binding(item, inputs) for item in evidence]
+    _require_claims(operation, inputs)
+    normalized = json.loads(canonical_json_bytes(operation))
+    assert isinstance(normalized, dict)
+    return normalized, bindings
+
+
+_SEMANTIC_FIELDS = frozenset(
+    {
         "action",
         "category",
         "slug",
@@ -1259,185 +1429,266 @@ def _validate_semantic_operation(
         "evidence",
         "related",
     }
-    allowed = required | {"claims"}
-    if not required.issubset(operation):
+)
+
+_SEMANTIC_STRING_BOUNDS = {
+    "title": (1, 200),
+    "summary": (1, 500),
+    "body_markdown": (1, 20_000),
+}
+
+_BODY_SECTIONS = frozenset(
+    {"Lesson", "Decision", "Symptom / Cause / Resolution", "Answer"}
+)
+
+
+def _require_semantic_shape(operation: Mapping[str, object]) -> None:
+    if not _SEMANTIC_FIELDS.issubset(operation):
         raise ValueError("compile operation is missing semantic fields")
-    if set(operation) - allowed:
+    if set(operation) - (_SEMANTIC_FIELDS | {"claims"}):
         raise ValueError("compile operation has unsupported semantic fields")
-    if not isinstance(operation["action"], str) or operation["action"] not in {
-        "create",
-        "update",
-    }:
+    _require_semantic_action(operation["action"])
+    _require_semantic_category(operation["category"])
+    _require_semantic_slug(operation["slug"])
+
+
+def _require_semantic_action(action: object) -> None:
+    if not isinstance(action, str) or action not in {"create", "update"}:
         raise ValueError("compile operation action is invalid")
-    if not isinstance(operation["category"], str):
+
+
+def _require_semantic_category(category: object) -> None:
+    if not isinstance(category, str):
         raise ValueError("compile operation category must be a string")
-    category = operation["category"]
     if category not in ALLOWED_CATEGORIES:
         raise ValueError("compile operation category is invalid")
-    slug = operation["slug"]
+
+
+def _require_semantic_slug(slug: object) -> None:
     if (
         not isinstance(slug, str)
         or len(slug) > 120
         or re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", slug) is None
     ):
         raise ValueError("compile operation slug is not normalized")
-    string_bounds = {
-        "title": (1, 200),
-        "summary": (1, 500),
-        "body_markdown": (1, 20_000),
-    }
-    for field, (minimum, maximum) in string_bounds.items():
-        value = operation[field]
-        if (
-            not isinstance(value, str)
-            or not minimum <= len(value) <= maximum
-            or (field in {"title", "summary"} and any(char in value for char in "\r\n"))
-        ):
-            raise ValueError(f"compile operation {field} has invalid type or length")
-    body_section = operation.get("body_section", "Lesson")
-    if body_section not in {
-        "Lesson",
-        "Decision",
-        "Symptom / Cause / Resolution",
-        "Answer",
-    }:
+
+
+def _require_semantic_strings(operation: Mapping[str, object]) -> None:
+    for field, (minimum, maximum) in _SEMANTIC_STRING_BOUNDS.items():
+        _require_bounded_string(field, operation[field], minimum, maximum)
+    if operation.get("body_section", "Lesson") not in _BODY_SECTIONS:
         raise ValueError("compile operation body_section is invalid")
+
+
+def _require_bounded_string(
+    field: str, value: object, minimum: int, maximum: int
+) -> None:
+    if not isinstance(value, str) or not minimum <= len(value) <= maximum:
+        raise ValueError(f"compile operation {field} has invalid type or length")
+    if field in _SINGLE_LINE_FIELDS and not _is_single_line(value):
+        raise ValueError(f"compile operation {field} has invalid type or length")
+
+
+_SINGLE_LINE_FIELDS = frozenset({"title", "summary"})
+
+
+def _is_single_line(value: str) -> bool:
+    return "\r" not in value and "\n" not in value
+
+
+def _require_semantic_links(operation: Mapping[str, object]) -> None:
     related = operation.get("related", [])
-    if (
-        not isinstance(related, list)
-        or len(related) > MAX_RELATED
-        or any(
-            not isinstance(item, str)
-            or len(item) > 200
-            or re.fullmatch(r"\[\[[^\r\n]+\]\]", item) is None
-            for item in related
-        )
-    ):
+    if not isinstance(related, list) or len(related) > MAX_RELATED:
         raise ValueError("compile operation related links are invalid")
-    evidence = operation["evidence"]
+    if any(not _is_wikilink(item) for item in related):
+        raise ValueError("compile operation related links are invalid")
+
+
+def _is_wikilink(item: object) -> bool:
+    if not isinstance(item, str) or len(item) > 200:
+        return False
+    return re.fullmatch(r"\[\[[^\r\n]+\]\]", item) is not None
+
+
+def _require_evidence_shape(evidence: object) -> None:
     if (
         not isinstance(evidence, list)
         or not evidence
         or len(evidence) > MAX_EVIDENCE_PER_OPERATION
     ):
         raise ValueError("compile operation requires evidence")
-    evidence_bindings: list[dict[str, str]] = []
-    for item in evidence:
-        if not isinstance(item, dict) or set(item) != {
-            "daily_date",
-            "timestamp",
-            "quoted_text",
-            "claim",
-        }:
-            raise ValueError("compile evidence must be an object")
-        date = item.get("daily_date")
-        timestamp = item.get("timestamp")
-        quote = item.get("quoted_text")
-        claim = item.get("claim")
-        if (
-            not isinstance(date, str)
-            or re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) is None
-            or not isinstance(timestamp, str)
-            or re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d", timestamp) is None
-            or not isinstance(quote, str)
-            or not 1 <= len(quote) <= 4_000
-            or not isinstance(claim, str)
-            or not 1 <= len(claim) <= 1_000
-            or any(char in claim for char in "\r\n")
-        ):
-            raise ValueError("compile evidence is incomplete")
-        try:
-            datetime.strptime(date, "%Y-%m-%d")
-        except ValueError as exc:
-            raise ValueError("compile evidence date is invalid") from exc
-        source = _daily_for_evidence(inputs, date)
-        quote_bytes = quote.encode("utf-8")
-        header = re.compile(
-            rb"(?m)^## \[" + re.escape(timestamp.encode()) + rb"\][^\r\n]*\r?$"
-        )
-        matches = list(header.finditer(source.content)) if source is not None else []
-        if len(matches) != 1:
-            raise ValueError("compile evidence timestamp block is ambiguous or missing")
-        marker_at = matches[0].start()
-        next_header = (
-            source.content.find(b"\n## [", matches[0].end())
-            if source is not None
-            else -1
-        )
-        block = (
-            source.content[marker_at:next_header]
-            if source is not None and next_header >= 0
-            else source.content[marker_at:]
-            if source is not None and marker_at >= 0
-            else b""
-        )
-        quote_offsets = [
-            match.start() for match in re.finditer(re.escape(quote_bytes), block)
-        ]
-        if len(quote_offsets) != 1:
-            raise ValueError("compile evidence does not match the immutable snapshot")
-        quote_offset = quote_offsets[0]
-        line_start = block.rfind(b"\n", 0, quote_offset) + 1
-        line_end = block.find(b"\n", quote_offset + len(quote_bytes))
-        if line_end < 0:
-            line_end = len(block)
-        source_line = block[line_start:line_end].decode("utf-8", errors="strict").strip()
-        bullet = re.match(r"^(?:[-+*]|\d+[.)])\s+(.*)$", source_line)
-        complete_line = (bullet.group(1) if bullet else source_line).strip()
-        if quote != complete_line:
-            raise ValueError("compile evidence must quote one complete source line")
-        quote_start = marker_at + quote_offsets[0]
-        reference = EvidenceRef(
-            date,
-            source.sha256,
-            timestamp,
-            quote_start,
-            quote_start + len(quote_bytes),
-        )
-        EvidenceResolver(ROOT).resolve_bytes(
-            reference,
-            source.content,
-            source_path=ROOT / source.logical_path,
-        )
-        evidence_bindings.append(
-            {
-                "source_path": source.logical_path,
-                "source_digest": source.sha256,
-                "quote_sha256": sha256_bytes(quote_bytes),
-                "reference": str(reference),
-            }
-        )
+
+
+def _evidence_binding(item: object, inputs: CompileInputs) -> dict[str, str]:
+    """Bind one quoted line to an exact byte span of an immutable daily source."""
+    date, timestamp, quote = _require_evidence_fields(item)
+    source = _daily_for_evidence(inputs, date)
+    block, marker_at = _evidence_block(source, timestamp)
+    quote_bytes = quote.encode("utf-8")
+    quote_offset = _sole_quote_offset(block, quote_bytes)
+    _require_complete_line(block, quote_offset, quote_bytes, quote)
+    quote_start = marker_at + quote_offset
+    reference = EvidenceRef(
+        date,
+        source.sha256,
+        timestamp,
+        quote_start,
+        quote_start + len(quote_bytes),
+    )
+    EvidenceResolver(ROOT).resolve_bytes(
+        reference,
+        source.content,
+        source_path=ROOT / source.logical_path,
+    )
+    return {
+        "source_path": source.logical_path,
+        "source_digest": source.sha256,
+        "quote_sha256": sha256_bytes(quote_bytes),
+        "reference": str(reference),
+    }
+
+
+def _require_evidence_fields(item: object) -> tuple[str, str, str]:
+    if not isinstance(item, dict) or set(item) != {
+        "daily_date",
+        "timestamp",
+        "quoted_text",
+        "claim",
+    }:
+        raise ValueError("compile evidence must be an object")
+    date = item.get("daily_date")
+    timestamp = item.get("timestamp")
+    quote = item.get("quoted_text")
+    if not _evidence_fields_valid(date, timestamp, quote, item.get("claim")):
+        raise ValueError("compile evidence is incomplete")
+    _require_calendar_date(date)
+    return date, timestamp, quote
+
+
+def _evidence_fields_valid(
+    date: object, timestamp: object, quote: object, claim: object
+) -> bool:
+    if not _evidence_matches(date, r"\d{4}-\d{2}-\d{2}"):
+        return False
+    if not _evidence_matches(timestamp, r"(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d"):
+        return False
+    if not _evidence_bounded_text(quote, 4_000):
+        return False
+    return _evidence_single_line(claim, 1_000)
+
+
+def _evidence_matches(value: object, pattern: str) -> bool:
+    if not isinstance(value, str):
+        return False
+    return re.fullmatch(pattern, value) is not None
+
+
+def _evidence_bounded_text(value: object, maximum: int) -> bool:
+    if not isinstance(value, str):
+        return False
+    return 1 <= len(value) <= maximum
+
+
+def _evidence_single_line(value: object, maximum: int) -> bool:
+    if not _evidence_bounded_text(value, maximum):
+        return False
+    return "\r" not in value and "\n" not in value
+
+
+def _require_calendar_date(date: str) -> None:
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError("compile evidence date is invalid") from exc
+
+
+def _evidence_block(source: object, timestamp: str) -> tuple[bytes, int]:
+    """The one entry a timestamp names, as bytes plus its offset in the source."""
+    content = source.content if source is not None else b""
+    header = re.compile(
+        rb"(?m)^## \[" + re.escape(timestamp.encode()) + rb"\][^\r\n]*\r?$"
+    )
+    matches = list(header.finditer(content))
+    if len(matches) != 1:
+        raise ValueError("compile evidence timestamp block is ambiguous or missing")
+    marker_at = matches[0].start()
+    next_header = content.find(b"\n## [", matches[0].end())
+    end = len(content) if next_header < 0 else next_header
+    return content[marker_at:end], marker_at
+
+
+def _sole_quote_offset(block: bytes, quote_bytes: bytes) -> int:
+    """An ambiguous quote is refused: one entry must name one span."""
+    offsets = [match.start() for match in re.finditer(re.escape(quote_bytes), block)]
+    if len(offsets) != 1:
+        raise ValueError("compile evidence does not match the immutable snapshot")
+    return offsets[0]
+
+
+def _require_complete_line(
+    block: bytes, quote_offset: int, quote_bytes: bytes, quote: str
+) -> None:
+    """A quote must be a whole line, so half a sentence cannot be cited."""
+    line_start = block.rfind(b"\n", 0, quote_offset) + 1
+    line_end = block.find(b"\n", quote_offset + len(quote_bytes))
+    if line_end < 0:
+        line_end = len(block)
+    source_line = block[line_start:line_end].decode("utf-8", errors="strict").strip()
+    if quote != _without_bullet(source_line):
+        raise ValueError("compile evidence must quote one complete source line")
+
+
+def _without_bullet(source_line: str) -> str:
+    bullet = re.match(r"^(?:[-+*]|\d+[.)])\s+(.*)$", source_line)
+    if bullet is None:
+        return source_line.strip()
+    return bullet.group(1).strip()
+
+
+def _require_claims(operation: Mapping[str, object], inputs: CompileInputs) -> None:
     claims = operation.get("claims", [])
     if not isinstance(claims, list) or len(claims) > 100:
         raise ValueError("compile operation claims must be a bounded array")
-    claim_ids = [str(record.get("id", "")) for record in claims if isinstance(record, Mapping)]
+    _require_unique_claim_ids(claims)
+    for record in claims:
+        _require_claim_evidence(record, inputs)
+
+
+def _require_unique_claim_ids(claims: list[object]) -> None:
+    claim_ids = [
+        str(record.get("id", "")) for record in claims if isinstance(record, Mapping)
+    ]
     if len(claim_ids) != len(claims) or len(claim_ids) != len(set(claim_ids)):
         raise ValueError("compile operation contains a duplicate claim id")
-    for record in claims:
-        validate_claim_record(record)
-        assert isinstance(record, Mapping)
-        if record.get("lifecycle") != "active":
-            raise ValueError("compile input claims must be active")
-        claim_evidence = record["evidence"]
-        assert isinstance(claim_evidence, Mapping)
-        reference = EvidenceRef.parse(claim_evidence["reference"])
-        source = _daily_for_evidence(inputs, reference.daily_id)
-        if source is None or source.sha256 != reference.source_sha256:
-            raise ValueError("compile claim evidence source is absent from the snapshot")
-        resolved = EvidenceResolver(ROOT).resolve_bytes(
-            reference,
-            source.content,
-            source_path=ROOT / source.logical_path,
-        )
-        if (
-            resolved.sha256 != claim_evidence["sha256"]
-            or resolved.bytes.decode("utf-8", errors="strict")
-            != claim_evidence["text"]
-        ):
-            raise ValueError("compile claim literal evidence does not match")
-    normalized = json.loads(canonical_json_bytes(operation))
-    assert isinstance(normalized, dict)
-    return normalized, evidence_bindings
+
+
+def _require_claim_evidence(record: object, inputs: CompileInputs) -> None:
+    validate_claim_record(record)
+    assert isinstance(record, Mapping)
+    if record.get("lifecycle") != "active":
+        raise ValueError("compile input claims must be active")
+    claim_evidence = record["evidence"]
+    assert isinstance(claim_evidence, Mapping)
+    reference = EvidenceRef.parse(claim_evidence["reference"])
+    source = _daily_for_evidence(inputs, reference.daily_id)
+    if source is None or source.sha256 != reference.source_sha256:
+        raise ValueError("compile claim evidence source is absent from the snapshot")
+    resolved = EvidenceResolver(ROOT).resolve_bytes(
+        reference,
+        source.content,
+        source_path=ROOT / source.logical_path,
+    )
+    _require_literal_match(resolved, claim_evidence)
+
+
+def _require_literal_match(
+    resolved: object, claim_evidence: Mapping[str, object]
+) -> None:
+    if (
+        resolved.sha256 != claim_evidence["sha256"]
+        or resolved.bytes.decode("utf-8", errors="strict") != claim_evidence["text"]
+    ):
+        raise ValueError("compile claim literal evidence does not match")
 
 
 def _render_page(
@@ -1685,33 +1936,11 @@ def _preflight_v3_receipts(
     provider_budget: Mapping[str, object],
     completed_at: str,
 ) -> None:
-    receipt_operations: list[dict[str, str]] = []
-    evidence_bindings: list[dict[str, str]] = []
     operations = plan.get("operations")
     assert isinstance(operations, list)
-    for planned in operations:
-        assert isinstance(planned, dict)
-        semantic = json.loads(str(planned["content"]))
-        if not isinstance(semantic, dict):
-            raise ValueError("compile operation content must describe an object")
-        semantic, bindings = _validate_semantic_operation(semantic, inputs)
-        references = [binding["reference"] for binding in bindings]
-        page = _render_page(semantic, completed_at, references)
-        page = _with_claim_ledger(page, semantic.get("claims", []))
-        receipt_operations.append(
-            {
-                "kind": str(planned["kind"]),
-                "path": str(planned["path"]),
-                "after_sha256": sha256_bytes(page),
-            }
-        )
-        evidence_bindings.extend(
-            {
-                "operation_path": str(planned["path"]),
-                **{key: value for key, value in binding.items() if key != "reference"},
-            }
-            for binding in bindings
-        )
+    receipt_operations, evidence_bindings = _materialized_operations(
+        operations, inputs, completed_at
+    )
     dispositions = _compile_dispositions(batch.manifest, evidence_bindings)
     operation_id = _compile_operation_id(
         action_key, batch.manifest_sha256, dispositions
@@ -1733,78 +1962,57 @@ def _preflight_v3_receipts(
             raise ValueError("compile receipt exceeds after-image limit")
 
 
+def _materialized_operations(
+    operations: Sequence[object], inputs: CompileInputs, completed_at: str
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """Render each planned page to prove its after-image and evidence bindings."""
+    receipt_operations: list[dict[str, str]] = []
+    evidence_bindings: list[dict[str, str]] = []
+    for planned in operations:
+        assert isinstance(planned, dict)
+        semantic, bindings = _validate_semantic_operation(
+            _operation_content(planned), inputs
+        )
+        references = [binding["reference"] for binding in bindings]
+        page = _with_claim_ledger(
+            _render_page(semantic, completed_at, references),
+            semantic.get("claims", []),
+        )
+        receipt_operations.append(
+            {
+                "kind": str(planned["kind"]),
+                "path": str(planned["path"]),
+                "after_sha256": sha256_bytes(page),
+            }
+        )
+        evidence_bindings.extend(_bound_evidence(str(planned["path"]), bindings))
+    return receipt_operations, evidence_bindings
+
+
+def _operation_content(planned: Mapping[str, object]) -> dict[str, object]:
+    semantic = json.loads(str(planned["content"]))
+    if not isinstance(semantic, dict):
+        raise ValueError("compile operation content must describe an object")
+    return semantic
+
+
+def _bound_evidence(
+    operation_path: str, bindings: Sequence[Mapping[str, str]]
+) -> list[dict[str, str]]:
+    return [
+        {
+            "operation_path": operation_path,
+            **{key: value for key, value in binding.items() if key != "reference"},
+        }
+        for binding in bindings
+    ]
+
+
 def parse_compile_receipt_v3(
     raw_bytes: bytes, *, logical_path: str, source_sha256: str
 ) -> dict[str, object]:
     try:
-        source_identity = compile_source_identity(logical_path, source_sha256)
-        text = raw_bytes.decode("utf-8", errors="strict")
-        frontmatter, body = text.split("---\n", 2)[1:]
-        fields: dict[str, str] = {}
-        for line in frontmatter.splitlines():
-            key, separator, value = line.partition(": ")
-            if not separator or key in fields:
-                raise ValueError("compile receipt frontmatter is invalid")
-            fields[key] = value
-        if fields != {
-            "type": "compile-receipt",
-            "schema_version": "compile-receipt/v3",
-            "source_identity": source_identity,
-            "status": "completed",
-            "confidence": "high",
-            "source_authority": "ai-derived",
-        }:
-            raise ValueError("compile receipt frontmatter fields are invalid")
-        prefix = (
-            "\n# Compile Receipt\n\n"
-            "One-sentence summary: This immutable receipt proves completion of a snapshot compile.\n\n"
-            "## Record\n```json\n"
-        )
-        if not body.startswith(prefix) or not body.endswith("\n```\n"):
-            raise ValueError("compile receipt body is invalid")
-        canonical = body[len(prefix) : -5]
-        record = json.loads(canonical)
-        validate_schema(record, COMPILE_RECEIPT_V3_SCHEMA)
-        if canonical_json_bytes(record).decode() != canonical:
-            raise ValueError("compile receipt record is not canonical")
-        source = record["source"]
-        if (
-            record["source_identity"] != source_identity
-            or source["logical_path"] != logical_path
-            or source["sha256"] != source_sha256
-        ):
-            raise ValueError("compile receipt source identity disagrees")
-        manifest = record["batch_manifest"]
-        if manifest != sorted(manifest, key=lambda item: item["logical_path"]):
-            raise ValueError("compile receipt manifest is not sorted")
-        if sha256_bytes(canonical_json_bytes(manifest)) != record[
-            "batch_manifest_sha256"
-        ]:
-            raise ValueError("compile receipt manifest digest disagrees")
-        identities = sorted(
-            compile_source_identity(item["logical_path"], item["sha256"])
-            for item in manifest
-        )
-        if [item["source_identity"] for item in record["dispositions"]] != identities:
-            raise ValueError("compile receipt dispositions are incomplete")
-        if record["operation_id"] != _compile_operation_id(
-            record["action_key"],
-            record["batch_manifest_sha256"],
-            record["dispositions"],
-        ):
-            raise ValueError("compile receipt operation identity is invalid")
-        operation_paths = {item["path"] for item in record["operations"]}
-        if len(operation_paths) != len(record["operations"]):
-            raise ValueError("compile receipt operation paths are duplicated")
-        for evidence in record["evidence"]:
-            if (
-                evidence["source_identity"] != source_identity
-                or evidence["source_path"] != logical_path
-                or evidence["source_digest"] != source_sha256
-                or evidence["operation_path"] not in operation_paths
-            ):
-                raise ValueError("compile receipt evidence scope is invalid")
-        return record
+        return _parsed_receipt_v3(raw_bytes, logical_path, source_sha256)
     except (
         IndexError,
         KeyError,
@@ -1814,6 +2022,117 @@ def parse_compile_receipt_v3(
         json.JSONDecodeError,
     ) as exc:
         raise ValueError("compile receipt is corrupt") from exc
+
+
+def _parsed_receipt_v3(
+    raw_bytes: bytes, logical_path: str, source_sha256: str
+) -> dict[str, object]:
+    source_identity = compile_source_identity(logical_path, source_sha256)
+    text = raw_bytes.decode("utf-8", errors="strict")
+    frontmatter, body = text.split("---\n", 2)[1:]
+    prefix = (
+        "\n# Compile Receipt\n\n"
+        "One-sentence summary: This immutable receipt proves completion of a snapshot compile.\n\n"
+        "## Record\n```json\n"
+    )
+    _require_v3_frontmatter(_receipt_frontmatter(frontmatter), source_identity)
+    record = _receipt_record(body, prefix, COMPILE_RECEIPT_V3_SCHEMA)
+    _require_v3_source(record, source_identity, logical_path, source_sha256)
+    _require_v3_manifest(record)
+    _require_v3_identity(record)
+    _require_v3_evidence_scope(record, source_identity, logical_path, source_sha256)
+    return record
+
+
+def _require_v3_frontmatter(fields: Mapping[str, str], source_identity: str) -> None:
+    if fields != {
+        "type": "compile-receipt",
+        "schema_version": "compile-receipt/v3",
+        "source_identity": source_identity,
+        "status": "completed",
+        "confidence": "high",
+        "source_authority": "ai-derived",
+    }:
+        raise ValueError("compile receipt frontmatter fields are invalid")
+
+
+def _require_v3_source(
+    record: Mapping[str, object],
+    source_identity: str,
+    logical_path: str,
+    source_sha256: str,
+) -> None:
+    source = record["source"]
+    if (
+        record["source_identity"] != source_identity
+        or source["logical_path"] != logical_path
+        or source["sha256"] != source_sha256
+    ):
+        raise ValueError("compile receipt source identity disagrees")
+
+
+def _require_v3_manifest(record: Mapping[str, object]) -> None:
+    manifest = record["batch_manifest"]
+    _require_sorted_manifest(manifest)
+    if sha256_bytes(canonical_json_bytes(manifest)) != record["batch_manifest_sha256"]:
+        raise ValueError("compile receipt manifest digest disagrees")
+    _require_complete_dispositions(record, manifest)
+
+
+def _require_sorted_manifest(manifest: Sequence[Mapping[str, str]]) -> None:
+    if manifest != sorted(manifest, key=lambda item: item["logical_path"]):
+        raise ValueError("compile receipt manifest is not sorted")
+
+
+def _require_complete_dispositions(
+    record: Mapping[str, object], manifest: Sequence[Mapping[str, str]]
+) -> None:
+    identities = sorted(
+        compile_source_identity(item["logical_path"], item["sha256"])
+        for item in manifest
+    )
+    if [item["source_identity"] for item in record["dispositions"]] != identities:
+        raise ValueError("compile receipt dispositions are incomplete")
+
+
+def _require_v3_identity(record: Mapping[str, object]) -> None:
+    if record["operation_id"] != _compile_operation_id(
+        record["action_key"],
+        record["batch_manifest_sha256"],
+        record["dispositions"],
+    ):
+        raise ValueError("compile receipt operation identity is invalid")
+
+
+def _require_v3_evidence_scope(
+    record: Mapping[str, object],
+    source_identity: str,
+    logical_path: str,
+    source_sha256: str,
+) -> None:
+    operation_paths = {item["path"] for item in record["operations"]}
+    if len(operation_paths) != len(record["operations"]):
+        raise ValueError("compile receipt operation paths are duplicated")
+    for evidence in record["evidence"]:
+        _require_v3_evidence_entry(
+            evidence, operation_paths, source_identity, logical_path, source_sha256
+        )
+
+
+def _require_v3_evidence_entry(
+    evidence: Mapping[str, str],
+    operation_paths: set[str],
+    source_identity: str,
+    logical_path: str,
+    source_sha256: str,
+) -> None:
+    if (
+        evidence["source_identity"] != source_identity
+        or evidence["source_path"] != logical_path
+        or evidence["source_digest"] != source_sha256
+        or evidence["operation_path"] not in operation_paths
+    ):
+        raise ValueError("compile receipt evidence scope is invalid")
 
 
 def read_compile_receipt_v3(
@@ -1832,31 +2151,13 @@ def read_compile_receipt_v3(
     except FileNotFoundError:
         return None
     try:
-        if path.name != f"v3-{source_identity}.md":
-            raise ValueError("compile receipt path identity disagrees")
+        _require_receipt_name(path, source_identity)
         record = parse_compile_receipt_v3(
             raw_bytes,
             logical_path=logical_path,
             source_sha256=source_sha256,
         )
-        transaction = coordinator._record_for_operation_id(str(record["operation_id"]))
-        if transaction is None or transaction.state != "committed":
-            raise ValueError("compile receipt has no committed transaction authority")
-        transaction_operations = {item.path: item for item in transaction.operations}
-        relative = path.relative_to(vault).as_posix()
-        receipt_operation = transaction_operations.get(relative)
-        if receipt_operation is None or receipt_operation.after_hash != sha256_bytes(
-            raw_bytes
-        ):
-            raise ValueError("compile receipt bytes are not transaction-authoritative")
-        for operation in record["operations"]:
-            authoritative = transaction_operations.get(operation["path"])
-            if (
-                authoritative is None
-                or authoritative.kind != operation["kind"]
-                or authoritative.after_hash != operation["after_sha256"]
-            ):
-                raise ValueError("compile receipt operation integrity failed")
+        _require_transaction_authority(record, coordinator, path, vault, raw_bytes)
         return record
     except (
         IndexError,
@@ -1867,6 +2168,11 @@ def read_compile_receipt_v3(
         json.JSONDecodeError,
     ) as exc:
         raise ValueError("compile receipt is corrupt") from exc
+
+
+def _require_receipt_name(path: Path, source_identity: str) -> None:
+    if path.name != f"v3-{source_identity}.md":
+        raise ValueError("compile receipt path identity disagrees")
 
 
 def apply_compile_plan(
@@ -1884,12 +2190,8 @@ def apply_compile_plan(
     cancelled: Callable[[], bool] | None = None,
 ) -> CompileApplyResult:
     """Materialize and publish one validated plan as one Markdown transaction."""
-    validate_compile_plan(plan, inputs)
-    if not re.fullmatch(r"[0-9a-f]{64}", action_key):
-        raise ValueError("action key must be a SHA-256 digest")
-    if (batch is None) != (provider_budget is None):
-        raise ValueError("compile batch and provider budget must be supplied together")
-    completed_at = completed_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    _require_apply_arguments(plan, inputs, action_key, batch, provider_budget)
+    completed_at = completed_at or _utc_now()
     if batch is not None:
         _preflight_v3_receipts(
             inputs,
@@ -1899,419 +2201,634 @@ def apply_compile_plan(
             provider_budget=provider_budget,
             completed_at=completed_at,
         )
-    source_digests = sorted({item.sha256 for item in inputs.dailies})
-    if batch is None:
-        operation_id = "compile:" + sha256_bytes(
-            canonical_json_bytes(
-                {"action_key": action_key, "source_digests": source_digests}
-            )
-        )
-    else:
-        if batch.inputs != inputs:
-            raise ValueError("compile batch inputs disagree")
-        operation_id = ""
-    claim_index: ClaimIndex | None = None
-    claim_tree_manifest: dict[str, object] | None = None
-    claim_groups: list[tuple[ContradictionPipeline, tuple[object, ...]]] = []
-    batch_candidates: list[IndexedClaim] = []
-    planned_operations = plan.get("operations")
-    assert isinstance(planned_operations, list)
-    if any(
-        isinstance(item, dict)
-        and isinstance(json.loads(str(item["content"])).get("claims"), list)
-        and json.loads(str(item["content"])).get("claims")
-        for item in planned_operations
-    ):
-        claim_tree_manifest = snapshot_claim_tree(ROOT)
-        claim_index = ClaimIndex(coordinator.state_root, vault=ROOT)
-        claim_index.rebuild(
-            lambda: [ROOT / item["path"] for item in claim_tree_manifest["entries"]]
-        )
-        for planned in planned_operations:
-            assert isinstance(planned, dict)
-            semantic = json.loads(str(planned["content"]))
-            claims = semantic.get("claims", [])
-            if not claims:
-                continue
-            pipeline = ContradictionPipeline(
-                claim_index=claim_index,
-                evaluators=() if os.environ.get("MEMORY_LLM_PROVIDER") == "fake" else None,
-                vault=ROOT,
-                coordinator=coordinator,
-                source_page=str(planned["path"]),
-                secondary_search=lambda query, limit: default_secondary_search(
-                    ROOT, query, limit
-                ),
-            )
-            assessments_list = []
-            for record in claims:
-                normalized = NormalizedClaim(record)
-                indexed = claim_index.candidates(normalized)
-                candidates = tuple(indexed) + tuple(batch_candidates)
-                assessment = pipeline.assess(
-                    normalized,
-                    candidates=candidates if candidates else None,
-                    commit=False,
-                )
-                assessments_list.append(assessment)
-                batch_candidates.append(
-                    IndexedClaim(str(planned["path"]), normalized, ledger_backed=False)
-                )
-            assessments = tuple(assessments_list)
-            claim_groups.append((pipeline, assessments))
-    batch_quarantine = any(
-        assessment.recommendation == "quarantine"
-        for _pipeline, assessments in claim_groups
-        for assessment in assessments
+    publication = _ApplyPlan(
+        inputs,
+        plan,
+        action_key=action_key,
+        trigger=trigger,
+        coordinator=coordinator,
+        batch=batch,
+        provider_budget=provider_budget,
+        completed_at=completed_at,
+        deadline=deadline,
+        cancelled=cancelled,
     )
+    publication.assess_claims()
+    with coordinator.writer_gate(owner=owner):
+        coordinator.recover(owner=owner, deadline=deadline, cancelled=cancelled)
+        return publication.publish()
 
-    def commit_quarantine_batch() -> CompileApplyResult:
-        quarantine_changes: list[MarkdownChange] = []
-        quarantine_paths: list[str] = []
-        for pipeline, assessments in claim_groups:
-            forced = tuple(
-                replace(
-                    assessment,
-                    recommendation="quarantine",
-                    lifecycle_mutations=(),
-                    candidate_path=None,
-                )
-                for assessment in assessments
-            )
-            policy_changes, _policy_preconditions, candidate_paths = (
-                pipeline.plan_changes(forced)
-            )
-            quarantine_changes.extend(policy_changes)
-            quarantine_paths.extend(candidate_paths)
-        if not quarantine_changes:
-            raise ValueError("quarantined compile batch produced no candidates")
-        claim_groups[0][0].ensure_candidate_parent()
-        quarantine_operation_id = "compile-quarantine:" + sha256_bytes(
-            canonical_json_bytes(
-                {
-                    "action_key": action_key,
-                    "source_digests": source_digests,
-                    "candidate_paths": sorted(quarantine_paths),
-                }
-            )
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _require_apply_arguments(
+    plan: dict[str, object],
+    inputs: CompileInputs,
+    action_key: str,
+    batch: CompileBatch | None,
+    provider_budget: Mapping[str, object] | None,
+) -> None:
+    validate_compile_plan(plan, inputs)
+    if not re.fullmatch(r"[0-9a-f]{64}", action_key):
+        raise ValueError("action key must be a SHA-256 digest")
+    if (batch is None) != (provider_budget is None):
+        raise ValueError("compile batch and provider budget must be supplied together")
+    if batch is not None and batch.inputs != inputs:
+        raise ValueError("compile batch inputs disagree")
+
+
+class _ApplyPlan:
+    """One publication of one validated compile plan.
+
+    Everything the transaction will contain is assembled here first; nothing
+    reaches disk until `_commit` prepares and applies the single transaction.
+    """
+
+    def __init__(
+        self,
+        inputs: CompileInputs,
+        plan: dict[str, object],
+        *,
+        action_key: str,
+        trigger: str,
+        coordinator: MarkdownCoordinator,
+        batch: CompileBatch | None,
+        provider_budget: Mapping[str, object] | None,
+        completed_at: str,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> None:
+        self.inputs = inputs
+        self.action_key = action_key
+        self.trigger = trigger
+        self.coordinator = coordinator
+        self.batch = batch
+        self.provider_budget = provider_budget
+        self.completed_at = completed_at
+        self.deadline = deadline
+        self.cancelled = cancelled
+        self.source_digests = sorted({item.sha256 for item in inputs.dailies})
+        self.operations = _plan_operations(plan)
+        self.claim_index: ClaimIndex | None = None
+        self.claim_tree_manifest: dict[str, object] | None = None
+        self.claim_groups: list[tuple[ContradictionPipeline, tuple[object, ...]]] = []
+        self.changes: list[MarkdownChange] = []
+        self.preconditions: dict[str, object] = {}
+        self.pending: dict[str, bytes | None] = {}
+        self.touched: list[str] = []
+        self.receipt_operations: list[dict[str, str]] = []
+        self.evidence_bindings: list[dict[str, str]] = []
+        self.dispositions: list[dict[str, str]] = []
+        self.operation_id = ""
+
+    # -- claim assessment, outside the writer gate ---------------------------
+
+    def assess_claims(self) -> None:
+        """Assess every claim before the gate; nothing is committed here."""
+        if not _plan_carries_claims(self.operations):
+            return
+        self.claim_tree_manifest = snapshot_claim_tree(ROOT)
+        self.claim_index = ClaimIndex(self.coordinator.state_root, vault=ROOT)
+        self.claim_index.rebuild(self._claim_tree_paths)
+        candidates: list[IndexedClaim] = []
+        for planned in self.operations:
+            self._assess_operation(planned, candidates)
+
+    def _claim_tree_paths(self) -> list[Path]:
+        manifest = self.claim_tree_manifest or {"entries": []}
+        return [ROOT / item["path"] for item in manifest["entries"]]
+
+    def _assess_operation(
+        self, planned: Mapping[str, object], candidates: list[IndexedClaim]
+    ) -> None:
+        claims = _operation_content(planned).get("claims", [])
+        if not claims:
+            return
+        path = str(planned["path"])
+        pipeline = self._pipeline(path)
+        assessments = tuple(
+            self._assessment(pipeline, record, path, candidates) for record in claims
         )
-        transaction = coordinator.prepare(
-            sorted(quarantine_changes, key=lambda item: item.path),
-            operation_id=quarantine_operation_id,
-            content_guard="model_output",
-            preconditions={
-                **{path: "absent" for path in quarantine_paths},
-                "claim_tree_manifest": snapshot_claim_tree(ROOT),
-            },
-            deadline=deadline,
-            cancelled=cancelled,
+        self.claim_groups.append((pipeline, assessments))
+
+    def _pipeline(self, source_page: str) -> ContradictionPipeline:
+        return ContradictionPipeline(
+            claim_index=self.claim_index,
+            evaluators=_contradiction_evaluators(),
+            vault=ROOT,
+            coordinator=self.coordinator,
+            source_page=source_page,
+            secondary_search=lambda query, limit: default_secondary_search(
+                ROOT, query, limit
+            ),
         )
-        coordinator.apply(
-            transaction.id, deadline=deadline, cancelled=cancelled
-        )
-        committed, sequence = _transaction_authority(
-            coordinator, quarantine_operation_id
-        )
+
+    def _assessment(
+        self,
+        pipeline: ContradictionPipeline,
+        record: object,
+        path: str,
+        candidates: list[IndexedClaim],
+    ) -> object:
+        """Each claim also sees the claims this same batch proposed before it."""
+        normalized = NormalizedClaim(record)
+        known = tuple(self.claim_index.candidates(normalized)) + tuple(candidates)
+        assessment = pipeline.assess(normalized, candidates=known or None, commit=False)
+        candidates.append(IndexedClaim(path, normalized, ledger_backed=False))
+        return assessment
+
+    # -- publication, inside the writer gate ---------------------------------
+
+    def publish(self) -> CompileApplyResult:
+        committed = self._existing_receipts()
+        if committed is not None:
+            return committed
+        if self._quarantined():
+            return self._commit_quarantine()
+        self._build_changes()
+        self._bind_operation_id()
+        quarantine = self._apply_claim_policy()
+        if quarantine is not None:
+            return quarantine
+        self._append_index_and_log()
+        self._append_receipts()
+        return self._commit()
+
+    def _existing_receipts(self) -> CompileApplyResult | None:
+        """A complete set of receipts means this exact plan already committed."""
+        receipts = self._read_receipts()
+        if not receipts or any(item is None for item in receipts):
+            return None
+        operation_id, action_key = _receipt_authority(receipts)
+        transaction, sequence = _transaction_authority(self.coordinator, operation_id)
+        _clear_compile_source_failures(self.inputs, self.coordinator.state_root)
         return CompileApplyResult(
-            committed.id,
-            quarantine_operation_id,
-            committed.state,
-            tuple(sorted(quarantine_paths)),
+            transaction.id,
+            operation_id,
+            "committed",
+            (),
             sequence,
-            committed.updated_at,
+            transaction.updated_at,
             action_key,
         )
 
-    with coordinator.writer_gate(owner=owner):
-        coordinator.recover(owner=owner, deadline=deadline, cancelled=cancelled)
-        existing = (
-            [read_compile_receipt(digest, coordinator) for digest in source_digests]
-            if batch is None
-            else [
-                read_compile_receipt_v3(
-                    source.logical_path, source.sha256, coordinator
-                )
-                for source in batch.manifest
+    def _read_receipts(self) -> list[dict[str, object] | None]:
+        if self.batch is None:
+            return [
+                read_compile_receipt(digest, self.coordinator)
+                for digest in self.source_digests
             ]
+        return [
+            read_compile_receipt_v3(
+                source.logical_path, source.sha256, self.coordinator
+            )
+            for source in self.batch.manifest
+        ]
+
+    def _quarantined(self) -> bool:
+        return any(
+            assessment.recommendation == "quarantine"
+            for _pipeline, assessments in self.claim_groups
+            for assessment in assessments
         )
-        if existing and all(item is not None for item in existing):
-            receipt_records = [item for item in existing if item is not None]
-            authority_ids = {str(item["operation_id"]) for item in receipt_records}
-            authority_keys = {str(item["action_key"]) for item in receipt_records}
-            if len(authority_ids) != 1 or len(authority_keys) != 1:
-                raise ValueError("compile receipts disagree about transaction authority")
-            authoritative_operation_id = authority_ids.pop()
-            authoritative_action_key = authority_keys.pop()
-            transaction, sequence = _transaction_authority(
-                coordinator, authoritative_operation_id
-            )
-            _clear_compile_source_failures(inputs, coordinator.state_root)
-            return CompileApplyResult(
-                transaction.id,
-                authoritative_operation_id,
-                "committed",
-                (),
-                sequence,
-                transaction.updated_at,
-                authoritative_action_key,
-            )
 
-        if batch_quarantine:
-            return commit_quarantine_batch()
-
-        pending: dict[str, bytes | None] = {}
+    def _commit_quarantine(self) -> CompileApplyResult:
+        """A quarantined batch publishes candidates only, and no pages."""
         changes: list[MarkdownChange] = []
-        touched: list[str] = []
-        receipt_operations: list[dict[str, str]] = []
-        evidence_bindings: list[dict[str, str]] = []
-        preconditions: dict[str, object] = {
-            item.logical_path: item.sha256 for item in inputs.targets
-        }
-        if claim_tree_manifest is not None:
-            preconditions["claim_tree_manifest"] = claim_tree_manifest
-        operations = plan.get("operations")
-        assert isinstance(operations, list)
-        for planned in operations:
-            assert isinstance(planned, dict)
-            semantic = json.loads(str(planned["content"]))
-            if not isinstance(semantic, dict):
-                raise ValueError("compile operation content must describe an object")
-            semantic, bindings = _validate_semantic_operation(semantic, inputs)
-            path = str(planned["path"])
-            expected = f"knowledge/notes/{semantic['slug']}.md"
-            if path != expected:
-                raise ValueError("compile operation path does not match its slug")
-            references = [binding["reference"] for binding in bindings]
-            page = _render_page(semantic, completed_at, references)
-            assessments = next(
-                (
-                    group
-                    for pipeline, group in claim_groups
-                    if pipeline.source_page == path
-                ),
-                (),
+        paths: list[str] = []
+        for pipeline, assessments in self.claim_groups:
+            policy_changes, _preconditions, candidate_paths = pipeline.plan_changes(
+                _forced_quarantine(assessments)
             )
-            recommendation_by_id = {
-                str(item.claim.record["id"]): item.recommendation
-                for item in assessments
-            }
-            rendered_claims = [
+            changes.extend(policy_changes)
+            paths.extend(candidate_paths)
+        if not changes:
+            raise ValueError("quarantined compile batch produced no candidates")
+        self.claim_groups[0][0].ensure_candidate_parent()
+        return self._commit_quarantine_changes(changes, paths)
+
+    def _commit_quarantine_changes(
+        self, changes: list[MarkdownChange], paths: list[str]
+    ) -> CompileApplyResult:
+        operation_id = "compile-quarantine:" + sha256_bytes(
+            canonical_json_bytes(
                 {
-                    **record,
-                    "lifecycle": "quarantined"
-                    if recommendation_by_id.get(str(record["id"])) == "quarantine"
-                    else record["lifecycle"],
-                }
-                for record in semantic.get("claims", [])
-            ]
-            target = _target_snapshot(inputs, path)
-            if planned["kind"] == "replace":
-                if target is None:
-                    raise ValueError("replace target was absent from snapshot")
-                existing_page = target.content.rstrip()
-                update = (
-                    f"\n\n## Update ({completed_at[:10]})\n{semantic['body_markdown']}\n\n"
-                    "## Evidence\n"
-                    + "\n".join(
-                        f"- `{reference}` — {item.get('claim', '')}"
-                        for item, reference in zip(semantic["evidence"], references)
-                    )
-                    + "\n"
-                ).encode("utf-8")
-                page = existing_page + update
-                page = _with_claim_ledger(page, rendered_claims)
-                changes.append(
-                    MarkdownChange.replace(
-                        path, page, max_before_bytes=MAX_AFTER_IMAGE_BYTES
-                    )
-                )
-                preconditions[path] = target.sha256
-            else:
-                if target is not None:
-                    raise ValueError("create target existed in snapshot")
-                page = _with_claim_ledger(page, rendered_claims)
-                changes.append(
-                    MarkdownChange.create(
-                        path, page, max_before_bytes=MAX_AFTER_IMAGE_BYTES
-                    )
-                )
-                preconditions[path] = "absent"
-            if len(page) > MAX_AFTER_IMAGE_BYTES:
-                raise ValueError("compiled page exceeds after-image limit")
-            pending[path] = page
-            touched.append(path)
-            receipt_operations.append(
-                {
-                    "kind": str(planned["kind"]),
-                    "path": path,
-                    "after_sha256": sha256_bytes(page),
+                    "action_key": self.action_key,
+                    "source_digests": self.source_digests,
+                    "candidate_paths": sorted(paths),
                 }
             )
-            evidence_bindings.extend(
-                {
-                    "operation_path": path,
-                    **{key: value for key, value in binding.items() if key != "reference"},
-                }
-                for binding in bindings
-            )
-
-        dispositions: list[dict[str, str]] = []
-        if batch is not None:
-            dispositions = _compile_dispositions(batch.manifest, evidence_bindings)
-            operation_id = _compile_operation_id(
-                action_key, batch.manifest_sha256, dispositions
-            )
-
-        candidate_needed = False
-        for pipeline, assessments in claim_groups:
-            try:
-                policy_changes, policy_preconditions, candidate_paths = (
-                    pipeline.plan_changes(assessments)
-                )
-            except StaleLifecycleTarget:
-                return commit_quarantine_batch()
-            candidate_needed = candidate_needed or bool(candidate_paths)
-            for change in policy_changes:
-                if change.path in {item.path for item in changes}:
-                    raise ValueError(
-                        "compile claim lifecycle overlaps a compile operation target"
-                    )
-                changes.append(change)
-                preconditions[change.path] = policy_preconditions.get(
-                    change.path, "absent"
-                )
-                if change.path.startswith("knowledge/notes/") and change.content is not None:
-                    pending[change.path] = change.content
-                touched.append(change.path)
-        if candidate_needed:
-            claim_groups[0][0].ensure_candidate_parent()
-
-        from rebuild_memory_index import build_index_bytes
-
-        base_notes = {
-            item.logical_path: item.content for item in inputs.targets
-        }
-        index_bytes = build_index_bytes(ROOT, pending, base=base_notes)
-        log_entry = (
-            f"- {completed_at[:10]} — {'Automated' if trigger == 'auto' else 'Manual'} "
-            f"compile completed for snapshot {', '.join(source_digests)}. "
-            f"Touched: {', '.join(touched) if touched else 'none'}."
         )
-        source_by_path = {item.logical_path: item for item in inputs.sources}
-        index_source = source_by_path.get("knowledge/index.md")
-        log_source = source_by_path.get("knowledge/log.md")
-        log_before = log_source.content if log_source is not None else b"# Session Memory Log\n"
-        preconditions["knowledge/index.md"] = (
-            index_source.sha256 if index_source is not None else "absent"
-        )
-        preconditions["knowledge/log.md"] = (
-            log_source.sha256 if log_source is not None else "absent"
-        )
-        changes.append(
-            MarkdownChange.replace(
-                "knowledge/index.md", index_bytes, max_before_bytes=MAX_INDEX_BYTES
-            )
-            if index_source is not None
-            else MarkdownChange.create(
-                "knowledge/index.md", index_bytes, max_before_bytes=MAX_INDEX_BYTES
-            )
-        )
-        log_bytes = _append_log_bytes(log_before, log_entry)
-        if len(log_bytes) > MAX_LOG_BYTES:
-            raise ValueError("knowledge log exceeds after-image limit")
-        changes.append(
-            MarkdownChange.replace(
-                "knowledge/log.md", log_bytes, max_before_bytes=MAX_LOG_BYTES
-            )
-            if log_source is not None
-            else MarkdownChange.create(
-                "knowledge/log.md", log_bytes, max_before_bytes=MAX_LOG_BYTES
-            )
-        )
-        receipt_descriptors = (
-            tuple(batch.manifest)
-            if batch is not None
-            else tuple(
-                SourceDescriptor(item.logical_path, len(item.content), item.sha256)
-                for item in inputs.dailies
-            )
-        )
-        for source in receipt_descriptors:
-            source_identity = compile_source_identity(
-                source.logical_path, source.sha256
-            )
-            relative = (
-                f"knowledge/daily/receipts/v3-{source_identity}.md"
-                if batch is not None
-                else f"knowledge/daily/receipts/{source.sha256}.md"
-            )
-            coordinator.ensure_target_parent(relative)
-            receipt_bytes = (
-                _receipt_v3_bytes(
-                    source,
-                    manifest=batch.manifest,
-                    manifest_sha256=batch.manifest_sha256,
-                    packing=batch.packing,
-                    provider_budget=provider_budget,
-                    dispositions=dispositions,
-                    action_key=action_key,
-                    operation_id=operation_id,
-                    operations=receipt_operations,
-                    evidence=evidence_bindings,
-                )
-                if batch is not None
-                else _receipt_bytes(
-                    source.sha256,
-                    source_digests,
-                    action_key,
-                    operation_id,
-                    receipt_operations,
-                    evidence_bindings,
-                    completed_at,
-                )
-            )
-            if len(receipt_bytes) > MAX_RECEIPT_BYTES:
-                raise ValueError("compile receipt exceeds after-image limit")
-            changes.append(
-                MarkdownChange.create(
-                    relative,
-                    receipt_bytes,
-                    max_before_bytes=MAX_RECEIPT_BYTES,
-                )
-            )
-            preconditions[relative] = "absent"
-
-        transaction = coordinator.prepare(
-            changes,
+        transaction = self.coordinator.prepare(
+            sorted(changes, key=lambda item: item.path),
             operation_id=operation_id,
             content_guard="model_output",
-            preconditions=preconditions,
-            deadline=deadline,
-            cancelled=cancelled,
+            preconditions={
+                **{path: "absent" for path in paths},
+                "claim_tree_manifest": snapshot_claim_tree(ROOT),
+            },
+            deadline=self.deadline,
+            cancelled=self.cancelled,
         )
-        committed = coordinator.apply(
-            transaction.id, deadline=deadline, cancelled=cancelled
+        self.coordinator.apply(
+            transaction.id, deadline=self.deadline, cancelled=self.cancelled
         )
-        committed, sequence = _transaction_authority(coordinator, operation_id)
-        if claim_index is not None:
-            try:
-                claim_index.rebuild()
-            except Exception:
-                for suffix in ("", "-journal", "-wal", "-shm"):
-                    try:
-                        Path(f"{claim_index.path}{suffix}").unlink(missing_ok=True)
-                    except OSError:
-                        pass
-        _clear_compile_source_failures(inputs, coordinator.state_root)
+        committed, sequence = _transaction_authority(self.coordinator, operation_id)
         return CompileApplyResult(
             committed.id,
             operation_id,
             committed.state,
-            tuple(touched),
+            tuple(sorted(paths)),
             sequence,
             committed.updated_at,
-            action_key,
+            self.action_key,
         )
+
+    # -- the pages themselves ------------------------------------------------
+
+    def _build_changes(self) -> None:
+        self.preconditions = {
+            item.logical_path: item.sha256 for item in self.inputs.targets
+        }
+        if self.claim_tree_manifest is not None:
+            self.preconditions["claim_tree_manifest"] = self.claim_tree_manifest
+        for planned in self.operations:
+            self._build_operation(planned)
+
+    def _build_operation(self, planned: Mapping[str, object]) -> None:
+        semantic, bindings = _validate_semantic_operation(
+            _operation_content(planned), self.inputs
+        )
+        path = str(planned["path"])
+        if path != f"knowledge/notes/{semantic['slug']}.md":
+            raise ValueError("compile operation path does not match its slug")
+        references = [binding["reference"] for binding in bindings]
+        page = self._page_bytes(planned, semantic, references, path)
+        if len(page) > MAX_AFTER_IMAGE_BYTES:
+            raise ValueError("compiled page exceeds after-image limit")
+        self.pending[path] = page
+        self.touched.append(path)
+        self.receipt_operations.append(
+            {"kind": str(planned["kind"]), "path": path, "after_sha256": sha256_bytes(page)}
+        )
+        self.evidence_bindings.extend(_bound_evidence(path, bindings))
+
+    def _page_bytes(
+        self,
+        planned: Mapping[str, object],
+        semantic: Mapping[str, object],
+        references: list[str],
+        path: str,
+    ) -> bytes:
+        claims = self._rendered_claims(semantic, path)
+        target = _target_snapshot(self.inputs, path)
+        if planned["kind"] == "replace":
+            return self._replaced_page(path, target, semantic, references, claims)
+        return self._created_page(path, target, semantic, references, claims)
+
+    def _replaced_page(
+        self,
+        path: str,
+        target: TargetSnapshot | None,
+        semantic: Mapping[str, object],
+        references: list[str],
+        claims: list[dict[str, object]],
+    ) -> bytes:
+        if target is None:
+            raise ValueError("replace target was absent from snapshot")
+        update = _update_section(semantic, references, self.completed_at)
+        page = _with_claim_ledger(target.content.rstrip() + update, claims)
+        self.changes.append(
+            MarkdownChange.replace(path, page, max_before_bytes=MAX_AFTER_IMAGE_BYTES)
+        )
+        self.preconditions[path] = target.sha256
+        return page
+
+    def _created_page(
+        self,
+        path: str,
+        target: TargetSnapshot | None,
+        semantic: Mapping[str, object],
+        references: list[str],
+        claims: list[dict[str, object]],
+    ) -> bytes:
+        if target is not None:
+            raise ValueError("create target existed in snapshot")
+        rendered = _render_page(semantic, self.completed_at, references)
+        page = _with_claim_ledger(rendered, claims)
+        self.changes.append(
+            MarkdownChange.create(path, page, max_before_bytes=MAX_AFTER_IMAGE_BYTES)
+        )
+        self.preconditions[path] = "absent"
+        return page
+
+    def _rendered_claims(
+        self, semantic: Mapping[str, object], path: str
+    ) -> list[dict[str, object]]:
+        """Quarantine is recorded on the claim, not on the page carrying it."""
+        quarantined = {
+            str(item.claim.record["id"])
+            for item in self._assessments_for(path)
+            if item.recommendation == "quarantine"
+        }
+        return [
+            {**record, "lifecycle": _claim_lifecycle(record, quarantined)}
+            for record in semantic.get("claims", [])
+        ]
+
+    def _assessments_for(self, path: str) -> tuple[object, ...]:
+        return next(
+            (
+                group
+                for pipeline, group in self.claim_groups
+                if pipeline.source_page == path
+            ),
+            (),
+        )
+
+    # -- identity, claim policy, index, log and receipts ---------------------
+
+    def _bind_operation_id(self) -> None:
+        """The v3 identity binds the dispositions, so it waits for the bindings."""
+        if self.batch is None:
+            self.operation_id = "compile:" + sha256_bytes(
+                canonical_json_bytes(
+                    {
+                        "action_key": self.action_key,
+                        "source_digests": self.source_digests,
+                    }
+                )
+            )
+            return
+        self.dispositions = _compile_dispositions(
+            self.batch.manifest, self.evidence_bindings
+        )
+        self.operation_id = _compile_operation_id(
+            self.action_key, self.batch.manifest_sha256, self.dispositions
+        )
+
+    def _apply_claim_policy(self) -> CompileApplyResult | None:
+        """Lifecycle writes join this transaction, or the batch is quarantined."""
+        candidate_needed = False
+        for pipeline, assessments in self.claim_groups:
+            try:
+                changes, preconditions, candidate_paths = pipeline.plan_changes(
+                    assessments
+                )
+            except StaleLifecycleTarget:
+                return self._commit_quarantine()
+            candidate_needed = candidate_needed or bool(candidate_paths)
+            self._add_policy_changes(changes, preconditions)
+        if candidate_needed:
+            self.claim_groups[0][0].ensure_candidate_parent()
+        return None
+
+    def _add_policy_changes(
+        self, changes: Sequence[MarkdownChange], preconditions: Mapping[str, object]
+    ) -> None:
+        known = {item.path for item in self.changes}
+        for change in changes:
+            _require_unclaimed_path(known, change.path)
+            self.changes.append(change)
+            self.preconditions[change.path] = preconditions.get(change.path, "absent")
+            self._remember_pending(change)
+            self.touched.append(change.path)
+
+    def _remember_pending(self, change: MarkdownChange) -> None:
+        """Only note pages feed the index rebuild."""
+        if not change.path.startswith("knowledge/notes/"):
+            return
+        if change.content is None:
+            return
+        self.pending[change.path] = change.content
+
+    def _append_index_and_log(self) -> None:
+        from rebuild_memory_index import build_index_bytes
+
+        base_notes = {item.logical_path: item.content for item in self.inputs.targets}
+        index_bytes = build_index_bytes(ROOT, self.pending, base=base_notes)
+        sources = {item.logical_path: item for item in self.inputs.sources}
+        self._append_vault_file(
+            "knowledge/index.md", index_bytes, sources, MAX_INDEX_BYTES
+        )
+        log_source = sources.get("knowledge/log.md")
+        log_bytes = _append_log_bytes(_log_before(log_source), self._log_entry())
+        if len(log_bytes) > MAX_LOG_BYTES:
+            raise ValueError("knowledge log exceeds after-image limit")
+        self._append_vault_file("knowledge/log.md", log_bytes, sources, MAX_LOG_BYTES)
+
+    def _append_vault_file(
+        self,
+        path: str,
+        content: bytes,
+        sources: Mapping[str, object],
+        maximum: int,
+    ) -> None:
+        source = sources.get(path)
+        if source is None:
+            self.preconditions[path] = "absent"
+            self.changes.append(
+                MarkdownChange.create(path, content, max_before_bytes=maximum)
+            )
+            return
+        self.preconditions[path] = source.sha256
+        self.changes.append(
+            MarkdownChange.replace(path, content, max_before_bytes=maximum)
+        )
+
+    def _log_entry(self) -> str:
+        touched = ", ".join(self.touched) if self.touched else "none"
+        return (
+            f"- {self.completed_at[:10]} — {_trigger_word(self.trigger)} "
+            f"compile completed for snapshot {', '.join(self.source_digests)}. "
+            f"Touched: {touched}."
+        )
+
+    def _append_receipts(self) -> None:
+        for source in self._receipt_descriptors():
+            self._append_receipt(source)
+
+    def _receipt_descriptors(self) -> tuple[SourceDescriptor, ...]:
+        if self.batch is not None:
+            return tuple(self.batch.manifest)
+        return tuple(
+            SourceDescriptor(item.logical_path, len(item.content), item.sha256)
+            for item in self.inputs.dailies
+        )
+
+    def _append_receipt(self, source: SourceDescriptor) -> None:
+        relative = self._receipt_relative(source)
+        self.coordinator.ensure_target_parent(relative)
+        receipt = self._receipt_body(source)
+        if len(receipt) > MAX_RECEIPT_BYTES:
+            raise ValueError("compile receipt exceeds after-image limit")
+        self.changes.append(
+            MarkdownChange.create(
+                relative, receipt, max_before_bytes=MAX_RECEIPT_BYTES
+            )
+        )
+        self.preconditions[relative] = "absent"
+
+    def _receipt_relative(self, source: SourceDescriptor) -> str:
+        if self.batch is None:
+            return f"knowledge/daily/receipts/{source.sha256}.md"
+        identity = compile_source_identity(source.logical_path, source.sha256)
+        return f"knowledge/daily/receipts/v3-{identity}.md"
+
+    def _receipt_body(self, source: SourceDescriptor) -> bytes:
+        if self.batch is None:
+            return _receipt_bytes(
+                source.sha256,
+                self.source_digests,
+                self.action_key,
+                self.operation_id,
+                self.receipt_operations,
+                self.evidence_bindings,
+                self.completed_at,
+            )
+        return _receipt_v3_bytes(
+            source,
+            manifest=self.batch.manifest,
+            manifest_sha256=self.batch.manifest_sha256,
+            packing=self.batch.packing,
+            provider_budget=self.provider_budget,
+            dispositions=self.dispositions,
+            action_key=self.action_key,
+            operation_id=self.operation_id,
+            operations=self.receipt_operations,
+            evidence=self.evidence_bindings,
+        )
+
+    def _commit(self) -> CompileApplyResult:
+        transaction = self.coordinator.prepare(
+            self.changes,
+            operation_id=self.operation_id,
+            content_guard="model_output",
+            preconditions=self.preconditions,
+            deadline=self.deadline,
+            cancelled=self.cancelled,
+        )
+        self.coordinator.apply(
+            transaction.id, deadline=self.deadline, cancelled=self.cancelled
+        )
+        committed, sequence = _transaction_authority(
+            self.coordinator, self.operation_id
+        )
+        _rebuild_claim_index(self.claim_index)
+        _clear_compile_source_failures(self.inputs, self.coordinator.state_root)
+        return CompileApplyResult(
+            committed.id,
+            self.operation_id,
+            committed.state,
+            tuple(self.touched),
+            sequence,
+            committed.updated_at,
+            self.action_key,
+        )
+
+
+def _plan_operations(plan: Mapping[str, object]) -> list[dict[str, object]]:
+    operations = plan.get("operations")
+    assert isinstance(operations, list)
+    return operations
+
+
+def _plan_carries_claims(operations: Sequence[object]) -> bool:
+    return any(_operation_claims(item) for item in operations)
+
+
+def _operation_claims(planned: object) -> list[object]:
+    if not isinstance(planned, dict):
+        return []
+    claims = _operation_content(planned).get("claims")
+    if not isinstance(claims, list):
+        return []
+    return claims
+
+
+def _contradiction_evaluators() -> tuple[object, ...] | None:
+    """The fake provider has no evaluator to call, so none are configured."""
+    if os.environ.get("MEMORY_LLM_PROVIDER") == "fake":
+        return ()
+    return None
+
+
+def _receipt_authority(receipts: Sequence[Mapping[str, object]]) -> tuple[str, str]:
+    ids = {str(item["operation_id"]) for item in receipts}
+    keys = {str(item["action_key"]) for item in receipts}
+    if len(ids) != 1 or len(keys) != 1:
+        raise ValueError("compile receipts disagree about transaction authority")
+    return ids.pop(), keys.pop()
+
+
+def _forced_quarantine(assessments: Sequence[object]) -> tuple[object, ...]:
+    return tuple(
+        replace(
+            assessment,
+            recommendation="quarantine",
+            lifecycle_mutations=(),
+            candidate_path=None,
+        )
+        for assessment in assessments
+    )
+
+
+def _update_section(
+    semantic: Mapping[str, object], references: Sequence[str], completed_at: str
+) -> bytes:
+    return (
+        f"\n\n## Update ({completed_at[:10]})\n{semantic['body_markdown']}\n\n"
+        "## Evidence\n"
+        + "\n".join(
+            f"- `{reference}` — {item.get('claim', '')}"
+            for item, reference in zip(semantic["evidence"], references)
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _claim_lifecycle(record: Mapping[str, object], quarantined: set[str]) -> object:
+    if str(record["id"]) in quarantined:
+        return "quarantined"
+    return record["lifecycle"]
+
+
+def _require_unclaimed_path(known: set[str], path: str) -> None:
+    if path in known:
+        raise ValueError("compile claim lifecycle overlaps a compile operation target")
+    known.add(path)
+
+
+def _log_before(log_source: object) -> bytes:
+    if log_source is None:
+        return b"# Session Memory Log\n"
+    return log_source.content
+
+
+def _trigger_word(trigger: str) -> str:
+    if trigger == "auto":
+        return "Automated"
+    return "Manual"
+
+
+def _rebuild_claim_index(claim_index: ClaimIndex | None) -> None:
+    """A failed rebuild must not leave a half-written derived index on disk."""
+    if claim_index is None:
+        return
+    try:
+        claim_index.rebuild()
+    except Exception:  # noqa: BLE001 - the claim index is derived and disposable
+        _discard_claim_index(claim_index)
+
+
+def _discard_claim_index(claim_index: ClaimIndex) -> None:
+    for suffix in ("", "-journal", "-wal", "-shm"):
+        try:
+            Path(f"{claim_index.path}{suffix}").unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _transaction_authority(
@@ -2809,100 +3326,155 @@ def _run(
         _mark_finished(args.trigger, "ok")
         return 0
 
-    print(f"compile_memory: compiling {len(dailies)} daily log(s){' (dry-run)' if args.dry_run else ''}:")
-    for p in dailies:
-        print(f"  - {p.relative_to(ROOT).as_posix()}")
-
+    _announce_compile(args, dailies)
     inputs = snapshot_compile_inputs(dailies, compiled=_receipt_predicate(coordinator))
     try:
         batches = pack_compile_batches(inputs, model=None)
     except Exception as exc:  # noqa: BLE001 - provider/cache boundary is fail-closed
         _require_compile_active(deadline, cancelled)
-        error = f"{type(exc).__name__}: {exc}"
-        _record_compile_source_failures(
-            inputs, STATE_ROOT, error_code=type(exc).__name__
-        )
-        print(f"compile_memory: FAILED — {error}")
-        _mark_finished(args.trigger, "error", error)
-        return 1
+        return _failed_compile(args, inputs, exc)
 
     for batch in batches:
-        batch = _refresh_compile_batch(batch)
-        try:
-            resolved = resolve_compile_plan(
-                batch.inputs,
-                CompileCache(STATE_ROOT),
-                coordinator=coordinator,
-                batch=batch,
-            )
-        except Exception as exc:  # noqa: BLE001 - provider/cache boundary is fail-closed
-            _require_compile_active(deadline, cancelled)
-            error = f"{type(exc).__name__}: {exc}"
-            _record_compile_source_failures(
-                batch.inputs, STATE_ROOT, error_code=type(exc).__name__
-            )
-            print(f"compile_memory: FAILED — {error}")
-            _mark_finished(args.trigger, "error", error)
-            return 1
-
-        _require_compile_active(deadline, cancelled)
-        if args.dry_run:
-            print(
-                f"compile_memory: dry-run resolved {len(resolved.plan['operations'])} "
-                f"operation(s){' from cache' if resolved.cache_hit else ''}; no writes."
-            )
-            continue
-
-        try:
-            result = apply_compile_plan(
-                batch.inputs,
-                resolved.plan,
-                action_key=resolved.action_key,
-                trigger=args.trigger,
-                coordinator=coordinator,
-                batch=batch,
-                provider_budget=resolved.provider_budget,
-                owner=(
-                    owner
-                    if getattr(coordinator, "_database_contract", None) is not None
-                    else None
-                ),
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-        except TimeoutError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - no diagnostic state is a commit receipt
-            error = f"{type(exc).__name__}: {exc}"
-            _record_compile_source_failures(
-                batch.inputs, STATE_ROOT, error_code=type(exc).__name__
-            )
-            print(f"compile_memory: FAILED — transaction not committed: {error}")
-            _mark_finished(args.trigger, "error", error)
-            return 1
-
-        snapshot_hashes = {
-            Path(item.logical_path).name: item.sha256 for item in batch.inputs.dailies
-        }
-
-        def _mutate(s: dict) -> None:
-            merge_compile_diagnostics(
-                s,
-                commit_sequence=result.commit_sequence,
-                committed_at=result.committed_at,
-                hashes=snapshot_hashes,
-                operation_id=result.operation_id,
-                action_key=result.action_key,
-                touched=result.touched,
-                trigger=args.trigger,
-            )
-
-        _require_compile_active(deadline, cancelled)
-        update_state(_mutate)
+        status = _run_batch(
+            _refresh_compile_batch(batch),
+            args,
+            coordinator=coordinator,
+            deadline=deadline,
+            cancelled=cancelled,
+            owner=owner,
+        )
+        if status != 0:
+            return status
     _require_compile_active(deadline, cancelled)
     _mark_finished(args.trigger, "ok")
     print("compile_memory: done.")
     return 0
+
+
+def _announce_compile(args: argparse.Namespace, dailies: Sequence[Path]) -> None:
+    suffix = " (dry-run)" if args.dry_run else ""
+    print(f"compile_memory: compiling {len(dailies)} daily log(s){suffix}:")
+    for path in dailies:
+        print(f"  - {path.relative_to(ROOT).as_posix()}")
+
+
+def _failed_compile(
+    args: argparse.Namespace,
+    inputs: CompileInputs,
+    exc: BaseException,
+    *,
+    prefix: str = "",
+) -> int:
+    """Record the failure against every source in the batch and stop the run."""
+    error = f"{type(exc).__name__}: {exc}"
+    _record_compile_source_failures(inputs, STATE_ROOT, error_code=type(exc).__name__)
+    print(f"compile_memory: FAILED — {prefix}{error}")
+    _mark_finished(args.trigger, "error", error)
+    return 1
+
+
+def _run_batch(
+    batch: CompileBatch,
+    args: argparse.Namespace,
+    *,
+    coordinator: MarkdownCoordinator,
+    deadline: float,
+    cancelled: Callable[[], bool] | None,
+    owner: OwnerLease | None,
+) -> int:
+    """Resolve and apply one batch; a non-zero result ends the whole run."""
+    try:
+        resolved = resolve_compile_plan(
+            batch.inputs,
+            CompileCache(STATE_ROOT),
+            coordinator=coordinator,
+            batch=batch,
+        )
+    except Exception as exc:  # noqa: BLE001 - provider/cache boundary is fail-closed
+        _require_compile_active(deadline, cancelled)
+        return _failed_compile(args, batch.inputs, exc)
+
+    _require_compile_active(deadline, cancelled)
+    if args.dry_run:
+        print(
+            f"compile_memory: dry-run resolved {len(resolved.plan['operations'])} "
+            f"operation(s){' from cache' if resolved.cache_hit else ''}; no writes."
+        )
+        return 0
+    return _apply_batch(
+        batch,
+        resolved,
+        args,
+        coordinator=coordinator,
+        deadline=deadline,
+        cancelled=cancelled,
+        owner=owner,
+    )
+
+
+def _apply_batch(
+    batch: CompileBatch,
+    resolved: ResolvedCompilePlan,
+    args: argparse.Namespace,
+    *,
+    coordinator: MarkdownCoordinator,
+    deadline: float,
+    cancelled: Callable[[], bool] | None,
+    owner: OwnerLease | None,
+) -> int:
+    try:
+        result = apply_compile_plan(
+            batch.inputs,
+            resolved.plan,
+            action_key=resolved.action_key,
+            trigger=args.trigger,
+            coordinator=coordinator,
+            batch=batch,
+            provider_budget=resolved.provider_budget,
+            owner=_transactional_owner(coordinator, owner),
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+    except TimeoutError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - no diagnostic state is a commit receipt
+        return _failed_compile(
+            args, batch.inputs, exc, prefix="transaction not committed: "
+        )
+    _require_compile_active(deadline, cancelled)
+    _record_batch_diagnostics(batch, result, args)
+    return 0
+
+
+def _transactional_owner(
+    coordinator: MarkdownCoordinator, owner: OwnerLease | None
+) -> OwnerLease | None:
+    """Only the database-backed coordinator understands a fenced owner lease."""
+    if getattr(coordinator, "_database_contract", None) is None:
+        return None
+    return owner
+
+
+def _record_batch_diagnostics(
+    batch: CompileBatch, result: CompileApplyResult, args: argparse.Namespace
+) -> None:
+    hashes = {
+        Path(item.logical_path).name: item.sha256 for item in batch.inputs.dailies
+    }
+
+    def mutate(state: dict) -> None:
+        merge_compile_diagnostics(
+            state,
+            commit_sequence=result.commit_sequence,
+            committed_at=result.committed_at,
+            hashes=hashes,
+            operation_id=result.operation_id,
+            action_key=result.action_key,
+            touched=result.touched,
+            trigger=args.trigger,
+        )
+
+    update_state(mutate)
 
 
 def _require_compile_active(
