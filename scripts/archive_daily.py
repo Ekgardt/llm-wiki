@@ -25,11 +25,11 @@ from evidence_resolver import (  # noqa: E402
     EvidenceRef,
     EvidenceResolutionError,
     EvidenceResolver,
-    _blocks,
     _line_span,
     _regular_directory,
     bounded_directory_entries,
     compile_authority_attestation,
+    daily_entries,
     validate_bag,
 )
 from markdown_transaction import (  # noqa: E402
@@ -239,7 +239,7 @@ class DailyArchiver:
         return []
 
     def _resolve_all_blocks(self, source: Path, content: bytes, digest: str) -> None:
-        blocks = _blocks(content)
+        blocks = daily_entries(content)
         if not blocks:
             raise EvidenceResolutionError("daily has no evidence blocks")
         resolver = EvidenceResolver(self.vault, state_root=self.state_root)
@@ -873,7 +873,7 @@ class DailyArchiver:
                 "line_end": _line_span(content, start, end)[1],
                 "sha256": sha256_bytes(content[start:end]),
             }
-            for block_id, start, end in _blocks(content)
+            for block_id, start, end in daily_entries(content)
         ]
 
     @staticmethod

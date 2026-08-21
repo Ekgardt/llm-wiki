@@ -75,3 +75,4 @@ rule below is still the one that runs within one language.
 - [[one-trust-weight-across-retrieval-paths-decision]]
 - [[reliable-memory-stage-2]]
 - [[classification-measurement-stand-decision]]
+- [[daily-entry-boundary-decision]]

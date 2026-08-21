@@ -18,7 +18,12 @@ from pathlib import Path
 
 from bounded_io import read_stable_bytes
 from compile_cache import _restrict_owner_only, _verify_owner_only
-from evidence_resolver import EvidenceRef, EvidenceResolutionError, EvidenceResolver
+from evidence_resolver import (
+    EvidenceRef,
+    EvidenceResolutionError,
+    EvidenceResolver,
+    daily_entries,
+)
 from reliable_memory import (
     canonical_json_bytes,
     open_operational_db,
@@ -143,18 +148,30 @@ def _canonical_time(value: object, *, nullable: bool, label: str) -> str | None:
     if value is None and nullable:
         return None
     text = _trim(value, label=label)
+    if "T" not in text:
+        return _canonical_date_text(text, label=label)
+    return _canonical_timestamp_text(text, label=label)
+
+
+def _canonical_date_text(text: str, *, label: str) -> str:
     try:
-        if "T" not in text:
-            if date.fromisoformat(text).isoformat() != text:
-                raise ValueError
-            return text
-        parsed = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
+        if date.fromisoformat(text).isoformat() != text:
+            raise ValueError
+    except ValueError as exc:
+        raise ValueError(f"{label} must be a canonical UTC date or timestamp") from exc
+    return text
+
+
+def _canonical_timestamp_text(text: str, *, label: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(
+            text[:-1] + "+00:00" if text.endswith("Z") else text
+        )
         if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
             raise ValueError
     except ValueError as exc:
         raise ValueError(f"{label} must be a canonical UTC date or timestamp") from exc
-    canonical = parsed.isoformat().replace("+00:00", "Z")
-    return canonical.replace(".000000Z", "Z")
+    return parsed.isoformat().replace("+00:00", "Z").replace(".000000Z", "Z")
 
 
 def _strict_rfc3339_utc(value: object, *, label: str) -> str:
@@ -170,50 +187,72 @@ def _strict_rfc3339_utc(value: object, *, label: str) -> str:
 
 
 def _canonical_decimal(value: object) -> str:
-    if isinstance(value, bool) or isinstance(value, float) or not isinstance(
-        value, (str, int, Decimal)
-    ):
+    source = _decimal_source(value)
+    _require_decimal_bounds(_decimal_match(source))
+    return _canonical_decimal_text(source)
+
+
+def _require_decimal_type(value: object) -> None:
+    if isinstance(value, (bool, float)) or not isinstance(value, (str, int, Decimal)):
         raise ValueError("number value must be a decimal string, integer, or Decimal")
-    if isinstance(value, str):
-        if value != value.strip() or not value:
-            raise ValueError("number value is invalid")
-        source = value
-    else:
-        source = str(value)
+
+
+def _decimal_source(value: object) -> str:
+    _require_decimal_type(value)
+    if not isinstance(value, str):
+        return str(value)
+    if value != value.strip() or not value:
+        raise ValueError("number value is invalid")
+    return value
+
+
+def _decimal_match(source: str) -> re.Match[str]:
     if len(source) > MAX_DECIMAL_CHARS:
         raise ValueError("number value exceeds the input length limit")
     match = _DECIMAL_INPUT_RE.fullmatch(source)
     if match is None:
         raise ValueError("number value is invalid")
+    return match
+
+
+def _require_decimal_bounds(match: re.Match[str]) -> None:
     integer = match["integer"] or ""
-    fraction = match["fraction"]
-    if fraction is None:
-        fraction = match["leading_fraction"] or ""
-    coefficient_digits = len(integer) + len(fraction)
+    coefficient_digits = len(integer) + len(_decimal_fraction(match))
     if coefficient_digits > MAX_DECIMAL_DIGITS:
         raise ValueError("number value exceeds the coefficient digit limit")
-    exponent_text = match["exponent"] or "0"
-    if len(exponent_text.lstrip("+-")) > 3:
+    position = len(integer) + _decimal_exponent(match)
+    if _expanded_digits(position, coefficient_digits) > MAX_DECIMAL_DIGITS:
+        raise ValueError("number value exceeds the expanded digit limit")
+
+
+def _decimal_fraction(match: re.Match[str]) -> str:
+    fraction = match["fraction"]
+    if fraction is None:
+        return match["leading_fraction"] or ""
+    return fraction
+
+
+def _decimal_exponent(match: re.Match[str]) -> int:
+    text = match["exponent"] or "0"
+    if len(text.lstrip("+-")) > 3:
         raise ValueError("number value exponent is out of range")
-    exponent = int(exponent_text)
+    exponent = int(text)
     if abs(exponent) > MAX_DECIMAL_EXPONENT:
         raise ValueError("number value exponent is out of range")
-    decimal_position = len(integer) + exponent
+    return exponent
+
+
+def _expanded_digits(decimal_position: int, coefficient_digits: int) -> int:
+    """How many digits the value would need written out in full."""
     if decimal_position <= 0:
-        expanded_digits = 1 - decimal_position + coefficient_digits
-    elif decimal_position >= coefficient_digits:
-        expanded_digits = decimal_position
-    else:
-        expanded_digits = coefficient_digits
-    if expanded_digits > MAX_DECIMAL_DIGITS:
-        raise ValueError("number value exceeds the expanded digit limit")
-    try:
-        number = Decimal(source)
-    except InvalidOperation as exc:
-        raise ValueError("number value is invalid") from exc
-    if not number.is_finite():
-        raise ValueError("number value must be finite")
-    result = format(number, "f")
+        return 1 - decimal_position + coefficient_digits
+    if decimal_position >= coefficient_digits:
+        return decimal_position
+    return coefficient_digits
+
+
+def _canonical_decimal_text(source: str) -> str:
+    result = format(_finite_decimal(source), "f")
     if "." in result:
         result = result.rstrip("0").rstrip(".")
     if len(result) > MAX_DECIMAL_CHARS:
@@ -223,36 +262,81 @@ def _canonical_decimal(value: object) -> str:
     return result
 
 
+def _finite_decimal(source: str) -> Decimal:
+    try:
+        number = Decimal(source)
+    except InvalidOperation as exc:
+        raise ValueError("number value is invalid") from exc
+    if not number.is_finite():
+        raise ValueError("number value must be finite")
+    return number
+
+
 def _normalize_value(value: object) -> dict[str, object]:
     if not isinstance(value, Mapping) or not isinstance(value.get("type"), str):
         raise ValueError("claim value must be typed")
     kind = value["type"]
+    _require_value_fields(value, kind)
+    raw = value["value"]
+    if kind == "number":
+        return {
+            "type": "number",
+            "value": _canonical_decimal(raw),
+            "unit": _trim(value["unit"], label="number unit", fold=True),
+        }
+    return {"type": kind, "value": _normalized_scalar(kind, raw)}
+
+
+def _require_value_fields(value: Mapping[str, object], kind: str) -> None:
     expected = {"type", "value", "unit"} if kind == "number" else {"type", "value"}
     if set(value) != expected:
         raise ValueError("typed claim value fields are invalid")
-    raw = value["value"]
-    if kind == "string":
-        result: object = _trim(raw, label="string value") if raw != "" else ""
-    elif kind == "entity":
-        result = _trim(raw, label="entity value", fold=True)
-    elif kind == "boolean":
-        if not isinstance(raw, bool):
-            raise ValueError("boolean value is invalid")
-        result = raw
-    elif kind == "number":
-        unit = _trim(value["unit"], label="number unit", fold=True)
-        return {"type": "number", "value": _canonical_decimal(raw), "unit": unit}
-    elif kind == "date":
-        result = _canonical_time(raw, nullable=False, label="date value")
-        if "T" in str(result):
-            raise ValueError("date value must not contain a time")
-    elif kind == "timestamp":
-        result = _canonical_time(raw, nullable=False, label="timestamp value")
-        if "T" not in str(result):
-            raise ValueError("timestamp value must contain a time")
-    else:
+
+
+def _normalized_scalar(kind: str, raw: object) -> object:
+    normalizer = _SCALAR_NORMALIZERS.get(kind)
+    if normalizer is None:
         raise ValueError("claim value type is invalid")
-    return {"type": kind, "value": result}
+    return normalizer(raw)
+
+
+def _normalized_string(raw: object) -> object:
+    if raw == "":
+        return ""
+    return _trim(raw, label="string value")
+
+
+def _normalized_entity(raw: object) -> object:
+    return _trim(raw, label="entity value", fold=True)
+
+
+def _normalized_boolean(raw: object) -> bool:
+    if not isinstance(raw, bool):
+        raise ValueError("boolean value is invalid")
+    return raw
+
+
+def _normalized_date(raw: object) -> object:
+    result = _canonical_time(raw, nullable=False, label="date value")
+    if "T" in str(result):
+        raise ValueError("date value must not contain a time")
+    return result
+
+
+def _normalized_timestamp(raw: object) -> object:
+    result = _canonical_time(raw, nullable=False, label="timestamp value")
+    if "T" not in str(result):
+        raise ValueError("timestamp value must contain a time")
+    return result
+
+
+_SCALAR_NORMALIZERS = {
+    "string": _normalized_string,
+    "entity": _normalized_entity,
+    "boolean": _normalized_boolean,
+    "date": _normalized_date,
+    "timestamp": _normalized_timestamp,
+}
 
 
 def _validate_interval(validity: object) -> dict[str, str | None]:
@@ -260,12 +344,22 @@ def _validate_interval(validity: object) -> dict[str, str | None]:
         raise ValueError("claim validity must contain exactly from and to")
     start = _canonical_time(validity["from"], nullable=True, label="validity from")
     end = _canonical_time(validity["to"], nullable=True, label="validity to")
-    if start is not None and end is not None:
-        start_cmp = f"{start}T00:00:00Z" if "T" not in start else start
-        end_cmp = f"{end}T00:00:00Z" if "T" not in end else end
-        if start_cmp >= end_cmp:
-            raise ValueError("claim validity must be a non-empty half-open interval")
+    _require_ordered_interval(start, end)
     return {"from": start, "to": end}
+
+
+def _require_ordered_interval(start: str | None, end: str | None) -> None:
+    if start is None or end is None:
+        return
+    if _comparable_time(start) >= _comparable_time(end):
+        raise ValueError("claim validity must be a non-empty half-open interval")
+
+
+def _comparable_time(value: str) -> str:
+    """A bare date compares as its first instant."""
+    if "T" in value:
+        return value
+    return f"{value}T00:00:00Z"
 
 
 def _semantic_payload(record: Mapping[str, object]) -> dict[str, object]:
@@ -291,35 +385,98 @@ def _validate_extracted_record(record: object) -> None:
         raise ValueError("claim extraction schema fields are invalid")
     for field in ("id", "text", "subject", "relation", "extractor_version"):
         _trim(record[field], label=field)
-    relation = _trim(record["relation"], label="relation", fold=True)
-    if relation not in RELATIONS:
-        raise ValueError("claim extraction schema relation is invalid")
+    _require_extracted_relation(record["relation"])
     _normalize_value(record["value"])
-    qualifiers = record["qualifiers"]
+    _require_extracted_qualifiers(record["qualifiers"])
+    _validate_interval(record["validity"])
+    _require_extracted_enums(record)
+    _require_extracted_evidence(record["evidence"])
+    _require_extracted_links(record["links"])
+
+
+def _require_extracted_relation(relation: object) -> None:
+    if _trim(relation, label="relation", fold=True) not in RELATIONS:
+        raise ValueError("claim extraction schema relation is invalid")
+
+
+def _require_extracted_qualifiers(qualifiers: object) -> None:
     if not isinstance(qualifiers, list) or len(qualifiers) > 100:
         raise ValueError("claim extraction schema qualifiers are invalid")
     for qualifier in qualifiers:
-        if not isinstance(qualifier, dict) or set(qualifier) != {"key", "value"}:
-            raise ValueError("claim extraction schema qualifier fields are invalid")
-        _trim(qualifier["key"], label="qualifier key")
-        _normalize_value(qualifier["value"])
-    _validate_interval(record["validity"])
-    if record["lifecycle"] not in {"active", "superseded", "inactive", "quarantined"}:
-        raise ValueError("claim extraction schema lifecycle is invalid")
-    if record["confidence"] not in {"high", "medium", "low"}:
-        raise ValueError("claim extraction schema confidence is invalid")
-    if record["authority"] not in {"user", "web", "ai-derived", "inferred"}:
-        raise ValueError("claim extraction schema authority is invalid")
-    evidence = record["evidence"]
-    if not isinstance(evidence, dict) or set(evidence) != {"reference", "sha256", "text"}:
+        _require_extracted_qualifier(qualifier)
+
+
+def _require_extracted_qualifier(qualifier: object) -> None:
+    if not isinstance(qualifier, dict) or set(qualifier) != {"key", "value"}:
+        raise ValueError("claim extraction schema qualifier fields are invalid")
+    _trim(qualifier["key"], label="qualifier key")
+    _normalize_value(qualifier["value"])
+
+
+_EXTRACTION_ENUMS = (
+    ("lifecycle", frozenset({"active", "superseded", "inactive", "quarantined"})),
+    ("confidence", frozenset({"high", "medium", "low"})),
+    ("authority", frozenset({"user", "web", "ai-derived", "inferred"})),
+)
+
+
+def _require_extracted_enums(record: Mapping[str, object]) -> None:
+    for field, allowed in _EXTRACTION_ENUMS:
+        if record[field] not in allowed:
+            raise ValueError(f"claim extraction schema {field} is invalid")
+
+
+def _require_extracted_evidence(evidence: object) -> None:
+    if not isinstance(evidence, dict) or set(evidence) != {
+        "reference",
+        "sha256",
+        "text",
+    }:
         raise ValueError("claim extraction schema evidence fields are invalid")
     EvidenceRef.parse(evidence["reference"])
-    if not isinstance(evidence["sha256"], str) or re.fullmatch(r"[0-9a-f]{64}", evidence["sha256"]) is None:
-        raise ValueError("claim extraction schema evidence hash is invalid")
+    _require_extracted_hash(evidence["sha256"])
     _trim(evidence["text"], label="evidence text")
-    links = record["links"]
-    if not isinstance(links, list) or len(links) > 100 or any(not isinstance(item, str) or not item for item in links):
+
+
+def _require_extracted_hash(digest: object) -> None:
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise ValueError("claim extraction schema evidence hash is invalid")
+
+
+def _require_extracted_links(links: object) -> None:
+    if not isinstance(links, list) or len(links) > 100:
         raise ValueError("claim extraction schema links are invalid")
+    if any(_is_empty_link(item) for item in links):
+        raise ValueError("claim extraction schema links are invalid")
+
+
+def _is_empty_link(item: object) -> bool:
+    return not isinstance(item, str) or not item
+
+
+def _timestamp_block(
+    source: bytes, digest: str, daily_id: str, entry: tuple[str, int, int]
+) -> TimestampBlock:
+    block_id, start, end = entry
+    _require_block_time(block_id)
+    return TimestampBlock(
+        source,
+        digest,
+        daily_id,
+        block_id,
+        f"{daily_id}T{block_id}Z",
+        start,
+        end,
+        source[start:end],
+    )
+
+
+def _require_block_time(block_id: str) -> None:
+    """A claim block is named by the time it happened at, and nothing else."""
+    try:
+        datetime.strptime(block_id, "%H:%M:%S")
+    except ValueError as exc:
+        raise ValueError("claim block timestamp is invalid") from exc
 
 
 class ClaimPipeline:
@@ -333,44 +490,12 @@ class ClaimPipeline:
         self.calls.append("split_blocks")
         if not isinstance(source, bytes):
             raise TypeError("source must be immutable bytes")
-        try:
-            text = source.decode("utf-8", errors="strict")
-        except UnicodeDecodeError as exc:
-            raise ValueError("claim source is not UTF-8") from exc
-        date_match = _DATE_RE.match(text)
-        if date_match is None:
-            raise ValueError("claim source has no canonical daily date")
-        daily_id = date_match[1]
-        try:
-            date.fromisoformat(daily_id)
-        except ValueError as exc:
-            raise ValueError("claim source daily date is invalid") from exc
-        raw_headers = list(re.finditer(rb"(?m)^## \[([^\]\r\n]+)\]", source))
-        matches = list(_BLOCK_RE.finditer(source))
-        if len(matches) != len(raw_headers):
-            raise ValueError("claim block timestamp is invalid")
+        daily_id = _claim_source_daily_id(source)
         digest = sha256_bytes(source)
-        blocks: list[TimestampBlock] = []
-        for index, match in enumerate(matches):
-            block_id = match[1].decode("ascii")
-            try:
-                datetime.strptime(block_id, "%H:%M:%S")
-            except ValueError as exc:
-                raise ValueError("claim block timestamp is invalid") from exc
-            end = matches[index + 1].start() if index + 1 < len(matches) else len(source)
-            blocks.append(
-                TimestampBlock(
-                    source,
-                    digest,
-                    daily_id,
-                    block_id,
-                    f"{daily_id}T{block_id}Z",
-                    match.start(),
-                    end,
-                    source[match.start() : end],
-                )
-            )
-        return tuple(blocks)
+        return tuple(
+            _timestamp_block(source, digest, daily_id, entry)
+            for entry in daily_entries(source)
+        )
 
     def extract(
         self, block: TimestampBlock, result: Mapping[str, object]
@@ -378,17 +503,8 @@ class ClaimPipeline:
         self.calls.append("extract")
         if not isinstance(block, TimestampBlock) or not isinstance(result, Mapping):
             raise TypeError("claim extraction inputs are invalid")
-        if set(result) != {"schema_version", "claims"} or result.get("schema_version") != "claim-extraction/v1":
-            raise ValueError("claim extraction schema envelope is invalid")
-        records = result.get("claims")
-        if not isinstance(records, list) or len(records) > 1000:
-            raise ValueError("claim extraction schema claims are invalid")
-        claims: list[Claim] = []
-        for raw in records:
-            record = dict(raw) if isinstance(raw, Mapping) else raw
-            _validate_extracted_record(record)
-            claims.append(Claim(record, block))
-        return tuple(claims)
+        records = _extraction_records(result)
+        return tuple(Claim(_validated_record(raw), block) for raw in records)
 
     def verify_literal(
         self, claim: Claim, reference: EvidenceRef | None = None
@@ -398,26 +514,28 @@ class ClaimPipeline:
             raise TypeError("claim must be extracted before evidence verification")
         evidence = claim.record["evidence"]
         assert isinstance(evidence, dict)
+        resolved = self._resolved_evidence(claim, evidence, reference)
+        if resolved.sha256 != evidence["sha256"]:
+            raise EvidenceMismatch("evidence span hash does not match")
+        literal = _evidence_literal(resolved.bytes)
+        if literal != evidence["text"] or literal != claim.record["text"]:
+            raise EvidenceMismatch("evidence literal text does not match")
+        return VerifiedClaim(claim, resolved.bytes)
+
+    def _resolved_evidence(
+        self,
+        claim: Claim,
+        evidence: Mapping[str, object],
+        reference: EvidenceRef | None,
+    ) -> object:
         try:
             embedded = EvidenceRef.parse(evidence["reference"])
-            if reference is not None and reference != embedded:
-                raise EvidenceMismatch("explicit evidence reference does not match the claim")
-            if embedded.source_sha256 != claim.block.source_sha256 or embedded.block_id != claim.block.block_id:
-                raise EvidenceMismatch("evidence reference does not match the immutable block")
-            resolved = self.resolver.resolve(embedded)
+            _require_matching_reference(embedded, claim, reference)
+            return self.resolver.resolve(embedded)
         except EvidenceMismatch:
             raise
         except (EvidenceResolutionError, TypeError, ValueError) as exc:
             raise EvidenceMismatch(str(exc)) from exc
-        if resolved.sha256 != evidence["sha256"]:
-            raise EvidenceMismatch("evidence span hash does not match")
-        try:
-            literal = resolved.bytes.decode("utf-8", errors="strict")
-        except UnicodeDecodeError as exc:
-            raise EvidenceMismatch("evidence span is not UTF-8") from exc
-        if literal != evidence["text"] or literal != claim.record["text"]:
-            raise EvidenceMismatch("evidence literal text does not match")
-        return VerifiedClaim(claim, resolved.bytes)
 
     def normalize(self, claim: VerifiedClaim) -> NormalizedClaim:
         if not isinstance(claim, VerifiedClaim):
@@ -443,9 +561,77 @@ class ClaimPipeline:
         return NormalizedClaim(record)
 
 
+def _claim_source_daily_id(source: bytes) -> str:
+    text = _decoded_claim_source(source)
+    match = _DATE_RE.match(text)
+    if match is None:
+        raise ValueError("claim source has no canonical daily date")
+    daily_id = match[1]
+    try:
+        date.fromisoformat(daily_id)
+    except ValueError as exc:
+        raise ValueError("claim source daily date is invalid") from exc
+    return daily_id
+
+
+def _decoded_claim_source(source: bytes) -> str:
+    try:
+        return source.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ValueError("claim source is not UTF-8") from exc
+
+
+def _extraction_records(result: Mapping[str, object]) -> list[object]:
+    if (
+        set(result) != {"schema_version", "claims"}
+        or result.get("schema_version") != "claim-extraction/v1"
+    ):
+        raise ValueError("claim extraction schema envelope is invalid")
+    records = result.get("claims")
+    if not isinstance(records, list) or len(records) > 1000:
+        raise ValueError("claim extraction schema claims are invalid")
+    return records
+
+
+def _validated_record(raw: object) -> object:
+    record = dict(raw) if isinstance(raw, Mapping) else raw
+    _validate_extracted_record(record)
+    return record
+
+
+def _require_matching_reference(
+    embedded: EvidenceRef, claim: Claim, reference: EvidenceRef | None
+) -> None:
+    if reference is not None and reference != embedded:
+        raise EvidenceMismatch("explicit evidence reference does not match the claim")
+    if (
+        embedded.source_sha256 != claim.block.source_sha256
+        or embedded.block_id != claim.block.block_id
+    ):
+        raise EvidenceMismatch("evidence reference does not match the immutable block")
+
+
+def _evidence_literal(span: bytes) -> str:
+    try:
+        return span.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise EvidenceMismatch("evidence span is not UTF-8") from exc
+
+
 def validate_claim_record(record: object) -> None:
     validate_schema({"schema_version": "claim-ledger/v1", "claims": [record]}, LEDGER_SCHEMA)
     assert isinstance(record, Mapping)
+    _require_canonical_semantics(record)
+    evidence = record["evidence"]
+    assert isinstance(evidence, Mapping)
+    ref = EvidenceRef.parse(evidence["reference"])
+    if ref.byte_end <= ref.byte_start:
+        raise ValueError("claim evidence span must be non-empty")
+    _require_evidence_literal(record, evidence)
+    _require_observation(record, ref)
+
+
+def _require_canonical_semantics(record: Mapping[str, object]) -> None:
     semantic = _semantic_payload(record)
     if any(
         canonical_json_bytes(record[field]) != canonical_json_bytes(semantic[field])
@@ -454,20 +640,25 @@ def validate_claim_record(record: object) -> None:
         raise ValueError("claim semantic fields are not canonical")
     if record["fingerprint"] != sha256_bytes(canonical_json_bytes(semantic)):
         raise ValueError("claim fingerprint does not match normalized semantics")
-    evidence = record["evidence"]
-    assert isinstance(evidence, Mapping)
-    ref = EvidenceRef.parse(evidence["reference"])
-    if ref.byte_end <= ref.byte_start:
-        raise ValueError("claim evidence span must be non-empty")
+
+
+def _require_evidence_literal(
+    record: Mapping[str, object], evidence: Mapping[str, object]
+) -> None:
     if evidence["text"] != record["text"] or sha256_bytes(
         evidence["text"].encode("utf-8")
     ) != evidence["sha256"]:
         raise ValueError("claim evidence literal hash does not match")
+
+
+def _require_observation(record: Mapping[str, object], ref: EvidenceRef) -> None:
     observed_at = _strict_rfc3339_utc(record["observed_at"], label="observed_at")
     try:
         datetime.strptime(ref.block_id, "%H:%M:%S")
     except ValueError as exc:
-        raise ValueError("observed evidence block is not a valid HH:MM:SS timestamp") from exc
+        raise ValueError(
+            "observed evidence block is not a valid HH:MM:SS timestamp"
+        ) from exc
     if re.fullmatch(r"\d{2}:\d{2}:\d{2}", ref.block_id) is None or observed_at != (
         f"{ref.daily_id}T{ref.block_id}Z"
     ):
@@ -475,15 +666,34 @@ def validate_claim_record(record: object) -> None:
 
 
 def parse_claim_ledger(content: bytes) -> dict[str, object] | None:
+    text = _decoded_claim_page(content)
+    if not _has_claims_heading(text):
+        return None
+    ledger = _parsed_ledger(text)
+    validate_schema(ledger, LEDGER_SCHEMA)
+    _require_unique_ledger_ids(ledger["claims"])
+    for record in ledger["claims"]:
+        validate_claim_record(record)
+    return ledger
+
+
+def _decoded_claim_page(content: bytes) -> str:
     try:
-        text = content.decode("utf-8", errors="strict")
+        return content.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
         raise ValueError("claim page is not UTF-8") from exc
+
+
+def _has_claims_heading(text: str) -> bool:
     headings = list(re.finditer(r"(?m)^## Claims[ \t]*\r?$", text))
     if not headings:
-        return None
+        return False
     if len(headings) != 1:
         raise ValueError("claim page must contain exactly one Claims ledger")
+    return True
+
+
+def _parsed_ledger(text: str) -> dict[str, object]:
     match = _CLAIMS_RE.search(text)
     if match is None:
         raise ValueError("Claims ledger must be one fenced canonical JSON object")
@@ -494,61 +704,191 @@ def parse_claim_ledger(content: bytes) -> dict[str, object] | None:
         raise ValueError("Claims ledger is malformed JSON") from exc
     if canonical_json_bytes(ledger) != raw:
         raise ValueError("Claims ledger is not restricted canonical JSON")
-    validate_schema(ledger, LEDGER_SCHEMA)
-    claim_ids = [str(record["id"]) for record in ledger["claims"]]
-    if len(claim_ids) != len(set(claim_ids)):
-        raise ValueError("claim ledger contains a duplicate claim id")
-    for record in ledger["claims"]:
-        validate_claim_record(record)
     return ledger
 
 
+def _require_unique_ledger_ids(claims: list[object]) -> None:
+    claim_ids = [str(record["id"]) for record in claims]
+    if len(claim_ids) != len(set(claim_ids)):
+        raise ValueError("claim ledger contains a duplicate claim id")
+
+
 def is_substantive(record: Mapping[str, object]) -> bool:
-    relation = str(record.get("relation", "")).strip().casefold()
     evidence = record.get("evidence")
-    structurally_substantive = (
-        record.get("lifecycle") == "active"
-        and relation in RELATIONS
-        and relation not in _NON_SUBSTANTIVE_RELATIONS
-        and isinstance(evidence, Mapping)
-        and set(evidence) == {"reference", "sha256", "text"}
-    )
-    if not structurally_substantive:
+    if not _structurally_substantive(record, evidence):
         return False
+    assert isinstance(evidence, Mapping)
     try:
         EvidenceRef.parse(evidence["reference"])
-        literal = evidence["text"]
-        return (
-            isinstance(literal, str)
-            and literal == record.get("text")
-            and sha256_bytes(literal.encode("utf-8")) == evidence["sha256"]
-        )
+        return _literal_agrees(record, evidence)
     except (TypeError, ValueError):
         return False
+
+
+def _structurally_substantive(record: Mapping[str, object], evidence: object) -> bool:
+    relation = str(record.get("relation", "")).strip().casefold()
+    if record.get("lifecycle") != "active":
+        return False
+    if relation not in RELATIONS or relation in _NON_SUBSTANTIVE_RELATIONS:
+        return False
+    return isinstance(evidence, Mapping) and set(evidence) == {
+        "reference",
+        "sha256",
+        "text",
+    }
+
+
+def _literal_agrees(
+    record: Mapping[str, object], evidence: Mapping[str, object]
+) -> bool:
+    literal = evidence["text"]
+    if not isinstance(literal, str) or literal != record.get("text"):
+        return False
+    return sha256_bytes(literal.encode("utf-8")) == evidence["sha256"]
 
 
 def page_may_auto_supersede(ledger: Mapping[str, object] | None) -> bool:
     if ledger is None or ledger.get("schema_version") != "claim-ledger/v1":
         return False
     claims = ledger.get("claims")
-    return isinstance(claims, list) and any(
-        isinstance(item, Mapping) and is_substantive(item) for item in claims
+    if not isinstance(claims, list):
+        return False
+    return any(_substantive_entry(item) for item in claims)
+
+
+def _substantive_entry(item: object) -> bool:
+    return isinstance(item, Mapping) and is_substantive(item)
+
+
+_EXPECTED_CLAIM_INDEX_SHAPES = (
+    (
+        ("id", "TEXT", 1, None, 2),
+        ("fingerprint", "TEXT", 1, None, 0),
+        ("subject", "TEXT", 1, None, 0),
+        ("relation", "TEXT", 1, None, 0),
+        ("lifecycle", "TEXT", 1, None, 0),
+        ("page", "TEXT", 1, None, 1),
+        ("record_json", "BLOB", 1, None, 0),
+    ),
+    (("schema_version", "TEXT", 1, None, 1),),
+    (
+        ("page", "TEXT", 1, None, 1),
+        ("claim_id", "TEXT", 1, None, 2),
+        ("code", "TEXT", 1, None, 0),
+    ),
+    ("subject", "relation", "lifecycle", "fingerprint"),
+    (CLAIM_INDEX_SCHEMA_VERSION,),
+)
+
+
+def _claim_index_shapes(database: sqlite3.Connection) -> tuple[object, ...]:
+    return (
+        _table_shape(database, "claim"),
+        _table_shape(database, "claim_index_meta"),
+        _table_shape(database, "claim_index_diagnostic"),
+        tuple(
+            row[2]
+            for row in database.execute("PRAGMA index_info(claim_candidate_lookup)")
+        ),
+        tuple(
+            row[0]
+            for row in database.execute("SELECT schema_version FROM claim_index_meta")
+        ),
     )
+
+
+def _table_shape(database: sqlite3.Connection, table: str) -> tuple[tuple, ...]:
+    return tuple(
+        tuple(row[index] for index in range(1, 6))
+        for row in database.execute(f"PRAGMA table_info({table})")
+    )
+
+
+def _resolved_state_root(state_root: Path | None) -> Path:
+    if state_root is not None:
+        return Path(state_root)
+    configured = os.environ.get("LLM_WIKI_STATE_ROOT") or os.environ.get("LLM_WIKI_ROOT")
+    if configured:
+        return Path(configured)
+    return Path(__file__).resolve().parent.parent
+
+
+def _resolved_vault(vault: Path | None, state_root: Path) -> Path:
+    """A vault beside the state root wins over the configured one."""
+    if vault is not None:
+        return Path(vault)
+    sibling = state_root.parent
+    if (sibling / "knowledge").is_dir():
+        return sibling
+    return Path(os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent))
+
+
+def _require_allowed_root(root: Path, allowed: tuple[Path, ...]) -> Path:
+    resolved = Path(root).resolve(strict=True)
+    if resolved not in allowed:
+        raise ValueError(
+            "claim rebuild sequences must contain canonical knowledge roots"
+        )
+    if Path(root).is_symlink() or not Path(root).is_dir():
+        raise PermissionError("claim rebuild root must be a regular directory")
+    return resolved
+
+
+def _project_pages(resolved: Path) -> list[Path]:
+    return [
+        page
+        for page in resolved.rglob("*.md")
+        if page.name in {"context.md", "journal.md", "state.md"}
+    ]
+
+
+def _require_rebuild_active(deadline: float, cancelled: Callable[[], bool] | None) -> None:
+    if time.monotonic() >= deadline or bool(cancelled and cancelled()):
+        raise TimeoutError("claim rebuild cancelled or deadline reached")
+
+
+def _unresolved_code(exc: BaseException) -> str:
+    if "ambiguous" in str(exc).casefold():
+        return "evidence_ambiguous"
+    return "evidence_unresolved"
+
+
+def _literal_diagnostic(
+    resolved: object, record: Mapping[str, object], evidence: Mapping[str, object]
+) -> str | None:
+    try:
+        literal = resolved.bytes.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return "evidence_literal_mismatch"
+    if _literal_disagrees(resolved, literal, record, evidence):
+        return "evidence_literal_mismatch"
+    return None
+
+
+def _literal_disagrees(
+    resolved: object,
+    literal: str,
+    record: Mapping[str, object],
+    evidence: Mapping[str, object],
+) -> bool:
+    if resolved.sha256 != evidence["sha256"]:
+        return True
+    return literal != evidence["text"] or literal != record["text"]
+
+
+def _require_candidate_limit(limit: object) -> None:
+    if not isinstance(limit, int) or isinstance(limit, bool):
+        raise ValueError(f"candidate limit must be between 0 and {MAX_CANDIDATES}")
+    if not 0 <= limit <= MAX_CANDIDATES:
+        raise ValueError(f"candidate limit must be between 0 and {MAX_CANDIDATES}")
 
 
 class ClaimIndex:
     """A local owner-only SQLite projection; Markdown ledgers remain canonical."""
 
     def __init__(self, state_root: Path | None = None, *, vault: Path | None = None):
-        if state_root is None:
-            configured = os.environ.get("LLM_WIKI_STATE_ROOT") or os.environ.get("LLM_WIKI_ROOT")
-            state_root = Path(configured) if configured else Path(__file__).resolve().parent.parent
-        self.state_root = Path(state_root).resolve(strict=False)
-        if vault is None:
-            sibling = self.state_root.parent
-            configured_vault = Path(os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent))
-            vault = sibling if (sibling / "knowledge").is_dir() else configured_vault
-        self.vault = Path(vault).resolve(strict=True)
+        self.state_root = _resolved_state_root(state_root).resolve(strict=False)
+        self.vault = _resolved_vault(vault, self.state_root).resolve(strict=True)
         self.path = self.state_root / "cache" / "claims.sqlite3"
         self.lock_path = self.state_root / "cache" / "claims.rebuild.lock"
         self.resolver = EvidenceResolver(self.vault, state_root=self.state_root)
@@ -576,56 +916,11 @@ class ClaimIndex:
 
     @staticmethod
     def _schema_compatible(database: sqlite3.Connection) -> bool:
-        expected_claim = [
-            ("id", "TEXT", 1, None, 2),
-            ("fingerprint", "TEXT", 1, None, 0),
-            ("subject", "TEXT", 1, None, 0),
-            ("relation", "TEXT", 1, None, 0),
-            ("lifecycle", "TEXT", 1, None, 0),
-            ("page", "TEXT", 1, None, 1),
-            ("record_json", "BLOB", 1, None, 0),
-        ]
         try:
-            claim_shape = [
-                tuple(row[index] for index in range(1, 6))
-                for row in database.execute("PRAGMA table_info(claim)")
-            ]
-            meta_shape = [
-                tuple(row[index] for index in range(1, 6))
-                for row in database.execute("PRAGMA table_info(claim_index_meta)")
-            ]
-            diagnostic_shape = [
-                tuple(row[index] for index in range(1, 6))
-                for row in database.execute(
-                    "PRAGMA table_info(claim_index_diagnostic)"
-                )
-            ]
-            index_columns = [
-                row[2]
-                for row in database.execute(
-                    "PRAGMA index_info(claim_candidate_lookup)"
-                )
-            ]
-            versions = [
-                row[0]
-                for row in database.execute(
-                    "SELECT schema_version FROM claim_index_meta"
-                ).fetchall()
-            ]
+            shapes = _claim_index_shapes(database)
         except sqlite3.Error:
             return False
-        return (
-            claim_shape == expected_claim
-            and meta_shape == [("schema_version", "TEXT", 1, None, 1)]
-            and diagnostic_shape
-            == [
-                ("page", "TEXT", 1, None, 1),
-                ("claim_id", "TEXT", 1, None, 2),
-                ("code", "TEXT", 1, None, 0),
-            ]
-            and index_columns == ["subject", "relation", "lifecycle", "fingerprint"]
-            and versions == [CLAIM_INDEX_SCHEMA_VERSION]
-        )
+        return shapes == _EXPECTED_CLAIM_INDEX_SHAPES
 
     @staticmethod
     def _replace_schema(database: sqlite3.Connection) -> None:
@@ -682,39 +977,38 @@ class ClaimIndex:
         self,
         sources: Sequence[Path] | Callable[[], Sequence[Path]] | None,
     ) -> list[Path]:
-        if callable(sources):
-            pages = list(sources())
-        else:
-            roots = list(sources) if sources is not None else [
-                self.vault / "knowledge/notes",
-                self.vault / "knowledge/projects",
-            ]
-            pages = []
-            allowed_roots = (
-                self.vault / "knowledge/notes",
-                self.vault / "knowledge/projects",
-            )
-            for root in roots:
-                resolved = Path(root).resolve(strict=True)
-                if resolved not in allowed_roots:
-                    raise ValueError(
-                        "claim rebuild sequences must contain canonical knowledge roots"
-                    )
-                if Path(root).is_symlink() or not Path(root).is_dir():
-                    raise PermissionError("claim rebuild root must be a regular directory")
-                if resolved == allowed_roots[0]:
-                    pages.extend(resolved.rglob("*.md"))
-                else:
-                    pages.extend(
-                        page
-                        for page in resolved.rglob("*.md")
-                        if page.name in {"context.md", "journal.md", "state.md"}
-                    )
+        pages = self._discovered_pages(sources)
         if len(pages) > 10_000:
             raise ValueError("claim rebuild page discovery exceeds 10000 pages")
         if any(not isinstance(page, Path) for page in pages):
             raise TypeError("claim rebuild provider must return Path values")
         return sorted(pages)
+
+    def _discovered_pages(
+        self,
+        sources: Sequence[Path] | Callable[[], Sequence[Path]] | None,
+    ) -> list[Path]:
+        if callable(sources):
+            return list(sources())
+        pages: list[Path] = []
+        for root in self._rebuild_roots(sources):
+            pages.extend(self._pages_under(root))
+        return pages
+
+    def _rebuild_roots(self, sources: Sequence[Path] | None) -> list[Path]:
+        if sources is None:
+            return list(self._allowed_roots())
+        return list(sources)
+
+    def _allowed_roots(self) -> tuple[Path, Path]:
+        return (self.vault / "knowledge/notes", self.vault / "knowledge/projects")
+
+    def _pages_under(self, root: Path) -> list[Path]:
+        allowed = self._allowed_roots()
+        resolved = _require_allowed_root(root, allowed)
+        if resolved == allowed[0]:
+            return list(resolved.rglob("*.md"))
+        return _project_pages(resolved)
 
     def _rebuild_locked(
         self,
@@ -727,78 +1021,96 @@ class ClaimIndex:
         diagnostics: list[tuple[str, str, str]] = []
         seen_pages: set[str] = set()
         for page in pages:
-            if time.monotonic() >= deadline or bool(cancelled and cancelled()):
-                raise TimeoutError("claim rebuild cancelled or deadline reached")
-            relative, content = self._page_bytes(Path(page))
-            if relative in seen_pages:
-                raise ValueError("claim index page list contains duplicates")
-            seen_pages.add(relative)
-            ledger = parse_claim_ledger(content)
-            if ledger is None:
-                continue
-            for record in ledger["claims"]:
-                if record["lifecycle"] == "active":
-                    evidence = record["evidence"]
-                    try:
-                        resolved = self.resolver.resolve(evidence["reference"])
-                    except (EvidenceResolutionError, OSError, TypeError, ValueError) as exc:
-                        code = (
-                            "evidence_ambiguous"
-                            if "ambiguous" in str(exc).casefold()
-                            else "evidence_unresolved"
-                        )
-                        diagnostics.append((relative, str(record["id"]), code))
-                        continue
-                    try:
-                        literal = resolved.bytes.decode("utf-8", errors="strict")
-                    except UnicodeDecodeError:
-                        diagnostics.append(
-                            (relative, str(record["id"]), "evidence_literal_mismatch")
-                        )
-                        continue
-                    if (
-                        resolved.sha256 != evidence["sha256"]
-                        or literal != evidence["text"]
-                        or literal != record["text"]
-                    ):
-                        diagnostics.append(
-                            (relative, str(record["id"]), "evidence_literal_mismatch")
-                        )
-                        continue
-                rows.append(
-                    (
-                        record["id"],
-                        record["fingerprint"],
-                        record["subject"],
-                        record["relation"],
-                        record["lifecycle"],
-                        relative,
-                        canonical_json_bytes(record),
-                    )
-                )
+            _require_rebuild_active(deadline, cancelled)
+            self._collect_page(Path(page), seen_pages, rows, diagnostics)
+        _require_rebuild_active(deadline, cancelled)
+        self._write_index(rows, diagnostics)
+
+    def _collect_page(
+        self,
+        page: Path,
+        seen_pages: set[str],
+        rows: list[tuple[object, ...]],
+        diagnostics: list[tuple[str, str, str]],
+    ) -> None:
+        relative, content = self._page_bytes(page)
+        if relative in seen_pages:
+            raise ValueError("claim index page list contains duplicates")
+        seen_pages.add(relative)
+        ledger = parse_claim_ledger(content)
+        if ledger is None:
+            return
+        for record in ledger["claims"]:
+            self._collect_record(relative, record, rows, diagnostics)
+
+    def _collect_record(
+        self,
+        relative: str,
+        record: Mapping[str, object],
+        rows: list[tuple[object, ...]],
+        diagnostics: list[tuple[str, str, str]],
+    ) -> None:
+        code = self._evidence_diagnostic(record)
+        if code is not None:
+            diagnostics.append((relative, str(record["id"]), code))
+            return
+        rows.append(
+            (
+                record["id"],
+                record["fingerprint"],
+                record["subject"],
+                record["relation"],
+                record["lifecycle"],
+                relative,
+                canonical_json_bytes(record),
+            )
+        )
+
+    def _evidence_diagnostic(self, record: Mapping[str, object]) -> str | None:
+        """None means the record is indexable; a code says why it is not."""
+        if record["lifecycle"] != "active":
+            return None
+        evidence = record["evidence"]
+        try:
+            resolved = self.resolver.resolve(evidence["reference"])
+        except (EvidenceResolutionError, OSError, TypeError, ValueError) as exc:
+            return _unresolved_code(exc)
+        return _literal_diagnostic(resolved, record, evidence)
+
+    def _write_index(
+        self,
+        rows: list[tuple[object, ...]],
+        diagnostics: list[tuple[str, str, str]],
+    ) -> None:
         with closing(self._connect()) as database:
-            if time.monotonic() >= deadline or bool(cancelled and cancelled()):
-                raise TimeoutError("claim rebuild cancelled or deadline reached")
             database.execute("BEGIN IMMEDIATE")
             try:
-                if self._schema_compatible(database):
-                    database.execute("DELETE FROM claim")
-                    database.execute("DELETE FROM claim_index_diagnostic")
-                else:
-                    self._replace_schema(database)
-                database.executemany(
-                    "INSERT INTO claim(id,fingerprint,subject,relation,lifecycle,page,record_json) VALUES(?,?,?,?,?,?,?)",
-                    rows,
-                )
-                database.executemany(
-                    "INSERT INTO claim_index_diagnostic(page,claim_id,code) VALUES(?,?,?)",
-                    sorted(diagnostics),
-                )
+                self._replace_rows(database, rows, diagnostics)
             except BaseException:
                 database.rollback()
                 raise
             else:
                 database.commit()
+
+    def _replace_rows(
+        self,
+        database: sqlite3.Connection,
+        rows: list[tuple[object, ...]],
+        diagnostics: list[tuple[str, str, str]],
+    ) -> None:
+        if self._schema_compatible(database):
+            database.execute("DELETE FROM claim")
+            database.execute("DELETE FROM claim_index_diagnostic")
+        else:
+            self._replace_schema(database)
+        database.executemany(
+            "INSERT INTO claim(id,fingerprint,subject,relation,lifecycle,page,record_json) VALUES(?,?,?,?,?,?,?)",
+            rows,
+        )
+        database.executemany(
+            "INSERT INTO claim_index_diagnostic(page,claim_id,code) VALUES(?,?,?)",
+            sorted(diagnostics),
+        )
 
     def diagnostics(self) -> list[dict[str, str]]:
         if not self.path.exists():
@@ -815,18 +1127,23 @@ class ClaimIndex:
     def candidates(
         self, claim: NormalizedClaim | None, *, limit: int = MAX_CANDIDATES
     ) -> list[IndexedClaim]:
-        if not isinstance(limit, int) or isinstance(limit, bool) or not 0 <= limit <= MAX_CANDIDATES:
-            raise ValueError(f"candidate limit must be between 0 and {MAX_CANDIDATES}")
+        _require_candidate_limit(limit)
         if limit == 0:
             return []
         if not isinstance(claim, NormalizedClaim):
             raise TypeError("candidate claim must be normalized")
         if not self.path.exists():
             return []
+        return [
+            IndexedClaim(row["page"], NormalizedClaim(json.loads(row["record_json"])))
+            for row in self._candidate_rows(claim, limit)
+        ]
+
+    def _candidate_rows(self, claim: NormalizedClaim, limit: int) -> list[object]:
         with closing(self._connect()) as database:
             if not self._schema_compatible(database):
                 return []
-            rows = database.execute(
+            return database.execute(
                 """
                 SELECT page, record_json FROM claim
                 WHERE lifecycle='active' AND (subject=? OR relation=? OR fingerprint=?)
@@ -843,65 +1160,89 @@ class ClaimIndex:
                     limit,
                 ),
             ).fetchall()
-        return [
-            IndexedClaim(row["page"], NormalizedClaim(json.loads(row["record_json"])))
-            for row in rows
-        ]
 
 
 @contextmanager
 def _exclusive_file_lock(path: Path, *, timeout: float = 10.0) -> Iterator[None]:
     """Hold an OS-released cross-process lock for a complete index rebuild."""
     path = Path(path)
-    flags = os.O_RDWR | getattr(os, "O_BINARY", 0)
-    created = False
-    try:
-        descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
-        created = True
-    except FileExistsError:
-        descriptor = os.open(path, flags)
+    descriptor, created = _open_lock_file(path)
     acquired = False
     try:
-        if os.fstat(descriptor).st_size == 0:
-            os.write(descriptor, b"0")
-        if created:
-            _restrict_owner_only(path, 0o600)
-        else:
-            _verify_owner_only(path, 0o600)
-        deadline = time.monotonic() + timeout
-        while True:
-            try:
-                os.lseek(descriptor, 0, os.SEEK_SET)
-                if sys.platform == "win32":
-                    import msvcrt
-
-                    msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
-                else:
-                    import fcntl
-
-                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                acquired = True
-                break
-            except OSError as exc:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(f"could not acquire claim rebuild lock: {path}") from exc
-                time.sleep(0.05)
-        token = f"{os.getpid()}:{threading.get_ident()}".encode()
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        os.write(descriptor, token)
-        os.ftruncate(descriptor, len(token))
+        _prepare_lock_file(path, descriptor, created)
+        _acquire_lock(descriptor, path, timeout)
+        acquired = True
+        _write_lock_token(descriptor)
         yield
     finally:
+        _release_lock(descriptor, acquired)
+
+
+def _open_lock_file(path: Path) -> tuple[int, bool]:
+    flags = os.O_RDWR | getattr(os, "O_BINARY", 0)
+    try:
+        return os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600), True
+    except FileExistsError:
+        return os.open(path, flags), False
+
+
+def _prepare_lock_file(path: Path, descriptor: int, created: bool) -> None:
+    if os.fstat(descriptor).st_size == 0:
+        os.write(descriptor, b"0")
+    if created:
+        _restrict_owner_only(path, 0o600)
+        return
+    _verify_owner_only(path, 0o600)
+
+
+def _acquire_lock(descriptor: int, path: Path, timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    while True:
         try:
-            if acquired:
-                os.lseek(descriptor, 0, os.SEEK_SET)
-                if sys.platform == "win32":
-                    import msvcrt
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            _lock_region(descriptor)
+            return
+        except OSError as exc:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"could not acquire claim rebuild lock: {path}"
+                ) from exc
+            time.sleep(0.05)
 
-                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
-                else:
-                    import fcntl
 
-                    fcntl.flock(descriptor, fcntl.LOCK_UN)
-        finally:
-            os.close(descriptor)
+def _lock_region(descriptor: int) -> None:
+    if sys.platform == "win32":
+        import msvcrt
+
+        msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_region(descriptor: int) -> None:
+    if sys.platform == "win32":
+        import msvcrt
+
+        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(descriptor, fcntl.LOCK_UN)
+
+
+def _write_lock_token(descriptor: int) -> None:
+    token = f"{os.getpid()}:{threading.get_ident()}".encode()
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    os.write(descriptor, token)
+    os.ftruncate(descriptor, len(token))
+
+
+def _release_lock(descriptor: int, acquired: bool) -> None:
+    try:
+        if acquired:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            _unlock_region(descriptor)
+    finally:
+        os.close(descriptor)

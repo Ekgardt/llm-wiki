@@ -61,7 +61,11 @@ from contradiction_pipeline import (  # noqa: E402
     StaleLifecycleTarget,
     default_secondary_search,
 )
-from evidence_resolver import EvidenceRef, EvidenceResolver  # noqa: E402
+from evidence_resolver import (  # noqa: E402
+    EvidenceRef,
+    EvidenceResolver,
+    daily_entries,
+)
 from llm_client import call_candidate, probe_candidate, provider_candidates  # noqa: E402
 from markdown_transaction import MarkdownChange, MarkdownCoordinator  # noqa: E402
 from memory_queue import MemoryQueue  # noqa: E402
@@ -1603,18 +1607,22 @@ def _require_calendar_date(date: str) -> None:
 
 
 def _evidence_block(source: object, timestamp: str) -> tuple[bytes, int]:
-    """The one entry a timestamp names, as bytes plus its offset in the source."""
+    """The one entry a timestamp names, as bytes plus its offset in the source.
+
+    Entries are delimited by `evidence_resolver.daily_entries`, the one
+    definition. Exactly one entry must declare the timestamp: none and several
+    are both refused.
+    """
     content = source.content if source is not None else b""
-    header = re.compile(
-        rb"(?m)^## \[" + re.escape(timestamp.encode()) + rb"\][^\r\n]*\r?$"
-    )
-    matches = list(header.finditer(content))
-    if len(matches) != 1:
+    matched = [
+        (start, end)
+        for block_id, start, end in daily_entries(content)
+        if block_id == timestamp
+    ]
+    if len(matched) != 1:
         raise ValueError("compile evidence timestamp block is ambiguous or missing")
-    marker_at = matches[0].start()
-    next_header = content.find(b"\n## [", matches[0].end())
-    end = len(content) if next_header < 0 else next_header
-    return content[marker_at:end], marker_at
+    start, end = matched[0]
+    return content[start:end], start
 
 
 def _sole_quote_offset(block: bytes, quote_bytes: bytes) -> int:

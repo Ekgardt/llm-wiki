@@ -52,3 +52,4 @@ Routine low-risk recovery remains automatic and agent-readable.
 - [[knowledge/notes/system-symlink-ancestor-decision]]
 - [[knowledge/notes/citation-relevance-gate-decision]]
 - [[knowledge/notes/dead-task-retirement-and-restore-decision]]
+- [[knowledge/notes/daily-entry-boundary-decision]]

@@ -86,3 +86,4 @@ it.
 ## Links
 
 - [[knowledge/notes/reliable-memory-stage-2]]
+- [[knowledge/notes/daily-entry-boundary-decision]] — what delimits one entry in the log this decision cuts.
