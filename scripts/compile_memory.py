@@ -344,40 +344,60 @@ def snapshot_compile_inputs(
     """
     dailies: list[DailySnapshot] = []
     sources: list[SourceSnapshot] = []
-    targets: list[TargetSnapshot] = []
-    total_source_bytes = 0
-
-    def add_source(source: SourceSnapshot) -> None:
-        nonlocal total_source_bytes
-        if len(sources) >= MAX_SOURCE_COUNT:
-            raise ValueError("compile source count exceeds limit")
-        total_source_bytes += len(source.content)
-        if total_source_bytes > MAX_TOTAL_SOURCE_BYTES:
-            raise ValueError("compile source bytes exceed limit")
-        sources.append(source)
+    budget = _SourceBudget(sources)
 
     for path in sorted(map(Path, paths), key=lambda item: item.as_posix()):
         content = read_stable_bytes(path, MAX_SOURCE_BYTES, label="daily source")
         logical = _logical_path(path)
-        digest = sha256_bytes(content)
         dailies.extend(_daily_parts(logical, content, compiled))
-        add_source(SourceSnapshot(logical, content, digest))
+        budget.add(SourceSnapshot(logical, content, sha256_bytes(content)))
     for path in (AGENTS, INDEX, LOG):
         if path.exists():
-            add_source(_snapshot(path))
-    if KNOWLEDGE.exists():
-        for path in sorted(KNOWLEDGE.rglob("*.md")):
-            if "archive" not in path.parts:
-                source = _snapshot(path, label="knowledge page")
-                add_source(source)
-                targets.append(
-                    TargetSnapshot(source.logical_path, source.content, source.sha256)
-                )
+            budget.add(_snapshot(path))
+    targets = _knowledge_targets(budget.add)
     return CompileInputs(
         tuple(dailies),
         tuple(sorted(sources, key=lambda item: item.logical_path)),
         tuple(sorted(targets, key=lambda item: item.logical_path)),
     )
+
+
+class _SourceBudget:
+    """Accumulate compile sources under the count and byte ceilings."""
+
+    def __init__(self, sources: list[SourceSnapshot]) -> None:
+        self._sources = sources
+        self._total_bytes = 0
+
+    def add(self, source: SourceSnapshot) -> None:
+        if len(self._sources) >= MAX_SOURCE_COUNT:
+            raise ValueError("compile source count exceeds limit")
+        self._total_bytes += len(source.content)
+        if self._total_bytes > MAX_TOTAL_SOURCE_BYTES:
+            raise ValueError("compile source bytes exceed limit")
+        self._sources.append(source)
+
+
+def _knowledge_targets(
+    add_source: Callable[[SourceSnapshot], None],
+) -> list[TargetSnapshot]:
+    """Snapshot each live knowledge page as both a source and a write target."""
+    targets: list[TargetSnapshot] = []
+    for path in _live_knowledge_pages():
+        source = _snapshot(path, label="knowledge page")
+        add_source(source)
+        targets.append(
+            TargetSnapshot(source.logical_path, source.content, source.sha256)
+        )
+    return targets
+
+
+def _live_knowledge_pages() -> list[Path]:
+    if not KNOWLEDGE.exists():
+        return []
+    return [
+        path for path in sorted(KNOWLEDGE.rglob("*.md")) if "archive" not in path.parts
+    ]
 
 
 def compile_source_identity(logical_path: str, source_sha256: str) -> str:
@@ -484,25 +504,10 @@ def _subset_compile_inputs(
     daily_paths: set[str],
     optional_paths: set[str] | None = None,
 ) -> CompileInputs:
-    optional_paths = optional_paths or set()
     all_daily_paths = {item.logical_path for item in inputs.dailies}
     selected = tuple(item for item in inputs.dailies if item.part_key in daily_paths)
-    context = tuple(
-        item
-        for item in inputs.sources
-        if item.logical_path not in all_daily_paths
-        and item.logical_path in optional_paths
-    )
-    # Two parts of the same day would otherwise appear twice under one path.
-    seen_paths: set[str] = set()
-    selected_sources: list[SourceSnapshot] = []
-    for item in selected:
-        if item.logical_path in seen_paths:
-            continue
-        seen_paths.add(item.logical_path)
-        selected_sources.append(
-            SourceSnapshot(item.logical_path, item.content, item.sha256)
-        )
+    context = _context_sources(inputs, all_daily_paths, optional_paths)
+    selected_sources = _deduplicated_sources(selected)
     return CompileInputs(
         selected,
         tuple(
@@ -510,6 +515,32 @@ def _subset_compile_inputs(
         ),
         inputs.targets,
     )
+
+
+def _context_sources(
+    inputs: CompileInputs, daily_paths: set[str], optional_paths: set[str] | None
+) -> tuple[SourceSnapshot, ...]:
+    """The non-daily pages this batch was given room to carry."""
+    wanted = optional_paths or set()
+    return tuple(
+        item
+        for item in inputs.sources
+        if item.logical_path not in daily_paths and item.logical_path in wanted
+    )
+
+
+def _deduplicated_sources(
+    selected: Sequence[DailySnapshot],
+) -> list[SourceSnapshot]:
+    """Two parts of the same day would otherwise appear twice under one path."""
+    seen_paths: set[str] = set()
+    sources: list[SourceSnapshot] = []
+    for item in selected:
+        if item.logical_path in seen_paths:
+            continue
+        seen_paths.add(item.logical_path)
+        sources.append(SourceSnapshot(item.logical_path, item.content, item.sha256))
+    return sources
 
 
 def _record_oversized_daily(logical_path: str) -> None:
@@ -532,18 +563,42 @@ def pack_compile_batches(
     token_adapters: Mapping[str, TokenCounter] | None = None,
 ) -> tuple[CompileBatch, ...]:
     budget = ContextBudget(model, 32_768, 4_000, 1_024)
-    batches: list[CompileBatch] = []
-    current_paths: set[str] = set()
+    measure = _batch_measure(inputs, model, token_adapters)
     daily_paths = {item.logical_path for item in inputs.dailies}
     optional_sources = tuple(
         item for item in inputs.sources if item.logical_path not in daily_paths
     )
+    return tuple(
+        _compile_batch(
+            inputs,
+            paths,
+            budget,
+            model,
+            token_adapters,
+            optional_paths=_fitting_context(paths, optional_sources, budget, measure),
+        )
+        for paths in _group_dailies(inputs, budget, measure)
+    )
+
+
+def _draft_prompt_text(inputs: CompileInputs) -> str:
+    return (
+        f"{DRAFT_SYSTEM}\n{canonical_json_bytes(RAW_PLAN_SCHEMA).decode()}\n"
+        f"{_draft_prompt(inputs)}"
+    )
+
+
+def _batch_measure(
+    inputs: CompileInputs,
+    model: str | None,
+    token_adapters: Mapping[str, TokenCounter] | None,
+) -> Callable[..., int]:
+    """Count the draft-prompt tokens one candidate grouping would cost."""
 
     def measured(paths: set[str], optional_paths: set[str] | None = None) -> int:
         subset = _subset_compile_inputs(inputs, paths, optional_paths)
         count = count_tokens(
-            f"{DRAFT_SYSTEM}\n{canonical_json_bytes(RAW_PLAN_SCHEMA).decode()}\n"
-            f"{_draft_prompt(subset)}",
+            _draft_prompt_text(subset),
             model=model,
             adapters=token_adapters,
         )
@@ -551,43 +606,60 @@ def pack_compile_batches(
             raise ValueError("compile input token count is unknown")
         return count.tokens
 
-    for daily in inputs.dailies:
-        singleton = {daily.part_key}
-        if measured(singleton) > budget.available_input_tokens:
-            # A day is already split by bytes before it gets here, so one part
-            # that still will not fit means the budget cannot take this day at
-            # all. That is the refusal the transactional tests pin, and it now
-            # names the file.
-            _record_oversized_daily(daily.logical_path)
-            raise ValueError("daily source exceeds compile input budget")
-        prospective = {*current_paths, daily.part_key}
-        if current_paths and measured(prospective) > budget.available_input_tokens:
-            batches.append(_compile_batch(inputs, current_paths, budget, model, token_adapters))
-            current_paths = singleton
-        else:
-            current_paths = prospective
-    if current_paths:
-        batches.append(_compile_batch(inputs, current_paths, budget, model, token_adapters))
+    return measured
 
-    packed: list[CompileBatch] = []
-    for batch in batches:
-        paths = {item.part_key for item in batch.inputs.dailies}
-        optional_paths: set[str] = set()
-        for source in optional_sources:
-            prospective = {*optional_paths, source.logical_path}
-            if measured(paths, prospective) <= budget.available_input_tokens:
-                optional_paths = prospective
-        packed.append(
-            _compile_batch(
-                inputs,
-                paths,
-                budget,
-                model,
-                token_adapters,
-                optional_paths=optional_paths,
-            )
-        )
-    return tuple(packed)
+
+def _group_dailies(
+    inputs: CompileInputs,
+    budget: ContextBudget,
+    measure: Callable[..., int],
+) -> list[set[str]]:
+    """Pack whole days into the largest groups the input budget allows."""
+    groups: list[set[str]] = []
+    current: set[str] = set()
+    for daily in inputs.dailies:
+        _require_daily_fits(daily, budget, measure)
+        prospective = {*current, daily.part_key}
+        if current and measure(prospective) > budget.available_input_tokens:
+            groups.append(current)
+            current = {daily.part_key}
+            continue
+        current = prospective
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _require_daily_fits(
+    daily: DailySnapshot,
+    budget: ContextBudget,
+    measure: Callable[..., int],
+) -> None:
+    """Refuse a day the budget cannot take.
+
+    A day is already split by bytes before it gets here, so one part that still
+    will not fit means the budget cannot take this day at all. That is the
+    refusal the transactional tests pin, and it names the file.
+    """
+    if measure({daily.part_key}) <= budget.available_input_tokens:
+        return
+    _record_oversized_daily(daily.logical_path)
+    raise ValueError("daily source exceeds compile input budget")
+
+
+def _fitting_context(
+    paths: set[str],
+    optional_sources: Sequence[SourceSnapshot],
+    budget: ContextBudget,
+    measure: Callable[..., int],
+) -> set[str]:
+    """Carry optional context pages while they still fit beside the days."""
+    chosen: set[str] = set()
+    for source in optional_sources:
+        prospective = {*chosen, source.logical_path}
+        if measure(paths, prospective) <= budget.available_input_tokens:
+            chosen = prospective
+    return chosen
 
 
 def _compile_batch(
@@ -601,8 +673,7 @@ def _compile_batch(
 ) -> CompileBatch:
     subset = _subset_compile_inputs(inputs, paths, optional_paths)
     count = count_tokens(
-        f"{DRAFT_SYSTEM}\n{canonical_json_bytes(RAW_PLAN_SCHEMA).decode()}\n"
-        f"{_draft_prompt(subset)}",
+        _draft_prompt_text(subset),
         model=model,
         adapters=token_adapters,
     )
@@ -614,11 +685,7 @@ def _compile_batch(
     )
     packing = CompilePackingIdentity(
         algorithm="compile-complete-items/v1",
-        tokenizer_identity=(
-            f"adapter:{model}"
-            if count.source == "tokenizer"
-            else "utf8-byte-estimate/v1"
-        ),
+        tokenizer_identity=_tokenizer_identity(count.source, model),
         count_source=count.source,
         max_input_tokens=budget.max_input_tokens,
         reserved_output_tokens=budget.reserved_output_tokens,
@@ -626,6 +693,12 @@ def _compile_batch(
         measured_input_tokens=count.tokens,
     )
     return CompileBatch(subset, manifest, sha256_bytes(manifest_bytes), packing)
+
+
+def _tokenizer_identity(count_source: str, model: str | None) -> str:
+    if count_source == "tokenizer":
+        return f"adapter:{model}"
+    return "utf8-byte-estimate/v1"
 
 
 def _refresh_compile_batch(batch: CompileBatch) -> CompileBatch:
@@ -1066,29 +1139,48 @@ def _normalize_plan(
     normalized_operations: list[dict[str, str]] = []
     paths: set[str] = set()
     for operation in operations:
-        if not isinstance(operation, dict):
-            raise ValueError("draft operation must be an object")
-        semantic, _hashes = _validate_semantic_operation(operation, inputs)
-        path = f"knowledge/notes/{semantic['slug']}.md"
-        target = _target_snapshot(inputs, path)
-        if semantic["action"] == "create" and target is not None:
-            raise ValueError("create target existed in the immutable snapshot")
-        if semantic["action"] == "update" and target is None:
-            raise ValueError("update target was absent from the immutable snapshot")
-        if path in paths:
-            raise ValueError("compile plan operation paths must be unique")
-        paths.add(path)
-        normalized_operations.append(
-            {
-                "kind": "create" if semantic["action"] == "create" else "replace",
-                "path": path,
-                "content": canonical_json_bytes(semantic).decode("utf-8"),
-            }
-        )
+        planned = _planned_operation(operation, inputs)
+        _require_unique_path(paths, planned["path"])
+        normalized_operations.append(planned)
     return {
         "schema_version": COMPILE_PLAN_SCHEMA_VERSION,
         "operations": normalized_operations,
     }
+
+
+def _planned_operation(operation: object, inputs: CompileInputs) -> dict[str, str]:
+    if not isinstance(operation, dict):
+        raise ValueError("draft operation must be an object")
+    semantic, _hashes = _validate_semantic_operation(operation, inputs)
+    path = f"knowledge/notes/{semantic['slug']}.md"
+    _require_target_state(semantic, _target_snapshot(inputs, path))
+    return {
+        "kind": _operation_kind(semantic),
+        "path": path,
+        "content": canonical_json_bytes(semantic).decode("utf-8"),
+    }
+
+
+def _operation_kind(semantic: Mapping[str, object]) -> str:
+    if semantic["action"] == "create":
+        return "create"
+    return "replace"
+
+
+def _require_target_state(
+    semantic: Mapping[str, object], target: TargetSnapshot | None
+) -> None:
+    """A create must not overwrite, and an update must not invent."""
+    if semantic["action"] == "create" and target is not None:
+        raise ValueError("create target existed in the immutable snapshot")
+    if semantic["action"] == "update" and target is None:
+        raise ValueError("update target was absent from the immutable snapshot")
+
+
+def _require_unique_path(paths: set[str], path: str) -> None:
+    if path in paths:
+        raise ValueError("compile plan operation paths must be unique")
+    paths.add(path)
 
 
 def validate_compile_plan(plan: dict[str, object], inputs: CompileInputs) -> bool:
@@ -1098,29 +1190,39 @@ def validate_compile_plan(plan: dict[str, object], inputs: CompileInputs) -> boo
         raise ValueError("compile plan operations must be an array")
     paths: set[str] = set()
     for planned in operations:
-        if not isinstance(planned, dict):
-            raise ValueError("compile plan operation must be an object")
-        semantic = json.loads(str(planned["content"]))
-        if not isinstance(semantic, dict):
-            raise ValueError("compile operation content must be an object")
-        semantic, _hashes = _validate_semantic_operation(semantic, inputs)
-        expected = f"knowledge/notes/{semantic['slug']}.md"
-        target = _target_snapshot(inputs, expected)
-        if semantic["action"] == "create" and target is not None:
-            raise ValueError("create target existed in the immutable snapshot")
-        if semantic["action"] == "update" and target is None:
-            raise ValueError("update target was absent from the immutable snapshot")
-        if planned["path"] != expected:
-            raise ValueError("compile operation path does not match its slug")
-        expected_kind = "create" if semantic["action"] == "create" else "replace"
-        if planned["kind"] != expected_kind:
-            raise ValueError("compile operation kind does not match its action")
-        if planned["content"] != canonical_json_bytes(semantic).decode("utf-8"):
-            raise ValueError("compile operation content is not normalized")
-        if expected in paths:
-            raise ValueError("compile plan operation paths must be unique")
-        paths.add(expected)
+        _require_unique_path(paths, _validated_operation_path(planned, inputs))
     return True
+
+
+def _validated_operation_path(planned: object, inputs: CompileInputs) -> str:
+    if not isinstance(planned, dict):
+        raise ValueError("compile plan operation must be an object")
+    semantic = _operation_semantics(planned, inputs)
+    expected = f"knowledge/notes/{semantic['slug']}.md"
+    _require_target_state(semantic, _target_snapshot(inputs, expected))
+    _require_normalized_operation(planned, semantic, expected)
+    return expected
+
+
+def _operation_semantics(
+    planned: Mapping[str, object], inputs: CompileInputs
+) -> dict[str, object]:
+    semantic = json.loads(str(planned["content"]))
+    if not isinstance(semantic, dict):
+        raise ValueError("compile operation content must be an object")
+    validated, _hashes = _validate_semantic_operation(semantic, inputs)
+    return validated
+
+
+def _require_normalized_operation(
+    planned: Mapping[str, object], semantic: Mapping[str, object], expected: str
+) -> None:
+    if planned["path"] != expected:
+        raise ValueError("compile operation path does not match its slug")
+    if planned["kind"] != _operation_kind(semantic):
+        raise ValueError("compile operation kind does not match its action")
+    if planned["content"] != canonical_json_bytes(semantic).decode("utf-8"):
+        raise ValueError("compile operation content is not normalized")
 
 
 def _escape_yaml(value: object) -> str:
@@ -1347,18 +1449,6 @@ def _render_page(
     body_section = str(operation.get("body_section") or "Lesson")
     evidence = operation["evidence"]
     assert isinstance(evidence, list)
-    evidence_lines = []
-    if len(evidence_refs) != len(evidence):
-        raise ValueError("compiled evidence references do not match evidence entries")
-    for item, reference in zip(evidence, evidence_refs):
-        assert isinstance(item, dict)
-        evidence_lines.append(
-            f"- `{reference}` — {item.get('claim', '')}"
-        )
-    related = operation.get("related") or []
-    related_section = ""
-    if isinstance(related, list) and related:
-        related_section = "\n\n## Related\n" + "\n".join(f"- {item}" for item in related)
     text = (
         "---\n"
         f"type: {CATEGORY_SINGULAR[category]}\n"
@@ -1372,11 +1462,28 @@ def _render_page(
         f"One-sentence summary: {summary}\n\n"
         f"## {body_section}\n{operation['body_markdown']}\n\n"
         "## Evidence\n"
-        + "\n".join(evidence_lines)
-        + related_section
+        + _evidence_lines(evidence, evidence_refs)
+        + _related_section(operation.get("related"))
         + "\n"
     )
     return text.encode("utf-8")
+
+
+def _evidence_lines(
+    evidence: Sequence[object], evidence_refs: Sequence[str]
+) -> str:
+    if len(evidence_refs) != len(evidence):
+        raise ValueError("compiled evidence references do not match evidence entries")
+    return "\n".join(
+        f"- `{reference}` — {item.get('claim', '')}"
+        for item, reference in zip(evidence, evidence_refs)
+    )
+
+
+def _related_section(related: object) -> str:
+    if not isinstance(related, list) or not related:
+        return ""
+    return "\n\n## Related\n" + "\n".join(f"- {item}" for item in related)
 
 
 _CLAIM_LEDGER = re.compile(
@@ -2275,45 +2382,63 @@ def select_dailies(
     coordinator: MarkdownCoordinator,
 ) -> list[Path]:
     if args.file:
-        path = Path(args.file).resolve()
-        daily_root = DAILY_DIR.resolve()
-        try:
-            path.relative_to(daily_root)
-        except ValueError as exc:
-            raise SystemExit(
-                f"compile_memory: --file must be under {daily_root}, got {path}"
-            ) from exc
-        if not path.is_file() or path.suffix.lower() != ".md":
-            raise SystemExit(f"compile_memory: --file must be an existing .md daily log: {path}")
-        content = read_stable_bytes(path, MAX_SOURCE_BYTES, label="daily source")
-        logical_path = path.relative_to(ROOT).as_posix()
-        if daily_is_compiled(logical_path, content, _receipt_predicate(coordinator)):
-            return []
-        return [path]
-    all_dailies = _canonical_dailies()
-    changed: list[Path] = []
-    compiled_hashes = state.get("compiled_daily_hashes", {})
-    if not isinstance(compiled_hashes, dict):
-        compiled_hashes = {}
-    for p in all_dailies:
-        content = read_stable_bytes(p, MAX_SOURCE_BYTES, label="daily source")
-        digest = sha256_bytes(content)
-        logical_path = p.relative_to(ROOT).as_posix()
-        if daily_is_compiled(
-            logical_path, content, _receipt_predicate(coordinator)
-        ):
-            continue
-        key = p.name
-        if (
-            "/" not in key
-            and "\\" not in key
-            and key not in {"", ".", ".."}
-            and compiled_hashes.get(key) == digest
-            and p == DAILY_DIR / key
-        ):
-            continue
-        changed.append(p)
-    return changed
+        return _explicit_daily(Path(args.file).resolve(), coordinator)
+    compiled_hashes = _compiled_hashes(state)
+    return [
+        path
+        for path in _canonical_dailies()
+        if not _daily_already_compiled(path, compiled_hashes, coordinator)
+    ]
+
+
+def _explicit_daily(path: Path, coordinator: MarkdownCoordinator) -> list[Path]:
+    _require_inside_daily_dir(path)
+    if not path.is_file() or path.suffix.lower() != ".md":
+        raise SystemExit(
+            f"compile_memory: --file must be an existing .md daily log: {path}"
+        )
+    content = read_stable_bytes(path, MAX_SOURCE_BYTES, label="daily source")
+    logical_path = path.relative_to(ROOT).as_posix()
+    if daily_is_compiled(logical_path, content, _receipt_predicate(coordinator)):
+        return []
+    return [path]
+
+
+def _require_inside_daily_dir(path: Path) -> None:
+    daily_root = DAILY_DIR.resolve()
+    try:
+        path.relative_to(daily_root)
+    except ValueError as exc:
+        raise SystemExit(
+            f"compile_memory: --file must be under {daily_root}, got {path}"
+        ) from exc
+
+
+def _compiled_hashes(state: dict) -> dict:
+    compiled = state.get("compiled_daily_hashes", {})
+    if not isinstance(compiled, dict):
+        return {}
+    return compiled
+
+
+def _daily_already_compiled(
+    path: Path, compiled_hashes: dict, coordinator: MarkdownCoordinator
+) -> bool:
+    content = read_stable_bytes(path, MAX_SOURCE_BYTES, label="daily source")
+    logical_path = path.relative_to(ROOT).as_posix()
+    if daily_is_compiled(logical_path, content, _receipt_predicate(coordinator)):
+        return True
+    return _unchanged_since_last_compile(path, compiled_hashes, sha256_bytes(content))
+
+
+def _unchanged_since_last_compile(
+    path: Path, compiled_hashes: dict, digest: str
+) -> bool:
+    """State records digests under a bare file name, so the name must be safe."""
+    key = path.name
+    if "/" in key or "\\" in key or key in {"", ".", ".."}:
+        return False
+    return compiled_hashes.get(key) == digest and path == DAILY_DIR / key
 
 
 def _page_text(path: Path) -> str | None:
@@ -2536,51 +2661,69 @@ def _mark_finished(trigger: str, status: str, error: str | None = None) -> None:
 def _clear_compile_lock() -> None:
     """Clear the maybe_compile PID lock — only if we own it.
 
-    Reads the lock and verifies the PID matches ``os.getpid()`` (or is
-    the 0-placeholder written before our PID was known). Refuses to
-    delete a lock owned by another live process — that lock may belong
-    to a newer compile spawned after a stale-lock steal.
-
-    For PID-0 placeholders, checks the owner token against
-    ``maybe_compile._current_owner`` — only clears if we can prove we
-    wrote it. Otherwise leaves it for PID-0 TTL to handle.
+    Refuses to delete a lock owned by another live process: that lock may
+    belong to a newer compile spawned after a stale-lock steal. A PID-0
+    placeholder is cleared only when its owner token proves we wrote it;
+    otherwise it is left for the PID-0 TTL to handle.
     """
     try:
         lock_file = STATE_ROOT / "run" / "compile.pid"
-        if not lock_file.exists():
+        lines = _lock_lines(lock_file)
+        if lines is None:
             return
-        text = lock_file.read_text(encoding="utf-8").strip()
-        if not text:
-            lock_file.unlink()
-            return
-        lines = text.splitlines()
-        first_line = lines[0].strip() if lines else ""
-        try:
-            lock_pid = int(first_line)
-        except ValueError:
-            lock_file.unlink()
-            return
-        owner = lines[2].strip() if len(lines) >= 3 and lines[2].strip() else None
-        if lock_pid == os.getpid():
-            # We own this lock — safe to clear.
-            lock_file.unlink()
-        elif lock_pid == 0:
-            # PID-0 placeholder — only clear if we can prove ownership
-            # via the owner token. Otherwise leave for PID-0 TTL.
-            sys.path.insert(0, str(Path(__file__).resolve().parent))
-            import maybe_compile
-            if (
-                owner
-                and maybe_compile._current_owner
-                and owner == maybe_compile._current_owner
-            ):
-                lock_file.unlink()
-            # If we can't prove ownership, leave the lock for PID-0 TTL.
-        elif not _is_pid_alive(lock_pid):
-            try:
-                lock_file.unlink()
-            except OSError:
-                pass
+        if _lock_is_ours(lines):
+            _unlink_quietly(lock_file)
+    except OSError:
+        pass
+
+
+def _lock_lines(lock_file: Path) -> list[str] | None:
+    """The lock's lines, or None when there is nothing left to decide."""
+    if not lock_file.exists():
+        return None
+    text = lock_file.read_text(encoding="utf-8").strip()
+    if not text:
+        lock_file.unlink()
+        return None
+    return text.splitlines()
+
+
+def _lock_is_ours(lines: list[str]) -> bool:
+    pid = _lock_pid(lines)
+    if pid is None:
+        return True
+    if pid == os.getpid():
+        return True
+    if pid == 0:
+        return _own_placeholder(_lock_owner(lines))
+    return not _is_pid_alive(pid)
+
+
+def _lock_pid(lines: list[str]) -> int | None:
+    """None means the lock is unreadable, which makes it ours to remove."""
+    try:
+        return int(lines[0].strip())
+    except (IndexError, ValueError):
+        return None
+
+
+def _lock_owner(lines: list[str]) -> str:
+    if len(lines) < 3:
+        return ""
+    return lines[2].strip()
+
+
+def _own_placeholder(owner: str) -> bool:
+    """Only a matching owner token proves we wrote the PID-0 placeholder."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import maybe_compile
+
+    return bool(owner) and owner == maybe_compile._current_owner
+
+
+def _unlink_quietly(path: Path) -> None:
+    try:
+        path.unlink()
     except OSError:
         pass
 
@@ -2588,50 +2731,65 @@ def _clear_compile_lock() -> None:
 def main() -> int:
     args = parse_args()
     _mark_started(args.trigger)
-
-    # Acquire compile lock for direct runs. When spawned by maybe_compile,
-    # the lock already holds our PID (written by the spawner) — in that
-    # case we must NOT release it here (maybe_compile owns the lifecycle).
-    lock_acquired = False
-    try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        import maybe_compile
-
-        if maybe_compile._try_claim_lock():
-            # Direct run — we own the lock. Update PID 0 placeholder with
-            # our real PID and capture the owner token so _clear_lock()
-            # will recognise us on exit.
-            lock_acquired = True
-            maybe_compile._write_lock(os.getpid())
-            lock = maybe_compile._read_lock()
-            if lock:
-                maybe_compile._current_owner = lock.get("owner")
-        else:
-            # Lock claim failed — check if WE already hold it (spawned case).
-            lock = maybe_compile._read_lock()
-            if not (lock and lock.get("pid") == os.getpid()):
-                print(
-                    "compile_memory: another compile is running (lock held). Exiting.",
-                    file=sys.stderr,
-                )
-                _mark_finished(args.trigger, "error", "lock held by another compile")
-                return 1
-    except Exception:
-        # Best-effort lock check — never block a direct run on a lock failure.
-        pass
-
+    lock_acquired = _acquire_compile_lock()
+    if lock_acquired is None:
+        print(
+            "compile_memory: another compile is running (lock held). Exiting.",
+            file=sys.stderr,
+        )
+        _mark_finished(args.trigger, "error", "lock held by another compile")
+        return 1
     try:
         return _run(args)
     except BaseException as e:  # noqa: BLE001
         _mark_finished(args.trigger, "error", f"{type(e).__name__}: {e}")
         raise
     finally:
-        if lock_acquired:
-            try:
-                import maybe_compile
-                maybe_compile._clear_lock()
-            except Exception:
-                pass
+        _release_compile_lock(lock_acquired)
+
+
+def _acquire_compile_lock() -> bool | None:
+    """Claim the compile lock for a direct run.
+
+    True when this run owns the lock, False when the spawner owns it and must
+    keep it, None when another compile holds it. A lock failure never blocks a
+    direct run: the check is best effort.
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import maybe_compile
+
+        if maybe_compile._try_claim_lock():
+            return _claim_direct_lock(maybe_compile)
+        return False if _spawned_lock_is_ours(maybe_compile) else None
+    except Exception:
+        return False
+
+
+def _claim_direct_lock(maybe_compile: object) -> bool:
+    """Replace the PID-0 placeholder with our PID and keep the owner token."""
+    maybe_compile._write_lock(os.getpid())
+    lock = maybe_compile._read_lock()
+    if lock:
+        maybe_compile._current_owner = lock.get("owner")
+    return True
+
+
+def _spawned_lock_is_ours(maybe_compile: object) -> bool:
+    lock = maybe_compile._read_lock()
+    return bool(lock) and lock.get("pid") == os.getpid()
+
+
+def _release_compile_lock(lock_acquired: bool) -> None:
+    """maybe_compile owns the lifecycle of a lock it wrote for a spawned run."""
+    if not lock_acquired:
+        return
+    try:
+        import maybe_compile
+
+        maybe_compile._clear_lock()
+    except Exception:
+        pass
 
 
 def _run(
@@ -2802,38 +2960,86 @@ def merge_compile_diagnostics(
     touched: tuple[str, ...],
     trigger: str,
 ) -> None:
-    compiled = state.setdefault("compiled_daily_hashes", {})
-    if not isinstance(compiled, dict):
-        raise ValueError("compiled_daily_hashes must be a mapping")
-    commit_versions = state.setdefault("compiled_daily_commits", {})
-    if not isinstance(commit_versions, dict):
-        raise ValueError("compiled_daily_commits must be a mapping")
+    compiled = _require_state_mapping(state, "compiled_daily_hashes")
+    commit_versions = _require_state_mapping(state, "compiled_daily_commits")
+    stamp = (committed_at, commit_sequence)
     for name, digest in hashes.items():
-        previous = commit_versions.get(name, {})
-        previous_at = previous.get("committed_at", "") if isinstance(previous, dict) else ""
-        previous_sequence = previous.get("sequence", -1) if isinstance(previous, dict) else -1
-        if not isinstance(previous_at, str):
-            previous_at = ""
-        if not isinstance(previous_sequence, int) or isinstance(previous_sequence, bool):
-            previous_sequence = -1
-        if (committed_at, commit_sequence) <= (previous_at, previous_sequence):
-            continue
-        compiled[name] = digest
-        commit_versions[name] = {
-            "committed_at": committed_at,
-            "sequence": commit_sequence,
-        }
-    previous_sequence = state.get("last_compile_commit_sequence", -1)
-    previous_at = state.get("last_compile_committed_at", "")
-    if not isinstance(previous_sequence, int) or isinstance(previous_sequence, bool):
-        previous_sequence = -1
-    if not isinstance(previous_at, str):
-        previous_at = ""
-    if (committed_at, commit_sequence) <= (previous_at, previous_sequence):
+        _merge_daily_commit(compiled, commit_versions, name, digest, stamp)
+    if stamp <= _last_compile_stamp(state):
         return
-    state["last_compile_commit_sequence"] = commit_sequence
-    state["last_compile_committed_at"] = committed_at
-    state["last_compile_at"] = committed_at
+    _write_compile_summary(
+        state,
+        stamp=stamp,
+        hashes=hashes,
+        operation_id=operation_id,
+        action_key=action_key,
+        touched=touched,
+        trigger=trigger,
+    )
+
+
+def _require_state_mapping(state: dict[str, object], key: str) -> dict:
+    value = state.setdefault(key, {})
+    if not isinstance(value, dict):
+        raise ValueError(f"{key} must be a mapping")
+    return value
+
+
+def _merge_daily_commit(
+    compiled: dict,
+    commit_versions: dict,
+    name: str,
+    digest: str,
+    stamp: tuple[str, int],
+) -> None:
+    """Keep the newest commit for one day; a replayed older commit must not win."""
+    if stamp <= _previous_stamp(commit_versions.get(name)):
+        return
+    compiled[name] = digest
+    commit_versions[name] = {"committed_at": stamp[0], "sequence": stamp[1]}
+
+
+def _previous_stamp(previous: object) -> tuple[str, int]:
+    if not isinstance(previous, dict):
+        return ("", -1)
+    return (
+        _state_text(previous.get("committed_at")),
+        _state_sequence(previous.get("sequence")),
+    )
+
+
+def _last_compile_stamp(state: dict[str, object]) -> tuple[str, int]:
+    return (
+        _state_text(state.get("last_compile_committed_at")),
+        _state_sequence(state.get("last_compile_commit_sequence")),
+    )
+
+
+def _state_text(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value
+
+
+def _state_sequence(value: object) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        return -1
+    return value
+
+
+def _write_compile_summary(
+    state: dict[str, object],
+    *,
+    stamp: tuple[str, int],
+    hashes: dict[str, str],
+    operation_id: str,
+    action_key: str,
+    touched: tuple[str, ...],
+    trigger: str,
+) -> None:
+    state["last_compile_commit_sequence"] = stamp[1]
+    state["last_compile_committed_at"] = stamp[0]
+    state["last_compile_at"] = stamp[0]
     state["last_compile_trigger"] = trigger
     state["last_compiled_files"] = sorted(hashes)
     state["last_compiled_touched"] = list(touched)
