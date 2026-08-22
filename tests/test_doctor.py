@@ -4221,16 +4221,23 @@ def test_the_host_markers_are_ones_the_shipped_templates_actually_write() -> Non
         "claude": root / "integrations" / "claude-code" / "settings.json",
     }
     configs = doctor._integration_host_configs(Path.home())
-    missing: dict[str, list[str]] = {}
-    for name, template in shipped.items():
-        text = template.read_text(encoding="utf-8")
-        _host_dir, files = configs[name]
-        for _path, markers in files:
-            absent = [marker for marker in markers if marker not in text]
-            if absent:
-                missing[name] = absent
 
-    assert missing == {}
+    missing = {
+        name: _absent_markers(configs[name], template.read_text(encoding="utf-8"))
+        for name, template in shipped.items()
+    }
+
+    assert {name: absent for name, absent in missing.items() if absent} == {}
+
+
+def _absent_markers(config: tuple, text: str) -> list[str]:
+    _host_dir, files = config
+    return [
+        marker
+        for _path, markers in files
+        for marker in markers
+        if marker not in text
+    ]
 
 def test_the_pyright_advice_names_what_would_change_the_outcome() -> None:
     """Reinstalling cannot fix a repository that declares no Pyright settings."""
@@ -4267,3 +4274,76 @@ def test_a_file_that_will_not_parse_is_named_not_treated_as_ill_health() -> None
     assert doctor._generation_message(True, 3) == (
         "Evidence generation requires refresh."
     )
+
+
+def _transaction_database(state_root: Path, rows: list[tuple[str, str, str | None]]) -> None:
+    """A minimal coordinator database holding just the rows a check reads."""
+    import sqlite3
+
+    path = state_root / "run" / "markdown-transactions.sqlite3"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    database = sqlite3.connect(path)
+    database.execute(
+        'CREATE TABLE "transaction" (id TEXT PRIMARY KEY, operation_id TEXT, '
+        "request_hash TEXT, state TEXT, preconditions_json TEXT, plan_hash TEXT, "
+        "created_at TEXT, updated_at TEXT, parent_transaction_id TEXT, "
+        "error_code TEXT, artifacts_pruned_at TEXT, owner_pid INTEGER)"
+    )
+    for identifier, state, parent in rows:
+        database.execute(
+            'INSERT INTO "transaction" (id, operation_id, request_hash, state, '
+            "preconditions_json, plan_hash, created_at, updated_at, "
+            "parent_transaction_id) VALUES (?, ?, ?, ?, '{}', '', ?, ?, ?)",
+            (
+                identifier,
+                f"compile:{identifier}",
+                identifier,
+                state,
+                "2026-08-22T00:00:00Z",
+                "2026-08-22T00:00:00Z",
+                parent,
+            ),
+        )
+    database.commit()
+    database.close()
+
+
+def test_a_quarantined_attempt_a_later_one_committed_is_history_not_a_problem(
+    tmp_path, monkeypatch
+):
+    """Quarantine is retained evidence, so it must not be a permanent red light.
+
+    Once a retry in the same chain commits, the refused attempt is history. The
+    live vault would otherwise report `error` for as long as it keeps the
+    evidence, which is exactly how an operator learns to stop reading it.
+    """
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
+    _transaction_database(
+        state_root,
+        [("a" * 32, "quarantined", None), ("b" * 32, "committed", "a" * 32)],
+    )
+
+    check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "transactions")
+
+    assert check["status"] == "ok"
+    assert check["details"]["states"]["quarantined"] == 1
+    assert check["details"]["quarantined_unresolved"] == 0
+
+
+def test_a_quarantined_attempt_with_no_successor_still_needs_attention(
+    tmp_path, monkeypatch
+):
+    """The exemption is a successful retry, not the passage of time."""
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
+    _transaction_database(state_root, [("c" * 32, "quarantined", None)])
+
+    check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "transactions")
+
+    assert check["status"] == "error"
+    assert check["details"]["quarantined_unresolved"] == 1
