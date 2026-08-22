@@ -18,6 +18,31 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 
+# The property is that a blocked daemon worker never joins at exit, so the
+# interpreter leaves at once instead of waiting for it. Half a second measured
+# that on an idle machine and failed at 0.551 s on a loaded one, which is the
+# machine and not the property. The outer bound stays larger than the inner one
+# so a process that truly hangs still fails as a hang.
+_SHUTDOWN_SECONDS = 2.0
+_HUNG_PROCESS_SECONDS = 5.0
+
+
+def _expected_task_state(action: str) -> str:
+    if action == "queue-cancel":
+        return "ready"
+    return "dead"
+
+
+def _drain_mcp_workers(mcp_server, seconds: float = 30.0) -> None:
+    deadline = time.monotonic() + seconds
+    while mcp_server._MCP_WORKERS and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
+def _redrive_links(queue) -> list:
+    return [task.redrive_of for task in queue.list_tasks() if task.redrive_of]
+
+
 ENVELOPE_FIELDS = {
     "schema_version",
     "generated_at",
@@ -1732,11 +1757,11 @@ class TestHandleToolCall:
         assert process.stdout is not None
         assert process.stdout.readline().strip() == "TIMEOUT_RETURNED"
         shutdown_started = time.perf_counter()
-        stdout, stderr = process.communicate(timeout=1.0)
+        stdout, stderr = process.communicate(timeout=_HUNG_PROCESS_SECONDS)
 
         assert process.returncode == 0, stderr
         assert stdout == ""
-        assert time.perf_counter() - shutdown_started < 0.5
+        assert time.perf_counter() - shutdown_started < _SHUTDOWN_SECONDS
 
     def test_thread_start_failure_releases_reserved_worker_slot(self, monkeypatch):
         import threading
@@ -1784,6 +1809,33 @@ class TestHandleToolCall:
             assert r"C:\private\vault" not in encoded
         assert "Unknown tool:" in unknown["data"]["error"]
         assert "failed at" in helper["data"]["nested"]["error"]
+
+    def test_a_failed_tool_call_records_which_tool_failed(self, monkeypatch):
+        import capture_diagnostics
+        import mcp_server
+
+        recorded: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            capture_diagnostics,
+            "record_capture_failure",
+            lambda kind, reason, **_options: recorded.append((kind, reason)),
+        )
+
+        def explode(*_args, **_options):
+            raise RuntimeError("page read exploded")
+
+        monkeypatch.setattr(mcp_server, "_read_page", explode)
+        envelope = json.loads(
+            mcp_server._execute_tool_call(
+                "read_page", {"slug": "any-page"}, time.monotonic() + 5
+            )
+        )
+
+        assert envelope["data"]["error"] == "operation_failed"
+        assert recorded, "the failure left no diagnostic trace at all"
+        kind, reason = recorded[-1]
+        assert kind == "mcp_tool"
+        assert reason.startswith("mcp.read_page:"), reason
 
     @pytest.mark.parametrize("action", ["queue-cancel", "queue-redrive"])
     def test_queue_mutations_receive_exact_doctor_deadline(self, monkeypatch, action):
@@ -1915,20 +1967,14 @@ class TestHandleToolCall:
             )
             assert commit_reached.is_set()
             assert json.loads(text)["data"] == {"error": "operation_timeout"}
-            assert queue.get(task_id).state == (
-                "ready" if action == "queue-cancel" else "dead"
-            )
+            assert queue.get(task_id).state == _expected_task_state(action)
         finally:
             release_commit.set()
 
-        deadline = time.monotonic() + 30
-        while mcp_server._MCP_WORKERS and time.monotonic() < deadline:
-            time.sleep(0.01)
+        _drain_mcp_workers(mcp_server)
         assert not mcp_server._MCP_WORKERS
-        assert queue.get(task_id).state == (
-            "ready" if action == "queue-cancel" else "dead"
-        )
-        assert [task.redrive_of for task in queue.list_tasks() if task.redrive_of] == []
+        assert queue.get(task_id).state == _expected_task_state(action)
+        assert _redrive_links(queue) == []
 
     def test_timed_out_log_decision_never_appends_after_response(
         self, tmp_path, monkeypatch
@@ -4551,6 +4597,17 @@ def test_every_precise_route_builds_one_request_and_one_renderer_window(
     assert data["status"] == "ok"
 
 
+def _assert_relative_graph_locations(items) -> None:
+    assert all(not Path(item.path).is_absolute() for item in items)
+    assert all(item.provenance[0].source == "graph" for item in items)
+
+
+def _assert_bounded_source_reads(reads, deadline) -> None:
+    assert reads
+    assert all(max_bytes == 16 * 1024 * 1024 for _path, max_bytes, _deadline in reads)
+    assert all(read_deadline == deadline for _path, _max, read_deadline in reads)
+
+
 def test_real_navigation_adapters_return_only_contained_exact_graph_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4709,11 +4766,8 @@ def test_real_navigation_adapters_return_only_contained_exact_graph_evidence(
     ]
     assert resolved == definitions
     assert verified is True
-    assert all(not Path(item.path).is_absolute() for item in (*definitions, *calls))
-    assert all(item.provenance[0].source == "graph" for item in (*definitions, *calls))
-    assert reads
-    assert all(max_bytes == 16 * 1024 * 1024 for _path, max_bytes, _deadline in reads)
-    assert all(read_deadline == deadline for _path, _max, read_deadline in reads)
+    _assert_relative_graph_locations((*definitions, *calls))
+    _assert_bounded_source_reads(reads, deadline)
 
 
 def test_navigation_source_bytes_uses_retained_containment_reader(

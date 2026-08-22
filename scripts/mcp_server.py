@@ -155,14 +155,20 @@ def _check_deadline(deadline: float | None) -> None:
         raise TimeoutError("MCP operation deadline reached")
 
 
+def _positioned_architecture_call(arguments: dict, mode: str) -> bool:
+    if mode not in {"callers", "callees"}:
+        return False
+    return all(key in arguments for key in ("path", "line", "character"))
+
+
 def _tool_operation_seconds(name: str, arguments: object) -> float:
-    if name == "get_architecture" and isinstance(arguments, dict):
-        mode = arguments.get("mode", "summary")
-        positioned_calls = mode in {"callers", "callees"} and all(
-            key in arguments for key in ("path", "line", "character")
-        )
-        if mode in PRECISE_ARCHITECTURE_MODES or positioned_calls:
-            return MCP_LSP_STARTUP_SECONDS
+    if name != "get_architecture" or not isinstance(arguments, dict):
+        return MCP_OPERATION_SECONDS
+    mode = arguments.get("mode", "summary")
+    if mode in PRECISE_ARCHITECTURE_MODES:
+        return MCP_LSP_STARTUP_SECONDS
+    if _positioned_architecture_call(arguments, mode):
+        return MCP_LSP_STARTUP_SECONDS
     return MCP_OPERATION_SECONDS
 
 
@@ -182,16 +188,17 @@ def _call_with_deadline(function, *args, deadline: float, **kwargs):
     return function(*args, **kwargs)
 
 
-async def _run_bounded(function, *args, deadline: float):
-    """Run synchronous work off-loop without an unbounded submission queue."""
-    _check_deadline(deadline)
-    submitted = concurrent.futures.Future()
+def _cancellation_context():
+    """Copy the caller context with the abandonment flag already bound in it."""
     abandoned = threading.Event()
     cancellation_token = _OPERATION_CANCELLED.set(abandoned.is_set)
     try:
-        context = contextvars.copy_context()
+        return abandoned, contextvars.copy_context()
     finally:
         _OPERATION_CANCELLED.reset(cancellation_token)
+
+
+def _reserve_mcp_worker(submitted) -> None:
     with _MCP_WORKERS_LOCK:
         _MCP_WORKERS.difference_update(
             future for future in _MCP_WORKERS if future.done()
@@ -200,33 +207,47 @@ async def _run_bounded(function, *args, deadline: float):
             raise TimeoutError("MCP worker capacity exhausted")
         _MCP_WORKERS.add(submitted)
 
+
+def _completed_worker_error(completed):
+    try:
+        return completed.exception()
+    except concurrent.futures.CancelledError:
+        return None
+
+
+def _discard_mcp_worker(completed, abandoned) -> None:
+    error = _completed_worker_error(completed)
+    if error is not None and abandoned.is_set():
+        print(
+            f"mcp worker failed after caller timeout: {type(error).__name__}",
+            file=sys.stderr,
+        )
+    with _MCP_WORKERS_LOCK:
+        _MCP_WORKERS.discard(completed)
+
+
+def _worker_discarder(abandoned):
     def discard(completed):
-        try:
-            error = completed.exception()
-        except concurrent.futures.CancelledError:
-            error = None
-        if error is not None and abandoned.is_set():
-            print(
-                f"mcp worker failed after caller timeout: {type(error).__name__}",
-                file=sys.stderr,
-            )
-        with _MCP_WORKERS_LOCK:
-            _MCP_WORKERS.discard(completed)
+        _discard_mcp_worker(completed, abandoned)
 
-    submitted.add_done_callback(discard)
+    return discard
 
-    def run():
-        if not submitted.set_running_or_notify_cancel():
-            return
-        try:
-            result = context.run(function, *args)
-        except BaseException as error:
-            submitted.set_exception(error)
-        else:
-            submitted.set_result(result)
 
+def _run_submitted(submitted, context, function, args) -> None:
+    if not submitted.set_running_or_notify_cancel():
+        return
+    try:
+        result = context.run(function, *args)
+    except BaseException as error:
+        submitted.set_exception(error)
+    else:
+        submitted.set_result(result)
+
+
+def _start_worker_thread(submitted, context, function, args) -> None:
     thread = threading.Thread(
-        target=run,
+        target=_run_submitted,
+        args=(submitted, context, function, args),
         name=f"llm-wiki-mcp-{next(_MCP_WORKER_IDS)}",
         daemon=True,
     )
@@ -235,6 +256,16 @@ async def _run_bounded(function, *args, deadline: float):
     except BaseException:
         submitted.cancel()
         raise
+
+
+async def _run_bounded(function, *args, deadline: float):
+    """Run synchronous work off-loop without an unbounded submission queue."""
+    _check_deadline(deadline)
+    submitted = concurrent.futures.Future()
+    abandoned, context = _cancellation_context()
+    _reserve_mcp_worker(submitted)
+    submitted.add_done_callback(_worker_discarder(abandoned))
+    _start_worker_thread(submitted, context, function, args)
     future = asyncio.wrap_future(submitted)
     try:
         done, _pending = await asyncio.wait(
@@ -559,39 +590,55 @@ def _search_vault(
     """Run hybrid search on the vault."""
     if not isinstance(query, str) or len(query) > MAX_MCP_QUERY_LENGTH:
         raise ValueError("query exceeds the MCP retrieval bound")
-    from search_memory import search
+    operation_deadline = _search_deadline(deadline)
+    try:
+        return _run_vault_search(query, limit, operation_deadline, semantic=True)
+    except TimeoutError:
+        lexical = _run_vault_search(
+            query, limit, operation_deadline, semantic=False, graph=False, rerank=False
+        )
+        return [_lexical_fallback_row(row) for row in lexical]
 
+
+def _search_deadline(deadline: float | None) -> float:
     operation_deadline = (
         _SEARCH_OPERATION_DEADLINE.get() if deadline is None else deadline
     )
     if operation_deadline is None:
-        operation_deadline = time.monotonic() + MCP_OPERATION_SECONDS
+        return time.monotonic() + MCP_OPERATION_SECONDS
+    return operation_deadline
 
-    def run_search(*, semantic: bool, graph: bool = True, rerank: bool = True) -> list[dict]:
-        return search(
-            query,
-            limit=limit,
-            semantic=semantic,
-            graph=graph,
-            rerank=rerank,
-            source_tool="mcp.recall",
-            deadline_monotonic=operation_deadline,
-            max_candidates=limit,
-        )
 
-    try:
-        return run_search(semantic=True)
-    except TimeoutError:
-        lexical = run_search(semantic=False, graph=False, rerank=False)
-        return [
-            {
-                **row,
-                "requested_mode": "HYBRID",
-                "fallback_reason": "retrieval_deadline_exceeded",
-                "partial": True,
-            }
-            for row in lexical
-        ]
+def _run_vault_search(
+    query: str,
+    limit: int,
+    operation_deadline: float,
+    *,
+    semantic: bool,
+    graph: bool = True,
+    rerank: bool = True,
+) -> list[dict]:
+    from search_memory import search
+
+    return search(
+        query,
+        limit=limit,
+        semantic=semantic,
+        graph=graph,
+        rerank=rerank,
+        source_tool="mcp.recall",
+        deadline_monotonic=operation_deadline,
+        max_candidates=limit,
+    )
+
+
+def _lexical_fallback_row(row: dict) -> dict:
+    return {
+        **row,
+        "requested_mode": "HYBRID",
+        "fallback_reason": "retrieval_deadline_exceeded",
+        "partial": True,
+    }
 
 
 def _retrieval_trace(query: str, results: list[dict]) -> dict[str, object]:
@@ -651,94 +698,143 @@ def _read_page(
     """Read a full page by slug."""
     from memory_state import ROOT, STATE_ROOT
 
-    if not isinstance(slug, str) or len(slug) > MAX_MCP_SLUG_LENGTH:
-        return {"error": "Invalid page slug"}
-    windows_path = PureWindowsPath(slug)
-    if (
-        slug in {".", ".."}
-        or "/" in slug
-        or "\\" in slug
-        or windows_path.drive
-        or Path(slug).is_absolute()
-    ):
-        return {"error": f"Invalid page slug: {slug}"}
-    notes_dir = ROOT / "knowledge" / "notes"
-    page_path = notes_dir / f"{slug}.md"
+    page_path = _readable_page_path(ROOT, slug, deadline)
+    if isinstance(page_path, dict):
+        return page_path
+    content = _page_content(page_path)
+    if isinstance(content, dict):
+        return content
+    evidence = _page_evidence(ROOT, STATE_ROOT, content, resolve_evidence, deadline)
+    if isinstance(evidence, dict):
+        return evidence
+    if emit_telemetry:
+        _record_page_reads(slug, evidence)
+    return {
+        "slug": slug,
+        "path": str(page_path.relative_to(ROOT)),
+        "content": content,
+        "evidence": evidence,
+    }
+
+
+def _readable_page_path(root: Path, slug, deadline):
+    """Return the page path, or the error dict the caller must hand back."""
+    invalid = _invalid_slug_error(slug)
+    if invalid is not None:
+        return invalid
+    page_path = root / "knowledge" / "notes" / f"{slug}.md"
     _check_deadline(deadline)
     if not page_path.exists():
         return {"error": f"Page not found: {slug}"}
+    return page_path
+
+
+def _slug_is_pathlike(slug: str) -> bool:
+    if slug in {".", ".."}:
+        return True
+    if "/" in slug or "\\" in slug:
+        return True
+    return bool(PureWindowsPath(slug).drive) or Path(slug).is_absolute()
+
+
+def _invalid_slug_error(slug) -> dict | None:
+    if not isinstance(slug, str) or len(slug) > MAX_MCP_SLUG_LENGTH:
+        return {"error": "Invalid page slug"}
+    if _slug_is_pathlike(slug):
+        return {"error": f"Invalid page slug: {slug}"}
+    return None
+
+
+def _page_content(page_path: Path):
+    """Return the decoded page, or the error dict the caller must hand back."""
     try:
-        content = read_stable_bytes(
+        return read_stable_bytes(
             page_path, MAX_MCP_PAGE_BYTES, label="MCP page"
         ).decode("utf-8", errors="strict")
     except (OSError, UnicodeDecodeError, ValueError) as exc:
         return {"error": f"Page read failed: {_safe_page_read_error(exc)}"}
+
+
+def _require_evidence_within_bounds(resolved, evidence_bytes: int, error_class) -> int:
+    if len(resolved.bytes) > MAX_MCP_EVIDENCE_BYTES:
+        raise error_class(f"evidence slice exceeds {MAX_MCP_EVIDENCE_BYTES} bytes")
+    if evidence_bytes + len(resolved.bytes) > MAX_MCP_TOTAL_EVIDENCE_BYTES:
+        raise error_class(
+            f"total evidence exceeds {MAX_MCP_TOTAL_EVIDENCE_BYTES} bytes"
+        )
+    return len(resolved.bytes)
+
+
+def _resolved_evidence(resolver, references, deadline, error_class) -> list:
+    evidence = []
+    evidence_bytes = 0
+    for reference in references:
+        _check_deadline(deadline)
+        resolved = resolver.resolve(reference)
+        evidence_bytes += _require_evidence_within_bounds(
+            resolved, evidence_bytes, error_class
+        )
+        evidence.append(
+            {
+                "reference": str(reference),
+                "sha256": resolved.sha256,
+                "text": resolved.bytes.decode("utf-8", errors="strict"),
+            }
+        )
+    return evidence
+
+
+def _page_evidence(root, state_root, content: str, resolve_evidence: bool, deadline):
+    """Return resolved evidence, or the error dict the caller must hand back."""
     from evidence_resolver import (
         EvidenceResolutionError,
         EvidenceResolver,
         extract_evidence_references,
     )
 
-    evidence = []
-    evidence_bytes = 0
-    resolver = EvidenceResolver(ROOT, state_root=STATE_ROOT)
+    resolver = EvidenceResolver(root, state_root=state_root)
     try:
         references = extract_evidence_references(content) if resolve_evidence else []
-        for reference in references:
-            _check_deadline(deadline)
-            resolved = resolver.resolve(reference)
-            if len(resolved.bytes) > MAX_MCP_EVIDENCE_BYTES:
-                raise EvidenceResolutionError(
-                    f"evidence slice exceeds {MAX_MCP_EVIDENCE_BYTES} bytes"
-                )
-            evidence_bytes += len(resolved.bytes)
-            if evidence_bytes > MAX_MCP_TOTAL_EVIDENCE_BYTES:
-                raise EvidenceResolutionError(
-                    f"total evidence exceeds {MAX_MCP_TOTAL_EVIDENCE_BYTES} bytes"
-                )
-            evidence.append(
-                {
-                    "reference": str(reference),
-                    "sha256": resolved.sha256,
-                    "text": resolved.bytes.decode("utf-8", errors="strict"),
-                }
-            )
+        return _resolved_evidence(
+            resolver, references, deadline, EvidenceResolutionError
+        )
     except (EvidenceResolutionError, OSError, UnicodeDecodeError, ValueError) as exc:
         return {"error": f"Evidence resolution failed: {_safe_evidence_error(exc)}"}
-    result = {
-        "slug": slug,
-        "path": str(page_path.relative_to(ROOT)),
-        "content": content,
-        "evidence": evidence,
-    }
-    if emit_telemetry:
-        try:
-            from retrieval_telemetry import (
-                best_effort_make_event,
-                best_effort_record_events,
-            )
 
-            events = []
-            for kind, candidate_id in [
-                ("page_read", slug),
-                *(("evidence_read", item["sha256"]) for item in evidence),
-            ]:
-                event = best_effort_make_event(
-                    event_kind=kind,
-                    query=None,
-                    retrieval_mode="direct",
-                    candidate_id=candidate_id,
-                    rank=None,
-                    generation="legacy",
-                    source_tool="mcp.read_page",
-                )
-                if event is not None:
-                    events.append(event)
-            if events:
-                best_effort_record_events(events)
-        except Exception:
-            pass
-    return result
+
+def _page_read_events(make_event, kinds) -> list:
+    events = []
+    for kind, candidate_id in kinds:
+        event = make_event(
+            event_kind=kind,
+            query=None,
+            retrieval_mode="direct",
+            candidate_id=candidate_id,
+            rank=None,
+            generation="legacy",
+            source_tool="mcp.read_page",
+        )
+        if event is not None:
+            events.append(event)
+    return events
+
+
+def _record_page_reads(slug: str, evidence: list) -> None:
+    try:
+        from retrieval_telemetry import (
+            best_effort_make_event,
+            best_effort_record_events,
+        )
+
+        kinds = [
+            ("page_read", slug),
+            *(("evidence_read", item["sha256"]) for item in evidence),
+        ]
+        events = _page_read_events(best_effort_make_event, kinds)
+        if events:
+            best_effort_record_events(events)
+    except Exception:
+        pass
 
 
 def _wiki_overview(*, deadline: float | None = None) -> dict:
@@ -764,25 +860,35 @@ def _vault_status(*, deadline: float | None = None) -> dict:
     _check_deadline(deadline)
     state = load_state()
     compiled = state.get("compiled_daily_hashes", {}) or {}
-    try:
-        daily_files = list((ROOT / "knowledge" / "daily").glob("*.md"))
-    except OSError:
-        daily_files = []
-    backlog = 0
-    for daily_path in daily_files:
-        _check_deadline(deadline)
-        try:
-            current_hash = file_hash(daily_path)
-        except OSError:
-            backlog += 1
-            continue
-        if compiled.get(daily_path.name) != current_hash:
-            backlog += 1
     return {
         "last_compile": state.get("last_compile_at", "never"),
         "last_compile_status": state.get("last_compile_status", "unknown"),
-        "compile_backlog": backlog,
+        "compile_backlog": _compile_backlog(ROOT, file_hash, compiled, deadline),
     }
+
+
+def _daily_files(root: Path) -> list[Path]:
+    try:
+        return list((root / "knowledge" / "daily").glob("*.md"))
+    except OSError:
+        return []
+
+
+def _daily_needs_compile(daily_path: Path, file_hash, compiled: dict) -> bool:
+    try:
+        current_hash = file_hash(daily_path)
+    except OSError:
+        return True
+    return compiled.get(daily_path.name) != current_hash
+
+
+def _compile_backlog(root: Path, file_hash, compiled: dict, deadline) -> int:
+    backlog = 0
+    for daily_path in _daily_files(root):
+        _check_deadline(deadline)
+        if _daily_needs_compile(daily_path, file_hash, compiled):
+            backlog += 1
+    return backlog
 
 
 def _get_decisions(
@@ -790,10 +896,8 @@ def _get_decisions(
 ) -> list[dict]:
     """Get active decisions from the vault."""
     from search_memory import search
-    if query is not None and (
-        not isinstance(query, str) or len(query) > MAX_MCP_QUERY_LENGTH
-    ):
-        raise ValueError("query exceeds the MCP retrieval bound")
+
+    _require_decision_query(query)
     effective_query = query or "decision"
     candidates = search(
         effective_query,
@@ -802,41 +906,57 @@ def _get_decisions(
         emit_telemetry=False,
         deadline_monotonic=deadline,
     )
-    # Filter to decision-type pages
-    results = [
-        result
-        for result in candidates
-        if result.get("type") == "decision"
-        or "decision" in result.get("path", "").lower()
-    ]
-    if results:
-        try:
-            from retrieval_telemetry import (
-                best_effort_make_event,
-                best_effort_record_events,
-            )
-
-            events = []
-            for rank, result in enumerate(results, start=1):
-                candidate_id = result.get("slug") or Path(
-                    result.get("path", "")
-                ).stem
-                event = best_effort_make_event(
-                    event_kind="impression",
-                    query=effective_query,
-                    retrieval_mode="decision-filter",
-                    candidate_id=candidate_id,
-                    rank=rank,
-                    generation="legacy",
-                    source_tool="mcp.get_decisions",
-                )
-                if event is not None:
-                    events.append(event)
-            if events:
-                best_effort_record_events(events)
-        except Exception:
-            pass
+    results = [result for result in candidates if _is_decision_result(result)]
+    _record_decision_impressions(effective_query, results)
     return results
+
+
+def _require_decision_query(query) -> None:
+    if query is None:
+        return
+    if not isinstance(query, str) or len(query) > MAX_MCP_QUERY_LENGTH:
+        raise ValueError("query exceeds the MCP retrieval bound")
+
+
+def _is_decision_result(result: dict) -> bool:
+    if result.get("type") == "decision":
+        return True
+    return "decision" in result.get("path", "").lower()
+
+
+def _decision_impression_events(make_event, effective_query: str, results: list) -> list:
+    events = []
+    for rank, result in enumerate(results, start=1):
+        event = make_event(
+            event_kind="impression",
+            query=effective_query,
+            retrieval_mode="decision-filter",
+            candidate_id=result.get("slug") or Path(result.get("path", "")).stem,
+            rank=rank,
+            generation="legacy",
+            source_tool="mcp.get_decisions",
+        )
+        if event is not None:
+            events.append(event)
+    return events
+
+
+def _record_decision_impressions(effective_query: str, results: list) -> None:
+    if not results:
+        return
+    try:
+        from retrieval_telemetry import (
+            best_effort_make_event,
+            best_effort_record_events,
+        )
+
+        events = _decision_impression_events(
+            best_effort_make_event, effective_query, results
+        )
+        if events:
+            best_effort_record_events(events)
+    except Exception:
+        pass
 
 
 def _get_context(
@@ -847,137 +967,205 @@ def _get_context(
     deadline: float | None = None,
 ) -> dict:
     """Return one compiler package under one shared token budget."""
-    if not isinstance(slugs, list) or not 1 <= len(slugs) <= MAX_MCP_CONTEXT_SLUGS:
-        raise ValueError("slugs exceed the MCP context bound")
-    if any(
-        not isinstance(slug, str) or len(slug) > MAX_MCP_SLUG_LENGTH
-        for slug in slugs
-    ):
-        raise ValueError("slug exceeds the MCP context bound")
-    include = include or []
-    if not isinstance(include, list) or len(include) > MAX_MCP_CONTEXT_INCLUDE:
-        raise ValueError("include exceeds the MCP context bound")
-    if any(
-        not isinstance(item, str) or len(item) > MAX_MCP_INCLUDE_LENGTH
-        for item in include
-    ):
-        raise ValueError("include item exceeds the MCP context bound")
-    slugs = list(dict.fromkeys(slugs))
-    include = list(dict.fromkeys(include))
-    if (
-        isinstance(token_budget, bool)
-        or not isinstance(token_budget, int)
-        or not 256 <= token_budget <= MAX_MCP_CONTEXT_TOKENS
-    ):
-        raise ValueError("token_budget exceeds the MCP context bound")
-
-    from context_budget import BudgetExceededError, ContextBudget
-    from context_compiler import compile_context
-    from corpus_snapshot import CorpusSnapshot, collect_corpus
+    from corpus_snapshot import collect_corpus
     from memory_state import ROOT
 
+    slugs, include = _validated_context_request(slugs, include, token_budget)
     operation_deadline = _operation_deadline(deadline)
     snapshot = collect_corpus(ROOT, deadline=operation_deadline)
-    requested = set(slugs)
-    sources = tuple(
-        source
-        for source in snapshot.sources
-        if Path(source.record.relative_path).stem in requested
-        or source.record.logical_id in requested
-        or source.record.relative_path in requested
+    selection = _context_selection(snapshot, set(slugs))
+    compiled = _compiled_context(
+        snapshot, selection, token_budget, operation_deadline
     )
-    selected_paths = {source.record.relative_path for source in sources}
-    found_requested = {
-        requested_slug
-        for requested_slug in requested
-        for source in sources
-        if requested_slug
-        in {
-            Path(source.record.relative_path).stem,
-            source.record.logical_id,
-            source.record.relative_path,
-        }
+    _record_context_injections(selection["selected_paths"])
+    return _context_result(compiled, snapshot, selection, token_budget, include)
+
+
+def _slug_exceeds_bound(slug) -> bool:
+    return not isinstance(slug, str) or len(slug) > MAX_MCP_SLUG_LENGTH
+
+
+def _include_exceeds_bound(item) -> bool:
+    return not isinstance(item, str) or len(item) > MAX_MCP_INCLUDE_LENGTH
+
+
+def _require_context_slugs(slugs) -> None:
+    if not isinstance(slugs, list) or not 1 <= len(slugs) <= MAX_MCP_CONTEXT_SLUGS:
+        raise ValueError("slugs exceed the MCP context bound")
+    if any(_slug_exceeds_bound(slug) for slug in slugs):
+        raise ValueError("slug exceeds the MCP context bound")
+
+
+def _require_context_include(include) -> None:
+    if not isinstance(include, list) or len(include) > MAX_MCP_CONTEXT_INCLUDE:
+        raise ValueError("include exceeds the MCP context bound")
+    if any(_include_exceeds_bound(item) for item in include):
+        raise ValueError("include item exceeds the MCP context bound")
+
+
+def _require_context_token_budget(token_budget) -> None:
+    if isinstance(token_budget, bool) or not isinstance(token_budget, int):
+        raise ValueError("token_budget exceeds the MCP context bound")
+    if not 256 <= token_budget <= MAX_MCP_CONTEXT_TOKENS:
+        raise ValueError("token_budget exceeds the MCP context bound")
+
+
+def _validated_context_request(slugs, include, token_budget):
+    _require_context_slugs(slugs)
+    include = include or []
+    _require_context_include(include)
+    _require_context_token_budget(token_budget)
+    return list(dict.fromkeys(slugs)), list(dict.fromkeys(include))
+
+
+def _source_identities(source) -> set:
+    return {
+        Path(source.record.relative_path).stem,
+        source.record.logical_id,
+        source.record.relative_path,
     }
-    chunks = tuple(
+
+
+def _source_matches(source, requested: set) -> bool:
+    return bool(_source_identities(source) & requested)
+
+
+def _selected_sources(snapshot, requested: set) -> tuple:
+    return tuple(
+        source for source in snapshot.sources if _source_matches(source, requested)
+    )
+
+
+def _selected_chunks(snapshot, selected_paths: set) -> tuple:
+    return tuple(
         chunk for chunk in snapshot.chunks if chunk.parent_page in selected_paths
     )
+
+
+def _missing_context_slugs(sources, requested: set) -> list:
+    found = set()
+    for source in sources:
+        found |= _source_identities(source) & requested
+    return sorted(requested - found)
+
+
+def _context_selection(snapshot, requested: set) -> dict:
+    sources = _selected_sources(snapshot, requested)
+    selected_paths = {source.record.relative_path for source in sources}
+    return {
+        "sources": sources,
+        "selected_paths": selected_paths,
+        "missing": _missing_context_slugs(sources, requested),
+        "chunks": _selected_chunks(snapshot, selected_paths),
+    }
+
+
+def _compiled_context(snapshot, selection: dict, token_budget: int, deadline):
+    from context_budget import BudgetExceededError, ContextBudget
+    from context_compiler import compile_context
+    from corpus_snapshot import CorpusSnapshot
+
     narrow = CorpusSnapshot(
-        sources,
-        chunks,
+        selection["sources"],
+        selection["chunks"],
         snapshot.corpus_sha256,
         snapshot.policy,
         snapshot.collector_version,
         snapshot.extractor_version,
     )
     budget = ContextBudget(None, token_budget, 0, 0)
-    shortlist = tuple(source.record.logical_id for source in sources)
+    shortlist = tuple(source.record.logical_id for source in selection["sources"])
     try:
-        compiled = compile_context(
+        return compile_context(
             narrow,
             shortlist=shortlist,
-            evidence_chunk_ids=(chunk.id for chunk in chunks),
+            evidence_chunk_ids=(chunk.id for chunk in selection["chunks"]),
             budget=budget,
-            deadline=operation_deadline,
+            deadline=deadline,
         )
     except BudgetExceededError:
-        compiled = compile_context(
+        return compile_context(
             narrow,
             shortlist=shortlist,
             evidence_chunk_ids=(),
             budget=budget,
-            deadline=operation_deadline,
+            deadline=deadline,
         )
+
+
+def _page_items(items: list) -> list:
+    return [item for item in items if item["source"].endswith(".md")]
+
+
+def _symbol_items(items: list) -> list:
+    return [item for item in items if not item["source"].endswith(".md")]
+
+
+def _items_of_type(items: list, types: set) -> list:
+    return [item for item in items if item["type"] in types]
+
+
+def _items_of_representation(items: list, representation: str) -> list:
+    return [item for item in items if item["representation"] == representation]
+
+
+def _materialization_trace(compiled) -> list:
+    return [asdict(item) for item in compiled.trace.materializations]
+
+
+def _context_result(compiled, snapshot, selection: dict, token_budget: int, include):
     items = [asdict(item) for item in compiled.items]
-    pages = [item for item in items if item["source"].endswith(".md")]
-    result = {
+    return {
         "text": compiled.text,
         "packed_tokens": compiled.packed_tokens,
         "token_budget": token_budget,
         "corpus_generation": snapshot.corpus_sha256,
-        "repo_map": sorted(selected_paths),
-        "pages": pages,
-        "symbols": [item for item in items if not item["source"].endswith(".md")],
-        "decisions": [item for item in items if item["type"] == "decision"],
-        "incidents": [
-            item for item in items if item["type"] in {"debugging", "incident"}
-        ],
-        "active_task": [item for item in items if item["type"] == "project-state"],
-        "evidence": [item for item in items if item["representation"] == "l2"],
+        "repo_map": sorted(selection["selected_paths"]),
+        "pages": _page_items(items),
+        "symbols": _symbol_items(items),
+        "decisions": _items_of_type(items, {"decision"}),
+        "incidents": _items_of_type(items, {"debugging", "incident"}),
+        "active_task": _items_of_type(items, {"project-state"}),
+        "evidence": _items_of_representation(items, "l2"),
         "retrieval_trace": asdict(compiled.trace.retrieval),
-        "materialization_trace": [
-            asdict(item) for item in compiled.trace.materializations
-        ],
+        "materialization_trace": _materialization_trace(compiled),
         "packing_trace": asdict(compiled.trace.packing),
-        "missing_slugs": sorted(requested - found_requested),
+        "missing_slugs": selection["missing"],
         "include": include,
     }
-    if sources:
-        try:
-            from retrieval_telemetry import (
-                best_effort_make_event,
-                best_effort_record_events,
-            )
 
-            events = [
-                event
-                for slug in sorted({Path(path).stem for path in selected_paths})
-                if (
-                    event := best_effort_make_event(
-                        event_kind="context_injected",
-                        query=None,
-                        retrieval_mode="direct",
-                        candidate_id=slug,
-                        rank=None,
-                        generation="legacy",
-                        source_tool="mcp.get_context",
-                    )
-                ) is not None
-            ]
-            if events:
-                best_effort_record_events(events)
-        except Exception:
-            pass
-    return result
+
+def _context_injection_events(make_event, selected_paths: set) -> list:
+    events = []
+    for slug in sorted({Path(path).stem for path in selected_paths}):
+        event = make_event(
+            event_kind="context_injected",
+            query=None,
+            retrieval_mode="direct",
+            candidate_id=slug,
+            rank=None,
+            generation="legacy",
+            source_tool="mcp.get_context",
+        )
+        if event is not None:
+            events.append(event)
+    return events
+
+
+def _record_context_injections(selected_paths: set) -> None:
+    if not selected_paths:
+        return
+    try:
+        from retrieval_telemetry import (
+            best_effort_make_event,
+            best_effort_record_events,
+        )
+
+        events = _context_injection_events(best_effort_make_event, selected_paths)
+        if events:
+            best_effort_record_events(events)
+    except Exception:
+        pass
 
 
 def _assess_contradiction_text(
@@ -1022,7 +1210,7 @@ def _log_decision(
         )
         return {"status": "logged", "path": str(path)}
     except Exception as e:
-        return {"error": _safe_exception_text(e)}
+        return {"error": _safe_exception_text(e, "mcp.log_decision")}
 
 
 def _trigger_compile(*, deadline: float | None = None) -> dict:
@@ -1088,6 +1276,122 @@ def _get_architecture(
     }
 
 
+_ARCHITECTURE_SYMBOL_MODES = {"symbol", "callers", "callees", "dependencies"}
+
+_ARCHITECTURE_REPORT_KEYS = (
+    "source_generation",
+    "graph_complete",
+    "unresolved_count",
+    "fallback",
+)
+
+
+def _architecture_path_mode_error(mode: str, symbol, target) -> str | None:
+    if mode != "path":
+        return None
+    if symbol and target:
+        return None
+    return "symbol and target are required for path mode"
+
+
+def _architecture_argument_error(mode: str, symbol, target) -> str | None:
+    if mode in _ARCHITECTURE_SYMBOL_MODES and not symbol:
+        return f"symbol is required for {mode} mode"
+    return _architecture_path_mode_error(mode, symbol, target)
+
+
+def _architecture_callers(request: dict):
+    from code_graph import find_callers
+
+    return find_callers(
+        request["symbol"], request["resolved"], live=request["live"], with_report=True
+    )
+
+
+def _architecture_callees(request: dict):
+    from code_graph import find_callees
+
+    return find_callees(
+        request["symbol"], request["resolved"], live=request["live"], with_report=True
+    )
+
+
+def _architecture_dependencies(request: dict):
+    from code_graph import find_dependencies
+
+    return find_dependencies(
+        request["symbol"],
+        request["resolved"],
+        reverse=request["reverse"],
+        live=request["live"],
+        with_report=True,
+    )
+
+
+def _architecture_path(request: dict):
+    from code_graph import find_paths
+
+    return find_paths(
+        request["symbol"],
+        request["target"],
+        request["resolved"],
+        live=request["live"],
+        with_report=True,
+    )
+
+
+def _architecture_community(request: dict):
+    from code_graph import detect_communities
+
+    return detect_communities(
+        request["resolved"], live=request["live"], with_report=True
+    )
+
+
+def _architecture_symbol_dependencies(request: dict):
+    """The symbol view never reverses; only the dependencies mode takes that."""
+    from code_graph import find_dependencies
+
+    return find_dependencies(
+        request["symbol"], request["resolved"], live=request["live"], with_report=True
+    )
+
+
+def _architecture_symbol(request: dict) -> dict:
+    deadline = request["deadline"]
+    callers = _architecture_callers(request)
+    _check_deadline(deadline)
+    callees = _architecture_callees(request)
+    _check_deadline(deadline)
+    dependencies = _architecture_symbol_dependencies(request)
+    return {
+        "symbol": request["symbol"],
+        "callers": callers.get("callers", []),
+        "callees": callees.get("callees", []),
+        "dependencies": dependencies.get("dependencies", []),
+        **{key: callers.get(key) for key in _ARCHITECTURE_REPORT_KEYS},
+    }
+
+
+_ARCHITECTURE_MODE_QUERIES = {
+    "callers": _architecture_callers,
+    "callees": _architecture_callees,
+    "dependencies": _architecture_dependencies,
+    "path": _architecture_path,
+    "community": _architecture_community,
+}
+
+
+def _architecture_report(architecture) -> dict:
+    if not isinstance(architecture, dict):
+        return {}
+    return {
+        key: architecture[key]
+        for key in _ARCHITECTURE_REPORT_KEYS
+        if key in architecture
+    }
+
+
 def _get_architecture_mode(
     directory: str,
     *,
@@ -1099,75 +1403,29 @@ def _get_architecture_mode(
     deadline: float | None = None,
 ) -> dict:
     """Dispatch bounded graph queries while retaining live/store reports."""
-    from code_graph import (
-        detect_communities,
-        find_callees,
-        find_callers,
-        find_dependencies,
-        find_paths,
-    )
-
     resolved, error = _validated_code_directory(directory, deadline=deadline)
     if error:
         return {"error": error}
-    if mode in {"symbol", "callers", "callees", "dependencies"} and not symbol:
-        return {"error": f"symbol is required for {mode} mode"}
-    if mode == "path" and (not symbol or not target):
-        return {"error": "symbol and target are required for path mode"}
-
+    argument_error = _architecture_argument_error(mode, symbol, target)
+    if argument_error is not None:
+        return {"error": argument_error}
     _check_deadline(deadline)
-    if mode == "callers":
-        architecture = find_callers(symbol, resolved, live=live, with_report=True)
-    elif mode == "callees":
-        architecture = find_callees(symbol, resolved, live=live, with_report=True)
-    elif mode == "dependencies":
-        architecture = find_dependencies(
-            symbol, resolved, reverse=reverse, live=live, with_report=True
-        )
-    elif mode == "path":
-        architecture = find_paths(
-            symbol, target, resolved, live=live, with_report=True
-        )
-    elif mode == "community":
-        architecture = detect_communities(resolved, live=live, with_report=True)
-    else:
-        callers = find_callers(symbol, resolved, live=live, with_report=True)
-        _check_deadline(deadline)
-        callees = find_callees(symbol, resolved, live=live, with_report=True)
-        _check_deadline(deadline)
-        dependencies = find_dependencies(
-            symbol, resolved, live=live, with_report=True
-        )
-        architecture = {
+    query = _ARCHITECTURE_MODE_QUERIES.get(mode, _architecture_symbol)
+    architecture = query(
+        {
+            "resolved": resolved,
             "symbol": symbol,
-            "callers": callers.get("callers", []),
-            "callees": callees.get("callees", []),
-            "dependencies": dependencies.get("dependencies", []),
-            **{
-                key: callers.get(key)
-                for key in (
-                    "source_generation",
-                    "graph_complete",
-                    "unresolved_count",
-                    "fallback",
-                )
-            },
+            "target": target,
+            "reverse": reverse,
+            "live": live,
+            "deadline": deadline,
         }
-    report = {
-        key: architecture.get(key)
-        for key in (
-            "source_generation",
-            "graph_complete",
-            "unresolved_count",
-            "fallback",
-        )
-        if isinstance(architecture, dict) and key in architecture
-    }
+    )
     return {
         "directory": str(resolved),
         "mode": mode,
         "architecture": architecture,
-        **report,
+        **_architecture_report(architecture),
     }
 
 
@@ -1259,35 +1517,56 @@ def _navigation_session_manager(
         _NAVIGATION_MANAGER_LOCK.release()
 
 
-def _close_navigation_session_manager(deadline: float) -> None:
+def _detach_navigation_manager():
+    """Claim the manager that must be closed. Caller holds the manager lock."""
     global _NAVIGATION_MANAGER, _NAVIGATION_MANAGER_CLOSING, _NAVIGATION_MANAGER_EPOCH
+    _NAVIGATION_MANAGER_EPOCH += 1
+    if _NAVIGATION_MANAGER_CLOSING is not None:
+        return _NAVIGATION_MANAGER_CLOSING
+    manager = _NAVIGATION_MANAGER
+    if manager is not None:
+        _NAVIGATION_MANAGER = None
+        _NAVIGATION_MANAGER_CLOSING = manager
+    return manager
+
+
+def _clear_navigation_manager_closing(manager) -> None:
+    global _NAVIGATION_MANAGER_CLOSING
+    if _NAVIGATION_MANAGER_CLOSING is manager:
+        _NAVIGATION_MANAGER_CLOSING = None
+
+
+def _navigation_deadline_error(deadline: float):
+    try:
+        _check_deadline(deadline)
+    except TimeoutError as error:
+        return error
+    return None
+
+
+def _reacquire_navigation_manager_lock(deadline: float, deadline_error) -> None:
+    """Past the deadline the lock is taken only if it is free right now."""
+    if deadline_error is None:
+        _acquire_navigation_manager_lock(deadline)
+        return
+    if not _NAVIGATION_MANAGER_LOCK.acquire(blocking=False):
+        raise deadline_error
+
+
+def _close_navigation_session_manager(deadline: float) -> None:
     _acquire_navigation_manager_lock(deadline)
     try:
-        _NAVIGATION_MANAGER_EPOCH += 1
-        manager = _NAVIGATION_MANAGER_CLOSING
-        if manager is None:
-            manager = _NAVIGATION_MANAGER
-            if manager is not None:
-                _NAVIGATION_MANAGER = None
-                _NAVIGATION_MANAGER_CLOSING = manager
+        manager = _detach_navigation_manager()
     finally:
         _NAVIGATION_MANAGER_LOCK.release()
     if manager is None:
         return
     _check_deadline(deadline)
     manager.close_all(deadline=deadline)
-    deadline_error = None
+    deadline_error = _navigation_deadline_error(deadline)
+    _reacquire_navigation_manager_lock(deadline, deadline_error)
     try:
-        _check_deadline(deadline)
-    except TimeoutError as error:
-        deadline_error = error
-    if deadline_error is None:
-        _acquire_navigation_manager_lock(deadline)
-    elif not _NAVIGATION_MANAGER_LOCK.acquire(blocking=False):
-        raise deadline_error
-    try:
-        if _NAVIGATION_MANAGER_CLOSING is manager:
-            _NAVIGATION_MANAGER_CLOSING = None
+        _clear_navigation_manager_closing(manager)
     finally:
         _NAVIGATION_MANAGER_LOCK.release()
     if deadline_error is not None:
@@ -1500,105 +1779,172 @@ def _navigation_location_from_span(
     deadline: float | None,
     source_cache: _NavigationSourceCache | None = None,
 ):
-    from code_intelligence import PositionRange
-    from code_navigation import NavigationLocation, Provenance, ResolutionLabel
-    from lsp_positions import SourceDocument
-
     try:
-        relative_path = _navigation_relative_path(
+        return _resolved_navigation_location(
             scope,
             span,
+            source_kind=source_kind,
+            require_span_hash=require_span_hash,
+            metadata=metadata,
+            graph_version=graph_version,
             deadline=deadline,
-        )
-        expected_source_sha256 = _navigation_digest(span.get("source_sha256"))
-        if expected_source_sha256 is None:
-            return None
-        if source_cache is None:
-            source_cache = _NavigationSourceCache()
-        cached = source_cache.read(scope, relative_path, deadline=deadline)
-        if cached is None:
-            return None
-        content, source_sha256 = cached
-        if source_sha256 != expected_source_sha256:
-            return None
-        byte_start = span.get("byte_start")
-        byte_end = span.get("byte_end")
-        if (
-            isinstance(byte_start, bool)
-            or not isinstance(byte_start, int)
-            or isinstance(byte_end, bool)
-            or not isinstance(byte_end, int)
-            or byte_start < 0
-            or byte_end <= byte_start
-            or byte_end > len(content)
-        ):
-            return None
-        if source_kind not in {"evidence", "occurrence"}:
-            return None
-        if require_span_hash != (source_kind == "evidence"):
-            return None
-        if require_span_hash:
-            expected_span_sha256 = span.get("span_sha256")
-            if (
-                _navigation_digest(expected_span_sha256) is None
-                or hashlib.sha256(content[byte_start:byte_end]).hexdigest()
-                != expected_span_sha256
-            ):
-                return None
-        _check_navigation_stop(deadline)
-        document = SourceDocument.from_bytes(relative_path, content)
-        _check_navigation_stop(deadline)
-        line = None
-        character = None
-        for line_number, (line_start, line_end) in enumerate(
-            document.line_spans,
-            1,
-        ):
-            _check_navigation_stop(deadline)
-            if line_start <= byte_start <= line_end:
-                content[line_start:byte_start].decode("utf-8", errors="strict")
-                line = line_number
-                character = byte_start - line_start
-                break
-        if line is None or character is None:
-            return None
-        reported_line = span.get("line_start")
-        if (
-            reported_line is not None
-            and (
-                isinstance(reported_line, bool)
-                or not isinstance(reported_line, int)
-                or reported_line != line
-            )
-        ):
-            return None
-        owner = None if metadata is None else metadata.get("owner")
-        containing_symbol = owner if isinstance(owner, str) and owner else None
-        signature = None
-        if span.get("role") in {"definition", "declaration"}:
-            signature = content[byte_start:byte_end].decode("utf-8", errors="strict")
-        _check_navigation_stop(deadline)
-        return NavigationLocation(
-            relative_path,
-            PositionRange(byte_start, byte_end),
-            line,
-            character,
-            containing_symbol,
-            signature,
-            ResolutionLabel.GRAPH_CANDIDATE,
-            (
-                Provenance(
-                    "graph",
-                    "evidence-graph",
-                    graph_version,
-                    "graph_candidate",
-                ),
-            ),
+            source_cache=_navigation_cache(source_cache),
         )
     except TimeoutError:
         raise
     except (OSError, TypeError, UnicodeError, ValueError):
         return None
+
+
+def _navigation_span_source(scope, span: dict, deadline, source_cache):
+    """Return (relative path, bytes) while the recorded source digest holds."""
+    relative_path = _navigation_relative_path(scope, span, deadline=deadline)
+    expected_source_sha256 = _navigation_digest(span.get("source_sha256"))
+    if expected_source_sha256 is None:
+        return None
+    cached = source_cache.read(scope, relative_path, deadline=deadline)
+    if cached is None:
+        return None
+    content, source_sha256 = cached
+    if source_sha256 != expected_source_sha256:
+        return None
+    return relative_path, content
+
+
+def _span_range_invalid(byte_start: int, byte_end: int, size: int) -> bool:
+    if byte_start < 0 or byte_end <= byte_start:
+        return True
+    return byte_end > size
+
+
+def _span_bounds(span: dict, content: bytes):
+    byte_start = span.get("byte_start")
+    byte_end = span.get("byte_end")
+    if not _is_integer_value(byte_start) or not _is_integer_value(byte_end):
+        return None
+    if _span_range_invalid(byte_start, byte_end, len(content)):
+        return None
+    return byte_start, byte_end
+
+
+def _span_kind_valid(source_kind: str, require_span_hash: bool) -> bool:
+    if source_kind not in {"evidence", "occurrence"}:
+        return False
+    return require_span_hash == (source_kind == "evidence")
+
+
+def _span_hash_matches(span: dict, content: bytes, bounds) -> bool:
+    expected = span.get("span_sha256")
+    if _navigation_digest(expected) is None:
+        return False
+    return hashlib.sha256(content[bounds[0]:bounds[1]]).hexdigest() == expected
+
+
+def _validated_span_bounds(
+    span: dict, content: bytes, source_kind: str, require_span_hash: bool
+):
+    if not _span_kind_valid(source_kind, require_span_hash):
+        return None
+    bounds = _span_bounds(span, content)
+    if bounds is None:
+        return None
+    if require_span_hash and not _span_hash_matches(span, content, bounds):
+        return None
+    return bounds
+
+
+def _span_line_position(document, content: bytes, byte_start: int, deadline):
+    """Return the 1-based line and byte column that hold byte_start."""
+    for line_number, (line_start, line_end) in enumerate(document.line_spans, 1):
+        _check_navigation_stop(deadline)
+        if line_start <= byte_start <= line_end:
+            content[line_start:byte_start].decode("utf-8", errors="strict")
+            return line_number, byte_start - line_start
+    return None
+
+
+def _reported_line_disagrees(span: dict, line: int) -> bool:
+    reported_line = span.get("line_start")
+    if reported_line is None:
+        return False
+    if not _is_integer_value(reported_line):
+        return True
+    return reported_line != line
+
+
+def _span_position(relative_path: str, content: bytes, byte_start: int, span, deadline):
+    from lsp_positions import SourceDocument
+
+    _check_navigation_stop(deadline)
+    document = SourceDocument.from_bytes(relative_path, content)
+    _check_navigation_stop(deadline)
+    position = _span_line_position(document, content, byte_start, deadline)
+    if position is None:
+        return None
+    if _reported_line_disagrees(span, position[0]):
+        return None
+    return position
+
+
+def _containing_symbol(metadata) -> str | None:
+    if not isinstance(metadata, dict):
+        return None
+    owner = metadata.get("owner")
+    if isinstance(owner, str) and owner:
+        return owner
+    return None
+
+
+def _span_signature(span: dict, content: bytes, bounds) -> str | None:
+    if span.get("role") not in {"definition", "declaration"}:
+        return None
+    return content[bounds[0]:bounds[1]].decode("utf-8", errors="strict")
+
+
+def _navigation_location(
+    relative_path, content, bounds, position, span, metadata, graph_version
+):
+    from code_intelligence import PositionRange
+    from code_navigation import NavigationLocation, Provenance, ResolutionLabel
+
+    line, character = position
+    return NavigationLocation(
+        relative_path,
+        PositionRange(bounds[0], bounds[1]),
+        line,
+        character,
+        _containing_symbol(metadata),
+        _span_signature(span, content, bounds),
+        ResolutionLabel.GRAPH_CANDIDATE,
+        (Provenance("graph", "evidence-graph", graph_version, "graph_candidate"),),
+    )
+
+
+def _resolved_navigation_location(
+    scope,
+    span: dict,
+    *,
+    source_kind: str,
+    require_span_hash: bool,
+    metadata: dict | None,
+    graph_version: str,
+    deadline: float | None,
+    source_cache,
+):
+    source = _navigation_span_source(scope, span, deadline, source_cache)
+    if source is None:
+        return None
+    relative_path, content = source
+    bounds = _validated_span_bounds(span, content, source_kind, require_span_hash)
+    if bounds is None:
+        return None
+    position = _span_position(relative_path, content, bounds[0], span, deadline)
+    if position is None:
+        return None
+    _check_navigation_stop(deadline)
+    return _navigation_location(
+        relative_path, content, bounds, position, span, metadata, graph_version
+    )
 
 
 def _bounded_navigation_locations(locations, deadline: float | None):
@@ -1633,6 +1979,71 @@ def _graph_nodes_for_symbol(graph, symbol: str, deadline: float | None):
     return tuple(nodes[:MAX_NAVIGATION_GRAPH_FACTS])
 
 
+def _navigation_cache(source_cache: _NavigationSourceCache | None):
+    if source_cache is None:
+        return _NavigationSourceCache()
+    return source_cache
+
+
+def _graph_generation_version(graph) -> str:
+    return str(getattr(graph, "generation_id", None) or "structural")
+
+
+def _graph_node_metadata(node):
+    metadata = node.get("metadata")
+    if isinstance(metadata, dict):
+        return metadata
+    return None
+
+
+def _declaration_locations_for_node(
+    graph, node, scope, version, deadline, source_cache, remaining
+):
+    """Return this node's declaration locations and how much budget they spent."""
+    occurrences = graph.occurrences(
+        node["node_id"],
+        max_rows=remaining,
+        deadline=deadline,
+    )
+    _check_navigation_stop(deadline)
+    metadata = _graph_node_metadata(node)
+    bounded = occurrences[:remaining]
+    locations = []
+    for occurrence in bounded:
+        _check_navigation_stop(deadline)
+        if occurrence.get("role") not in {"definition", "declaration"}:
+            continue
+        locations.append(
+            _navigation_location_from_span(
+                scope,
+                occurrence,
+                source_kind="occurrence",
+                require_span_hash=False,
+                metadata=metadata,
+                graph_version=version,
+                deadline=deadline,
+                source_cache=source_cache,
+            )
+        )
+    return locations, len(bounded)
+
+
+def _collected_declaration_locations(graph, symbol, scope, deadline, source_cache):
+    version = _graph_generation_version(graph)
+    locations = []
+    remaining = MAX_NAVIGATION_GRAPH_FACTS
+    for node in _graph_nodes_for_symbol(graph, symbol, deadline):
+        _check_navigation_stop(deadline)
+        if remaining <= 0:
+            break
+        found, spent = _declaration_locations_for_node(
+            graph, node, scope, version, deadline, source_cache, remaining
+        )
+        locations.extend(found)
+        remaining -= spent
+    return _bounded_navigation_locations(locations, deadline)
+
+
 def _graph_declaration_locations(
     symbol: str,
     scope,
@@ -1643,45 +2054,80 @@ def _graph_declaration_locations(
     if graph is None:
         return ()
     try:
-        version = str(getattr(graph, "generation_id", None) or "structural")
-        if source_cache is None:
-            source_cache = _NavigationSourceCache()
-        locations = []
-        remaining_work = MAX_NAVIGATION_GRAPH_FACTS
-        for node in _graph_nodes_for_symbol(graph, symbol, deadline):
-            _check_navigation_stop(deadline)
-            if remaining_work <= 0:
-                break
-            occurrences = graph.occurrences(
-                node["node_id"],
-                max_rows=remaining_work,
-                deadline=deadline,
-            )
-            _check_navigation_stop(deadline)
-            metadata = node.get("metadata")
-            if not isinstance(metadata, dict):
-                metadata = None
-            for occurrence in occurrences[:remaining_work]:
-                _check_navigation_stop(deadline)
-                remaining_work -= 1
-                if occurrence.get("role") not in {"definition", "declaration"}:
-                    continue
-                locations.append(
-                    _navigation_location_from_span(
-                        scope,
-                        occurrence,
-                        source_kind="occurrence",
-                        require_span_hash=False,
-                        metadata=metadata,
-                        graph_version=version,
-                        deadline=deadline,
-                        source_cache=source_cache,
-                    )
-                )
-        return _bounded_navigation_locations(locations, deadline)
+        return _collected_declaration_locations(
+            graph, symbol, scope, deadline, _navigation_cache(source_cache)
+        )
     finally:
         graph.close()
         _check_navigation_stop(deadline)
+
+
+def _call_edge_source_key(direction: str) -> str:
+    if direction == "incoming":
+        return "target_node_id"
+    return "source_node_id"
+
+
+def _matching_call_edges(edges, source_key: str, node_ids: set, deadline):
+    for edge in edges:
+        _check_navigation_stop(deadline)
+        if edge.get(source_key) in node_ids:
+            yield edge
+
+
+def _call_evidence_locations(
+    graph, edge, scope, version, deadline, source_cache, remaining
+):
+    """Return this edge's evidence locations and how much budget they spent."""
+    evidence = graph.evidence_spans(
+        assertion_id=edge["assertion_id"],
+        max_rows=remaining,
+        deadline=deadline,
+    )
+    _check_navigation_stop(deadline)
+    bounded = evidence[:remaining]
+    locations = []
+    for span in bounded:
+        _check_navigation_stop(deadline)
+        locations.append(
+            _navigation_location_from_span(
+                scope,
+                span,
+                source_kind="evidence",
+                require_span_hash=True,
+                metadata=None,
+                graph_version=version,
+                deadline=deadline,
+                source_cache=source_cache,
+            )
+        )
+    return locations, len(bounded)
+
+
+def _collected_call_locations(graph, symbol, scope, direction, deadline, source_cache):
+    node_ids = {
+        node["node_id"] for node in _graph_nodes_for_symbol(graph, symbol, deadline)
+    }
+    _check_navigation_stop(deadline)
+    edges = graph.edges(
+        edge_types=("CALLS",),
+        max_rows=MAX_NAVIGATION_GRAPH_FACTS,
+        deadline=deadline,
+    )
+    _check_navigation_stop(deadline)
+    source_key = _call_edge_source_key(direction)
+    version = _graph_generation_version(graph)
+    locations = []
+    remaining = MAX_NAVIGATION_GRAPH_FACTS
+    for edge in _matching_call_edges(edges, source_key, node_ids, deadline):
+        if remaining <= 0:
+            break
+        found, spent = _call_evidence_locations(
+            graph, edge, scope, version, deadline, source_cache, remaining
+        )
+        locations.extend(found)
+        remaining -= spent
+    return _bounded_navigation_locations(locations, deadline)
 
 
 def _graph_call_locations(
@@ -1696,53 +2142,14 @@ def _graph_call_locations(
     if graph is None:
         return ()
     try:
-        nodes = _graph_nodes_for_symbol(graph, symbol, deadline)
-        node_ids = {node["node_id"] for node in nodes}
-        _check_navigation_stop(deadline)
-        edges = graph.edges(
-            edge_types=("CALLS",),
-            max_rows=MAX_NAVIGATION_GRAPH_FACTS,
-            deadline=deadline,
+        return _collected_call_locations(
+            graph,
+            symbol,
+            scope,
+            direction,
+            deadline,
+            _navigation_cache(source_cache),
         )
-        _check_navigation_stop(deadline)
-        source_key = (
-            "target_node_id"
-            if direction == "incoming"
-            else "source_node_id"
-        )
-        version = str(getattr(graph, "generation_id", None) or "structural")
-        if source_cache is None:
-            source_cache = _NavigationSourceCache()
-        locations = []
-        remaining_work = MAX_NAVIGATION_GRAPH_FACTS
-        for edge in edges:
-            _check_navigation_stop(deadline)
-            if edge.get(source_key) not in node_ids:
-                continue
-            if remaining_work <= 0:
-                break
-            evidence = graph.evidence_spans(
-                assertion_id=edge["assertion_id"],
-                max_rows=remaining_work,
-                deadline=deadline,
-            )
-            _check_navigation_stop(deadline)
-            for span in evidence[:remaining_work]:
-                _check_navigation_stop(deadline)
-                remaining_work -= 1
-                locations.append(
-                    _navigation_location_from_span(
-                        scope,
-                        span,
-                        source_kind="evidence",
-                        require_span_hash=True,
-                        metadata=None,
-                        graph_version=version,
-                        deadline=deadline,
-                        source_cache=source_cache,
-                    )
-                )
-        return _bounded_navigation_locations(locations, deadline)
     finally:
         graph.close()
         _check_navigation_stop(deadline)
@@ -1758,32 +2165,47 @@ def _navigation_anchor_symbol(
     deadline: float | None,
     source_cache: _NavigationSourceCache | None = None,
 ) -> str | None:
-    from lsp_positions import SourceDocument
-
     try:
-        if source_cache is None:
-            source_cache = _NavigationSourceCache()
-        cached = source_cache.read(scope, path, deadline=deadline)
-        if cached is None:
-            return None
-        content, _source_sha256 = cached
-        _check_navigation_stop(deadline)
-        document = SourceDocument.from_bytes(path, content)
-        _check_navigation_stop(deadline)
-        anchor = document.validate_anchor(line=line, character=character)
-        if byte_offset is not None and anchor.byte_offset != byte_offset:
-            return None
-        line_start, line_end = document.line_spans[line - 1]
-        line_bytes = content[line_start:line_end]
-        for match in re.finditer(rb"[A-Za-z_][A-Za-z0-9_]*", line_bytes):
-            _check_navigation_stop(deadline)
-            if match.start() <= character <= match.end():
-                return match.group().decode("ascii")
-        return None
+        return _resolved_anchor_symbol(
+            scope,
+            path,
+            line,
+            character,
+            byte_offset,
+            deadline,
+            _navigation_cache(source_cache),
+        )
     except TimeoutError:
         raise
     except (OSError, TypeError, UnicodeError, ValueError):
         return None
+
+
+def _anchor_identifier(line_bytes: bytes, character: int, deadline) -> str | None:
+    for match in re.finditer(rb"[A-Za-z_][A-Za-z0-9_]*", line_bytes):
+        _check_navigation_stop(deadline)
+        if match.start() <= character <= match.end():
+            return match.group().decode("ascii")
+    return None
+
+
+def _resolved_anchor_symbol(
+    scope, path, line, character, byte_offset, deadline, source_cache
+) -> str | None:
+    from lsp_positions import SourceDocument
+
+    cached = source_cache.read(scope, path, deadline=deadline)
+    if cached is None:
+        return None
+    content, _source_sha256 = cached
+    _check_navigation_stop(deadline)
+    document = SourceDocument.from_bytes(path, content)
+    _check_navigation_stop(deadline)
+    anchor = document.validate_anchor(line=line, character=character)
+    if byte_offset is not None and anchor.byte_offset != byte_offset:
+        return None
+    line_start, line_end = document.line_spans[line - 1]
+    return _anchor_identifier(content[line_start:line_end], character, deadline)
 
 
 def _navigation_structural_candidates(request, deadline: float):
@@ -1801,6 +2223,24 @@ def _navigation_structural_candidates(request, deadline: float):
     )
     if symbol is None:
         return ()
+    return _structural_candidates_for(
+        Capability, request, symbol, deadline, source_cache
+    )
+
+
+def _structural_call_candidates(request, symbol, deadline, source_cache):
+    if request.direction not in {"incoming", "outgoing"}:
+        return ()
+    return _graph_call_locations(
+        symbol,
+        request.repository,
+        direction=request.direction,
+        deadline=deadline,
+        source_cache=source_cache,
+    )
+
+
+def _structural_candidates_for(Capability, request, symbol, deadline, source_cache):
     if request.capability is Capability.DEFINITIONS:
         return _graph_declaration_locations(
             symbol,
@@ -1817,15 +2257,7 @@ def _navigation_structural_candidates(request, deadline: float):
             source_cache=source_cache,
         )
     if request.capability is Capability.CALLS:
-        if request.direction not in {"incoming", "outgoing"}:
-            return ()
-        return _graph_call_locations(
-            symbol,
-            request.repository,
-            direction=request.direction,
-            deadline=deadline,
-            source_cache=source_cache,
-        )
+        return _structural_call_candidates(request, symbol, deadline, source_cache)
     return ()
 
 
@@ -1848,43 +2280,57 @@ def _graph_node_ids_at_anchor(
     deadline,
     source_cache: _NavigationSourceCache | None = None,
 ):
+    source_cache = _navigation_cache(source_cache)
+    version = _graph_generation_version(graph)
     identifiers = set()
-    if source_cache is None:
-        source_cache = _NavigationSourceCache()
-    version = str(getattr(graph, "generation_id", None) or "structural")
     remaining = MAX_NAVIGATION_GRAPH_FACTS
     for node in _graph_nodes_for_symbol(graph, symbol, deadline):
         _check_navigation_stop(deadline)
         if remaining <= 0:
             break
-        occurrences = graph.occurrences(
-            node["node_id"],
-            max_rows=remaining,
-            deadline=deadline,
+        covers, spent = _node_covers_anchor(
+            graph, node, anchor, scope, version, deadline, source_cache, remaining
         )
-        _check_navigation_stop(deadline)
-        for occurrence in occurrences[:remaining]:
-            _check_navigation_stop(deadline)
-            remaining -= 1
-            if occurrence.get("role") not in {"definition", "declaration"}:
-                continue
-            location = _navigation_location_from_span(
-                scope,
-                occurrence,
-                source_kind="occurrence",
-                require_span_hash=False,
-                metadata=None,
-                graph_version=version,
-                deadline=deadline,
-                source_cache=source_cache,
-            )
-            if (
-                location is not None
-                and location.path == anchor.path
-                and location.range.byte_start <= anchor.byte_offset < location.range.byte_end
-            ):
-                identifiers.add(node["node_id"])
+        remaining -= spent
+        if covers:
+            identifiers.add(node["node_id"])
     return identifiers
+
+
+def _location_covers_anchor(location, anchor) -> bool:
+    if location is None or location.path != anchor.path:
+        return False
+    return location.range.byte_start <= anchor.byte_offset < location.range.byte_end
+
+
+def _node_covers_anchor(
+    graph, node, anchor, scope, version, deadline, source_cache, remaining
+):
+    """Report whether this node declares the anchor, and what budget it spent."""
+    occurrences = graph.occurrences(
+        node["node_id"],
+        max_rows=remaining,
+        deadline=deadline,
+    )
+    _check_navigation_stop(deadline)
+    bounded = occurrences[:remaining]
+    covers = False
+    for occurrence in bounded:
+        _check_navigation_stop(deadline)
+        if occurrence.get("role") not in {"definition", "declaration"}:
+            continue
+        location = _navigation_location_from_span(
+            scope,
+            occurrence,
+            source_kind="occurrence",
+            require_span_hash=False,
+            metadata=None,
+            graph_version=version,
+            deadline=deadline,
+            source_cache=source_cache,
+        )
+        covers = covers or _location_covers_anchor(location, anchor)
+    return covers, len(bounded)
 
 
 def _navigation_edge_verifier(source, target, scope, deadline):
@@ -1913,40 +2359,47 @@ def _navigation_edge_verifier(source, target, scope, deadline):
     if graph is None:
         return False
     try:
-        source_ids = _graph_node_ids_at_anchor(
+        return _verified_call_edge(
             graph,
-            source_symbol,
-            source,
+            (source, source_symbol),
+            (target, target_symbol),
             scope,
             deadline,
             source_cache,
         )
-        target_ids = _graph_node_ids_at_anchor(
-            graph,
-            target_symbol,
-            target,
-            scope,
-            deadline,
-            source_cache,
-        )
-        _check_navigation_stop(deadline)
-        edges = graph.edges(
-            edge_types=("CALLS",),
-            max_rows=MAX_NAVIGATION_GRAPH_FACTS,
-            deadline=deadline,
-        )
-        _check_navigation_stop(deadline)
-        for edge in edges:
-            _check_navigation_stop(deadline)
-            if (
-                edge.get("source_node_id") in source_ids
-                and edge.get("target_node_id") in target_ids
-            ):
-                return True
-        return False
     finally:
         graph.close()
         _check_navigation_stop(deadline)
+
+
+def _edge_connects(edges, source_ids: set, target_ids: set, deadline) -> bool:
+    for edge in edges:
+        _check_navigation_stop(deadline)
+        if (
+            edge.get("source_node_id") in source_ids
+            and edge.get("target_node_id") in target_ids
+        ):
+            return True
+    return False
+
+
+def _verified_call_edge(graph, source, target, scope, deadline, source_cache) -> bool:
+    source_anchor, source_symbol = source
+    target_anchor, target_symbol = target
+    source_ids = _graph_node_ids_at_anchor(
+        graph, source_symbol, source_anchor, scope, deadline, source_cache
+    )
+    target_ids = _graph_node_ids_at_anchor(
+        graph, target_symbol, target_anchor, scope, deadline, source_cache
+    )
+    _check_navigation_stop(deadline)
+    edges = graph.edges(
+        edge_types=("CALLS",),
+        max_rows=MAX_NAVIGATION_GRAPH_FACTS,
+        deadline=deadline,
+    )
+    _check_navigation_stop(deadline)
+    return _edge_connects(edges, source_ids, target_ids, deadline)
 
 
 def _get_precise_architecture(
@@ -1961,154 +2414,210 @@ def _get_precise_architecture(
     deadline: float | None = None,
 ) -> dict:
     """Route precise modes through the owned CodeNavigation facade."""
-    from code_navigation import CodeNavigation, NavigationRequest
-    from code_navigation_renderer import render_navigation
-    from lsp_security import (
-        resolve_repository_source,
-        validate_repository_relative_path,
-    )
-    from repository_scope import resolve_repository_scope
-
-    effective_deadline = (
-        deadline
-        if deadline is not None
-        else time.monotonic() + MCP_LSP_STARTUP_SECONDS
-    )
-    scope = None
-    resolved: Path | None = None
-    stage = "directory"
+    effective_deadline = _navigation_effective_deadline(deadline)
+    progress = {"stage": "directory", "scope": None, "resolved": None}
     try:
-        cancelled = _operation_cancelled()
-        _check_navigation_manager_stop(effective_deadline, cancelled)
-        _acquire_navigation_manager_lock(effective_deadline)
-        try:
-            _check_navigation_manager_stop(effective_deadline, cancelled)
-            manager_epoch = _NAVIGATION_MANAGER_EPOCH
-        finally:
-            _NAVIGATION_MANAGER_LOCK.release()
-        _check_navigation_manager_stop(effective_deadline, cancelled)
-        resolved, error = _validated_code_directory(
+        return _precise_architecture_result(
+            progress,
             directory,
-            deadline=effective_deadline,
-        )
-        _check_deadline(effective_deadline)
-        if error or resolved is None:
-            return _normalized_navigation_failure(
-                directory=None,
-                mode=mode,
-                status="error",
-                warning="navigation_directory_invalid",
-                offset=offset,
-                limit=limit,
-            )
-        stage = "scope"
-        _check_deadline(effective_deadline)
-        scope = resolve_repository_scope(
-            resolved,
-            deadline=effective_deadline,
-            cancelled=cancelled,
-        )
-        _check_deadline(effective_deadline)
-        if not _same_filesystem_path(
-            resolved,
-            Path(scope.checkout_root),
-            deadline=effective_deadline,
-        ):
-            return _normalized_navigation_failure(
-                directory=str(resolved),
-                mode=mode,
-                status="error",
-                warning="navigation_directory_not_checkout_root",
-                offset=offset,
-                limit=limit,
-                scope=scope,
-            )
-        stage = "source"
-        _check_deadline(effective_deadline)
-        normalized_path = validate_repository_relative_path(path)
-        _check_deadline(effective_deadline)
-        resolve_repository_source(scope, normalized_path, must_exist=True)
-        _check_deadline(effective_deadline)
-        stage = "manager"
-        manager = _navigation_session_manager(
+            mode,
+            {"path": path, "line": line, "character": character},
+            offset,
+            limit,
             effective_deadline,
-            manager_epoch,
-            cancelled,
         )
-        _check_deadline(effective_deadline)
-        session = manager.get(scope, deadline=effective_deadline)
-        _check_deadline(effective_deadline)
-        identity = session.identity
-        stage = "facade"
-        navigation = CodeNavigation(
-            scope,
-            session,
-            identity,
-            structural_candidates=_navigation_structural_candidates,
-            symbol_resolver=_navigation_symbol_resolver,
-            edge_verifier=_navigation_edge_verifier,
-        )
-        _check_deadline(effective_deadline)
-        capability = _navigation_capability(mode)
-        direction = None
-        if mode == "callers":
-            direction = "incoming"
-        elif mode == "callees":
-            direction = "outgoing"
-        request = NavigationRequest(
-            scope,
-            capability,
-            normalized_path,
-            line,
-            character,
-            offset=offset,
-            limit=limit,
-            direction=direction,
-        )
-        _check_deadline(effective_deadline)
-        result = navigation.query(request, deadline=effective_deadline)
-        _check_deadline(effective_deadline)
-        stage = "renderer"
-        rendered = render_navigation(result)
-        _check_deadline(effective_deadline)
-        data = {
-            "directory": str(resolved),
-            "mode": mode,
-            **rendered,
-        }
-        _check_deadline(effective_deadline)
-        data = _sanitize_navigation_data(data)
-        _check_deadline(effective_deadline)
-        return data
     except TimeoutError:
         return _normalized_navigation_failure(
-            directory=None if resolved is None else str(resolved),
+            directory=_progress_directory(progress),
             mode=mode,
             status="timeout",
             warning="navigation_timeout",
             offset=offset,
             limit=limit,
-            scope=scope,
+            scope=progress["scope"],
         )
     except (OSError, RuntimeError, TypeError, ValueError):
+        return _navigation_stage_failure(progress, mode, offset, limit)
+
+
+def _navigation_effective_deadline(deadline: float | None) -> float:
+    if deadline is not None:
+        return deadline
+    return time.monotonic() + MCP_LSP_STARTUP_SECONDS
+
+
+def _progress_directory(progress: dict) -> str | None:
+    resolved = progress["resolved"]
+    if resolved is None:
+        return None
+    return str(resolved)
+
+
+_NAVIGATION_STAGE_WARNINGS = {
+    "manager": "navigation_provider_not_ready",
+    "renderer": "navigation_render_failed",
+    "source": "navigation_source_unavailable",
+}
+
+_NAVIGATION_PROVIDER_STAGES = {"manager", "facade", "renderer"}
+
+
+def _navigation_stage_status(stage: str) -> str:
+    if stage == "manager":
+        return "not_ready"
+    return "error"
+
+
+def _navigation_stage_provider(stage: str) -> str | None:
+    if stage in _NAVIGATION_PROVIDER_STAGES:
+        return "pyright"
+    return None
+
+
+def _navigation_stage_failure(progress: dict, mode, offset, limit) -> dict:
+    stage = progress["stage"]
+    return _normalized_navigation_failure(
+        directory=_progress_directory(progress),
+        mode=mode,
+        status=_navigation_stage_status(stage),
+        warning=_NAVIGATION_STAGE_WARNINGS.get(stage, "navigation_setup_failed"),
+        offset=offset,
+        limit=limit,
+        scope=progress["scope"],
+        provider=_navigation_stage_provider(stage),
+    )
+
+
+def _navigation_manager_epoch(deadline: float, cancelled) -> int:
+    _check_navigation_manager_stop(deadline, cancelled)
+    _acquire_navigation_manager_lock(deadline)
+    try:
+        _check_navigation_manager_stop(deadline, cancelled)
+        epoch = _NAVIGATION_MANAGER_EPOCH
+    finally:
+        _NAVIGATION_MANAGER_LOCK.release()
+    _check_navigation_manager_stop(deadline, cancelled)
+    return epoch
+
+
+def _navigation_scope(resolved: Path, deadline: float, cancelled):
+    from repository_scope import resolve_repository_scope
+
+    _check_deadline(deadline)
+    scope = resolve_repository_scope(resolved, deadline=deadline, cancelled=cancelled)
+    _check_deadline(deadline)
+    return scope
+
+
+def _validated_navigation_source(scope, path: str, deadline: float) -> str:
+    from lsp_security import (
+        resolve_repository_source,
+        validate_repository_relative_path,
+    )
+
+    _check_deadline(deadline)
+    normalized_path = validate_repository_relative_path(path)
+    _check_deadline(deadline)
+    resolve_repository_source(scope, normalized_path, must_exist=True)
+    _check_deadline(deadline)
+    return normalized_path
+
+
+def _navigation_session(scope, deadline: float, manager_epoch: int, cancelled):
+    manager = _navigation_session_manager(deadline, manager_epoch, cancelled)
+    _check_deadline(deadline)
+    session = manager.get(scope, deadline=deadline)
+    _check_deadline(deadline)
+    return session
+
+
+_NAVIGATION_MODE_DIRECTIONS = {"callers": "incoming", "callees": "outgoing"}
+
+
+def _navigation_query_result(
+    scope, session, mode, normalized_path, anchor, offset, limit, deadline
+):
+    from code_navigation import CodeNavigation, NavigationRequest
+
+    navigation = CodeNavigation(
+        scope,
+        session,
+        session.identity,
+        structural_candidates=_navigation_structural_candidates,
+        symbol_resolver=_navigation_symbol_resolver,
+        edge_verifier=_navigation_edge_verifier,
+    )
+    _check_deadline(deadline)
+    request = NavigationRequest(
+        scope,
+        _navigation_capability(mode),
+        normalized_path,
+        anchor["line"],
+        anchor["character"],
+        offset=offset,
+        limit=limit,
+        direction=_NAVIGATION_MODE_DIRECTIONS.get(mode),
+    )
+    _check_deadline(deadline)
+    result = navigation.query(request, deadline=deadline)
+    _check_deadline(deadline)
+    return result
+
+
+def _rendered_navigation_result(resolved: Path, mode, result, deadline: float) -> dict:
+    from code_navigation_renderer import render_navigation
+
+    rendered = render_navigation(result)
+    _check_deadline(deadline)
+    data = {"directory": str(resolved), "mode": mode, **rendered}
+    _check_deadline(deadline)
+    data = _sanitize_navigation_data(data)
+    _check_deadline(deadline)
+    return data
+
+
+def _precise_architecture_result(
+    progress: dict, directory, mode, anchor: dict, offset, limit, deadline: float
+) -> dict:
+    cancelled = _operation_cancelled()
+    manager_epoch = _navigation_manager_epoch(deadline, cancelled)
+    resolved, error = _validated_code_directory(directory, deadline=deadline)
+    progress["resolved"] = resolved
+    _check_deadline(deadline)
+    if error or resolved is None:
         return _normalized_navigation_failure(
-            directory=None if resolved is None else str(resolved),
+            directory=None,
             mode=mode,
-            status="not_ready" if stage == "manager" else "error",
-            warning=(
-                "navigation_provider_not_ready"
-                if stage == "manager"
-                else "navigation_render_failed"
-                if stage == "renderer"
-                else "navigation_source_unavailable"
-                if stage == "source"
-                else "navigation_setup_failed"
-            ),
+            status="error",
+            warning="navigation_directory_invalid",
+            offset=offset,
+            limit=limit,
+        )
+    progress["stage"] = "scope"
+    scope = _navigation_scope(resolved, deadline, cancelled)
+    progress["scope"] = scope
+    if not _same_filesystem_path(
+        resolved, Path(scope.checkout_root), deadline=deadline
+    ):
+        return _normalized_navigation_failure(
+            directory=str(resolved),
+            mode=mode,
+            status="error",
+            warning="navigation_directory_not_checkout_root",
             offset=offset,
             limit=limit,
             scope=scope,
-            provider="pyright" if stage in {"manager", "facade", "renderer"} else None,
         )
+    progress["stage"] = "source"
+    normalized_path = _validated_navigation_source(scope, anchor["path"], deadline)
+    progress["stage"] = "manager"
+    session = _navigation_session(scope, deadline, manager_epoch, cancelled)
+    progress["stage"] = "facade"
+    result = _navigation_query_result(
+        scope, session, mode, normalized_path, anchor, offset, limit, deadline
+    )
+    progress["stage"] = "renderer"
+    return _rendered_navigation_result(resolved, mode, result, deadline)
 
 
 def _operator_result(
@@ -2120,22 +2629,284 @@ def _operator_result(
     counts: dict[str, int] | None = None,
     overall_status: str | None = None,
 ) -> dict:
+    identifiers = list(ids or [])
     state_values = set(states or [])
-    overall_status = overall_status or (
-        "error"
-        if "error" in state_values
-        else "degraded"
-        if "degraded" in state_values
-        else "ok"
-    )
     return {
         "action": action,
-        "overall_status": overall_status,
-        "ids": (ids or [])[:100],
-        "counts": counts or {"items": len(ids or [])},
-        "states": sorted(set(states or [])),
+        "overall_status": overall_status or _default_overall_status(state_values),
+        "ids": identifiers[:100],
+        "counts": _operator_counts(counts, identifiers),
+        "states": sorted(state_values),
         "codes": sorted(set(codes or [])),
     }
+
+
+def _operator_counts(counts: dict | None, identifiers: list) -> dict:
+    if counts is not None:
+        return counts
+    return {"items": len(identifiers)}
+
+
+def _default_overall_status(state_values: set) -> str:
+    if "error" in state_values:
+        return "error"
+    if "degraded" in state_values:
+        return "degraded"
+    return "ok"
+
+
+_DOCTOR_MUTATIONS = {
+    "queue-cancel",
+    "queue-redrive",
+    "transaction-recover",
+    "transaction-undo",
+}
+
+_DOCTOR_FAILURE_CODES = {
+    "KeyError": "unknown_target",
+    "TimeoutError": "owner_busy",
+    "MigrationBusy": "owner_busy",
+}
+
+
+def _doctor_failure_code(error: BaseException) -> str:
+    return _DOCTOR_FAILURE_CODES.get(type(error).__name__, "operation_failed")
+
+
+def _doctor_report_codes(report: dict) -> list:
+    codes = [item["code"] for item in report["run_deletion"]["blockers"]]
+    for check in report["checks"]:
+        codes.extend(
+            str(code) for code in check.get("details", {}).get("codes", [])
+        )
+    return codes
+
+
+def _doctor_status(context: dict) -> dict:
+    from doctor import run_doctor
+
+    report = run_doctor(
+        root=context["root"],
+        state_root=context["state_root"],
+        deadline=context["deadline"],
+    )
+    return _operator_result(
+        "status",
+        ids=[str(check["id"]) for check in report["checks"]][: context["limit"]],
+        states=[str(report["overall_status"])],
+        codes=_doctor_report_codes(report),
+        counts={key: int(value) for key, value in report["counts"].items()},
+        overall_status=str(report["overall_status"]),
+    )
+
+
+def _queue_database_path(context: dict) -> Path:
+    return context["state_root"] / "run" / "queue.sqlite3"
+
+
+def _missing_queue_result(action: str) -> dict:
+    if action == "queue-dead-list":
+        return _operator_result(action, codes=["queue_missing"])
+    return _operator_result(
+        action, states=["error"], codes=["queue_missing"], overall_status="error"
+    )
+
+
+def _open_queue_reader(context: dict):
+    from reliable_memory import open_readonly_operational_db
+
+    return open_readonly_operational_db(
+        _queue_database_path(context),
+        context["state_root"],
+        max_bytes=256 * 1024 * 1024,
+        busy_ms=QUEUE_READ_BUSY_MS,
+    )
+
+
+def _row_error_codes(row) -> list:
+    if row["error_code"]:
+        return [str(row["error_code"])]
+    return []
+
+
+def _queue_inspect_result(connection, target_id) -> dict:
+    row = connection.execute(
+        "SELECT id,state,error_code FROM tasks WHERE id=?", (target_id,)
+    ).fetchone()
+    if row is None:
+        return _operator_result(
+            "queue-inspect",
+            states=["error"],
+            codes=["unknown_task"],
+            overall_status="error",
+        )
+    return _operator_result(
+        "queue-inspect",
+        ids=[str(row["id"])],
+        states=[str(row["state"])],
+        codes=_row_error_codes(row),
+    )
+
+
+def _queue_dead_list_result(connection, limit: int) -> dict:
+    rows = connection.execute(
+        "SELECT id,state,error_code FROM tasks WHERE state='dead' "
+        "ORDER BY updated_at,id LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return _operator_result(
+        "queue-dead-list",
+        ids=[str(row["id"]) for row in rows],
+        states=[str(row["state"]) for row in rows],
+        codes=[str(row["error_code"]) for row in rows if row["error_code"]],
+    )
+
+
+def _doctor_queue_read(context: dict) -> dict:
+    action = context["action"]
+    if not _queue_database_path(context).is_file():
+        return _missing_queue_result(action)
+    connection = _open_queue_reader(context)
+    try:
+        if action == "queue-inspect":
+            return _queue_inspect_result(connection, context["target_id"])
+        return _queue_dead_list_result(connection, context["limit"])
+    finally:
+        connection.close()
+
+
+def _doctor_queue_cancel(context: dict) -> dict:
+    from memory_queue import MemoryQueue
+
+    changed = MemoryQueue(context["state_root"]).cancel(
+        str(context["target_id"]),
+        deadline=context["deadline"],
+        cancelled=context["cancelled"],
+    )
+    if not changed:
+        return _operator_result(
+            "queue-cancel",
+            states=["error"],
+            codes=["unknown_or_terminal_task"],
+            overall_status="error",
+        )
+    return _operator_result(
+        "queue-cancel", ids=[str(context["target_id"])], states=["cancelled"]
+    )
+
+
+def _redrive_error_code(error) -> str:
+    if str(error) == "redrive_requires_dead":
+        return str(error)
+    return "redrive_invalid"
+
+
+def _doctor_queue_redrive(context: dict) -> dict:
+    from memory_queue import MemoryQueue, QueueOperationError
+
+    try:
+        replacement = MemoryQueue(context["state_root"]).redrive(
+            str(context["target_id"]),
+            deadline=context["deadline"],
+            cancelled=context["cancelled"],
+        )
+    except KeyError:
+        return _operator_result(
+            "queue-redrive",
+            states=["error"],
+            codes=["unknown_task"],
+            overall_status="error",
+        )
+    except QueueOperationError as error:
+        return _operator_result(
+            "queue-redrive",
+            states=["error"],
+            codes=[_redrive_error_code(error)],
+            overall_status="error",
+        )
+    return _operator_result("queue-redrive", ids=[replacement], states=["ready"])
+
+
+def _transaction_result(action: str, records) -> dict:
+    return _operator_result(
+        action,
+        ids=[record.id for record in records],
+        states=[record.state for record in records],
+        codes=[record.error_code for record in records if record.error_code],
+    )
+
+
+def _transaction_coordinator(context: dict):
+    from markdown_transaction import MarkdownCoordinator
+
+    return MarkdownCoordinator(context["root"], context["state_root"])
+
+
+def _doctor_transaction_recover(context: dict) -> dict:
+    records = _transaction_coordinator(context).recover(
+        max_transactions=context["limit"],
+        deadline=context["deadline"],
+        cancelled=context["cancelled"],
+    )
+    return _transaction_result("transaction-recover", records)
+
+
+def _doctor_transaction_undo(context: dict) -> dict:
+    coordinator = _transaction_coordinator(context)
+    prepared = coordinator.undo(
+        str(context["target_id"]),
+        deadline=context["deadline"],
+        cancelled=context["cancelled"],
+    )
+    record = coordinator.apply(
+        prepared.id, deadline=context["deadline"], cancelled=context["cancelled"]
+    )
+    return _transaction_result("transaction-undo", [record])
+
+
+def _check_counts(details: dict) -> dict:
+    return {
+        key: value
+        for key, value in details.items()
+        if isinstance(value, int) and not isinstance(value, bool)
+    }
+
+
+def _check_result(action: str, check: dict) -> dict:
+    details = check["details"]
+    return _operator_result(
+        action,
+        states=[str(check["status"])],
+        codes=[str(code) for code in details.get("codes", [])],
+        counts=_check_counts(details),
+    )
+
+
+def _doctor_archive_status(context: dict) -> dict:
+    from doctor import _archive_check
+
+    check = _archive_check(context["root"], context["state_root"], context["deadline"])
+    return _check_result("archive-status", check)
+
+
+def _doctor_claim_status(context: dict) -> dict:
+    from doctor import _claim_check
+
+    check = _claim_check(context["root"], context["state_root"], context["deadline"])
+    return _check_result("claim-status", check)
+
+
+_DOCTOR_ACTIONS = {
+    "status": _doctor_status,
+    "queue-inspect": _doctor_queue_read,
+    "queue-dead-list": _doctor_queue_read,
+    "queue-cancel": _doctor_queue_cancel,
+    "queue-redrive": _doctor_queue_redrive,
+    "transaction-recover": _doctor_transaction_recover,
+    "transaction-undo": _doctor_transaction_undo,
+    "archive-status": _doctor_archive_status,
+    "claim-status": _doctor_claim_status,
+}
 
 
 def _doctor(
@@ -2149,188 +2920,33 @@ def _doctor(
     """Dispatch bounded health and recovery actions with redacted output."""
     from memory_state import ROOT, STATE_ROOT
 
-    mutations = {
-        "queue-cancel",
-        "queue-redrive",
-        "transaction-recover",
-        "transaction-undo",
-    }
-    if action in mutations and repair is not True:
+    if action in _DOCTOR_MUTATIONS and repair is not True:
         return _operator_result(
             action, states=["error"], codes=["repair_required"], overall_status="error"
         )
-    operation_deadline = _operation_deadline(deadline)
-    cancelled = _operation_cancelled()
-    try:
-        if action == "status":
-            from doctor import run_doctor
-
-            report = run_doctor(
-                root=ROOT,
-                state_root=STATE_ROOT,
-                deadline=operation_deadline,
-            )
-            codes = [item["code"] for item in report["run_deletion"]["blockers"]]
-            for check in report["checks"]:
-                codes.extend(str(code) for code in check.get("details", {}).get("codes", []))
-            return _operator_result(
-                action,
-                ids=[str(check["id"]) for check in report["checks"]][:limit],
-                states=[str(report["overall_status"])],
-                codes=codes,
-                counts={key: int(value) for key, value in report["counts"].items()},
-                overall_status=str(report["overall_status"]),
-            )
-        if action in {"queue-inspect", "queue-dead-list"}:
-            from reliable_memory import open_readonly_operational_db
-
-            path = STATE_ROOT / "run" / "queue.sqlite3"
-            if not path.is_file():
-                if action == "queue-dead-list":
-                    return _operator_result(action, codes=["queue_missing"])
-                return _operator_result(
-                    action,
-                    states=["error"],
-                    codes=["queue_missing"],
-                    overall_status="error",
-                )
-            connection = open_readonly_operational_db(
-                path,
-                STATE_ROOT,
-                max_bytes=256 * 1024 * 1024,
-                busy_ms=QUEUE_READ_BUSY_MS,
-            )
-            try:
-                if action == "queue-inspect":
-                    row = connection.execute(
-                        "SELECT id,state,error_code FROM tasks WHERE id=?", (target_id,)
-                    ).fetchone()
-                    if row is None:
-                        return _operator_result(
-                            action,
-                            states=["error"],
-                            codes=["unknown_task"],
-                            overall_status="error",
-                        )
-                    return _operator_result(
-                        action,
-                        ids=[str(row["id"])],
-                        states=[str(row["state"])],
-                        codes=[str(row["error_code"])] if row["error_code"] else [],
-                    )
-                rows = connection.execute(
-                    "SELECT id,state,error_code FROM tasks WHERE state='dead' "
-                    "ORDER BY updated_at,id LIMIT ?",
-                    (limit,),
-                ).fetchall()
-            finally:
-                connection.close()
-            return _operator_result(
-                action,
-                ids=[str(row["id"]) for row in rows],
-                states=[str(row["state"]) for row in rows],
-                codes=[str(row["error_code"]) for row in rows if row["error_code"]],
-            )
-        if action in {"queue-cancel", "queue-redrive"}:
-            from memory_queue import MemoryQueue, QueueOperationError
-
-            queue = MemoryQueue(STATE_ROOT)
-            if action == "queue-cancel":
-                changed = queue.cancel(
-                    str(target_id),
-                    deadline=operation_deadline,
-                    cancelled=cancelled,
-                )
-                return _operator_result(
-                    action,
-                    ids=[str(target_id)] if changed else [],
-                    states=["cancelled"] if changed else ["error"],
-                    codes=[] if changed else ["unknown_or_terminal_task"],
-                    overall_status="ok" if changed else "error",
-                )
-            try:
-                replacement = queue.redrive(
-                    str(target_id),
-                    deadline=operation_deadline,
-                    cancelled=cancelled,
-                )
-            except KeyError:
-                return _operator_result(
-                    action,
-                    states=["error"],
-                    codes=["unknown_task"],
-                    overall_status="error",
-                )
-            except QueueOperationError as error:
-                code = str(error) if str(error) == "redrive_requires_dead" else "redrive_invalid"
-                return _operator_result(
-                    action,
-                    states=["error"],
-                    codes=[code],
-                    overall_status="error",
-                )
-            return _operator_result(action, ids=[replacement], states=["ready"])
-        if action in {"transaction-recover", "transaction-undo"}:
-            from markdown_transaction import MarkdownCoordinator
-
-            coordinator = MarkdownCoordinator(ROOT, STATE_ROOT)
-            if action == "transaction-recover":
-                records = coordinator.recover(
-                    max_transactions=limit,
-                    deadline=operation_deadline,
-                    cancelled=cancelled,
-                )
-            else:
-                prepared = coordinator.undo(
-                    str(target_id),
-                    deadline=operation_deadline,
-                    cancelled=cancelled,
-                )
-                records = [
-                    coordinator.apply(
-                        prepared.id,
-                        deadline=operation_deadline,
-                        cancelled=cancelled,
-                    )
-                ]
-            return _operator_result(
-                action,
-                ids=[record.id for record in records],
-                states=[record.state for record in records],
-                codes=[record.error_code for record in records if record.error_code],
-            )
-        if action in {"archive-status", "claim-status"}:
-            from doctor import _archive_check, _claim_check
-
-            check = (
-                _archive_check(ROOT, STATE_ROOT, operation_deadline)
-                if action == "archive-status"
-                else _claim_check(ROOT, STATE_ROOT, operation_deadline)
-            )
-            details = check["details"]
-            counts = {
-                key: value
-                for key, value in details.items()
-                if isinstance(value, int) and not isinstance(value, bool)
-            }
-            return _operator_result(
-                action,
-                states=[str(check["status"])],
-                codes=[str(code) for code in details.get("codes", [])],
-                counts=counts,
-            )
-    except Exception as error:  # noqa: BLE001 - stable operator failure boundary
-        code = {
-            "KeyError": "unknown_target",
-            "TimeoutError": "owner_busy",
-            "MigrationBusy": "owner_busy",
-        }.get(type(error).__name__, "operation_failed")
+    handler = _DOCTOR_ACTIONS.get(action)
+    if handler is None:
         return _operator_result(
-            action, states=["error"], codes=[code], overall_status="error"
+            action, states=["error"], codes=["unknown_action"], overall_status="error"
         )
-    return _operator_result(
-        action, states=["error"], codes=["unknown_action"], overall_status="error"
-    )
+    context = {
+        "action": action,
+        "target_id": target_id,
+        "limit": limit,
+        "root": ROOT,
+        "state_root": STATE_ROOT,
+        "deadline": _operation_deadline(deadline),
+        "cancelled": _operation_cancelled(),
+    }
+    try:
+        return handler(context)
+    except Exception as error:  # noqa: BLE001 - stable operator failure boundary
+        return _operator_result(
+            action,
+            states=["error"],
+            codes=[_doctor_failure_code(error)],
+            overall_status="error",
+        )
 
 
 def _validated_code_directory(
@@ -2346,16 +2962,19 @@ def _validated_code_directory(
         return None, "directory must be an absolute local path"
     resolved = candidate.resolve()
     _check_deadline(deadline)
+    error = _code_directory_error(resolved)
+    _check_deadline(deadline)
+    return (None, error) if error else (resolved, None)
+
+
+def _code_directory_error(resolved: Path) -> str | None:
     if not resolved.exists():
-        return None, f"directory does not exist: {resolved}"
-    _check_deadline(deadline)
+        return f"directory does not exist: {resolved}"
     if not resolved.is_dir():
-        return None, f"directory is not a directory: {resolved}"
-    _check_deadline(deadline)
+        return f"directory is not a directory: {resolved}"
     if resolved == Path(resolved.anchor):
-        return None, "directory must not be a filesystem root"
-    _check_deadline(deadline)
-    return resolved, None
+        return "directory must not be a filesystem root"
+    return None
 
 
 def _build_tool_definitions() -> list:
@@ -2457,13 +3076,7 @@ def _validate_tool_arguments(name: str, arguments) -> str | None:
         return "arguments must be an object"
     schema = TOOL_INPUT_SCHEMAS[name]
     if "oneOf" in schema:
-        errors = [
-            _validate_object_schema(branch, arguments)
-            for branch in schema["oneOf"]
-        ]
-        if sum(error is None for error in errors) == 1:
-            return None
-        return "arguments do not match exactly one allowed action"
+        return _validate_one_of(schema, arguments)
     error = _validate_object_schema(
         schema,
         arguments,
@@ -2471,126 +3084,266 @@ def _validate_tool_arguments(name: str, arguments) -> str | None:
     )
     if error is not None:
         return error
-    if name == "recall" and "profile" in arguments and arguments.get("grounded") is not True:
+    return _validate_tool_specific_arguments(name, arguments)
+
+
+def _validate_one_of(schema: dict, arguments: dict) -> str | None:
+    errors = [
+        _validate_object_schema(branch, arguments) for branch in schema["oneOf"]
+    ]
+    if sum(error is None for error in errors) == 1:
+        return None
+    return "arguments do not match exactly one allowed action"
+
+
+def _validate_recall_arguments(arguments: dict) -> str | None:
+    if "profile" in arguments and arguments.get("grounded") is not True:
         return "argument 'profile' requires grounded=true"
+    return None
+
+
+def _validate_tool_specific_arguments(name: str, arguments: dict) -> str | None:
+    if name == "recall":
+        return _validate_recall_arguments(arguments)
     if name == "get_architecture":
         return _validate_architecture_arguments(arguments)
     return None
 
 
+_ARCHITECTURE_POSITION_KEYS = ("path", "line", "character")
+
+_ARCHITECTURE_CONTRACTS = {
+    "summary": ({"directory"}, {"directory", "mode", "live"}),
+    "symbol": (
+        {"directory", "mode", "symbol"},
+        {"directory", "mode", "symbol", "live"},
+    ),
+    "callers": (
+        {"directory", "mode", "symbol"},
+        {"directory", "mode", "symbol", "live"},
+    ),
+    "callees": (
+        {"directory", "mode", "symbol"},
+        {"directory", "mode", "symbol", "live"},
+    ),
+    "dependencies": (
+        {"directory", "mode", "symbol"},
+        {"directory", "mode", "symbol", "reverse", "live"},
+    ),
+    "path": (
+        {"directory", "mode", "symbol", "target"},
+        {"directory", "mode", "symbol", "target", "live"},
+    ),
+    "community": (
+        {"directory", "mode"},
+        {"directory", "mode", "live"},
+    ),
+    "impact": (
+        {"directory", "mode"},
+        {"directory", "mode", "comparison", "base", "target", "branch"},
+    ),
+}
+
+
+def _positioned_architecture_arguments(arguments: dict, mode: str) -> bool:
+    if mode not in {"callers", "callees"}:
+        return False
+    return any(
+        key in arguments
+        for key in (*_ARCHITECTURE_POSITION_KEYS, "offset", "limit")
+    )
+
+
+def _architecture_contract(mode: str, positioned: bool) -> tuple[set, set]:
+    if mode in PRECISE_ARCHITECTURE_MODES or positioned:
+        required = {"directory", "mode", *_ARCHITECTURE_POSITION_KEYS}
+        return required, {*required, "offset", "limit"}
+    return _ARCHITECTURE_CONTRACTS[mode]
+
+
+def _missing_architecture_message(mode: str, missing: list, positioned: bool) -> str:
+    if positioned:
+        return (
+            f"positioned {mode} require path, line, and character together; "
+            f"missing: {', '.join(missing)}"
+        )
+    return f"required arguments are missing for {mode}: {', '.join(missing)}"
+
+
+def _architecture_path_error(arguments: dict) -> str | None:
+    try:
+        from lsp_security import validate_repository_relative_path
+
+        validate_repository_relative_path(arguments["path"])
+    except (TypeError, ValueError):
+        return "argument 'path' must be a canonical repository-relative path"
+    return None
+
+
 def _validate_architecture_arguments(arguments: dict) -> str | None:
     mode = arguments.get("mode", "summary")
-    position = {"path", "line", "character"}
-    positioned = mode in {"callers", "callees"} and any(
-        key in arguments for key in (*position, "offset", "limit")
-    )
-    if mode in PRECISE_ARCHITECTURE_MODES or positioned:
-        required = {"directory", "mode", *position}
-        allowed = {*required, "offset", "limit"}
-    else:
-        contracts = {
-            "summary": ({"directory"}, {"directory", "mode", "live"}),
-            "symbol": (
-                {"directory", "mode", "symbol"},
-                {"directory", "mode", "symbol", "live"},
-            ),
-            "callers": (
-                {"directory", "mode", "symbol"},
-                {"directory", "mode", "symbol", "live"},
-            ),
-            "callees": (
-                {"directory", "mode", "symbol"},
-                {"directory", "mode", "symbol", "live"},
-            ),
-            "dependencies": (
-                {"directory", "mode", "symbol"},
-                {"directory", "mode", "symbol", "reverse", "live"},
-            ),
-            "path": (
-                {"directory", "mode", "symbol", "target"},
-                {"directory", "mode", "symbol", "target", "live"},
-            ),
-            "community": (
-                {"directory", "mode"},
-                {"directory", "mode", "live"},
-            ),
-            "impact": (
-                {"directory", "mode"},
-                {"directory", "mode", "comparison", "base", "target", "branch"},
-            ),
-        }
-        required, allowed = contracts[mode]
+    positioned = _positioned_architecture_arguments(arguments, mode)
+    required, allowed = _architecture_contract(mode, positioned)
     missing = sorted(required.difference(arguments))
     if missing:
-        if positioned:
-            return (
-                f"positioned {mode} require path, line, and character together; "
-                f"missing: {', '.join(missing)}"
-            )
-        return f"required arguments are missing for {mode}: {', '.join(missing)}"
+        return _missing_architecture_message(mode, missing, positioned)
     forbidden = sorted(set(arguments).difference(allowed))
     if forbidden:
         return f"arguments are not valid for {mode}: {', '.join(forbidden)}"
     if mode in PRECISE_ARCHITECTURE_MODES or positioned:
-        try:
-            from lsp_security import validate_repository_relative_path
+        return _architecture_path_error(arguments)
+    return None
 
-            validate_repository_relative_path(arguments["path"])
-        except (TypeError, ValueError):
-            return "argument 'path' must be a canonical repository-relative path"
+
+def _is_string_value(value) -> bool:
+    return isinstance(value, str)
+
+
+def _is_integer_value(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_boolean_value(value) -> bool:
+    return isinstance(value, bool)
+
+
+def _is_array_value(value) -> bool:
+    return isinstance(value, list)
+
+
+_SCHEMA_TYPE_CHECKS = {
+    "string": (_is_string_value, "a string"),
+    "integer": (_is_integer_value, "an integer"),
+    "boolean": (_is_boolean_value, "a boolean"),
+    "array": (_is_array_value, "an array"),
+}
+
+
+def _validate_field_type(expected: str, key: str, value) -> str | None:
+    check = _SCHEMA_TYPE_CHECKS.get(expected)
+    if check is None:
+        return None
+    predicate, description = check
+    if predicate(value):
+        return None
+    return f"argument '{key}' must be {description}"
+
+
+def _validate_array_item_type(items: dict, key: str, value: list) -> str | None:
+    if items.get("type") != "string":
+        return None
+    if all(isinstance(item, str) for item in value):
+        return None
+    return f"argument '{key}' items must be strings"
+
+
+def _validate_array_length(field: dict, key: str, value: list) -> str | None:
+    if "minItems" in field and len(value) < field["minItems"]:
+        return f"argument '{key}' has too few items"
+    if "maxItems" in field and len(value) > field["maxItems"]:
+        return f"argument '{key}' has too many items"
+    return None
+
+
+def _validate_array_item_length(items: dict, key: str, value: list) -> str | None:
+    item_max_length = items.get("maxLength")
+    if item_max_length is None:
+        return None
+    if all(len(item) <= item_max_length for item in value):
+        return None
+    return f"argument '{key}' item is too long"
+
+
+def _validate_array_items(items: dict, field: dict, key: str, value: list) -> str | None:
+    if field.get("uniqueItems") and len(set(value)) != len(value):
+        return f"argument '{key}' items must be unique"
+    return _validate_array_item_length(items, key, value)
+
+
+def _validate_array_field(field: dict, key: str, value: list) -> str | None:
+    items = field.get("items", {})
+    error = _validate_array_item_type(items, key, value)
+    if error is not None:
+        return error
+    error = _validate_array_length(field, key, value)
+    if error is not None:
+        return error
+    return _validate_array_items(items, field, key, value)
+
+
+def _validate_numeric_bounds(field: dict, key: str, value) -> str | None:
+    if "minimum" in field and value < field["minimum"]:
+        return f"argument '{key}' must be at least {field['minimum']}"
+    if "maximum" in field and value > field["maximum"]:
+        return f"argument '{key}' must be at most {field['maximum']}"
+    return None
+
+
+def _validate_length_bounds(field: dict, key: str, value) -> str | None:
+    if "minLength" in field and len(value) < field["minLength"]:
+        return f"argument '{key}' is too short"
+    if "maxLength" in field and len(value) > field["maxLength"]:
+        return f"argument '{key}' is too long"
+    return None
+
+
+def _validate_value_choice(field: dict, key: str, value) -> str | None:
+    if "const" in field and value != field["const"]:
+        return f"argument '{key}' has an invalid value"
+    if "enum" in field and value not in field["enum"]:
+        return f"argument '{key}' has an invalid value"
+    return None
+
+
+def _validate_field_bounds(field: dict, key: str, value) -> str | None:
+    error = _validate_numeric_bounds(field, key, value)
+    if error is not None:
+        return error
+    error = _validate_length_bounds(field, key, value)
+    if error is not None:
+        return error
+    return _validate_value_choice(field, key, value)
+
+
+def _unknown_argument_error(schema: dict, key: str, reject_unknown: bool) -> str | None:
+    if reject_unknown or schema.get("additionalProperties") is False:
+        return f"unknown argument: {key}"
+    return None
+
+
+def _validate_schema_field(
+    schema: dict, key: str, value, reject_unknown: bool
+) -> str | None:
+    field = schema["properties"].get(key)
+    if field is None:
+        return _unknown_argument_error(schema, key, reject_unknown)
+    error = _validate_field_type(field["type"], key, value)
+    if error is not None:
+        return error
+    if field["type"] == "array":
+        return _validate_array_field(field, key, value) or _validate_field_bounds(
+            field, key, value
+        )
+    return _validate_field_bounds(field, key, value)
+
+
+def _missing_required_argument(schema: dict, arguments: dict) -> str | None:
+    for key in schema["required"]:
+        if key not in arguments:
+            return f"required argument is missing: {key}"
     return None
 
 
 def _validate_object_schema(
     schema: dict, arguments: dict, *, reject_unknown: bool = True
 ) -> str | None:
-    for key in schema["required"]:
-        if key not in arguments:
-            return f"required argument is missing: {key}"
+    missing = _missing_required_argument(schema, arguments)
+    if missing is not None:
+        return missing
     for key, value in arguments.items():
-        field = schema["properties"].get(key)
-        if field is None:
-            if reject_unknown or schema.get("additionalProperties") is False:
-                return f"unknown argument: {key}"
-            continue
-        expected = field["type"]
-        if expected == "string" and not isinstance(value, str):
-            return f"argument '{key}' must be a string"
-        if expected == "integer" and (
-            isinstance(value, bool) or not isinstance(value, int)
-        ):
-            return f"argument '{key}' must be an integer"
-        if expected == "boolean" and not isinstance(value, bool):
-            return f"argument '{key}' must be a boolean"
-        if expected == "array":
-            if not isinstance(value, list):
-                return f"argument '{key}' must be an array"
-            item_type = field.get("items", {}).get("type")
-            if item_type == "string" and any(not isinstance(item, str) for item in value):
-                return f"argument '{key}' items must be strings"
-            if "minItems" in field and len(value) < field["minItems"]:
-                return f"argument '{key}' has too few items"
-            if "maxItems" in field and len(value) > field["maxItems"]:
-                return f"argument '{key}' has too many items"
-            if field.get("uniqueItems") and len(set(value)) != len(value):
-                return f"argument '{key}' items must be unique"
-            item_max_length = field.get("items", {}).get("maxLength")
-            if item_max_length is not None and any(
-                len(item) > item_max_length for item in value
-            ):
-                return f"argument '{key}' item is too long"
-        if "minimum" in field and value < field["minimum"]:
-            return f"argument '{key}' must be at least {field['minimum']}"
-        if "maximum" in field and value > field["maximum"]:
-            return f"argument '{key}' must be at most {field['maximum']}"
-        if "minLength" in field and len(value) < field["minLength"]:
-            return f"argument '{key}' is too short"
-        if "maxLength" in field and len(value) > field["maxLength"]:
-            return f"argument '{key}' is too long"
-        if "const" in field and value != field["const"]:
-            return f"argument '{key}' has an invalid value"
-        if "enum" in field and value not in field["enum"]:
-            return f"argument '{key}' has an invalid value"
+        error = _validate_schema_field(schema, key, value, reject_unknown)
+        if error is not None:
+            return error
     return None
 
 
@@ -2672,16 +3425,33 @@ _NAVIGATION_REDACTION_MARKER = re.compile(
 )
 
 
+def _sanitized_diagnostic_text(value: str) -> str:
+    text = _ABSOLUTE_PATH.sub("[REDACTED_PATH]", redact_secrets(value))
+    return " ".join(text.split())[:MAX_MCP_ERROR_CHARS]
+
+
+def _sanitized_diagnostic_list(value: list) -> list:
+    return [_sanitize_diagnostic(item) for item in value]
+
+
+def _sanitized_diagnostic_mapping(value: dict) -> dict:
+    return {key: _sanitize_diagnostic(item) for key, item in value.items()}
+
+
 def _sanitize_diagnostic(value):
     if isinstance(value, str):
-        text = redact_secrets(value)
-        text = _ABSOLUTE_PATH.sub("[REDACTED_PATH]", text)
-        return " ".join(text.split())[:MAX_MCP_ERROR_CHARS]
+        return _sanitized_diagnostic_text(value)
     if isinstance(value, list):
-        return [_sanitize_diagnostic(item) for item in value]
+        return _sanitized_diagnostic_list(value)
     if isinstance(value, dict):
-        return {key: _sanitize_diagnostic(item) for key, item in value.items()}
+        return _sanitized_diagnostic_mapping(value)
     return value
+
+
+def _sanitized_error_value(key: str, item):
+    if key == "error":
+        return _sanitize_diagnostic(item)
+    return _sanitize_error_fields(item)
 
 
 def _sanitize_error_fields(value):
@@ -2689,10 +3459,7 @@ def _sanitize_error_fields(value):
         return [_sanitize_error_fields(item) for item in value]
     if isinstance(value, dict):
         return {
-            key: _sanitize_diagnostic(item)
-            if key == "error"
-            else _sanitize_error_fields(item)
-            for key, item in value.items()
+            key: _sanitized_error_value(key, item) for key, item in value.items()
         }
     return value
 
@@ -2728,69 +3495,92 @@ def _sanitize_navigation_location(value):
     return sanitized
 
 
-def _sanitize_navigation_data(data: dict) -> dict:
-    sanitized = dict(data)
+def _sanitized_navigation_warning(item):
+    if isinstance(item, str):
+        return _sanitize_navigation_text(item)
+    return item
+
+
+def _sanitize_navigation_warnings(sanitized: dict) -> None:
     warnings = sanitized.get("warnings")
-    if isinstance(warnings, (list, tuple)):
-        values = tuple(
-            _sanitize_navigation_text(item) if isinstance(item, str) else item
-            for item in warnings
-        )
-        sanitized["warnings"] = values if isinstance(warnings, tuple) else list(values)
+    if not isinstance(warnings, (list, tuple)):
+        return
+    values = tuple(_sanitized_navigation_warning(item) for item in warnings)
+    sanitized["warnings"] = values if isinstance(warnings, tuple) else list(values)
+
+
+def _sanitize_navigation_hover(sanitized: dict) -> None:
     hover = sanitized.get("hover")
     if isinstance(hover, str):
         sanitized["hover"] = _sanitize_navigation_text(hover)
+
+
+def _sanitized_navigation_group(group):
+    if not isinstance(group, dict):
+        return group
+    sanitized_group = dict(group)
+    locations = group.get("locations")
+    if isinstance(locations, list):
+        sanitized_group["locations"] = [
+            _sanitize_navigation_location(location) for location in locations
+        ]
+    return sanitized_group
+
+
+def _sanitize_navigation_groups(sanitized: dict) -> None:
     groups = sanitized.get("groups")
     if isinstance(groups, list):
-        sanitized_groups = []
-        for group in groups:
-            if not isinstance(group, dict):
-                sanitized_groups.append(group)
-                continue
-            sanitized_group = dict(group)
-            locations = group.get("locations")
-            if isinstance(locations, list):
-                sanitized_group["locations"] = [
-                    _sanitize_navigation_location(location)
-                    for location in locations
-                ]
-            sanitized_groups.append(sanitized_group)
-        sanitized["groups"] = sanitized_groups
-    diagnostics = sanitized.get("diagnostics")
-    if isinstance(diagnostics, list):
-        sanitized_diagnostics = []
-        for diagnostic in diagnostics:
-            if not isinstance(diagnostic, dict):
-                sanitized_diagnostics.append(diagnostic)
-                continue
-            sanitized_diagnostic = dict(diagnostic)
-            message = diagnostic.get("message")
-            if isinstance(message, str):
-                sanitized_diagnostic["message"] = _sanitize_navigation_text(message)
-            code = diagnostic.get("code")
-            if isinstance(code, str):
-                sanitized_diagnostic["code"] = _sanitize_navigation_text(code)
-            related = diagnostic.get("related")
-            if isinstance(related, list):
-                sanitized_diagnostic["related"] = [
-                    _sanitize_navigation_location(location)
-                    for location in related
-                ]
-            sanitized_diagnostics.append(sanitized_diagnostic)
-        sanitized["diagnostics"] = sanitized_diagnostics
+        sanitized["groups"] = [_sanitized_navigation_group(item) for item in groups]
+
+
+def _sanitize_diagnostic_text_fields(diagnostic: dict, sanitized: dict) -> None:
+    for field in ("message", "code"):
+        value = diagnostic.get(field)
+        if isinstance(value, str):
+            sanitized[field] = _sanitize_navigation_text(value)
+
+
+def _sanitized_navigation_diagnostic(diagnostic):
+    if not isinstance(diagnostic, dict):
+        return diagnostic
+    sanitized = dict(diagnostic)
+    _sanitize_diagnostic_text_fields(diagnostic, sanitized)
+    related = diagnostic.get("related")
+    if isinstance(related, list):
+        sanitized["related"] = [
+            _sanitize_navigation_location(location) for location in related
+        ]
     return sanitized
 
 
+def _sanitize_navigation_diagnostics(sanitized: dict) -> None:
+    diagnostics = sanitized.get("diagnostics")
+    if isinstance(diagnostics, list):
+        sanitized["diagnostics"] = [
+            _sanitized_navigation_diagnostic(item) for item in diagnostics
+        ]
+
+
+def _sanitize_navigation_data(data: dict) -> dict:
+    sanitized = dict(data)
+    _sanitize_navigation_warnings(sanitized)
+    _sanitize_navigation_hover(sanitized)
+    _sanitize_navigation_groups(sanitized)
+    _sanitize_navigation_diagnostics(sanitized)
+    return sanitized
+
+
+_NAVIGATION_RENDER_KEYS = frozenset(
+    {"requested_capability", "repository", "groups", "diagnostics"}
+)
+
+
 def _is_rendered_navigation_data(name: str, data) -> bool:
-    return (
-        name == "get_architecture"
-        and isinstance(data, dict)
-        and isinstance(data.get("status"), str)
-        and "requested_capability" in data
-        and "repository" in data
-        and "groups" in data
-        and "diagnostics" in data
-    )
+    if name != "get_architecture" or not isinstance(data, dict):
+        return False
+    if not isinstance(data.get("status"), str):
+        return False
+    return _NAVIGATION_RENDER_KEYS.issubset(data)
 
 
 def _quality_for(
@@ -2800,176 +3590,261 @@ def _quality_for(
     *,
     limit_clamped: bool = False,
 ) -> dict:
-    """Infer conservative operation quality only from returned evidence."""
-    if isinstance(data, dict) and "error" in data:
+    """Infer conservative operation quality only from returned evidence.
+
+    The rules are tried in order and the first one that recognises the result
+    answers; order is behaviour, because `get_architecture` is claimed by the
+    impact rule before the code-graph rule ever sees it.
+    """
+    for rule in _QUALITY_RULES:
+        quality = rule(name, data, arguments, limit_clamped)
+        if quality is not None:
+            return quality
+    return {}
+
+
+def _quality_of_error(name, data, arguments, limit_clamped) -> dict | None:
+    if not isinstance(data, dict) or "error" not in data:
+        return None
+    return {
+        "coverage": 0.0,
+        "confidence": 0.2,
+        "partial": True,
+        "warnings": [str(data["error"])],
+    }
+
+
+def _is_grounded_recall(name: str, arguments: dict | None) -> bool:
+    if name != "recall" or not arguments:
+        return False
+    return arguments.get("grounded") is True
+
+
+def _citation_ids(citations) -> set:
+    identifiers = set()
+    for citation in citations:
+        if isinstance(citation, dict) and citation.get("citation_id"):
+            identifiers.add(citation.get("citation_id"))
+    return identifiers
+
+
+def _is_verified_claim(claim: object, citation_ids: set) -> bool:
+    if not isinstance(claim, dict) or not claim.get("citation_ids"):
+        return False
+    return set(claim["citation_ids"]).issubset(citation_ids)
+
+
+def _verified_claim_ratio(data: dict) -> float:
+    """The share of claims whose citations all came back with the answer."""
+    claims = data.get("claims", [])
+    citation_ids = _citation_ids(data.get("citations", []))
+    verified = sum(1 for claim in claims if _is_verified_claim(claim, citation_ids))
+    return verified / len(claims) if claims else 0.0
+
+
+def _grounded_answer_quality(data: dict) -> dict:
+    ratio = _verified_claim_ratio(data)
+    return {
+        "coverage": 0.0,
+        "confidence": min(0.8, ratio),
+        "partial": ratio < 1.0,
+        "warnings": ["Grounded answer coverage is unknown."],
+    }
+
+
+def _grounded_abstention_quality(data) -> dict:
+    reason = data.get("reason") if isinstance(data, dict) else None
+    return {
+        "coverage": 0.0,
+        "confidence": 0.0,
+        "partial": True,
+        "warnings": [str(reason or "Grounded QA abstained without a reason.")],
+    }
+
+
+def _quality_of_grounded_recall(name, data, arguments, limit_clamped) -> dict | None:
+    if not _is_grounded_recall(name, arguments):
+        return None
+    if isinstance(data, dict) and data.get("status") == "answered":
+        return _grounded_answer_quality(data)
+    return _grounded_abstention_quality(data)
+
+
+def _no_results_quality() -> dict:
+    """A fresh dict every time: `_degrade_quality` writes into what it is given."""
+    return {
+        "coverage": 0.1,
+        "confidence": 0.3,
+        "fallback": True,
+        "partial": True,
+        "warnings": ["Search returned no results; retrieval coverage is unknown."],
+    }
+
+
+def _bm25_only_quality() -> dict:
+    return {
+        "coverage": 0.6,
+        "confidence": 0.6,
+        "fallback": True,
+        "partial": True,
+        "warnings": ["Only BM25 retrieval evidence is available."],
+    }
+
+
+def _carries_score(result: object) -> bool:
+    if not isinstance(result, dict):
+        return False
+    return any(key in result for key in ("fused_score", "vector_score"))
+
+
+def _has_fused_scores(results) -> bool:
+    return any(_carries_score(result) for result in results)
+
+
+def _contradiction_candidate_quality(data: list) -> dict:
+    if not data:
+        return _degrade_quality(
+            _no_results_quality(),
+            "Contradiction candidates are unverified.",
+            coverage=0.6,
+            confidence=0.45,
+        )
+    quality = (
+        {"coverage": 0.9, "confidence": 0.8}
+        if _has_fused_scores(data)
+        else _bm25_only_quality()
+    )
+    return _degrade_quality(
+        quality,
+        "Contradiction candidates are unverified.",
+        coverage=0.6,
+        confidence=0.45,
+    )
+
+
+def _is_verified_validity(validity: object) -> bool:
+    if not isinstance(validity, dict):
+        return False
+    return validity.get("status") == "verified"
+
+
+def _contradiction_claim_quality(data) -> dict:
+    fields = data if isinstance(data, dict) else {}
+    evidence = fields.get("evidence", [])
+    if _is_verified_validity(fields.get("validity", {})):
         return {
-            "coverage": 0.0,
-            "confidence": 0.2,
-            "partial": True,
-            "warnings": [str(data["error"])],
+            "coverage": 0.9 if evidence else 0.7,
+            "confidence": 0.9,
+            "partial": False,
+            "warnings": [],
         }
-    if name == "recall" and arguments and arguments.get("grounded") is True:
-        if isinstance(data, dict) and data.get("status") == "answered":
-            claims = data.get("claims", [])
-            citations = data.get("citations", [])
-            citation_ids = {
-                citation.get("citation_id")
-                for citation in citations
-                if isinstance(citation, dict) and citation.get("citation_id")
-            }
-            verified_claims = sum(
-                1
-                for claim in claims
-                if isinstance(claim, dict)
-                and claim.get("citation_ids")
-                and set(claim["citation_ids"]).issubset(citation_ids)
-            )
-            verification_ratio = verified_claims / len(claims) if claims else 0.0
-            return {
-                "coverage": 0.0,
-                "confidence": min(0.8, verification_ratio),
-                "partial": verification_ratio < 1.0,
-                "warnings": ["Grounded answer coverage is unknown."],
-            }
-        reason = data.get("reason") if isinstance(data, dict) else None
-        return {
-            "coverage": 0.0,
-            "confidence": 0.0,
-            "partial": True,
-            "warnings": [str(reason or "Grounded QA abstained without a reason.")],
-        }
-    if name == "check_contradiction":
-        if isinstance(data, list):
-            if not data:
-                return {
-                    "coverage": 0.1,
-                    "confidence": 0.3,
-                    "fallback": True,
-                    "partial": True,
-                    "warnings": [
-                        "Search returned no results; retrieval coverage is unknown."
-                    ],
-                }
-            fused = any(
-                isinstance(result, dict)
-                and any(key in result for key in ("fused_score", "vector_score"))
-                for result in data
-            )
-            quality = (
-                {"coverage": 0.9, "confidence": 0.8}
-                if fused
-                else {
-                    "coverage": 0.6,
-                    "confidence": 0.6,
-                    "fallback": True,
-                    "partial": True,
-                    "warnings": ["Only BM25 retrieval evidence is available."],
-                }
-            )
-            return _degrade_quality(
-                quality,
-                "Contradiction candidates are unverified.",
-                coverage=0.6,
-                confidence=0.45,
-            )
-        validity = data.get("validity", {}) if isinstance(data, dict) else {}
-        evidence = data.get("evidence", []) if isinstance(data, dict) else []
-        if isinstance(validity, dict) and validity.get("status") == "verified":
-            return {
-                "coverage": 0.9 if evidence else 0.7,
-                "confidence": 0.9,
-                "partial": False,
-                "warnings": [],
-            }
-        return {
-            "coverage": 0.5 if evidence else 0.2,
-            "confidence": 0.35,
-            "fallback": True,
-            "partial": True,
-            "warnings": [
-                "Claim evidence is unsupported; recommendations are quarantined."
-            ],
-        }
-    if name in {"recall", "get_decisions"}:
-        results = data.get("results", []) if name == "recall" else data
-        if not isinstance(results, list) or not results:
-            quality = {
-                "coverage": 0.1,
-                "confidence": 0.3,
-                "fallback": True,
-                "partial": True,
-                "warnings": ["Search returned no results; retrieval coverage is unknown."],
-            }
-        else:
-            fused = any(
-                isinstance(result, dict)
-                and any(key in result for key in ("fused_score", "vector_score"))
-                for result in results
-            )
-            if not fused:
-                quality = {
-                    "coverage": 0.6,
-                    "confidence": 0.6,
-                    "fallback": True,
-                    "partial": True,
-                    "warnings": ["Only BM25 retrieval evidence is available."],
-                }
-            else:
-                quality = {"coverage": 0.9, "confidence": 0.8}
-        if limit_clamped:
-            quality = _degrade_quality(
-                quality,
-                "Requested limit was clamped to the safe 1-20 range.",
-                coverage=0.8,
-                confidence=0.8,
-            )
+    return {
+        "coverage": 0.5 if evidence else 0.2,
+        "confidence": 0.35,
+        "fallback": True,
+        "partial": True,
+        "warnings": ["Claim evidence is unsupported; recommendations are quarantined."],
+    }
+
+
+def _quality_of_contradiction(name, data, arguments, limit_clamped) -> dict | None:
+    if name != "check_contradiction":
+        return None
+    if isinstance(data, list):
+        return _contradiction_candidate_quality(data)
+    return _contradiction_claim_quality(data)
+
+
+def _results_quality(results) -> dict:
+    if not isinstance(results, list) or not results:
+        return _no_results_quality()
+    if not _has_fused_scores(results):
+        return _bm25_only_quality()
+    return {"coverage": 0.9, "confidence": 0.8}
+
+
+def _quality_of_results(name, data, arguments, limit_clamped) -> dict | None:
+    if name not in {"recall", "get_decisions"}:
+        return None
+    results = data.get("results", []) if name == "recall" else data
+    quality = _results_quality(results)
+    if not limit_clamped:
         return quality
-    if name == "get_architecture" and arguments and arguments.get("mode") == "impact":
-        classification = data.get("classification") if isinstance(data, dict) else None
-        if classification == "exact":
-            return {"coverage": 0.9, "confidence": 0.9}
-        if classification == "conservative":
-            return {
-                "coverage": 0.6,
-                "confidence": 0.55,
-                "partial": True,
-                "warnings": list(data.get("warnings", [])) or ["Impact analysis is conservative."],
-            }
+    return _degrade_quality(
+        quality,
+        "Requested limit was clamped to the safe 1-20 range.",
+        coverage=0.8,
+        confidence=0.8,
+    )
+
+
+def _impact_warnings(data, fallback: str) -> list:
+    return list(data.get("warnings", [])) or [fallback]
+
+
+def _impact_quality(data) -> dict:
+    classification = data.get("classification") if isinstance(data, dict) else None
+    if classification == "exact":
+        return {"coverage": 0.9, "confidence": 0.9}
+    if classification == "conservative":
         return {
-            "coverage": 0.2,
-            "confidence": 0.25,
+            "coverage": 0.6,
+            "confidence": 0.55,
             "partial": True,
-            "warnings": list(data.get("warnings", [])) or ["Impact analysis is unresolved."],
+            "warnings": _impact_warnings(data, "Impact analysis is conservative."),
         }
-    if _is_rendered_navigation_data(name, data):
-        partial = data["status"] != "ok"
+    return {
+        "coverage": 0.2,
+        "confidence": 0.25,
+        "partial": True,
+        "warnings": _impact_warnings(data, "Impact analysis is unresolved."),
+    }
+
+
+def _quality_of_impact(name, data, arguments, limit_clamped) -> dict | None:
+    if name != "get_architecture" or not arguments:
+        return None
+    if arguments.get("mode") != "impact":
+        return None
+    return _impact_quality(data)
+
+
+def _quality_of_navigation(name, data, arguments, limit_clamped) -> dict | None:
+    if not _is_rendered_navigation_data(name, data):
+        return None
+    partial = data["status"] != "ok"
+    return {
+        "coverage": 0.5 if partial else 0.9,
+        "confidence": 0.4 if partial else 0.85,
+        "fallback": False,
+        "partial": partial,
+        "warnings": list(data.get("warnings", ())),
+    }
+
+
+def _active_graph_quality(data: dict) -> dict:
+    unresolved = data.get("unresolved_count")
+    if data.get("graph_complete") is True and unresolved == 0:
         return {
-            "coverage": 0.9 if not partial else 0.5,
-            "confidence": 0.85 if not partial else 0.4,
+            "coverage": 0.95,
+            "confidence": 0.9,
             "fallback": False,
-            "partial": partial,
-            "warnings": list(data.get("warnings", ())),
+            "partial": False,
+            "warnings": [],
         }
-    if name in {"find_dead_code", "get_architecture"}:
-        if isinstance(data, dict) and data.get("fallback") is False:
-            unresolved = data.get("unresolved_count")
-            if data.get("graph_complete") is True and unresolved == 0:
-                return {
-                    "coverage": 0.95,
-                    "confidence": 0.9,
-                    "fallback": False,
-                    "partial": False,
-                    "warnings": [],
-                }
-            return {
-                "coverage": 0.8,
-                "confidence": 0.75,
-                "fallback": False,
-                "partial": True,
-                "warnings": [
-                    f"Active code graph has {unresolved} unresolved observations."
-                ],
-            }
+    return {
+        "coverage": 0.8,
+        "confidence": 0.75,
+        "fallback": False,
+        "partial": True,
+        "warnings": [f"Active code graph has {unresolved} unresolved observations."],
+    }
+
+
+def _quality_of_code_graph(name, data, arguments, limit_clamped) -> dict | None:
+    if name not in {"find_dead_code", "get_architecture"}:
+        return None
+    if not isinstance(data, dict) or data.get("fallback") is not False:
         return {
             "coverage": 0.6,
             "confidence": 0.55,
@@ -2977,61 +3852,122 @@ def _quality_for(
             "partial": True,
             "warnings": ["Live static extraction fallback is incomplete."],
         }
-    if name == "doctor":
-        overall = data.get("overall_status") if isinstance(data, dict) else None
-        if overall == "ok":
-            return {"coverage": 0.9, "confidence": 0.85}
-        if overall == "error":
-            codes = data.get("codes", []) if isinstance(data, dict) else []
-            return {
-                "coverage": 0.2,
-                "confidence": 0.3,
-                "partial": True,
-                "warnings": [
-                    "Doctor operator failed"
-                    + (f": {', '.join(str(code) for code in codes[:3])}" if codes else ".")
-                ],
-            }
-        if overall == "degraded":
-            codes = data.get("codes", []) if isinstance(data, dict) else []
-            return {
-                "coverage": 0.7,
-                "confidence": 0.7,
-                "partial": True,
-                "warnings": [
-                    "Doctor status is degraded"
-                    + (f": {', '.join(str(code) for code in codes[:3])}" if codes else ".")
-                ],
-            }
-        from doctor import degraded_summary
+    return _active_graph_quality(data)
 
-        warning = degraded_summary(data) or "Doctor health is unknown."
-        return {
-            "coverage": 0.75,
-            "confidence": 0.75,
-            "partial": True,
-            "warnings": [warning],
-        }
-    if name == "get_context" and arguments:
-        requested = arguments.get("slugs", [])
-        missing = data.get("missing_slugs", []) if isinstance(data, dict) else []
-        if requested and missing:
-            ratio = max(0.0, (len(requested) - len(missing)) / len(requested))
-            return {
-                "coverage": ratio,
-                "confidence": 0.8,
-                "partial": True,
-                "warnings": ["Some requested pages were unavailable."],
-            }
-    return {}
+
+def _doctor_warning(prefix: str, data) -> str:
+    codes = data.get("codes", []) if isinstance(data, dict) else []
+    if not codes:
+        return f"{prefix}."
+    return f"{prefix}: {', '.join(str(code) for code in codes[:3])}"
+
+
+def _unknown_doctor_quality(data) -> dict:
+    from doctor import degraded_summary
+
+    return {
+        "coverage": 0.75,
+        "confidence": 0.75,
+        "partial": True,
+        "warnings": [degraded_summary(data) or "Doctor health is unknown."],
+    }
+
+
+_DOCTOR_QUALITY = {
+    "ok": lambda data: {"coverage": 0.9, "confidence": 0.85},
+    "error": lambda data: {
+        "coverage": 0.2,
+        "confidence": 0.3,
+        "partial": True,
+        "warnings": [_doctor_warning("Doctor operator failed", data)],
+    },
+    "degraded": lambda data: {
+        "coverage": 0.7,
+        "confidence": 0.7,
+        "partial": True,
+        "warnings": [_doctor_warning("Doctor status is degraded", data)],
+    },
+}
+
+
+def _quality_of_doctor(name, data, arguments, limit_clamped) -> dict | None:
+    if name != "doctor":
+        return None
+    overall = data.get("overall_status") if isinstance(data, dict) else None
+    build = _DOCTOR_QUALITY.get(overall)
+    if build is None:
+        return _unknown_doctor_quality(data)
+    return build(data)
+
+
+def _is_context_request(name: str, arguments: dict | None) -> bool:
+    if name != "get_context":
+        return False
+    return bool(arguments)
+
+
+def _missing_slugs(data) -> list:
+    if not isinstance(data, dict):
+        return []
+    return data.get("missing_slugs", [])
+
+
+def _context_quality(requested, missing) -> dict | None:
+    if not requested or not missing:
+        return None
+    return {
+        "coverage": max(0.0, (len(requested) - len(missing)) / len(requested)),
+        "confidence": 0.8,
+        "partial": True,
+        "warnings": ["Some requested pages were unavailable."],
+    }
+
+
+def _quality_of_context(name, data, arguments, limit_clamped) -> dict | None:
+    if not _is_context_request(name, arguments):
+        return None
+    return _context_quality(arguments.get("slugs", []), _missing_slugs(data))
+
+
+# Order is behaviour: the first rule that recognises the result answers.
+_QUALITY_RULES = (
+    _quality_of_error,
+    _quality_of_grounded_recall,
+    _quality_of_contradiction,
+    _quality_of_results,
+    _quality_of_impact,
+    _quality_of_navigation,
+    _quality_of_code_graph,
+    _quality_of_doctor,
+    _quality_of_context,
+)
 
 
 def _resource_quality(data) -> dict:
     if isinstance(data, dict) and "error" in data:
         return _quality_for("resource", data)
+    return _compile_health_quality(_resource_status(data))
+
+
+def _resource_status(data) -> dict:
     status = data.get("status", data) if isinstance(data, dict) else {}
     if not isinstance(status, dict):
-        status = {}
+        return {}
+    return status
+
+
+def _backlog_quality(backlog) -> dict:
+    if isinstance(backlog, (int, float)) and backlog > 0:
+        return {
+            "coverage": 0.7,
+            "confidence": 0.7,
+            "partial": True,
+            "warnings": [f"Compile backlog contains {backlog} daily file(s)."],
+        }
+    return {"coverage": 0.9, "confidence": 0.85}
+
+
+def _compile_health_quality(status: dict) -> dict:
     compile_status = status.get("last_compile_status", "unknown")
     last_compile = status.get("last_compile", "never")
     if compile_status in {None, "unknown"} or last_compile in {None, "never"}:
@@ -3048,15 +3984,7 @@ def _resource_quality(data) -> dict:
             "partial": True,
             "warnings": [f"Compile status is {compile_status}."],
         }
-    backlog = status.get("compile_backlog", 0)
-    if isinstance(backlog, (int, float)) and backlog > 0:
-        return {
-            "coverage": 0.7,
-            "confidence": 0.7,
-            "partial": True,
-            "warnings": [f"Compile backlog contains {backlog} daily file(s)."],
-        }
-    return {"coverage": 0.9, "confidence": 0.85}
+    return _backlog_quality(status.get("compile_backlog", 0))
 
 
 def _build_operation_envelope(
@@ -3067,94 +3995,404 @@ def _build_operation_envelope(
 ) -> dict:
     envelope = build_envelope(data, components=components, **(quality or {}))
     if components and envelope["freshness"] == "stale":
-        limit = 0.6 if envelope["freshness"] == "stale" else 0.4
-        envelope["coverage"] = min(envelope["coverage"], limit)
-        envelope["confidence"] = min(envelope["confidence"], limit)
-        envelope["partial"] = True
-        warning = "One or more response components are stale."
-        if warning not in envelope["warnings"]:
-            envelope["warnings"].append(warning)
+        _degrade_stale_envelope(envelope)
     envelope["warnings"] = _sanitize_diagnostic(envelope["warnings"])
     envelope["data"] = _sanitize_error_fields(envelope["data"])
     return envelope
 
 
+# Reached only when the freshness already is "stale", so the ceiling was never
+# anything but 0.6; the ternary that said otherwise could not choose its second
+# branch.
+_STALE_COMPONENT_CEILING = 0.6
+
+
+def _degrade_stale_envelope(envelope: dict) -> None:
+    envelope["coverage"] = min(envelope["coverage"], _STALE_COMPONENT_CEILING)
+    envelope["confidence"] = min(envelope["confidence"], _STALE_COMPONENT_CEILING)
+    envelope["partial"] = True
+    warning = "One or more response components are stale."
+    if warning not in envelope["warnings"]:
+        envelope["warnings"].append(warning)
+
+
+def _signal_freshness(signal: str, signals: set) -> str:
+    if signal in signals:
+        return "fresh"
+    return "missing"
+
+
+def _reranker_freshness(trace: dict) -> str:
+    if trace.get("reranker_applied"):
+        return "fresh"
+    if trace.get("reranker_fallback_reason"):
+        return "missing"
+    return "unknown"
+
+
+def _recall_components(data) -> dict:
+    if not isinstance(data, dict):
+        return {}
+    trace = data.get("retrieval_trace")
+    if not isinstance(trace, dict):
+        return {}
+    generation = trace.get("corpus_generation")
+    signals = set(trace.get("signals_used", []))
+    components = {
+        signal: {
+            "generation": generation,
+            "freshness": _signal_freshness(signal, signals),
+        }
+        for signal in ("lexical", "dense", "graph")
+    }
+    components["reranker"] = {
+        "generation": generation,
+        "freshness": _reranker_freshness(trace),
+    }
+    return components
+
+
+def _context_components(data) -> dict:
+    if not isinstance(data, dict):
+        return {}
+    if "packing_trace" not in data:
+        return {}
+    return {
+        "context_compiler": {
+            "generation": data.get("corpus_generation"),
+            "freshness": "fresh",
+        }
+    }
+
+
+def _navigation_freshness(status) -> str:
+    if status == "stale":
+        return "stale"
+    if status in {"timeout", "error", "not_ready"}:
+        return "unknown"
+    return "fresh"
+
+
+def _navigation_provider_component(data: dict, freshness: str) -> dict:
+    provider = data.get("provider")
+    if not isinstance(provider, dict):
+        return {}
+    if not isinstance(provider.get("name"), str):
+        return {}
+    return {
+        "provider": {"generation": provider.get("version"), "freshness": freshness}
+    }
+
+
+def _first_graph_provenance(provenance: list):
+    for item in provenance:
+        if isinstance(item, dict) and item.get("source") == "graph":
+            return item
+    return None
+
+
+def _navigation_graph_component(data: dict, freshness: str) -> dict:
+    provenance = data.get("provenance")
+    if not isinstance(provenance, list):
+        return {}
+    graph = _first_graph_provenance(provenance)
+    if graph is None:
+        return {}
+    return {"graph": {"generation": graph.get("version"), "freshness": freshness}}
+
+
+def _navigation_components(data: dict) -> dict:
+    freshness = _navigation_freshness(data.get("status"))
+    return {
+        **_navigation_provider_component(data, freshness),
+        **_navigation_graph_component(data, freshness),
+    }
+
+
+_GRAPH_COMPONENT_KEYS = ("source_generation", "graph_complete", "fallback")
+
+
+def _graph_component_freshness(data: dict) -> str:
+    if "error" in data:
+        return "unknown"
+    return "fresh"
+
+
+def _graph_components(data) -> dict:
+    if not isinstance(data, dict):
+        return {}
+    if not any(key in data for key in _GRAPH_COMPONENT_KEYS):
+        return {}
+    return {
+        "graph": {
+            "generation": data.get("source_generation"),
+            "freshness": _graph_component_freshness(data),
+        }
+    }
+
+
+_COMPONENT_BUILDERS = {
+    "recall": _recall_components,
+    "get_context": _context_components,
+    "get_architecture": _graph_components,
+    "find_dead_code": _graph_components,
+}
+
+
 def _components_for(name: str, data) -> dict[str, dict[str, object]]:
-    if name == "recall" and isinstance(data, dict):
-        trace = data.get("retrieval_trace")
-        if isinstance(trace, dict):
-            generation = trace.get("corpus_generation")
-            signals = set(trace.get("signals_used", []))
-            components = {
-                signal: {
-                    "generation": generation,
-                    "freshness": "fresh" if signal in signals else "missing",
-                }
-                for signal in ("lexical", "dense", "graph")
-            }
-            components["reranker"] = {
-                "generation": generation,
-                "freshness": "fresh"
-                if trace.get("reranker_applied")
-                else "missing"
-                if trace.get("reranker_fallback_reason")
-                else "unknown",
-            }
-            return components
-    if name == "get_context" and isinstance(data, dict) and "packing_trace" in data:
-        return {
-            "context_compiler": {
-                "generation": data.get("corpus_generation"),
-                "freshness": "fresh",
-            }
-        }
     if _is_rendered_navigation_data(name, data):
-        status = data.get("status")
-        freshness = (
-            "stale"
-            if status == "stale"
-            else "unknown"
-            if status in {"timeout", "error", "not_ready"}
-            else "fresh"
-        )
-        components = {}
-        provider = data.get("provider")
-        if isinstance(provider, dict) and isinstance(provider.get("name"), str):
-            components["provider"] = {
-                "generation": provider.get("version"),
-                "freshness": freshness,
-            }
-        provenance = data.get("provenance")
-        if isinstance(provenance, list):
-            graph = next(
-                (
-                    item
-                    for item in provenance
-                    if isinstance(item, dict) and item.get("source") == "graph"
-                ),
-                None,
-            )
-            if graph is not None:
-                components["graph"] = {
-                    "generation": graph.get("version"),
-                    "freshness": freshness,
-                }
-        return components
-    if (
-        name in {"get_architecture", "find_dead_code"}
-        and isinstance(data, dict)
-        and any(
-            key in data
-            for key in ("source_generation", "graph_complete", "fallback")
-        )
-    ):
-        return {
-            "graph": {
-                "generation": data.get("source_generation"),
-                "freshness": "fresh" if "error" not in data else "unknown",
-            }
-        }
+        return _navigation_components(data)
+    builder = _COMPONENT_BUILDERS.get(name)
+    if builder is None:
+        return {}
+    return builder(data)
+
+
+def _grounded_recall(arguments: dict, deadline: float):
+    from memory_state import ROOT
+    from query_memory import grounded_qa
+
+    return grounded_qa(
+        arguments["query"],
+        vault=ROOT,
+        profile=arguments.get("profile"),
+        deadline=deadline,
+    )
+
+
+def _tool_recall(arguments: dict, deadline: float):
+    if arguments.get("grounded", False):
+        return _grounded_recall(arguments, deadline), False
+    effective_limit, limit_clamped = _clamped_limit(arguments.get("limit", 8))
+    results = _call_with_deadline(
+        _search_vault,
+        arguments["query"],
+        limit=effective_limit,
+        deadline=deadline,
+    )
+    data = {
+        "results": results,
+        "retrieval_trace": _retrieval_trace(arguments["query"], results),
+        "_meta": _call_with_deadline(_meta, deadline=deadline),
+    }
+    return data, limit_clamped
+
+
+def _tool_read_page(arguments: dict, deadline: float):
+    return _call_with_deadline(_read_page, arguments["slug"], deadline=deadline), False
+
+
+def _tool_wiki_overview(arguments: dict, deadline: float):
+    data = _call_with_deadline(_wiki_overview, deadline=deadline)
+    data["_meta"] = _call_with_deadline(_meta, deadline=deadline)
+    return data, False
+
+
+def _tool_vault_status(arguments: dict, deadline: float):
+    return _call_with_deadline(_vault_status, deadline=deadline), False
+
+
+def _tool_get_decisions(arguments: dict, deadline: float):
+    effective_limit, limit_clamped = _clamped_limit(arguments.get("limit", 10))
+    data = _call_with_deadline(
+        _get_decisions,
+        arguments.get("query"),
+        limit=effective_limit,
+        deadline=deadline,
+    )
+    return data, limit_clamped
+
+
+def _context_token_budget_options(arguments: dict) -> dict:
+    if "token_budget" in arguments:
+        return {"token_budget": arguments["token_budget"]}
     return {}
+
+
+def _tool_get_context(arguments: dict, deadline: float):
+    data = _call_with_deadline(
+        _get_context,
+        arguments["slugs"],
+        arguments.get("include"),
+        **_context_token_budget_options(arguments),
+        deadline=deadline,
+    )
+    return data, False
+
+
+def _tool_check_contradiction(arguments: dict, deadline: float):
+    data = _call_with_deadline(
+        _check_contradiction, arguments["claim"], deadline=deadline
+    )
+    return data, False
+
+
+def _tool_log_decision(arguments: dict, deadline: float):
+    data = _call_with_deadline(
+        _log_decision,
+        arguments["summary"],
+        arguments.get("rationale", ""),
+        deadline=deadline,
+    )
+    return data, False
+
+
+def _tool_compile(arguments: dict, deadline: float):
+    return _call_with_deadline(_trigger_compile, deadline=deadline), False
+
+
+def _tool_find_dead_code(arguments: dict, deadline: float):
+    data = _call_with_deadline(
+        _find_dead_code,
+        arguments["directory"],
+        live=arguments.get("live", False),
+        deadline=deadline,
+    )
+    return data, False
+
+
+def _precise_architecture_call(arguments: dict, deadline: float):
+    return _get_precise_architecture(
+        arguments["directory"],
+        mode=arguments.get("mode"),
+        path=arguments["path"],
+        line=arguments["line"],
+        character=arguments["character"],
+        offset=arguments.get("offset", 0),
+        limit=arguments.get("limit", 10),
+        deadline=deadline,
+    )
+
+
+def _impact_architecture_call(arguments: dict, deadline: float):
+    return _analyze_impact(
+        directory=arguments["directory"],
+        comparison=arguments.get("comparison", "dirty"),
+        base=arguments.get("base"),
+        target=arguments.get("target"),
+        branch=arguments.get("branch"),
+        deadline=deadline,
+    )
+
+
+def _summary_architecture_call(arguments: dict, deadline: float):
+    return _call_with_deadline(
+        _get_architecture,
+        arguments["directory"],
+        live=arguments.get("live", False),
+        deadline=deadline,
+    )
+
+
+def _architecture_mode_call(arguments: dict, deadline: float):
+    return _get_architecture_mode(
+        arguments["directory"],
+        mode=arguments["mode"],
+        symbol=arguments.get("symbol"),
+        target=arguments.get("target"),
+        reverse=arguments.get("reverse", False),
+        live=arguments.get("live", False),
+        deadline=deadline,
+    )
+
+
+def _tool_get_architecture(arguments: dict, deadline: float):
+    if _is_precise_architecture_request(arguments):
+        return _precise_architecture_call(arguments, deadline), False
+    mode = arguments.get("mode", "summary")
+    if mode == "impact":
+        return _impact_architecture_call(arguments, deadline), False
+    if mode == "summary":
+        return _summary_architecture_call(arguments, deadline), False
+    return _architecture_mode_call(arguments, deadline), False
+
+
+def _tool_doctor(arguments: dict, deadline: float):
+    return _call_with_deadline(_doctor, **arguments, deadline=deadline), False
+
+
+_TOOL_HANDLERS = {
+    "recall": _tool_recall,
+    "read_page": _tool_read_page,
+    "wiki_overview": _tool_wiki_overview,
+    "vault_status": _tool_vault_status,
+    "get_decisions": _tool_get_decisions,
+    "get_context": _tool_get_context,
+    "check_contradiction": _tool_check_contradiction,
+    "log_decision": _tool_log_decision,
+    "compile": _tool_compile,
+    "find_dead_code": _tool_find_dead_code,
+    "get_architecture": _tool_get_architecture,
+}
+
+
+def _dispatch_tool(name: str, arguments, deadline: float):
+    handler = _TOOL_HANDLERS.get(name, _tool_doctor)
+    return handler(arguments, deadline)
+
+
+def _navigation_error_status(error: BaseException) -> str:
+    if isinstance(error, TimeoutError):
+        return "timeout"
+    return "error"
+
+
+def _navigation_error_warning(error: BaseException) -> str:
+    if isinstance(error, TimeoutError):
+        return "navigation_timeout"
+    return "navigation_failed"
+
+
+def _tool_call_failure(name: str, arguments, error: BaseException) -> dict:
+    """The failing tool names itself, so the trace can say which one it was."""
+    if name != "get_architecture":
+        return {"error": _safe_exception_text(error, f"mcp.{name}")}
+    failure = _navigation_failure_from_arguments(
+        arguments,
+        status=_navigation_error_status(error),
+        warning=_navigation_error_warning(error),
+    )
+    if failure is None:
+        return {"error": _safe_exception_text(error, f"mcp.{name}")}
+    return failure
+
+
+def _tool_call_data(name: str, arguments, operation_deadline: float):
+    """Return the tool payload and whether its limit argument was clamped."""
+    _check_deadline(operation_deadline)
+    if name not in TOOL_INPUT_SCHEMAS:
+        return {"error": f"Unknown tool: {name}"}, False
+    _check_deadline(operation_deadline)
+    validation_error = _validate_tool_arguments(name, arguments)
+    _check_deadline(operation_deadline)
+    if validation_error is not None:
+        return {"error": validation_error}, False
+    try:
+        _check_deadline(operation_deadline)
+        return _dispatch_tool(name, arguments, operation_deadline)
+    except Exception as error:  # noqa: BLE001 - stable tool failure boundary
+        return _tool_call_failure(name, arguments, error), False
+
+
+def _dict_arguments(arguments):
+    if isinstance(arguments, dict):
+        return arguments
+    return None
+
+
+def _tool_call_envelope(
+    name: str, data, arguments, limit_clamped: bool, operation_deadline: float
+) -> dict:
+    if _is_rendered_navigation_data(name, data):
+        data = _sanitize_navigation_data(data)
+    _check_deadline(operation_deadline)
+    quality = _quality_for(
+        name, data, _dict_arguments(arguments), limit_clamped=limit_clamped
+    )
+    _check_deadline(operation_deadline)
+    components = _components_for(name, data)
+    _check_deadline(operation_deadline)
+    return _build_operation_envelope(data, quality, components=components)
 
 
 def _execute_tool_call(name: str, arguments, operation_deadline: float) -> str:
@@ -3162,203 +4400,14 @@ def _execute_tool_call(name: str, arguments, operation_deadline: float) -> str:
     import json
 
     deadline_token = _OPERATION_DEADLINE.set(operation_deadline)
-    limit_clamped = False
     try:
+        data, limit_clamped = _tool_call_data(name, arguments, operation_deadline)
         _check_deadline(operation_deadline)
-        if name not in TOOL_INPUT_SCHEMAS:
-            data = {"error": f"Unknown tool: {name}"}
-        else:
-            _check_deadline(operation_deadline)
-            validation_error = _validate_tool_arguments(name, arguments)
-            _check_deadline(operation_deadline)
-            if validation_error is not None:
-                data = {"error": validation_error}
-            else:
-                try:
-                    _check_deadline(operation_deadline)
-                    if name == "recall":
-                        if arguments.get("grounded", False):
-                            from memory_state import ROOT
-                            from query_memory import grounded_qa
-
-                            data = grounded_qa(
-                                arguments["query"],
-                                vault=ROOT,
-                                profile=arguments.get("profile"),
-                                deadline=operation_deadline,
-                            )
-                        else:
-                            effective_limit, limit_clamped = _clamped_limit(
-                                arguments.get("limit", 8)
-                            )
-                            results = _call_with_deadline(
-                                _search_vault,
-                                arguments["query"],
-                                limit=effective_limit,
-                                deadline=operation_deadline,
-                            )
-                            data = {
-                                "results": results,
-                                "retrieval_trace": _retrieval_trace(arguments["query"], results),
-                                "_meta": _call_with_deadline(
-                                    _meta, deadline=operation_deadline
-                                ),
-                            }
-                    elif name == "read_page":
-                        data = _call_with_deadline(
-                            _read_page, arguments["slug"], deadline=operation_deadline
-                        )
-                    elif name == "wiki_overview":
-                        data = _call_with_deadline(
-                            _wiki_overview, deadline=operation_deadline
-                        )
-                        data["_meta"] = _call_with_deadline(
-                            _meta, deadline=operation_deadline
-                        )
-                    elif name == "vault_status":
-                        data = _call_with_deadline(
-                            _vault_status, deadline=operation_deadline
-                        )
-                    elif name == "get_decisions":
-                        effective_limit, limit_clamped = _clamped_limit(
-                            arguments.get("limit", 10)
-                        )
-                        data = _call_with_deadline(
-                            _get_decisions,
-                            arguments.get("query"),
-                            limit=effective_limit,
-                            deadline=operation_deadline,
-                        )
-                    elif name == "get_context":
-                        context_options = (
-                            {"token_budget": arguments["token_budget"]}
-                            if "token_budget" in arguments
-                            else {}
-                        )
-                        data = _call_with_deadline(
-                            _get_context,
-                            arguments["slugs"],
-                            arguments.get("include"),
-                            **context_options,
-                            deadline=operation_deadline,
-                        )
-                    elif name == "check_contradiction":
-                        data = _call_with_deadline(
-                            _check_contradiction,
-                            arguments["claim"],
-                            deadline=operation_deadline,
-                        )
-                    elif name == "log_decision":
-                        data = _call_with_deadline(
-                            _log_decision,
-                            arguments["summary"],
-                            arguments.get("rationale", ""),
-                            deadline=operation_deadline,
-                        )
-                    elif name == "compile":
-                        data = _call_with_deadline(
-                            _trigger_compile, deadline=operation_deadline
-                        )
-                    elif name == "find_dead_code":
-                        data = _call_with_deadline(
-                            _find_dead_code,
-                            arguments["directory"],
-                            live=arguments.get("live", False),
-                            deadline=operation_deadline,
-                        )
-                    elif name == "get_architecture":
-                        if _is_precise_architecture_request(arguments):
-                            data = _get_precise_architecture(
-                                arguments["directory"],
-                                mode=arguments.get("mode"),
-                                path=arguments["path"],
-                                line=arguments["line"],
-                                character=arguments["character"],
-                                offset=arguments.get("offset", 0),
-                                limit=arguments.get("limit", 10),
-                                deadline=operation_deadline,
-                            )
-                        elif arguments.get("mode", "summary") == "impact":
-                            data = _analyze_impact(
-                                directory=arguments["directory"],
-                                comparison=arguments.get("comparison", "dirty"),
-                                base=arguments.get("base"),
-                                target=arguments.get("target"),
-                                branch=arguments.get("branch"),
-                                deadline=operation_deadline,
-                            )
-                        elif arguments.get("mode", "summary") == "summary":
-                            data = _call_with_deadline(
-                                _get_architecture,
-                                arguments["directory"],
-                                live=arguments.get("live", False),
-                                deadline=operation_deadline,
-                            )
-                        else:
-                            data = _get_architecture_mode(
-                                arguments["directory"],
-                                mode=arguments["mode"],
-                                symbol=arguments.get("symbol"),
-                                target=arguments.get("target"),
-                                reverse=arguments.get("reverse", False),
-                                live=arguments.get("live", False),
-                                deadline=operation_deadline,
-                            )
-                    else:
-                        data = _call_with_deadline(
-                            _doctor, **arguments, deadline=operation_deadline
-                        )
-                except Exception as error:
-                    navigation_failure = (
-                        _navigation_failure_from_arguments(
-                            arguments,
-                            status=(
-                                "timeout"
-                                if isinstance(error, TimeoutError)
-                                else "error"
-                            ),
-                            warning=(
-                                "navigation_timeout"
-                                if isinstance(error, TimeoutError)
-                                else "navigation_failed"
-                            ),
-                        )
-                        if name == "get_architecture"
-                        else None
-                    )
-                    data = (
-                        navigation_failure
-                        if navigation_failure is not None
-                        else {"error": _safe_exception_text(error)}
-                    )
-
-        _check_deadline(operation_deadline)
-        if _is_rendered_navigation_data(name, data):
-            data = _sanitize_navigation_data(data)
-        _check_deadline(operation_deadline)
-        quality = _quality_for(
-            name,
-            data,
-            arguments if isinstance(arguments, dict) else None,
-            limit_clamped=limit_clamped,
+        envelope = _tool_call_envelope(
+            name, data, arguments, limit_clamped, operation_deadline
         )
         _check_deadline(operation_deadline)
-        components = _components_for(name, data)
-        _check_deadline(operation_deadline)
-        envelope = _build_operation_envelope(
-            data,
-            quality,
-            components=components,
-        )
-        _check_deadline(operation_deadline)
-        rendered_envelope = json.dumps(
-            envelope,
-            indent=2,
-            ensure_ascii=False,
-            allow_nan=False,
-        )
-        _check_deadline(operation_deadline)
-        return rendered_envelope
+        return json.dumps(envelope, indent=2, ensure_ascii=False, allow_nan=False)
     finally:
         _OPERATION_DEADLINE.reset(deadline_token)
 
@@ -3418,7 +4467,7 @@ def _handle_resource_read(uri: str, deadline: float | None = None) -> str:
         else:
             data = {"error": f"Unknown resource: {uri}"}
     except Exception as error:
-        data = {"error": _safe_exception_text(error)}
+        data = {"error": _safe_exception_text(error, f"mcp.resource:{uri}")}
     try:
         envelope = _build_operation_envelope(data, _resource_quality(data))
         return json.dumps(envelope, indent=2, ensure_ascii=False, allow_nan=False)
@@ -3470,34 +4519,36 @@ def _format_tool_result(result: str):
     text_content = [TextContent(type="text", text=result)]
     structured = json.loads(result)
     if MCP_CALL_TOOL_RESULT_AVAILABLE:
-        data = structured.get("data")
-        repair_failed = (
-            isinstance(data, dict)
-            and any(
-                isinstance(check, dict)
-                and bool(check.get("details", {}).get("repair_errors"))
-                for check in data.get("checks", [])
-            )
-        )
-        navigation_result = _is_rendered_navigation_data("get_architecture", data)
-        is_error = isinstance(data, dict) and (
-            data.get("status") in {"error", "timeout"}
-            if navigation_result
-            else (
-                "error" in data
-                or data.get("status") == "error"
-                or data.get("overall_status") == "error"
-                or repair_failed
-            )
-        )
         return CallToolResult(
             content=text_content,
             structuredContent=structured,
-            isError=is_error,
+            isError=_result_is_error(structured.get("data")),
         )
     if MCP_STRUCTURED_OUTPUT_AVAILABLE:
         return text_content, structured
     return text_content
+
+
+def _repair_failed(data: dict) -> bool:
+    return any(
+        isinstance(check, dict)
+        and bool(check.get("details", {}).get("repair_errors"))
+        for check in data.get("checks", [])
+    )
+
+
+def _plain_result_is_error(data: dict) -> bool:
+    if "error" in data or _repair_failed(data):
+        return True
+    return data.get("status") == "error" or data.get("overall_status") == "error"
+
+
+def _result_is_error(data) -> bool:
+    if not isinstance(data, dict):
+        return False
+    if _is_rendered_navigation_data("get_architecture", data):
+        return data.get("status") in {"error", "timeout"}
+    return _plain_result_is_error(data)
 
 
 def _execute_formatted_tool_call(name: str, arguments, operation_deadline: float):
