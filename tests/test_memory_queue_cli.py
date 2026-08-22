@@ -477,10 +477,29 @@ def test_deferred_compile_timeout_kills_compiler_tree(
 
     compiler_pid = int(pid_path.read_text(encoding="ascii"))
     task = queue.get(task_id)
-    assert summary.failed == 1
-    assert task.state == "ready"
-    assert task.error_code == "worker_timeout"
+    # The subject is the kill, so it is asserted first and unconditionally.
     assert not memory_queue._pid_is_alive(compiler_pid)
+    assert summary.failed == 1
+    _assert_timed_out_task(task)
+
+
+def _assert_timed_out_task(task) -> None:
+    """A timed-out task has two correct endings; only a silent one is wrong.
+
+    The worker offers the task again once the process cleanup it owns has
+    finished. When that cleanup misses its own budget the queue fails closed and
+    blocks the task instead, under the contract
+    `test_cleanup_failure_blocks_task_and_stops_worker` pins. Asserting only the
+    first ending made a loaded Windows runner look like a defect: runs
+    32552183417 and 32554778342 both lost a shard here on commits that changed
+    nothing but documentation, and a rerun of the same job went green.
+    """
+    if task.state == "ready":
+        assert task.error_code == "worker_timeout"
+        return
+    assert task.state == "blocked"
+    assert task.error_code == "process_cleanup_failed"
+    assert task.blocked_capability == "process_cleanup"
 
 
 def test_worker_child_drains_one_megabyte_result_before_join() -> None:
