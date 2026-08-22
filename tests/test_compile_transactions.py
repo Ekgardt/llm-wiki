@@ -1854,3 +1854,47 @@ def test_the_quarantined_attempt_is_kept_and_named_as_the_parent(vault):
     assert committed
     assert committed[-1]["operation_id"] != quarantined[0]["operation_id"]
     assert committed[-1]["parent_transaction_id"] is not None
+
+
+def test_a_second_refusal_takes_the_next_ordinal_again(vault):
+    """Attempts form a chain, so two refusals do not become a dead end either."""
+    root, state_root = vault
+    daily = _daily(root)
+    _quarantine_next_compile(root, state_root, daily)
+    _quarantine_next_compile(root, state_root, daily)
+    import compile_memory
+
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    result = compile_memory.apply_compile_plan(
+        inputs,
+        _semantic_plan(),
+        action_key="9" * 64,
+        trigger="manual",
+        coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T13:00:00Z",
+    )
+
+    assert result.state == "committed"
+
+
+def test_the_retry_chain_is_bounded(vault, monkeypatch):
+    """A hundred refusals is an operator's problem, not a numbering exercise."""
+    root, state_root = vault
+    daily = _daily(root)
+    import markdown_transaction
+
+    monkeypatch.setattr(markdown_transaction, "MAX_ATTEMPT_ORDINAL", 1)
+    _quarantine_next_compile(root, state_root, daily)
+    _quarantine_next_compile(root, state_root, daily)
+    coordinator = MarkdownCoordinator(root, state_root)
+    import sqlite3
+
+    database = sqlite3.connect(state_root / "run" / "markdown-transactions.sqlite3")
+    base = database.execute(
+        'SELECT operation_id FROM "transaction" '
+        "WHERE state = 'quarantined' AND operation_id NOT LIKE '%#%' LIMIT 1"
+    ).fetchone()[0]
+    database.close()
+
+    with pytest.raises(ValueError, match="exhausted its quarantined retry ordinals"):
+        coordinator.attempt_operation_id(base)
