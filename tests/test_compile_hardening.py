@@ -266,7 +266,9 @@ def test_snapshot_and_provider_responses_enforce_byte_caps(vault, monkeypatch):
             descriptor, "x" * 33, True, None, "native"
         ),
     )
-    with pytest.raises(RuntimeError, match="validated compile plan"):
+    # The lineage is the whole diagnosis: without it this failure says only that
+    # nothing worked, which cost hours of guessing on a live vault.
+    with pytest.raises(RuntimeError, match=r"validated compile plan: \w+:"):
         compile_memory.resolve_compile_plan(
             inputs,
             CompileCache(state_root),

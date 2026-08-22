@@ -947,7 +947,22 @@ def resolve_compile_plan(
         resolved = attempt.resolve(candidate)
         if resolved is not None:
             return resolved
-    raise RuntimeError("no LLM provider produced a validated compile plan")
+    raise RuntimeError(_no_plan_message(attempt.lineage))
+
+
+def _no_plan_message(lineage: Sequence[str]) -> str:
+    """Say which provider failed at which stage, not merely that none worked.
+
+    The chain records `stage:provider:code` for every attempt and used to drop
+    it on the floor, so a live vault that could not compile reported the same
+    sentence whether no provider existed, one refused, or a plan failed its
+    critique.
+    """
+    if not lineage:
+        return "no LLM provider produced a validated compile plan: none was tried"
+    return (
+        "no LLM provider produced a validated compile plan: " + "; ".join(lineage)
+    )
 
 
 class _ProviderStageFailure(Exception):
