@@ -1017,3 +1017,32 @@ def test_compile_receipts_are_never_tracked() -> None:
     """
     receipt = "knowledge/daily/receipts/deadbeef.md"
     assert _unpublished_notes({receipt}) == {receipt}
+
+
+def test_every_tracked_note_is_named_by_the_allowlist() -> None:
+    """The runtime decides what is public by reading .gitignore, not git.
+
+    The index rebuild is an automatic writer and no automatic writer here runs
+    git, so `.gitignore` is its only source of truth. When a page is tracked
+    without an allowlist line the two disagree, and on 2026-08-22 the first
+    successful compile of this vault acted on that disagreement: it dropped five
+    published pages — three workflows and two architecture decisions — out of the
+    tracked index.
+    """
+    tracked = {
+        path
+        for path in subprocess.run(
+            ["git", "ls-files", "knowledge/notes/*.md"],
+            capture_output=True,
+            text=True,
+            cwd=ROOT,
+        ).stdout.splitlines()
+        if path
+    }
+    allowlisted = {
+        line[1:]
+        for line in (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+        if line.startswith("!knowledge/notes/")
+    }
+
+    assert tracked - allowlisted == set()

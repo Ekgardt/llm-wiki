@@ -67,6 +67,11 @@ knowledge/notes/*
 !knowledge/notes/single-directory-vault-decision.md
 !knowledge/notes/classification-measurement-stand-decision.md
 !knowledge/notes/idempotent-retry-after-quarantine-decision.md
+!knowledge/notes/Ingestion Workflow.md
+!knowledge/notes/Retrieval Workflow.md
+!knowledge/notes/Review Workflow.md
+!knowledge/notes/blackboard-fenced-resource-claims-decision.md
+!knowledge/notes/managed-ide-hooks-install-update-decision.md
 !knowledge/notes/audit-closure-security-recovery-control-plane-decision.md
 !knowledge/notes/derived-evidence-generation-decision.md
 !knowledge/notes/lsp-live-lease-decision.md
