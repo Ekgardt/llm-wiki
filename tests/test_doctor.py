@@ -4435,9 +4435,9 @@ def test_a_quarantined_attempt_a_later_one_committed_is_history_not_a_problem(
 
     check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "transactions")
 
-    assert check["status"] == "ok"
-    assert check["details"]["states"]["quarantined"] == 1
-    assert check["details"]["quarantined_unresolved"] == 0
+    assert check["details"]["quarantined_unresolved"] == 0, check["details"]
+    assert check["details"]["states"]["quarantined"] == 1, check["details"]
+    assert check["status"] == "ok", check["details"]
 
 
 def test_a_refused_attempt_whose_pages_another_commit_wrote_is_history(
@@ -4464,9 +4464,9 @@ def test_a_refused_attempt_whose_pages_another_commit_wrote_is_history(
 
     check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "transactions")
 
-    assert check["status"] == "ok"
-    assert check["details"]["states"]["quarantined"] == 1
-    assert check["details"]["quarantined_unresolved"] == 0
+    assert check["details"]["quarantined_unresolved"] == 0, check["details"]
+    assert check["details"]["states"]["quarantined"] == 1, check["details"]
+    assert check["status"] == "ok", check["details"]
     del home
 
 
@@ -4486,8 +4486,8 @@ def test_a_refused_attempt_whose_pages_nobody_wrote_still_needs_attention(
 
     check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "transactions")
 
-    assert check["status"] == "error"
-    assert check["details"]["quarantined_unresolved"] == 1
+    assert check["details"]["quarantined_unresolved"] == 1, check["details"]
+    assert check["status"] == "error", check["details"]
     del home
 
 
@@ -4503,8 +4503,8 @@ def test_a_quarantined_attempt_with_no_successor_still_needs_attention(
 
     check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "transactions")
 
-    assert check["status"] == "error"
-    assert check["details"]["quarantined_unresolved"] == 1
+    assert check["details"]["quarantined_unresolved"] == 1, check["details"]
+    assert check["status"] == "error", check["details"]
 
 
 def _nightly_state(state_root: Path, payload: dict) -> None:
