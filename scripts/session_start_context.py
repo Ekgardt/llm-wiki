@@ -679,20 +679,56 @@ def _impact_block() -> str:
         return ""
 
 
+# The suite pins this budget deliberately: session start must not wait on the
+# doctor. Measured against the vault this was written on, the sixteen checks
+# want 1.77 seconds, so at this budget the run is always truncated — see
+# `_deferred_count` for what that means for its findings.
+HEALTH_BUDGET_SECONDS = 0.1
+
+
+def _deferred_count(report: dict) -> int:
+    """How many checks never ran because the doctor's budget ran out.
+
+    A truncated run is not a partial answer, it is no answer. Checks that are
+    cut short mid-read report failure without marking themselves: on this vault
+    the queue and the LSP both report their state unreadable at this budget and
+    are fine at a real one. So the count is used to discard the run, not to
+    filter it.
+    """
+    return sum(
+        1
+        for check in report.get("checks", [])
+        if check.get("details", {}).get("budget_exhausted")
+    )
+
+
 def health_block() -> str:
-    """Return doctor output only when local health is degraded."""
+    """Return doctor output only when local health is degraded.
+
+    A run that ran out of budget reports nothing but the fact that it did. The
+    findings of a truncated run are artefacts of the clock, and naming them
+    teaches the reader to ignore this block.
+    """
     try:
         from doctor import degraded_summary, run_doctor
 
-        summary = degraded_summary(
-            run_doctor(
-                root=ROOT,
-                state_root=STATE_ROOT,
-                time_budget_seconds=0.1,
-            )
+        report = run_doctor(
+            root=ROOT,
+            state_root=STATE_ROOT,
+            time_budget_seconds=HEALTH_BUDGET_SECONDS,
         )
+        deferred = _deferred_count(report)
+        summary = degraded_summary(report)
     except Exception:  # noqa: BLE001
         return ""
+    if deferred:
+        return (
+            "## Health\n\n"
+            f"Health was not measured: {deferred} of "
+            f"{len(report.get('checks', []))} checks did not run inside the "
+            f"{HEALTH_BUDGET_SECONDS}s budget. Run "
+            "`uv run python scripts/doctor.py` for the real state.\n\n"
+        )
     return f"## Health\n\n{summary}\n\n" if summary else ""
 
 

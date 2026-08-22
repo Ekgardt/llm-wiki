@@ -972,3 +972,49 @@ def test_char_ceiling_never_drops_mandatory_sections():
     )
 
     assert len(rendered) == 500
+
+
+def test_a_truncated_run_reports_only_that_it_was_truncated(monkeypatch):
+    """Measured: the doctor wants 1.77s and gets 0.1. Seven checks never run,
+    and two that do are cut short and report their state unreadable without
+    marking themselves — the queue and the LSP, both fine at a real budget. So
+    a truncated run's findings are discarded, not filtered."""
+    import doctor
+    import session_start_context
+
+    report = {
+        "overall_status": "error",
+        "checks": [
+            {"id": "queue", "status": "error", "details": {}},
+            {
+                "id": "scheduler",
+                "status": "degraded",
+                "details": {"budget_exhausted": True},
+            },
+        ],
+    }
+    monkeypatch.setattr(doctor, "run_doctor", lambda **kwargs: report)
+    monkeypatch.setattr(
+        doctor, "degraded_summary", lambda passed: "queue (error): unreadable"
+    )
+
+    block = session_start_context.health_block()
+
+    assert "Health was not measured" in block
+    assert "1 of 2 checks" in block
+    assert "queue" not in block
+    assert "unreadable" not in block
+
+
+def test_a_complete_run_reports_its_findings(monkeypatch):
+    import doctor
+    import session_start_context
+
+    report = {
+        "overall_status": "degraded",
+        "checks": [{"id": "index", "status": "degraded", "details": {}}],
+    }
+    monkeypatch.setattr(doctor, "run_doctor", lambda **kwargs: report)
+    monkeypatch.setattr(doctor, "degraded_summary", lambda passed: "index: stale")
+
+    assert session_start_context.health_block() == "## Health\n\nindex: stale\n\n"
