@@ -134,6 +134,17 @@ class CheckpointDecision:
     next_token_threshold: int | None = None
 
 
+def _yaml_scalar(value: str) -> str:
+    """One double-quoted YAML scalar.
+
+    A project slug is not guaranteed to be plain text: redaction can leave
+    brackets in it, and an unquoted `[...]` parses as a list, which the corpus
+    reader refuses. Quoting keeps every slug a string.
+    """
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 @dataclass
 class ProjectProjection:
     project: str
@@ -1584,8 +1595,8 @@ class ProjectStore:
         lines = [
             "---",
             "type: project-state",
-            f'title: "{project} - State"',
-            f"project: {project}",
+            f"title: {_yaml_scalar(f'{project} - State')}",
+            f"project: {_yaml_scalar(project)}",
             "generated: true",
             f"last_applied_sequence: {last_sequence}",
             "---",

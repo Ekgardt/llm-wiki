@@ -19,10 +19,11 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, NamedTuple
 
 import reliable_memory
@@ -1937,7 +1938,13 @@ def _claim_check(root: Path, state_root: Path, deadline: float = float("inf")) -
     }
     kind = _safe_kind(path, state_root)[0]
     if kind == "missing":
-        return _result("claims", "degraded", "Claim index is missing.", details)
+        # Nothing has recorded a claim yet, which is what a new vault looks
+        # like. The generation check says the same about a generation that has
+        # not been built; calling this degraded left every fresh install
+        # permanently unhealthy for having done nothing wrong.
+        return _result(
+            "claims", "ok", "No claim has been recorded yet.", details
+        )
     if kind != "regular":
         details.update(index="invalid", read_error=True)
         return _result("claims", "error", "Claim index is unsafe.", details)
@@ -2265,6 +2272,38 @@ def _valid_lsp_failure(record: dict[str, Any], owner_nonce: str) -> bool:
     )
 
 
+# What actually fixes each way Pyright can fail to qualify. Reinstalling is the
+# answer only when the installation itself is wrong; telling an operator to
+# reinstall because the repository declares no Pyright settings sends them to
+# a command that cannot change the outcome.
+_PYRIGHT_ACTIONS = MappingProxyType(
+    {
+        "pyright_repository_config_ancestor_search": (
+            "declare [tool.pyright] in the repository's pyproject.toml so "
+            "settings are not read from outside the checkout"
+        ),
+        "pyright_repository_config_malformed": (
+            "fix the repository's [tool.pyright] settings"
+        ),
+        "pyright_repository_config_too_deep": (
+            "flatten the repository's [tool.pyright] settings"
+        ),
+    }
+)
+_PYRIGHT_INSTALL_ACTION = (
+    "uv run python scripts/install_pyright.py --state-root <state-root>"
+)
+
+
+def _pyright_recommended_action(codes: Sequence[str]) -> str:
+    """The one thing that would change this outcome."""
+    for code in codes:
+        action = _PYRIGHT_ACTIONS.get(code)
+        if action is not None:
+            return action
+    return _PYRIGHT_INSTALL_ACTION
+
+
 def _pyright_check(
     root: Path,
     state_root: Path,
@@ -2340,9 +2379,7 @@ def _pyright_check(
                     codes.append(code)
             if identity.version != "1.1.411" and "pyright_version_mismatch" not in codes:
                 codes.append("pyright_version_mismatch")
-        details["recommended_action"] = (
-            "uv run python scripts/install_pyright.py --state-root <state-root>"
-        )
+        details["recommended_action"] = _pyright_recommended_action(codes)
         return _result(
             "pyright",
             "degraded",
@@ -3296,6 +3333,7 @@ def _maintenance_extractor_identity() -> str:
 class _GenerationFacts(NamedTuple):
     delta: int
     unresolved: int
+    extraction_faults: int
     scope_state: str
     corpus_extraction_state: str
     graph_extraction_state: str
@@ -3423,18 +3461,48 @@ def _source_delta(source_manifest: dict, snapshot: object) -> int:
     )
 
 
-def _unresolved_observations(
-    generation_path: Path, state_root: Path, deadline: float
+# What an observation's reason says about who is at fault. A reference the
+# language cannot resolve statically, or a dependency the repository does not
+# vendor, is the normal outcome of indexing real code and says nothing about
+# the health of the generation. A parse error is the extractor failing at its
+# own job, and is the one that should be surfaced.
+_UNRESOLVED_REASONS = ("missing_dependency", "unresolved_reference")
+_EXTRACTION_FAULT_REASONS = ("parse_error",)
+
+
+def _count_observations(
+    generation_path: Path, state_root: Path, deadline: float, reasons: Sequence[str]
 ) -> int:
+    """How many observations carry one of these reasons, up to the row bound."""
     graph = generation_path / "evidence.sqlite3"
+    placeholders = ",".join("?" for _ in reasons)
     with _readonly_database(
         graph, state_root, max_bytes=16 * 1024 * 1024 * 1024, deadline=deadline
     ) as database:
         database.set_progress_handler(lambda: int(_deadline_reached(deadline)), 1000)
         return database.execute(
-            "SELECT COUNT(*) FROM (SELECT 1 FROM observation LIMIT ?)",
-            (MAX_OPERATIONAL_ROWS + 1,),
+            "SELECT COUNT(*) FROM (SELECT 1 FROM observation "  # noqa: S608
+            f"WHERE reason IN ({placeholders}) LIMIT ?)",
+            (*reasons, MAX_OPERATIONAL_ROWS + 1),
         ).fetchone()[0]
+
+
+def _unresolved_observations(
+    generation_path: Path, state_root: Path, deadline: float
+) -> int:
+    """References the graph could not resolve. Reported, never a health failure."""
+    return _count_observations(
+        generation_path, state_root, deadline, _UNRESOLVED_REASONS
+    )
+
+
+def _extraction_faults(
+    generation_path: Path, state_root: Path, deadline: float
+) -> int:
+    """Files the extractor could not parse: its own failure, not the language's."""
+    return _count_observations(
+        generation_path, state_root, deadline, _EXTRACTION_FAULT_REASONS
+    )
 
 
 def _generation_facts(
@@ -3474,6 +3542,7 @@ def _generation_facts(
     return _GenerationFacts(
         delta=_source_delta(source_manifest, snapshot),
         unresolved=_unresolved_observations(generation_path, state_root, deadline),
+        extraction_faults=_extraction_faults(generation_path, state_root, deadline),
         scope_state=_scope_state(manifest, repository_scope),
         corpus_extraction_state=_corpus_extraction_state(
             manifest, COLLECTOR_VERSION, EXTRACTOR_VERSION
@@ -3519,6 +3588,15 @@ def _generation_search_fields(complete_v2: bool) -> dict:
     }
 
 
+def _generation_message(degraded: bool, extraction_faults: int) -> str:
+    """What this generation's state is, saying so when files would not parse."""
+    if degraded:
+        return "Evidence generation requires refresh."
+    if extraction_faults:
+        return f"Evidence generation is healthy; {extraction_faults} file(s) did not parse."
+    return "Evidence generation is healthy."
+
+
 def _generation_health_result(
     active: str,
     manifest: dict,
@@ -3535,10 +3613,16 @@ def _generation_health_result(
         or age > GENERATION_FRESH_SECONDS
         or _identity_stale(facts, complete_v2)
     )
-    degraded = stale or vector_state == "stale" or bool(facts.unresolved)
-    message = "Evidence generation is healthy."
-    if degraded:
-        message = "Evidence generation requires refresh."
+    # What this status answers is whether the generation is usable and current,
+    # so it degrades on the things a refresh fixes. An unresolved reference is
+    # what indexing real code looks like — this repository alone has 21199 of
+    # them and 5481 missing dependencies — and a file that will not parse is
+    # usually one the repository keeps deliberately broken. Counting either as
+    # ill health left every real vault permanently degraded and pointed the
+    # operator at a refresh that changes nothing. Both are still reported, and
+    # a parse error is named rather than buried.
+    degraded = stale or vector_state == "stale"
+    message = _generation_message(degraded, facts.extraction_faults)
     return _generation_result(
         "degraded" if degraded else "ok",
         message,
@@ -3557,6 +3641,7 @@ def _generation_health_result(
         corpus_extraction_identity=facts.corpus_extraction_state,
         unindexed_delta=facts.delta,
         unresolved_observations=facts.unresolved,
+        extraction_faults=facts.extraction_faults,
         age_seconds=age,
         age_source=age_source,
         repairable=degraded,
@@ -4586,7 +4671,12 @@ def _integration_host_configs(
     return {
         "claude": (
             home / ".claude",
-            [(home / ".claude" / "settings.json", ("LLM_WIKI_ROOT", "session_start_context.py"))],
+            [
+                (
+                    home / ".claude" / "settings.json",
+                    ("LLM_WIKI_ROOT", "integration_adapter.py"),
+                )
+            ],
         ),
         "opencode": (
             home / ".config" / "opencode",
@@ -6145,11 +6235,32 @@ def _unusable_filesystem_outcome(state_path: Path, deadline: float) -> dict | No
     return _maintenance_outcome("error", "unsupported_filesystem", partial=False)
 
 
+# Which bound a bounded refusal actually hit. Collapsing all of them into
+# "source_limit" told an operator to shrink a corpus that was not the problem.
+_BOUNDED_REASONS = (
+    ("incremental manifest", "manifest_byte_ceiling"),
+    ("total byte limit", "corpus_byte_limit"),
+    ("entry limit", "corpus_entry_limit"),
+    ("directory limit", "corpus_directory_limit"),
+    ("depth limit", "corpus_depth_limit"),
+)
+
+
+def _bounded_reason(message: str) -> str:
+    """The name of the bound this refusal names, or the generic source limit."""
+    lowered = message.casefold()
+    for fragment, reason in _BOUNDED_REASONS:
+        if fragment in lowered:
+            return reason
+    return "source_limit"
+
+
 def _value_error_outcome(exc: ValueError, repaired: list[dict]) -> dict:
-    lowered = str(exc).casefold()
+    message = str(exc)
+    lowered = message.casefold()
     if "limit" in lowered or "ceiling" in lowered:
         return _maintenance_outcome(
-            "deferred", "source_limit", partial=True, repairs=repaired
+            "deferred", _bounded_reason(message), partial=True, repairs=repaired
         )
     return _maintenance_outcome(
         "error", type(exc).__name__, partial=False, repairs=repaired
@@ -6187,6 +6298,53 @@ def _refreshed_generation(
         )
         result["repairs"] = repaired
         return result
+
+
+def _rebuild_after_corpus_change(
+    root_path: Path,
+    state_path: Path,
+    coordinator: object,
+    lease: object,
+    deadline: float,
+    max_sources: int,
+    repaired: list[dict],
+) -> dict:
+    """Capture the vault again, once. A second change defers to the next pass."""
+    try:
+        return _refreshed_generation(
+            root_path,
+            state_path,
+            coordinator,
+            lease,
+            deadline,
+            max_sources,
+            True,
+            repaired,
+        )
+    except _corpus_changed_error():
+        return _maintenance_outcome(
+            "deferred", "corpus_changed", partial=True, repairs=repaired
+        )
+    except TimeoutError:
+        return _maintenance_outcome(
+            "deferred", "time_limit", partial=True, repairs=repaired
+        )
+    except RuntimeError as exc:
+        # This runs inside the caller's `except`, so the caller's own handlers
+        # can no longer see what happens here. The fence can be lost during the
+        # recapture just as easily as during the first pass.
+        if str(exc) != "maintenance_owner_fence_lost":
+            raise
+        return _maintenance_outcome(
+            "deferred", "maintenance_owner_lost", partial=True, repairs=repaired
+        )
+
+
+def _corpus_changed_error() -> type[BaseException]:
+    """The error a live vault raises when it was written to mid-capture."""
+    from corpus_snapshot import CorpusChanged
+
+    return CorpusChanged
 
 
 def run_generation_maintenance(
@@ -6231,6 +6389,22 @@ def run_generation_maintenance(
     except TimeoutError:
         return _maintenance_outcome(
             "deferred", "time_limit", partial=True, repairs=repaired
+        )
+    except _corpus_changed_error():
+        # The vault was written to while its snapshot was being validated. That
+        # is the normal state of a vault in use, so it is captured again rather
+        # than deferred: deferring would leave an active vault never refreshed.
+        return _rebuild_after_corpus_change(
+            root_path, state_path, coordinator, lease, deadline, max_sources, repaired
+        )
+    except RuntimeError as exc:
+        # Another maintenance owner took the fence while this pass was working.
+        # Losing that race is an ordinary outcome — the nightly timer and a
+        # manual run collide — and belongs in the report, not in a traceback.
+        if str(exc) != "maintenance_owner_fence_lost":
+            raise
+        return _maintenance_outcome(
+            "deferred", "maintenance_owner_lost", partial=True, repairs=repaired
         )
     except ValueError as exc:
         return _value_error_outcome(exc, repaired)

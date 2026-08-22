@@ -2105,3 +2105,88 @@ def test_windows_task_v2_rejects_untrusted_historical_spec_root(
 
     with pytest.raises(Exception, match="task_spec_invalid"):
         resource.read_projections([untrusted])
+
+def test_a_half_registered_scheduler_can_still_be_removed(tmp_path: Path) -> None:
+    """Rollback exists for a half-applied resource; refusing to read one strands it."""
+    runner = _FakeSystemd()
+    unit_dir = tmp_path / "systemd"
+    vault = tmp_path / "vault"
+    state_root = tmp_path / "state"
+    uv_path = tmp_path / "uv"
+    resource = systemd_scheduler_resource(
+        root=vault,
+        state_root=state_root,
+        uv_path=uv_path,
+        unit_directory=unit_dir,
+        runner=runner,
+        systemctl="systemctl",
+    )
+    definitions = render_systemd_definitions(vault, state_root, uv_path)
+    installed = resource.desired
+
+    # Exactly what an interrupted install leaves behind: the unit files are on
+    # disk, but the running user manager never registered the timers.
+    unit_dir.mkdir(parents=True)
+    for name, value in definitions.items():
+        (unit_dir / name).write_bytes(value)
+    assert runner.enabled == set()
+
+    assert resource.write_projection is not None
+    resource.write_projection(installed, None, {})
+
+    assert _definition_directory_state(unit_dir) == {}
+
+class _UnregisteredSystemd(_FakeSystemd):
+    """A user manager that never registered these units, so disabling them fails."""
+
+    def _disable(self, command: tuple[str, ...]) -> tuple[int, bytes]:
+        return 1, b"Failed to disable unit: Unit file does not exist.\n"
+
+
+def test_removal_survives_a_manager_that_never_registered_the_units(
+    tmp_path: Path,
+) -> None:
+    """Disabling a unit the manager never knew fails, and that is the goal state."""
+    runner = _UnregisteredSystemd()
+    unit_dir = tmp_path / "systemd"
+    vault = tmp_path / "vault"
+    state_root = tmp_path / "state"
+    uv_path = tmp_path / "uv"
+    resource = systemd_scheduler_resource(
+        root=vault,
+        state_root=state_root,
+        uv_path=uv_path,
+        unit_directory=unit_dir,
+        runner=runner,
+        systemctl="systemctl",
+    )
+    unit_dir.mkdir(parents=True)
+    for name, value in render_systemd_definitions(vault, state_root, uv_path).items():
+        (unit_dir / name).write_bytes(value)
+
+    assert resource.write_projection is not None
+    resource.write_projection(resource.desired, None, {})
+
+    assert _definition_directory_state(unit_dir) == {}
+
+
+def test_systemd_units_can_find_the_tools_installed_beside_uv(tmp_path: Path) -> None:
+    """A scheduled run needs the operator's local bin, where the providers live.
+
+    A systemd user service inherits the manager's PATH, which does not contain
+    it. The nightly compile therefore probed every LLM provider, found none, and
+    failed while the same command from a login shell succeeded.
+    """
+    root = tmp_path / "vault"
+    uv_path = tmp_path / "operator bin" / "uv"
+
+    definitions = render_systemd_definitions(root, tmp_path / "state", uv_path)
+
+    expected = str(uv_path.resolve().parent).replace("\\", "\\\\")
+    for name in ("llm-wiki-nightly.service", "llm-wiki-weekly.service"):
+        lines = definitions[name].decode().splitlines()
+        paths = [line for line in lines if line.startswith('Environment="PATH=')]
+        assert paths == [
+            f'Environment="PATH={expected}:'
+            '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"'
+        ]

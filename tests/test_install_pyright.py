@@ -1322,6 +1322,13 @@ def test_incomplete_lock_gets_initialization_grace_then_is_reclaimed(
         parent.close()
 
 
+def _release_attempts(attempts, winners) -> None:
+    for lock in winners:
+        lock.cleanup()
+    for parent, _lock in attempts:
+        parent.close()
+
+
 def test_concurrent_stale_lock_reclaimers_have_one_winner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1341,20 +1348,24 @@ def test_concurrent_stale_lock_reclaimers_have_one_winner(
     start = threading.Barrier(2)
     acquired = threading.Event()
 
-    def try_acquire() -> tuple[object, object | None]:
+    def race_for_lock(parent, deadline):
         # Retry the way the installer does: losing one attempt means another
         # reclaimer got there first, not that this one may never proceed. Both
         # threads try at least once, and the loser stops as soon as the winner
         # holds the lock rather than spinning out a deadline sized for the
         # slowest supported machine.
-        parent = installer_module._open_absolute_directory(parent_path, writable=True)
-        deadline = time.monotonic() + 120
-        start.wait(timeout=120)
         lock = None
         while lock is None:
             lock = installer_module._try_create_lock(parent, deadline)
             if acquired.is_set() or time.monotonic() >= deadline:
                 break
+        return lock
+
+    def try_acquire() -> tuple[object, object | None]:
+        parent = installer_module._open_absolute_directory(parent_path, writable=True)
+        deadline = time.monotonic() + 120
+        start.wait(timeout=120)
+        lock = race_for_lock(parent, deadline)
         if lock is not None:
             acquired.set()
         return parent, lock
@@ -1366,10 +1377,7 @@ def test_concurrent_stale_lock_reclaimers_have_one_winner(
     try:
         assert len(winners) == 1
     finally:
-        for lock in winners:
-            lock.cleanup()
-        for parent, _lock in attempts:
-            parent.close()
+        _release_attempts(attempts, winners)
 
 
 def test_lock_release_refuses_same_file_with_changed_nonce(
@@ -1977,18 +1985,21 @@ def test_windows_5424_file_idempotence_enumerates_each_directory_once(
     real_list_directory = installer_module._windows_workspace.list_directory
     enumerations = {"root": 0, "package": 0}
 
+    def enumeration_label(names: set[str]) -> str | None:
+        if names == {"install-manifest.json", "package"}:
+            return "root"
+        if "synthetic-0000.js" in names:
+            return "package"
+        return None
+
     def bounded_list_directory(handle: int, *, max_entries: int):
         entries = real_list_directory(handle, max_entries=max_entries)
-        names = {entry.name for entry in entries}
-        label = None
-        if names == {"install-manifest.json", "package"}:
-            label = "root"
-        elif "synthetic-0000.js" in names:
-            label = "package"
-        if label is not None:
-            enumerations[label] += 1
-            if enumerations[label] > 1:
-                pytest.fail(f"existing {label} directory was enumerated more than once")
+        label = enumeration_label({entry.name for entry in entries})
+        if label is None:
+            return entries
+        enumerations[label] += 1
+        if enumerations[label] > 1:
+            pytest.fail(f"existing {label} directory was enumerated more than once")
         return entries
 
     monkeypatch.setattr(
@@ -2114,6 +2125,54 @@ def test_existing_install_with_unsafe_extra_entry_is_refused(
     assert _error_code(error) == "pyright_existing_install_invalid"
 
 
+def _report_server_as_link(server: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Where symlinks are unavailable, make the listing report one anyway."""
+    real_list_directory = installer_module._windows_workspace.list_directory
+
+    def list_directory(handle: int, *, max_entries: int):
+        return [
+            dataclasses.replace(entry, kind="link")
+            if entry.name == server.name
+            else entry
+            for entry in real_list_directory(handle, max_entries=max_entries)
+        ]
+
+    monkeypatch.setattr(
+        installer_module._windows_workspace, "list_directory", list_directory
+    )
+
+
+def _replace_server_with_link(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = root / "package/langserver.index.js"
+    server.unlink()
+    try:
+        server.symlink_to(root / "install-manifest.json")
+    except OSError:
+        server.write_bytes(b"simulated reparse point")
+        _report_server_as_link(server, monkeypatch)
+
+
+def _damage_existing_install(
+    state_root: Path,
+    root: Path,
+    artifact,
+    damage: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Leave one existing installation in each way the installer must refuse."""
+    if damage == "empty":
+        root.mkdir(parents=True)
+        return
+    install_pyright(state_root=state_root, artifact=artifact.path)
+    if damage == "manifest":
+        (root / "install-manifest.json").write_bytes(b"{}")
+        return
+    if damage == "server":
+        (root / "package/langserver.index.js").write_bytes(b"changed")
+        return
+    _replace_server_with_link(root, monkeypatch)
+
+
 @pytest.mark.parametrize("damage", ["empty", "manifest", "server", "symlink"], ids=str)
 def test_existing_invalid_or_unsafe_target_is_never_overwritten(
     tmp_path: Path,
@@ -2123,36 +2182,7 @@ def test_existing_invalid_or_unsafe_target_is_never_overwritten(
     state_root = tmp_path / "state"
     artifact = _artifact(tmp_path, monkeypatch)
     root = _root(state_root)
-    if damage == "empty":
-        root.mkdir(parents=True)
-    else:
-        install_pyright(state_root=state_root, artifact=artifact.path)
-        if damage == "manifest":
-            (root / "install-manifest.json").write_bytes(b"{}")
-        elif damage == "server":
-            (root / "package/langserver.index.js").write_bytes(b"changed")
-        else:
-            server = root / "package/langserver.index.js"
-            server.unlink()
-            try:
-                server.symlink_to(root / "install-manifest.json")
-            except OSError:
-                server.write_bytes(b"simulated reparse point")
-                real_list_directory = installer_module._windows_workspace.list_directory
-
-                def list_directory(handle: int, *, max_entries: int):
-                    return [
-                        dataclasses.replace(entry, kind="link")
-                        if entry.name == server.name
-                        else entry
-                        for entry in real_list_directory(handle, max_entries=max_entries)
-                    ]
-
-                monkeypatch.setattr(
-                    installer_module._windows_workspace,
-                    "list_directory",
-                    list_directory,
-                )
+    _damage_existing_install(state_root, root, artifact, damage, monkeypatch)
     before = tuple(sorted(str(path.relative_to(root)) for path in root.rglob("*")))
 
     with pytest.raises(PyrightInstallError) as error:
@@ -2427,3 +2457,66 @@ def test_profile_discovery_does_not_import_or_call_installer() -> None:
         )
         for node in ast.walk(tree)
     )
+
+
+def test_a_flush_failure_hands_both_runtime_handles_to_the_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A handle left as a local inside the creation helper is closed by nobody.
+
+    `_ensure_runtime_parent` creates what is missing and flushes the parent
+    afterwards. Both handles have to be in the caller's hands when the flush
+    fails, because the cleanup closes what it is given. On Windows a leaked
+    directory handle is a sharing violation on the directory the retry needs;
+    this sees the same defect on any platform.
+    """
+    state_root = tmp_path / "handle-state"
+    state_root.mkdir()
+    received: list[tuple[object, ...]] = []
+    real_cleanup = installer_module._close_handles_preserving_error
+
+    def recording_cleanup(primary_error, *handles):
+        received.append(handles)
+        return real_cleanup(primary_error, *handles)
+
+    def failing_flush(_handle):
+        raise OSError("directory flush failed")
+
+    monkeypatch.setattr(
+        installer_module, "_close_handles_preserving_error", recording_cleanup
+    )
+    monkeypatch.setattr(
+        installer_module, "_checked_fsync_directory", failing_flush
+    )
+
+    with pytest.raises(OSError, match="directory flush failed"):
+        installer_module._ensure_runtime_parent(state_root, deadline=float("inf"))
+
+    assert received, "the cleanup never ran"
+    handles = [handle for handle in received[0] if handle is not None]
+    assert len(handles) == 2, "the created child was not handed over"
+
+
+def test_an_existing_runtime_directory_needs_no_flush(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the call that creates a directory owes its parent a flush."""
+    state_root = tmp_path / "existing-state"
+    (state_root / "cache" / "code-tools" / "pyright").mkdir(parents=True)
+    flushes: list[object] = []
+
+    monkeypatch.setattr(
+        installer_module,
+        "_checked_fsync_directory",
+        lambda handle: flushes.append(handle),
+    )
+
+    parent = installer_module._ensure_runtime_parent(
+        state_root, deadline=float("inf")
+    )
+    try:
+        assert flushes == []
+    finally:
+        parent.close()

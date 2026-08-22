@@ -40,6 +40,16 @@ from lsp_protocol import (
 FAKE_SERVER = Path(__file__).with_name("fake_lsp_server.py").resolve()
 OWNER_NONCE = "a" * 32
 
+# A barrier waits for another thread to reach a point; a hold keeps a lock taken
+# until the test says otherwise. Neither is the property under test, so both are
+# generous — a loaded machine may take seconds to schedule a thread, and a hold
+# that expires early would let a bounded assertion pass for the wrong reason.
+# The short waits that prove work completes *while* a lock is held stay short:
+# they are the bound being measured.
+_BARRIER_SECONDS = 30.0
+_HOLD_SECONDS = 30.0
+
+
 
 def _await_records(records: list, count: int, timeout: float) -> None:
     """Wait for a worker to publish `count` records, bounded by the timeout."""
@@ -425,13 +435,22 @@ def _await_pid_exit(pid: int, timeout: float = 60.0) -> None:
 
 def _await_threads_gone(names: set[str], timeout: float = 60.0) -> list[str]:
     """Named worker threads that never leave; an empty list means none leaked."""
+    return _poll_until_empty(lambda: _live_threads(names), timeout)
+
+
+def _live_threads(names: set[str]) -> list[str]:
+    return [thread.name for thread in threading.enumerate() if thread.name in names]
+
+
+def _poll_until_empty(sample, timeout: float) -> list[str]:
+    """Sample until nothing is left or the bound expires; the last sample wins."""
     deadline = time.monotonic() + timeout
     while True:
-        alive = [
-            thread.name for thread in threading.enumerate() if thread.name in names
-        ]
-        if not alive or time.monotonic() >= deadline:
-            return alive
+        remaining = sample()
+        if not remaining:
+            return remaining
+        if time.monotonic() >= deadline:
+            return remaining
         time.sleep(0.05)
 
 
@@ -623,16 +642,15 @@ def _still_owned(started: list[LspProcess], seconds: float = 60) -> list[str]:
     while cleanup is still in flight. Retrying keeps this a leak check rather
     than a race against the machine.
     """
-    deadline = time.monotonic() + seconds
-    while True:
-        owned = [
-            process.owner_nonce
-            for process in started
-            if lsp_process._coordinator_has_ownership(process._coordinator)
-        ]
-        if not owned or time.monotonic() >= deadline:
-            return owned
-        time.sleep(0.05)
+    return _poll_until_empty(lambda: _owned_nonces(started), seconds)
+
+
+def _owned_nonces(started: list[LspProcess]) -> list[str]:
+    return [
+        process.owner_nonce
+        for process in started
+        if lsp_process._coordinator_has_ownership(process._coordinator)
+    ]
 
 
 def _command(*arguments: str) -> list[str]:
@@ -1160,8 +1178,8 @@ def test_startup_commit_rejects_heartbeat_terminal_failure_during_bootstrap(
     heartbeat = coordinator.heartbeat_thread
     assert heartbeat is not None
     coordinator.heartbeat_wake.set()
-    assert heartbeat_failed.wait(1)
-    assert terminal_recorded.wait(1)
+    assert heartbeat_failed.wait(_BARRIER_SECONDS)
+    assert terminal_recorded.wait(_BARRIER_SECONDS)
     with coordinator.terminal_state_lock:
         assert coordinator.pending_failure_intents == 1
         assert coordinator.success_committed is False
@@ -1253,6 +1271,13 @@ def test_transparent_restart_bootstraps_fresh_generation_before_request_replay(
 BOOTSTRAP_BUDGET_SECONDS = 3.0
 
 
+# The live deadline a replacement generation is aimed at. It is a floor, not
+# the expected value: the wait that produces it can overshoot by a sizeable
+# fraction of a second on the slowest supported machine, and the measured
+# margin still has to stay clearly positive.
+_REPLACEMENT_MARGIN_FLOOR_SECONDS = 1.0
+
+
 def test_delayed_crash_restart_commits_with_a_short_live_deadline(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1280,7 +1305,11 @@ def test_delayed_crash_restart_commits_with_a_short_live_deadline(
     # interpreter costs far more on a loaded Windows runner than on a quiet
     # Linux one, so the target is derived from this machine's own measured
     # startup instead of a number that only holds on a fast host.
-    target_margin = [0.4]
+    #
+    # The floor also has to absorb the wait below overshooting: on a loaded
+    # macOS runner `Event().wait()` has been seen to return more than 150 ms
+    # late, which is what the measured margin loses.
+    target_margin = [_REPLACEMENT_MARGIN_FLOOR_SECONDS]
 
     def delayed_protocol(*args: object, **kwargs: object) -> lsp_protocol.LspProtocol:
         deadline = kwargs.get("_startup_deadline")
@@ -1329,7 +1358,10 @@ def test_delayed_crash_restart_commits_with_a_short_live_deadline(
         generation_bootstrap=bootstrap,
         bootstrap_timeout_seconds=BOOTSTRAP_BUDGET_SECONDS,
     )
-    target_margin[0] = min(2.0, max(0.4, (time.monotonic() - started) * 2))
+    target_margin[0] = min(
+        2.0,
+        max(_REPLACEMENT_MARGIN_FLOOR_SECONDS, (time.monotonic() - started) * 2),
+    )
     first_nonce = process.generation_nonce
     try:
         assert process.request(
@@ -3365,7 +3397,7 @@ def test_restart_lease_names_candidate_before_bootstrap_commit_without_activatio
         assert bootstrap_entered.wait(120)
         candidate_nonce = bootstraps[1]
         process._coordinator.heartbeat_wake.set()
-        assert heartbeat_wrote.wait(1)
+        assert heartbeat_wrote.wait(_BARRIER_SECONDS)
         lease_record = json.loads(
             (process.owner_root / "lease.json").read_bytes()
         )
@@ -3469,14 +3501,14 @@ def test_driver_release_survives_transition_contention_and_cleanup_reacquires() 
     def hold_lifecycle_lock() -> None:
         with coordinator.condition:
             held.set()
-            assert release_transition.wait(2)
+            assert release_transition.wait(_HOLD_SECONDS)
 
     owner = threading.Thread(target=own_driver)
     owner.start()
-    assert owner_acquired.wait(1)
+    assert owner_acquired.wait(_BARRIER_SECONDS)
     holder = threading.Thread(target=hold_lifecycle_lock)
     holder.start()
-    assert held.wait(1)
+    assert held.wait(_BARRIER_SECONDS)
     expired = time.monotonic() + 0.05
     try:
         assert threading.Event().wait(max(0.0, expired - time.monotonic())) is False
@@ -3484,8 +3516,8 @@ def test_driver_release_survives_transition_contention_and_cleanup_reacquires() 
         assert owner_done.wait(0.2)
     finally:
         release_transition.set()
-        holder.join(1)
-        owner.join(1)
+        holder.join(_BARRIER_SECONDS)
+        owner.join(_BARRIER_SECONDS)
 
     assert not holder.is_alive()
     assert not owner.is_alive()
@@ -4725,13 +4757,26 @@ def test_owner_json_is_canonical_redacted_restricted_and_has_only_schema(
     process.close(time.monotonic() + 5)
 
 
+# The stub counts this from its own start, so it has to outlive the parent's
+# startup, not just the assertion. At two seconds it did not: on 2026-08-22 the
+# hosted Windows shard of CI run 32542795352 (job 96955875519) recorded
+# `returncode: 0` with `started_monotonic=730.375` — the stub had slept its two
+# seconds out and exited cleanly while startup was still running, and the
+# coordinator correctly called that a terminal failure. The file already answers
+# the same problem for stderr with a three-second linger; this is the same
+# answer with more room. The price is that each parametrization waits this long
+# for the exit it asserts.
+_SELF_EXIT_SECONDS = 8.0
+_SELF_EXIT_WAIT_SECONDS = 20.0
+
+
 @pytest.mark.parametrize("deadline", [math.nan, math.inf, "later", True])
 def test_wait_for_exit_rejects_invalid_deadline(tmp_path: Path, deadline: object) -> None:
-    process = _start(tmp_path, "--sleep-seconds", "2")
+    process = _start(tmp_path, "--sleep-seconds", str(_SELF_EXIT_SECONDS))
     with pytest.raises((TypeError, ValueError)):
         process.wait_for_exit(deadline)  # type: ignore[arg-type]
     _expect_active_generation_exit(process)
-    _wait(process)
+    _wait(process, _SELF_EXIT_WAIT_SECONDS)
     process.close(time.monotonic() + 5)
 
 
@@ -7235,11 +7280,11 @@ def test_fatal_intent_survives_transition_lock_contention_and_recovers_once(
     def hold_transition() -> None:
         with coordinator.condition:
             held.set()
-            assert release.wait(2)
+            assert release.wait(_HOLD_SECONDS)
 
     holder = threading.Thread(target=hold_transition)
     holder.start()
-    assert held.wait(1)
+    assert held.wait(_BARRIER_SECONDS)
 
     callback = threading.Thread(
         target=lambda: (
@@ -7250,8 +7295,8 @@ def test_fatal_intent_survives_transition_lock_contention_and_recovers_once(
     callback.start()
     assert callback_returned.wait(0.5)
     release.set()
-    holder.join(1)
-    callback.join(1)
+    holder.join(_BARRIER_SECONDS)
+    callback.join(_BARRIER_SECONDS)
 
     assert _coordinator_wait(process, lambda: process.restart_count == 1)
     assert process.request("echo", {"ok": True}, deadline=time.monotonic() + 3) == {
@@ -7800,7 +7845,7 @@ def test_heartbeat_failure_is_bounded_when_transition_lock_is_held(
     def hold_transition() -> None:
         with coordinator.condition:
             held.set()
-            assert release.wait(30)
+            assert release.wait(_HOLD_SECONDS)
 
     def fail_heartbeat(_instance: LspProcess, _deadline: float) -> None:
         attempted.set()
@@ -7810,7 +7855,7 @@ def test_heartbeat_failure_is_bounded_when_transition_lock_is_held(
     monkeypatch.setattr(lsp_process, "_write_current_lease", fail_heartbeat)
     holder = threading.Thread(target=hold_transition)
     holder.start()
-    assert held.wait(1)
+    assert held.wait(_BARRIER_SECONDS)
     coordinator.heartbeat_wake.set()
 
     try:
@@ -7854,7 +7899,7 @@ def test_expired_drain_inspection_is_bounded_when_transition_lock_is_held(
     def hold_transition() -> None:
         with coordinator.condition:
             held.set()
-            assert release.wait(3)
+            assert release.wait(_HOLD_SECONDS)
 
     def inspect() -> None:
         try:
@@ -7867,7 +7912,7 @@ def test_expired_drain_inspection_is_bounded_when_transition_lock_is_held(
     monkeypatch.setattr(lsp_process, "_GRACEFUL_CLEANUP_SECONDS", 0.05)
     holder = threading.Thread(target=hold_transition)
     holder.start()
-    assert held.wait(1)
+    assert held.wait(_BARRIER_SECONDS)
     inspector = threading.Thread(target=inspect)
     inspector.start()
     try:
@@ -8265,7 +8310,7 @@ def test_failed_state_and_waiter_notification_follow_durable_failure_evidence(
         assert not (process.owner_root / "failure.json").exists()
         assert (process.owner_root / "lease.json").is_file()
         coordinator.heartbeat_wake.set()
-        assert heartbeat_wrote.wait(1)
+        assert heartbeat_wrote.wait(_BARRIER_SECONDS)
     finally:
         release_evidence.set()
         cleanup.join(5)
@@ -8973,7 +9018,7 @@ def test_expired_deadline_waiting_for_transition_lock_changes_nothing(
     def hold_transition() -> None:
         with coordinator.condition:
             acquired.set()
-            assert release.wait(2)
+            assert release.wait(_HOLD_SECONDS)
 
     holder = threading.Thread(target=hold_transition)
     holder.start()
@@ -9020,10 +9065,10 @@ def test_explicit_restart_timeout_after_pending_hands_off_one_recovery_worker(
     armed = True
 
     def hold_transition() -> None:
-        assert seize.wait(2)
+        assert seize.wait(_BARRIER_SECONDS)
         with coordinator.condition:
             held.set()
-            assert release.wait(5)
+            assert release.wait(_HOLD_SECONDS)
 
     def release_then_contend(current: lsp_process._LifecycleCoordinator) -> None:
         nonlocal armed
@@ -9037,7 +9082,7 @@ def test_explicit_restart_timeout_after_pending_hands_off_one_recovery_worker(
         if pending:
             armed = False
             seize.set()
-            assert held.wait(1)
+            assert held.wait(_BARRIER_SECONDS)
 
     def observe_prepare(*args: object, **kwargs: object) -> lsp_process._Generation:
         prepared_by.append(threading.current_thread())
@@ -9335,7 +9380,7 @@ def test_terminal_intent_lock_respects_deadline_and_cannot_commit_success(
         coordinator.terminal_intent_lock.acquire()
         try:
             held.set()
-            assert release.wait(2)
+            assert release.wait(_HOLD_SECONDS)
         finally:
             coordinator.terminal_intent_lock.release()
 
@@ -9349,7 +9394,7 @@ def test_terminal_intent_lock_respects_deadline_and_cannot_commit_success(
 
     holder = threading.Thread(target=hold_terminal_intent)
     holder.start()
-    assert held.wait(1)
+    assert held.wait(_BARRIER_SECONDS)
     closer = threading.Thread(target=shutdown)
     closer.start()
     completed_before_release = finished.wait(0.2)
@@ -9432,7 +9477,7 @@ def test_startup_terminal_intent_timeout_returns_retryable_cleanup_error(
             coordinator.terminal_intent_lock.acquire()
             try:
                 held.set()
-                release.wait(120)
+                release.wait(_HOLD_SECONDS)
             finally:
                 coordinator.terminal_intent_lock.release()
 
@@ -9440,7 +9485,7 @@ def test_startup_terminal_intent_timeout_returns_retryable_cleanup_error(
         holders.append(holder)
         captured.append(instance)
         holder.start()
-        assert held.wait(1)
+        assert held.wait(_BARRIER_SECONDS)
         assert deadline is not None
         remaining = deadline - time.monotonic()
         if remaining > 0:
@@ -9543,12 +9588,12 @@ def test_autonomous_restart_failure_with_expired_transition_lock_is_sticky(
         def hold_transition() -> None:
             with coordinator.condition:
                 held.set()
-                release.wait(10)
+                release.wait(_HOLD_SECONDS)
 
         holder = threading.Thread(target=hold_transition)
         holders.append(holder)
         holder.start()
-        assert held.wait(1)
+        assert held.wait(_BARRIER_SECONDS)
         remaining = deadline - time.monotonic()
         if remaining > 0:
             time.sleep(remaining + 0.01)
@@ -9651,13 +9696,13 @@ def test_persistent_autonomous_cleanup_fault_retries_with_fresh_bounded_budgets(
     def hold_transition() -> None:
         with coordinator.condition:
             held.set()
-            assert release.wait(5)
+            assert release.wait(_HOLD_SECONDS)
 
     holder = threading.Thread(target=hold_transition)
 
     def fail_restart(_instance: LspProcess, deadline: float) -> None:
         holder.start()
-        assert held.wait(1)
+        assert held.wait(_BARRIER_SECONDS)
         threading.Event().wait(max(0.0, deadline - time.monotonic()) + 0.005)
         raise RuntimeError("persistent autonomous restart failure")
 
@@ -9736,10 +9781,10 @@ def test_second_explicit_restart_failure_with_held_transition_lock_is_sticky(
     armed = True
 
     def hold_transition() -> None:
-        assert seize.wait(2)
+        assert seize.wait(_BARRIER_SECONDS)
         with coordinator.condition:
             held.set()
-            release.wait(10)
+            release.wait(_HOLD_SECONDS)
 
     def release_then_contend(current: lsp_process._LifecycleCoordinator) -> None:
         nonlocal armed
@@ -9747,7 +9792,7 @@ def test_second_explicit_restart_failure_with_held_transition_lock_is_sticky(
         if current is coordinator and armed and threading.current_thread() is restart_thread:
             armed = False
             seize.set()
-            assert held.wait(1)
+            assert held.wait(_BARRIER_SECONDS)
 
     holder = threading.Thread(target=hold_transition)
     holder.start()

@@ -2042,23 +2042,38 @@ def test_close_during_blocked_initial_write_cleans_request_and_owners() -> None:
     assert not protocol.writer_thread.is_alive()
 
 
+# Closing from the reader handler skips joining the reader — it is the current
+# thread — and still joins the writer. The default budget for that join is one
+# second, and on 2026-08-22 the Windows/3.13 shard of CI run 32548995167 did not
+# make it: close() raised, `handler_returned` was never set, and the test spent
+# its full wait reporting `assert False` with no cause. The deadline belongs to
+# the caller, so the test names one that outlasts a loaded runner.
+_CLOSE_FROM_HANDLER_SECONDS = 30.0
+
+
 def test_close_from_reader_handler_does_not_deadlock(fake_server: FakeLspServer) -> None:
     handler_returned = threading.Event()
+    handler_failure: list[BaseException] = []
 
     def peer_handler(peer: FakeLspPeer) -> None:
         peer.send({"jsonrpc": "2.0", "method": "$/progress", "params": {}})
 
     def notification_handler(_params: object) -> None:
-        protocol.close()
-        handler_returned.set()
+        try:
+            protocol.close(time.monotonic() + _CLOSE_FROM_HANDLER_SECONDS)
+        except BaseException as error:  # noqa: BLE001 - a hang must say why
+            handler_failure.append(error)
+        finally:
+            # Set in `finally`, so a real deadlock never reaches it and this
+            # stays the liveness test it was; only the diagnosis is new.
+            handler_returned.set()
 
     protocol = fake_server.start(
         peer_handler,
         server_notification_handlers={"$/progress": notification_handler},
     )
-    # This is a liveness test: a deadlock still fails it, just later. The wait
-    # has to outlast a loaded CI runner, not describe how fast the close is.
-    assert handler_returned.wait(60)
+    assert handler_returned.wait(60), "close() never returned from the reader handler"
+    assert not handler_failure, f"close() raised {handler_failure[0]!r}"
     protocol.reader_thread.join(60)
     assert not protocol.reader_thread.is_alive()
     assert not protocol.writer_thread.is_alive()

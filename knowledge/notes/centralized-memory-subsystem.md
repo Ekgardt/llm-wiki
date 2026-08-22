@@ -30,3 +30,4 @@ Follow-up: if a new hook appears to "lose" captures, check first whether it was 
 - [[docs/operating-model]] — compile cadence and the `knowledge/daily/` ↔ `knowledge/notes/` boundary this centralization protects.
 - [[knowledge/notes/agent-native-mcp-foundation]] — agent integrations share this canonical vault through MCP and thin lifecycle adapters.
 - [[knowledge/notes/reliable-memory-stage-2]] — recoverable transactions and operational state build on the same canonical-root contract.
+- [[knowledge/notes/single-directory-vault-decision]] — the same canonical root later became the only root: vault and public source are one directory, and `.gitignore` took over the separation this page's boundary used to provide.

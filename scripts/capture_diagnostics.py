@@ -120,7 +120,10 @@ def record_capture_failure(
 ) -> None:
     """Record one lost capture. Never raises — diagnostics never break a hook."""
     record = _failure_record(kind, reason, slug, session_id)
-    _append_failure_line(record)
+    try:
+        _append_failure_line(record)
+    except Exception:  # noqa: BLE001 - the counter still records the loss
+        pass
     try:
         update_state(
             lambda state: _bump_counter(state, record),
@@ -142,17 +145,69 @@ def capture_failure_totals(state: dict) -> dict[str, int]:
     }
 
 
+def _trail_pointer() -> str:
+    """Send the reader to the trail only when the trail is actually there.
+
+    The counters live in state.json and the trail is a separate best-effort
+    file. It can be absent — an unwritable reports directory, a state root that
+    moved, ordinary cleanup — and pointing at a file that is not there wastes
+    the one moment the operator is paying attention.
+    """
+    if FAILURE_LOG.is_file():
+        return "see `logs/capture-failures.jsonl`."
+    return "the trail at `logs/capture-failures.jsonl` is missing; reasons are in `run/state.json`."
+
+
+def _recorded_moment(entry: object) -> str:
+    if not isinstance(entry, dict):
+        return ""
+    return str(entry.get("last_at", ""))
+
+
+def _last_failure_at(state: dict) -> str:
+    """The most recent moment any kind was recorded, or an empty string."""
+    counters = state.get(STATE_KEY)
+    if not isinstance(counters, dict):
+        return ""
+    moments = [_recorded_moment(entry) for entry in counters.values()]
+    return max(moments, default="")
+
+
 def capture_failure_line(state: dict) -> str:
-    """One SessionStart line naming lost captures, empty when nothing was lost."""
+    """One SessionStart line naming lost captures, empty when nothing was lost.
+
+    The count is cumulative and nothing clears it on its own, so the line has to
+    say when this last happened. Without that, a loss fixed months ago reads
+    exactly like one from this morning.
+    """
     totals = capture_failure_totals(state)
     lost = sum(totals.values())
     if not lost:
         return ""
     detail = ", ".join(f"{kind} {count}" for kind, count in sorted(totals.items()))
+    last_at = _last_failure_at(state)
+    when = f", last at {last_at}" if last_at else ""
     return (
-        f"- **Capture**: ⚠️ {lost} capture(s) lost ({detail}) — "
-        f"see `logs/capture-failures.jsonl`."
+        f"- **Capture**: ⚠️ {lost} capture(s) lost ({detail}{when}) — "
+        f"{_trail_pointer()} Retire with "
+        f"`uv run python scripts/capture_diagnostics.py --clear`."
     )
+
+
+def clear_capture_failures() -> dict[str, int]:
+    """Retire the counters and report what was retired.
+
+    Deliberate, never automatic: the count records a loss that really happened,
+    and only a person can say it has been dealt with.
+    """
+    retired: dict[str, int] = {}
+
+    def mutate(state: dict) -> None:
+        retired.update(capture_failure_totals(state))
+        state.pop(STATE_KEY, None)
+
+    update_state(mutate, lock_timeout=STATE_LOCK_TIMEOUT)
+    return retired
 
 
 def _print_summary(state: dict) -> int:
@@ -166,6 +221,15 @@ def _print_summary(state: dict) -> int:
     return 1
 
 
+def _print_cleared(retired: dict[str, int]) -> int:
+    if not retired:
+        print("capture_diagnostics: nothing to clear")
+        return 0
+    for kind, count in sorted(retired.items()):
+        print(f"cleared {kind}: {count}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Capture failure diagnostics.")
     parser.add_argument(
@@ -173,7 +237,14 @@ def main() -> int:
         action="store_true",
         help="Exit non-zero when any capture failure has been recorded.",
     )
+    parser.add_argument(
+        "--clear",
+        action="store_true",
+        help="Retire the recorded counters after dealing with them.",
+    )
     args = parser.parse_args()
+    if args.clear:
+        return _print_cleared(clear_capture_failures())
     status = _print_summary(load_state())
     return status if args.check else 0
 

@@ -2062,6 +2062,131 @@ def validate_generation_database(
         database.close()
 
 
+# Which exact evidence.sqlite3 bytes have already passed the closed-format pass
+# in this process. That pass reads nothing but the database and values the
+# manifest carries, so the same bytes and the same manifest can only reach the
+# same verdict — and re-deciding it cost about twenty seconds per read of a
+# 146 MB artifact, four times per search. Everything that consults the live
+# corpus stays outside this and still runs every time.
+_FORMAT_VALIDATED: set[str] = set()
+
+
+def _evidence_artifact_digest(manifest: Mapping[str, object]) -> str | None:
+    """The digest the manifest binds evidence.sqlite3 to, if it binds one."""
+    for item in manifest.get("artifacts", []):
+        if isinstance(item, Mapping) and item.get("path") == "evidence.sqlite3":
+            digest = item.get("sha256")
+            return digest if isinstance(digest, str) else None
+    return None
+
+
+def _format_validation_key(
+    manifest: Mapping[str, object], schema: GraphSchema
+) -> str | None:
+    """One key for the bytes and every manifest value the closed-format pass reads."""
+    digest = _evidence_artifact_digest(manifest)
+    if digest is None:
+        return None
+    parts = [
+        digest,
+        schema.value,
+        str(manifest.get("generation_id")),
+        str(manifest.get("source_manifest_sha256")),
+        canonical_json_bytes(manifest.get("repository_scope") or {}).decode("utf-8"),
+    ]
+    return "|".join(parts)
+
+
+# Where this installation remembers which exact artifact bytes already passed
+# the closed-format pass. Without it every fresh process pays for the pass
+# again: about twenty seconds of a 146 MB artifact, on every CLI query. The
+# file lives beside the generations, never inside one, so an activated
+# generation stays byte-for-byte immutable.
+_FORMAT_RECEIPT_NAME = "format-validated.json"
+_MAX_FORMAT_RECEIPTS = 32
+_MAX_FORMAT_RECEIPT_BYTES = 64 * 1024
+
+
+def _format_receipt_path(generation_path: Path) -> Path:
+    """The receipt file that belongs to this generation's catalog directory."""
+    return Path(generation_path).parent.parent / _FORMAT_RECEIPT_NAME
+
+
+def _stored_format_receipts(path: Path) -> list[str]:
+    """The keys this installation has already validated, or none it can trust."""
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return []
+    if len(raw) > _MAX_FORMAT_RECEIPT_BYTES:
+        return []
+    try:
+        value = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        return []
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)][:_MAX_FORMAT_RECEIPTS]
+
+
+def _remember_format_receipt(path: Path, key: str) -> None:
+    """Keep this verdict for the next process; failing to keep it costs only time."""
+    keys = [item for item in _stored_format_receipts(path) if item != key]
+    keys.insert(0, key)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(keys[:_MAX_FORMAT_RECEIPTS]), encoding="utf-8"
+        )
+        os.replace(temporary, path)
+    except OSError:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+
+
+def _validate_connection_once(
+    database: sqlite3.Connection,
+    manifest: Mapping[str, object],
+    generation_path: Path,
+    *,
+    schema: GraphSchema,
+    deadline: float | None,
+    monotonic: Callable[[], float],
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    """Validate the closed file format, deciding it once per exact artifact."""
+    key = _format_validation_key(manifest, schema)
+    if key is not None and key in _FORMAT_VALIDATED:
+        return
+    receipt = _format_receipt_path(generation_path)
+    if key is not None and key in _stored_format_receipts(receipt):
+        _FORMAT_VALIDATED.add(key)
+        return
+    _validate_connection(
+        database,
+        schema=schema,
+        deadline=deadline,
+        monotonic=monotonic,
+        cancelled=cancelled,
+        publication_generation_id=(
+            manifest.get("generation_id") if schema is GraphSchema.V3 else None
+        ),
+        repository_scope=(
+            RepositoryScope.from_dict(manifest.get("repository_scope"))
+            if schema is GraphSchema.V3
+            else None
+        ),
+        source_manifest_sha256=(
+            manifest.get("source_manifest_sha256") if schema is GraphSchema.V3 else None
+        ),
+    )
+    if key is not None:
+        _FORMAT_VALIDATED.add(key)
+        _remember_format_receipt(receipt, key)
+
+
 def validate_generation_artifact(
     generation_path: Path,
     manifest: Mapping[str, object],
@@ -2148,23 +2273,14 @@ def validate_generation_artifact(
         database.row_factory = sqlite3.Row
         database.execute("PRAGMA query_only=ON")
         database.execute("PRAGMA trusted_schema=OFF")
-        _validate_connection(
+        _validate_connection_once(
             database,
+            manifest,
+            Path(generation_path),
             schema=schema,
             deadline=deadline,
             monotonic=monotonic,
             cancelled=cancelled,
-            publication_generation_id=(
-                manifest.get("generation_id") if schema is GraphSchema.V3 else None
-            ),
-            repository_scope=(
-                RepositoryScope.from_dict(manifest.get("repository_scope"))
-                if schema is GraphSchema.V3
-                else None
-            ),
-            source_manifest_sha256=(
-                manifest.get("source_manifest_sha256") if schema is GraphSchema.V3 else None
-            ),
         )
         stored_sources = _stored_shared_source_membership(
             database,

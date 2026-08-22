@@ -21,10 +21,12 @@ from tests.test_reliability_v3_adoption import (
 def _child_writer_budget() -> None:
     """Give a child the gate budget a hosted Windows image actually needs.
 
-    `claim_task` is not retry-safe: the SQLite claim is durable before the
-    journal line is appended, so a caller that retries after losing the gate
-    conflicts with its own live claim. Waiting long enough for the gate is the
-    honest way to keep these processes from retrying at all.
+    The SQLite claim is durable before the journal line is appended, so a
+    caller that loses the gate in between holds resources it was never told
+    about. `_publish_active_claim` releases them, and since 2026-08-22 it keeps
+    trying rather than failing quietly, which is what makes the retry converge.
+    Waiting long enough for the gate keeps these processes from needing that
+    path at all.
     """
     markdown_transaction._WRITER_WAIT_SECONDS = 120.0
 

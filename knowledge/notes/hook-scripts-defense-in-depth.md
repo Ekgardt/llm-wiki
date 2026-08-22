@@ -39,3 +39,4 @@ One-sentence summary: Two hardening decisions made 2026-04-19 to prevent silent 
 - [[knowledge/notes/hook-errors-silent-without-state-root]] — deeper debugging entry for the state-root symptom
 - [[knowledge/notes/b-sim-hook-testing]] — the testing technique that uncovered these gaps
 - [[docs-portability-absolute-paths]] — the defense-in-depth decisions and the portability pattern both address path-resolution robustness.
+- [[knowledge/notes/single-directory-vault-decision]] — the same reasoning at repository scale: the safety property is enforced by a mechanism, not by a convention someone remembers.

@@ -557,6 +557,23 @@ def _systemd_literal(value: str) -> str:
     return value.replace("%", "%%")
 
 
+# The PATH a systemd user manager hands its services on Linux. It contains no
+# per-user directory, which is where the LLM provider CLIs are installed.
+_SYSTEMD_USER_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+def _scheduled_path(uv_path: Path) -> str:
+    """Let a scheduled run see the tools installed beside uv.
+
+    A user service inherits the manager's PATH, which reaches no per-user
+    directory. The provider CLIs live in one, next to the uv this unit already
+    calls by absolute path, so without this a scheduled compile probes every
+    provider, finds none, and fails where the same command from a login shell
+    succeeds.
+    """
+    return f"{Path(uv_path).resolve().parent}:{_SYSTEMD_USER_PATH}"
+
+
 def _systemd_service(root: Path, state_root: Path, uv_path: Path, kind: str) -> bytes:
     arguments = " ".join(
         _systemd_quote(argument) for argument in _scheduled_arguments(root, uv_path, kind)
@@ -569,6 +586,7 @@ def _systemd_service(root: Path, state_root: Path, uv_path: Path, kind: str) -> 
         "Type=oneshot",
         f"Environment={_systemd_quote(f'LLM_WIKI_ROOT={Path(root).resolve()}')}",
         f"Environment={_systemd_quote(f'LLM_WIKI_STATE_ROOT={Path(state_root).resolve()}')}",
+        f"Environment={_systemd_quote(f'PATH={_scheduled_path(uv_path)}')}",
         f"WorkingDirectory={_systemd_literal(str(Path(root).resolve()))}",
         f"ExecStart={arguments}",
         "",
@@ -698,6 +716,19 @@ def _default_command_runner(
     return completed
 
 
+def _try_command(runner: CommandRunner, command: tuple[str, ...]) -> None:
+    """Run a teardown step whose own exit code settles nothing.
+
+    Disabling or cleaning units the manager never registered exits nonzero,
+    and that is precisely the state the teardown is trying to reach. Whether
+    the teardown worked is decided by verifying the projection afterwards, so
+    letting these steps stop it is what strands a half-registered scheduler.
+    """
+    _exit_code, output = runner(command, None)
+    if len(output) > MAX_RECORD_BYTES:
+        raise InstallControlError("install_scheduler_output_oversized")
+
+
 def _require_command(runner: CommandRunner, command: tuple[str, ...]) -> bytes:
     exit_code, output = runner(command, None)
     if exit_code != 0:
@@ -772,7 +803,10 @@ def _write_systemd_files(unit_directory: Path, definitions: Mapping[str, bytes])
 def _remove_systemd_files(unit_directory: Path, definitions: Mapping[str, bytes]) -> None:
     for name, expected in definitions.items():
         path = unit_directory / name
-        if _read_managed_file(path) != expected:
+        current = _read_managed_file(path)
+        if current is None:
+            continue
+        if current != expected:
             raise InstallControlError("install_scheduler_file_drift")
         _remove_managed_file(path)
 
@@ -804,7 +838,7 @@ def _uninstall_systemd(
     runner: CommandRunner,
     systemctl: str,
 ) -> None:
-    _require_command(
+    _try_command(
         runner,
         (
             systemctl,
@@ -815,7 +849,7 @@ def _uninstall_systemd(
             "llm-wiki-weekly.timer",
         ),
     )
-    _require_command(
+    _try_command(
         runner,
         (
             systemctl,
@@ -1049,6 +1083,23 @@ def _require_scheduler_projection(
         raise InstallControlError("install_scheduler_projection_drift")
 
 
+def _require_projection_before_write(
+    reader: Callable[[Sequence[bytes]], bytes | None],
+    expected: bytes | None,
+    replacement: bytes | None,
+) -> None:
+    """Where the projection has to start, unless this write is a removal.
+
+    Removal is what a rollback does, and a rollback exists for a resource that
+    was left half applied: demanding a readable, single-valued starting
+    projection is exactly what makes such a failure impossible to undo. The
+    result is still verified after the write, so nothing is accepted unproven.
+    """
+    if replacement is None:
+        return
+    _require_scheduler_projection(reader, expected)
+
+
 def _systemd_projection_writer(
     expected: bytes | None,
     replacement: bytes | None,
@@ -1059,7 +1110,7 @@ def _systemd_projection_writer(
     runner: CommandRunner,
     systemctl: str,
 ) -> None:
-    _require_scheduler_projection(reader, expected)
+    _require_projection_before_write(reader, expected, replacement)
     old = None if expected is None else resolver(expected)
     new = None if replacement is None else resolver(replacement)
     if new is None:
@@ -1245,7 +1296,7 @@ def _launchd_projection_writer(
     launchctl: str,
     domain: str,
 ) -> None:
-    _require_scheduler_projection(reader, expected)
+    _require_projection_before_write(reader, expected, replacement)
     if expected is not None:
         old = resolver(expected)
         _uninstall_launchd(launch_agents_directory, old, runner, launchctl, domain)
@@ -1730,7 +1781,7 @@ def _windows_projection_writer(
     powershell: str,
     script_path: Path,
 ) -> None:
-    _require_scheduler_projection(reader, expected)
+    _require_projection_before_write(reader, expected, replacement)
     if expected is not None:
         old = resolver(expected)
         command = _windows_task_command_from_spec(
@@ -2571,6 +2622,56 @@ def _v2_mutate_resources(
         )
 
 
+class _UnreadableProjection:
+    """The current projection could not be selected, so drift cannot be judged."""
+
+
+# What a revert starts from when the resource was left in a state no single
+# projection describes. It is not a value the resource can ever hold.
+_UNREADABLE_PROJECTION = _UnreadableProjection()
+
+
+def _revert_start_projection(
+    install_root: Path,
+    resource: ManagedResource,
+    snapshots: Sequence[Mapping[str, object]],
+    rollback: Mapping[str, object],
+) -> bytes | None | _UnreadableProjection:
+    """Where the revert starts; a resource left half applied is reported, not refused.
+
+    Only a revert back to absence tolerates this. Refusing to read a mixed
+    projection is what leaves an interrupted install with no way forward and no
+    way back, because the rollback dies on the same read that failed the install.
+    """
+    try:
+        return _read_v2_resource(install_root, resource, snapshots)
+    except InstallControlError as error:
+        if rollback.get("state") != "absent":
+            raise
+        if str(error) != "install_scheduler_projection_conflict":
+            raise
+        return _UNREADABLE_PROJECTION
+
+
+def _revert_already_done(
+    current: bytes | None | _UnreadableProjection, rollback: Mapping[str, object]
+) -> bool:
+    """Whether the resource already sits where the revert wants it."""
+    if isinstance(current, _UnreadableProjection):
+        return False
+    return _same_snapshot(current, rollback)
+
+
+def _require_revertible(
+    current: bytes | None | _UnreadableProjection, desired: Mapping[str, object]
+) -> None:
+    """A revert only touches a resource that is still where the install left it."""
+    if isinstance(current, _UnreadableProjection):
+        return
+    if not _same_snapshot(current, desired):
+        raise InstallControlError("install_rollback_drift")
+
+
 def _v2_revert_resource(
     *,
     install_root: Path,
@@ -2580,18 +2681,21 @@ def _v2_revert_resource(
     resource: ManagedResource,
 ) -> None:
     desired, _origin, rollback = _v2_resource_snapshots(record)
-    current = _read_v2_resource(install_root, resource, (desired, rollback))
-    if _same_snapshot(current, rollback):
+    current = _revert_start_projection(
+        install_root, resource, (desired, rollback), rollback
+    )
+    if _revert_already_done(current, rollback):
         _mark_resource_state(transaction_path, transaction, record, "reverted")
         return
-    if not _same_snapshot(current, desired):
-        raise InstallControlError("install_rollback_drift")
+    _require_revertible(current, desired)
     _mark_resource_state(transaction_path, transaction, record, "reverting")
     rollback_value = _read_v2_snapshot(install_root, rollback)
     metadata = record.get("metadata")
     if not isinstance(metadata, Mapping):
         raise InstallControlError("install_transaction_invalid")
-    _write_resource_projection(resource, current, rollback_value, metadata)
+    _write_resource_projection(
+        resource, _read_v2_snapshot(install_root, desired), rollback_value, metadata
+    )
     if not _same_snapshot(_read_v2_resource(install_root, resource, (rollback,)), rollback):
         raise InstallControlError("install_rollback_verification_failed")
     _mark_resource_state(transaction_path, transaction, record, "reverted")

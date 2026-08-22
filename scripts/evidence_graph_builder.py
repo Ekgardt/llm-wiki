@@ -58,6 +58,10 @@ _LEGACY_INCREMENTAL_MANIFEST_VERSIONS = frozenset(
     }
 )
 MAX_INCREMENTAL_MANIFEST_BYTES = 64 * 1024 * 1024
+# What this build is willing to store. The same size, but a different decision:
+# a parent manifest larger than the read bound cannot be trusted, while one
+# larger than this only costs the next pass its reuse.
+MAX_STORED_INCREMENTAL_MANIFEST_BYTES = MAX_INCREMENTAL_MANIFEST_BYTES
 MAX_LEGACY_WORKSPACE_SENSITIVE_SOURCES = 10_000
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _INVALIDATION_KEYS = frozenset(
@@ -1413,8 +1417,11 @@ def build_incremental_generation(
         "sources": source_entries,
         "record_dependencies": record_dependencies,
     }
-    if len(canonical_json_bytes(incremental_manifest)) > MAX_INCREMENTAL_MANIFEST_BYTES:
-        raise ValueError("incremental manifest exceeds the supported byte ceiling")
+    # A manifest too large to store is not a reason to refuse the generation.
+    # It only buys the next pass its reuse, so the generation is built without
+    # one and the pass after this starts from a full build instead.
+    if len(canonical_json_bytes(incremental_manifest)) > MAX_STORED_INCREMENTAL_MANIFEST_BYTES:
+        incremental_manifest = None
     _check_stop(deadline, cancelled)
     built = build_full_generation(
         catalog,

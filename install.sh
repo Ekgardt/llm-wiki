@@ -182,6 +182,7 @@ else
   exec bash "$VAULT_ROOT/install.sh" "$@"
 fi
 
+INHERITED_STATE_ROOT="${LLM_WIKI_STATE_ROOT:-}"
 STATE_ROOT_INPUT="${LLM_WIKI_STATE_ROOT:-$VAULT_ROOT}"
 mkdir -p "$STATE_ROOT_INPUT"
 STATE_ROOT="$(cd "$STATE_ROOT_INPUT" && pwd -P)"
@@ -199,6 +200,13 @@ fi
 cd "$VAULT_ROOT"
 info "Vault root: $VAULT_ROOT"
 info "State root: $STATE_ROOT"
+# A state root left over from another vault silently splits the installation
+# across two directories, so say so rather than letting it pass as a default.
+if [ -n "$INHERITED_STATE_ROOT" ] && [ "$STATE_ROOT" != "$VAULT_ROOT" ]; then
+  warn "Runtime state will live outside this vault, in $STATE_ROOT"
+  warn "That came from LLM_WIKI_STATE_ROOT in your environment, not from this vault."
+  warn "Unset it and re-run to keep run/, logs/ and cache/ inside $VAULT_ROOT"
+fi
 
 # ─── 2. Check prerequisites ────────────────────────────────────────
 
@@ -537,8 +545,18 @@ if command -v claude &>/dev/null || [ -d "$HOME/.claude" ] || [ -f "$HOME/.claud
     printf '%s\n' '{"mcpServers":{"llm-wiki":{"command":"uv","args":["run","--locked","--no-sync","--directory",'"$VAULT_JSON"',"python","scripts/mcp_server.py"]}}}' > "$CLAUDE_MCP"
     ok "Claude MCP config: ~/.claude.json"
   elif ! grep -q '"llm-wiki"' "$CLAUDE_MCP" 2>/dev/null; then
-    warn "Existing ~/.claude.json found without llm-wiki; merge this under top-level mcpServers:"
-    warn '  "llm-wiki":{"command":"uv","args":["run","--locked","--no-sync","--directory",'"$VAULT_JSON"',"python","scripts/mcp_server.py"]}'
+    # `~/.claude.json` is Claude Code's live state file and it writes to it
+    # while running, so this must not read-modify-write it. Its own CLI adds
+    # the entry safely; without the CLI the only honest option is to say what
+    # to add.
+    if command -v claude &>/dev/null && claude mcp add --scope user llm-wiki \
+        -- uv run --locked --no-sync --directory "$VAULT_ROOT" python scripts/mcp_server.py \
+        >/dev/null 2>&1; then
+      ok "Claude MCP server registered: llm-wiki"
+    else
+      warn "Existing ~/.claude.json found without llm-wiki; add it with:"
+      warn "  claude mcp add --scope user llm-wiki -- uv run --locked --no-sync --directory $VAULT_ROOT python scripts/mcp_server.py"
+    fi
   fi
   if [ "$CLAUDE_AUTOMATIC" -eq 1 ]; then
     AGENT_STATUSES+=("Claude Code: active automatic")

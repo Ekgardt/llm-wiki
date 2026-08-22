@@ -21,7 +21,10 @@ Every knowledge page:
 - `# Title`
 - `One-sentence summary: ...`
 - `## Lesson` (or `## Decision`, `## Symptom / Cause / Resolution`, etc.)
-- `## Evidence` — pointer to `knowledge/daily/<date>.md` and `[HH:MM:SS]` block
+- `## Evidence` — pointer to `knowledge/daily/<date>.md` and the entry that
+  declares an `[HH:MM:SS]`. An entry starts at a `## [HH:MM:SS]` heading or at
+  an `<!-- llm-wiki-operation: -->` marker and ends at the next such start; see
+  `knowledge/notes/daily-entry-boundary-decision.md`
 - `## Related` — wikilinks to sibling notes pages
 
 ## What to lift into knowledge

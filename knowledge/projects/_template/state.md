@@ -1,7 +1,7 @@
 ---
 type: project-state
 title: "<project-slug> - State"
-project: <project-slug>
+project: "<project-slug>"
 generated: true
 last_applied_sequence: 0
 ---

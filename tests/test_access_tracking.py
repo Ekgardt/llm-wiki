@@ -6,6 +6,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -164,8 +165,13 @@ class TestDecayScore:
 
         log_file = tmp_path / "frequent.jsonl"
         lines = []
+        # Dated from now, not from a fixed month: the score decays with age, so
+        # timestamps written into the test go stale and the claim it makes —
+        # recent frequent access beats none — stops being the one it checks.
+        now = datetime.now()
         for i in range(10):
-            lines.append(json.dumps({"slug": "hot", "source": "search", "timestamp": f"2026-07-{i+1:02d}T00:00:00"}))
+            stamp = (now - timedelta(days=i)).replace(microsecond=0).isoformat()
+            lines.append(json.dumps({"slug": "hot", "source": "search", "timestamp": stamp}))
         log_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
         monkeypatch.setattr(access_tracking, "ACCESS_LOG_FILE", log_file)
 

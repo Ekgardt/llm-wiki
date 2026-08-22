@@ -32,6 +32,7 @@ from memory_state import (  # noqa: E402
     REPORTS_DIR,
     ROOT,
     STATE_ROOT,
+    load_state,
     update_state,
 )
 from operational_ownership import (  # noqa: E402
@@ -39,13 +40,21 @@ from operational_ownership import (  # noqa: E402
     heartbeat_owner,
 )
 
+# How long the nightly pass will spend rebuilding the evidence generation.
+# The interactive default is one minute, which is the right bound for a doctor
+# run someone is waiting on. A nightly window is not that: on this vault a full
+# build of 762 sources takes 98 seconds, so a one-minute bound deferred every
+# night and the generation was never rebuilt at all. The unit itself has no
+# start timeout, so the only bound that matters is this one.
+NIGHTLY_GENERATION_BUDGET_SECONDS = 15 * 60
+
 
 def _refresh_generation(log, *, ownership: OwnerLease | None = None) -> int:
     """Run the shared bounded builder under its fenced maintenance owner."""
     arguments = {
         "root": ROOT,
         "state_root": STATE_ROOT,
-        "time_budget_seconds": 60,
+        "time_budget_seconds": NIGHTLY_GENERATION_BUDGET_SECONDS,
         "max_sources": DEFAULT_GENERATION_SOURCE_LIMIT,
     }
     if ownership is not None and _accepts_ownership(run_generation_maintenance):
@@ -54,7 +63,10 @@ def _refresh_generation(log, *, ownership: OwnerLease | None = None) -> int:
         result = run_generation_maintenance(**arguments)
     status = result["status"]
     generation = result.get("generation_id") or "none"
-    log(f"  generation: {status} (id={generation}, partial={bool(result.get('partial'))})")
+    log(
+        f"  generation: {status} (id={generation}, "
+        f"partial={bool(result.get('partial'))}, reason={result.get('reason') or 'none'})"
+    )
     return 0 if status in {"built", "current"} else 1
 
 
@@ -174,6 +186,37 @@ def _compile_running() -> bool:
         return False
 
 
+def _safe_state() -> dict:
+    """State is a report here, never a precondition; unreadable means unknown."""
+    try:
+        return load_state()
+    except Exception:  # noqa: BLE001 - a nightly pass never fails on diagnostics
+        return {}
+
+
+def _compile_failed_this_pass(before: str | None) -> str | None:
+    """The error of a compile that ran in this pass, or None.
+
+    `maybe_compile` spawns the compile and returns 0 as soon as it is running,
+    so the step it belongs to says nothing about the outcome. Waiting for the
+    process to stop says nothing either. On 2026-08-22 that let a nightly pass
+    report `failures=0` for a night whose compile had died a second in. The
+    stamp comparison keeps last night's error out of tonight's count.
+    """
+    state = _safe_state()
+    finished = state.get("last_compile_finished_at")
+    if not finished or str(finished) == before:
+        return None
+    if state.get("last_compile_status") != "error":
+        return None
+    return str(state.get("last_compile_error") or "unknown")
+
+
+def _last_compile_finished() -> str | None:
+    finished = _safe_state().get("last_compile_finished_at")
+    return str(finished) if finished else None
+
+
 def _wait_compile_finished() -> bool:
     """Wait up to 5 minutes (60 × 5s) for a running compile to finish."""
     for _ in range(60):
@@ -217,6 +260,7 @@ def _nightly_steps(run_step, log, ownership: OwnerLease | None) -> int:
 
     # Step 2 must not skip compile just because a hook-triggered one runs.
     _wait_for_compile_idle(log)
+    before = _last_compile_finished()
     failures += _run_steps(run_step, log, [_compile_step()])
 
     log("Step 2b: waiting for compile to finish...")
@@ -224,7 +268,16 @@ def _nightly_steps(run_step, log, ownership: OwnerLease | None) -> int:
         log("WARNING: compile still running after 5 min — skipping lint/index/graph")
         # Steps 3, 3b, 3c depend on compile output.
         return failures + 1
+    failures += _report_compile_outcome(log, before)
     return failures + _post_compile_pass(run_step, log, ownership)
+
+
+def _report_compile_outcome(log, before: str | None) -> int:
+    error = _compile_failed_this_pass(before)
+    if error is None:
+        return 0
+    log(f"  compile: FAILED — {error}")
+    return 1
 
 
 def _require_nightly_owner(ownership: OwnerLease | None) -> None:

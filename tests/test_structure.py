@@ -13,6 +13,7 @@ from __future__ import annotations
 import ast
 import os
 import re
+import subprocess
 from datetime import date, datetime
 from pathlib import Path
 
@@ -39,18 +40,19 @@ def _assert_literal_note_allowlist(lines: list[str]) -> None:
         ), f"knowledge note allowlist rule must name one Markdown file: {line}"
 
 
-def _required_frontmatter_scalars(
-    text: str, expected: dict[str, str]
-) -> dict[str, str]:
-    """Load required root scalars after validating the YAML representation graph."""
+def _frontmatter_block(text: str) -> str:
     lines = text.splitlines()
     assert lines and lines[0] == "---", "decision must start with YAML frontmatter"
     try:
         closing = lines.index("---", 1)
     except ValueError as exc:
-        raise AssertionError("decision frontmatter must have a closing delimiter") from exc
-    frontmatter = "\n".join(lines[1:closing]) + "\n"
+        raise AssertionError(
+            "decision frontmatter must have a closing delimiter"
+        ) from exc
+    return "\n".join(lines[1:closing]) + "\n"
 
+
+def _composed_root(frontmatter: str) -> yaml.nodes.MappingNode:
     try:
         tokens = yaml.scan(frontmatter, Loader=yaml.SafeLoader)
         assert not any(
@@ -60,49 +62,93 @@ def _required_frontmatter_scalars(
         root = yaml.compose(frontmatter, Loader=yaml.SafeLoader)
     except yaml.YAMLError as exc:
         raise AssertionError("decision frontmatter must be valid safe YAML") from exc
-
     assert isinstance(root, yaml.nodes.MappingNode), "frontmatter must be a mapping"
-    assert root.tag == "tag:yaml.org,2002:map", "frontmatter must use the standard map tag"
+    assert root.tag == "tag:yaml.org,2002:map", (
+        "frontmatter must use the standard map tag"
+    )
+    return root
 
+
+def _require_plain_keys(root: yaml.nodes.MappingNode) -> None:
     seen: set[str] = set()
     for key_node, value_node in root.value:
-        assert isinstance(key_node, yaml.nodes.ScalarNode), (
-            "frontmatter keys must be scalar strings"
-        )
-        assert key_node.tag == "tag:yaml.org,2002:str", (
-            "frontmatter keys must use the standard string tag"
-        )
-        assert key_node.value not in seen, (
-            f"frontmatter key {key_node.value!r} must not be duplicated"
-        )
-        seen.add(key_node.value)
+        _require_plain_key(key_node, seen)
+        _require_standard_tags(value_node)
 
-        pending = [value_node]
-        while pending:
-            node = pending.pop()
-            assert node.tag.startswith("tag:yaml.org,2002:"), (
-                "frontmatter custom tags are not allowed"
-            )
-            if isinstance(node, yaml.nodes.MappingNode):
-                pending.extend(child for pair in node.value for child in pair)
-            elif isinstance(node, yaml.nodes.SequenceNode):
-                pending.extend(node.value)
 
+def _require_plain_key(key_node: object, seen: set[str]) -> None:
+    assert isinstance(key_node, yaml.nodes.ScalarNode), (
+        "frontmatter keys must be scalar strings"
+    )
+    assert key_node.tag == "tag:yaml.org,2002:str", (
+        "frontmatter keys must use the standard string tag"
+    )
+    assert key_node.value not in seen, (
+        f"frontmatter key {key_node.value!r} must not be duplicated"
+    )
+    seen.add(key_node.value)
+
+
+def _require_standard_tags(value_node: object) -> None:
+    pending = [value_node]
+    while pending:
+        node = pending.pop()
+        assert node.tag.startswith("tag:yaml.org,2002:"), (
+            "frontmatter custom tags are not allowed"
+        )
+        pending.extend(_child_nodes(node))
+
+
+def _child_nodes(node: object) -> list:
+    if isinstance(node, yaml.nodes.MappingNode):
+        return [child for pair in node.value for child in pair]
+    if isinstance(node, yaml.nodes.SequenceNode):
+        return list(node.value)
+    return []
+
+
+def _loaded_mapping(frontmatter: str) -> dict:
     try:
         loaded = yaml.safe_load(frontmatter)
     except yaml.YAMLError as exc:
         raise AssertionError("decision frontmatter must be safe to load") from exc
     assert isinstance(loaded, dict), "frontmatter must load as a mapping"
+    return loaded
 
-    actual: dict[str, str] = {}
-    for key, expected_value in expected.items():
-        assert key in loaded, f"frontmatter requires {key!r}"
-        value = loaded[key]
-        if key == "date" and isinstance(value, (date, datetime)):
-            value = value.date().isoformat() if isinstance(value, datetime) else value.isoformat()
-        assert isinstance(value, str), f"frontmatter {key!r} must be a scalar string"
-        actual[key] = value
-        assert value == expected_value, f"frontmatter {key!r} has unexpected value"
+
+def _date_string(value: object) -> str:
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    assert isinstance(value, str), "frontmatter 'date' must be a scalar string"
+    return value
+
+
+def _scalar_value(key: str, value: object) -> str:
+    if key == "date":
+        return _date_string(value)
+    assert isinstance(value, str), f"frontmatter {key!r} must be a scalar string"
+    return value
+
+
+def _required_scalar(loaded: dict, key: str, expected_value: str) -> str:
+    assert key in loaded, f"frontmatter requires {key!r}"
+    value = _scalar_value(key, loaded[key])
+    assert value == expected_value, f"frontmatter {key!r} has unexpected value"
+    return value
+
+
+def _required_frontmatter_scalars(
+    text: str, expected: dict[str, str]
+) -> dict[str, str]:
+    """Load required root scalars after validating the YAML representation graph."""
+    frontmatter = _frontmatter_block(text)
+    _require_plain_keys(_composed_root(frontmatter))
+    loaded = _loaded_mapping(frontmatter)
+    actual = {
+        key: _required_scalar(loaded, key, value) for key, value in expected.items()
+    }
     assert actual == expected
     return actual
 
@@ -520,187 +566,230 @@ def test_readmes_have_same_h2_section_count():
     )
 
 
-def test_docs_name_stage_two_runtime_artifacts():
-    structure = (ROOT / "docs" / "STRUCTURE.md").read_text(encoding="utf-8")
-    structure_words = " ".join(structure.split())
+STAGE_TWO_RUNTIME_PATHS = (
+    "run/markdown-transactions.sqlite3",
+    "run/transactions/",
+    "run/queue.sqlite3",
+    "run/queue-results/",
+    "cache/compile/",
+    "cache/claims.sqlite3",
+    "scripts/schemas/",
+    "knowledge/daily/receipts/",
+    "knowledge/projects/<slug>/journal.md",
+    "knowledge/daily/archive/YYYY-MM/bag-",
+)
+
+GENERATION_FILES = {
+    "manifest.json",
+    "source-manifest.json",
+    "incremental-manifest.json",
+    "evidence.sqlite3",
+    "search.sqlite3",
+    "vectors.npy",
+    "vectors.json",
+}
+
+GENERATION_STATEMENTS = (
+    "cache/evidence-graph/catalog.sqlite3",
+    "cache/evidence-graph/telemetry.sqlite3",
+    "cache/evidence-graph/generations/<generation-id>/",
+    "immutable after activation",
+    "one active generation",
+    "absent, complete, or explicitly stale",
+    "No generation database belongs under `run/`",
+    "operational state only",
+    "implemented v2 layout",
+    "cache/index.sqlite",
+    "cache/vectors.npy",
+    "cache/vectors_meta.json",
+    "cache/lancedb/",
+    "remain readable during migration",
+    "disposable derived caches",
+    "not members of a generation",
+    "installed-vault migration evidence",
+)
+
+BROAD_ALLOWLIST_RULES = (
+    "!knowledge/notes/*",
+    "!knowledge/notes/**",
+    "!knowledge/notes/*.md",
+    "!/knowledge/notes/**/public.md",
+    "!knowledge/notes/public?/page.md",
+    "!knowledge/notes/[ab].md",
+    "!knowledge/notes/public/",
+)
+
+DECISION_SCALARS = {
+    "type": "decision",
+    "status": "active",
+    "confidence": "high",
+    "source_authority": "user",
+    "date": "2026-07-17",
+}
+
+QUOTED_FRONTMATTER_FORMS = (
+    ("type: decision", '"type": "decision" # public decision'),
+    ("status: active", "'status': 'active' # current status"),
+    ("confidence: high", 'confidence: "high" # reviewed'),
+    ("source_authority: user", "source_authority: 'user' # approved"),
+    ("date: 2026-07-17", 'date: "2026-07-17" # implementation date'),
+)
+
+DECISION_STATEMENTS = (
+    "Markdown, Git, and project journals",
+    "graph, FTS, vector, tier, and telemetry",
+    "disposable",
+    "immutable after activation",
+    "No persistent daemon",
+    "docs/superpowers/plans/2026-07-16-unified-evidence-retrieval.md",
+    "https://www.sqlite.org/atomiccommit.html",
+    "https://www.sqlite.org/lockingv3.html",
+    "## Rejected alternatives",
+    "## Consequences",
+    "target generation layout",
+    "cache/index.sqlite",
+    "cache/vectors.npy",
+    "cache/vectors_meta.json",
+    "cache/lancedb/",
+    "remain readable during migration",
+    "disposable derived caches",
+    "not members of a generation",
+    "installed-vault migration evidence",
+)
+
+PRIVATE_PATTERNS = {
+    "Windows absolute path": r"(?i)(?:^|[^A-Za-z0-9])[A-Z]:[\\/]",
+    "UNC path": r"\\\\[^\\/\s]+[\\/][^\\/\s]+",
+    "user home path": r"/(?:home|Users)/[^/\s]+/",
+    "private/session marker": (
+        r"(?i)\b(?:transcript[_-](?:id|path)|session[_-](?:id|path)|"
+        r"private[_-]data)\b"
+    ),
+}
+
+PRIVATE_EXAMPLES = {
+    "Windows absolute path": r"[D:\vault\private.md] and 'E:/vault/private.md'",
+    "UNC path": r"[\\server\share\private.md] and '\\host\docs\note.md'",
+    "user home path": "'/home/alice/private.md' and [\"/Users/bob/private.md\"]",
+    "private/session marker": "transcript_path session_id private-data",
+}
+
+SAFE_PUBLIC_EXAMPLES = (
+    "session",
+    "Session data is excluded from this public product decision.",
+    "https://www.sqlite.org/atomiccommit.html",
+    "docs/superpowers/plans/2026-07-16-unified-evidence-retrieval.md",
+)
+
+
+def _assert_pyyaml_stays_a_dev_dependency() -> None:
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     project_dependencies, dev_dependencies = pyproject.split("[dependency-groups]", 1)
     assert "pyyaml" not in project_dependencies.casefold(), (
         "PyYAML must remain a test/dev dependency, not a project dependency"
     )
     assert '"pyyaml>=6.0.3,<7"' in dev_dependencies.casefold()
-    for value in (
-        "run/markdown-transactions.sqlite3",
-        "run/transactions/",
-        "run/queue.sqlite3",
-        "run/queue-results/",
-        "cache/compile/",
-        "cache/claims.sqlite3",
-        "scripts/schemas/",
-        "knowledge/daily/receipts/",
-        "knowledge/projects/<slug>/journal.md",
-        "knowledge/daily/archive/YYYY-MM/bag-",
-    ):
-        assert value in structure
 
-    generation_files = {
-        "manifest.json",
-        "source-manifest.json",
-        "incremental-manifest.json",
-        "evidence.sqlite3",
-        "search.sqlite3",
-        "vectors.npy",
-        "vectors.json",
-    }
-    for value in (
-        "cache/evidence-graph/catalog.sqlite3",
-        "cache/evidence-graph/telemetry.sqlite3",
-        "cache/evidence-graph/generations/<generation-id>/",
-        "immutable after activation",
-        "one active generation",
-        "absent, complete, or explicitly stale",
-        "No generation database belongs under `run/`",
-        "operational state only",
-        "implemented v2 layout",
-        "cache/index.sqlite",
-        "cache/vectors.npy",
-        "cache/vectors_meta.json",
-        "cache/lancedb/",
-        "remain readable during migration",
-        "disposable derived caches",
-        "not members of a generation",
-        "installed-vault migration evidence",
-    ):
-        assert value in structure_words, f"STRUCTURE.md must document {value!r}"
-    generation_block = structure.split(
-        "cache/evidence-graph/generations/<generation-id>/", 1
-    )[1].split("```", 1)[0]
-    documented_files = {
-        line.strip().removeprefix("├── ").removeprefix("└── ").split()[0]
-        for line in generation_block.splitlines()
-        if line.strip().startswith(("├── ", "└── "))
-    }
-    assert documented_files == generation_files
+
+def _assert_structure_documents_generations(structure: str, words: str) -> None:
+    for value in STAGE_TWO_RUNTIME_PATHS:
+        assert value in structure
+    for value in GENERATION_STATEMENTS:
+        assert value in words, f"STRUCTURE.md must document {value!r}"
+    assert _documented_generation_files(structure) == GENERATION_FILES
     assert "run/evidence-graph" not in structure
-    assert "cross-generation" in structure_words
-    assert "private" in structure_words
-    assert "not authoritative" in structure_words
+    assert "cross-generation" in words
+    assert "private" in words
+    assert "not authoritative" in words
     assert "run/generations/" not in structure
 
+
+def _documented_generation_files(structure: str) -> set[str]:
+    block = structure.split(
+        "cache/evidence-graph/generations/<generation-id>/", 1
+    )[1].split("```", 1)[0]
+    return {
+        line.strip().removeprefix("├── ").removeprefix("└── ").split()[0]
+        for line in block.splitlines()
+        if line.strip().startswith(("├── ", "└── "))
+    }
+
+
+def _assert_note_allowlist_is_literal() -> None:
     gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
     decision_allowlist = "!knowledge/notes/derived-evidence-generation-decision.md"
     assert gitignore.count(decision_allowlist) == 1
     _assert_literal_note_allowlist(gitignore)
-    for broad_rule in (
-        "!knowledge/notes/*",
-        "!knowledge/notes/**",
-        "!knowledge/notes/*.md",
-        "!/knowledge/notes/**/public.md",
-        "!knowledge/notes/public?/page.md",
-        "!knowledge/notes/[ab].md",
-        "!knowledge/notes/public/",
-    ):
+    for broad_rule in BROAD_ALLOWLIST_RULES:
         with pytest.raises(AssertionError):
             _assert_literal_note_allowlist([broad_rule])
+
+
+def _assert_frontmatter_accepts_quoted_forms(text: str) -> None:
+    _required_frontmatter_scalars(text, DECISION_SCALARS)
+    quoted = text
+    for old, new in QUOTED_FRONTMATTER_FORMS:
+        quoted = quoted.replace(old, new, 1)
+    _required_frontmatter_scalars(quoted, DECISION_SCALARS)
+
+
+def _malformed_frontmatter_forms(text: str) -> tuple[str, ...]:
+    return (
+        text.replace("type: decision", "type: decision\ntype: concept", 1),
+        text.replace("type: decision", "'type': decision\n\"type\": concept", 1),
+        text.replace("status: active", "status: # missing", 1),
+        text.replace("type: decision\n", "type: &decision_type decision\n", 1).replace(
+            "status: active", "status: *decision_type", 1
+        ),
+        text.replace("type: decision", "type: !private decision", 1),
+        text.replace("type: decision", "? [type]\n: decision", 1),
+        text.replace("type: decision", "- type: decision", 1),
+    )
+
+
+def _assert_frontmatter_rejects_malformed(text: str) -> None:
+    for malformed in _malformed_frontmatter_forms(text):
+        with pytest.raises(AssertionError):
+            _required_frontmatter_scalars(malformed, DECISION_SCALARS)
+
+
+def _assert_no_private_paths(text: str) -> None:
+    for label, pattern in PRIVATE_PATTERNS.items():
+        assert re.search(pattern, text) is None, f"public decision contains {label}"
+
+
+def _assert_privacy_patterns_are_honest() -> None:
+    for label, example in PRIVATE_EXAMPLES.items():
+        assert re.search(PRIVATE_PATTERNS[label], example), (
+            f"privacy pattern does not reject representative {label}"
+        )
+    for example in SAFE_PUBLIC_EXAMPLES:
+        _assert_example_reads_as_public(example)
+
+
+def _assert_example_reads_as_public(example: str) -> None:
+    for label, pattern in PRIVATE_PATTERNS.items():
+        assert re.search(pattern, example) is None, (
+            f"privacy pattern {label!r} rejected safe public text: {example}"
+        )
+
+
+def test_docs_name_stage_two_runtime_artifacts():
+    structure = (ROOT / "docs" / "STRUCTURE.md").read_text(encoding="utf-8")
+    _assert_pyyaml_stays_a_dev_dependency()
+    _assert_structure_documents_generations(structure, " ".join(structure.split()))
+    _assert_note_allowlist_is_literal()
 
     decision = ROOT / "knowledge" / "notes" / "derived-evidence-generation-decision.md"
     assert decision.is_file()
     text = decision.read_text(encoding="utf-8")
+    _assert_frontmatter_accepts_quoted_forms(text)
+    _assert_frontmatter_rejects_malformed(text)
     decision_words = " ".join(text.split())
-    required_scalars = {
-        "type": "decision",
-        "status": "active",
-        "confidence": "high",
-        "source_authority": "user",
-        "date": "2026-07-17",
-    }
-    _required_frontmatter_scalars(text, required_scalars)
-    quoted_frontmatter = text
-    for old, new in (
-        ("type: decision", '"type": "decision" # public decision'),
-        ("status: active", "'status': 'active' # current status"),
-        ("confidence: high", 'confidence: "high" # reviewed'),
-        ("source_authority: user", "source_authority: 'user' # approved"),
-        ("date: 2026-07-17", 'date: "2026-07-17" # implementation date'),
-    ):
-        quoted_frontmatter = quoted_frontmatter.replace(old, new, 1)
-    _required_frontmatter_scalars(quoted_frontmatter, required_scalars)
-    duplicate_type = text.replace("type: decision", "type: decision\ntype: concept", 1)
-    quoted_duplicate_type = text.replace(
-        "type: decision", "'type': decision\n\"type\": concept", 1
-    )
-    empty_status = text.replace("status: active", "status: # missing", 1)
-    alias_value = text.replace(
-        "type: decision\n", "type: &decision_type decision\n", 1
-    ).replace("status: active", "status: *decision_type", 1)
-    custom_tag = text.replace("type: decision", "type: !private decision", 1)
-    complex_key = text.replace("type: decision", "? [type]\n: decision", 1)
-    sequence_root = text.replace("type: decision", "- type: decision", 1)
-    for malformed in (
-        duplicate_type,
-        quoted_duplicate_type,
-        empty_status,
-        alias_value,
-        custom_tag,
-        complex_key,
-        sequence_root,
-    ):
-        with pytest.raises(AssertionError):
-            _required_frontmatter_scalars(malformed, required_scalars)
-    for value in (
-        "Markdown, Git, and project journals",
-        "graph, FTS, vector, tier, and telemetry",
-        "disposable",
-        "immutable after activation",
-        "No persistent daemon",
-        "docs/superpowers/plans/2026-07-16-unified-evidence-retrieval.md",
-        "https://www.sqlite.org/atomiccommit.html",
-        "https://www.sqlite.org/lockingv3.html",
-        "## Rejected alternatives",
-        "## Consequences",
-        "target generation layout",
-        "cache/index.sqlite",
-        "cache/vectors.npy",
-        "cache/vectors_meta.json",
-        "cache/lancedb/",
-        "remain readable during migration",
-        "disposable derived caches",
-        "not members of a generation",
-        "installed-vault migration evidence",
-    ):
+    for value in DECISION_STATEMENTS:
         assert value in decision_words, f"public decision must document {value!r}"
-    private_patterns = {
-        "Windows absolute path": r"(?i)(?:^|[^A-Za-z0-9])[A-Z]:[\\/]",
-        "UNC path": r"\\\\[^\\/\s]+[\\/][^\\/\s]+",
-        "user home path": r"/(?:home|Users)/[^/\s]+/",
-        "private/session marker": (
-            r"(?i)\b(?:transcript[_-](?:id|path)|session[_-](?:id|path)|"
-            r"private[_-]data)\b"
-        ),
-    }
-    for label, pattern in private_patterns.items():
-        assert re.search(pattern, text) is None, f"public decision contains {label}"
-    private_examples = {
-        "Windows absolute path": r"[D:\vault\private.md] and 'E:/vault/private.md'",
-        "UNC path": r"[\\server\share\private.md] and '\\host\docs\note.md'",
-        "user home path": "'/home/alice/private.md' and [\"/Users/bob/private.md\"]",
-        "private/session marker": "transcript_path session_id private-data",
-    }
-    for label, example in private_examples.items():
-        assert re.search(private_patterns[label], example), (
-            f"privacy pattern does not reject representative {label}"
-        )
-    safe_public_examples = (
-        "session",
-        "Session data is excluded from this public product decision.",
-        "https://www.sqlite.org/atomiccommit.html",
-        "docs/superpowers/plans/2026-07-16-unified-evidence-retrieval.md",
-    )
-    for example in safe_public_examples:
-        for label, pattern in private_patterns.items():
-            assert re.search(pattern, example) is None, (
-                f"privacy pattern {label!r} rejected safe public text: {example}"
-            )
+    _assert_no_private_paths(text)
+    _assert_privacy_patterns_are_honest()
 
 
 def _duplicate_top_level_names(source: str) -> list[str]:
@@ -771,16 +860,17 @@ def _unbound_methods(source: str) -> list[str]:
     return offenders
 
 
+def _is_unbound_method(item: ast.stmt) -> bool:
+    if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return False
+    if _binds_instance(item):
+        return False
+    return not _declared_static(item)
+
+
 def _unbound_class_methods(node: ast.ClassDef) -> list[str]:
-    functions = [
-        item
-        for item in node.body
-        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-    ]
     return [
-        f"{node.name}.{item.name}"
-        for item in functions
-        if not _binds_instance(item) and not _declared_static(item)
+        f"{node.name}.{item.name}" for item in node.body if _is_unbound_method(item)
     ]
 
 
@@ -814,30 +904,42 @@ def _decorator_name(node: ast.expr) -> str:
 _GENERATOR_DECORATORS = frozenset({"contextmanager", "asynccontextmanager"})
 
 
+def _is_nested_function(child: ast.AST, node: ast.AST) -> bool:
+    if child is node:
+        return False
+    return isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef)
+
+
+def _nested_node_ids(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[int]:
+    nested = [child for child in ast.walk(node) if _is_nested_function(child, node)]
+    return {id(item) for holder in nested for item in ast.walk(holder)}
+
+
 def _yields(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     """Whether this function body itself yields, ignoring nested functions."""
-    nested = tuple(
-        child
-        for child in ast.walk(node)
-        if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef) and child is not node
-    )
-    inner = {id(descendant) for holder in nested for descendant in ast.walk(holder)}
+    inner = _nested_node_ids(node)
     return any(
         isinstance(child, ast.Yield | ast.YieldFrom) and id(child) not in inner
         for child in ast.walk(node)
     )
 
 
+def _is_broken_context_manager(node: ast.AST) -> bool:
+    if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+        return False
+    names = {_decorator_name(item) for item in node.decorator_list}
+    if not names & _GENERATOR_DECORATORS:
+        return False
+    return not _yields(node)
+
+
 def _context_managers_without_yield(source: str) -> list[str]:
     """Functions a `@contextmanager` decorates that can never enter a `with`."""
-    offenders: list[str] = []
-    for node in ast.walk(ast.parse(source)):
-        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-            continue
-        names = {_decorator_name(item) for item in node.decorator_list}
-        if names & _GENERATOR_DECORATORS and not _yields(node):
-            offenders.append(node.name)
-    return offenders
+    return [
+        node.name
+        for node in ast.walk(ast.parse(source))
+        if _is_broken_context_manager(node)
+    ]
 
 
 def test_a_context_manager_decorator_stayed_on_a_function_that_yields() -> None:
@@ -856,3 +958,62 @@ def test_a_context_manager_decorator_stayed_on_a_function_that_yields() -> None:
             offenders[str(path.relative_to(ROOT))] = found
 
     assert offenders == {}
+
+_VAULT_METADATA_FILES = ("knowledge/index.md", "knowledge/log.md")
+
+
+def _unpublished_notes(paths: set[str]) -> set[str]:
+    """Which of these note paths this repository keeps out of git.
+
+    Membership is decided by the ignore rules rather than by what is currently
+    tracked: a page added in the same change as the index that names it is
+    published, it has just not been committed yet.
+    """
+    if not paths:
+        return set()
+    ordered = sorted(paths)
+    result = subprocess.run(
+        ["git", "check-ignore", "--stdin", "-z"],
+        input="\0".join(ordered).encode("utf-8"),
+        capture_output=True,
+        cwd=ROOT,
+    )
+    return {
+        item.decode("utf-8") for item in result.stdout.split(b"\0") if item
+    }
+
+
+def _linked_note_paths(text: str) -> set[str]:
+    """The note pages this file links to by path."""
+    return {
+        f"knowledge/notes/{name}.md"
+        for name in re.findall(r"\[\[knowledge/notes/([^\]|]+)", text)
+    }
+
+
+def test_the_vault_index_and_log_name_only_published_notes() -> None:
+    """A running vault rewrites these two files, and they are the only tracked
+    knowledge files it writes. If one of them names a page this repository does
+    not publish, the page is personal and the file must not be committed."""
+    sample = "- [[knowledge/notes/private-thing]] — a page this repo does not ship.\n"
+    assert _linked_note_paths(sample) == {"knowledge/notes/private-thing.md"}
+
+    leaked = {}
+    for name in _VAULT_METADATA_FILES:
+        linked = _linked_note_paths((ROOT / name).read_text(encoding="utf-8"))
+        unpublished = sorted(_unpublished_notes(linked))
+        if unpublished:
+            leaked[name] = unpublished
+
+    assert leaked == {}
+
+
+def test_compile_receipts_are_never_tracked() -> None:
+    """A receipt names the pages one private daily produced.
+
+    `knowledge/daily/*.md` covers files directly in that directory and not the
+    receipts beneath it, so without its own rule a committed compile would
+    leave private page paths in the working tree ready for `git add -A`.
+    """
+    receipt = "knowledge/daily/receipts/deadbeef.md"
+    assert _unpublished_notes({receipt}) == {receipt}

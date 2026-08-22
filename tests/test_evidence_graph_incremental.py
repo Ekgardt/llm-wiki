@@ -765,3 +765,24 @@ def test_incremental_extractor_cannot_mutate_the_pinned_source_snapshot(tmp_path
             "one.fixture",
             _sha(files["one"][1]),
         )
+
+def test_a_manifest_too_large_to_store_still_builds_the_generation(tmp_path, monkeypatch):
+    """The manifest only buys the next pass its reuse; the vault still needs a build."""
+    import evidence_graph_builder
+    from generation_catalog import GenerationCatalog
+
+    catalog = GenerationCatalog(tmp_path / "state")
+    files = {
+        "lib": ("lib.fixture", _document("lib")),
+        "consumer": ("consumer.fixture", _document("consumer", imports=("lib",))),
+    }
+    _build(catalog, "gen-1", files, FixtureExtractor())
+    changed = {**files, "lib": ("lib.fixture", _document("lib", signatures=("lib(v)",)))}
+    monkeypatch.setattr(
+        evidence_graph_builder, "MAX_STORED_INCREMENTAL_MANIFEST_BYTES", 1
+    )
+
+    result = _build(catalog, "gen-2", changed, FixtureExtractor(), parent="gen-1")
+
+    assert result.generation_id == "gen-2"
+    assert set(result.rebuilt_sources) == {"consumer", "lib"}

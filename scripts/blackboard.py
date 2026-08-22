@@ -33,7 +33,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import contextlib
 import hashlib
 import json
 import os
@@ -41,6 +40,7 @@ import re
 import secrets
 import sqlite3
 import sys
+import time
 import unicodedata
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, replace
@@ -65,6 +65,11 @@ _MAX_TASK_BYTES = 4096
 _MAX_AGENT_BYTES = 128
 _MIN_TTL_SECONDS = 1
 _MAX_TTL_SECONDS = 86400
+# Releasing a claim nobody was told about competes with whatever stopped the
+# announcement, so it is worth more than one try. Six attempts spread over
+# about two seconds, then the caller's own failure stands.
+_RELEASE_ATTEMPTS = 6
+_RELEASE_RETRY_SECONDS = 0.1
 
 
 @dataclass(frozen=True)
@@ -521,9 +526,33 @@ def _publish_active_claim(tasks_file: Path, acquired: BlackboardClaim) -> None:
     except BaseException:
         if _active_record_present(tasks_file, acquired.claim_id):
             return
-        with contextlib.suppress(Exception):
-            _delete_exact_claim(_coordinator(), acquired)
+        _release_unannounced_claim(acquired)
         raise
+
+
+def _release_unannounced_claim(acquired: BlackboardClaim) -> None:
+    """Release a claim the caller was never told it holds, and keep trying.
+
+    The release runs under the same contention that just stopped the
+    announcement, so a single attempt is the one most likely to fail as well.
+    Failing quietly here breaks the promise the announcement makes: the caller
+    retries and meets its own rows as a conflict, for the whole lease. The
+    attempts are bounded, and the original failure is still what reaches the
+    caller — this only widens the window in which the promise can be kept.
+    """
+    for attempt in range(_RELEASE_ATTEMPTS):
+        if _released_exact_claim(acquired):
+            return
+        if attempt < _RELEASE_ATTEMPTS - 1:
+            time.sleep(_RELEASE_RETRY_SECONDS * (attempt + 1))
+
+
+def _released_exact_claim(acquired: BlackboardClaim) -> bool:
+    try:
+        _delete_exact_claim(_coordinator(), acquired)
+    except Exception:  # noqa: BLE001 - the caller's own failure is the one raised
+        return False
+    return True
 
 
 def _row_epochs(rows: Sequence[sqlite3.Row]) -> tuple[tuple[str, int], ...]:

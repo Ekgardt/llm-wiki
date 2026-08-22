@@ -1854,3 +1854,11 @@ def test_prepared_lease_refresh_rejects_successor_token(
 
     assert rejected.value.code == "precondition_failed"
     assert store.coordinator._record(transaction.id).state == "prepared"
+
+def test_a_generated_state_page_quotes_a_slug_that_would_parse_as_a_list() -> None:
+    """Redaction can leave brackets in a slug, and `[x]` unquoted is a YAML list."""
+    from project_journal import _yaml_scalar
+
+    assert _yaml_scalar("[redacted-api-key]") == '"[redacted-api-key]"'
+    assert _yaml_scalar('has "quotes"') == '"has \\"quotes\\""'
+    assert _yaml_scalar("back\\slash") == '"back\\\\slash"'

@@ -82,6 +82,14 @@ testpaths = ["tests"]
 # `conftest.py` injects scripts/ into sys.path; no package install needed.
 pythonpath = ["scripts"]
 
+[tool.pyright]
+# Declared so Pyright never searches ancestor directories for its settings.
+# Without this the navigation engine refuses to qualify against this
+# repository, because an analysis that reads configuration from outside the
+# checkout is not reproducible.
+include = ["scripts", "tests", "benchmark"]
+typeCheckingMode = "basic"
+
 [tool.ruff]
 extend-exclude = ["tests/fixtures/code_kernel/python/pkg/broken.py"]
 force-exclude = true

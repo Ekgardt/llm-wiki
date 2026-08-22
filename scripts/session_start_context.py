@@ -487,8 +487,14 @@ def _parse_iso_safe(raw: str | None) -> datetime | None:
 
 
 def _compile_backlog_days(state: dict) -> int | None:
-    """Days since last compile. None if no compile has ever run."""
-    last = _parse_iso_safe(state.get("last_compile_at") or state.get("last_compile_finished_at"))
+    """Days since the last compile that committed. None if none ever did.
+
+    A run that finished is not a run that wrote anything: `last_compile_at` is
+    stamped at commit, `last_compile_finished_at` on every exit including a
+    failure. Reading the second one called a vault fresh on the day its only
+    compile failed.
+    """
+    last = _parse_iso_safe(state.get("last_compile_at"))
     if last is None:
         return None
     return max(0, (datetime.now() - last).days)
@@ -530,13 +536,24 @@ def _backlog_line(backlog_days: int) -> str:
     )
 
 
-def _compile_line(backlog_days: int | None) -> str:
+def _compile_line(backlog_days: int | None, last_status: str = "") -> str:
     """Compile backlog — the most actionable maintenance signal."""
+    if last_status == "error":
+        return _failed_compile_line(backlog_days)
     if backlog_days is None:
         return "- **Compile**: never run. Daily logs are accumulating uncompiled."
     if backlog_days == 0:
         return "- **Compile**: fresh (today)."
     return _backlog_line(backlog_days)
+
+
+def _failed_compile_line(backlog_days: int | None) -> str:
+    """The last attempt failed; say so before saying anything about backlog."""
+    committed = "never" if backlog_days is None else f"{backlog_days}d ago"
+    return (
+        f"- **Compile**: 🔴 the last run failed; last committed compile: "
+        f"{committed}. Run `uv run python scripts/compile_memory.py` to see why."
+    )
 
 
 def _audit_line(last_audit: dict) -> str:
@@ -589,7 +606,10 @@ def metacognitive_block() -> str:
     state = _load_state_safe()
     body = (
         _inventory_line(),
-        _compile_line(_compile_backlog_days(state)),
+        _compile_line(
+            _compile_backlog_days(state),
+            str(state.get("last_compile_status") or ""),
+        ),
         _audit_line(_state_map(state, "last_compile_audit")),
         _flush_line(_state_map(state, "flush_tier_counts")),
         _capture_line(state),
@@ -679,20 +699,56 @@ def _impact_block() -> str:
         return ""
 
 
+# The suite pins this budget deliberately: session start must not wait on the
+# doctor. Measured against the vault this was written on, the sixteen checks
+# want 1.77 seconds, so at this budget the run is always truncated — see
+# `_deferred_count` for what that means for its findings.
+HEALTH_BUDGET_SECONDS = 0.1
+
+
+def _deferred_count(report: dict) -> int:
+    """How many checks never ran because the doctor's budget ran out.
+
+    A truncated run is not a partial answer, it is no answer. Checks that are
+    cut short mid-read report failure without marking themselves: on this vault
+    the queue and the LSP both report their state unreadable at this budget and
+    are fine at a real one. So the count is used to discard the run, not to
+    filter it.
+    """
+    return sum(
+        1
+        for check in report.get("checks", [])
+        if check.get("details", {}).get("budget_exhausted")
+    )
+
+
 def health_block() -> str:
-    """Return doctor output only when local health is degraded."""
+    """Return doctor output only when local health is degraded.
+
+    A run that ran out of budget reports nothing but the fact that it did. The
+    findings of a truncated run are artefacts of the clock, and naming them
+    teaches the reader to ignore this block.
+    """
     try:
         from doctor import degraded_summary, run_doctor
 
-        summary = degraded_summary(
-            run_doctor(
-                root=ROOT,
-                state_root=STATE_ROOT,
-                time_budget_seconds=0.1,
-            )
+        report = run_doctor(
+            root=ROOT,
+            state_root=STATE_ROOT,
+            time_budget_seconds=HEALTH_BUDGET_SECONDS,
         )
+        deferred = _deferred_count(report)
+        summary = degraded_summary(report)
     except Exception:  # noqa: BLE001
         return ""
+    if deferred:
+        return (
+            "## Health\n\n"
+            f"Health was not measured: {deferred} of "
+            f"{len(report.get('checks', []))} checks did not run inside the "
+            f"{HEALTH_BUDGET_SECONDS}s budget. Run "
+            "`uv run python scripts/doctor.py` for the real state.\n\n"
+        )
     return f"## Health\n\n{summary}\n\n" if summary else ""
 
 

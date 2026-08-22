@@ -635,7 +635,7 @@ def test_integrations_use_injected_home_and_skip_absent_optional_hosts(tmp_path)
     root, state_root, home = _build_root(tmp_path)
     (home / ".claude").mkdir()
     (home / ".claude" / "settings.json").write_text(
-        "LLM_WIKI_ROOT session_start_context.py", encoding="utf-8"
+        "LLM_WIKI_ROOT integration_adapter.py", encoding="utf-8"
     )
 
     check = _check(run_doctor(root=root, state_root=state_root, home=home), "integrations")
@@ -2219,7 +2219,7 @@ def test_unrelated_installed_configs_are_not_false_positives(tmp_path):
 @pytest.mark.parametrize(
     ("host", "relative", "marker"),
     [
-        ("claude", ".claude/settings.json", "LLM_WIKI_ROOT session_start_context.py"),
+        ("claude", ".claude/settings.json", "LLM_WIKI_ROOT integration_adapter.py"),
         (
             "opencode",
             ".config/opencode/plugins/llm-wiki-memory.js",
@@ -4123,3 +4123,147 @@ def test_a_vault_without_lost_captures_reports_the_capture_check_as_ok(tmp_path)
     assert check["status"] == "ok"
     assert check["details"]["lost"] == 0
     del home
+
+def test_a_vault_written_to_mid_capture_is_captured_again(tmp_path, monkeypatch):
+    """An active vault changes while it is read; deferring would never refresh it."""
+    import doctor
+    from corpus_snapshot import CorpusChanged
+
+    calls: list[bool] = []
+
+    def refresh(root, state, coordinator, lease, deadline, max_sources, force, repaired):
+        calls.append(force)
+        if len(calls) == 1:
+            raise CorpusChanged("live corpus membership or source hashes changed")
+        return {"status": "built", "generation_id": "gen-2"}
+
+    monkeypatch.setattr(doctor, "_refreshed_generation", refresh)
+    monkeypatch.setattr(
+        doctor, "_acquire_maintenance_owner", lambda *a, **k: (object(), object())
+    )
+    monkeypatch.setattr(doctor, "_release_maintenance_owner", lambda *a, **k: None)
+    monkeypatch.setattr(doctor, "_unusable_filesystem_outcome", lambda *a, **k: None)
+
+    result = doctor.run_generation_maintenance(tmp_path, tmp_path, time_budget_seconds=30)
+
+    assert result["status"] == "built"
+    assert calls == [False, True]
+
+def test_losing_the_maintenance_fence_is_reported_not_raised(tmp_path, monkeypatch):
+    """The nightly timer and a manual run collide; the loser reports, not crashes."""
+    import doctor
+
+    def refresh(*_args, **_kwargs):
+        raise RuntimeError("maintenance_owner_fence_lost")
+
+    monkeypatch.setattr(doctor, "_refreshed_generation", refresh)
+    monkeypatch.setattr(
+        doctor, "_acquire_maintenance_owner", lambda *a, **k: (object(), object())
+    )
+    monkeypatch.setattr(doctor, "_release_maintenance_owner", lambda *a, **k: None)
+    monkeypatch.setattr(doctor, "_unusable_filesystem_outcome", lambda *a, **k: None)
+
+    result = doctor.run_generation_maintenance(tmp_path, tmp_path, time_budget_seconds=30)
+
+    assert result["status"] == "deferred"
+    assert result["reason"] == "maintenance_owner_lost"
+
+
+def test_an_unrelated_runtime_error_still_escapes(tmp_path, monkeypatch):
+    """Only the fence loss is an outcome; anything else is still a defect."""
+    import doctor
+
+    def refresh(*_args, **_kwargs):
+        raise RuntimeError("something else went wrong")
+
+    monkeypatch.setattr(doctor, "_refreshed_generation", refresh)
+    monkeypatch.setattr(
+        doctor, "_acquire_maintenance_owner", lambda *a, **k: (object(), object())
+    )
+    monkeypatch.setattr(doctor, "_release_maintenance_owner", lambda *a, **k: None)
+    monkeypatch.setattr(doctor, "_unusable_filesystem_outcome", lambda *a, **k: None)
+
+    with pytest.raises(RuntimeError, match="something else"):
+        doctor.run_generation_maintenance(tmp_path, tmp_path, time_budget_seconds=30)
+
+def test_losing_the_fence_during_the_recapture_is_also_reported(tmp_path, monkeypatch):
+    """The recapture runs inside an except block, out of reach of its handlers."""
+    import doctor
+    from corpus_snapshot import CorpusChanged
+
+    calls: list[bool] = []
+
+    def refresh(root, state, coordinator, lease, deadline, max_sources, force, repaired):
+        calls.append(force)
+        if len(calls) == 1:
+            raise CorpusChanged("live corpus membership or source hashes changed")
+        raise RuntimeError("maintenance_owner_fence_lost")
+
+    monkeypatch.setattr(doctor, "_refreshed_generation", refresh)
+    monkeypatch.setattr(
+        doctor, "_acquire_maintenance_owner", lambda *a, **k: (object(), object())
+    )
+    monkeypatch.setattr(doctor, "_release_maintenance_owner", lambda *a, **k: None)
+    monkeypatch.setattr(doctor, "_unusable_filesystem_outcome", lambda *a, **k: None)
+
+    result = doctor.run_generation_maintenance(tmp_path, tmp_path, time_budget_seconds=30)
+
+    assert result["status"] == "deferred"
+    assert result["reason"] == "maintenance_owner_lost"
+    assert calls == [False, True]
+
+def test_the_host_markers_are_ones_the_shipped_templates_actually_write() -> None:
+    """A marker naming a script the installer no longer writes fails every install."""
+    import doctor
+
+    root = Path(__file__).resolve().parent.parent
+    shipped = {
+        "claude": root / "integrations" / "claude-code" / "settings.json",
+    }
+    configs = doctor._integration_host_configs(Path.home())
+    missing: dict[str, list[str]] = {}
+    for name, template in shipped.items():
+        text = template.read_text(encoding="utf-8")
+        _host_dir, files = configs[name]
+        for _path, markers in files:
+            absent = [marker for marker in markers if marker not in text]
+            if absent:
+                missing[name] = absent
+
+    assert missing == {}
+
+def test_the_pyright_advice_names_what_would_change_the_outcome() -> None:
+    """Reinstalling cannot fix a repository that declares no Pyright settings."""
+    import doctor
+
+    assert "pyproject.toml" in doctor._pyright_recommended_action(
+        ["pyright_repository_config_ancestor_search"]
+    )
+    assert doctor._pyright_recommended_action(["pyright_missing"]) == (
+        "uv run python scripts/install_pyright.py --state-root <state-root>"
+    )
+    assert doctor._pyright_recommended_action([]) == (
+        "uv run python scripts/install_pyright.py --state-root <state-root>"
+    )
+
+def test_a_vault_that_has_recorded_no_claim_is_healthy(tmp_path) -> None:
+    """A new vault has no claim index, and that is not something to repair."""
+    import doctor
+
+    result = doctor._claim_check(tmp_path, tmp_path)
+
+    assert result["status"] == "ok"
+    assert result["details"]["index"] == "missing"
+
+def test_a_file_that_will_not_parse_is_named_not_treated_as_ill_health() -> None:
+    """A refresh cannot fix a file the repository keeps deliberately broken."""
+    import doctor
+
+    assert doctor._generation_message(False, 0) == "Evidence generation is healthy."
+    assert "1 file(s) did not parse" in doctor._generation_message(False, 1)
+    assert doctor._generation_message(True, 0) == (
+        "Evidence generation requires refresh."
+    )
+    assert doctor._generation_message(True, 3) == (
+        "Evidence generation requires refresh."
+    )

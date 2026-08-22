@@ -189,10 +189,10 @@ def test_extraction_rejects_every_malformed_daily_candidate(candidate: str) -> N
 
 
 def test_block_parser_uses_reference_block_id_grammar() -> None:
-    from evidence_resolver import EvidenceResolutionError, _blocks
+    from evidence_resolver import EvidenceResolutionError, daily_entries
 
     with pytest.raises(EvidenceResolutionError, match="block ID"):
-        _blocks(b"## [../evt] event\ntext\n")
+        daily_entries(b"## [../evt] event\ntext\n")
 
 
 def test_flat_resolution_uses_utf8_half_open_bytes_lines_and_block_hash(vault: Path) -> None:

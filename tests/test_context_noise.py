@@ -20,6 +20,7 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -972,3 +973,96 @@ def test_char_ceiling_never_drops_mandatory_sections():
     )
 
     assert len(rendered) == 500
+
+
+def test_a_truncated_run_reports_only_that_it_was_truncated(monkeypatch):
+    """Measured: the doctor wants 1.77s and gets 0.1. Seven checks never run,
+    and two that do are cut short and report their state unreadable without
+    marking themselves — the queue and the LSP, both fine at a real budget. So
+    a truncated run's findings are discarded, not filtered."""
+    import doctor
+    import session_start_context
+
+    report = {
+        "overall_status": "error",
+        "checks": [
+            {"id": "queue", "status": "error", "details": {}},
+            {
+                "id": "scheduler",
+                "status": "degraded",
+                "details": {"budget_exhausted": True},
+            },
+        ],
+    }
+    monkeypatch.setattr(doctor, "run_doctor", lambda **kwargs: report)
+    monkeypatch.setattr(
+        doctor, "degraded_summary", lambda passed: "queue (error): unreadable"
+    )
+
+    block = session_start_context.health_block()
+
+    assert "Health was not measured" in block
+    assert "1 of 2 checks" in block
+    assert "queue" not in block
+    assert "unreadable" not in block
+
+
+def test_a_complete_run_reports_its_findings(monkeypatch):
+    import doctor
+    import session_start_context
+
+    report = {
+        "overall_status": "degraded",
+        "checks": [{"id": "index", "status": "degraded", "details": {}}],
+    }
+    monkeypatch.setattr(doctor, "run_doctor", lambda **kwargs: report)
+    monkeypatch.setattr(doctor, "degraded_summary", lambda passed: "index: stale")
+
+    assert session_start_context.health_block() == "## Health\n\nindex: stale\n\n"
+
+
+def _knowledge_state(monkeypatch, state: dict) -> str:
+    import session_start_context
+
+    monkeypatch.setattr(session_start_context, "_load_state_safe", lambda: state)
+    return session_start_context.metacognitive_block()
+
+
+def test_a_compile_that_failed_today_is_not_reported_as_fresh(monkeypatch):
+    """Only a committed compile makes the memory fresh."""
+    block = _knowledge_state(
+        monkeypatch,
+        {
+            "last_compile_finished_at": datetime.now().isoformat(timespec="seconds"),
+            "last_compile_status": "error",
+        },
+    )
+
+    assert "fresh (today)" not in block
+    assert "failed" in block
+
+
+def test_a_vault_that_never_committed_a_compile_says_so(monkeypatch):
+    """A finished-but-failed run is not a compile that ever happened."""
+    block = _knowledge_state(
+        monkeypatch,
+        {
+            "last_compile_finished_at": datetime.now().isoformat(timespec="seconds"),
+            "last_compile_status": "error",
+        },
+    )
+
+    assert "never" in block
+
+
+def test_a_committed_compile_today_is_still_fresh(monkeypatch):
+    """The line the fix must not break."""
+    block = _knowledge_state(
+        monkeypatch,
+        {
+            "last_compile_at": datetime.now().isoformat(timespec="seconds"),
+            "last_compile_status": "ok",
+        },
+    )
+
+    assert "fresh (today)" in block
