@@ -1184,6 +1184,36 @@ state field is only a post-commit diagnostic mirror». Зеркало прост
 `test_a_split_day_is_recorded_by_the_whole_file_not_its_last_part` и
 `test_a_day_without_receipts_for_every_part_is_left_alone`.
 
+### CROSS-07 — на Python 3.10 доктор объявлял здоровые транзакции испорченными
+
+**Найдено прогоном CI 32579866020 и исправлено 2026-08-22.** Четыре задачи
+падали на тестах доктора с `assert 'error' == 'ok'` и ничем больше. После того
+как утверждения понесли с собой детали, CI назвал причину сам:
+`codes: ['transaction_metadata_corrupt']`.
+
+Падало только на py3.10, на всех трёх платформах. Причина —
+`datetime.fromisoformat` научился читать суффикс `Z` только в 3.11, а 3.10 у
+этого продукта минимальная поддерживаемая версия. Рантайм пишет метки именно с
+`Z` (`markdown_transaction` — `created_at: 2026-08-22T07:28:49.755941Z`), значит
+на 3.10 `_parse_utc` возвращал `None` для каждой метки, `_valid_transaction_timestamps`
+считал строку недействительной, и проверка транзакций объявляла здоровое
+хранилище `error` с кодом `transaction_metadata_corrupt` — а заодно запрещала
+удаление `run/` по `transaction_state_corrupt`.
+
+Проверено на настоящем 3.10 (`/home/user/.local/bin/python3.10`):
+`fromisoformat('2026-08-22T00:00:00Z')` → `Invalid isoformat string`,
+`...+00:00` — читается.
+
+Исправлено одним нормализатором `_iso_text` на три места разбора в
+`scripts/doctor.py`. Остальные читатели репозитория проверены поимённо: в
+`claims.py`, `corpus_snapshot.py` и `archive_daily.py` нормализация уже была, а
+`flush_memory.py`, `capture_operation.py` и `integration_adapter.py` читают
+метки, которые сами же пишут без `Z`. Проверка —
+`test_the_doctor_reads_the_z_suffix_this_runtime_writes`.
+
+Урок общий и уже второй за день: утверждение, которое не может назвать причину,
+стоит одного прогона CI на каждую попытку понять.
+
 ## 7. Кроссплатформенные разрывы (найдено 2026-08-18 по CI)
 
 ### Прогон 2026-08-21 (`32533628288`) — что осталось

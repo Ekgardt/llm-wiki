@@ -324,7 +324,7 @@ def _lease_is_stale(task: dict, now: datetime) -> bool:
 
 
 def _aware_timestamp(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value)
+    parsed = datetime.fromisoformat(_iso_text(value))
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
@@ -668,9 +668,23 @@ def _columns(
     return {str(row[1]) for row in rows}
 
 
+def _iso_text(value: object) -> str:
+    """Normalize the trailing Z this runtime writes and Python 3.10 rejects.
+
+    `datetime.fromisoformat` only learned the military zone suffix in 3.11, and
+    3.10 is the lowest version this product supports. Transactions and state are
+    written with `Z`, so on 3.10 every timestamp a reader touched looked
+    unparseable — and a check that reads them called healthy rows corrupt.
+    """
+    text = str(value)
+    if text.endswith("Z"):
+        return text[:-1] + "+00:00"
+    return text
+
+
 def _parse_utc(value: object) -> datetime | None:
     try:
-        parsed = datetime.fromisoformat(str(value))
+        parsed = datetime.fromisoformat(_iso_text(value))
     except (TypeError, ValueError):
         return None
     if parsed.tzinfo is None:
@@ -5557,7 +5571,9 @@ def _open_existing_lock(path: Path, root: Path) -> int | None:
 
 def _lock_acquired_at(existing: dict) -> datetime | None:
     try:
-        acquired = datetime.fromisoformat(str(existing.get("lock_acquired_at", "")))
+        acquired = datetime.fromisoformat(
+            _iso_text(existing.get("lock_acquired_at", ""))
+        )
     except (TypeError, ValueError):
         return None
     if acquired.tzinfo is None:

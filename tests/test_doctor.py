@@ -4321,6 +4321,27 @@ def test_a_file_that_will_not_parse_is_named_not_treated_as_ill_health() -> None
     )
 
 
+def test_the_doctor_reads_the_z_suffix_this_runtime_writes():
+    """Python 3.10 rejects `Z`, and 3.10 is the lowest version supported here.
+
+    Transactions and state are written with it, so on 3.10 every timestamp a
+    check touched looked unparseable and the transaction check called healthy
+    rows `transaction_metadata_corrupt`. CI run 32579866020 failed exactly that
+    way on py3.10 while every 3.11+ job passed.
+    """
+    from datetime import timezone
+
+    import doctor
+
+    assert doctor._iso_text("2026-08-22T00:00:00Z") == "2026-08-22T00:00:00+00:00"
+    assert doctor._iso_text("2026-08-22T00:00:00+00:00") == "2026-08-22T00:00:00+00:00"
+
+    parsed = doctor._parse_utc("2026-08-22T07:28:49.755941Z")
+    assert parsed is not None
+    assert parsed.tzinfo is not None
+    assert parsed.utcoffset() == timezone.utc.utcoffset(parsed)
+
+
 class _FixedScope:
     def __init__(self, scope: dict) -> None:
         self._scope = scope
