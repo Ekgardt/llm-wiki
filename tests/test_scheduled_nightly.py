@@ -153,3 +153,66 @@ def test_generation_refresh_never_treats_deferred_or_error_as_success(monkeypatc
 
     assert scheduled_nightly._refresh_generation(messages.append) == 1
     assert any(status in message for message in messages)
+
+
+def _state(monkeypatch, payload: dict) -> None:
+    import scheduled_nightly
+
+    monkeypatch.setattr(scheduled_nightly, "_safe_state", lambda: payload)
+
+
+def test_a_compile_that_ran_and_failed_is_a_nightly_failure(monkeypatch):
+    """The step spawns the compile and returns 0; the outcome lives in state."""
+    import scheduled_nightly
+
+    _state(
+        monkeypatch,
+        {
+            "last_compile_finished_at": "2026-08-22T03:00:43",
+            "last_compile_status": "error",
+            "last_compile_error": "RuntimeError: no LLM provider",
+        },
+    )
+
+    assert scheduled_nightly._compile_failed_this_pass("2026-08-21T03:00:41") == (
+        "RuntimeError: no LLM provider"
+    )
+
+
+def test_an_older_failure_is_not_counted_against_this_pass(monkeypatch):
+    """No compile ran tonight, so last night's error is not tonight's failure."""
+    import scheduled_nightly
+
+    stamp = "2026-08-21T03:00:41"
+    _state(
+        monkeypatch,
+        {
+            "last_compile_finished_at": stamp,
+            "last_compile_status": "error",
+            "last_compile_error": "RuntimeError: no LLM provider",
+        },
+    )
+
+    assert scheduled_nightly._compile_failed_this_pass(stamp) is None
+
+
+def test_a_compile_that_ran_and_committed_is_not_a_failure(monkeypatch):
+    import scheduled_nightly
+
+    _state(
+        monkeypatch,
+        {
+            "last_compile_finished_at": "2026-08-22T03:00:43",
+            "last_compile_status": "ok",
+        },
+    )
+
+    assert scheduled_nightly._compile_failed_this_pass("2026-08-21T03:00:41") is None
+
+
+def test_a_vault_that_never_compiled_reports_no_failure(monkeypatch):
+    import scheduled_nightly
+
+    _state(monkeypatch, {})
+
+    assert scheduled_nightly._compile_failed_this_pass(None) is None

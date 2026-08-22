@@ -2168,3 +2168,25 @@ def test_removal_survives_a_manager_that_never_registered_the_units(
     resource.write_projection(resource.desired, None, {})
 
     assert _definition_directory_state(unit_dir) == {}
+
+
+def test_systemd_units_can_find_the_tools_installed_beside_uv(tmp_path: Path) -> None:
+    """A scheduled run needs the operator's local bin, where the providers live.
+
+    A systemd user service inherits the manager's PATH, which does not contain
+    it. The nightly compile therefore probed every LLM provider, found none, and
+    failed while the same command from a login shell succeeded.
+    """
+    root = tmp_path / "vault"
+    uv_path = tmp_path / "operator bin" / "uv"
+
+    definitions = render_systemd_definitions(root, tmp_path / "state", uv_path)
+
+    expected = str(uv_path.resolve().parent).replace("\\", "\\\\")
+    for name in ("llm-wiki-nightly.service", "llm-wiki-weekly.service"):
+        lines = definitions[name].decode().splitlines()
+        paths = [line for line in lines if line.startswith('Environment="PATH=')]
+        assert paths == [
+            f'Environment="PATH={expected}:'
+            '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"'
+        ]

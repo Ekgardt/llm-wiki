@@ -557,6 +557,23 @@ def _systemd_literal(value: str) -> str:
     return value.replace("%", "%%")
 
 
+# The PATH a systemd user manager hands its services on Linux. It contains no
+# per-user directory, which is where the LLM provider CLIs are installed.
+_SYSTEMD_USER_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+def _scheduled_path(uv_path: Path) -> str:
+    """Let a scheduled run see the tools installed beside uv.
+
+    A user service inherits the manager's PATH, which reaches no per-user
+    directory. The provider CLIs live in one, next to the uv this unit already
+    calls by absolute path, so without this a scheduled compile probes every
+    provider, finds none, and fails where the same command from a login shell
+    succeeds.
+    """
+    return f"{Path(uv_path).resolve().parent}:{_SYSTEMD_USER_PATH}"
+
+
 def _systemd_service(root: Path, state_root: Path, uv_path: Path, kind: str) -> bytes:
     arguments = " ".join(
         _systemd_quote(argument) for argument in _scheduled_arguments(root, uv_path, kind)
@@ -569,6 +586,7 @@ def _systemd_service(root: Path, state_root: Path, uv_path: Path, kind: str) -> 
         "Type=oneshot",
         f"Environment={_systemd_quote(f'LLM_WIKI_ROOT={Path(root).resolve()}')}",
         f"Environment={_systemd_quote(f'LLM_WIKI_STATE_ROOT={Path(state_root).resolve()}')}",
+        f"Environment={_systemd_quote(f'PATH={_scheduled_path(uv_path)}')}",
         f"WorkingDirectory={_systemd_literal(str(Path(root).resolve()))}",
         f"ExecStart={arguments}",
         "",
