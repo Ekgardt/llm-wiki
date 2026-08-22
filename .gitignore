@@ -67,6 +67,7 @@ knowledge/notes/*
 !knowledge/notes/single-directory-vault-decision.md
 !knowledge/notes/classification-measurement-stand-decision.md
 !knowledge/notes/idempotent-retry-after-quarantine-decision.md
+!knowledge/notes/self-resolving-health-findings-decision.md
 !knowledge/notes/Ingestion Workflow.md
 !knowledge/notes/Retrieval Workflow.md
 !knowledge/notes/Review Workflow.md

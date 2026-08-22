@@ -4086,6 +4086,10 @@ def test_doctor_repair_preserves_lsp_runtime_bytes(tmp_path, monkeypatch) -> Non
     assert _snapshot(lsp_root) == before
 
 
+def _moment_days_ago(days: float) -> str:
+    return (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
+
+
 def test_lost_captures_are_reported_as_a_degraded_capture_check(tmp_path):
     """A capture the hooks lost must show up in health, not only at session start."""
     import doctor
@@ -4096,8 +4100,16 @@ def test_lost_captures_are_reported_as_a_degraded_capture_check(tmp_path):
         json.dumps(
             {
                 "capture_failures": {
-                    "session_end": {"count": 2, "last_reason": "spawn_failed"},
-                    "pre_compact": {"count": 1, "last_reason": "spawn_failed"},
+                    "session_end": {
+                        "count": 2,
+                        "last_reason": "spawn_failed",
+                        "last_at": _moment_days_ago(0),
+                    },
+                    "pre_compact": {
+                        "count": 1,
+                        "last_reason": "spawn_failed",
+                        "last_at": _moment_days_ago(0),
+                    },
                 }
             }
         ),
@@ -4110,6 +4122,39 @@ def test_lost_captures_are_reported_as_a_degraded_capture_check(tmp_path):
     assert check["details"]["lost"] == 3
     assert check["details"]["kinds"] == {"session_end": 2, "pre_compact": 1}
     assert "capture-failures.jsonl" in check["details"]["trail"]
+    del home
+
+
+def test_a_loss_that_stopped_happening_returns_the_capture_check_to_green(tmp_path):
+    """Nothing may require a human to make a report green again.
+
+    The counter is evidence and stays; the finding covers the last seven days,
+    so a vault whose loss was diagnosed and fixed recovers on its own.
+    """
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    (state_root / "run").mkdir(parents=True, exist_ok=True)
+    (state_root / "run" / "state.json").write_text(
+        json.dumps(
+            {
+                "capture_failures": {
+                    "session_end": {
+                        "count": 2,
+                        "last_reason": "spawn_failed",
+                        "last_at": _moment_days_ago(30),
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "capture")
+
+    assert check["status"] == "ok"
+    assert check["details"]["lost"] == 2
+    assert check["details"]["live"] is False
     del home
 
 
@@ -4276,7 +4321,47 @@ def test_a_file_that_will_not_parse_is_named_not_treated_as_ill_health() -> None
     )
 
 
-def _transaction_database(state_root: Path, rows: list[tuple[str, str, str | None]]) -> None:
+class _FixedScope:
+    def __init__(self, scope: dict) -> None:
+        self._scope = scope
+
+    def as_dict(self) -> dict:
+        return dict(self._scope)
+
+
+_LIVE_SCOPE = {
+    "schema_version": "repository-scope/v1",
+    "repository_id": "repository:" + "a" * 64,
+    "checkout_id": "checkout:" + "b" * 64,
+    "checkout_root": "/repo",
+    "git_common_dir": "/repo/.git",
+    "git_commit": "c" * 40,
+}
+
+
+def test_a_generation_from_an_earlier_commit_is_superseded_not_mismatched():
+    """`mismatched` reads as "this belongs to another repository". It did not.
+
+    Comparing the whole scope made every commit report a mismatch, so the field
+    was wrong far more often than right and said nothing when it mattered.
+    """
+    import doctor
+
+    scope = _FixedScope(_LIVE_SCOPE)
+    earlier = {**_LIVE_SCOPE, "git_commit": "d" * 40}
+    elsewhere = {**_LIVE_SCOPE, "checkout_id": "checkout:" + "e" * 64}
+
+    assert doctor._scope_state({"repository_scope": dict(_LIVE_SCOPE)}, scope) == "current"
+    assert doctor._scope_state({"repository_scope": earlier}, scope) == "superseded"
+    assert doctor._scope_state({"repository_scope": elsewhere}, scope) == "mismatched"
+    assert doctor._scope_state({}, scope) == "missing"
+
+
+def _transaction_database(
+    state_root: Path,
+    rows: list[tuple[str, str, str | None]],
+    creates: dict[str, list[str]] | None = None,
+) -> None:
     """A minimal coordinator database holding just the rows a check reads."""
     import sqlite3
 
@@ -4318,6 +4403,13 @@ def _transaction_database(state_root: Path, rows: list[tuple[str, str, str | Non
             "VALUES (?, 0, 'replace', 'knowledge/notes/page.md', ?, ?, 0, 0, 1)",
             (identifier, "c" * 64, "d" * 64),
         )
+        for position, path in enumerate((creates or {}).get(identifier, ()), start=1):
+            database.execute(
+                "INSERT INTO operation (transaction_id, position, kind, path, "
+                "before_hash, after_hash, parent_device, parent_inode, applied) "
+                "VALUES (?, ?, 'create', ?, 'absent', ?, 0, 0, 1)",
+                (identifier, position, path, "e" * 64),
+            )
         (state_root / "run" / "transactions" / identifier).mkdir(parents=True, exist_ok=True)
     database.commit()
     database.close()
@@ -4346,6 +4438,57 @@ def test_a_quarantined_attempt_a_later_one_committed_is_history_not_a_problem(
     assert check["status"] == "ok"
     assert check["details"]["states"]["quarantined"] == 1
     assert check["details"]["quarantined_unresolved"] == 0
+
+
+def test_a_refused_attempt_whose_pages_another_commit_wrote_is_history(
+    tmp_path, monkeypatch
+):
+    """The ordinary recovery is a new attempt, not a retry of the same chain.
+
+    Once the refusal is fixed the compile runs again with different inputs or
+    dispositions, so it legitimately carries a different operation identity and
+    the refused attempt gets no successor in its own chain — ever. What proves
+    the work happened is the outcome: everything it meant to create exists,
+    because a transaction that committed created it.
+    """
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
+    receipt = "knowledge/daily/receipts/v3-written.md"
+    _transaction_database(
+        state_root,
+        [("d" * 32, "quarantined", None), ("e" * 32, "committed", None)],
+        creates={"d" * 32: [receipt], "e" * 32: [receipt]},
+    )
+
+    check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "transactions")
+
+    assert check["status"] == "ok"
+    assert check["details"]["states"]["quarantined"] == 1
+    assert check["details"]["quarantined_unresolved"] == 0
+    del home
+
+
+def test_a_refused_attempt_whose_pages_nobody_wrote_still_needs_attention(
+    tmp_path, monkeypatch
+):
+    """A page that exists nowhere is a real loss, and stays a finding."""
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
+    _transaction_database(
+        state_root,
+        [("f" * 32, "quarantined", None), ("a" * 32, "committed", None)],
+        creates={"f" * 32: ["knowledge/notes/never-written.md"]},
+    )
+
+    check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "transactions")
+
+    assert check["status"] == "error"
+    assert check["details"]["quarantined_unresolved"] == 1
+    del home
 
 
 def test_a_quarantined_attempt_with_no_successor_still_needs_attention(

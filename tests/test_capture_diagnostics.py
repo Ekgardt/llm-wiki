@@ -133,18 +133,64 @@ def _raise_disk_full(*args, **kwargs):
     raise OSError("no space left on device")
 
 
+def _recent_moment(days_ago: float = 0.0) -> str:
+    from datetime import datetime, timedelta
+
+    return (datetime.now() - timedelta(days=days_ago)).isoformat(timespec="seconds")
+
+
 def test_session_start_shows_lost_captures(monkeypatch):
     import session_start_context
 
     monkeypatch.setattr(
         session_start_context,
         "_load_state_safe",
-        lambda: {"capture_failures": {"user_prompt_append": {"count": 2, "last_at": "x"}}},
+        lambda: {
+            "capture_failures": {
+                "user_prompt_append": {"count": 2, "last_at": _recent_moment()}
+            }
+        },
     )
 
     block = session_start_context.metacognitive_block()
 
     assert "2 capture(s) lost" in block
+
+
+def test_session_start_stops_naming_a_loss_that_stopped_happening(monkeypatch):
+    """A warning nobody can clear is a warning nobody reads.
+
+    The counter keeps the evidence; the line covers the last seven days, so a
+    quiet week takes it away by itself and a new loss brings it back at once.
+    """
+    import session_start_context
+
+    monkeypatch.setattr(
+        session_start_context,
+        "_load_state_safe",
+        lambda: {
+            "capture_failures": {
+                "user_prompt_append": {"count": 2, "last_at": _recent_moment(30)}
+            }
+        },
+    )
+
+    block = session_start_context.metacognitive_block()
+
+    assert "capture(s) lost" not in block
+
+
+def test_a_capture_lost_today_is_live_and_one_lost_last_month_is_not():
+    import capture_diagnostics
+
+    live = {"capture_failures": {"session_end": {"count": 1, "last_at": _recent_moment(1)}}}
+    old = {"capture_failures": {"session_end": {"count": 1, "last_at": _recent_moment(30)}}}
+    undated = {"capture_failures": {"session_end": {"count": 1}}}
+
+    assert capture_diagnostics.capture_failure_is_live(live) is True
+    assert capture_diagnostics.capture_failure_is_live(old) is False
+    assert capture_diagnostics.capture_failure_is_live(undated) is False
+    assert capture_diagnostics.capture_failure_totals(old) == {"session_end": 1}
 
 
 def test_the_line_says_so_when_the_trail_is_missing(diagnostics):

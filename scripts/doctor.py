@@ -1210,19 +1210,17 @@ def _scan_transaction_database(
         return None
 
 
-def _unresolved_quarantine(
-    database: sqlite3.Connection, transaction_columns: set[str]
-) -> int:
-    """Quarantined attempts no committed retry has superseded.
+def _quarantined_ids(database: sqlite3.Connection) -> set[str]:
+    return {
+        row[0]
+        for row in database.execute(
+            'SELECT id FROM "transaction" WHERE state=\'quarantined\''
+        )
+    }
 
-    Quarantine is retained evidence, so counting all of it as an open problem
-    left a vault that had already recovered permanently reporting `error` — and
-    a health check that is always red stops being read. An attempt whose chain
-    later committed is history; one with no successor still needs attention.
-    """
-    if "parent_transaction_id" not in transaction_columns:
-        return _quarantined_total(database)
-    resolved = {
+
+def _chain_resolved_ids(database: sqlite3.Connection) -> set[str]:
+    return {
         row[0]
         for row in database.execute(
             'SELECT parent_transaction_id FROM "transaction" '
@@ -1230,13 +1228,63 @@ def _unresolved_quarantine(
         )
         if row[0]
     }
-    quarantined = {
+
+
+def _committed_created_paths(database: sqlite3.Connection) -> set[str]:
+    return {
         row[0]
         for row in database.execute(
-            'SELECT id FROM "transaction" WHERE state=\'quarantined\''
+            'SELECT operation.path FROM operation JOIN "transaction" '
+            "ON operation.transaction_id = \"transaction\".id "
+            "WHERE \"transaction\".state='committed' AND operation.kind='create'"
         )
     }
-    return len(quarantined - resolved)
+
+
+def _outcome_was_written(
+    database: sqlite3.Connection, identifier: str, committed_creates: set[str]
+) -> bool:
+    """Everything this refused attempt meant to create was created by a commit."""
+    intended = {
+        row[0]
+        for row in database.execute(
+            "SELECT path FROM operation WHERE transaction_id = ? AND kind = 'create'",
+            (identifier,),
+        )
+    }
+    if not intended:
+        return False
+    return intended <= committed_creates
+
+
+def _unresolved_quarantine(
+    database: sqlite3.Connection, transaction_columns: set[str]
+) -> int:
+    """Quarantined attempts whose work never happened.
+
+    Quarantine is retained evidence, so counting all of it as an open problem
+    left a vault that had already recovered permanently reporting `error` — and
+    a health check that is always red stops being read, which is the opposite of
+    why it exists.
+
+    An attempt is history on either of two proofs. A retry in its own chain
+    committed — that is the lineage. Or everything it meant to create was
+    created by a transaction that did commit — that is the outcome, and it is
+    the ordinary case: once the refusal is fixed the new attempt legitimately
+    carries a different operation identity, because its inputs or dispositions
+    changed with the fix. An attempt that intended no creation, or whose pages
+    were never written, stays a finding: there something really was lost.
+    """
+    if "parent_transaction_id" not in transaction_columns:
+        return _quarantined_total(database)
+    open_attempts = _quarantined_ids(database) - _chain_resolved_ids(database)
+    if not open_attempts:
+        return 0
+    committed_creates = _committed_created_paths(database)
+    return sum(
+        0 if _outcome_was_written(database, identifier, committed_creates) else 1
+        for identifier in open_attempts
+    )
 
 
 def _quarantined_total(database: sqlite3.Connection) -> int:
@@ -3727,11 +3775,38 @@ def _validated_generation_manifest(
     )
 
 
+# Which fields say *which* repository this is. The commit says *when*, and a
+# generation built one commit ago belongs to this repository just as much.
+_SCOPE_IDENTITY_FIELDS = (
+    "schema_version",
+    "repository_id",
+    "checkout_id",
+    "checkout_root",
+    "git_common_dir",
+)
+
+
+def _scope_identity(scope: dict) -> tuple:
+    return tuple(scope.get(field) for field in _SCOPE_IDENTITY_FIELDS)
+
+
 def _scope_state(manifest: dict, repository_scope: object) -> str:
-    if manifest.get("repository_scope") == repository_scope.as_dict():
-        return "current"
-    if "repository_scope" not in manifest:
+    """Whether the active generation belongs here, and whether it is current.
+
+    Comparing the whole scope made every commit read as `mismatched`, which
+    says the generation belongs to another repository. It does not: only the
+    commit moved, and how far behind the generation is already has its own
+    signals. `superseded` is treated exactly like a mismatch by every caller —
+    it only stops the report from saying something untrue.
+    """
+    recorded = manifest.get("repository_scope")
+    if recorded is None:
         return "missing"
+    current = repository_scope.as_dict()
+    if recorded == current:
+        return "current"
+    if _scope_identity(recorded) == _scope_identity(current):
+        return "superseded"
     return "mismatched"
 
 
@@ -4415,16 +4490,23 @@ def _read_state(state_root: Path, deadline: float) -> tuple[dict, str | None]:
 
 def _capture_check(state_root: Path, deadline: float) -> dict:
     """Report captures the hooks lost, so a silent loss is visible in health."""
-    from capture_diagnostics import capture_failure_totals
+    from capture_diagnostics import (
+        capture_failure_is_live,
+        capture_failure_totals,
+        last_capture_failure_at,
+    )
 
     state, state_error = _read_state(state_root, deadline)
     totals = capture_failure_totals(state)
     lost = sum(totals.values())
+    live = capture_failure_is_live(state)
     details: dict[str, Any] = {
         "lost": lost,
         "kinds": totals,
         "trail": "logs/capture-failures.jsonl",
         "state_error": state_error,
+        "last_at": last_capture_failure_at(state),
+        "live": live,
     }
     if state_error:
         return _result(
@@ -4433,8 +4515,15 @@ def _capture_check(state_root: Path, deadline: float) -> dict:
             "Capture diagnostics could not be read within safety bounds.",
             details,
         )
-    if lost:
+    if live:
         return _result("capture", "degraded", f"{lost} capture(s) were lost.", details)
+    if lost:
+        return _result(
+            "capture",
+            "ok",
+            f"{lost} capture(s) were lost, none recently.",
+            details,
+        )
     return _result("capture", "ok", "No lost capture is recorded.", details)
 
 
