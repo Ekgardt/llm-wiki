@@ -4757,13 +4757,26 @@ def test_owner_json_is_canonical_redacted_restricted_and_has_only_schema(
     process.close(time.monotonic() + 5)
 
 
+# The stub counts this from its own start, so it has to outlive the parent's
+# startup, not just the assertion. At two seconds it did not: on 2026-08-22 the
+# hosted Windows shard of CI run 32542795352 (job 96955875519) recorded
+# `returncode: 0` with `started_monotonic=730.375` — the stub had slept its two
+# seconds out and exited cleanly while startup was still running, and the
+# coordinator correctly called that a terminal failure. The file already answers
+# the same problem for stderr with a three-second linger; this is the same
+# answer with more room. The price is that each parametrization waits this long
+# for the exit it asserts.
+_SELF_EXIT_SECONDS = 8.0
+_SELF_EXIT_WAIT_SECONDS = 20.0
+
+
 @pytest.mark.parametrize("deadline", [math.nan, math.inf, "later", True])
 def test_wait_for_exit_rejects_invalid_deadline(tmp_path: Path, deadline: object) -> None:
-    process = _start(tmp_path, "--sleep-seconds", "2")
+    process = _start(tmp_path, "--sleep-seconds", str(_SELF_EXIT_SECONDS))
     with pytest.raises((TypeError, ValueError)):
         process.wait_for_exit(deadline)  # type: ignore[arg-type]
     _expect_active_generation_exit(process)
-    _wait(process)
+    _wait(process, _SELF_EXIT_WAIT_SECONDS)
     process.close(time.monotonic() + 5)
 
 
