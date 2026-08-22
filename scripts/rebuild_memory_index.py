@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -147,20 +147,9 @@ def _published_only(root: Path, virtual: dict[str, bytes]) -> dict[str, bytes]:
     is tracked, so a private page's title reaching the index would put it in a
     public file.
     """
-    allowed = _published_notes(root)
-    if allowed is None:
-        return virtual
-    return {
-        path: content
-        for path, content in virtual.items()
-        if _is_published(path, allowed)
-    }
-
-
-def _is_published(path: str, allowed: set[str]) -> bool:
-    if not path.startswith("knowledge/notes/"):
-        return True
-    return path in allowed
+    named, _hidden = published_paths(root, sorted(virtual))
+    keep = set(named)
+    return {path: content for path, content in virtual.items() if path in keep}
 
 
 def _published_notes(root: Path) -> set[str] | None:
@@ -176,6 +165,63 @@ def _published_notes(root: Path) -> set[str] | None:
     if NOTES_DENIAL not in lines:
         return None
     return {line[1:] for line in lines if line.startswith(f"!{NOTES_PREFIX}")}
+
+
+def published_paths(root: Path, paths: Sequence[str]) -> tuple[list[str], int]:
+    """Split paths into the ones this repository publishes and a count of the rest.
+
+    `knowledge/log.md` is tracked in the public source and the compile pass
+    appends the pages it touched to it, so a private slug written there is
+    personal content in a public file. A vault whose `.gitignore` denies
+    nothing publishes everything, and nothing is filtered.
+    """
+    denials, allowed = _publication_rules(root)
+    if not denials:
+        return list(paths), 0
+    named = [item for item in paths if _is_public_path(item, denials, allowed)]
+    return named, len(paths) - len(named)
+
+
+def _publication_rules(root: Path) -> tuple[set[str], set[str]]:
+    """Denied directory prefixes, and the exceptions that publish again.
+
+    A denial covers a directory; an exception names one exact file, or one
+    directory when it ends in a slash. Reading an exception as a prefix would
+    publish every sibling of the one page that was allowed.
+    """
+    denials: set[str] = set()
+    allowed: set[str] = set()
+    for line in _gitignore_lines(root):
+        _classify_rule(line, denials, allowed)
+    return {item for item in denials if item}, allowed
+
+
+def _classify_rule(line: str, denials: set[str], allowed: set[str]) -> None:
+    if line.startswith("!"):
+        allowed.add(line[1:])
+        return
+    denials.add(_rule_prefix(line))
+
+
+def _rule_prefix(rule: str) -> str:
+    """A rule covers the directory it names; `notes/*.md` covers `notes/`."""
+    head, separator, _tail = rule.rpartition("/")
+    if not separator:
+        return ""
+    return f"{head}/"
+
+
+def _is_public_path(path: str, denials: set[str], allowed: set[str]) -> bool:
+    if not any(path.startswith(prefix) for prefix in denials):
+        return True
+    if path in allowed:
+        return True
+    return _under_allowed_directory(path, allowed)
+
+
+def _under_allowed_directory(path: str, allowed: set[str]) -> bool:
+    directories = [item for item in allowed if item.endswith("/")]
+    return any(path.startswith(item) for item in directories)
 
 
 def _gitignore_lines(root: Path) -> set[str]:

@@ -487,8 +487,14 @@ def _parse_iso_safe(raw: str | None) -> datetime | None:
 
 
 def _compile_backlog_days(state: dict) -> int | None:
-    """Days since last compile. None if no compile has ever run."""
-    last = _parse_iso_safe(state.get("last_compile_at") or state.get("last_compile_finished_at"))
+    """Days since the last compile that committed. None if none ever did.
+
+    A run that finished is not a run that wrote anything: `last_compile_at` is
+    stamped at commit, `last_compile_finished_at` on every exit including a
+    failure. Reading the second one called a vault fresh on the day its only
+    compile failed.
+    """
+    last = _parse_iso_safe(state.get("last_compile_at"))
     if last is None:
         return None
     return max(0, (datetime.now() - last).days)
@@ -530,13 +536,24 @@ def _backlog_line(backlog_days: int) -> str:
     )
 
 
-def _compile_line(backlog_days: int | None) -> str:
+def _compile_line(backlog_days: int | None, last_status: str = "") -> str:
     """Compile backlog — the most actionable maintenance signal."""
+    if last_status == "error":
+        return _failed_compile_line(backlog_days)
     if backlog_days is None:
         return "- **Compile**: never run. Daily logs are accumulating uncompiled."
     if backlog_days == 0:
         return "- **Compile**: fresh (today)."
     return _backlog_line(backlog_days)
+
+
+def _failed_compile_line(backlog_days: int | None) -> str:
+    """The last attempt failed; say so before saying anything about backlog."""
+    committed = "never" if backlog_days is None else f"{backlog_days}d ago"
+    return (
+        f"- **Compile**: 🔴 the last run failed; last committed compile: "
+        f"{committed}. Run `uv run python scripts/compile_memory.py` to see why."
+    )
 
 
 def _audit_line(last_audit: dict) -> str:
@@ -589,7 +606,10 @@ def metacognitive_block() -> str:
     state = _load_state_safe()
     body = (
         _inventory_line(),
-        _compile_line(_compile_backlog_days(state)),
+        _compile_line(
+            _compile_backlog_days(state),
+            str(state.get("last_compile_status") or ""),
+        ),
         _audit_line(_state_map(state, "last_compile_audit")),
         _flush_line(_state_map(state, "flush_tier_counts")),
         _capture_line(state),

@@ -29,6 +29,9 @@ knowledge/daily/*.md
 !knowledge/daily/2026-04-19.md
 !knowledge/daily/README.md
 # Empty local scratch dailies stay ignored (no un-ignore for 2026-07-*)
+# Compile receipts bind a private daily to the pages it produced, so they
+# name private slugs. `knowledge/daily/*.md` does not reach this directory.
+knowledge/daily/receipts/
 
 # === Knowledge allowlist ===
 # Personal/user notes are blocked; public system-self-knowledge samples are un-ignored.

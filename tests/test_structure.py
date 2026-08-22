@@ -1006,3 +1006,14 @@ def test_the_vault_index_and_log_name_only_published_notes() -> None:
             leaked[name] = unpublished
 
     assert leaked == {}
+
+
+def test_compile_receipts_are_never_tracked() -> None:
+    """A receipt names the pages one private daily produced.
+
+    `knowledge/daily/*.md` covers files directly in that directory and not the
+    receipts beneath it, so without its own rule a committed compile would
+    leave private page paths in the working tree ready for `git add -A`.
+    """
+    receipt = "knowledge/daily/receipts/deadbeef.md"
+    assert _unpublished_notes({receipt}) == {receipt}

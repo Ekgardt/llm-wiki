@@ -261,6 +261,10 @@ class CompileInputs:
     dailies: tuple[DailySnapshot, ...]
     sources: tuple[SourceSnapshot, ...]
     targets: tuple[TargetSnapshot, ...]
+    # The vault files read whole, before any model call. `sources` is narrowed
+    # to what one prompt has room for; these are what is on disk, so the writer
+    # can say whether a file it replaces existed without asking the budget.
+    vault_files: tuple[SourceSnapshot, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -355,15 +359,28 @@ def snapshot_compile_inputs(
         logical = _logical_path(path)
         dailies.extend(_daily_parts(logical, content, compiled))
         budget.add(SourceSnapshot(logical, content, sha256_bytes(content)))
-    for path in (AGENTS, INDEX, LOG):
-        if path.exists():
-            budget.add(_snapshot(path))
+    vault_files = _vault_file_snapshots(budget.add)
     targets = _knowledge_targets(budget.add)
     return CompileInputs(
         tuple(dailies),
         tuple(sorted(sources, key=lambda item: item.logical_path)),
         tuple(sorted(targets, key=lambda item: item.logical_path)),
+        tuple(vault_files),
     )
+
+
+def _vault_file_snapshots(
+    add_source: Callable[[SourceSnapshot], None],
+) -> list[SourceSnapshot]:
+    """Snapshot every vault file whole, whatever one prompt later has room for."""
+    snapshots: list[SourceSnapshot] = []
+    for path in (AGENTS, INDEX, LOG):
+        if not path.exists():
+            continue
+        snapshot = _snapshot(path)
+        add_source(snapshot)
+        snapshots.append(snapshot)
+    return snapshots
 
 
 class _SourceBudget:
@@ -518,6 +535,7 @@ def _subset_compile_inputs(
             sorted((*selected_sources, *context), key=lambda item: item.logical_path)
         ),
         inputs.targets,
+        inputs.vault_files,
     )
 
 
@@ -720,6 +738,7 @@ def _refresh_compile_batch(batch: CompileBatch) -> CompileBatch:
             )
         ),
         context.targets,
+        context.vault_files,
     )
     batches = pack_compile_batches(refreshed, model=None)
     if len(batches) != 1 or batches[0].manifest != batch.manifest:
@@ -2617,7 +2636,7 @@ class _ApplyPlan:
 
         base_notes = {item.logical_path: item.content for item in self.inputs.targets}
         index_bytes = build_index_bytes(ROOT, self.pending, base=base_notes)
-        sources = {item.logical_path: item for item in self.inputs.sources}
+        sources = self._vault_sources()
         self._append_vault_file(
             "knowledge/index.md", index_bytes, sources, MAX_INDEX_BYTES
         )
@@ -2626,6 +2645,21 @@ class _ApplyPlan:
         if len(log_bytes) > MAX_LOG_BYTES:
             raise ValueError("knowledge log exceeds after-image limit")
         self._append_vault_file("knowledge/log.md", log_bytes, sources, MAX_LOG_BYTES)
+
+    def _vault_sources(self) -> dict[str, object]:
+        """What is on disk outranks what one prompt had room to carry.
+
+        A vault file that did not fit the context budget is absent from
+        `sources`, and reading the write precondition from there once told the
+        transaction to create a file that already existed.
+        """
+        sources: dict[str, object] = {
+            item.logical_path: item for item in self.inputs.sources
+        }
+        sources.update(
+            {item.logical_path: item for item in self.inputs.vault_files}
+        )
+        return sources
 
     def _append_vault_file(
         self,
@@ -2647,7 +2681,7 @@ class _ApplyPlan:
         )
 
     def _log_entry(self) -> str:
-        touched = ", ".join(self.touched) if self.touched else "none"
+        touched = _touched_phrase(self.touched)
         return (
             f"- {self.completed_at[:10]} — {_trigger_word(self.trigger)} "
             f"compile completed for snapshot {', '.join(self.source_digests)}. "
@@ -2807,6 +2841,25 @@ def _require_unclaimed_path(known: set[str], path: str) -> None:
     if path in known:
         raise ValueError("compile claim lifecycle overlaps a compile operation target")
     known.add(path)
+
+
+def _touched_phrase(touched: Sequence[str]) -> str:
+    """Name the pages this repository publishes and count the rest.
+
+    The line lands in `knowledge/log.md`, which is tracked. Where the vault is
+    also the public source, a private page's slug is itself personal content,
+    so it is counted instead of named. A vault that publishes everything reads
+    exactly as before.
+    """
+    from rebuild_memory_index import published_paths
+
+    named, hidden = published_paths(ROOT, touched)
+    if not named and not hidden:
+        return "none"
+    parts = [*named]
+    if hidden:
+        parts.append(f"{hidden} unpublished page(s)")
+    return ", ".join(parts)
 
 
 def _log_before(log_source: object) -> bytes:

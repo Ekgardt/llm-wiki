@@ -93,3 +93,74 @@ def test_the_repositorys_own_allowlist_is_read(tmp_path: Path) -> None:
 
     assert published is not None
     assert "knowledge/notes/single-directory-vault-decision.md" in published
+
+
+PUBLIC_GITIGNORE = """
+cache/
+knowledge/daily/*.md
+!knowledge/daily/2026-04-13.md
+knowledge/notes/*
+!knowledge/notes/public-page.md
+knowledge/projects/*
+!knowledge/projects/_template/
+"""
+
+
+@pytest.fixture
+def public_vault(tmp_path: Path) -> Path:
+    """A vault whose .gitignore publishes by exception, as this repository does."""
+    (tmp_path / ".gitignore").write_text(PUBLIC_GITIGNORE, encoding="utf-8")
+    return tmp_path
+
+
+def test_an_allowlisted_page_is_named_in_the_log(public_vault):
+    from rebuild_memory_index import published_paths
+
+    named, hidden = published_paths(public_vault, ["knowledge/notes/public-page.md"])
+
+    assert named == ["knowledge/notes/public-page.md"]
+    assert hidden == 0
+
+
+def test_a_private_page_is_counted_rather_than_named(public_vault):
+    """`knowledge/log.md` is tracked, and a private slug is itself content."""
+    from rebuild_memory_index import published_paths
+
+    named, hidden = published_paths(public_vault, ["knowledge/notes/my-employer.md"])
+
+    assert named == []
+    assert hidden == 1
+
+
+def test_a_compile_receipt_is_not_published(public_vault):
+    from rebuild_memory_index import published_paths
+
+    named, hidden = published_paths(public_vault, ["knowledge/daily/receipts/ab.md"])
+
+    assert (named, hidden) == ([], 1)
+
+
+def test_a_private_project_is_counted_and_the_template_is_named(public_vault):
+    from rebuild_memory_index import published_paths
+
+    named, hidden = published_paths(
+        public_vault,
+        [
+            "knowledge/projects/secret-app/state.md",
+            "knowledge/projects/_template/state.md",
+        ],
+    )
+
+    assert named == ["knowledge/projects/_template/state.md"]
+    assert hidden == 1
+
+
+def test_a_vault_that_publishes_everything_names_everything(tmp_path):
+    """An installed vault is not a public repository; nothing is filtered."""
+    from rebuild_memory_index import published_paths
+
+    (tmp_path / ".gitignore").write_text("cache/\nrun/\n", encoding="utf-8")
+
+    named, hidden = published_paths(tmp_path, ["knowledge/notes/anything.md"])
+
+    assert (named, hidden) == (["knowledge/notes/anything.md"], 0)

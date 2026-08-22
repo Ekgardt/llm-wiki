@@ -1631,3 +1631,132 @@ def test_prompt_fallback_output_is_schema_checked_before_cache(vault, monkeypatc
         )
 
     assert not list((state_root / "cache/compile").glob("*.json"))
+
+
+def _narrowed(inputs):
+    """What batching hands the writer when nothing optional fits the prompt."""
+    import compile_memory
+
+    return compile_memory._subset_compile_inputs(
+        inputs, {inputs.dailies[0].part_key}, optional_paths=set()
+    )
+
+
+def test_index_and_log_commit_when_the_prompt_had_no_room_for_them(vault):
+    """The prompt budget decides what the model reads, never what is on disk."""
+    root, state_root = vault
+    daily = _daily(root)
+    (root / "knowledge/log.md").write_bytes(
+        b"# Session Memory Log\n\n- 2026-07-01 - an earlier pass.\n"
+    )
+    import compile_memory
+
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+
+    result = compile_memory.apply_compile_plan(
+        _narrowed(inputs),
+        _semantic_plan(),
+        action_key="b" * 64,
+        trigger="manual",
+        coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T12:00:00Z",
+    )
+
+    assert result.state == "committed"
+    assert b"exact-byte-pattern" in (root / "knowledge/index.md").read_bytes()
+
+
+def test_a_log_outside_the_prompt_is_appended_to_rather_than_rewritten(vault):
+    """A dropped log source once became an empty before-image."""
+    root, state_root = vault
+    daily = _daily(root)
+    (root / "knowledge/log.md").write_bytes(
+        b"# Session Memory Log\n\n- 2026-07-01 - an earlier pass.\n"
+    )
+    import compile_memory
+
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+
+    compile_memory.apply_compile_plan(
+        _narrowed(inputs),
+        _semantic_plan(),
+        action_key="c" * 64,
+        trigger="manual",
+        coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T12:00:00Z",
+    )
+
+    log = (root / "knowledge/log.md").read_bytes()
+    assert b"an earlier pass." in log
+    assert inputs.dailies[0].sha256.encode() in log
+
+
+def test_an_absent_index_and_log_are_still_created(vault):
+    """Nothing on disk means create, which is how a fresh vault compiles."""
+    root, state_root = vault
+    daily = _daily(root)
+    (root / "knowledge/index.md").unlink()
+    (root / "knowledge/log.md").unlink()
+    import compile_memory
+
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+
+    result = compile_memory.apply_compile_plan(
+        _narrowed(inputs),
+        _semantic_plan(),
+        action_key="d" * 64,
+        trigger="manual",
+        coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T12:00:00Z",
+    )
+
+    assert result.state == "committed"
+    assert (root / "knowledge/log.md").is_file()
+    assert (root / "knowledge/index.md").is_file()
+
+
+def test_the_log_counts_a_page_this_repository_does_not_publish(vault):
+    """`knowledge/log.md` is tracked; a private slug written there is content."""
+    root, state_root = vault
+    daily = _daily(root)
+    (root / ".gitignore").write_text(
+        "knowledge/notes/*\n!knowledge/notes/README.md\n", encoding="utf-8"
+    )
+    import compile_memory
+
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+
+    compile_memory.apply_compile_plan(
+        inputs,
+        _semantic_plan(),
+        action_key="e" * 64,
+        trigger="manual",
+        coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T12:00:00Z",
+    )
+
+    log = (root / "knowledge/log.md").read_text(encoding="utf-8")
+    assert "exact-byte-pattern" not in log
+    assert "1 unpublished page(s)" in log
+
+
+def test_the_log_names_pages_in_a_vault_that_publishes_them(vault):
+    """An installed vault denies nothing under notes; the names stay useful."""
+    root, state_root = vault
+    daily = _daily(root)
+    (root / ".gitignore").write_text("cache/\nrun/\n", encoding="utf-8")
+    import compile_memory
+
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+
+    compile_memory.apply_compile_plan(
+        inputs,
+        _semantic_plan(),
+        action_key="f" * 64,
+        trigger="manual",
+        coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T12:00:00Z",
+    )
+
+    log = (root / "knowledge/log.md").read_text(encoding="utf-8")
+    assert "knowledge/notes/exact-byte-pattern.md" in log
