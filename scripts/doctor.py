@@ -4465,10 +4465,23 @@ def _scheduler_check(root: Path, state_root: Path, now: datetime, deadline: floa
     return _nightly_result(state, now, details)
 
 
-def _nightly_is_current(status: str, last_date: str, now: datetime) -> bool:
+# A day plus slack for a run that starts late or takes long. Freshness of a
+# scheduled job is an interval, not a calendar boundary: the nightly runs at
+# 03:00, so comparing against "today" called a healthy timer stale every night
+# from midnight until it ran. See
+# docs/research/2026-08-22-scheduled-job-freshness.md.
+NIGHTLY_FRESH_SECONDS = 26 * 3600
+
+
+def _nightly_is_current(state: dict, status: str, last_date: str, now: datetime) -> bool:
     if status not in {"ok", "success"}:
         return False
-    return last_date == now.date().isoformat()
+    ran_at = _parse_utc(state.get("last_nightly_at"))
+    if ran_at is None:
+        # State written before the timestamp existed keeps the day rule, so an
+        # upgraded vault does not become noisier for lacking a new field.
+        return last_date == now.date().isoformat()
+    return (now - ran_at).total_seconds() <= NIGHTLY_FRESH_SECONDS
 
 
 def _nightly_result(state: dict, now: datetime, details: dict) -> dict:
@@ -4478,7 +4491,7 @@ def _nightly_result(state: dict, now: datetime, details: dict) -> dict:
         return _result("scheduler", "error", "Last nightly maintenance failed.", details)
     if not status or not last_date:
         return _result("scheduler", "skipped", "Nightly maintenance status is unknown.", details)
-    if _nightly_is_current(status, last_date, now):
+    if _nightly_is_current(state, status, last_date, now):
         return _result("scheduler", "ok", "Nightly maintenance is current.", details)
     return _result("scheduler", "degraded", "Nightly maintenance is stale.", details)
 

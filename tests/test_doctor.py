@@ -4362,3 +4362,85 @@ def test_a_quarantined_attempt_with_no_successor_still_needs_attention(
 
     assert check["status"] == "error"
     assert check["details"]["quarantined_unresolved"] == 1
+
+
+def _nightly_state(state_root: Path, payload: dict) -> None:
+    (state_root / "run").mkdir(parents=True, exist_ok=True)
+    (state_root / "run" / "state.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_a_nightly_that_ran_last_night_is_current_before_tonight_runs(
+    tmp_path, monkeypatch
+):
+    """The nightly runs at 03:00, so midnight to three is not staleness.
+
+    Measured on this machine at 2026-08-22T00:06Z: the timer had run 21 hours
+    earlier and would run again in under three, `last_nightly_status` was
+    success, and the check said degraded at that same moment.
+    """
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
+    now = datetime(2026, 8, 22, 0, 6, tzinfo=timezone.utc)
+    _nightly_state(
+        state_root,
+        {
+            "last_nightly_status": "success",
+            "last_nightly_date": "2026-08-21",
+            "last_nightly_at": "2026-08-21T03:00:40+00:00",
+        },
+    )
+
+    check = _check(
+        doctor.run_doctor(root=root, state_root=state_root, home=home, now=now),
+        "scheduler",
+    )
+
+    assert check["status"] == "ok"
+
+
+def test_a_nightly_that_missed_its_window_is_still_stale(tmp_path, monkeypatch):
+    """The buffer is a day plus slack, not an amnesty."""
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
+    now = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
+    _nightly_state(
+        state_root,
+        {
+            "last_nightly_status": "success",
+            "last_nightly_date": "2026-08-21",
+            "last_nightly_at": "2026-08-21T03:00:40+00:00",
+        },
+    )
+
+    check = _check(
+        doctor.run_doctor(root=root, state_root=state_root, home=home, now=now),
+        "scheduler",
+    )
+
+    assert check["status"] == "degraded"
+
+
+def test_state_without_a_nightly_timestamp_keeps_the_old_day_rule(
+    tmp_path, monkeypatch
+):
+    """An upgraded vault must not get noisier for lacking a new field."""
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
+    now = datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc)
+    _nightly_state(
+        state_root,
+        {"last_nightly_status": "success", "last_nightly_date": "2026-08-22"},
+    )
+
+    check = _check(
+        doctor.run_doctor(root=root, state_root=state_root, home=home, now=now),
+        "scheduler",
+    )
+
+    assert check["status"] == "ok"

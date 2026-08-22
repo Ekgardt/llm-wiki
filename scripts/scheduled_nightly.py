@@ -16,7 +16,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -89,6 +89,11 @@ def _record_nightly_result(today: str, failures: int, error: str | None = None) 
         else:
             state["last_nightly_status"] = "success"
             state["last_nightly_date"] = today
+            # The date alone cannot say whether a 03:00 run is late; the health
+            # check needs an instant to measure an interval against.
+            state["last_nightly_at"] = datetime.now(timezone.utc).isoformat(
+                timespec="seconds"
+            )
             state.pop("last_nightly_failure", None)
 
     update_state(_mutate)
