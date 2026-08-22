@@ -3015,6 +3015,30 @@ def _receipt_predicate(
     return compiled
 
 
+def _repair_compile_mirror(coordinator: MarkdownCoordinator) -> None:
+    """Make the diagnostic mirror agree with the receipts, every pass.
+
+    A vault that already carries the wrong digest would keep reporting a phantom
+    backlog for ever, because the day is compiled and no compile will ever
+    revisit it. Nothing here decides anything: the receipts already did, and
+    this only writes down what they say.
+    """
+    compiled = _receipt_predicate(coordinator)
+    corrected = {}
+    for path in _canonical_dailies():
+        whole = _whole_daily_digest(path.relative_to(ROOT).as_posix(), compiled)
+        if whole is not None:
+            corrected[path.name] = whole
+    if corrected:
+        update_state(lambda state: _apply_mirror_repair(state, corrected))
+
+
+def _apply_mirror_repair(state: dict, corrected: dict) -> None:
+    mirror = _require_state_mapping(state, "compiled_daily_hashes")
+    for name, digest in corrected.items():
+        mirror[name] = digest
+
+
 def select_dailies(
     args: argparse.Namespace,
     state: dict,
@@ -3443,6 +3467,7 @@ def _run(
     state = load_state()
     coordinator = MarkdownCoordinator(ROOT, STATE_ROOT)
     dailies = select_dailies(args, state, coordinator=coordinator)
+    _repair_compile_mirror(coordinator)
     _require_compile_active(deadline, cancelled)
     if not dailies:
         print("compile_memory: no changed daily logs; nothing to do.")
@@ -3565,7 +3590,7 @@ def _apply_batch(
             args, batch.inputs, exc, prefix="transaction not committed: "
         )
     _require_compile_active(deadline, cancelled)
-    _record_batch_diagnostics(batch, result, args)
+    _record_batch_diagnostics(batch, result, args, coordinator)
     return 0
 
 
@@ -3578,12 +3603,47 @@ def _transactional_owner(
     return owner
 
 
-def _record_batch_diagnostics(
-    batch: CompileBatch, result: CompileApplyResult, args: argparse.Namespace
-) -> None:
-    hashes = {
+def _whole_daily_digest(logical_path: str, compiled) -> str | None:
+    """The digest of the file itself, once every part of it has a receipt."""
+    try:
+        content = read_stable_bytes(
+            ROOT / logical_path, MAX_SOURCE_BYTES, label="daily source"
+        )
+    except (OSError, ValueError):
+        return None
+    if not daily_is_compiled(logical_path, content, compiled):
+        return None
+    return sha256_bytes(content)
+
+
+def _mirror_digests(batch: CompileBatch, coordinator: MarkdownCoordinator) -> dict:
+    """What the diagnostic mirror should say about each daily after this commit.
+
+    Receipts are the authority. The mirror exists so cheap readers — the lint,
+    the MCP status, the compile trigger — can ask "is this day compiled" without
+    opening the coordinator. A long day is compiled part by part, and recording
+    the last part's digest under the file name made every one of those readers
+    call a fully compiled day stale for ever. The mirror now names the whole
+    file, and only once every part of it carries a receipt.
+    """
+    compiled = _receipt_predicate(coordinator)
+    digests = {
         Path(item.logical_path).name: item.sha256 for item in batch.inputs.dailies
     }
+    for logical_path in sorted({item.logical_path for item in batch.inputs.dailies}):
+        whole = _whole_daily_digest(logical_path, compiled)
+        if whole is not None:
+            digests[Path(logical_path).name] = whole
+    return digests
+
+
+def _record_batch_diagnostics(
+    batch: CompileBatch,
+    result: CompileApplyResult,
+    args: argparse.Namespace,
+    coordinator: MarkdownCoordinator,
+) -> None:
+    hashes = _mirror_digests(batch, coordinator)
 
     def mutate(state: dict) -> None:
         merge_compile_diagnostics(

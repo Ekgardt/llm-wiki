@@ -1819,6 +1819,57 @@ def test_a_quarantined_attempt_does_not_lock_its_inputs_out_of_compiling(vault):
     assert (root / "knowledge/notes/exact-byte-pattern.md").is_file()
 
 
+def test_a_split_day_is_recorded_by_the_whole_file_not_its_last_part(
+    vault, monkeypatch
+):
+    """The mirror must mean what its cheap readers assume it means.
+
+    A long day is compiled part by part. Recording the last part's digest under
+    the file name made the lint, the MCP status and the compile trigger call a
+    fully compiled day stale for ever — no compile would ever revisit it, so
+    nothing could correct the record.
+    """
+    root, state_root = vault
+    import compile_memory
+    from memory_state import load_state
+
+    daily = root / "knowledge/daily/2026-07-14.md"
+    entry = b"<!-- llm-wiki-operation: session -->\n" + b"session text\n" * 300
+    daily.write_bytes(b"# 2026-07-14\n\n" + entry * 12)
+    content = daily.read_bytes()
+    bounds = compile_memory._daily_part_bounds(content)
+    assert len(bounds) > 1, "this day is supposed to split into parts"
+    monkeypatch.setattr(
+        compile_memory, "_receipt_predicate", lambda _coordinator: lambda *_a: True
+    )
+
+    compile_memory._repair_compile_mirror(object())
+
+    mirror = load_state().get("compiled_daily_hashes", {})
+    last_part = compile_memory.sha256_bytes(content[bounds[-1][0] : bounds[-1][1]])
+    assert mirror["2026-07-14.md"] == compile_memory.sha256_bytes(content)
+    assert mirror["2026-07-14.md"] != last_part
+    del state_root
+
+
+def test_a_day_without_receipts_for_every_part_is_left_alone(vault, monkeypatch):
+    """Only the receipts decide; the repair merely writes down what they say."""
+    root, state_root = vault
+    import compile_memory
+    from memory_state import load_state
+
+    daily = root / "knowledge/daily/2026-07-15.md"
+    daily.write_bytes(b"# 2026-07-15\n\nshort day\n")
+    monkeypatch.setattr(
+        compile_memory, "_receipt_predicate", lambda _coordinator: lambda *_a: False
+    )
+
+    compile_memory._repair_compile_mirror(object())
+
+    assert "2026-07-15.md" not in load_state().get("compiled_daily_hashes", {})
+    del state_root
+
+
 def test_a_corrupt_receipt_says_which_one_and_why(vault):
     """One message for four causes explains nothing to whoever meets it.
 

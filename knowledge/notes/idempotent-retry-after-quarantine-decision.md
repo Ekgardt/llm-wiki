@@ -85,3 +85,4 @@ question is retention, not liveness.
   extends.
 - [[knowledge/notes/v4-reliability-contracts-decision]] — the reliability
   contracts this stays inside.
+- [[knowledge/notes/self-resolving-health-findings-decision]] — how a refused attempt stops being an open finding once its work happened.
