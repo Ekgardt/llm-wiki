@@ -97,6 +97,11 @@ LOG = MEMORY / "log.md"
 COMPILE_PLAN_SCHEMA = Path(__file__).with_name("schemas") / "compile-plan-v2.json"
 COMPILE_RECEIPT_SCHEMA = Path(__file__).with_name("schemas") / "compile-receipt-v2.json"
 COMPILE_RECEIPT_V3_SCHEMA = Path(__file__).with_name("schemas") / "compile-receipt-v3.json"
+# One malformed generation used to lose a whole compile. Current practice caps
+# structured-output retries at about three attempts in total, because a prompt
+# that needs more than that needs work rather than more calls.
+VALIDATION_RETRIES = 2
+
 COMPILER_VERSION = "2.0.0"
 NORMALIZATION_VERSION = "normalize-v2"
 MAX_SOURCE_BYTES = 4 * 1024 * 1024
@@ -1007,7 +1012,25 @@ class _CompileAttempt:
         cached = self._cached(actions, descriptor)
         if cached is not None:
             return cached
-        return self._drafted(descriptor, actions)
+        return self._drafted_with_retries(descriptor, actions)
+
+    def _drafted_with_retries(
+        self, descriptor: object, actions: tuple[object, object]
+    ) -> ResolvedCompilePlan | None:
+        """A malformed generation is stochastic; a bounded retry is the remedy.
+
+        Only a validation error is tried again: an input budget or a provider
+        that is down repeats itself, and retrying either would just spend
+        tokens. Every attempt stays in the lineage, so the extra calls are
+        visible rather than a silent cost.
+        """
+        for _attempt in range(VALIDATION_RETRIES + 1):
+            resolved = self._drafted(descriptor, actions)
+            if resolved is not None:
+                return resolved
+            if not self.lineage[-1].endswith(":validation_error"):
+                return None
+        return None
 
     def _record(
         self, stage: str, descriptor: object, failure: str
@@ -1086,7 +1109,11 @@ class _CompileAttempt:
     def _review(self, descriptor: object, operations: list[object]) -> list[object]:
         prompt = _critique_prompt(self.inputs, operations)
         if not self._fits(prompt, CRITIQUE_SYSTEM, CRITIQUE_SCHEMA, descriptor):
-            raise ValueError("compile critique exceeds input budget")
+            # A prompt that does not fit will not fit next time either. Saying
+            # `validation_error` here called a deterministic refusal a
+            # stochastic one, which read as a bad generation in the lineage and
+            # would have spent the retry budget on it.
+            raise _ProviderStageFailure("input_budget")
         critique = self._call(descriptor, prompt, CRITIQUE_SYSTEM, CRITIQUE_SCHEMA)
         if critique.text is None:
             raise _ProviderStageFailure(critique.failure_class or "provider_error")

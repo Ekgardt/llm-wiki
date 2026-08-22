@@ -140,3 +140,75 @@ def test_failed_compile_does_not_mark_hash(isolated_compile_state, monkeypatch):
 
     monkeypatch.undo()
     assert maybe_compile._current_owner == state_snapshot["owner_before"]
+
+
+def _attempt(monkeypatch, outcomes: list[str]):
+    """One provider attempt whose draft stage yields the given failure codes."""
+    import compile_memory
+
+    calls: list[int] = []
+
+    def staged(self, descriptor, actions):
+        index = len(calls)
+        calls.append(1)
+        if index >= len(outcomes):
+            return "plan"
+        return self._record("critique", descriptor, outcomes[index])
+
+    monkeypatch.setattr(compile_memory, "probe_candidate", lambda _d: True)
+    monkeypatch.setattr(
+        compile_memory._CompileAttempt, "_actions", lambda self, _d: ((), ())
+    )
+    monkeypatch.setattr(
+        compile_memory._CompileAttempt, "_cached", lambda self, _a, _d: None
+    )
+    monkeypatch.setattr(compile_memory._CompileAttempt, "_drafted", staged)
+    attempt = compile_memory._CompileAttempt(
+        compile_memory.CompileInputs((), (), ()), None, None, None
+    )
+    return attempt, calls
+
+
+def test_a_stochastic_validation_failure_is_retried(monkeypatch):
+    """One malformed generation used to lose the whole nightly compile.
+
+    Evidence: the nightly of 2026-08-22 reported
+    `critique:claude:<implicit>:validation_error` while the same inputs resolved
+    a plan minutes earlier and minutes later.
+    """
+    from dataclasses import replace
+
+    import compile_memory
+
+    attempt, calls = _attempt(monkeypatch, ["validation_error", "validation_error"])
+    candidate = compile_memory.provider_candidates("", max_tokens=4000)[0]
+
+    assert attempt.resolve(replace(candidate)) == "plan"
+    assert len(calls) == 3
+    assert attempt.lineage.count("critique:" + candidate.identity + ":validation_error") == 2
+
+
+def test_a_provider_failure_is_not_retried(monkeypatch):
+    """Only the stochastic class is retried; a provider that is down stays down."""
+    from dataclasses import replace
+
+    import compile_memory
+
+    attempt, calls = _attempt(monkeypatch, ["provider_error", "provider_error"])
+    candidate = compile_memory.provider_candidates("", max_tokens=4000)[0]
+
+    assert attempt.resolve(replace(candidate)) is None
+    assert len(calls) == 1
+
+
+def test_the_validation_retry_is_bounded(monkeypatch):
+    """Retries cost tokens, so they stop and the lineage shows every one."""
+    from dataclasses import replace
+
+    import compile_memory
+
+    attempt, calls = _attempt(monkeypatch, ["validation_error"] * 10)
+    candidate = compile_memory.provider_candidates("", max_tokens=4000)[0]
+
+    assert attempt.resolve(replace(candidate)) is None
+    assert len(calls) == compile_memory.VALIDATION_RETRIES + 1
