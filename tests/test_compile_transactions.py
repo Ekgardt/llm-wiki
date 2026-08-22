@@ -1819,6 +1819,82 @@ def test_a_quarantined_attempt_does_not_lock_its_inputs_out_of_compiling(vault):
     assert (root / "knowledge/notes/exact-byte-pattern.md").is_file()
 
 
+def test_a_corrupt_receipt_says_which_one_and_why(vault):
+    """One message for four causes explains nothing to whoever meets it.
+
+    The live vault stopped compiling behind this message and the only way to
+    learn the reason was to reproduce the failure through the reader.
+    """
+    root, state_root = vault
+    daily = _daily(root)
+    import compile_memory
+
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    compile_memory.apply_compile_plan(
+        inputs,
+        _semantic_plan(),
+        action_key="9" * 64,
+        trigger="manual",
+        coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T12:00:00Z",
+    )
+    digest = inputs.dailies[0].sha256
+    path = root / "knowledge/daily/receipts" / f"{digest}.md"
+    path.write_bytes(
+        path.read_bytes().replace(b'"state":"completed"', b'"state":"broken"')
+    )
+
+    with pytest.raises(ValueError) as failure:
+        compile_memory.read_compile_receipt(
+            digest, MarkdownCoordinator(root, state_root)
+        )
+
+    message = str(failure.value)
+    prefix, separator, reason = message.partition(": ")
+    assert prefix.startswith("compile receipt is corrupt")
+    assert path.name in prefix
+    assert separator and reason.strip()
+
+
+def test_the_retry_receipt_names_the_transaction_that_committed_it(vault):
+    """A receipt is evidence only when the operation it names actually wrote it.
+
+    The retry ordinal used to be chosen at the commit, after the receipts had
+    been rendered with the refused id. Those receipts then pointed at a
+    quarantined transaction, the reader called them corrupt, and every later
+    compile of the same sources failed on reading them. That is how the live
+    vault stopped compiling on 2026-08-22 while its own log said the compile
+    had succeeded.
+    """
+    root, state_root = vault
+    daily = _daily(root)
+    _quarantine_next_compile(root, state_root, daily)
+    import compile_memory
+
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    result = compile_memory.apply_compile_plan(
+        inputs,
+        _semantic_plan(),
+        action_key="9" * 64,
+        trigger="manual",
+        coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T12:30:00Z",
+    )
+    assert result.state == "committed"
+
+    coordinator = MarkdownCoordinator(root, state_root)
+    digest = inputs.dailies[0].sha256
+    record = compile_memory.read_compile_receipt(digest, coordinator)
+    assert record is not None
+
+    identity = str(record["operation_id"])
+    assert "#" not in identity, "the receipt names the identity, not the attempt"
+    committed = coordinator.committed_attempt(identity)
+    assert committed is not None
+    assert committed.state == "committed"
+    assert committed.operation_id.startswith(f"{identity}#")
+
+
 def test_the_quarantined_attempt_is_kept_and_named_as_the_parent(vault):
     """The refused attempt stays exactly as it was, and the retry points at it."""
     root, state_root = vault

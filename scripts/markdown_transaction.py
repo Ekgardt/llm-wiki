@@ -598,6 +598,15 @@ def _coordinator_v3_statements() -> tuple[MigrationStatement, ...]:
 # operator's problem rather than something to keep numbering.
 MAX_ATTEMPT_ORDINAL = 100
 
+LIKE_ESCAPE = "\\"
+
+
+def _like_prefix(value: str) -> str:
+    """Quote an operation id so LIKE reads it as literal text."""
+    for character in (LIKE_ESCAPE, "%", "_"):
+        value = value.replace(character, LIKE_ESCAPE + character)
+    return value
+
 
 def _coordinator_migration_error(
     code: str, message: str
@@ -4854,6 +4863,34 @@ class MarkdownCoordinator:
         if len(paths) != len(set(paths)):
             raise ValueError("duplicate transaction target")
         return normalized
+
+    def committed_attempt(self, operation_id: str):
+        """The attempt of this operation that committed, ordinals included.
+
+        Evidence written by a compile names the operation identity derived from
+        its inputs, not the row that wrote it: the receipt readers recompute
+        that identity from the receipt's own fields and refuse anything else.
+        When an attempt is refused, the next one carries the same identity with
+        the next ordinal, so the committed writer is a sibling of the named row.
+        Callers still have to prove the bytes: this only says which attempt to
+        ask.
+        """
+        record = self._record_for_operation_id(operation_id)
+        if record is not None and record.state == "committed":
+            return record
+        return self._committed_attempt_by_ordinal(operation_id)
+
+    def _committed_attempt_by_ordinal(self, operation_id: str):
+        with self._connect() as database:
+            row = database.execute(
+                'SELECT id FROM "transaction" WHERE operation_id LIKE ? ESCAPE ? '
+                "AND state = 'committed' ORDER BY created_at DESC, rowid DESC "
+                "LIMIT 1",
+                (_like_prefix(operation_id) + "#%", LIKE_ESCAPE),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._record(row["id"])
 
     def attempt_operation_id(self, operation_id: str) -> tuple[str, str | None]:
         """The id this attempt must use, and the quarantined one it follows.

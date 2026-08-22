@@ -755,6 +755,17 @@ def _receipt_path(digest: str) -> Path:
     return DAILY_DIR / "receipts" / f"{digest}.md"
 
 
+def _corrupt_receipt(reason: BaseException, path: Path | None = None) -> ValueError:
+    """Say which receipt failed and why, not merely that one did.
+
+    The bare message was the same for four different causes, so the only way to
+    learn what happened was to reproduce it through the reader. Receipt paths
+    and these reasons are our own text, never page content.
+    """
+    named = "" if path is None else f" {path.name}"
+    return ValueError(f"compile receipt is corrupt{named}: {reason}")
+
+
 def parse_compile_receipt_v2(raw_bytes: bytes, digest: str) -> dict[str, object]:
     """Validate canonical receipt bytes without requiring live transaction state."""
     try:
@@ -767,7 +778,7 @@ def parse_compile_receipt_v2(raw_bytes: bytes, digest: str) -> dict[str, object]
         UnicodeDecodeError,
         json.JSONDecodeError,
     ) as exc:
-        raise ValueError("compile receipt is corrupt") from exc
+        raise _corrupt_receipt(exc) from exc
 
 
 def _parsed_receipt_v2(raw_bytes: bytes, digest: str) -> dict[str, object]:
@@ -889,7 +900,7 @@ def read_compile_receipt_v2(
         UnicodeDecodeError,
         json.JSONDecodeError,
     ) as exc:
-        raise ValueError("compile receipt is corrupt") from exc
+        raise _corrupt_receipt(exc, path) from exc
 
 
 def _require_transaction_authority(
@@ -900,8 +911,8 @@ def _require_transaction_authority(
     raw_bytes: bytes,
 ) -> None:
     """A receipt is evidence only when a committed transaction wrote those bytes."""
-    transaction = coordinator._record_for_operation_id(str(record["operation_id"]))
-    if transaction is None or transaction.state != "committed":
+    transaction = coordinator.committed_attempt(str(record["operation_id"]))
+    if transaction is None:
         raise ValueError("compile receipt has no committed transaction authority")
     operations = _transaction_operations(transaction)
     receipt_operation = operations.get(path.relative_to(vault).as_posix())
@@ -2090,7 +2101,7 @@ def parse_compile_receipt_v3(
         UnicodeDecodeError,
         json.JSONDecodeError,
     ) as exc:
-        raise ValueError("compile receipt is corrupt") from exc
+        raise _corrupt_receipt(exc) from exc
 
 
 def _parsed_receipt_v3(
@@ -2236,7 +2247,7 @@ def read_compile_receipt_v3(
         UnicodeDecodeError,
         json.JSONDecodeError,
     ) as exc:
-        raise ValueError("compile receipt is corrupt") from exc
+        raise _corrupt_receipt(exc, path) from exc
 
 
 def _require_receipt_name(path: Path, source_identity: str) -> None:
@@ -2351,6 +2362,7 @@ class _ApplyPlan:
         self.evidence_bindings: list[dict[str, str]] = []
         self.dispositions: list[dict[str, str]] = []
         self.operation_id = ""
+        self.parent_transaction_id: str | None = None
 
     # -- claim assessment, outside the writer gate ---------------------------
 
@@ -2787,18 +2799,20 @@ class _ApplyPlan:
 
     def _commit(self) -> CompileApplyResult:
         # A refused attempt keeps its id and its evidence; this one takes the
-        # next ordinal so the same dailies stay compilable.
-        self.operation_id, parent = self.coordinator.attempt_operation_id(
-            self.operation_id
+        # next ordinal so the same dailies stay compilable. The receipts keep
+        # naming the derived identity, because their own readers recompute it
+        # from the record; the committed attempt is found through that identity.
+        attempt_id, self.parent_transaction_id = (
+            self.coordinator.attempt_operation_id(self.operation_id)
         )
         transaction = self.coordinator.prepare(
             self.changes,
-            operation_id=self.operation_id,
+            operation_id=attempt_id,
             content_guard="model_output",
             preconditions=self.preconditions,
             deadline=self.deadline,
             cancelled=self.cancelled,
-            _parent_transaction_id=parent,
+            _parent_transaction_id=self.parent_transaction_id,
         )
         self.coordinator.apply(
             transaction.id, deadline=self.deadline, cancelled=self.cancelled
@@ -2943,8 +2957,8 @@ def _discard_claim_index(claim_index: ClaimIndex) -> None:
 def _transaction_authority(
     coordinator: MarkdownCoordinator, operation_id: str
 ) -> tuple[object, int]:
-    transaction = coordinator._record_for_operation_id(operation_id)
-    if transaction is None or transaction.state != "committed":
+    transaction = coordinator.committed_attempt(operation_id)
+    if transaction is None:
         raise ValueError("compile transaction is not committed")
     with coordinator._connect() as database:
         row = database.execute(
