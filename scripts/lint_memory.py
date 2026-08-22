@@ -320,8 +320,22 @@ def _is_retired(md: Path) -> bool:
     return match.group(1).strip().strip("`\"'") in RETIRED_STATUSES
 
 
+def _is_published(md: Path) -> bool:
+    """Whether this repository publishes the page, by the same rule the index uses."""
+    from rebuild_memory_index import published_paths
+
+    named, _hidden = published_paths(ROOT, [_rel(md)])
+    return bool(named)
+
+
 def _expects_an_index_entry(md: Path) -> bool:
     if md.name in EDITORIAL_NAMES:
+        return False
+    if not _is_published(md):
+        # `knowledge/index.md` is tracked and names only published pages, so
+        # demanding a private page's presence there demands a leak. The first
+        # successful compile of this vault raised exactly that on the page it
+        # had just written.
         return False
     return not _is_retired(md)
 
@@ -408,7 +422,20 @@ def check_missing_backlinks(pages: list[Path], search_roots: list[Path]) -> list
         f"{_rel(source)} -> {_rel(target)} (no backlink)"
         for source, target in _backlink_pairs(link_map)
         if source not in link_map.get(target, [])
+        and _backlink_is_publishable(source, target)
     ]
+
+
+def _backlink_is_publishable(source: Path, target: Path) -> bool:
+    """The obligation sits on the target, so the target must be able to carry it.
+
+    A published page naming a private one would put a private slug into a
+    tracked file, which is the leak the whole publication boundary exists to
+    prevent. The reverse direction is already reported as a broken link.
+    """
+    if _is_published(source):
+        return True
+    return not _is_published(target)
 
 
 def check_sparse_pages(pages: list[Path], min_words: int) -> list[str]:
