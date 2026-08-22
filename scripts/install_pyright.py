@@ -1209,7 +1209,10 @@ def _ensure_runtime_parent(state_root: Path, deadline: float) -> _Handle:
     pending: _Handle | None = None
     try:
         for component in ("cache", "code-tools", "pyright"):
-            pending = _runtime_child(current, component, deadline)
+            pending, created = _runtime_child(current, component, deadline)
+            if created:
+                _check_deadline(deadline)
+                _checked_fsync_directory(current)
             current.close()
             current = pending
             pending = None
@@ -1219,26 +1222,31 @@ def _ensure_runtime_parent(state_root: Path, deadline: float) -> _Handle:
         raise
 
 
-def _runtime_child(current: _Handle, component: str, deadline: float) -> _Handle:
+def _runtime_child(
+    current: _Handle, component: str, deadline: float
+) -> tuple[_Handle, bool]:
+    """The child directory and whether this call is the one that created it.
+
+    The handle is returned before the parent is flushed, so a flush failure
+    still finds it in the caller's hands and closes it. Leaving it a local here
+    leaked it, and a leaked directory handle on Windows blocks the retry.
+    """
     _check_deadline(deadline)
     kind = _entry_kind(current, component)
     if kind is None:
-        return _created_runtime_child(current, component, deadline)
+        return _created_runtime_child(current, component)
     if kind == "directory":
-        return _open_child_directory(current, component, writable=True)
+        return _open_child_directory(current, component, writable=True), False
     raise PermissionError("runtime hierarchy contains an unsafe entry")
 
 
 def _created_runtime_child(
-    current: _Handle, component: str, deadline: float
-) -> _Handle:
+    current: _Handle, component: str
+) -> tuple[_Handle, bool]:
     try:
-        child = _create_child_directory(current, component)
+        return _create_child_directory(current, component), True
     except FileExistsError:
-        return _adopted_runtime_child(current, component)
-    _check_deadline(deadline)
-    _checked_fsync_directory(current)
-    return child
+        return _adopted_runtime_child(current, component), False
 
 
 def _adopted_runtime_child(current: _Handle, component: str) -> _Handle:
