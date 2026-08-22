@@ -2759,6 +2759,11 @@ class _ApplyPlan:
         )
 
     def _commit(self) -> CompileApplyResult:
+        # A refused attempt keeps its id and its evidence; this one takes the
+        # next ordinal so the same dailies stay compilable.
+        self.operation_id, parent = self.coordinator.attempt_operation_id(
+            self.operation_id
+        )
         transaction = self.coordinator.prepare(
             self.changes,
             operation_id=self.operation_id,
@@ -2766,6 +2771,7 @@ class _ApplyPlan:
             preconditions=self.preconditions,
             deadline=self.deadline,
             cancelled=self.cancelled,
+            _parent_transaction_id=parent,
         )
         self.coordinator.apply(
             transaction.id, deadline=self.deadline, cancelled=self.cancelled

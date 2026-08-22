@@ -1760,3 +1760,97 @@ def test_the_log_names_pages_in_a_vault_that_publishes_them(vault):
 
     log = (root / "knowledge/log.md").read_text(encoding="utf-8")
     assert "knowledge/notes/exact-byte-pattern.md" in log
+
+
+def _quarantine_next_compile(root: Path, state_root: Path, daily: Path):
+    """Drive one compile into quarantine the way the DLP boundary did."""
+    import compile_memory
+    import markdown_transaction
+
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    coordinator = MarkdownCoordinator(root, state_root)
+    original = markdown_transaction.require_safe_publication
+
+    def refuse(content: bytes) -> None:
+        del content
+        raise markdown_transaction.DLPContentBlocked("content contains protected data")
+
+    markdown_transaction.require_safe_publication = refuse
+    try:
+        with pytest.raises(Exception):
+            compile_memory.apply_compile_plan(
+                inputs,
+                _semantic_plan(),
+                action_key="9" * 64,
+                trigger="manual",
+                coordinator=coordinator,
+                completed_at="2026-07-14T12:00:00Z",
+            )
+    finally:
+        markdown_transaction.require_safe_publication = original
+    return inputs
+
+
+def test_a_quarantined_attempt_does_not_lock_its_inputs_out_of_compiling(vault):
+    """A refused attempt is evidence, not a life sentence for those dailies.
+
+    The operation id comes from the inputs, so a retry after the refusal was
+    fixed carries the same id with a different request hash and the coordinator
+    refused it. That refusal is right — an idempotency key must never be reused
+    for a different payload — so the retry takes the next attempt id instead,
+    exactly as project checkpoints already do.
+    """
+    root, state_root = vault
+    daily = _daily(root)
+    _quarantine_next_compile(root, state_root, daily)
+    import compile_memory
+
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    result = compile_memory.apply_compile_plan(
+        inputs,
+        _semantic_plan(),
+        action_key="9" * 64,
+        trigger="manual",
+        coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T12:30:00Z",
+    )
+
+    assert result.state == "committed"
+    assert (root / "knowledge/notes/exact-byte-pattern.md").is_file()
+
+
+def test_the_quarantined_attempt_is_kept_and_named_as_the_parent(vault):
+    """The refused attempt stays exactly as it was, and the retry points at it."""
+    root, state_root = vault
+    daily = _daily(root)
+    _quarantine_next_compile(root, state_root, daily)
+    import sqlite3
+
+    import compile_memory
+
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    compile_memory.apply_compile_plan(
+        inputs,
+        _semantic_plan(),
+        action_key="9" * 64,
+        trigger="manual",
+        coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T12:30:00Z",
+    )
+
+    database = sqlite3.connect(state_root / "run" / "markdown-transactions.sqlite3")
+    database.row_factory = sqlite3.Row
+    rows = list(
+        database.execute(
+            'SELECT operation_id, state, parent_transaction_id FROM "transaction" '
+            "WHERE operation_id LIKE 'compile:%' ORDER BY created_at"
+        )
+    )
+    database.close()
+
+    quarantined = [row for row in rows if row["state"] == "quarantined"]
+    committed = [row for row in rows if row["state"] == "committed"]
+    assert len(quarantined) == 1
+    assert committed
+    assert committed[-1]["operation_id"] != quarantined[0]["operation_id"]
+    assert committed[-1]["parent_transaction_id"] is not None

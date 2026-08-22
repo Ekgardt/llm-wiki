@@ -66,6 +66,7 @@ knowledge/notes/*
 !knowledge/notes/cross-lingual-citation-relevance-decision.md
 !knowledge/notes/single-directory-vault-decision.md
 !knowledge/notes/classification-measurement-stand-decision.md
+!knowledge/notes/idempotent-retry-after-quarantine-decision.md
 !knowledge/notes/audit-closure-security-recovery-control-plane-decision.md
 !knowledge/notes/derived-evidence-generation-decision.md
 !knowledge/notes/lsp-live-lease-decision.md

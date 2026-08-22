@@ -53,3 +53,4 @@ Routine low-risk recovery remains automatic and agent-readable.
 - [[knowledge/notes/citation-relevance-gate-decision]]
 - [[knowledge/notes/dead-task-retirement-and-restore-decision]]
 - [[knowledge/notes/daily-entry-boundary-decision]]
+- [[knowledge/notes/idempotent-retry-after-quarantine-decision]]

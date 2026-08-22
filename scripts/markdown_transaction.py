@@ -594,6 +594,11 @@ def _coordinator_v3_statements() -> tuple[MigrationStatement, ...]:
     )
 
 
+# A quarantined attempt may be followed by another, but a hundred of them is an
+# operator's problem rather than something to keep numbering.
+MAX_ATTEMPT_ORDINAL = 100
+
+
 def _coordinator_migration_error(
     code: str, message: str
 ) -> OperationalDatabaseContractError:
@@ -4849,6 +4854,28 @@ class MarkdownCoordinator:
         if len(paths) != len(set(paths)):
             raise ValueError("duplicate transaction target")
         return normalized
+
+    def attempt_operation_id(self, operation_id: str) -> tuple[str, str | None]:
+        """The id this attempt must use, and the quarantined one it follows.
+
+        A key is never reused for a different payload — that refusal stays. What
+        changes is that it stops being a dead end: a quarantined attempt wrote
+        nothing durable, so the next one is a new operation and takes the next
+        ordinal, naming the refused transaction as its parent. Project
+        checkpoints in this file have always retried this way.
+
+        An unchanged payload still resolves to the same id, so crash resume and
+        ordinary idempotency are untouched.
+        """
+        candidate = operation_id
+        parent: str | None = None
+        for ordinal in range(2, MAX_ATTEMPT_ORDINAL + 2):
+            record = self._record_for_operation_id(candidate)
+            if record is None or record.state != "quarantined":
+                return candidate, parent
+            parent = record.id
+            candidate = f"{operation_id}#{ordinal}"
+        raise ValueError("operation has exhausted its quarantined retry ordinals")
 
     def _existing_bound_record(
         self, operation_id: str, request_hash: str
