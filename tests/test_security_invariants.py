@@ -285,6 +285,32 @@ class TestRedactionBeforePersistence:
         assert key not in out
         assert "[REDACTED_API_KEY]" in out
 
+    def test_redact_keeps_a_key_prefix_that_is_part_of_a_word(self):
+        """`task-` ends in `sk-`, and that blocked every compile this vault ran.
+
+        The page slug `dead-task-retirement-and-restore-decision` contains
+        `sk-retirement-and-restore-decision`, which the provider-key pattern
+        matched. The fail-closed DLP boundary then quarantined the transaction,
+        so the memory pipeline could not write at all. A real key starts a
+        token; a suffix inside a word does not.
+        """
+        from secret_redact import redact_secrets
+
+        for text in (
+            "- [[knowledge/notes/dead-task-retirement-and-restore-decision]] — a page",
+            "Recorded in `dead-task-retirement-and-restore-decision.md`.",
+            "see risk-assessment-and-mitigation-plan for the rest",
+        ):
+            assert redact_secrets(text) == text
+
+    def test_redact_still_catches_a_key_after_punctuation(self):
+        """Boundary means token start, not whitespace: `=`, quotes and `(` count."""
+        from secret_redact import redact_secrets
+
+        key = "sk-ant-api03-QWERTYUIOPASDFGHJKLZXCVBNM1234"
+        for text in (f"OPENAI_API_KEY={key}", f'value "{key}"', f"({key})"):
+            assert key not in redact_secrets(text)
+
     def test_redact_keeps_hyphenated_prose(self):
         """A long hyphenated identifier is not a key just because it is long."""
         from secret_redact import redact_secrets
