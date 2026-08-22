@@ -4289,33 +4289,40 @@ def _transaction_database(state_root: Path, rows: list[tuple[str, str, str | Non
         "created_at TEXT, updated_at TEXT, parent_transaction_id TEXT, "
         "error_code TEXT, artifacts_pruned_at TEXT, owner_pid INTEGER)"
     )
+    database.execute(
+        "CREATE TABLE operation (transaction_id TEXT, position INTEGER, kind TEXT, "
+        "path TEXT, before_hash TEXT, after_hash TEXT, parent_device INTEGER, "
+        "parent_inode INTEGER, applied INTEGER)"
+    )
     for identifier, state, parent in rows:
         database.execute(
             'INSERT INTO "transaction" (id, operation_id, request_hash, state, '
             "preconditions_json, plan_hash, created_at, updated_at, "
-            "parent_transaction_id) VALUES (?, ?, ?, ?, '{}', '', ?, ?, ?)",
+            "parent_transaction_id) VALUES (?, ?, ?, ?, '{}', ?, ?, ?, ?)",
             (
                 identifier,
                 f"compile:{identifier}",
-                identifier,
+                identifier * 2,
                 state,
+                identifier * 2,
                 "2026-08-22T00:00:00Z",
                 "2026-08-22T00:00:00Z",
                 parent,
             ),
         )
+        # Every state but preparing and discarded must carry its operations, or
+        # the scan calls the row corrupt and the whole check turns error.
+        database.execute(
+            "INSERT INTO operation (transaction_id, position, kind, path, "
+            "before_hash, after_hash, parent_device, parent_inode, applied) "
+            "VALUES (?, 0, 'replace', 'knowledge/notes/page.md', ?, ?, 0, 0, 1)",
+            (identifier, "c" * 64, "d" * 64),
+        )
+        (state_root / "run" / "transactions" / identifier).mkdir(parents=True, exist_ok=True)
     database.commit()
     database.close()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "NEW-56: the severity rule counts every quarantined transaction as an open "
-        "problem. The three-line fix lives in a file carrying 39 complexity-gate "
-        "findings, so it waits for the owner's decision on that refactor."
-    ),
-)
 def test_a_quarantined_attempt_a_later_one_committed_is_history_not_a_problem(
     tmp_path, monkeypatch
 ):
@@ -4341,10 +4348,6 @@ def test_a_quarantined_attempt_a_later_one_committed_is_history_not_a_problem(
     assert check["details"]["quarantined_unresolved"] == 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="NEW-56: `quarantined_unresolved` does not exist until the fix lands.",
-)
 def test_a_quarantined_attempt_with_no_successor_still_needs_attention(
     tmp_path, monkeypatch
 ):

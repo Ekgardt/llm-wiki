@@ -138,22 +138,34 @@ def _environment_check(root: Path, state_root: Path) -> dict:
         "knowledge_notes": (root / "knowledge" / "notes").is_dir(),
         "scripts": (root / "scripts").is_dir(),
     }
-    status = "ok" if python_ok and root_ok and state_parent_ok and all(layout.values()) else "error"
+    status = _environment_status(python_ok, root_ok, state_parent_ok, layout)
     details = {
         "python": {
-            "status": "ok" if python_ok else "error",
+            "status": _ok_or_error(python_ok),
             "version": ".".join(str(part) for part in sys.version_info[:3]),
         },
-        "vault_root": {"status": "ok" if root_ok else "error"},
-        "state_root": {"status": "ok" if state_parent_ok else "error"},
+        "vault_root": {"status": _ok_or_error(root_ok)},
+        "state_root": {"status": _ok_or_error(state_parent_ok)},
         "layout": layout,
     }
-    message = (
-        "Configured roots and source layout are available."
-        if status == "ok"
-        else "Configured environment is incomplete."
-    )
-    return _result("environment", status, message, details)
+    return _result("environment", status, _environment_message(status), details)
+
+
+def _ok_or_error(value: bool) -> str:
+    return "ok" if value else "error"
+
+
+def _environment_status(
+    python_ok: bool, root_ok: bool, state_parent_ok: bool, layout: dict
+) -> str:
+    roots_ok = root_ok and state_parent_ok
+    return _ok_or_error(python_ok and roots_ok and all(layout.values()))
+
+
+def _environment_message(status: str) -> str:
+    if status == "ok":
+        return "Configured roots and source layout are available."
+    return "Configured environment is incomplete."
 
 
 def _is_writable_directory(directory: Path) -> bool:
@@ -183,15 +195,23 @@ def _safe_kind(path: Path, root: Path) -> tuple[str, os.stat_result | None]:
         return "missing", None
     except OSError:
         return "unsafe", None
+    return _kind_of_stat(path, root, info), info
+
+
+def _kind_of_stat(path: Path, root: Path, info: os.stat_result) -> str:
     if stat.S_ISLNK(info.st_mode):
-        return "symlink", info
+        return "symlink"
     if not _within(path, root):
-        return "outside", info
+        return "outside"
+    return _regular_kind(info)
+
+
+def _regular_kind(info: os.stat_result) -> str:
     if stat.S_ISDIR(info.st_mode):
-        return "directory", info
+        return "directory"
     if stat.S_ISREG(info.st_mode):
-        return "regular", info
-    return "special", info
+        return "regular"
+    return "special"
 
 
 def _runtime_directory_state(state_root: Path) -> tuple[dict[str, object], tuple[int, int, int]]:
@@ -292,17 +312,30 @@ def _read_bounded_json(
 
 
 def _lease_state(task: dict, now: datetime) -> tuple[bool, bool]:
+    return _lease_is_stale(task, now), _lease_is_owned(task)
+
+
+def _lease_is_stale(task: dict, now: datetime) -> bool:
+    try:
+        acquired = _aware_timestamp(str(task.get("lease_acquired_at", "")))
+    except (TypeError, ValueError):
+        return True
+    return (now - acquired).total_seconds() > STALE_LEASE_SECONDS
+
+
+def _aware_timestamp(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _lease_is_owned(task: dict) -> bool:
     pid = task.get("lease_pid")
     token = task.get("lease_token")
-    try:
-        acquired = datetime.fromisoformat(str(task.get("lease_acquired_at", "")))
-        if acquired.tzinfo is None:
-            acquired = acquired.replace(tzinfo=timezone.utc)
-        stale = (now - acquired.astimezone(timezone.utc)).total_seconds() > STALE_LEASE_SECONDS
-    except (TypeError, ValueError):
-        stale = True
-    owned = isinstance(pid, int) and pid > 0 and isinstance(token, str) and bool(token)
-    return stale, owned
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    return isinstance(token, str) and bool(token)
 
 
 def _queue_artifact_state(state_root: Path, deadline: float) -> dict[str, Any]:
@@ -589,11 +622,21 @@ def _bounded_runtime_entries(
         return [], False, False
     if kind != "directory":
         return [], False, True
+    return _scanned_entries(directory, limit, deadline)
+
+
+def _entry_budget_spent(entries: list[Path], limit: int, deadline: float) -> bool:
+    return _deadline_reached(deadline) or len(entries) >= limit
+
+
+def _scanned_entries(
+    directory: Path, limit: int, deadline: float
+) -> tuple[list[Path], bool, bool]:
     entries: list[Path] = []
     try:
         with os.scandir(directory) as scanned:
             for entry in scanned:
-                if _deadline_reached(deadline) or len(entries) >= limit:
+                if _entry_budget_spent(entries, limit, deadline):
                     return entries, True, False
                 entries.append(Path(entry.path))
     except OSError:
@@ -639,9 +682,17 @@ def _live_owner(row: sqlite3.Row, now: datetime, *, pid_column: str) -> bool:
     columns = set(row.keys())
     pid = row[pid_column] if pid_column in columns else None
     expiry = _parse_utc(row["expires_at"]) if "expires_at" in columns else None
-    pid_live = isinstance(pid, int) and pid > 0 and _pid_alive(pid)
-    unexpired = expiry is not None and expiry > now
-    return pid_live or unexpired
+    return _owner_pid_live(pid) or _owner_unexpired(expiry, now)
+
+
+def _owner_pid_live(pid: object) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    return _pid_alive(pid)
+
+
+def _owner_unexpired(expiry: datetime | None, now: datetime) -> bool:
+    return expiry is not None and expiry > now
 
 
 def _owner_row_known(row: sqlite3.Row, *, pid_column: str) -> bool:
@@ -1153,7 +1204,46 @@ def _scan_transaction_database(
             details=details,
             states=states,
         )
+        details["quarantined_unresolved"] = _unresolved_quarantine(
+            database, transaction_columns
+        )
         return None
+
+
+def _unresolved_quarantine(
+    database: sqlite3.Connection, transaction_columns: set[str]
+) -> int:
+    """Quarantined attempts no committed retry has superseded.
+
+    Quarantine is retained evidence, so counting all of it as an open problem
+    left a vault that had already recovered permanently reporting `error` — and
+    a health check that is always red stops being read. An attempt whose chain
+    later committed is history; one with no successor still needs attention.
+    """
+    if "parent_transaction_id" not in transaction_columns:
+        return _quarantined_total(database)
+    resolved = {
+        row[0]
+        for row in database.execute(
+            'SELECT parent_transaction_id FROM "transaction" '
+            "WHERE state='committed' AND parent_transaction_id IS NOT NULL"
+        )
+        if row[0]
+    }
+    quarantined = {
+        row[0]
+        for row in database.execute(
+            'SELECT id FROM "transaction" WHERE state=\'quarantined\''
+        )
+    }
+    return len(quarantined - resolved)
+
+
+def _quarantined_total(database: sqlite3.Connection) -> int:
+    row = database.execute(
+        'SELECT COUNT(*) FROM "transaction" WHERE state=\'quarantined\''
+    ).fetchone()
+    return int(row[0]) if row else 0
 
 
 def _unreadable_transactions(details: dict, message: str) -> dict:
@@ -1173,8 +1263,10 @@ def _missing_transaction_database(
     return _result("transactions", "ok", "No transaction database exists.", details)
 
 
-def _transaction_status(states: dict[str, int], problem: int, invalid: bool) -> str:
-    if states["conflicted"] or states["quarantined"] or invalid:
+def _transaction_status(
+    states: dict[str, int], problem: int, invalid: bool, unresolved: int = 0
+) -> str:
+    if states["conflicted"] or unresolved or invalid:
         return "error"
     if problem:
         return "degraded"
@@ -1207,7 +1299,7 @@ def _transaction_result(details: dict, states: dict[str, int]) -> dict:
     problem = (
         sum(states[state] for state in ("preparing", "prepared", "applying"))
         + states["conflicted"]
-        + states["quarantined"]
+        + details["quarantined_unresolved"]
     )
     invalid_state = any(
         code in details["deletion_codes"]
@@ -1220,7 +1312,9 @@ def _transaction_result(details: dict, states: dict[str, int]) -> dict:
         message = "Transaction state requires operator attention."
     return _result(
         "transactions",
-        _transaction_status(states, problem, invalid_state),
+        _transaction_status(
+            states, problem, invalid_state, details["quarantined_unresolved"]
+        ),
         message,
         details,
     )
@@ -1235,6 +1329,7 @@ def _empty_transaction_details() -> tuple[dict, dict[str, int]]:
         "live_project_leases": 0,
         "live_writers": 0,
         "live_maintenance_owners": 0,
+        "quarantined_unresolved": 0,
         "read_error": False,
         "deletion_codes": [],
     }
@@ -1732,11 +1827,15 @@ def _archive_months(
     if error:
         raise OSError("archive month scan failed")
     months = [month for month in months if _archive_month_directory(month, root)]
-    if truncated or len(months) > 120:
-        details["codes"].append("archive_scan_truncated")
-        details["deletion_codes"].append("archive_state_unknown")
-        return months[:120]
-    return months
+    if not _months_truncated(truncated, months):
+        return months
+    details["codes"].append("archive_scan_truncated")
+    details["deletion_codes"].append("archive_state_unknown")
+    return months[:120]
+
+
+def _months_truncated(truncated: bool, months: list[Path]) -> bool:
+    return truncated or len(months) > 120
 
 
 def _is_bag_directory(item: Path, root: Path) -> bool:
@@ -1763,6 +1862,12 @@ def _collect_month_bags(
     if truncated:
         details["codes"].append("archive_scan_truncated")
         details["deletion_codes"].append("archive_state_unknown")
+    _append_bag_directories(entries, root, details, bags)
+
+
+def _append_bag_directories(
+    entries: list[Path], root: Path, details: dict, bags: list[Path]
+) -> None:
     for item in entries:
         if _is_bag_directory(item, root):
             bags.append(item)
@@ -1816,15 +1921,19 @@ def _bag_path_entry(item: object) -> bool:
 
 
 def _index_validity(index: dict, bag_paths: set[str]) -> str:
+    if index.get("schema_version") != "archive-index/v1":
+        return "invalid"
     indexed = index.get("bags", [])
     indexed_paths = {
         str(item.get("bag_path")) for item in indexed if _bag_path_entry(item)
     }
-    if index.get("schema_version") != "archive-index/v1":
-        return "invalid"
-    if indexed_paths != bag_paths or len(indexed_paths) != len(indexed):
-        return "invalid"
-    return "valid"
+    if _index_paths_agree(indexed_paths, bag_paths, indexed):
+        return "valid"
+    return "invalid"
+
+
+def _index_paths_agree(indexed_paths: set[str], bag_paths: set[str], indexed) -> bool:
+    return indexed_paths == bag_paths and len(indexed_paths) == len(indexed)
 
 
 def _archive_index_state(
@@ -1948,20 +2057,30 @@ def _claim_check(root: Path, state_root: Path, deadline: float = float("inf")) -
     if kind != "regular":
         details.update(index="invalid", read_error=True)
         return _result("claims", "error", "Claim index is unsafe.", details)
+    _read_claim_index(path, state_root, deadline, details)
+    return _claim_result(details)
+
+
+def _record_claim_schema(index_class, database, details: dict) -> None:
+    compatible = index_class._schema_compatible(database)  # noqa: SLF001
+    details["index"] = "valid" if compatible else "invalid"
+    if compatible:
+        _count_claims(database, details)
+
+
+def _read_claim_index(
+    path: Path, state_root: Path, deadline: float, details: dict
+) -> None:
     try:
         from claims import ClaimIndex
 
         with _readonly_database(path, state_root, deadline=deadline) as database:
             if _deadline_reached(deadline):
                 raise TimeoutError("claim check deadline")
-            compatible = ClaimIndex._schema_compatible(database)  # noqa: SLF001
-            details["index"] = "valid" if compatible else "invalid"
-            if compatible:
-                _count_claims(database, details)
+            _record_claim_schema(ClaimIndex, database, details)
     except (OSError, PermissionError, sqlite3.Error, TimeoutError, ValueError):
         details["index"] = "invalid"
         details["read_error"] = True
-    return _claim_result(details)
 
 
 def _filesystem_check(state_root: Path, deadline: float = float("inf")) -> dict:
@@ -1977,6 +2096,14 @@ def _filesystem_check(state_root: Path, deadline: float = float("inf")) -> dict:
                 "read_error": True,
             },
         )
+    unusable = _filesystem_unusable(state_root)
+    if unusable is not None:
+        return unusable
+    probe_deadline = min(deadline, time.monotonic() + FILESYSTEM_PROBE_SECONDS)
+    return _locking_result(_probe_locking(state_root, probe_deadline))
+
+
+def _filesystem_unusable(state_root: Path) -> dict | None:
     try:
         network = reliable_memory._known_network_path(state_root)
     except (OSError, RuntimeError, ValueError):
@@ -2000,29 +2127,32 @@ def _filesystem_check(state_root: Path, deadline: float = float("inf")) -> dict:
             "Runtime filesystem locking cannot be probed until the state root exists.",
             {"local": True, "locking": "unknown"},
         )
-    probe_deadline = min(deadline, time.monotonic() + FILESYSTEM_PROBE_SECONDS)
+    return None
+
+
+def _probe_locking(state_root: Path, probe_deadline: float) -> bool | None:
     try:
-        locking = reliable_memory._sqlite_lock_probe(state_root, deadline=probe_deadline)
+        return reliable_memory._sqlite_lock_probe(state_root, deadline=probe_deadline)
     except (OSError, RuntimeError, sqlite3.Error):
-        locking = None
-    details = {
-        "local": True,
-        "locking": "supported"
-        if locking is True
-        else "unsupported"
-        if locking is False
-        else "unknown",
-    }
-    status = "ok" if locking is True else "error" if locking is False else "degraded"
+        return None
+
+
+# Three states, one table each: a nested ternary hid which reading meant what.
+_LOCKING_STATE = {True: "supported", False: "unsupported", None: "unknown"}
+_LOCKING_STATUS = {True: "ok", False: "error", None: "degraded"}
+_LOCKING_MESSAGE = {
+    True: "Runtime filesystem supports local locking.",
+    False: "Runtime filesystem locking is broken.",
+    None: "Runtime filesystem locking probe is unavailable.",
+}
+
+
+def _locking_result(locking: bool | None) -> dict:
     return _result(
         "filesystem",
-        status,
-        "Runtime filesystem supports local locking."
-        if locking is True
-        else "Runtime filesystem locking is broken."
-        if locking is False
-        else "Runtime filesystem locking probe is unavailable.",
-        details,
+        _LOCKING_STATUS[locking],
+        _LOCKING_MESSAGE[locking],
+        {"local": True, "locking": _LOCKING_STATE[locking]},
     )
 
 
@@ -2138,22 +2268,45 @@ def _run_deletion_check(
         code = getattr(exc, "code", "runtime_deletion_check_unavailable")
         return _deletion_snapshot([str(code)])
 
-    codes: list[str] = []
-    try:
-        codes = _observed_deletion_codes(
+    return _deletion_snapshot(
+        _deletion_codes_with_owner(
+            registry,
+            owner,
             root_path,
             state_path,
             now,
             snapshot_deadline,
-            owner,
             validate_reliability_v3_runtime,
         )
+    )
+
+
+def _release_deletion_owner(registry, owner, codes: list[str]) -> None:
+    from operational_ownership import OperationalOwnershipError
+
+    try:
+        registry.release(owner)
+    except (OperationalOwnershipError, OSError, sqlite3.Error, ValueError):
+        codes.append("runtime_deletion_check_release_failed")
+
+
+def _deletion_codes_with_owner(
+    registry,
+    owner,
+    root_path: Path,
+    state_path: Path,
+    now: datetime,
+    snapshot_deadline: float,
+    validate,
+) -> list[str]:
+    codes: list[str] = []
+    try:
+        codes = _observed_deletion_codes(
+            root_path, state_path, now, snapshot_deadline, owner, validate
+        )
     finally:
-        try:
-            registry.release(owner)
-        except (OperationalOwnershipError, OSError, sqlite3.Error, ValueError):
-            codes.append("runtime_deletion_check_release_failed")
-    return _deletion_snapshot(codes)
+        _release_deletion_owner(registry, owner, codes)
+    return codes
 
 
 LSP_FAILURE_RETENTION = timedelta(days=7)
@@ -2194,25 +2347,46 @@ def _parse_lsp_timestamp(value: object) -> datetime | None:
         parsed = datetime.fromisoformat(value[:-1] + "+00:00")
     except ValueError:
         return None
-    if parsed.tzinfo != timezone.utc or parsed.isoformat().replace("+00:00", "Z") != value:
-        return None
-    return parsed
+    return parsed if _lsp_timestamp_round_trips(parsed, value) else None
+
+
+def _lsp_timestamp_round_trips(parsed: datetime, value: str) -> bool:
+    if parsed.tzinfo != timezone.utc:
+        return False
+    return parsed.isoformat().replace("+00:00", "Z") == value
+
+
+def _valid_lsp_command(command: object) -> bool:
+    if not isinstance(command, str) or not 0 < len(command) <= 255:
+        return False
+    return not any(character in command for character in "/\\\x00\r\n")
+
+
+def _valid_lsp_nonces(record: dict[str, Any], owner_nonce: str) -> bool:
+    if record.get("owner_nonce") != owner_nonce:
+        return False
+    generation = record.get("generation_nonce")
+    if not isinstance(generation, str):
+        return False
+    return _LSP_OWNER_NONCE.fullmatch(generation) is not None
+
+
+def _valid_lsp_owner_process(record: dict[str, Any]) -> bool:
+    if not _lsp_positive_pid(record.get("owner_pid")):
+        return False
+    if _parse_lsp_timestamp(record.get("started_at")) is None:
+        return False
+    return record.get("state") == "process_running"
 
 
 def _valid_lsp_owner(record: dict[str, Any], owner_nonce: str) -> bool:
-    command = record.get("command_basename")
-    return (
-        set(record) == _LSP_OWNER_FIELDS
-        and isinstance(command, str)
-        and 0 < len(command) <= 255
-        and not any(character in command for character in "/\\\x00\r\n")
-        and record.get("owner_nonce") == owner_nonce
-        and isinstance(record.get("generation_nonce"), str)
-        and _LSP_OWNER_NONCE.fullmatch(record["generation_nonce"]) is not None
-        and _lsp_positive_pid(record.get("owner_pid"))
-        and _parse_lsp_timestamp(record.get("started_at")) is not None
-        and record.get("state") == "process_running"
-    )
+    if set(record) != _LSP_OWNER_FIELDS:
+        return False
+    if not _valid_lsp_command(record.get("command_basename")):
+        return False
+    if not _valid_lsp_nonces(record, owner_nonce):
+        return False
+    return _valid_lsp_owner_process(record)
 
 
 def _lsp_schema_version_one(record: dict[str, Any]) -> bool:
@@ -2257,19 +2431,28 @@ def _valid_lsp_lease(record: dict[str, Any], owner_nonce: str) -> bool:
     return _lsp_lease_window_valid(record)
 
 
+def _valid_lsp_failure_code(code: object) -> bool:
+    if not isinstance(code, str):
+        return False
+    return re.fullmatch(r"[a-z0-9_]{1,64}", code) is not None
+
+
+def _valid_lsp_failure_pid(record: dict[str, Any]) -> bool:
+    if "server_pid" not in record:
+        return True
+    return _lsp_positive_pid(record.get("server_pid"))
+
+
 def _valid_lsp_failure(record: dict[str, Any], owner_nonce: str) -> bool:
-    fields = set(record)
-    code = record.get("code")
-    return (
-        fields in (_LSP_FAILURE_FIELDS, _LSP_FAILURE_FIELDS | {"server_pid"})
-        and isinstance(code, str)
-        and re.fullmatch(r"[a-z0-9_]{1,64}", code) is not None
-        and record.get("owner_nonce") == owner_nonce
-        and isinstance(record.get("generation_nonce"), str)
-        and _LSP_OWNER_NONCE.fullmatch(record["generation_nonce"]) is not None
-        and _parse_lsp_timestamp(record.get("timestamp")) is not None
-        and ("server_pid" not in record or _lsp_positive_pid(record.get("server_pid")))
-    )
+    if set(record) not in (_LSP_FAILURE_FIELDS, _LSP_FAILURE_FIELDS | {"server_pid"}):
+        return False
+    if not _valid_lsp_failure_code(record.get("code")):
+        return False
+    if not _valid_lsp_nonces(record, owner_nonce):
+        return False
+    if _parse_lsp_timestamp(record.get("timestamp")) is None:
+        return False
+    return _valid_lsp_failure_pid(record)
 
 
 # What actually fixes each way Pyright can fail to qualify. Reinstalling is the
@@ -2369,24 +2552,32 @@ def _pyright_check(
         }
     )
     details["executable_sha256_present"] = identity.executable_sha256 is not None
-    if not identity.qualified:
-        if identity.status == "missing":
-            codes.append("pyright_missing")
-        else:
-            details["status"] = "degraded"
-            for code in identity.degradation_codes:
-                if code not in codes:
-                    codes.append(code)
-            if identity.version != "1.1.411" and "pyright_version_mismatch" not in codes:
-                codes.append("pyright_version_mismatch")
-        details["recommended_action"] = _pyright_recommended_action(codes)
-        return _result(
-            "pyright",
-            "degraded",
-            "Pyright identity is degraded or mismatched.",
-            details,
-        )
-    return _result("pyright", "ok", "Pyright identity is qualified.", details)
+    if identity.qualified:
+        return _result("pyright", "ok", "Pyright identity is qualified.", details)
+    _record_pyright_degradation(identity, details, codes)
+    details["recommended_action"] = _pyright_recommended_action(codes)
+    return _result(
+        "pyright",
+        "degraded",
+        "Pyright identity is degraded or mismatched.",
+        details,
+    )
+
+
+def _extend_unique(codes: list[str], extra) -> None:
+    for code in extra:
+        if code not in codes:
+            codes.append(code)
+
+
+def _record_pyright_degradation(identity, details: dict, codes: list[str]) -> None:
+    if identity.status == "missing":
+        codes.append("pyright_missing")
+        return
+    details["status"] = "degraded"
+    _extend_unique(codes, identity.degradation_codes)
+    if identity.version != "1.1.411":
+        _extend_unique(codes, ("pyright_version_mismatch",))
 
 
 def _navigation_optional_check(
@@ -2433,27 +2624,35 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return record
 
 
+def _string_state(character: str, escaped: bool) -> tuple[bool, bool]:
+    """Whether the scanner is still inside a string, and whether it is escaped."""
+    if escaped:
+        return True, False
+    if character == "\\":
+        return True, True
+    return character != '"', False
+
+
+def _depth_after(character: str, depth: int) -> int:
+    if character in "[{":
+        if depth + 1 > _LSP_JSON_MAX_DEPTH:
+            raise ValueError("LSP runtime record is too deeply nested")
+        return depth + 1
+    if character in "]}":
+        return depth - 1
+    return depth
+
+
 def _require_lsp_json_depth(text: str) -> None:
     depth = 0
     in_string = False
     escaped = False
     for character in text:
         if in_string:
-            if escaped:
-                escaped = False
-            elif character == "\\":
-                escaped = True
-            elif character == '"':
-                in_string = False
+            in_string, escaped = _string_state(character, escaped)
             continue
-        if character == '"':
-            in_string = True
-        elif character in "[{":
-            depth += 1
-            if depth > _LSP_JSON_MAX_DEPTH:
-                raise ValueError("LSP runtime record is too deeply nested")
-        elif character in "]}":
-            depth -= 1
+        depth = _depth_after(character, depth)
+        in_string = character == '"'
 
 
 def _decode_lsp_record(payload: bytes) -> dict[str, Any]:
@@ -2477,42 +2676,60 @@ def _lsp_posix_directory_flags() -> int:
     return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
 
 
-def _open_posix_lsp_root(state_root: Path, deadline: float) -> int:
-    state_root = Path(os.path.abspath(state_root))
-    anchor = Path(state_root.anchor)
+def _require_absolute_lsp_root(state_root: Path, anchor: Path) -> None:
     if not state_root.is_absolute() or not anchor.anchor:
         raise ValueError("LSP state root must be an absolute local path")
-    components = (*state_root.relative_to(anchor).parts, "run", "lsp")
-    flags = _lsp_posix_directory_flags()
-    current: int | None = None
+
+
+def _opened_lsp_anchor(anchor: Path, deadline: float) -> int:
+    _require_lsp_deadline(deadline)
+    current = os.open(anchor, _lsp_posix_directory_flags())
     try:
-        _require_lsp_deadline(deadline)
-        current = os.open(anchor, flags)
         _require_lsp_deadline(deadline)
         if not stat.S_ISDIR(os.fstat(current).st_mode):
             raise PermissionError("LSP path anchor is not a directory")
         _require_lsp_deadline(deadline)
-        for component in components:
-            _require_lsp_deadline(deadline)
-            opened = os.open(component, flags, dir_fd=current)
-            try:
-                _require_lsp_deadline(deadline)
-                if not stat.S_ISDIR(os.fstat(opened).st_mode):
-                    raise PermissionError("LSP path component is not a directory")
-                _require_lsp_deadline(deadline)
-            except BaseException:
-                os.close(opened)
-                raise
-            previous = current
-            current = opened
-            os.close(previous)
-        if current is None:
-            raise OSError("LSP root descriptor was not retained")
         return current
     except BaseException:
-        if current is not None:
-            os.close(current)
+        os.close(current)
         raise
+
+
+def _opened_lsp_component(parent: int, component: str, deadline: float) -> int:
+    opened = os.open(component, _lsp_posix_directory_flags(), dir_fd=parent)
+    try:
+        _require_lsp_deadline(deadline)
+        if not stat.S_ISDIR(os.fstat(opened).st_mode):
+            raise PermissionError("LSP path component is not a directory")
+        _require_lsp_deadline(deadline)
+        return opened
+    except BaseException:
+        os.close(opened)
+        raise
+
+
+def _descend_lsp_components(current: int, components, deadline: float) -> int:
+    """Owns `current`: closes it on any failure and returns the final descriptor."""
+    try:
+        for component in components:
+            _require_lsp_deadline(deadline)
+            opened = _opened_lsp_component(current, component, deadline)
+            os.close(current)
+            current = opened
+        return current
+    except BaseException:
+        os.close(current)
+        raise
+
+
+def _open_posix_lsp_root(state_root: Path, deadline: float) -> int:
+    state_root = Path(os.path.abspath(state_root))
+    anchor = Path(state_root.anchor)
+    _require_absolute_lsp_root(state_root, anchor)
+    components = (*state_root.relative_to(anchor).parts, "run", "lsp")
+    return _descend_lsp_components(
+        _opened_lsp_anchor(anchor, deadline), components, deadline
+    )
 
 
 def _list_posix_lsp_names(
@@ -2546,8 +2763,7 @@ def _open_posix_lsp_directory(
     _require_lsp_deadline(deadline)
     expected = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     _require_lsp_deadline(deadline)
-    if stat.S_ISLNK(expected.st_mode) or not stat.S_ISDIR(expected.st_mode):
-        raise PermissionError("LSP runtime member is not a real directory")
+    _require_real_lsp_directory(expected)
     opened = os.open(
         name,
         _lsp_posix_directory_flags(),
@@ -2555,14 +2771,23 @@ def _open_posix_lsp_directory(
     )
     try:
         _require_lsp_deadline(deadline)
-        current = os.fstat(opened)
+        _require_same_directory(opened, expected)
         _require_lsp_deadline(deadline)
-        if not stat.S_ISDIR(current.st_mode) or not os.path.samestat(expected, current):
-            raise PermissionError("LSP runtime directory changed before open")
         return opened
     except BaseException:
         os.close(opened)
         raise
+
+
+def _require_real_lsp_directory(expected: os.stat_result) -> None:
+    if stat.S_ISLNK(expected.st_mode) or not stat.S_ISDIR(expected.st_mode):
+        raise PermissionError("LSP runtime member is not a real directory")
+
+
+def _require_same_directory(opened: int, expected: os.stat_result) -> None:
+    current = os.fstat(opened)
+    if not stat.S_ISDIR(current.st_mode) or not os.path.samestat(expected, current):
+        raise PermissionError("LSP runtime directory changed before open")
 
 
 def _read_posix_lsp_record(
@@ -2573,52 +2798,72 @@ def _read_posix_lsp_record(
     _require_lsp_deadline(deadline)
     expected = os.stat(name, dir_fd=owner_fd, follow_symlinks=False)
     _require_lsp_deadline(deadline)
-    if (
-        stat.S_ISLNK(expected.st_mode)
-        or not stat.S_ISREG(expected.st_mode)
-        or expected.st_size > _LSP_RECORD_BYTES
-    ):
-        raise PermissionError("LSP runtime record is unsafe or oversized")
+    _require_safe_lsp_record(expected)
     descriptor = os.open(
         name,
         os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
         dir_fd=owner_fd,
     )
     try:
-        _require_lsp_deadline(deadline)
-        opened = os.fstat(descriptor)
-        _require_lsp_deadline(deadline)
-        if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(expected, opened):
-            raise PermissionError("LSP runtime record changed before open")
-        identity = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
-        chunks: list[bytes] = []
-        total = 0
-        while total <= _LSP_RECORD_BYTES:
-            _require_lsp_deadline(deadline)
-            chunk = os.read(
-                descriptor,
-                min(_LSP_READ_CHUNK_BYTES, _LSP_RECORD_BYTES + 1 - total),
-            )
-            _require_lsp_deadline(deadline)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-        if total > _LSP_RECORD_BYTES:
-            raise ValueError("LSP runtime record exceeds its byte bound")
-        _require_lsp_deadline(deadline)
-        after = os.fstat(descriptor)
-        _require_lsp_deadline(deadline)
-        if total != opened.st_size or identity != (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-        ):
-            raise PermissionError("LSP runtime record changed during read")
-        return _decode_lsp_record(b"".join(chunks))
+        return _read_opened_lsp_record(descriptor, expected, deadline)
     finally:
         os.close(descriptor)
+
+
+def _require_safe_lsp_record(expected: os.stat_result) -> None:
+    if stat.S_ISLNK(expected.st_mode) or not stat.S_ISREG(expected.st_mode):
+        raise PermissionError("LSP runtime record is unsafe or oversized")
+    if expected.st_size > _LSP_RECORD_BYTES:
+        raise PermissionError("LSP runtime record is unsafe or oversized")
+
+
+def _read_lsp_chunks(descriptor: int, deadline: float) -> tuple[list[bytes], int]:
+    chunks: list[bytes] = []
+    total = 0
+    while total <= _LSP_RECORD_BYTES:
+        _require_lsp_deadline(deadline)
+        chunk = os.read(
+            descriptor,
+            min(_LSP_READ_CHUNK_BYTES, _LSP_RECORD_BYTES + 1 - total),
+        )
+        _require_lsp_deadline(deadline)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    if total > _LSP_RECORD_BYTES:
+        raise ValueError("LSP runtime record exceeds its byte bound")
+    return chunks, total
+
+
+def _require_stable_lsp_record(
+    descriptor: int, opened: os.stat_result, identity: tuple, total: int, deadline: float
+) -> None:
+    after = os.fstat(descriptor)
+    _require_lsp_deadline(deadline)
+    changed = identity != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+    )
+    if total != opened.st_size or changed:
+        raise PermissionError("LSP runtime record changed during read")
+
+
+def _read_opened_lsp_record(
+    descriptor: int, expected: os.stat_result, deadline: float
+) -> dict[str, Any]:
+    _require_lsp_deadline(deadline)
+    opened = os.fstat(descriptor)
+    _require_lsp_deadline(deadline)
+    if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(expected, opened):
+        raise PermissionError("LSP runtime record changed before open")
+    identity = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+    chunks, total = _read_lsp_chunks(descriptor, deadline)
+    _require_lsp_deadline(deadline)
+    _require_stable_lsp_record(descriptor, opened, identity, total, deadline)
+    return _decode_lsp_record(b"".join(chunks))
 
 
 class _PosixOwnerReading(NamedTuple):
@@ -2677,23 +2922,28 @@ def _read_posix_owner(
     records: dict[str, dict[str, Any] | None] = {
         name: None for name in _LSP_RECORD_NAMES
     }
-    present: frozenset[str] = frozenset()
+    present, unreadable, stop = _read_posix_owner_records(
+        lsp_fd, owner_name, deadline, records
+    )
+    snapshot = _posix_owner_snapshot(owner_name, present, records)
+    return _PosixOwnerReading(snapshot, unreadable, stop)
+
+
+def _read_posix_owner_records(
+    lsp_fd: int, owner_name: str, deadline: float, records: dict
+) -> tuple[frozenset[str], bool, bool]:
     owner_fd: int | None = None
-    unreadable = False
-    stop = False
     try:
         owner_fd = _open_posix_lsp_directory(lsp_fd, owner_name, deadline)
         present, unreadable = _read_posix_owner_children(owner_fd, deadline, records)
+        return present, unreadable, False
     except TimeoutError:
-        unreadable = True
-        stop = True
+        return frozenset(), True, True
     except (OSError, ValueError):
-        unreadable = True
+        return frozenset(), True, False
     finally:
         if owner_fd is not None:
             os.close(owner_fd)
-    snapshot = _posix_owner_snapshot(owner_name, present, records)
-    return _PosixOwnerReading(snapshot, unreadable, stop)
 
 
 def _scan_posix_owners(
@@ -2767,41 +3017,53 @@ def _read_windows_lsp_record(
     _require_lsp_deadline(deadline)
     handle = workspace.open_file(owner_handle, entry.name)
     try:
-        _require_lsp_deadline(deadline)
-        if _windows_lsp_identity(workspace, handle, directory=False) != entry.file_id:
-            raise PermissionError("Windows LSP record changed before open")
-        _require_lsp_deadline(deadline)
-        size = workspace.file_size(handle)
-        _require_lsp_deadline(deadline)
-        if size != entry.size or size > _LSP_RECORD_BYTES:
-            raise PermissionError("Windows LSP record size changed before read")
-        chunks: list[bytes] = []
-        total = 0
-        iterator = iter(
-            workspace.read_chunks(
-                handle,
-                chunk_bytes=_LSP_READ_CHUNK_BYTES,
-                max_bytes=_LSP_RECORD_BYTES,
-            )
-        )
-        while True:
-            _require_lsp_deadline(deadline)
-            try:
-                chunk = next(iterator)
-            except StopIteration:
-                _require_lsp_deadline(deadline)
-                break
-            _require_lsp_deadline(deadline)
-            chunks.append(chunk)
-            total += len(chunk)
-        _require_lsp_deadline(deadline)
-        after_size = workspace.file_size(handle)
-        _require_lsp_deadline(deadline)
-        if total != size or after_size != size:
-            raise PermissionError("Windows LSP record changed during read")
-        return _decode_lsp_record(b"".join(chunks))
+        return _read_windows_record_body(workspace, handle, entry, deadline)
     finally:
         workspace.close_handle(handle)
+
+
+def _require_windows_record_size(size: int, entry) -> None:
+    if size != entry.size or size > _LSP_RECORD_BYTES:
+        raise PermissionError("Windows LSP record size changed before read")
+
+
+def _read_windows_chunks(workspace, handle: int, deadline: float) -> tuple[list[bytes], int]:
+    chunks: list[bytes] = []
+    total = 0
+    iterator = iter(
+        workspace.read_chunks(
+            handle,
+            chunk_bytes=_LSP_READ_CHUNK_BYTES,
+            max_bytes=_LSP_RECORD_BYTES,
+        )
+    )
+    while True:
+        _require_lsp_deadline(deadline)
+        try:
+            chunk = next(iterator)
+        except StopIteration:
+            _require_lsp_deadline(deadline)
+            return chunks, total
+        _require_lsp_deadline(deadline)
+        chunks.append(chunk)
+        total += len(chunk)
+
+
+def _read_windows_record_body(workspace, handle: int, entry, deadline: float) -> dict[str, Any]:
+    _require_lsp_deadline(deadline)
+    if _windows_lsp_identity(workspace, handle, directory=False) != entry.file_id:
+        raise PermissionError("Windows LSP record changed before open")
+    _require_lsp_deadline(deadline)
+    size = workspace.file_size(handle)
+    _require_lsp_deadline(deadline)
+    _require_windows_record_size(size, entry)
+    chunks, total = _read_windows_chunks(workspace, handle, deadline)
+    _require_lsp_deadline(deadline)
+    after_size = workspace.file_size(handle)
+    _require_lsp_deadline(deadline)
+    if total != size or after_size != size:
+        raise PermissionError("Windows LSP record changed during read")
+    return _decode_lsp_record(b"".join(chunks))
 
 
 def _snapshot_windows_lsp(
@@ -2811,123 +3073,165 @@ def _snapshot_windows_lsp(
     import windows_workspace as workspace
 
     lsp_root = Path(os.path.abspath(state_root)) / "run" / "lsp"
-    snapshots: list[_LspOwnerSnapshot] = []
-    unreadable = False
     try:
         _require_lsp_deadline(deadline)
         lsp_handle = workspace.open_directory_path(lsp_root)
     except FileNotFoundError:
-        if _deadline_reached(deadline):
-            return [], True, False
-        return [], False, True
+        return _missing_windows_lsp_root(deadline)
     except (OSError, ValueError, RuntimeError, TimeoutError):
         return [], True, False
     try:
-        try:
-            _require_lsp_deadline(deadline)
-            owner_entries = workspace.list_directory(
-                lsp_handle,
-                max_entries=MAX_LSP_OWNER_ROWS,
-            )
-            _require_lsp_deadline(deadline)
-        except (OSError, ValueError, RuntimeError, TimeoutError):
-            return [], True, False
-        for owner_entry in owner_entries:
-            if (
-                owner_entry.kind != "directory"
-                or _LSP_OWNER_NONCE.fullmatch(owner_entry.name) is None
-            ):
-                unreadable = True
-                continue
-            owner_handle: int | None = None
-            present: frozenset[str] = frozenset()
-            records: dict[str, dict[str, Any] | None] = {name: None for name in _LSP_RECORD_NAMES}
-            try:
-                _require_lsp_deadline(deadline)
-                owner_handle = workspace.open_directory(lsp_handle, owner_entry.name)
-                _require_lsp_deadline(deadline)
-                if (
-                    _windows_lsp_identity(workspace, owner_handle, directory=True)
-                    != owner_entry.file_id
-                ):
-                    raise PermissionError("Windows LSP owner changed before open")
-                _require_lsp_deadline(deadline)
-                child_entries = workspace.list_directory(
-                    owner_handle,
-                    max_entries=len(_LSP_OWNER_ENTRY_NAMES),
-                )
-                _require_lsp_deadline(deadline)
-                present = frozenset(entry.name for entry in child_entries)
-                if "cancellation" not in present:
-                    unreadable = True
-                for child_entry in child_entries:
-                    if child_entry.name not in _LSP_OWNER_ENTRY_NAMES:
-                        unreadable = True
-                        continue
-                    if child_entry.name == "cancellation":
-                        if child_entry.kind != "directory":
-                            unreadable = True
-                            continue
-                        _require_lsp_deadline(deadline)
-                        cancellation = workspace.open_directory(owner_handle, child_entry.name)
-                        try:
-                            _require_lsp_deadline(deadline)
-                            if (
-                                _windows_lsp_identity(workspace, cancellation, directory=True)
-                                != child_entry.file_id
-                            ):
-                                raise PermissionError("Windows LSP cancellation directory changed")
-                            _require_lsp_deadline(deadline)
-                        finally:
-                            workspace.close_handle(cancellation)
-                        continue
-                    try:
-                        records[child_entry.name] = _read_windows_lsp_record(
-                            workspace,
-                            owner_handle,
-                            child_entry,
-                            deadline,
-                        )
-                    except (
-                        OSError,
-                        UnicodeError,
-                        ValueError,
-                        json.JSONDecodeError,
-                        RuntimeError,
-                    ):
-                        unreadable = True
-            except TimeoutError:
-                unreadable = True
-                snapshots.append(
-                    (
-                        owner_entry.name,
-                        present,
-                        records["owner.json"],
-                        records["lease.json"],
-                        records["failure.json"],
-                    )
-                )
-                break
-            except (OSError, ValueError, RuntimeError):
-                unreadable = True
-            finally:
-                if owner_handle is not None:
-                    workspace.close_handle(owner_handle)
-            snapshots.append(
-                (
-                    owner_entry.name,
-                    present,
-                    records["owner.json"],
-                    records["lease.json"],
-                    records["failure.json"],
-                )
-            )
-        _require_lsp_deadline(deadline)
-        return snapshots, unreadable, False
-    except TimeoutError:
-        return snapshots, True, False
+        return _windows_lsp_owner_snapshots(workspace, lsp_handle, deadline)
     finally:
         workspace.close_handle(lsp_handle)
+
+
+def _missing_windows_lsp_root(deadline: float):
+    if _deadline_reached(deadline):
+        return [], True, False
+    return [], False, True
+
+
+def _valid_windows_owner_entry(owner_entry) -> bool:
+    if owner_entry.kind != "directory":
+        return False
+    return _LSP_OWNER_NONCE.fullmatch(owner_entry.name) is not None
+
+
+def _windows_lsp_owner_entries(workspace, lsp_handle: int, deadline: float):
+    _require_lsp_deadline(deadline)
+    entries = workspace.list_directory(lsp_handle, max_entries=MAX_LSP_OWNER_ROWS)
+    _require_lsp_deadline(deadline)
+    return entries
+
+
+def _verify_windows_cancellation(workspace, owner_handle: int, child_entry, deadline: float) -> bool:
+    """True when this child leaves the owner unreadable."""
+    if child_entry.kind != "directory":
+        return True
+    _require_lsp_deadline(deadline)
+    cancellation = workspace.open_directory(owner_handle, child_entry.name)
+    try:
+        _require_lsp_deadline(deadline)
+        if (
+            _windows_lsp_identity(workspace, cancellation, directory=True)
+            != child_entry.file_id
+        ):
+            raise PermissionError("Windows LSP cancellation directory changed")
+        _require_lsp_deadline(deadline)
+    finally:
+        workspace.close_handle(cancellation)
+    return False
+
+
+def _read_windows_child(workspace, owner_handle: int, child_entry, deadline: float, records: dict) -> bool:
+    """True when this child leaves the owner unreadable."""
+    if child_entry.name not in _LSP_OWNER_ENTRY_NAMES:
+        return True
+    if child_entry.name == "cancellation":
+        return _verify_windows_cancellation(workspace, owner_handle, child_entry, deadline)
+    try:
+        records[child_entry.name] = _read_windows_lsp_record(
+            workspace, owner_handle, child_entry, deadline
+        )
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError, RuntimeError):
+        return True
+    return False
+
+
+def _read_windows_owner_children(
+    workspace, owner_handle: int, owner_entry, deadline: float, records: dict
+) -> tuple[frozenset[str], bool]:
+    _require_lsp_deadline(deadline)
+    if (
+        _windows_lsp_identity(workspace, owner_handle, directory=True)
+        != owner_entry.file_id
+    ):
+        raise PermissionError("Windows LSP owner changed before open")
+    _require_lsp_deadline(deadline)
+    child_entries = workspace.list_directory(
+        owner_handle, max_entries=len(_LSP_OWNER_ENTRY_NAMES)
+    )
+    _require_lsp_deadline(deadline)
+    present = frozenset(entry.name for entry in child_entries)
+    unreadable = "cancellation" not in present
+    for child_entry in child_entries:
+        child_unreadable = _read_windows_child(
+            workspace, owner_handle, child_entry, deadline, records
+        )
+        unreadable = unreadable or child_unreadable
+    return present, unreadable
+
+
+def _read_windows_owner_records(
+    workspace, lsp_handle: int, owner_entry, deadline: float, records: dict
+) -> tuple[frozenset[str], bool, bool]:
+    owner_handle: int | None = None
+    try:
+        _require_lsp_deadline(deadline)
+        owner_handle = workspace.open_directory(lsp_handle, owner_entry.name)
+        present, unreadable = _read_windows_owner_children(
+            workspace, owner_handle, owner_entry, deadline, records
+        )
+        return present, unreadable, False
+    except TimeoutError:
+        return frozenset(), True, True
+    except (OSError, ValueError, RuntimeError):
+        return frozenset(), True, False
+    finally:
+        if owner_handle is not None:
+            workspace.close_handle(owner_handle)
+
+
+def _windows_owner_reading(workspace, lsp_handle: int, owner_entry, deadline: float):
+    """One owner directory: its snapshot, whether it was unreadable, whether to stop."""
+    records: dict[str, dict[str, Any] | None] = {
+        name: None for name in _LSP_RECORD_NAMES
+    }
+    present, unreadable, stop = _read_windows_owner_records(
+        workspace, lsp_handle, owner_entry, deadline, records
+    )
+    snapshot = (
+        owner_entry.name,
+        present,
+        records["owner.json"],
+        records["lease.json"],
+        records["failure.json"],
+    )
+    return snapshot, unreadable, stop
+
+
+def _finished_windows_snapshots(snapshots: list, unreadable: bool, deadline: float):
+    try:
+        _require_lsp_deadline(deadline)
+    except TimeoutError:
+        return snapshots, True, False
+    return snapshots, unreadable, False
+
+
+def _collected_windows_snapshots(workspace, lsp_handle: int, owner_entries, deadline: float):
+    snapshots: list[_LspOwnerSnapshot] = []
+    unreadable = False
+    for owner_entry in owner_entries:
+        if not _valid_windows_owner_entry(owner_entry):
+            unreadable = True
+            continue
+        snapshot, entry_unreadable, stop = _windows_owner_reading(
+            workspace, lsp_handle, owner_entry, deadline
+        )
+        unreadable = unreadable or entry_unreadable
+        snapshots.append(snapshot)
+        if stop:
+            return snapshots, True, False
+    return _finished_windows_snapshots(snapshots, unreadable, deadline)
+
+
+def _windows_lsp_owner_snapshots(workspace, lsp_handle: int, deadline: float):
+    try:
+        owner_entries = _windows_lsp_owner_entries(workspace, lsp_handle, deadline)
+    except (OSError, ValueError, RuntimeError, TimeoutError):
+        return [], True, False
+    return _collected_windows_snapshots(workspace, lsp_handle, owner_entries, deadline)
 
 
 def _snapshot_lsp_runtime(
@@ -3597,6 +3901,12 @@ def _generation_message(degraded: bool, extraction_faults: int) -> str:
     return "Evidence generation is healthy."
 
 
+def _generation_is_stale(facts: _GenerationFacts, age: float, complete_v2: bool) -> bool:
+    if facts.delta or age > GENERATION_FRESH_SECONDS:
+        return True
+    return _identity_stale(facts, complete_v2)
+
+
 def _generation_health_result(
     active: str,
     manifest: dict,
@@ -3608,11 +3918,7 @@ def _generation_health_result(
     age, age_source = _generation_age(seal, catalog_info, now)
     vector_state = str(manifest["vector_state"])
     complete_v2 = manifest.get("schema_version") == "corpus-generation/v2"
-    stale = bool(
-        facts.delta
-        or age > GENERATION_FRESH_SECONDS
-        or _identity_stale(facts, complete_v2)
-    )
+    stale = _generation_is_stale(facts, age, complete_v2)
     # What this status answers is whether the generation is usable and current,
     # so it degrades on the things a refresh fixes. An unresolved reference is
     # what indexing real code looks like — this repository alone has 21199 of
@@ -4156,42 +4462,61 @@ def _scheduler_check(root: Path, state_root: Path, now: datetime, deadline: floa
         return _result(
             "scheduler", "error", "Maintenance source or local state is invalid.", details
         )
+    return _nightly_result(state, now, details)
+
+
+def _nightly_is_current(status: str, last_date: str, now: datetime) -> bool:
+    if status not in {"ok", "success"}:
+        return False
+    return last_date == now.date().isoformat()
+
+
+def _nightly_result(state: dict, now: datetime, details: dict) -> dict:
     status = state.get("last_nightly_status")
     last_date = str(state.get("last_nightly_date", ""))[:10]
     if status == "failed":
         return _result("scheduler", "error", "Last nightly maintenance failed.", details)
     if not status or not last_date:
         return _result("scheduler", "skipped", "Nightly maintenance status is unknown.", details)
-    today = now.date().isoformat()
-    if status in {"ok", "success"} and last_date == today:
+    if _nightly_is_current(status, last_date, now):
         return _result("scheduler", "ok", "Nightly maintenance is current.", details)
     return _result("scheduler", "degraded", "Nightly maintenance is stale.", details)
 
 
+def _mcp_package_available() -> bool:
+    try:
+        return importlib.util.find_spec("mcp") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _mcp_message(source: bool) -> str:
+    if source:
+        return "MCP source is available; package capability was detected."
+    return "MCP server source is missing."
+
+
 def _mcp_check(root: Path) -> dict:
     source = (root / "scripts" / "mcp_server.py").is_file()
-    try:
-        package = importlib.util.find_spec("mcp") is not None
-    except (ImportError, ValueError):
-        package = False
+    package = _mcp_package_available()
     details = {
-        "source": "ok" if source else "error",
+        "source": _ok_or_error(source),
         "package": "ok" if package else "skipped",
         "capability": "available" if package else "optional dependency not installed",
         "core_capture_required": False,
     }
-    status = "ok" if source else "error"
-    message = (
-        "MCP source is available; package capability was detected."
-        if source
-        else "MCP server source is missing."
-    )
-    return _result("mcp", status, message, details)
+    return _result("mcp", _ok_or_error(source), _mcp_message(source), details)
+
+
+def _readable_config(path: Path) -> bool:
+    kind, info = _safe_kind(path, path.parent)
+    if kind != "regular" or info is None:
+        return False
+    return info.st_size <= MAX_CONFIG_BYTES
 
 
 def _contains_markers(path: Path, markers: tuple[str, ...]) -> bool:
-    kind, info = _safe_kind(path, path.parent)
-    if kind != "regular" or info is None or info.st_size > MAX_CONFIG_BYTES:
+    if not _readable_config(path):
         return False
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -4238,41 +4563,57 @@ def _codex_server_configured(table: dict) -> bool:
     return _codex_server_args_match(table.get("args"))
 
 
-def _codex_config_state(path: Path) -> tuple[bool | None, str]:
-    kind, info = _safe_kind(path, path.parent)
-    if kind != "regular" or info is None or info.st_size > MAX_CONFIG_BYTES:
-        return False, "config_missing_or_unsafe"
+def _codex_config_text(path: Path) -> str | None:
     try:
         raw = read_stable_bytes(path, MAX_CONFIG_BYTES, label="Codex config")
-        text = raw.decode("utf-8")
+        return raw.decode("utf-8")
     except (OSError, UnicodeDecodeError, ValueError):
+        return None
+
+
+def _codex_table_state(document: dict) -> tuple[bool | None, str]:
+    servers = document.get("mcp_servers")
+    table = servers.get("llm-wiki") if isinstance(servers, dict) else None
+    if not isinstance(table, dict):
+        return False, "target_missing_or_invalid"
+    if _codex_server_configured(table):
+        return True, "configured"
+    return False, "target_missing_or_invalid"
+
+
+def _codex_config_state(path: Path) -> tuple[bool | None, str]:
+    if not _readable_config(path):
+        return False, "config_missing_or_unsafe"
+    text = _codex_config_text(path)
+    if text is None:
         return False, "config_missing_or_unsafe"
     document, error = _parse_toml_document(text)
     if error is not None:
         return (None, error) if error == "toml_parser_unavailable" else (False, error)
     assert document is not None
-    servers = document.get("mcp_servers")
-    table = servers.get("llm-wiki") if isinstance(servers, dict) else None
-    if not isinstance(table, dict):
-        return False, "target_missing_or_invalid"
-    configured = _codex_server_configured(table)
-    if configured:
-        return True, "configured"
-    return False, "target_missing_or_invalid"
+    return _codex_table_state(document)
+
+
+def _codex_shim_command(arguments: list[str]) -> list[str] | None:
+    shim = shutil.which("codex.cmd")
+    command_processor = os.environ.get("ComSpec")
+    if not shim or not command_processor:
+        return None
+    command_line = subprocess.list2cmdline([shim, *arguments])
+    return [command_processor, "/d", "/s", "/c", command_line]
+
+
+def _windows_codex_command(arguments: list[str]) -> list[str] | None:
+    executable = shutil.which("codex.exe")
+    if executable:
+        return [executable, *arguments]
+    return _codex_shim_command(arguments)
 
 
 def _codex_app_server_command(*, platform: str = os.name) -> list[str] | None:
     arguments = ["app-server", "--listen", "stdio://"]
     if platform == "nt":
-        executable = shutil.which("codex.exe")
-        if executable:
-            return [executable, *arguments]
-        shim = shutil.which("codex.cmd")
-        command_processor = os.environ.get("ComSpec")
-        if shim and command_processor:
-            command_line = subprocess.list2cmdline([shim, *arguments])
-            return [command_processor, "/d", "/s", "/c", command_line]
-        return None
+        return _windows_codex_command(arguments)
     executable = shutil.which("codex")
     return [executable, *arguments] if executable else None
 
@@ -4946,24 +5287,32 @@ def _lsp_pid_state(pid: int) -> str:
     return _posix_process_state(pid)
 
 
+def _windows_exit_code_is_active(ctypes, handle) -> bool:
+    still_active = 259
+    exit_code = ctypes.c_ulong()
+    if not ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+        return False
+    return exit_code.value == still_active
+
+
+def _windows_pid_alive(pid: int) -> bool:
+    import ctypes
+
+    process_query = 0x1000
+    handle = ctypes.windll.kernel32.OpenProcess(process_query, False, pid)
+    if not handle:
+        return False
+    try:
+        return _windows_exit_code_is_active(ctypes, handle)
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)
+
+
 def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
     if sys.platform == "win32":
-        import ctypes
-
-        process_query = 0x1000
-        still_active = 259
-        handle = ctypes.windll.kernel32.OpenProcess(process_query, False, pid)
-        if not handle:
-            return False
-        try:
-            exit_code = ctypes.c_ulong()
-            if not ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
-                return False
-            return exit_code.value == still_active
-        finally:
-            ctypes.windll.kernel32.CloseHandle(handle)
+        return _windows_pid_alive(pid)
     try:
         os.kill(pid, 0)
         return True
@@ -5036,14 +5385,23 @@ def _unlock_file(fd: int) -> None:
         pass
 
 
+def _lock_stat_usable(opened: os.stat_result) -> bool:
+    return stat.S_ISREG(opened.st_mode) and opened.st_size <= MAX_LOCK_BYTES
+
+
+def _read_lock_bytes(fd: int) -> bytes | None:
+    os.lseek(fd, 0, os.SEEK_SET)
+    raw = os.read(fd, MAX_LOCK_BYTES + 1)
+    return None if len(raw) > MAX_LOCK_BYTES else raw
+
+
 def _read_lock_fd(fd: int) -> tuple[dict | None, os.stat_result | None]:
     try:
         opened = os.fstat(fd)
-        if not stat.S_ISREG(opened.st_mode) or opened.st_size > MAX_LOCK_BYTES:
+        if not _lock_stat_usable(opened):
             return None, None
-        os.lseek(fd, 0, os.SEEK_SET)
-        raw = os.read(fd, MAX_LOCK_BYTES + 1)
-        if len(raw) > MAX_LOCK_BYTES:
+        raw = _read_lock_bytes(fd)
+        if raw is None:
             return None, None
         value = json.loads(raw.decode("utf-8"))
         return (value, opened) if isinstance(value, dict) else (None, None)
@@ -5051,19 +5409,7 @@ def _read_lock_fd(fd: int) -> tuple[dict | None, os.stat_result | None]:
         return None, None
 
 
-def _open_existing_lock(path: Path, root: Path) -> int | None:
-    if _safe_kind(path, root)[0] != "regular":
-        return None
-    if sys.platform != "win32":
-        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
-        try:
-            return os.open(path, flags)
-        except OSError:
-            return None
-
-    import ctypes
-    import msvcrt
-
+def _create_windows_lock_handle(ctypes, path: Path):
     generic_read_write = 0x80000000 | 0x40000000
     share_read_write_delete = 0x1 | 0x2 | 0x4
     open_existing = 3
@@ -5079,13 +5425,31 @@ def _open_existing_lock(path: Path, root: Path) -> int | None:
         file_attribute_normal,
         None,
     )
-    invalid_handle = ctypes.c_void_p(-1).value
-    if handle == invalid_handle:
+    return None if handle == ctypes.c_void_p(-1).value else handle
+
+
+def _open_windows_lock(path: Path) -> int | None:
+    import ctypes
+    import msvcrt
+
+    handle = _create_windows_lock_handle(ctypes, path)
+    if handle is None:
         return None
     try:
         return msvcrt.open_osfhandle(handle, os.O_RDWR | getattr(os, "O_BINARY", 0))
     except OSError:
         ctypes.windll.kernel32.CloseHandle(handle)
+        return None
+
+
+def _open_existing_lock(path: Path, root: Path) -> int | None:
+    if _safe_kind(path, root)[0] != "regular":
+        return None
+    if sys.platform == "win32":
+        return _open_windows_lock(path)
+    try:
+        return os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
         return None
 
 
@@ -5249,6 +5613,10 @@ def _repair_leases(state_root: Path, now: datetime, repaired: list[dict]) -> boo
         return True
     if kind != "directory":
         raise OSError("unsafe queue directory")
+    return _recover_queue_leases(queue, now, repaired)
+
+
+def _recover_queue_leases(queue: Path, now: datetime, repaired: list[dict]) -> bool:
     lock = queue / ".doctor-recovery.lock"
     lock_token = _acquire_lock(lock, queue, now)
     if lock_token is None:
@@ -5867,12 +6235,8 @@ def _partition_code_extraction(
     return _source_partitions(source_ids, state, check_stop, SourceExtraction)
 
 
-def _generation_source_extractor(snapshot, repository_id: str):
-    """Return the incremental builder adapter for one immutable snapshot."""
-    from evidence_graph_builder import SourceExtraction
-
-    by_id = {source.record.logical_id: source for source in snapshot.sources}
-    code_sources = tuple(
+def _code_extraction_sources(snapshot):
+    return tuple(
         sorted(
             (
                 source
@@ -5886,92 +6250,140 @@ def _generation_source_extractor(snapshot, repository_id: str):
             ),
         )
     )
-    knowledge_sources = tuple(
+
+
+def _knowledge_extraction_sources(snapshot):
+    return tuple(
         source
         for source in snapshot.sources
         if source.record.relative_path.startswith("knowledge/")
         and not source.record.relative_path.startswith("knowledge/projects/")
     )
-    code_partitions = None
-    knowledge_partitions = None
 
-    def extract(source, content, *, sources, source_bytes, deadline, cancelled):
-        nonlocal code_partitions, knowledge_partitions
+
+class _SourceExtractionAdapter:
+    """The incremental builder adapter for one immutable snapshot.
+
+    A class rather than a closure so each branch of the decision is its own
+    named step and the two memoized partitions are ordinary attributes.
+    """
+
+    def __init__(self, snapshot, repository_id: str) -> None:
+        self.by_id = {source.record.logical_id: source for source in snapshot.sources}
+        self.code_sources = _code_extraction_sources(snapshot)
+        self.knowledge_sources = _knowledge_extraction_sources(snapshot)
+        self.repository_id = repository_id
+        self.code_partitions = None
+        self.knowledge_partitions = None
+
+    def __call__(self, source, content, *, sources, source_bytes, deadline, cancelled):
+        from evidence_graph_builder import SourceExtraction
+
         del sources
-        captured = by_id[str(source["source_id"])]
+        captured = self.by_id[str(source["source_id"])]
         if captured.content != content:
             raise ValueError("incremental extraction bytes differ from snapshot")
+        result = self._result_for(captured, source_bytes, deadline, cancelled)
+        return _source_extraction(SourceExtraction, result, content)
+
+    def _result_for(self, captured, source_bytes, deadline, cancelled):
         path = captured.record.relative_path
         if path.startswith("knowledge/projects/"):
-            from project_extractor import extract_projects
+            return _project_extraction(captured, deadline, cancelled)
+        if path.startswith("knowledge/"):
+            return self._knowledge_result(captured, source_bytes, deadline, cancelled)
+        return self._code_result(captured, source_bytes, deadline, cancelled)
 
-            result = extract_projects((captured,), deadline=deadline, cancelled=cancelled)
-        elif path.startswith("knowledge/"):
-            from knowledge_extractor import extract_knowledge
-
-            if knowledge_partitions is None:
-                if any(
-                    item.content != source_bytes[item.record.logical_id]
-                    for item in knowledge_sources
-                ):
-                    raise ValueError("knowledge extraction bytes differ from snapshot")
-                workspace_result = extract_knowledge(
-                    knowledge_sources,
-                    deadline=deadline,
-                    cancelled=cancelled,
-                )
-                knowledge_partitions = _partition_code_extraction(
-                    workspace_result,
-                    knowledge_sources,
-                    deadline=deadline,
-                    cancelled=cancelled,
-                )
-            result = knowledge_partitions[captured.record.logical_id]
-        else:
-            from code_extractor import extract_code
-
-            if code_partitions is None:
-                if any(
-                    item.content != source_bytes[item.record.logical_id] for item in code_sources
-                ):
-                    raise ValueError("workspace extraction bytes differ from snapshot")
-                workspace_result = extract_code(
-                    code_sources,
-                    repository_id=repository_id,
-                    deadline=deadline,
-                    cancelled=cancelled,
-                )
-                code_partitions = _partition_code_extraction(
-                    workspace_result,
-                    code_sources,
-                    deadline=deadline,
-                    cancelled=cancelled,
-                )
-            result = code_partitions[captured.record.logical_id]
-        digest = hashlib.sha256(content).hexdigest()
-        fingerprints = {
-            key: hashlib.sha256(f"{key}:{digest}".encode("ascii")).hexdigest()
-            for key in (
-                "exports",
-                "imports",
-                "signatures",
-                "aliases",
-                "project_metadata",
-            )
-        }
-        return SourceExtraction(
-            nodes=tuple(result.nodes),
-            occurrences=tuple(result.occurrences),
-            assertions=tuple(result.assertions),
-            evidence=tuple(result.evidence),
-            observations=tuple(result.observations),
-            dependencies=tuple(getattr(result, "dependencies", ())),
-            source_dependencies=tuple(getattr(result, "source_dependencies", ())),
-            workspace_sensitive=bool(getattr(result, "workspace_sensitive", False)),
-            invalidation_fingerprints=fingerprints,
+    def _knowledge_result(self, captured, source_bytes, deadline, cancelled):
+        self.knowledge_partitions = _memoized(
+            self.knowledge_partitions,
+            lambda: _knowledge_partitions(
+                self.knowledge_sources, source_bytes, deadline, cancelled
+            ),
         )
+        return self.knowledge_partitions[captured.record.logical_id]
 
-    return extract
+    def _code_result(self, captured, source_bytes, deadline, cancelled):
+        self.code_partitions = _memoized(
+            self.code_partitions,
+            lambda: _code_partitions(
+                self.code_sources, self.repository_id, source_bytes, deadline, cancelled
+            ),
+        )
+        return self.code_partitions[captured.record.logical_id]
+
+
+def _generation_source_extractor(snapshot, repository_id: str):
+    """Return the incremental builder adapter for one immutable snapshot."""
+    return _SourceExtractionAdapter(snapshot, repository_id)
+
+
+def _memoized(value, build):
+    """Compute once. An empty mapping is a real answer, so `or` will not do."""
+    return build() if value is None else value
+
+
+def _require_snapshot_bytes(items, source_bytes: dict, label: str) -> None:
+    if any(item.content != source_bytes[item.record.logical_id] for item in items):
+        raise ValueError(f"{label} extraction bytes differ from snapshot")
+
+
+def _project_extraction(captured, deadline, cancelled):
+    from project_extractor import extract_projects
+
+    return extract_projects((captured,), deadline=deadline, cancelled=cancelled)
+
+
+def _knowledge_partitions(knowledge_sources, source_bytes, deadline, cancelled):
+    from knowledge_extractor import extract_knowledge
+
+    _require_snapshot_bytes(knowledge_sources, source_bytes, "knowledge")
+    workspace_result = extract_knowledge(
+        knowledge_sources, deadline=deadline, cancelled=cancelled
+    )
+    return _partition_code_extraction(
+        workspace_result, knowledge_sources, deadline=deadline, cancelled=cancelled
+    )
+
+
+def _code_partitions(code_sources, repository_id, source_bytes, deadline, cancelled):
+    from code_extractor import extract_code
+
+    _require_snapshot_bytes(code_sources, source_bytes, "workspace")
+    workspace_result = extract_code(
+        code_sources,
+        repository_id=repository_id,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    return _partition_code_extraction(
+        workspace_result, code_sources, deadline=deadline, cancelled=cancelled
+    )
+
+
+def _source_extraction(source_extraction_class, result, content: bytes):
+    digest = hashlib.sha256(content).hexdigest()
+    fingerprints = {
+        key: hashlib.sha256(f"{key}:{digest}".encode("ascii")).hexdigest()
+        for key in (
+            "exports",
+            "imports",
+            "signatures",
+            "aliases",
+            "project_metadata",
+        )
+    }
+    return source_extraction_class(
+        nodes=tuple(result.nodes),
+        occurrences=tuple(result.occurrences),
+        assertions=tuple(result.assertions),
+        evidence=tuple(result.evidence),
+        observations=tuple(result.observations),
+        dependencies=tuple(getattr(result, "dependencies", ())),
+        source_dependencies=tuple(getattr(result, "source_dependencies", ())),
+        workspace_sensitive=bool(getattr(result, "workspace_sensitive", False)),
+        invalidation_fingerprints=fingerprints,
+    )
 
 
 def _corpus_policy(snapshot: object) -> dict:
@@ -6374,7 +6786,25 @@ def run_generation_maintenance(
     if acquired is None:
         return _maintenance_outcome("deferred", "maintenance_owner_busy", partial=True)
     coordinator, lease = acquired
-    repaired: list[dict] = []
+    return _guarded_generation_refresh(
+        root_path, state_path, coordinator, lease, deadline, max_sources, force_rebuild
+    )
+
+
+def _fence_lost_outcome(exc: RuntimeError, repaired: list[dict]) -> dict:
+    # Another maintenance owner took the fence while this pass was working.
+    # Losing that race is an ordinary outcome — the nightly timer and a manual
+    # run collide — and belongs in the report, not in a traceback.
+    if str(exc) != "maintenance_owner_fence_lost":
+        raise exc
+    return _maintenance_outcome(
+        "deferred", "maintenance_owner_lost", partial=True, repairs=repaired
+    )
+
+
+def _attempted_generation_refresh(
+    root_path, state_path, coordinator, lease, deadline, max_sources, force_rebuild, repaired
+) -> dict:
     try:
         return _refreshed_generation(
             root_path,
@@ -6398,13 +6828,23 @@ def run_generation_maintenance(
             root_path, state_path, coordinator, lease, deadline, max_sources, repaired
         )
     except RuntimeError as exc:
-        # Another maintenance owner took the fence while this pass was working.
-        # Losing that race is an ordinary outcome — the nightly timer and a
-        # manual run collide — and belongs in the report, not in a traceback.
-        if str(exc) != "maintenance_owner_fence_lost":
-            raise
-        return _maintenance_outcome(
-            "deferred", "maintenance_owner_lost", partial=True, repairs=repaired
+        return _fence_lost_outcome(exc, repaired)
+
+
+def _guarded_generation_refresh(
+    root_path, state_path, coordinator, lease, deadline, max_sources, force_rebuild
+) -> dict:
+    repaired: list[dict] = []
+    try:
+        return _attempted_generation_refresh(
+            root_path,
+            state_path,
+            coordinator,
+            lease,
+            deadline,
+            max_sources,
+            force_rebuild,
+            repaired,
         )
     except ValueError as exc:
         return _value_error_outcome(exc, repaired)
@@ -6414,16 +6854,15 @@ def run_generation_maintenance(
         )
 
 
-def _repair_queue_capabilities(state_root: Path) -> int:
-    path = state_root / "run" / "queue.sqlite3"
-    if not path.is_file():
-        return 0
+def _ready_capabilities() -> set[str]:
     from llm_client import probe_candidate, provider_candidates
 
-    provider_ready = any(probe_candidate(item) for item in provider_candidates())
-    repaired = {"llm.compile", "llm.flush", "llm.query"} if provider_ready else set()
-    if not repaired:
-        return 0
+    if not any(probe_candidate(item) for item in provider_candidates()):
+        return set()
+    return {"llm.compile", "llm.flush", "llm.query"}
+
+
+def _unblock_capabilities(state_root: Path, repaired: set[str]) -> int:
     placeholders = ",".join("?" for _ in repaired)
     from memory_queue import MemoryQueue
 
@@ -6436,6 +6875,30 @@ def _repair_queue_capabilities(state_root: Path) -> int:
         ).rowcount
         database.commit()
     return changed
+
+
+def _repair_queue_capabilities(state_root: Path) -> int:
+    path = state_root / "run" / "queue.sqlite3"
+    if not path.is_file():
+        return 0
+    repaired = _ready_capabilities()
+    if not repaired:
+        return 0
+    return _unblock_capabilities(state_root, repaired)
+
+
+def _worker_state_root_matches(state_root: Path) -> bool:
+    configured = Path(
+        os.environ.get(
+            "LLM_WIKI_STATE_ROOT",
+            os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent),
+        )
+    ).resolve()
+    return configured == Path(state_root).resolve()
+
+
+def _worker_should_stop(remaining: int, cancelled) -> bool:
+    return remaining <= 0 or bool(cancelled and cancelled())
 
 
 def _run_bounded_worker(
@@ -6453,16 +6916,10 @@ def _run_bounded_worker(
     )
 
     MemoryQueue(state_root)
-    configured = Path(
-        os.environ.get(
-            "LLM_WIKI_STATE_ROOT",
-            os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent),
-        )
-    ).resolve()
-    if configured != Path(state_root).resolve():
+    if not _worker_state_root_matches(state_root):
         return 0
     remaining = max(0, min(1, int(deadline - time.monotonic() + 0.999)))
-    if remaining <= 0 or bool(cancelled and cancelled()):
+    if _worker_should_stop(remaining, cancelled):
         return 0
     owner = _acquire_queue_owner(
         state_root, "worker", "worker_busy", ttl_seconds=MAINTENANCE_LEASE_SECONDS
@@ -6669,7 +7126,7 @@ def _repair_index_action(guard: Any, context: _RepairContext) -> None:
         context.deadline,
         root=context.root_path,
     )
-    if not index_before["details"].get("repairable") or index_before["status"] == "ok":
+    if not _index_needs_repair(index_before):
         return
     index_lock = context.state_path / "cache" / ".doctor-index.lock"
     lock_token = guard.run(
@@ -6681,6 +7138,16 @@ def _repair_index_action(guard: Any, context: _RepairContext) -> None:
     if lock_token is None:
         context.repair_deferred.add("index")
         return
+    _guarded_index_rebuild(guard, context, index_lock, lock_token)
+
+
+def _index_needs_repair(index_before: dict) -> bool:
+    if not index_before["details"].get("repairable"):
+        return False
+    return index_before["status"] != "ok"
+
+
+def _guarded_index_rebuild(guard: Any, context, index_lock: Path, lock_token) -> None:
     try:
         _rebuild_and_verify_index(guard, context)
     except Exception as exc:  # noqa: BLE001
@@ -7039,16 +7506,20 @@ def main(argv: list[str] | None = None) -> int:
         rebuild_generation=args.rebuild_generation,
         time_budget_seconds=args.time_budget,
     )
-    if args.json:
-        print(json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False))
-    else:
-        print(f"LLM-Wiki doctor: {report['overall_status']}")
-        summary = degraded_summary(report)
-        if summary:
-            print(summary)
-        if report["repaired"]:
-            print(f"Repairs applied: {len(report['repaired'])}")
+    _print_report(report, args.json)
     return {"ok": 0, "degraded": 1, "error": 2}[report["overall_status"]]
+
+
+def _print_report(report: dict, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False))
+        return
+    print(f"LLM-Wiki doctor: {report['overall_status']}")
+    summary = degraded_summary(report)
+    if summary:
+        print(summary)
+    if report["repaired"]:
+        print(f"Repairs applied: {len(report['repaired'])}")
 
 
 if __name__ == "__main__":
