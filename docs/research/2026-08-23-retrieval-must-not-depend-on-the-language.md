@@ -120,6 +120,33 @@ never been built here — `cache/vectors*` is absent and the generation reports
 question still returns nothing. Building and refreshing vectors is the next step;
 the model choice above only decides how well that step pays.
 
+## Why one chunk per page had to come with it
+
+Switching the encoder and building the vectors was not enough to make the result
+useful. Measured on this vault, every Russian question returned the same large
+Russian document filling all four places with its own chunks, and no English
+decision page appeared at all. Dense similarity legitimately pulls toward text in
+the language of the question, and a long document has many chunks to offer.
+
+Current practice names this exactly: retrieved top-K chunks "are not diverse and
+cluster around the same few paragraphs", so the reader "sees the same information
+multiple times compressed differently rather than getting three times as much
+signal". The standard answers are Maximal Marginal Relevance, which ranks each
+candidate by its marginal value against what is already selected, and greedy
+semantic deduplication, which drops a chunk too similar to one already kept and
+is reported to cut input tokens by 30-50% while sharpening answers.
+
+Both compare candidates to each other. This vault does not need that cost: its
+duplication is structural, not semantic — several chunks of one page. Ordering by
+page, one chunk each before any second chunk, buys the same diversity for one
+pass over the already-ranked list and no extra model call. Nothing is dropped;
+the remaining chunks follow, so a caller that wanted them still receives them.
+
+Measured immediately after, on the same questions: four Russian questions that
+had returned one document each now return four distinct pages, and the right
+English decision page ranks first for "как устроен повтор после карантина" and
+second for "зачем нужна аренда владельца для языкового сервера".
+
 ## Sources
 
 - Milvus, "How do embeddings enable cross-lingual search?" —
@@ -148,6 +175,12 @@ the model choice above only decides how well that step pays.
   https://sbert.net/examples/sentence_transformer/applications/embedding-quantization/README.html
 - "Scaling Vector Search: Comparing Quantization and Matryoshka Embeddings" —
   https://towardsdatascience.com/649627-2/
+- "RAG with Retrieval-Time Semantic Deduplication" (clustered top-K, 30-50%
+  fewer tokens) — https://heyneo.com/blog/rag-retrieval-semantic-deduplication
+- "Reducing Redundancy in Retrieval-Augmented Generation through Chunk
+  Filtering" — https://arxiv.org/html/2604.24334v1
+- "RAG Chunking Strategies: A 2026 Retrieval Playbook" —
+  https://www.digitalapplied.com/blog/rag-chunking-strategies-2026-retrieval-quality-playbook
 
 ## Open questions
 

@@ -3492,6 +3492,29 @@ def _generation_vectors_search(
         return None
 
 
+def _page_diverse_order(
+    ordered: list[str], metadata: Mapping[str, Mapping[str, object]]
+) -> list[str]:
+    """One chunk per page first, then the rest in the order they already had.
+
+    Retrieved chunks cluster: several passages of one page are one answer
+    repeated, not several answers, and they crowd every other page out of the
+    result. Nothing is dropped here — the extra chunks follow the first pass —
+    so a caller that wanted them still receives them.
+    """
+    first_by_page: list[str] = []
+    extras: list[str] = []
+    seen: set[str] = set()
+    for chunk_id in ordered:
+        page = str(metadata[chunk_id].get("path") or "")
+        if page in seen:
+            extras.append(chunk_id)
+            continue
+        seen.add(page)
+        first_by_page.append(chunk_id)
+    return first_by_page + extras
+
+
 def _fuse_generation_results(
     lexical: list[dict[str, object]], vectors: list[dict[str, object]], limit: int
 ) -> list[dict[str, object]]:
@@ -3505,7 +3528,9 @@ def _fuse_generation_results(
         chunk_id = str(result["chunk_id"])
         scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (60 + rank)
         metadata.setdefault(chunk_id, result)
-    ordered = sorted(scores, key=lambda key: (-scores[key], key))
+    ordered = _page_diverse_order(
+        sorted(scores, key=lambda key: (-scores[key], key)), metadata
+    )
     results = []
     for chunk_id in ordered[:limit]:
         result = dict(metadata[chunk_id])
