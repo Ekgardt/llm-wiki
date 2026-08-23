@@ -40,12 +40,18 @@ from bounded_io import read_stable_bytes  # noqa: E402
 from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
 from memory_state import ROOT  # noqa: E402
 from reliable_memory import sha256_bytes  # noqa: E402
+from vault_editorial import EDITORIAL_NAMES  # noqa: E402
 
 # Reserved OKF filenames — no frontmatter allowed at bundle level.
 RESERVED_NAMES = frozenset({"index.md", "log.md"})
 MAX_MIGRATION_PAGE_BYTES = 16 * 1024 * 1024
 
 # Editorial / contract files at the vault root — left alone.
+#
+# `EDITORIAL_NAMES` (imported above) covers the ones that are editorial wherever
+# they sit: directory READMEs, indexes, logs, project state pages. The linter has
+# always exempted those from the frontmatter checks, so writing frontmatter into
+# them satisfies nobody and edits tracked files nobody asked to change.
 ROOT_LEVEL_SKIP = frozenset(
     {
         "CLAUDE.md",
@@ -123,16 +129,21 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _matched_type(forward: str, needle: str, type_name: str) -> str:
+    """Under `projects/`, only `state.md` is a project-state page."""
+    if needle != "knowledge/projects/":
+        return type_name
+    if forward.endswith("state.md"):
+        return type_name
+    return "concept"
+
+
 def infer_type(rel_path: str) -> str | None:
     """Infer OKF `type` from the file's path. Returns None if no rule matches."""
     forward = rel_path.replace("\\", "/")
     for needle, type_name in TYPE_INFERENCE:
         if needle in forward:
-            # Special case: state.md under projects gets its own type.
-            if needle == "knowledge/projects/" and not forward.endswith("state.md"):
-                # Other files under projects/ — leave them as concept by default.
-                return "concept"
-            return type_name
+            return _matched_type(forward, needle, type_name)
     return None
 
 
@@ -183,143 +194,244 @@ def build_frontmatter(
     return "\n".join(lines) + "\n"
 
 
+def _root_contract_status(path: Path) -> str | None:
+    if path.name in ROOT_LEVEL_SKIP and path.parent == ROOT:
+        return "skip_root_contract"
+    return None
+
+
+def _skip_status(path: Path) -> str | None:
+    """The reason this file must not be touched, or None to go on.
+
+    Editorial names are skipped wherever they sit, not only at the vault root.
+    The linter has always exempted them from the frontmatter checks, so stamping
+    frontmatter into a directory README satisfied no check and changed a tracked
+    public file for nobody.
+    """
+    if path.name in RESERVED_NAMES:
+        return "skip_reserved"
+    if path.name in EDITORIAL_NAMES:
+        return "skip_editorial"
+    return _root_contract_status(path)
+
+
+def _read_page(path: Path) -> tuple[str, str | None]:
+    """(status, text) — the status is empty when the read succeeded."""
+    try:
+        return "", path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        return (f"error_read:{type(e).__name__}", None)
+
+
+def _added_field(body: str, field: str, value: str) -> str:
+    """The quoted field to append, or nothing when it is empty or already set."""
+    if not value:
+        return ""
+    if f"{field}:" in body:
+        return ""
+    return f'\n{field}: "{value}"'
+
+
+def _added_timestamp(body: str, timestamp: str) -> str:
+    """The timestamp is a bare scalar, not a quoted string."""
+    if "timestamp:" in body:
+        return ""
+    return f"\ntimestamp: {timestamp}"
+
+
+def _merged_frontmatter(
+    existing_body: str,
+    type_name: str,
+    title: str,
+    description: str,
+    timestamp: str,
+) -> str:
+    """Inject `type:` into a frontmatter block that has one without a type."""
+    body = f"type: {type_name}\n{existing_body}"
+    body += _added_field(existing_body, "title", title)
+    body += _added_field(existing_body, "description", description[:200])
+    body += _added_timestamp(existing_body, timestamp)
+    return "---\n" + body + "\n---\n"
+
+
+def _migrated_content(
+    content: str,
+    type_name: str,
+    title: str,
+    description: str,
+    timestamp: str,
+) -> str:
+    existing = FRONTMATTER_RE.match(content)
+    if existing is None:
+        return build_frontmatter(type_name, title, description, timestamp) + content
+    merged = _merged_frontmatter(
+        existing.group(1), type_name, title, description, timestamp
+    )
+    return merged + content[existing.end() :]
+
+
+def _page_migration(path: Path, content: str, type_name: str) -> str:
+    return _migrated_content(
+        content,
+        type_name,
+        extract_title(content, path.stem),
+        extract_description(content),
+        datetime.now().isoformat(timespec="seconds"),
+    )
+
+
 def migrate_file(path: Path) -> tuple[str, str | None]:
     """Decide what to do with one file.
 
     Returns (status, new_content_or_None):
         ("skip_already_okf", None)   — already conformant
         ("skip_reserved", None)      — index.md / log.md
+        ("skip_editorial", None)     — editorial metadata anywhere in the tree
+                                       (directory README.md, state.md, ...)
         ("skip_root_contract", None) — CLAUDE.md / README.md / AGENTS.md
         ("skip_no_type_rule", None)  — path doesn't match any TYPE_INFERENCE entry
         ("migrate", new_content)     — frontmatter to prepend
     """
-    if path.name in RESERVED_NAMES:
-        return ("skip_reserved", None)
-    if path.name in ROOT_LEVEL_SKIP and path.parent == ROOT:
-        return ("skip_root_contract", None)
-
-    try:
-        content = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as e:
-        return (f"error_read:{type(e).__name__}", None)
-
+    skipped = _skip_status(path)
+    if skipped is not None:
+        return (skipped, None)
+    status, content = _read_page(path)
+    if content is None:
+        return (status, None)
     if has_okf_type(content):
         return ("skip_already_okf", None)
-
-    rel = path.relative_to(ROOT).as_posix()
-    type_name = infer_type(rel)
+    type_name = infer_type(path.relative_to(ROOT).as_posix())
     if not type_name:
         return ("skip_no_type_rule", None)
+    return ("migrate", _page_migration(path, content, type_name))
 
-    title = extract_title(content, path.stem)
-    description = extract_description(content)
-    timestamp = datetime.now().isoformat(timespec="seconds")
-    fm = build_frontmatter(type_name, title, description, timestamp)
 
-    # If the file already has frontmatter WITHOUT type (rare but possible
-    # — e.g. only `author:` was set), merge instead of double-prepending.
-    existing_fm = FRONTMATTER_RE.match(content)
-    if existing_fm:
-        existing_body = existing_fm.group(1)
-        # Inject type: at the top of the existing block.
-        new_fm_body = f"type: {type_name}\n{existing_body}"
-        if title and "title:" not in existing_body:
-            new_fm_body += f'\ntitle: "{title}"'
-        if description and "description:" not in existing_body:
-            new_fm_body += f'\ndescription: "{description[:200]}"'
-        if "timestamp:" not in existing_body:
-            new_fm_body += f"\ntimestamp: {timestamp}"
-        new_fm = "---\n" + new_fm_body + "\n---\n"
-        new_content = new_fm + content[existing_fm.end() :]
-    else:
-        new_content = fm + content
-
-    return ("migrate", new_content)
+def _scope_pages(root: Path) -> list[Path]:
+    return [page for page in sorted(root.rglob("*.md")) if page.is_file()]
 
 
 def collect_files(scope: str) -> list[Path]:
-    """All .md files in scope, deduplicated."""
-    seen: set[Path] = set()
-    out: list[Path] = []
+    """All .md files in scope, in order, without duplicates."""
+    pages: list[Path] = []
     for root in SCOPE_ROOTS[scope]:
-        if not root.exists():
+        if root.exists():
+            pages.extend(_scope_pages(root))
+    return list(dict.fromkeys(pages))
+
+
+def _rel(path: Path) -> str:
+    return path.relative_to(ROOT).as_posix()
+
+
+def _source_hash(path: Path) -> tuple[str, str | None]:
+    """(status, digest) — the status is empty when the hash was taken."""
+    try:
+        data = read_stable_bytes(path, MAX_MIGRATION_PAGE_BYTES, label="migration page")
+    except (OSError, ValueError) as exc:
+        return (f"error_read:{type(exc).__name__}", None)
+    return "", sha256_bytes(data)
+
+
+class MigrationPlan:
+    """What one scan decided, before anything is written."""
+
+    def __init__(self) -> None:
+        self.counts: dict[str, int] = {}
+        self.pages: list[tuple[Path, str]] = []
+        self.source_hashes: dict[Path, str] = {}
+        self.skipped: list[tuple[str, Path]] = []
+
+    def record(self, status: str, path: Path, content: str | None) -> None:
+        self.counts[status] = self.counts.get(status, 0) + 1
+        if status == "migrate" and content is not None:
+            self.pages.append((path, content))
+            print(f"  MIGRATE: {_rel(path)}")
+            return
+        self._record_skip(status, path)
+
+    def _record_skip(self, status: str, path: Path) -> None:
+        if status.startswith("error"):
+            print(f"  ERROR: {_rel(path)} — {status}")
+            self.skipped.append((status, path))
+            return
+        if status == "skip_no_type_rule":
+            # Kept in the summary so the operator can investigate.
+            self.skipped.append((status, path))
+
+
+def _plan_migration(files: list[Path]) -> MigrationPlan:
+    plan = MigrationPlan()
+    for path in files:
+        status, digest = _source_hash(path)
+        if digest is None:
+            plan.record(status, path, None)
             continue
-        for p in sorted(root.rglob("*.md")):
-            if p.is_file() and p not in seen:
-                seen.add(p)
-                out.append(p)
-    return out
+        plan.source_hashes[path] = digest
+        status, content = migrate_file(path)
+        plan.record(status, path, content)
+    return plan
+
+
+def _print_summary(plan: MigrationPlan) -> None:
+    print("\n=== summary ===")
+    for status, count in sorted(plan.counts.items()):
+        print(f"  {status}: {count}")
+    if not plan.skipped:
+        return
+    print("\nDetail of skipped/error files:")
+    for status, path in plan.skipped:
+        print(f"  [{status}] {_rel(path)}")
+
+
+def _write_page(path: Path, content: str, digest: str) -> str | None:
+    """None when the page was written, or the message naming the failure."""
+    encoded = content.encode("utf-8")
+    rel = _rel(path)
+    try:
+        mutate_knowledge(
+            stable_operation_id("okf-migrate", rel, encoded),
+            {path: encoded},
+            preconditions={rel: digest},
+        )
+    except (OSError, RuntimeError, ValueError) as e:
+        return f"{type(e).__name__}: {e}"
+    return None
+
+
+def _apply_plan(plan: MigrationPlan) -> int:
+    """Write every planned page; returns how many writes failed."""
+    errors = 0
+    for path, content in plan.pages:
+        failure = _write_page(path, content, plan.source_hashes[path])
+        if failure is not None:
+            print(f"  WRITE ERROR: {path} — {failure}")
+            errors += 1
+    print(f"\nApplied: {len(plan.pages) - errors}/{len(plan.pages)} file(s) migrated.")
+    return errors
+
+
+def _dry_run(plan: MigrationPlan, report: bool) -> int:
+    print(
+        f"\nDry-run: {len(plan.pages)} file(s) would be migrated. "
+        "Re-run with --apply to write."
+    )
+    if report:
+        _write_report(plan.pages, plan.counts, applied=False)
+    return 0
 
 
 def main() -> int:
     args = parse_args()
     files = collect_files(args.scope)
     print(f"migrate_to_okf: scanned {len(files)} file(s) under scope={args.scope}")
-
-    counts: dict[str, int] = {}
-    plan: list[tuple[Path, str]] = []
-    source_hashes: dict[Path, str] = {}
-    skipped_detail: list[tuple[str, Path]] = []
-    for path in files:
-        rel = path.relative_to(ROOT).as_posix()
-        try:
-            source_hashes[path] = sha256_bytes(
-                read_stable_bytes(path, MAX_MIGRATION_PAGE_BYTES, label="migration page")
-            )
-        except (OSError, ValueError) as exc:
-            status = f"error_read:{type(exc).__name__}"
-            counts[status] = counts.get(status, 0) + 1
-            skipped_detail.append((status, path))
-            continue
-        status, new_content = migrate_file(path)
-        counts[status] = counts.get(status, 0) + 1
-        if status == "migrate":
-            plan.append((path, new_content))
-            print(f"  MIGRATE: {rel}")
-        elif status.startswith("error"):
-            print(f"  ERROR: {rel} — {status}")
-            skipped_detail.append((status, path))
-        elif status in ("skip_no_type_rule",):
-            # Track these for the summary so the operator can investigate.
-            skipped_detail.append((status, path))
-
-    print("\n=== summary ===")
-    for status, count in sorted(counts.items()):
-        print(f"  {status}: {count}")
-    if skipped_detail:
-        print("\nDetail of skipped/error files:")
-        for status, path in skipped_detail:
-            print(f"  [{status}] {path.relative_to(ROOT).as_posix()}")
-
+    plan = _plan_migration(files)
+    _print_summary(plan)
     if not args.apply:
-        print(f"\nDry-run: {len(plan)} file(s) would be migrated. Re-run with --apply to write.")
-        if args.report:
-            _write_report(plan, counts, applied=False)
-        return 0
-
-    written = 0
-    write_errors = 0
-    for path, new_content in plan:
-        try:
-            encoded = new_content.encode("utf-8")
-            mutate_knowledge(
-                stable_operation_id(
-                    "okf-migrate", path.relative_to(ROOT).as_posix(), encoded
-                ),
-                {path: encoded},
-                preconditions={
-                    path.relative_to(ROOT).as_posix(): source_hashes[path]
-                },
-            )
-            written += 1
-        except (OSError, RuntimeError, ValueError) as e:
-            print(f"  WRITE ERROR: {path} — {type(e).__name__}: {e}")
-            write_errors += 1
-    print(f"\nApplied: {written}/{len(plan)} file(s) migrated.")
-
+        return _dry_run(plan, args.report)
+    errors = _apply_plan(plan)
     if args.report:
-        _write_report(plan, counts, applied=True)
-    return 1 if write_errors else 0
+        _write_report(plan.pages, plan.counts, applied=True)
+    return 1 if errors else 0
 
 
 def _write_report(
