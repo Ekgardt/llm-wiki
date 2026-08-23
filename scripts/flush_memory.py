@@ -55,6 +55,9 @@ from secret_redact import redact_secrets  # noqa: E402
 DAILY_DIR = ROOT / "knowledge" / "daily"
 DEDUPE_WINDOW_SECONDS = 60
 MAX_TRANSCRIPT_CHARS = 60_000
+# What a session record may read from a transcript file; the record itself is
+# bounded again after rendering.
+MAX_RECORD_CHARS = 4_000_000
 MAX_CAPTURE_INTENT_BYTES = 1024 * 1024
 MAX_CAPTURE_DECISION_BYTES = 1024 * 1024
 MAX_CAPTURE_TERMINAL_BYTES = 64 * 1024
@@ -1182,7 +1185,11 @@ def _keep_transcript_record(args: argparse.Namespace) -> None:
 
     if not args.transcript:
         return
-    transcript = read_transcript_tail(Path(args.transcript))
+    # The whole file, not the classifier's tail: a transcript's entries can each
+    # be tens of thousands of characters, so a 60k tail can start inside one and
+    # leave no complete line to render. The record is for storage, not for a
+    # context window, and the rendered result is bounded on its own.
+    transcript = read_transcript_tail(Path(args.transcript), max_chars=MAX_RECORD_CHARS)
     if not transcript:
         return
     fields = {

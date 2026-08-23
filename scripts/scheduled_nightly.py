@@ -148,6 +148,21 @@ def _queue_step() -> _Step:
     )
 
 
+def _episode_step() -> _Step:
+    """Consolidate yesterday's sessions before compile reads the daily log.
+
+    Sessions are kept verbatim whatever the classifier thought of them; this is
+    where a day of them becomes durable knowledge, in the window where nobody is
+    waiting. Every promoted item must quote the record it came from.
+    """
+    return _Step(
+        "Step 1b: consolidating yesterday's sessions...",
+        "episodes",
+        _script("episode_consolidation.py"),
+        300,
+    )
+
+
 def _compile_step() -> _Step:
     return _Step(
         "Step 2: triggering compile (if needed)...",
@@ -275,7 +290,7 @@ def _prune_reports(log) -> None:
 
 
 def _nightly_steps(run_step, log, ownership: OwnerLease | None) -> int:
-    failures = _run_steps(run_step, log, [_queue_step()])
+    failures = _run_steps(run_step, log, [_queue_step(), _episode_step()])
 
     # Step 2 must not skip compile just because a hook-triggered one runs.
     _wait_for_compile_idle(log)
