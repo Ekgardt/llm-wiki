@@ -103,23 +103,19 @@ function Resolve-StateRoot(
     if (-not [string]::IsNullOrWhiteSpace($UserState)) { return $UserState }
     return $VaultRoot
 }
-function Install-CodexHooks(
+function Get-CodexInlineHooksState(
     [string]$VaultRoot,
     [string]$CodexDir
 ) {
-    & uv run --directory $VaultRoot python (Join-Path $VaultRoot "scripts\codex_memory.py") `
-        merge-hooks `
+    # Asked before the ownership transaction, and it writes nothing: the
+    # transaction may own hooks.json only when the inline configuration neither
+    # disables the feature, already carries our handlers, nor contradicts them.
+    $state = (& uv run --directory $VaultRoot python (Join-Path $VaultRoot "scripts\codex_memory.py") `
+        hooks-state `
         --source (Join-Path $VaultRoot "integrations\codex\hooks.json") `
-        --destination (Join-Path $CodexDir "hooks.json") `
-        --config (Join-Path $CodexDir "config.toml") | Out-Null
-    $hookExit = $LASTEXITCODE
-    if ($hookExit -eq 4) {
-        [Console]::Error.WriteLine(
-            "Codex lifecycle hooks are disabled. Set [features] hooks = true in config.toml " +
-            "and rerun the installer; hooks.json was not changed."
-        )
-    }
-    return $hookExit
+        --config (Join-Path $CodexDir "config.toml") | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $state) { return "unknown" }
+    return $state
 }
 function Install-CodexMcp(
     [string]$VaultRoot,
@@ -373,6 +369,12 @@ $antigravityDetected = [bool]((Test-Path "$env:USERPROFILE\.gemini\antigravity-i
 # Detected here, before the transaction, so the settings our hooks live in are
 # owned by it: an uninstall has to take back exactly what the install wrote.
 $claudeDetected = [bool]((Get-Command claude -ErrorAction SilentlyContinue) -or (Test-Path "$env:USERPROFILE\.claude") -or (Test-Path "$env:USERPROFILE\.claude.json"))
+$codexDetected = [bool]((Get-Command codex -ErrorAction SilentlyContinue) -or (Test-Path "$env:USERPROFILE\.codex"))
+$codexHooksState = "none"
+if ($codexDetected) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $env:USERPROFILE ".codex") | Out-Null
+    $codexHooksState = Get-CodexInlineHooksState -VaultRoot $VAULT_ROOT -CodexDir (Join-Path $env:USERPROFILE ".codex")
+}
 try {
     $powerShellPath = [System.Diagnostics.Process]::GetCurrentProcess().Path
     $installControlArgs = @(
@@ -386,6 +388,7 @@ try {
     if ($cursorDetected) { $installControlArgs += "--cursor-hooks" }
     if ($antigravityDetected) { $installControlArgs += "--antigravity-hooks" }
     if ($claudeDetected) { $installControlArgs += "--claude-settings" }
+    if ($codexHooksState -eq "absent") { $installControlArgs += "--codex-hooks" }
     $installControlJson = Invoke-NativeCommand uv $installControlArgs -CaptureOutput
     $installControl = $installControlJson | ConvertFrom-Json
     if ($installControl.status -ne "committed" -or
@@ -449,19 +452,18 @@ if (Get-Command codex -ErrorAction SilentlyContinue) {
         Warn "Codex MCP config could not be verified; config.toml was not changed."
     }
     $codexHooks = Join-Path $codexDir "hooks.json"
-    $codexHookExit = Install-CodexHooks -VaultRoot $VAULT_ROOT -CodexDir $codexDir
-    if ($codexHookExit -eq 0) {
+    if ($codexHooksState -eq "absent") {
         $codexHooksReady = $true
-        Ok "Codex official hooks merged -> $codexHooks"
+        Ok "Codex official hooks owned by the install transaction -> $codexHooks"
         Info "Open /hooks in Codex to review and trust the LLM-Wiki commands."
-    } elseif ($codexHookExit -eq 2) {
-        Warn "Active inline Codex hooks require manual merge and /hooks trust review; hooks.json was not changed."
-    } elseif ($codexHookExit -eq 3) {
+    } elseif ($codexHooksState -eq "equivalent") {
         $codexHooksReady = $true
         Ok "Equivalent LLM-Wiki hooks are already configured inline; hooks.json was not changed."
         Info "Open /hooks in Codex to review and trust the inline LLM-Wiki commands."
-    } elseif ($codexHookExit -eq 4) {
-        # Install-CodexHooks already printed the manual enable instruction.
+    } elseif ($codexHooksState -eq "conflict") {
+        Warn "Active inline Codex hooks require manual merge and /hooks trust review; hooks.json was not changed."
+    } elseif ($codexHooksState -eq "disabled") {
+        Warn "Codex lifecycle hooks are disabled. Set [features] hooks = true in config.toml and rerun the installer; hooks.json was not changed."
     } else {
         Warn "Codex hooks were not changed; review the existing hooks configuration manually."
     }

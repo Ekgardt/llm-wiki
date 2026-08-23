@@ -85,23 +85,16 @@ protect_push_urls_if_authorized() {
   fi
 }
 
-install_codex_hooks() {
+codex_inline_hooks_state() {
+  # Asked before the ownership transaction, and it writes nothing: the
+  # transaction may own hooks.json only when the inline configuration neither
+  # disables the feature, already carries our handlers, nor contradicts them.
   local vault_root="$1"
   local codex_dir="$2"
-  local hook_exit
-  if uv run --directory "$vault_root" python "$vault_root/scripts/codex_memory.py" \
-    merge-hooks \
+  uv run --directory "$vault_root" python "$vault_root/scripts/codex_memory.py" \
+    hooks-state \
     --source "$vault_root/integrations/codex/hooks.json" \
-    --destination "$codex_dir/hooks.json" \
-    --config "$codex_dir/config.toml"; then
-    return 0
-  else
-    hook_exit=$?
-  fi
-  if [ "$hook_exit" -eq 4 ]; then
-    echo "Codex lifecycle hooks are disabled. Set [features] hooks = true in config.toml and rerun the installer; hooks.json was not changed." >&2
-  fi
-  return "$hook_exit"
+    --config "$codex_dir/config.toml" 2>/dev/null || echo "unknown"
 }
 
 configure_codex_mcp() {
@@ -422,6 +415,18 @@ CLAUDE_SETTINGS=0
 if command -v claude &>/dev/null || [ -d "$HOME/.claude" ] || [ -f "$HOME/.claude.json" ]; then
   CLAUDE_SETTINGS=1
 fi
+# Same reason again: Codex hooks were merged in step 7 by a separate command, so
+# an uninstall never took them back. The transaction owns hooks.json when the
+# inline configuration leaves that free.
+CODEX_HOOKS_STATE="none"
+CODEX_HOOKS_OWNED=0
+if command -v codex &>/dev/null || [ -d "$HOME/.codex" ]; then
+  mkdir -p "$HOME/.codex"
+  CODEX_HOOKS_STATE="$(codex_inline_hooks_state "$VAULT_ROOT" "$HOME/.codex")"
+  if [ "$CODEX_HOOKS_STATE" = "absent" ]; then
+    CODEX_HOOKS_OWNED=1
+  fi
+fi
 IDE_HOOK_ARGS=()
 if [ "$CURSOR_HOOKS" -eq 1 ]; then
   IDE_HOOK_ARGS+=(--cursor-hooks)
@@ -434,6 +439,9 @@ if [ "$OPENCODE_PLUGIN" -eq 1 ]; then
 fi
 if [ "$CLAUDE_SETTINGS" -eq 1 ]; then
   IDE_HOOK_ARGS+=(--claude-settings)
+fi
+if [ "$CODEX_HOOKS_OWNED" -eq 1 ]; then
+  IDE_HOOK_ARGS+=(--codex-hooks)
 fi
 
 # ─── 6. Set up scheduled maintenance ────────────────────────────────
@@ -507,24 +515,27 @@ if command -v codex &>/dev/null; then
     fi
   fi
   CODEX_HOOKS="$HOME/.codex/hooks.json"
-  if install_codex_hooks "$VAULT_ROOT" "$HOME/.codex"; then
-    CODEX_HOOKS_READY=1
-    ok "Codex official hooks merged: $CODEX_HOOKS"
-    info "Open /hooks in Codex to review and trust the LLM-Wiki commands."
-  else
-    hook_exit=$?
-    if [ "$hook_exit" -eq 2 ]; then
-      warn "Active inline Codex hooks require manual merge and /hooks trust review; hooks.json was not changed."
-    elif [ "$hook_exit" -eq 3 ]; then
+  case "$CODEX_HOOKS_STATE" in
+    absent)
+      CODEX_HOOKS_READY=1
+      ok "Codex official hooks owned by the install transaction: $CODEX_HOOKS"
+      info "Open /hooks in Codex to review and trust the LLM-Wiki commands."
+      ;;
+    equivalent)
       CODEX_HOOKS_READY=1
       ok "Equivalent LLM-Wiki hooks are already configured inline; hooks.json was not changed."
       info "Open /hooks in Codex to review and trust the inline LLM-Wiki commands."
-    elif [ "$hook_exit" -eq 4 ]; then
-      : # install_codex_hooks already printed the manual enable instruction.
-    else
+      ;;
+    conflict)
+      warn "Active inline Codex hooks require manual merge and /hooks trust review; hooks.json was not changed."
+      ;;
+    disabled)
+      warn "Codex lifecycle hooks are disabled. Set [features] hooks = true in config.toml and rerun the installer; hooks.json was not changed."
+      ;;
+    *)
       warn "Codex hooks were not changed; review the existing hooks configuration manually."
-    fi
-  fi
+      ;;
+  esac
   if [ "$CODEX_MCP_READY" -eq 1 ] && [ "$CODEX_HOOKS_READY" -eq 1 ]; then
     AGENT_STATUSES+=("Codex: manual /hooks trust review required")
   else

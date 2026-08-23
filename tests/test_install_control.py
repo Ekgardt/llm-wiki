@@ -1200,6 +1200,7 @@ def test_install_cli_activates_v2_with_explicit_home(tmp_path: Path, monkeypatch
         antigravity_hooks=True,
         opencode_plugin=False,
         claude_settings=False,
+        codex_hooks=False,
     )
     monkeypatch.setattr(install_control, "_selected_backend", lambda _value: "cron")
     monkeypatch.setattr(
@@ -1334,7 +1335,10 @@ def test_the_opencode_plugin_is_written_and_taken_back_by_the_transaction(
 
     assert manifest["resources"][0]["id"] == "opencode-plugin"
     published = plugin.read_text(encoding="utf-8")
-    assert f'const _EMBEDDED_ROOT = "{root}";' in published
+    # The plugin is JavaScript, so the path is a JSON string literal: on Windows
+    # every backslash in it is escaped, and comparing against the raw path failed
+    # on every Python version there.
+    assert f"const _EMBEDDED_ROOT = {json.dumps(str(root))};" in published
 
     uninstall_resources(state_root=state_root, resources=[resource])
 

@@ -4508,6 +4508,10 @@ def _claude_settings_destination(home: Path) -> Path:
     return home / ".claude" / "settings.json"
 
 
+def _codex_hooks_destination(home: Path) -> Path:
+    return home / ".codex" / "hooks.json"
+
+
 def _recorded_config_existed(
     metadata: Mapping[str, Mapping[str, object]], resource_id: str
 ) -> bool | None:
@@ -4527,6 +4531,8 @@ def _ide_hook_factories(
     from integration_hook_config import (
         claude_settings_resource,
         claude_settings_template,
+        codex_hooks_resource,
+        codex_hooks_template,
         managed_ide_hook_resources,
         opencode_plugin_resource,
     )
@@ -4550,6 +4556,11 @@ def _ide_hook_factories(
             state_root or root,
             config_existed=_recorded_config_existed(metadata, "claude-user-settings"),
         ),
+        "codex-user-hooks": lambda: codex_hooks_resource(
+            _codex_hooks_destination(home),
+            codex_hooks_template(root),
+            config_existed=_recorded_config_existed(metadata, "codex-user-hooks"),
+        ),
     }
 
 
@@ -4560,6 +4571,7 @@ def _selected_ide_hook_resources(
     antigravity_hooks: bool,
     opencode_plugin: bool = False,
     claude_settings: bool = False,
+    codex_hooks: bool = False,
     state_root: Path | None = None,
     metadata: Mapping[str, Mapping[str, object]] | None = None,
 ) -> list[ManagedResource]:
@@ -4568,6 +4580,7 @@ def _selected_ide_hook_resources(
         "antigravity-user-hooks": antigravity_hooks,
         "opencode-plugin": opencode_plugin,
         "claude-user-settings": claude_settings,
+        "codex-user-hooks": codex_hooks,
     }
     factories = _ide_hook_factories(root, home, state_root, metadata or {})
     return [factories[key]() for key, selected in wanted.items() if selected]
@@ -4660,6 +4673,7 @@ def build_install_resources(
     antigravity_hooks: bool = False,
     opencode_plugin: bool = False,
     claude_settings: bool = False,
+    codex_hooks: bool = False,
     ownership_metadata: Mapping[str, Mapping[str, object]] | None = None,
 ) -> list[ManagedResource]:
     metadata = ownership_metadata or {}
@@ -4680,6 +4694,7 @@ def build_install_resources(
             antigravity_hooks,
             opencode_plugin,
             claude_settings,
+            codex_hooks,
             state_root,
             metadata,
         ),
@@ -4711,6 +4726,7 @@ def _install_from_args(args: argparse.Namespace) -> dict[str, object]:
         antigravity_hooks=args.antigravity_hooks,
         opencode_plugin=args.opencode_plugin,
         claude_settings=args.claude_settings,
+        codex_hooks=args.codex_hooks,
         ownership_metadata=None,
     )
     manifest = install_resources(
@@ -4782,6 +4798,7 @@ def _resources_from_existing_args(args: argparse.Namespace, command: str) -> lis
         antigravity_hooks="antigravity-user-hooks" in identifiers,
         opencode_plugin="opencode-plugin" in identifiers,
         claude_settings="claude-user-settings" in identifiers,
+        codex_hooks="codex-user-hooks" in identifiers,
         ownership_metadata=_record_metadata(record),
     )
 
@@ -4832,6 +4849,7 @@ def _parser() -> argparse.ArgumentParser:
     install.add_argument("--antigravity-hooks", action="store_true")
     install.add_argument("--opencode-plugin", action="store_true")
     install.add_argument("--claude-settings", action="store_true")
+    install.add_argument("--codex-hooks", action="store_true")
     _add_existing_arguments(subparsers.add_parser("rollback"))
     _add_existing_arguments(subparsers.add_parser("uninstall"))
     return parser
