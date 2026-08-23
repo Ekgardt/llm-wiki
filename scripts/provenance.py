@@ -16,6 +16,10 @@ AUTHORITY_WEIGHTS: dict[str, float] = {
     "ai": 1.0,
     "inferred": 0.8,
     "unknown": 1.0,
+    # A session record holds the user's own words, but unreviewed and unedited:
+    # it is evidence, not a stated fact, so a compiled page that was written from
+    # it still outranks it. See session-evidence-retention-decision.
+    "session": 0.9,
 }
 
 DEFAULT_AUTHORITY_WEIGHT = 1.0

@@ -200,3 +200,65 @@ def test_the_capture_worker_writes_the_record_before_classifying(monkeypatch):
 
     assert written and written[0][0]["session"] == "session-10"
     assert "why systemd and not cron?" in written[0][1]
+
+
+def test_a_session_record_ranks_below_a_compiled_page() -> None:
+    """The words are the user's; the page written from them still wins.
+
+    A session record is evidence, not a stated fact, so its authority weight sits
+    below both a user-stated page and an ai-derived compiled one.
+    """
+    from provenance import authority_weight
+
+    assert authority_weight("session") < authority_weight("ai-derived")
+    assert authority_weight("session") < authority_weight("user")
+
+
+def test_the_record_declares_the_session_authority() -> None:
+    document = session_evidence.render_session_document({"session": "s"}, TRANSCRIPT)
+
+    assert "source_authority: session" in document
+
+
+def test_the_corpus_collects_session_records(tmp_path: Path) -> None:
+    """MEM-01: the records are members of the corpus, so retrieval can see them."""
+    import corpus_snapshot
+
+    vault = tmp_path / "vault"
+    (vault / "knowledge/notes").mkdir(parents=True)
+    record = vault / "knowledge/raw/sessions/2026-08-23/abc123.md"
+    record.parent.mkdir(parents=True)
+    record.write_text(
+        session_evidence.render_session_document(
+            {"session": "abc123", "captured_at": "2026-08-23T10:00:00Z"}, TRANSCRIPT
+        ),
+        encoding="utf-8",
+    )
+
+    snapshot = corpus_snapshot.collect_corpus(vault)
+
+    paths = [source.record.relative_path for source in snapshot.sources]
+    assert "knowledge/raw/sessions/2026-08-23/abc123.md" in paths
+    kept = next(item for item in snapshot.sources if "sessions" in item.record.relative_path)
+    assert kept.metadata.authority == "session"
+
+
+def test_a_session_chunk_carries_the_session_kind(tmp_path: Path) -> None:
+    import corpus_snapshot
+
+    document = session_evidence.render_session_document({"session": "abc123"}, TRANSCRIPT)
+    content = document.encode("utf-8")
+    relative = "knowledge/raw/sessions/2026-08-23/abc123.md"
+
+    chunks = corpus_snapshot.canonical_retrieval_chunks(
+        source_id=f"source:{relative}",
+        source_path=relative,
+        source_sha256=__import__("hashlib").sha256(content).hexdigest(),
+        content=content,
+    )
+
+    assert chunks
+    # `type` comes from the record's own frontmatter; the authority is what makes
+    # it rank below a compiled page.
+    assert all(chunk.type == "raw-source" for chunk in chunks)
+    assert all(chunk.authority == "session" for chunk in chunks)

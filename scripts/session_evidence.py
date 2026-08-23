@@ -150,7 +150,9 @@ def render_transcript(text: str) -> str:
 
 def _frontmatter(fields: Mapping[str, object]) -> str:
     lines = ["---", "type: raw-source", "status: active", "confidence: high"]
-    lines.append("source_authority: user")
+    # Not `user`: these are the user's words, but raw and unreviewed, so a page
+    # compiled from them must still outrank them in retrieval.
+    lines.append("source_authority: session")
     for key in ("session", "project", "host", "event", "captured_at", "source_event_id"):
         value = fields.get(key)
         if value:
