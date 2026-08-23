@@ -3601,7 +3601,7 @@ def search(
     project: str | None = None,
     since: str | None = None,
     as_of: str | None = None,
-    semantic: bool = False,
+    semantic: bool = True,
     page_paths: list[Path] | None = None,
     graph: bool = True,
     rerank: bool = True,
@@ -4588,7 +4588,7 @@ def _search_backends(
     project: str | None = None,
     since: str | None = None,
     as_of: str | None = None,
-    semantic: bool = False,
+    semantic: bool = True,
     page_paths: list[Path] | None = None,
     graph: bool = True,
     rerank: bool = True,
@@ -4843,7 +4843,7 @@ def _legacy_search(
     project: str | None = None,
     since: str | None = None,
     as_of: str | None = None,
-    semantic: bool = False,
+    semantic: bool = True,
     page_paths: list[Path] | None = None,
     graph: bool = True,
     rerank: bool = True,
@@ -5440,7 +5440,16 @@ def main() -> int:
     p.add_argument("--project", default=None, help="Boost results from this project slug")
     p.add_argument("--since", default=None, help="Only results since YYYY-MM-DD")
     p.add_argument("--as-of", dest="as_of", default=None, help="Only results valid on YYYY-MM-DD")
-    p.add_argument("--semantic", action="store_true", help="Enable vector search (needs sentence-transformers)")
+    # On by default: measured on this vault, "почему systemd таймер, а не cron"
+    # returns nothing without it and four results with it. The dense leg costs
+    # about three seconds once the model is warm, and it fails soft — no model or
+    # no vectors in the active generation simply means the lexical answer.
+    p.add_argument(
+        "--semantic",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Vector search over the active generation (default: on)",
+    )
     p.add_argument(
         "--profile",
         choices=[
