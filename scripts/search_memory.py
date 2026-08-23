@@ -144,13 +144,17 @@ SUMMARY_RE = re.compile(
     r"^One-sentence summary:\s*(.+?)\s*$", re.MULTILINE | re.IGNORECASE
 )
 
-# Embedding model — bge-small-en-v1.5 (MIT, MTEB 62.17, +25% over MiniLM).
-# Same 384d as all-MiniLM-L6-v2 — no dimension change needed.
-# Query instruction prefix improves retrieval accuracy (per BGE model card).
-EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
-EMBEDDING_MODEL_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
-EMBEDDING_DIM = 384
-QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages:"
+# The model, its revision and its prefixes live in one module, because the
+# LanceDB store and its rebuild encode with the same model and a drifting copy
+# would embed questions and pages with different ones.
+from embedding_model import (  # noqa: E402
+    EMBEDDING_DIM,
+    EMBEDDING_MODEL,
+    EMBEDDING_MODEL_REVISION,
+    PASSAGE_INSTRUCTION,
+    QUERY_INSTRUCTION,
+    prefixed_texts,
+)
 
 
 def _have_sentence_transformers() -> bool:
@@ -846,9 +850,8 @@ def _check_legacy_stop(
 
 
 def _prefixed_for_query(texts: list[str], is_query: bool) -> list[str]:
-    if not is_query or not QUERY_INSTRUCTION:
-        return texts
-    return [f"{QUERY_INSTRUCTION} {text}" for text in texts]
+    """Both sides carry their E5 prefix; the model is trained to expect them."""
+    return prefixed_texts(texts, is_query)
 
 
 def _embed_texts(
@@ -860,8 +863,7 @@ def _embed_texts(
 ) -> list[list[float]] | None:
     """Embed a list of texts. Returns None if model unavailable.
 
-    For bge-small-en-v1.5, queries are prefixed with a retrieval instruction
-    for better accuracy. Documents are embedded without prefix.
+    Both sides carry an E5 prefix: questions are queries, pages are passages.
     """
     _check_legacy_stop(deadline, cancelled)
     embedder = _get_embedder()
@@ -5248,7 +5250,11 @@ def _encoded_page_vectors(
         import numpy as np
 
         vectors = np.asarray(
-            embedder.encode(texts, show_progress_bar=False, convert_to_numpy=True)
+            embedder.encode(
+                _prefixed_for_query(texts, False),
+                show_progress_bar=False,
+                convert_to_numpy=True,
+            )
         )
         _check_legacy_stop(deadline, cancelled)
     except TimeoutError:

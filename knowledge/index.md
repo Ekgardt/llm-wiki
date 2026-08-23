@@ -34,6 +34,7 @@ This index catalogs durable memory distilled from AI agent sessions
 - [[knowledge/notes/lsp-live-lease-decision]] — Live LSP lifecycle ownership is represented by one bounded mutable lease anchored inside the immutable owner directory.
 - [[knowledge/notes/lsp-process-containment-decision]] — Windows Job Objects own assigned LSP trees, while POSIX process groups cover only pinned Pyright descendants that remain in the group.
 - [[knowledge/notes/managed-ide-hooks-install-update-decision]] — Cursor and Antigravity user hooks use canonical lifecycle adapters and bounded structural fragments owned by one resumable install v2 update, rollback, and uninstall control plane.
+- [[knowledge/notes/nightly-builds-generation-vectors-decision]] — semantic retrieval stops being code that only tests exercise: the maintenance pass that publishes a generation also builds its vectors, so a question in any language can reach a page written in another.
 - [[knowledge/notes/no-gitkeep-in-inbox-articles]] — Do not add `.gitkeep` to `knowledge/inbox/articles/` — the directory will be created on demand by scripts at first use.
 - [[knowledge/notes/observable-capture-and-bounded-maintenance-decision]] — A failed capture is recorded durably instead of vanishing,
 - [[knowledge/notes/one-trust-weight-across-retrieval-paths-decision]] — Typed provenance multiplies the score that decides the order on every retrieval path, from one shared table, and the weight is reported.

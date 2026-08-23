@@ -96,3 +96,4 @@ without ever proving the capture path works again.
   decision that made a lost capture visible in the first place.
 - [[knowledge/notes/idempotent-retry-after-quarantine-decision]] — the retry
   chain whose ordinary case this rule recognises.
+- [[knowledge/notes/nightly-builds-generation-vectors-decision]] — what the maintenance pass must build so the published generation can answer in any language.

@@ -183,7 +183,7 @@ No embedding model, vector cache, or optional package is required in this tier.
 
 ### Optional semantic tier (`uv sync --extra semantic`)
 1. **BM25 (weight=2.0)**: SQLite FTS5.
-2. **Vector (weight=1.0)**: numpy brute-force cosine similarity using BAAI/bge-small-en-v1.5. Vectors are cached in `vectors.npy` with `vectors_meta.json` metadata.
+2. **Vector (weight=1.0)**: numpy brute-force cosine similarity using intfloat/multilingual-e5-small. Vectors are cached in `vectors.npy` with `vectors_meta.json` metadata.
 3. **Graph-neighbor (weight=0.5)**: wikilink adjacency boost.
 
 ### Hybrid tier (`uv sync --extra hybrid`)
@@ -194,7 +194,7 @@ No embedding model, vector cache, or optional package is required in this tier.
 
 **RRF formula**: `score = 2.0/(60+bm25_rank) + 1.0/(60+vector_rank) + 0.5/(60+graph_rank)` for signals that actually return a ranked candidate.
 
-The legacy optional vector path remains pinned to `BAAI/bge-small-en-v1.5` for
+The legacy optional vector path remains pinned to `intfloat/multilingual-e5-small` for
 compatibility. `benchmark/model-matrix-v1.json` defines pinned multilingual embedding
 and reranker candidates, but its default embedding and reranker are both `null` and
 its status is `awaiting_raw_benchmark`. No new default or superiority claim is
