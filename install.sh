@@ -415,6 +415,13 @@ fi
 if [ -d "$HOME/.config/opencode" ] || command -v opencode &>/dev/null; then
   OPENCODE_PLUGIN=1
 fi
+# Same reason: Claude's user settings were merged by a separate script in step 7,
+# so an uninstall left our hooks in settings.json pointing at a vault that was
+# gone. The transaction owns our hook blocks and the two env keys now.
+CLAUDE_SETTINGS=0
+if command -v claude &>/dev/null || [ -d "$HOME/.claude" ] || [ -f "$HOME/.claude.json" ]; then
+  CLAUDE_SETTINGS=1
+fi
 IDE_HOOK_ARGS=()
 if [ "$CURSOR_HOOKS" -eq 1 ]; then
   IDE_HOOK_ARGS+=(--cursor-hooks)
@@ -424,6 +431,9 @@ if [ "$ANTIGRAVITY_HOOKS" -eq 1 ]; then
 fi
 if [ "$OPENCODE_PLUGIN" -eq 1 ]; then
   IDE_HOOK_ARGS+=(--opencode-plugin)
+fi
+if [ "$CLAUDE_SETTINGS" -eq 1 ]; then
+  IDE_HOOK_ARGS+=(--claude-settings)
 fi
 
 # ─── 6. Set up scheduled maintenance ────────────────────────────────
@@ -535,18 +545,10 @@ if [ "$ANTIGRAVITY_HOOKS" -eq 1 ]; then
   ok "Antigravity local user hooks are active"
 fi
 
-# Claude Code — merge hooks if CLI or config dir present (safe: backup + non-destructive)
-if command -v claude &>/dev/null || [ -d "$HOME/.claude" ] || [ -f "$HOME/.claude.json" ]; then
-  CLAUDE_AUTOMATIC=0
-  info "Merging LLM-wiki hooks into Claude user settings (backup first)..."
-  if uv run python "$VAULT_ROOT/scripts/merge_claude_settings.py" \
-      --vault-root "$VAULT_ROOT" \
-      --state-root "$STATE_ROOT"; then
-    CLAUDE_AUTOMATIC=1
-    ok "Claude settings merged → ~/.claude/settings.json"
-  else
-    warn "Claude settings merge failed — run: uv run python scripts/merge_claude_settings.py"
-  fi
+# Claude Code — hooks and env are owned by the install transaction (step 6)
+if [ "$CLAUDE_SETTINGS" -eq 1 ]; then
+  CLAUDE_AUTOMATIC=1
+  ok "Claude settings owned by the install transaction → ~/.claude/settings.json"
   # v4.0: MCP server config for Claude Code
   CLAUDE_MCP="$HOME/.claude.json"
   if [ ! -f "$CLAUDE_MCP" ]; then

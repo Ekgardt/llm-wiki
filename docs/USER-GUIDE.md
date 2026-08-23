@@ -143,7 +143,7 @@ successful cutover and do not remove v2 state manually.
 
 | Agent | How to wire |
 |-------|-------------|
-| **Claude Code** | Configure MCP for reads/actions, then run `uv run python scripts/merge_claude_settings.py` for five thin lifecycle hooks. |
+| **Claude Code** | Configure MCP for reads/actions; the installer's ownership transaction writes the thin lifecycle hooks into `~/.claude/settings.json` and takes them back on uninstall. |
 | **OpenCode** | Configure MCP, then copy `scripts/llm-wiki-memory-opencode.js` for lifecycle events. |
 | **Codex CLI** | Configure MCP; on Windows add `. "$env:LLM_WIKI_ROOT\scripts\codex-memory-wrapper.ps1"` to `$PROFILE` for lifecycle capture. |
 | **Cursor** | Configure MCP for reads/actions, install Cursor locally, then rerun the native installer. It manages exact LLM-Wiki handlers in `~/.cursor/hooks.json`; the rules file is optional guidance. |

@@ -1199,6 +1199,7 @@ def test_install_cli_activates_v2_with_explicit_home(tmp_path: Path, monkeypatch
         cursor_hooks=True,
         antigravity_hooks=True,
         opencode_plugin=False,
+        claude_settings=False,
     )
     monkeypatch.setattr(install_control, "_selected_backend", lambda _value: "cron")
     monkeypatch.setattr(

@@ -370,6 +370,9 @@ $uvPath = (Get-Command uv).Source
 $schedulerWarning = $false
 $cursorDetected = [bool]((Test-Path "$env:USERPROFILE\.cursor") -or (Get-Command cursor -ErrorAction SilentlyContinue))
 $antigravityDetected = [bool]((Test-Path "$env:USERPROFILE\.gemini\antigravity-ide") -or (Get-Command agy -ErrorAction SilentlyContinue))
+# Detected here, before the transaction, so the settings our hooks live in are
+# owned by it: an uninstall has to take back exactly what the install wrote.
+$claudeDetected = [bool]((Get-Command claude -ErrorAction SilentlyContinue) -or (Test-Path "$env:USERPROFILE\.claude") -or (Test-Path "$env:USERPROFILE\.claude.json"))
 try {
     $powerShellPath = [System.Diagnostics.Process]::GetCurrentProcess().Path
     $installControlArgs = @(
@@ -382,6 +385,7 @@ try {
     )
     if ($cursorDetected) { $installControlArgs += "--cursor-hooks" }
     if ($antigravityDetected) { $installControlArgs += "--antigravity-hooks" }
+    if ($claudeDetected) { $installControlArgs += "--claude-settings" }
     $installControlJson = Invoke-NativeCommand uv $installControlArgs -CaptureOutput
     $installControl = $installControlJson | ConvertFrom-Json
     if ($installControl.status -ne "committed" -or
@@ -469,23 +473,12 @@ if (Get-Command codex -ErrorAction SilentlyContinue) {
     }
 }
 
-# Claude Code - merge hooks into user settings if CLI or config dir present
+# Claude Code - hooks and env are owned by the install transaction (step 6)
 $claudeConfig = Join-Path $env:USERPROFILE ".claude"
 $claudeUserConfig = Join-Path $env:USERPROFILE ".claude.json"
-if ((Get-Command claude -ErrorAction SilentlyContinue) -or (Test-Path $claudeConfig) -or (Test-Path $claudeUserConfig)) {
-    $claudeAutomatic = $false
-    Ok "Claude Code detected (or ~/.claude present)"
-    Info "Merging LLM-wiki hooks into Claude user settings (backup first)..."
-    uv run python (Join-Path $VAULT_ROOT "scripts\merge_claude_settings.py") `
-        --vault-root $VAULT_ROOT `
-        --state-root $STATE_ROOT 2>&1 | ForEach-Object { Info "$_" }
-    if ($LASTEXITCODE -eq 0) {
-        $claudeAutomatic = $true
-        Ok "Claude settings merged -> $claudeConfig\settings.json"
-    } else {
-        Warn "Claude settings merge failed - run manually:"
-        Warn "  uv run python scripts\merge_claude_settings.py"
-    }
+if ($claudeDetected) {
+    $claudeAutomatic = $true
+    Ok "Claude settings owned by the install transaction -> $claudeConfig\settings.json"
     $claudeMcp = $claudeUserConfig
     $claudeEntryObject = [ordered]@{
         command = "uv"
