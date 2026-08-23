@@ -30,12 +30,24 @@ from memory_state import ROOT, update_state  # noqa: E402
 from session_evidence import SESSION_EVIDENCE_DIR  # noqa: E402
 
 MAX_RECORDS = 12
-MAX_RECORD_CHARS = 12_000
+# One budget for the day, shared between its records, instead of a fixed slice
+# per record: a real session record runs to hundreds of kilobytes, and a 12 000
+# character head showed the model the setup and none of the work — it answered
+# "nothing durable" for a day that plainly had some.
+MAX_PROMPT_CHARS = 200_000
+MIN_RECORD_CHARS = 8_000
+GAP_NOTE = "\n\n… (middle of the session omitted) …\n\n"
 MAX_ITEMS = 8
 MAX_QUOTE_CHARS = 240
 MAX_TEXT_CHARS = 400
 CONSOLIDATION_MAX_TOKENS = 1200
-KINDS = ("decision", "lesson", "gotcha")
+KINDS = ("decision", "lesson", "gotcha", "rule")
+# A rule is procedural memory: it is read before acting, not searched for after.
+# `build_guardrails` collects pattern pages whose summary carries one of these
+# words and injects them at session start, so a "rule" that cannot be phrased as
+# one is not a rule — it is a lesson, and it is kept as a lesson.
+IMPERATIVE_MARKERS = ("do not", "don't", "never", "always", "must", "should")
+MAX_TRIGGER_CHARS = 160
 
 CONSOLIDATION_SYSTEM_PROMPT = (
     "You read a day of software work sessions and report only what a reader "
@@ -50,11 +62,18 @@ lessons, and debugging gotchas (symptom to cause). Skip everything that was
 routine work, status chatter, or a detail that only mattered inside one session.
 
 For each item give:
-- "kind": decision, lesson, or gotcha
-- "text": one sentence a reader would understand a month later
+- "kind": decision, lesson, gotcha, or rule
+- "text": one sentence a reader would understand a month later. For a rule it
+  must read as an instruction and contain one of: do not, never, always, must,
+  should.
+- "trigger": for a rule only — the situation in which it applies, so it can be
+  read before acting rather than searched for afterwards
 - "quote": a verbatim fragment from the record that supports it, under 200
   characters, copied exactly
 - "session": the session id it came from
+
+Report a rule only when the session shows something going wrong and being put
+right: what should be done differently next time in that situation.
 
 Answer with a JSON array and nothing else. If the day holds nothing durable,
 answer with an empty array.
@@ -68,6 +87,7 @@ class Lesson:
     text: str
     quote: str
     session: str
+    trigger: str = ""
 
 
 def session_day_directory(vault: Path, day: str) -> Path:
@@ -82,14 +102,31 @@ def session_records(vault: Path, day: str) -> list[Path]:
 
 
 def _record_text(path: Path) -> str:
+    """The whole record; the prompt decides how much of it fits."""
     try:
-        return path.read_text(encoding="utf-8", errors="ignore")[:MAX_RECORD_CHARS]
+        return path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return ""
 
 
+def _record_share(count: int) -> int:
+    return max(MIN_RECORD_CHARS, MAX_PROMPT_CHARS // max(count, 1))
+
+
+def _within_share(text: str, share: int) -> str:
+    """Head and tail, not just the head: a session's work is rarely at its start."""
+    if len(text) <= share:
+        return text
+    half = share // 2
+    return text[:half] + GAP_NOTE + text[-half:]
+
+
 def _records_block(paths: list[Path]) -> str:
-    parts = [f"=== session {path.stem} ===\n{_record_text(path)}" for path in paths]
+    share = _record_share(len(paths))
+    parts = [
+        f"=== session {path.stem} ===\n{_within_share(_record_text(path), share)}"
+        for path in paths
+    ]
     return "\n\n".join(part for part in parts if part.strip())
 
 
@@ -122,15 +159,41 @@ def _lesson_kind(item: dict) -> str | None:
     return kind
 
 
+def _is_imperative(text: str) -> bool:
+    lowered = text.casefold()
+    return any(marker in lowered for marker in IMPERATIVE_MARKERS)
+
+
+def _valid_rule(kind: str, text: str, trigger: str) -> bool:
+    """A rule needs a situation to fire in and words that make it an instruction."""
+    if kind != "rule":
+        return True
+    return bool(trigger) and _is_imperative(text)
+
+
+def _complete_lesson(lesson: Lesson) -> Lesson | None:
+    if not lesson.text or not lesson.quote:
+        return None
+    if not _valid_rule(lesson.kind, lesson.text, lesson.trigger):
+        return None
+    return lesson
+
+
 def _lesson_of(item: object) -> Lesson | None:
     if not isinstance(item, dict):
         return None
     kind = _lesson_kind(item)
-    text = _string_field(item, "text", MAX_TEXT_CHARS)
-    quote = _string_field(item, "quote", MAX_QUOTE_CHARS)
-    if kind is None or not text or not quote:
+    if kind is None:
         return None
-    return Lesson(kind, text, quote, _string_field(item, "session", 80))
+    return _complete_lesson(
+        Lesson(
+            kind,
+            _string_field(item, "text", MAX_TEXT_CHARS),
+            _string_field(item, "quote", MAX_QUOTE_CHARS),
+            _string_field(item, "session", 80),
+            _string_field(item, "trigger", MAX_TRIGGER_CHARS),
+        )
+    )
 
 
 def _grounded(lesson: Lesson, corpus: str) -> bool:
@@ -153,10 +216,30 @@ def grounded_lessons(raw: str, paths: list[Path]) -> list[Lesson]:
     return [lesson for lesson in kept if lesson is not None][:MAX_ITEMS]
 
 
+def _lesson_headline(lesson: Lesson) -> str:
+    """A rule states its situation first, because that is when it must be read."""
+    if lesson.kind != "rule":
+        return f"  - **{lesson.kind.capitalize()}** — {lesson.text}"
+    return f"  - **Rule** — When {lesson.trigger}: {lesson.text}"
+
+
+def _lesson_shape(lesson: Lesson) -> list[str]:
+    """A rule says what page it wants to become, because that is how it gets read.
+
+    `build_guardrails` collects pattern pages whose one-sentence summary carries
+    the instruction and injects them at session start. Losing the instruction in
+    the summary would leave the rule searchable but never read.
+    """
+    if lesson.kind != "rule":
+        return []
+    return ["    Kind: procedural rule — pattern page, keep the instruction in the summary"]
+
+
 def _lesson_lines(lesson: Lesson) -> list[str]:
     return [
-        f"  - **{lesson.kind.capitalize()}** — {lesson.text}",
+        _lesson_headline(lesson),
         f"    > {lesson.quote}",
+        *_lesson_shape(lesson),
         f"    Source: `{SESSION_EVIDENCE_DIR}/…/{lesson.session}.md`",
     ]
 
@@ -177,7 +260,8 @@ def _operation_id(day: str, lessons: list[Lesson]) -> str:
     from reliable_memory import sha256_bytes
 
     payload = json.dumps(
-        [[item.kind, item.text, item.quote] for item in lessons], ensure_ascii=False
+        [[item.kind, item.text, item.quote, item.trigger] for item in lessons],
+        ensure_ascii=False,
     ).encode("utf-8")
     return f"episodes:{day}:{sha256_bytes(payload)[:16]}"
 

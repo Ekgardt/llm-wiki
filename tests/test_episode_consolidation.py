@@ -199,3 +199,81 @@ def test_the_prompt_carries_the_records(vault: Path) -> None:
 
     assert "=== session abc123 ===" in prompt
     assert "systemd user timers survive a reboot" in prompt
+
+
+def _rule(text: str, trigger: str) -> str:
+    return _answer(
+        [
+            {
+                "kind": "rule",
+                "text": text,
+                "trigger": trigger,
+                "quote": "systemd user timers survive a reboot",
+                "session": "abc123",
+            }
+        ]
+    )
+
+
+def test_a_rule_needs_a_situation_and_an_instruction(vault: Path) -> None:
+    """Procedural memory is read before acting, so it must say when and what."""
+    lessons = consolidation.grounded_lessons(
+        _rule("always prefer a user timer over cron", "scheduling maintenance"),
+        consolidation.session_records(vault, "2026-08-23"),
+    )
+
+    assert [item.kind for item in lessons] == ["rule"]
+    assert lessons[0].trigger == "scheduling maintenance"
+
+
+def test_a_rule_without_a_trigger_is_not_a_rule(vault: Path) -> None:
+    lessons = consolidation.grounded_lessons(
+        _rule("always prefer a user timer over cron", ""),
+        consolidation.session_records(vault, "2026-08-23"),
+    )
+
+    assert lessons == []
+
+
+def test_a_rule_that_reads_like_a_note_is_not_a_rule(vault: Path) -> None:
+    """`build_guardrails` recognises rules by these words; without one it is a lesson."""
+    lessons = consolidation.grounded_lessons(
+        _rule("user timers are nicer than cron", "scheduling maintenance"),
+        consolidation.session_records(vault, "2026-08-23"),
+    )
+
+    assert lessons == []
+
+
+def test_a_rule_states_its_situation_first(vault: Path) -> None:
+    lesson = consolidation.Lesson(
+        "rule",
+        "always prefer a user timer over cron",
+        "systemd user timers survive a reboot",
+        "abc123",
+        "scheduling maintenance",
+    )
+
+    block = consolidation.render_block(
+        "2026-08-23", [lesson], datetime(2026, 8, 24, 3, 15, 0)
+    )
+
+    assert "**Rule** — When scheduling maintenance: always prefer a user timer" in block
+
+
+def test_a_rule_summary_is_shaped_for_the_session_start_surface(vault: Path) -> None:
+    """The loop only closes if `build_guardrails` would pick the page up."""
+    import re
+
+    lesson = consolidation.Lesson(
+        "rule",
+        "never resolve a merge conflict automatically",
+        "systemd user timers survive a reboot",
+        "abc123",
+        "updating the checkout",
+    )
+    block = consolidation.render_block("2026-08-23", [lesson], datetime.now())
+
+    assert re.search(
+        r"\b(do not|don'?t|always|never|must|should)\b", block, re.IGNORECASE
+    )
