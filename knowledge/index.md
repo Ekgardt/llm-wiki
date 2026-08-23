@@ -16,6 +16,7 @@ This index catalogs durable memory distilled from AI agent sessions
 ## Decisions
 - [[knowledge/notes/agent-native-mcp-foundation]] — LLM Wiki uses MCP as the common read/action interface for every agent while host-specific hooks remain thin lifecycle-event adapters.
 - [[knowledge/notes/audit-closure-security-recovery-control-plane-decision]] — Audit closure retires the unsupported Cognee bridge and adds one fail-closed DLP, recovery, install, scheduling, coordination, and evidence contract without another daemon, database, or MCP tool.
+- [[knowledge/notes/automatic-code-update-decision]] — the nightly pass may advance the checkout to the remote branch when that is a strict fast-forward and touches no file the owner has modified, and may do nothing else with git.
 - [[knowledge/notes/baseline-environment-binding-decision]] — The frozen retrieval-v2 baseline is bound to the exact
 - [[knowledge/notes/blackboard-fenced-resource-claims-decision]] — Blackboard coordination uses two bounded tables in the existing coordinator-v3 database for atomic resource claims while immutable coordination history remains authoritative Markdown.
 - [[knowledge/notes/centralized-memory-subsystem]] — The memory subsystem (`run/state.json`, `knowledge/daily/`, `knowledge/notes/`) resolves to a single canonical location regardless of whether Claude Code runs from the main checkout or a git worktree.

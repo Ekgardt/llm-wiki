@@ -94,7 +94,9 @@ resumable install state, exact-release/external-path manifests, verified preimag
 and non-secret scheduler definitions. Windows uses Task Scheduler, macOS uses a
 user LaunchAgent, Linux uses a user systemd timer, and cron is explicit degraded
 fallback. Blackboard and capture reuse the two Reliability v3 databases. No daemon,
-MCP tool, runtime root, or automatic Git operation is added. See
+MCP tool, or runtime root is added. The prohibition on automatic Git operations was
+lifted by the owner on 2026-08-23 for one bounded case only — see
+`knowledge/notes/automatic-code-update-decision.md`. See
 `knowledge/notes/audit-closure-security-recovery-control-plane-decision.md`.
 
 **Superset product contract (approved 2026-07-19):** LLM Wiki is the single
@@ -131,8 +133,11 @@ logical evidence in immutable uncompressed BagIt packages. Claims with uncertain
 evidence or evaluator disagreement enter quarantine; automatic semantic supersession
 and eager backfill remain disabled. Do not delete `run/` while doctor reports a
 source failure, any 30-day undo artifact, retained work/result, or live owner. There
-is no automatic Git operation, persistent daemon, cloud service, remote queue/cache,
-exactly-once promise, or gzip archive tier.
+is no persistent daemon, cloud service, remote queue/cache, exactly-once promise, or
+gzip archive tier. The single automatic Git operation is the nightly fast-forward
+update of the checkout, which never pushes, never resolves a conflict, and declines
+whenever the update would touch a locally modified file — see
+`knowledge/notes/automatic-code-update-decision.md`.
 
 **Approved Reliability v3 target (not implemented):** New
 unprocessed lifecycle evidence would be create-only under `run/capture-intents/`

@@ -69,6 +69,7 @@ knowledge/notes/*
 !knowledge/notes/idempotent-retry-after-quarantine-decision.md
 !knowledge/notes/self-resolving-health-findings-decision.md
 !knowledge/notes/nightly-builds-generation-vectors-decision.md
+!knowledge/notes/automatic-code-update-decision.md
 !knowledge/notes/Ingestion Workflow.md
 !knowledge/notes/Retrieval Workflow.md
 !knowledge/notes/Review Workflow.md

@@ -254,6 +254,20 @@ def _post_compile_pass(run_step, log, ownership: OwnerLease | None) -> int:
     return failures
 
 
+def _update_code(log) -> None:
+    """Advance the checkout last, so changed code takes effect next pass.
+
+    An update is never a reason to fail the night: a diverged branch, an offline
+    machine and a file the owner is editing are ordinary states, and the step
+    names which one it met.
+    """
+    from self_update import update_checkout
+
+    log("Step 5: updating the vault code...")
+    outcome = update_checkout(ROOT)
+    log(f"  update: {outcome['status']} ({outcome.get('reason') or 'none'})")
+
+
 def _prune_reports(log) -> None:
     """Retention over every maintenance report family and its artifacts."""
     log("Step 4: pruning maintenance reports and artifacts...")
@@ -327,6 +341,7 @@ def _run_nightly_body(*, ownership: OwnerLease | None) -> int:
 
         failures = _nightly_steps(run_step, log, ownership)
         _prune_reports(log)
+        _update_code(log)
 
         log(f"=== Nightly pass complete (failures={failures}) ===")
         return 1 if failures else 0
