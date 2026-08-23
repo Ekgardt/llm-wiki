@@ -4488,13 +4488,26 @@ def _posix_scheduler_resource(
         raise InstallControlError("install_scheduler_backend_invalid") from exc
 
 
+def _opencode_plugin_destination(home: Path) -> Path:
+    from installer_config import opencode_global_dir
+
+    directory = opencode_global_dir(
+        home, os.environ.get("XDG_CONFIG_HOME"), platform=sys.platform
+    )
+    return directory / "plugins" / "llm-wiki-memory.js"
+
+
 def _selected_ide_hook_resources(
     root: Path,
     home: Path,
     cursor_hooks: bool,
     antigravity_hooks: bool,
+    opencode_plugin: bool = False,
 ) -> list[ManagedResource]:
-    from integration_hook_config import managed_ide_hook_resources
+    from integration_hook_config import (
+        managed_ide_hook_resources,
+        opencode_plugin_resource,
+    )
 
     resources = {
         resource.resource_id: resource for resource in managed_ide_hook_resources(root, home)
@@ -4504,6 +4517,10 @@ def _selected_ide_hook_resources(
         selected.append(resources["cursor-user-hooks"])
     if antigravity_hooks:
         selected.append(resources["antigravity-user-hooks"])
+    if opencode_plugin:
+        selected.append(
+            opencode_plugin_resource(root, _opencode_plugin_destination(home))
+        )
     return selected
 
 
@@ -4592,6 +4609,7 @@ def build_install_resources(
     powershell_path: str | None,
     cursor_hooks: bool = False,
     antigravity_hooks: bool = False,
+    opencode_plugin: bool = False,
     ownership_metadata: Mapping[str, Mapping[str, object]] | None = None,
 ) -> list[ManagedResource]:
     metadata = ownership_metadata or {}
@@ -4610,6 +4628,7 @@ def build_install_resources(
             home,
             cursor_hooks,
             antigravity_hooks,
+            opencode_plugin,
         ),
     ]
 
@@ -4637,6 +4656,7 @@ def _install_from_args(args: argparse.Namespace) -> dict[str, object]:
         powershell_path=args.powershell_path,
         cursor_hooks=args.cursor_hooks,
         antigravity_hooks=args.antigravity_hooks,
+        opencode_plugin=args.opencode_plugin,
         ownership_metadata=None,
     )
     manifest = install_resources(
@@ -4754,6 +4774,7 @@ def _parser() -> argparse.ArgumentParser:
     install.add_argument("--powershell-path")
     install.add_argument("--cursor-hooks", action="store_true")
     install.add_argument("--antigravity-hooks", action="store_true")
+    install.add_argument("--opencode-plugin", action="store_true")
     _add_existing_arguments(subparsers.add_parser("rollback"))
     _add_existing_arguments(subparsers.add_parser("uninstall"))
     return parser

@@ -9,7 +9,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from install_control import InstallControlError, ManagedResource
+from install_control import InstallControlError, ManagedResource, file_resource
 from integration_config_backup import publish_configuration
 from reliable_memory import canonical_json_bytes, fsync_directory
 
@@ -468,6 +468,33 @@ def _antigravity_template_config(root: Path) -> dict[str, object]:
     if not isinstance(owned, dict):
         raise InstallControlError("integration_antigravity_template_invalid")
     return owned
+
+
+def _plugin_source_bytes(source: Path) -> str:
+    if source.is_symlink() or not source.is_file():
+        raise InstallControlError("integration_opencode_plugin_unavailable")
+    return source.read_text(encoding="utf-8")
+
+
+def opencode_plugin_resource(root: Path, destination: Path) -> ManagedResource:
+    """Own the published OpenCode plugin as one whole file.
+
+    The installer copied it outside the ownership transaction, so an uninstall
+    left the plugin behind, still pointing at a vault that no longer existed,
+    and a rollback could not put back what was there before.
+    """
+    from installer_config import plugin_with_embedded_root
+
+    root = _absolute_destination(root)
+    source = root / "scripts" / "llm-wiki-memory-opencode.js"
+    desired = plugin_with_embedded_root(_plugin_source_bytes(source), root)
+    return file_resource(
+        resource_id="opencode-plugin",
+        kind="opencode_plugin",
+        path=_absolute_destination(destination),
+        desired=desired.encode("utf-8"),
+        mode=0o644,
+    )
 
 
 def managed_ide_hook_resources(root: Path, home: Path) -> list[ManagedResource]:

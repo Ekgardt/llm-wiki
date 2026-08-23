@@ -1198,6 +1198,7 @@ def test_install_cli_activates_v2_with_explicit_home(tmp_path: Path, monkeypatch
         home=tmp_path / "home",
         cursor_hooks=True,
         antigravity_hooks=True,
+        opencode_plugin=False,
     )
     monkeypatch.setattr(install_control, "_selected_backend", lambda _value: "cron")
     monkeypatch.setattr(
@@ -1293,6 +1294,50 @@ def test_doctor_runtime_check_reports_corrupt_install_state(tmp_path: Path) -> N
     assert result["status"] == "error"
     assert result["details"]["codes"] == ["install_state_corrupt"]
     assert result["details"]["install"]["status"] == "corrupt"
+
+
+def _plugin_vault(tmp_path: Path) -> Path:
+    root = tmp_path / "vault"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "llm-wiki-memory-opencode.js").write_text(
+        "const _EMBEDDED_ROOT = null; // llm-wiki:embedded-root\n",
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_the_opencode_plugin_is_written_and_taken_back_by_the_transaction(
+    tmp_path: Path,
+) -> None:
+    """An uninstall has to take back exactly what the install wrote.
+
+    The plugin used to be copied outside the ownership transaction, so removing
+    the installation left it behind, still naming a vault that was gone.
+    """
+    from integration_hook_config import opencode_plugin_resource
+
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    root = _plugin_vault(tmp_path)
+    plugin = tmp_path / "home" / ".config" / "opencode" / "plugins" / "llm-wiki-memory.js"
+
+    resource = opencode_plugin_resource(root, plugin)
+    manifest = install_resources(
+        state_root=state_root,
+        vault_root=root,
+        release=_release(),
+        scheduler_backend="cron",
+        resources=[resource],
+        control_version=2,
+    )
+
+    assert manifest["resources"][0]["id"] == "opencode-plugin"
+    published = plugin.read_text(encoding="utf-8")
+    assert f'const _EMBEDDED_ROOT = "{root}";' in published
+
+    uninstall_resources(state_root=state_root, resources=[resource])
+
+    assert not plugin.exists()
 
 
 def test_fresh_v2_install_persists_exact_owned_fragments_before_mutation(

@@ -403,11 +403,17 @@ ok "Runtime dirs: $STATE_ROOT/{run,logs,cache} (gitignored)"
 
 CURSOR_HOOKS=0
 ANTIGRAVITY_HOOKS=0
+OPENCODE_PLUGIN=0
 if [ -d "$HOME/.cursor" ] || command -v cursor &>/dev/null; then
   CURSOR_HOOKS=1
 fi
 if [ -d "$HOME/.gemini/antigravity-ide" ] || command -v agy &>/dev/null; then
   ANTIGRAVITY_HOOKS=1
+fi
+# Detected here rather than in step 7 so the plugin is written by the ownership
+# transaction: an uninstall has to be able to take back exactly what it wrote.
+if [ -d "$HOME/.config/opencode" ] || command -v opencode &>/dev/null; then
+  OPENCODE_PLUGIN=1
 fi
 IDE_HOOK_ARGS=()
 if [ "$CURSOR_HOOKS" -eq 1 ]; then
@@ -415,6 +421,9 @@ if [ "$CURSOR_HOOKS" -eq 1 ]; then
 fi
 if [ "$ANTIGRAVITY_HOOKS" -eq 1 ]; then
   IDE_HOOK_ARGS+=(--antigravity-hooks)
+fi
+if [ "$OPENCODE_PLUGIN" -eq 1 ]; then
+  IDE_HOOK_ARGS+=(--opencode-plugin)
 fi
 
 # ─── 6. Set up scheduled maintenance ────────────────────────────────
