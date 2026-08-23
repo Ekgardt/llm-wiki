@@ -210,6 +210,18 @@ retries only errors 5, 32, and 33 within the previous lease expiry. See
 `knowledge/notes/lsp-live-lease-decision.md`, and
 `knowledge/notes/lsp-process-containment-decision.md`.
 
+**Session evidence (approved 2026-08-23):** every captured session writes a
+redacted copy of itself to `knowledge/raw/sessions/<date>/<session-id>.md` before
+any classification and regardless of the tier — the conversation verbatim, each
+tool call as one line naming the tool and its target. Retention never depends on
+a judgement made before the question exists; the classifier decides only whether
+a session also deserves a compiled page. That directory is private by default
+(`knowledge/raw/**` is denied in `.gitignore`), the record is bounded, and a
+failed write never breaks capture. Session evidence is not yet a member of the
+corpus generation, so it is on disk and greppable but not yet part of hybrid
+retrieval — adding it requires the corpus collector to carry a `session` source
+kind. See `knowledge/notes/session-evidence-retention-decision.md`.
+
 **Forbidden at vault root:** `wiki/`, `memory/`, `outputs/`, `state/`,
 `LLM-wiki-state/` (legacy sibling layout — removed). Runtime lives **inside**
 the vault under gitignored `cache/logs/run/`.
