@@ -151,8 +151,6 @@ from embedding_model import (  # noqa: E402
     EMBEDDING_DIM,
     EMBEDDING_MODEL,
     EMBEDDING_MODEL_REVISION,
-    PASSAGE_INSTRUCTION,
-    QUERY_INSTRUCTION,
     prefixed_texts,
 )
 
@@ -590,6 +588,100 @@ def build_generation_numpy_vectors(
         _artifact_descriptor(directory / name, name)
         for name in GENERATION_VECTOR_ARTIFACTS
     ]
+
+
+def _generation_embedder(embedder, *, is_query: bool):
+    """The generation paths want a callable, and E5 wants each side told apart.
+
+    A page is a passage and a question is a query; encoding either with the
+    other's prefix costs accuracy the model was trained to give.
+    """
+
+    def encode(texts) -> list[list[float]]:
+        vectors = embedder.encode(
+            prefixed_texts(list(texts), is_query),
+            show_progress_bar=False,
+            convert_to_numpy=True,
+        )
+        return vectors.tolist()
+
+    return encode
+
+
+def _resolved_generation_embedder(
+    semantic: bool,
+    embedder: object | None,
+    model_id: str | None,
+    model_revision: str | None,
+):
+    """Give generation search the encoder it needs when no caller supplied one.
+
+    These three arguments had no default and no caller, so the dense leg of
+    generation search never ran in any installed vault: every question was
+    answered by token overlap alone, and a question asked in another language
+    than the pages could not be answered at all.
+    """
+    if not semantic:
+        return None, None, None
+    if embedder is not None:
+        return embedder, model_id, model_revision
+    loaded = _get_embedder()
+    if loaded is None:
+        return None, None, None
+    return (
+        _generation_embedder(loaded, is_query=True),
+        EMBEDDING_MODEL,
+        EMBEDDING_MODEL_REVISION,
+    )
+
+
+def build_generation_vectors_if_available(
+    snapshot: CorpusSnapshot,
+    generation_directory: Path,
+    *,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> dict[str, object] | None:
+    """Build this generation's vectors, or say plainly that they cannot be built.
+
+    Semantic retrieval is the only leg that can answer a question asked in a
+    language the pages are not written in, and it stayed unbuilt in every
+    installed vault because nothing outside the tests ever called the builder.
+
+    Returning None is a real answer, not a swallowed error: the generation is
+    then published with `vector_state: absent`, exactly as before, and the
+    doctor reports it. A vault without the optional model keeps working on
+    lexical search alone.
+    """
+    _check_generation_stop(deadline, cancelled)
+    if not snapshot.chunks:
+        return None
+    embedder = _get_embedder()
+    if embedder is None:
+        return None
+    try:
+        artifacts = build_generation_numpy_vectors(
+            snapshot,
+            generation_directory,
+            embedder=_generation_embedder(embedder, is_query=False),
+            model_id=EMBEDDING_MODEL,
+            model_revision=EMBEDDING_MODEL_REVISION,
+            dimensions=EMBEDDING_DIM,
+        )
+    except TimeoutError:
+        raise
+    except Exception:  # noqa: BLE001 - vectors are optional, a generation is not
+        # Losing the whole generation because its optional vectors could not be
+        # built would trade a working lexical index for nothing. The generation
+        # is published with `vector_state: absent` and the doctor reports it.
+        return None
+    _check_generation_stop(deadline, cancelled)
+    return {
+        "artifacts": artifacts,
+        "model_id": EMBEDDING_MODEL,
+        "model_revision": EMBEDDING_MODEL_REVISION,
+        "dimensions": EMBEDDING_DIM,
+    }
 
 
 def publish_generation(
@@ -3506,6 +3598,12 @@ def search(
         return []
     from retrieval import retrieve_via_search_memory
 
+    generation_embedder, generation_model_id, generation_model_revision = (
+        _resolved_generation_embedder(
+            semantic, generation_embedder, generation_model_id, generation_model_revision
+        )
+    )
+
     return retrieve_via_search_memory(
         query,
         scope=scope,
@@ -4484,6 +4582,11 @@ def _search_backends(
     if _blank_query(query):
         return []
     selected_catalog = catalog if catalog is not None else _active_generation_catalog()
+    generation_embedder, generation_model_id, generation_model_revision = (
+        _resolved_generation_embedder(
+            semantic, generation_embedder, generation_model_id, generation_model_revision
+        )
+    )
     stop_options = _stop_options(deadline, cancelled)
     _check_generation_stop(deadline, cancelled)
     if _generation_search_allowed(selected_catalog, force_rebuild, page_paths):

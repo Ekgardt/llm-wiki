@@ -144,14 +144,34 @@ class IncrementalReuseConfig:
     workspace_manifest_sha256: str
 
     def __post_init__(self) -> None:
-        for name in ("extractor_version", "grammar_version", "compiler_version", "schema_version"):
-            value = getattr(self, name)
-            if not isinstance(value, str) or not value or len(value) > 128:
-                raise ValueError(f"{name} must be a bounded non-empty string")
-        for name in ("resolver_config_sha256", "workspace_manifest_sha256"):
-            value = getattr(self, name)
-            if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
-                raise ValueError(f"{name} must be a lowercase SHA-256 digest")
+        for name in _BOUNDED_STRING_FIELDS:
+            _require_bounded_string(getattr(self, name), name)
+        for name in _DIGEST_FIELDS:
+            _require_digest(getattr(self, name), name)
+
+
+_BOUNDED_STRING_FIELDS = (
+    "extractor_version",
+    "grammar_version",
+    "compiler_version",
+    "schema_version",
+)
+
+_DIGEST_FIELDS = ("resolver_config_sha256", "workspace_manifest_sha256")
+
+
+def _is_digest(value: object) -> bool:
+    return isinstance(value, str) and _SHA256_RE.fullmatch(value) is not None
+
+
+def _require_bounded_string(value: object, name: str) -> None:
+    if not isinstance(value, str) or not value or len(value) > 128:
+        raise ValueError(f"{name} must be a bounded non-empty string")
+
+
+def _require_digest(value: object, name: str) -> None:
+    if not _is_digest(value):
+        raise ValueError(f"{name} must be a lowercase SHA-256 digest")
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +199,314 @@ class IncrementalBuildResult(BuildResult):
     renamed_sources: tuple[tuple[str, str], ...]
     reused_sources: tuple[str, ...]
     rebuilt_sources: tuple[str, ...]
+
+
+def _require_type(value: object, expected: type, message: str) -> None:
+    if not isinstance(value, expected):
+        raise TypeError(message)
+
+
+def _require_optional_type(value: object, expected: type, message: str) -> None:
+    if value is None:
+        return
+    _require_type(value, expected, message)
+
+
+def _require_build_types(
+    catalog: object,
+    graph_schema: object,
+    repository_scope: object,
+    snapshot: object,
+    code_capture: object,
+) -> None:
+    _require_type(
+        catalog,
+        generation_catalog.GenerationCatalog,
+        "catalog must be a GenerationCatalog",
+    )
+    _require_type(
+        graph_schema, evidence_graph.GraphSchema, "graph_schema must be a GraphSchema"
+    )
+    _require_optional_type(
+        repository_scope,
+        RepositoryScope,
+        "repository_scope must be a RepositoryScope or None",
+    )
+    _require_optional_type(
+        snapshot,
+        corpus_snapshot.CorpusSnapshot,
+        "snapshot must be a CorpusSnapshot or None",
+    )
+    _require_optional_type(
+        code_capture,
+        corpus_snapshot.CodeCaptureContract,
+        "code_capture must be a CodeCaptureContract or None",
+    )
+
+
+def _require_capture_agreement(snapshot: object, code_capture: object) -> None:
+    if code_capture is None:
+        return
+    from code_workspace import code_capture_as_dict, validate_code_capture
+
+    validate_code_capture(code_capture_as_dict(code_capture))
+    if snapshot is not None and snapshot.code_capture != code_capture:
+        raise ValueError("code_capture must be the exact supplied CorpusSnapshot contract")
+
+
+def _require_publication_root(
+    snapshot: object, activate: bool, publication_root: object
+) -> None:
+    if snapshot is None or not activate:
+        return
+    if publication_root is None:
+        raise ValueError("complete generation activation requires publication_root")
+
+
+def _require_v3_inputs(
+    graph_schema: object,
+    snapshot: object,
+    repository_scope: object,
+    code_capture: object,
+) -> None:
+    if graph_schema is not evidence_graph.GraphSchema.V3:
+        return
+    if snapshot is None or repository_scope is None or code_capture is None:
+        raise ValueError(
+            "evidence-graph/v3 requires a CorpusSnapshot, repository scope, and code_capture"
+        )
+
+
+def _require_complete_generation_inputs(
+    graph_schema: object,
+    snapshot: object,
+    repository_scope: object,
+    code_capture: object,
+    activate: bool,
+    publication_root: object,
+) -> None:
+    _require_publication_root(snapshot, activate, publication_root)
+    _require_v3_inputs(graph_schema, snapshot, repository_scope, code_capture)
+
+
+def _validated_build_inputs(
+    *,
+    catalog: object,
+    graph_schema: object,
+    repository_scope: RepositoryScope | None,
+    snapshot: object,
+    code_capture: object,
+    activate: bool,
+    publication_root: object,
+) -> RepositoryScope | None:
+    """Check every argument once, and hand back the scope the build will use."""
+    _require_build_types(catalog, graph_schema, repository_scope, snapshot, code_capture)
+    _require_capture_agreement(snapshot, code_capture)
+    _require_complete_generation_inputs(
+        graph_schema, snapshot, repository_scope, code_capture, activate, publication_root
+    )
+    if repository_scope is None:
+        return None
+    return RepositoryScope.from_dict(repository_scope.as_dict())
+
+
+def _require_capture_membership(
+    code_capture: corpus_snapshot.CodeCaptureContract | None,
+    sources_list: list[Mapping[str, object]],
+) -> None:
+    if code_capture is None:
+        return
+    capture_membership = sorted(
+        (item.source_id, item.relative_path, item.sha256, item.stat.size)
+        for item in code_capture.files
+    )
+    source_membership = sorted(
+        (
+            str(source["source_id"]),
+            str(source["relative_path"]),
+            str(source["sha256"]),
+            int(source["size"]),
+        )
+        for source in sources_list
+    )
+    if capture_membership != source_membership:
+        raise ValueError("code_capture files must match builder source membership")
+
+
+def _snapshot_source_rows(snapshot: corpus_snapshot.CorpusSnapshot) -> list[dict]:
+    return [
+        {
+            "source_id": source.record.logical_id,
+            "relative_path": source.record.relative_path,
+            "sha256": source.record.sha256,
+            "size": source.record.size,
+            "media_type": source.record.media_type,
+            "language": source.record.language,
+            "git_oid": source.record.git_oid,
+        }
+        for source in snapshot.sources
+    ]
+
+
+def _require_snapshot_agreement(
+    snapshot: corpus_snapshot.CorpusSnapshot | None,
+    sources_list: list[Mapping[str, object]],
+    source_bytes_snapshot: Mapping[str, bytes],
+    *,
+    collector_version: str,
+    extractor_version: str,
+) -> None:
+    if snapshot is None:
+        return
+    if sources_list != _snapshot_source_rows(snapshot):
+        raise ValueError("builder sources must be the exact supplied CorpusSnapshot")
+    if source_bytes_snapshot != _snapshot_content_bytes(snapshot):
+        raise ValueError("builder sources must be the exact supplied CorpusSnapshot")
+    _require_snapshot_provenance(snapshot, collector_version, extractor_version)
+
+
+def _snapshot_content_bytes(
+    snapshot: corpus_snapshot.CorpusSnapshot,
+) -> dict[str, bytes]:
+    return {source.record.logical_id: source.content for source in snapshot.sources}
+
+
+def _require_snapshot_provenance(
+    snapshot: corpus_snapshot.CorpusSnapshot,
+    collector_version: str,
+    extractor_version: str,
+) -> None:
+    if collector_version != snapshot.collector_version:
+        raise ValueError("corpus provenance must match the supplied CorpusSnapshot")
+    if extractor_version != snapshot.extractor_version:
+        raise ValueError("corpus provenance must match the supplied CorpusSnapshot")
+
+
+def _generation_source_manifest(
+    snapshot: corpus_snapshot.CorpusSnapshot | None,
+    sources_list: list[Mapping[str, object]],
+    *,
+    policy: Mapping[str, object] | None,
+    collector_version: str,
+    extractor_version: str,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+):
+    """Pin source membership and hashes before any extraction can drift them."""
+    if snapshot is None:
+        return _snapshot_source_manifest(
+            sources_list,
+            policy=policy,
+            collector_version=collector_version,
+            extractor_version=extractor_version,
+        )
+    source_manifest = corpus_snapshot.canonical_source_manifest(
+        (source.record for source in snapshot.sources),
+        snapshot.policy,
+        collector_version=snapshot.collector_version,
+        extractor_version=snapshot.extractor_version,
+    )
+    source_manifest_bytes = canonical_json_bytes(source_manifest)
+    source_manifest_sha256 = _hash_bytes(
+        source_manifest_bytes, deadline=deadline, cancelled=cancelled
+    )
+    if source_manifest_sha256 != snapshot.corpus_sha256:
+        raise ValueError("CorpusSnapshot hash does not match its canonical source manifest")
+    return source_manifest, source_manifest_bytes, source_manifest_sha256
+
+
+def _require_analysis_batch(
+    batch: object,
+    count: int,
+    source_manifest_sha256: str,
+    graph_schema: object,
+    repository_scope: RepositoryScope | None,
+) -> None:
+    if count >= evidence_graph.MAX_VALIDATION_ROWS:
+        raise ValueError("verified analysis row ceiling exceeded")
+    if type(batch) is not VerifiedAnalysisBatch:
+        raise TypeError("verified_analyses must contain VerifiedAnalysisBatch values")
+    if batch.source_manifest_sha256 != source_manifest_sha256:
+        raise ValueError("verified analysis source manifest must match generation manifest")
+    _require_analysis_scope(batch, graph_schema, repository_scope)
+
+
+def _require_analysis_scope(
+    batch: VerifiedAnalysisBatch,
+    graph_schema: object,
+    repository_scope: RepositoryScope | None,
+) -> None:
+    if graph_schema is not evidence_graph.GraphSchema.V3:
+        return
+    observed = (batch.analysis.run.repository_id, batch.analysis.run.checkout_id)
+    if observed != (repository_scope.repository_id, repository_scope.checkout_id):
+        raise ValueError("verified analysis repository or checkout does not match publication")
+
+
+def _validated_analysis_batches(
+    verified_analyses: Iterable[VerifiedAnalysisBatch],
+    *,
+    source_manifest_sha256: str,
+    graph_schema: object,
+    repository_scope: RepositoryScope | None,
+    code_capture: object,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[VerifiedAnalysisBatch]:
+    validated: list[VerifiedAnalysisBatch] = []
+    for batch in verified_analyses:
+        _check_stop(deadline, cancelled)
+        _require_analysis_batch(
+            batch, len(validated), source_manifest_sha256, graph_schema, repository_scope
+        )
+        validated.append(batch)
+    if validated and code_capture is None:
+        raise ValueError("verified analyses require code_capture")
+    return validated
+
+
+def _materialized_graph_records(
+    *,
+    nodes: Iterable[Mapping[str, object]],
+    occurrences: Iterable[Mapping[str, object]],
+    assertions: Iterable[Mapping[str, object]],
+    evidence: Iterable[Mapping[str, object]],
+    observations: Iterable[Mapping[str, object]],
+    dependencies: Iterable[Mapping[str, object]],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> dict[str, list[Mapping[str, object]]]:
+    supplied = {
+        "nodes": nodes,
+        "occurrences": occurrences,
+        "assertions": assertions,
+        "evidence": evidence,
+        "observations": observations,
+        "dependencies": dependencies,
+    }
+    return {
+        label: _materialize(
+            records,
+            label=label,
+            limit=evidence_graph.MAX_VALIDATION_ROWS,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+        for label, records in supplied.items()
+    }
+
+
+def _created_generation_directory(
+    catalog: generation_catalog.GenerationCatalog, generation_id: str
+) -> Path:
+    generation_path = catalog.generations_path / generation_id
+    if generation_path.exists() or generation_path.is_symlink():
+        raise FileExistsError(
+            f"generation {generation_id!r} already exists; builder never mutates"
+        )
+    generation_path.mkdir(parents=True, exist_ok=False)
+    fsync_directory(generation_path)
+    return generation_path
 
 
 def _validate_kill_point(kill_point: str | None) -> None:
@@ -218,9 +546,61 @@ def _build_manifest(
     search_artifact: Mapping[str, object] | None = None,
     incremental_manifest_bytes: bytes | None = None,
     code_capture: corpus_snapshot.CodeCaptureContract | None = None,
+    vectors: Mapping[str, object] | None = None,
 ) -> Mapping[str, object]:
     if graph_schema is evidence_graph.GraphSchema.V3 and code_capture is None:
         raise ValueError("evidence-graph/v3 manifests require code_capture")
+    manifest = {
+        "generation_id": generation_id,
+        "schema_version": schema_version,
+        "collector_version": collector_version,
+        "extractor_version": extractor_version,
+        "tokenizer_version": tokenizer_version,
+        "tokenizer_config_sha256": tokenizer_config_sha256,
+        "embedding_model_id": None,
+        "embedding_model_revision": None,
+        "vector_dimensions": None,
+        "graph_schema_version": graph_schema.value,
+        "graph_extractor_version": graph_extractor_version,
+        "source_manifest_sha256": source_manifest_sha256,
+        "artifacts": _manifest_artifacts(
+            database_size=database_size,
+            database_sha256=database_sha256,
+            source_manifest_bytes=source_manifest_bytes,
+            incremental_manifest_bytes=incremental_manifest_bytes,
+            search_artifact=search_artifact,
+            vectors=vectors,
+        ),
+        "vector_state": "absent",
+    }
+    manifest.update(
+        _optional_manifest_fields(parent_generation_id, repository_scope, code_capture)
+    )
+    manifest.update(_vector_manifest_fields(vectors))
+    return manifest
+
+
+def _vector_manifest_fields(vectors: Mapping[str, object] | None) -> dict[str, object]:
+    """A generation declares complete vectors only when it carries them."""
+    if vectors is None:
+        return {}
+    return {
+        "embedding_model_id": vectors["model_id"],
+        "embedding_model_revision": vectors["model_revision"],
+        "vector_dimensions": vectors["dimensions"],
+        "vector_state": "complete",
+    }
+
+
+def _manifest_artifacts(
+    *,
+    database_size: int,
+    database_sha256: str,
+    source_manifest_bytes: bytes,
+    incremental_manifest_bytes: bytes | None,
+    search_artifact: Mapping[str, object] | None,
+    vectors: Mapping[str, object] | None = None,
+) -> list[dict[str, object]]:
     artifacts = [
         {
             "path": "evidence.sqlite3",
@@ -243,42 +623,48 @@ def _build_manifest(
         )
     if search_artifact is not None:
         artifacts.append(dict(search_artifact))
+    if vectors is not None:
+        artifacts.extend(dict(item) for item in vectors["artifacts"])
     artifacts.sort(key=lambda item: str(item["path"]))
-    manifest = {
-        "generation_id": generation_id,
-        "schema_version": schema_version,
-        "collector_version": collector_version,
-        "extractor_version": extractor_version,
-        "tokenizer_version": tokenizer_version,
-        "tokenizer_config_sha256": tokenizer_config_sha256,
-        "embedding_model_id": None,
-        "embedding_model_revision": None,
-        "vector_dimensions": None,
-        "graph_schema_version": graph_schema.value,
-        "graph_extractor_version": graph_extractor_version,
-        "source_manifest_sha256": source_manifest_sha256,
-        "artifacts": artifacts,
-        "vector_state": "absent",
-        **({"parent_generation_id": parent_generation_id} if parent_generation_id else {}),
-        **({"repository_scope": repository_scope.as_dict()} if repository_scope else {}),
-    }
+    return artifacts
+
+
+def _optional_manifest_fields(
+    parent_generation_id: str | None,
+    repository_scope: RepositoryScope | None,
+    code_capture: corpus_snapshot.CodeCaptureContract | None,
+) -> dict[str, object]:
+    """The fields a manifest carries only when the build actually has them."""
+    fields: dict[str, object] = {}
+    if parent_generation_id:
+        fields["parent_generation_id"] = parent_generation_id
+    if repository_scope:
+        fields["repository_scope"] = repository_scope.as_dict()
     if code_capture is not None:
         from code_workspace import code_capture_as_dict
 
-        manifest["code_capture"] = code_capture_as_dict(code_capture)
-    return manifest
+        fields["code_capture"] = code_capture_as_dict(code_capture)
+    return fields
+
+
+def _invalid_deadline(deadline: float | None) -> bool:
+    if deadline is None:
+        return False
+    if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
+        return True
+    return not math.isfinite(deadline)
+
+
+def _deadline_reached(deadline: float | None) -> bool:
+    return deadline is not None and time.monotonic() >= deadline
 
 
 def _check_stop(deadline: float | None, cancelled: Callable[[], bool] | None) -> None:
-    if deadline is not None and (
-        isinstance(deadline, bool)
-        or not isinstance(deadline, (int, float))
-        or not math.isfinite(deadline)
-    ):
+    if _invalid_deadline(deadline):
         raise ValueError("deadline must be a finite monotonic timestamp")
     if bool(cancelled and cancelled()):
         raise TimeoutError("Evidence Graph build cancelled")
-    if deadline is not None and time.monotonic() >= deadline:
+    if _deadline_reached(deadline):
         raise TimeoutError("Evidence Graph build deadline reached")
 
 
@@ -335,14 +721,24 @@ def _verify_source_snapshot(
         _check_stop(deadline, cancelled)
         source_id = source.get("source_id")
         content = source_bytes[source_id]
-        if not isinstance(content, bytes):
-            raise TypeError("captured source content must be bytes")
-        if source.get("size") != len(content) or source.get("sha256") != _hash_bytes(
-            content, deadline=deadline, cancelled=cancelled
-        ):
-            raise ValueError("captured source size or hash does not match source bytes")
+        _require_captured_content(source, content, deadline, cancelled)
         snapshot[source_id] = content
     return snapshot
+
+
+def _require_captured_content(
+    source: Mapping[str, object],
+    content: object,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    if not isinstance(content, bytes):
+        raise TypeError("captured source content must be bytes")
+    if source.get("size") != len(content):
+        raise ValueError("captured source size or hash does not match source bytes")
+    digest = _hash_bytes(content, deadline=deadline, cancelled=cancelled)
+    if source.get("sha256") != digest:
+        raise ValueError("captured source size or hash does not match source bytes")
 
 
 def _hash_file(
@@ -453,35 +849,15 @@ def build_full_generation(
     touching anything.
     """
     _validate_kill_point(kill_point)
-    if not isinstance(catalog, generation_catalog.GenerationCatalog):
-        raise TypeError("catalog must be a GenerationCatalog")
-    if not isinstance(graph_schema, evidence_graph.GraphSchema):
-        raise TypeError("graph_schema must be a GraphSchema")
-    if repository_scope is not None and not isinstance(repository_scope, RepositoryScope):
-        raise TypeError("repository_scope must be a RepositoryScope or None")
-    if repository_scope is not None:
-        repository_scope = RepositoryScope.from_dict(repository_scope.as_dict())
-    if snapshot is not None and not isinstance(snapshot, corpus_snapshot.CorpusSnapshot):
-        raise TypeError("snapshot must be a CorpusSnapshot or None")
-    if code_capture is not None and not isinstance(
-        code_capture, corpus_snapshot.CodeCaptureContract
-    ):
-        raise TypeError("code_capture must be a CodeCaptureContract or None")
-    if code_capture is not None:
-        from code_workspace import code_capture_as_dict, validate_code_capture
-
-        validate_code_capture(code_capture_as_dict(code_capture))
-    if snapshot is not None and code_capture is not None and snapshot.code_capture != code_capture:
-        raise ValueError("code_capture must be the exact supplied CorpusSnapshot contract")
-    if snapshot is not None and activate and publication_root is None:
-        raise ValueError("complete generation activation requires publication_root")
-    if graph_schema is evidence_graph.GraphSchema.V3 and (
-        snapshot is None or repository_scope is None or code_capture is None
-    ):
-        raise ValueError(
-            "evidence-graph/v3 requires a CorpusSnapshot, repository scope, and code_capture"
-        )
-
+    repository_scope = _validated_build_inputs(
+        catalog=catalog,
+        graph_schema=graph_schema,
+        repository_scope=repository_scope,
+        snapshot=snapshot,
+        code_capture=code_capture,
+        activate=activate,
+        publication_root=publication_root,
+    )
     sources_list = [
         dict(source)
         for source in _materialize(
@@ -495,252 +871,101 @@ def build_full_generation(
     source_bytes_snapshot = _verify_source_snapshot(
         sources_list, source_bytes, deadline=deadline, cancelled=cancelled
     )
-    if code_capture is not None:
-        capture_membership = sorted(
-            (item.source_id, item.relative_path, item.sha256, item.stat.size)
-            for item in code_capture.files
-        )
-        source_membership = sorted(
-            (
-                str(source["source_id"]),
-                str(source["relative_path"]),
-                str(source["sha256"]),
-                int(source["size"]),
-            )
-            for source in sources_list
-        )
-        if capture_membership != source_membership:
-            raise ValueError("code_capture files must match builder source membership")
-
-    if snapshot is not None:
-        snapshot_rows = [
-            {
-                "source_id": source.record.logical_id,
-                "relative_path": source.record.relative_path,
-                "sha256": source.record.sha256,
-                "size": source.record.size,
-                "media_type": source.record.media_type,
-                "language": source.record.language,
-                "git_oid": source.record.git_oid,
-            }
-            for source in snapshot.sources
-        ]
-        snapshot_bytes = {
-            source.record.logical_id: source.content for source in snapshot.sources
-        }
-        if sources_list != snapshot_rows or source_bytes_snapshot != snapshot_bytes:
-            raise ValueError("builder sources must be the exact supplied CorpusSnapshot")
-        if (
-            collector_version != snapshot.collector_version
-            or extractor_version != snapshot.extractor_version
-        ):
-            raise ValueError("corpus provenance must match the supplied CorpusSnapshot")
-
-    # 1. Snapshot source membership and exact source SHA-256 hashes BEFORE
-    # any extraction. The hash pins the source manifest in the generation
-    # manifest so post-build validation can detect drift.
-    if snapshot is None:
-        source_manifest, source_manifest_bytes, source_manifest_sha256 = _snapshot_source_manifest(
+    _require_capture_membership(code_capture, sources_list)
+    _require_snapshot_agreement(
+        snapshot,
+        sources_list,
+        source_bytes_snapshot,
+        collector_version=collector_version,
+        extractor_version=extractor_version,
+    )
+    source_manifest, source_manifest_bytes, source_manifest_sha256 = (
+        _generation_source_manifest(
+            snapshot,
             sources_list,
             policy=policy,
             collector_version=collector_version,
             extractor_version=extractor_version,
+            deadline=deadline,
+            cancelled=cancelled,
         )
-    else:
-        source_manifest = corpus_snapshot.canonical_source_manifest(
-            (source.record for source in snapshot.sources),
-            snapshot.policy,
-            collector_version=snapshot.collector_version,
-            extractor_version=snapshot.extractor_version,
-        )
-        source_manifest_bytes = canonical_json_bytes(source_manifest)
-        source_manifest_sha256 = _hash_bytes(
-            source_manifest_bytes, deadline=deadline, cancelled=cancelled
-        )
-        if source_manifest_sha256 != snapshot.corpus_sha256:
-            raise ValueError("CorpusSnapshot hash does not match its canonical source manifest")
+    )
     _check_stop(deadline, cancelled)
+    verified_analysis_list = _validated_analysis_batches(
+        verified_analyses,
+        source_manifest_sha256=source_manifest_sha256,
+        graph_schema=graph_schema,
+        repository_scope=repository_scope,
+        code_capture=code_capture,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    records = _materialized_graph_records(
+        nodes=nodes,
+        occurrences=occurrences,
+        assertions=assertions,
+        evidence=evidence,
+        observations=observations,
+        dependencies=dependencies,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    _kill_if(kill_point, "before_directory_create")
 
-    verified_analysis_list: list[VerifiedAnalysisBatch] = []
-    for batch in verified_analyses:
-        _check_stop(deadline, cancelled)
-        if len(verified_analysis_list) >= evidence_graph.MAX_VALIDATION_ROWS:
-            raise ValueError("verified analysis row ceiling exceeded")
-        if type(batch) is not VerifiedAnalysisBatch:
-            raise TypeError("verified_analyses must contain VerifiedAnalysisBatch values")
-        if batch.source_manifest_sha256 != source_manifest_sha256:
-            raise ValueError("verified analysis source manifest must match generation manifest")
-        if graph_schema is evidence_graph.GraphSchema.V3 and (
-            batch.analysis.run.repository_id,
-            batch.analysis.run.checkout_id,
-        ) != (repository_scope.repository_id, repository_scope.checkout_id):
-            raise ValueError("verified analysis repository or checkout does not match publication")
-        verified_analysis_list.append(batch)
-    if verified_analysis_list and code_capture is None:
-        raise ValueError("verified analyses require code_capture")
-
-    nodes_list = _materialize(
-        nodes,
-        label="nodes",
-        limit=evidence_graph.MAX_VALIDATION_ROWS,
-        deadline=deadline,
-        cancelled=cancelled,
-    )
-    occurrences_list = _materialize(
-        occurrences,
-        label="occurrences",
-        limit=evidence_graph.MAX_VALIDATION_ROWS,
-        deadline=deadline,
-        cancelled=cancelled,
-    )
-    assertions_list = _materialize(
-        assertions,
-        label="assertions",
-        limit=evidence_graph.MAX_VALIDATION_ROWS,
-        deadline=deadline,
-        cancelled=cancelled,
-    )
-    evidence_list = _materialize(
-        evidence,
-        label="evidence",
-        limit=evidence_graph.MAX_VALIDATION_ROWS,
-        deadline=deadline,
-        cancelled=cancelled,
-    )
-    observations_list = _materialize(
-        observations,
-        label="observations",
-        limit=evidence_graph.MAX_VALIDATION_ROWS,
-        deadline=deadline,
-        cancelled=cancelled,
-    )
-    dependencies_list = _materialize(
-        dependencies,
-        label="dependencies",
-        limit=evidence_graph.MAX_VALIDATION_ROWS,
-        deadline=deadline,
-        cancelled=cancelled,
-    )
-
-    if kill_point == "before_directory_create":
-        raise KillPointError(kill_point)
-
-    generation_path = catalog.generations_path / generation_id
-    if generation_path.exists() or generation_path.is_symlink():
-        raise FileExistsError(f"generation {generation_id!r} already exists; builder never mutates")
-    generation_path.mkdir(parents=True, exist_ok=False)
-    fsync_directory(generation_path)
+    generation_path = _created_generation_directory(catalog, generation_id)
 
     # Track whether we've reached the registration phase. Kill-point aborts
     # leave partial state on disk (they simulate a crash); any other
     # exception during artifact build cleans up so retries are not blocked.
-    publication_attempted = False
+    state = {"publication_attempted": False}
     try:
-        if kill_point == "during_extraction":
-            raise KillPointError(kill_point)
-
+        _kill_if(kill_point, "during_extraction")
         database_path = generation_path / "evidence.sqlite3"
-        evidence_graph.create_generation_database(
+        _write_generation_database(
             database_path,
-            schema=graph_schema,
-            sources=sources_list,
-            source_bytes=source_bytes_snapshot,
-            nodes=nodes_list,
-            occurrences=occurrences_list,
-            assertions=assertions_list,
-            evidence=evidence_list,
-            observations=observations_list,
-            dependencies=dependencies_list,
-            verified_analyses=verified_analysis_list,
-            publication_generation_id=(
-                generation_id if graph_schema is evidence_graph.GraphSchema.V3 else None
-            ),
-            publication_expected_active=(
-                expected_active if graph_schema is evidence_graph.GraphSchema.V3 else None
-            ),
-            repository_scope=(
-                repository_scope if graph_schema is evidence_graph.GraphSchema.V3 else None
-            ),
+            graph_schema=graph_schema,
+            sources_list=sources_list,
+            source_bytes_snapshot=source_bytes_snapshot,
+            records=records,
+            verified_analysis_list=verified_analysis_list,
+            generation_id=generation_id,
+            expected_active=expected_active,
+            repository_scope=repository_scope,
             deadline=deadline,
             cancelled=cancelled,
         )
         _check_stop(deadline, cancelled)
         fsync_file(database_path)
         fsync_directory(generation_path)
-
-        search_artifact = None
-        if snapshot is not None:
-            import search_memory
-
-            search_artifact = search_memory.build_generation_fts(
-                snapshot,
-                generation_path,
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-
-        if kill_point == "after_database_commit":
-            raise KillPointError(kill_point)
-
-        # 4. Write canonical source-manifest.json and manifest.json. Both
-        # files are canonical JSON, fsynced, and the parent directory is
-        # fsynced so the catalog can validate them durably.
-        source_manifest_path = generation_path / "source-manifest.json"
-        _write_canonical_file(
-            source_manifest_path,
-            source_manifest,
-            deadline=deadline,
-            cancelled=cancelled,
+        search_artifact = _generation_search_artifact(
+            snapshot, generation_path, deadline=deadline, cancelled=cancelled
         )
-        incremental_manifest_bytes = None
-        if incremental_manifest is not None:
-            incremental_manifest_bytes = canonical_json_bytes(incremental_manifest)
-            _write_canonical_file(
-                generation_path / "incremental-manifest.json",
-                incremental_manifest,
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-
-        database_size, database_sha256 = _hash_file(
-            database_path, deadline=deadline, cancelled=cancelled
+        vectors = _generation_vector_artifacts(
+            snapshot, generation_path, deadline=deadline, cancelled=cancelled
         )
-        manifest = _build_manifest(
+        _kill_if(kill_point, "after_database_commit")
+        manifest = _write_generation_manifests(
+            generation_path,
+            database_path,
+            source_manifest=source_manifest,
+            source_manifest_bytes=source_manifest_bytes,
+            source_manifest_sha256=source_manifest_sha256,
+            incremental_manifest=incremental_manifest,
+            search_artifact=search_artifact,
+            vectors=vectors,
             generation_id=generation_id,
             parent_generation_id=parent_generation_id,
             collector_version=collector_version,
             extractor_version=extractor_version,
             graph_extractor_version=graph_extractor_version,
-            source_manifest_sha256=source_manifest_sha256,
-            database_size=database_size,
-            database_sha256=database_sha256,
-            source_manifest_bytes=source_manifest_bytes,
             repository_scope=repository_scope,
             graph_schema=graph_schema,
-            schema_version=(
-                COMPLETE_CORPUS_GENERATION_SCHEMA_VERSION
-                if snapshot is not None
-                else CORPUS_GENERATION_SCHEMA_VERSION
-            ),
-            tokenizer_version=(
-                search_memory.GENERATION_TOKENIZER_VERSION
-                if snapshot is not None
-                else DEFAULT_TOKENIZER_VERSION
-            ),
-            tokenizer_config_sha256=(
-                search_memory.GENERATION_TOKENIZER_CONFIG_SHA256
-                if snapshot is not None
-                else DEFAULT_TOKENIZER_CONFIG_SHA256
-            ),
-            search_artifact=search_artifact,
-            incremental_manifest_bytes=incremental_manifest_bytes,
+            snapshot=snapshot,
             code_capture=code_capture,
+            deadline=deadline,
+            cancelled=cancelled,
         )
-        manifest_path = generation_path / "manifest.json"
-        _write_canonical_file(manifest_path, manifest, deadline=deadline, cancelled=cancelled)
-        fsync_directory(generation_path)
-
-        # 5. Perform semantic validation once and carry the resulting
+        # Perform semantic validation once and carry the resulting
         # process-local capability through registration and activation.
         candidate = catalog._validate_candidate(  # noqa: SLF001
             generation_id,
@@ -748,13 +973,7 @@ def build_full_generation(
             deadline=deadline,
             cancelled=cancelled,
         )
-
-        if kill_point == "after_validation":
-            raise KillPointError(kill_point)
-
-        # 6. Register the new generation. The catalog re-validates the
-        # manifest and the on-disk seal before recording it; identical
-        # retries are idempotent.
+        _kill_if(kill_point, "after_validation")
         if not activate:
             catalog._register_validated(  # noqa: SLF001
                 candidate, deadline=deadline, cancelled=cancelled
@@ -765,52 +984,27 @@ def build_full_generation(
                 manifest=manifest,
                 activated=False,
             )
-
-        if snapshot is None:
-            catalog._register_validated(  # noqa: SLF001
-                candidate, deadline=deadline, cancelled=cancelled
-            )
-            if kill_point == "before_activation":
-                raise KillPointError(kill_point)
-            activated = catalog._activate_validated(  # noqa: SLF001
-                candidate,
-                expected_active=expected_active,
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-            if not activated:
-                catalog.discard_unactivated(
-                    generation_id, deadline=deadline, cancelled=cancelled
-                )
-        else:
-            import search_memory
-
-            if kill_point == "before_activation":
-                raise KillPointError(kill_point)
-            publication_attempted = True
-            activated = search_memory._publish_validated_generation(  # noqa: SLF001
-                snapshot,
-                Path(publication_root),
-                catalog,
-                generation_id,
-                candidate,
-                expected_repository_scope=repository_scope,
-                expected_active=expected_active,
-                coordinator=coordinator,
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-
+        activated = _activated_generation(
+            catalog,
+            candidate,
+            state,
+            generation_id=generation_id,
+            snapshot=snapshot,
+            publication_root=publication_root,
+            expected_active=expected_active,
+            repository_scope=repository_scope,
+            coordinator=coordinator,
+            kill_point=kill_point,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
         result = BuildResult(
             generation_id=generation_id,
             generation_path=generation_path,
             manifest=manifest,
             activated=activated,
         )
-
-        if kill_point == "after_activation":
-            raise KillPointError(kill_point)
-
+        _kill_if(kill_point, "after_activation")
         return result
     except KillPointError:
         # Kill-point aborts deliberately leave the partial state on disk
@@ -818,41 +1012,303 @@ def build_full_generation(
         # generation stays readable.
         raise
     except BaseException:
-        cleanup_options = {}
-        if publication_attempted:
-            cleanup_options = {"deadline": deadline, "cancelled": cancelled}
-        try:
-            catalog.discard_unactivated(generation_id, **cleanup_options)
-        except BaseException:
-            # Preserve the publication failure. Catalog cleanup is fail-safe:
-            # inability to prove the generation unreferenced leaves it on disk.
-            pass
+        _discard_failed_generation(catalog, generation_id, state, deadline, cancelled)
         raise
 
 
-def _validated_extraction(value: object) -> SourceExtraction:
-    if not isinstance(value, SourceExtraction):
-        raise TypeError("extractor must return SourceExtraction")
-    fingerprints = value.invalidation_fingerprints
+def _kill_if(kill_point: str | None, name: str) -> None:
+    """A configured kill point simulates a crash exactly here."""
+    if kill_point == name:
+        raise KillPointError(kill_point)
+
+
+def _v3_only(value: object, graph_schema: evidence_graph.GraphSchema) -> object:
+    if graph_schema is evidence_graph.GraphSchema.V3:
+        return value
+    return None
+
+
+def _write_generation_database(
+    database_path: Path,
+    *,
+    graph_schema: evidence_graph.GraphSchema,
+    sources_list: list[Mapping[str, object]],
+    source_bytes_snapshot: Mapping[str, bytes],
+    records: Mapping[str, list[Mapping[str, object]]],
+    verified_analysis_list: list[VerifiedAnalysisBatch],
+    generation_id: str,
+    expected_active: str | None,
+    repository_scope: RepositoryScope | None,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    evidence_graph.create_generation_database(
+        database_path,
+        schema=graph_schema,
+        sources=sources_list,
+        source_bytes=source_bytes_snapshot,
+        nodes=records["nodes"],
+        occurrences=records["occurrences"],
+        assertions=records["assertions"],
+        evidence=records["evidence"],
+        observations=records["observations"],
+        dependencies=records["dependencies"],
+        verified_analyses=verified_analysis_list,
+        publication_generation_id=_v3_only(generation_id, graph_schema),
+        publication_expected_active=_v3_only(expected_active, graph_schema),
+        repository_scope=_v3_only(repository_scope, graph_schema),
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+
+
+def _generation_search_artifact(
+    snapshot: corpus_snapshot.CorpusSnapshot | None,
+    generation_path: Path,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+):
+    if snapshot is None:
+        return None
+    import search_memory
+
+    return search_memory.build_generation_fts(
+        snapshot, generation_path, deadline=deadline, cancelled=cancelled
+    )
+
+
+def _generation_vector_artifacts(
+    snapshot: corpus_snapshot.CorpusSnapshot | None,
+    generation_path: Path,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+):
+    """Vectors are what let a question reach a page written in another language."""
+    if snapshot is None:
+        return None
+    import search_memory
+
+    return search_memory.build_generation_vectors_if_available(
+        snapshot, generation_path, deadline=deadline, cancelled=cancelled
+    )
+
+
+def _manifest_versions(snapshot: corpus_snapshot.CorpusSnapshot | None):
+    """A complete generation carries the search tokenizer identity; a bare one does not."""
+    if snapshot is None:
+        return (
+            CORPUS_GENERATION_SCHEMA_VERSION,
+            DEFAULT_TOKENIZER_VERSION,
+            DEFAULT_TOKENIZER_CONFIG_SHA256,
+        )
+    import search_memory
+
+    return (
+        COMPLETE_CORPUS_GENERATION_SCHEMA_VERSION,
+        search_memory.GENERATION_TOKENIZER_VERSION,
+        search_memory.GENERATION_TOKENIZER_CONFIG_SHA256,
+    )
+
+
+def _write_generation_manifests(
+    generation_path: Path,
+    database_path: Path,
+    *,
+    source_manifest: Mapping[str, object],
+    source_manifest_bytes: bytes,
+    source_manifest_sha256: str,
+    incremental_manifest: Mapping[str, object] | None,
+    search_artifact: Mapping[str, object] | None,
+    vectors: Mapping[str, object] | None,
+    generation_id: str,
+    parent_generation_id: str | None,
+    collector_version: str,
+    extractor_version: str,
+    graph_extractor_version: str,
+    repository_scope: RepositoryScope | None,
+    graph_schema: evidence_graph.GraphSchema,
+    snapshot: corpus_snapshot.CorpusSnapshot | None,
+    code_capture: corpus_snapshot.CodeCaptureContract | None,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> Mapping[str, object]:
+    """Both files are canonical JSON, fsynced, and the directory is fsynced."""
+    _write_canonical_file(
+        generation_path / "source-manifest.json",
+        source_manifest,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    incremental_manifest_bytes = None
+    if incremental_manifest is not None:
+        incremental_manifest_bytes = canonical_json_bytes(incremental_manifest)
+        _write_canonical_file(
+            generation_path / "incremental-manifest.json",
+            incremental_manifest,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+    database_size, database_sha256 = _hash_file(
+        database_path, deadline=deadline, cancelled=cancelled
+    )
+    schema_version, tokenizer_version, tokenizer_config_sha256 = _manifest_versions(
+        snapshot
+    )
+    manifest = _build_manifest(
+        generation_id=generation_id,
+        parent_generation_id=parent_generation_id,
+        collector_version=collector_version,
+        extractor_version=extractor_version,
+        graph_extractor_version=graph_extractor_version,
+        source_manifest_sha256=source_manifest_sha256,
+        database_size=database_size,
+        database_sha256=database_sha256,
+        source_manifest_bytes=source_manifest_bytes,
+        repository_scope=repository_scope,
+        graph_schema=graph_schema,
+        schema_version=schema_version,
+        tokenizer_version=tokenizer_version,
+        tokenizer_config_sha256=tokenizer_config_sha256,
+        search_artifact=search_artifact,
+        incremental_manifest_bytes=incremental_manifest_bytes,
+        code_capture=code_capture,
+        vectors=vectors,
+    )
+    _write_canonical_file(
+        generation_path / "manifest.json", manifest, deadline=deadline, cancelled=cancelled
+    )
+    fsync_directory(generation_path)
+    return manifest
+
+
+def _activated_catalog_generation(
+    catalog: generation_catalog.GenerationCatalog,
+    candidate: object,
+    *,
+    generation_id: str,
+    expected_active: str | None,
+    kill_point: str | None,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    catalog._register_validated(  # noqa: SLF001
+        candidate, deadline=deadline, cancelled=cancelled
+    )
+    _kill_if(kill_point, "before_activation")
+    activated = catalog._activate_validated(  # noqa: SLF001
+        candidate,
+        expected_active=expected_active,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    if not activated:
+        catalog.discard_unactivated(generation_id, deadline=deadline, cancelled=cancelled)
+    return activated
+
+
+def _activated_generation(
+    catalog: generation_catalog.GenerationCatalog,
+    candidate: object,
+    state: dict[str, bool],
+    *,
+    generation_id: str,
+    snapshot: corpus_snapshot.CorpusSnapshot | None,
+    publication_root: Path | None,
+    expected_active: str | None,
+    repository_scope: RepositoryScope | None,
+    coordinator: object | None,
+    kill_point: str | None,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    """Register the new generation, then advance the pointer under CAS."""
+    if snapshot is None:
+        return _activated_catalog_generation(
+            catalog,
+            candidate,
+            generation_id=generation_id,
+            expected_active=expected_active,
+            kill_point=kill_point,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+    import search_memory
+
+    _kill_if(kill_point, "before_activation")
+    state["publication_attempted"] = True
+    return search_memory._publish_validated_generation(  # noqa: SLF001
+        snapshot,
+        Path(publication_root),
+        catalog,
+        generation_id,
+        candidate,
+        expected_repository_scope=repository_scope,
+        expected_active=expected_active,
+        coordinator=coordinator,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+
+
+def _discard_failed_generation(
+    catalog: generation_catalog.GenerationCatalog,
+    generation_id: str,
+    state: Mapping[str, bool],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    cleanup_options = {}
+    if state["publication_attempted"]:
+        cleanup_options = {"deadline": deadline, "cancelled": cancelled}
+    try:
+        catalog.discard_unactivated(generation_id, **cleanup_options)
+    except BaseException:
+        # Preserve the publication failure. Catalog cleanup is fail-safe:
+        # inability to prove the generation unreferenced leaves it on disk.
+        pass
+
+
+def _require_invalidation_fingerprints(fingerprints: object) -> None:
     if not isinstance(fingerprints, Mapping) or set(fingerprints) != _INVALIDATION_KEYS:
         raise ValueError(
             "invalidation_fingerprints must contain exports, imports, signatures, aliases, "
             "and project_metadata"
         )
-    if any(not isinstance(item, str) or _SHA256_RE.fullmatch(item) is None for item in fingerprints.values()):
+    if any(not _is_digest(item) for item in fingerprints.values()):
         raise ValueError("invalidation fingerprints must be lowercase SHA-256 digests")
-    if (
-        not isinstance(value.source_dependencies, tuple)
-        or any(not isinstance(item, str) or not item for item in value.source_dependencies)
-        or tuple(sorted(set(value.source_dependencies))) != value.source_dependencies
-    ):
+
+
+def _is_sorted_unique_ids(dependencies: object) -> bool:
+    if not isinstance(dependencies, tuple):
+        return False
+    if any(not isinstance(item, str) or not item for item in dependencies):
+        return False
+    return tuple(sorted(set(dependencies))) == dependencies
+
+
+def _is_record_tuple(records: object) -> bool:
+    if not isinstance(records, tuple):
+        return False
+    return all(isinstance(record, Mapping) for record in records)
+
+
+def _require_record_collections(value: SourceExtraction) -> None:
+    for collection in _RECORD_COLLECTIONS:
+        if not _is_record_tuple(getattr(value, collection)):
+            raise TypeError(f"{collection} must be a tuple of record mappings")
+
+
+def _validated_extraction(value: object) -> SourceExtraction:
+    if not isinstance(value, SourceExtraction):
+        raise TypeError("extractor must return SourceExtraction")
+    _require_invalidation_fingerprints(value.invalidation_fingerprints)
+    if not _is_sorted_unique_ids(value.source_dependencies):
         raise ValueError("source_dependencies must be a sorted unique tuple of source IDs")
     if not isinstance(value.workspace_sensitive, bool):
         raise TypeError("workspace_sensitive must be a boolean")
-    for collection in _RECORD_COLLECTIONS:
-        records = getattr(value, collection)
-        if not isinstance(records, tuple) or any(not isinstance(record, Mapping) for record in records):
-            raise TypeError(f"{collection} must be a tuple of record mappings")
+    _require_record_collections(value)
     return value
 
 
@@ -888,101 +1344,150 @@ def _load_incremental_manifest(
     return _validated_incremental_manifest(value), generation_manifest
 
 
-def _validated_incremental_manifest(value: Mapping[str, object]) -> Mapping[str, object]:
-    if set(value) != {"version", "reuse_config", "sources", "record_dependencies"}:
-        raise ValueError("incremental manifest must be a closed object")
-    version = value["version"]
+_LANGUAGE_MANIFEST_VERSIONS = {
+    INCREMENTAL_MANIFEST_VERSION,
+    "evidence-graph-incremental/v2",
+    "evidence-graph-incremental/v3",
+}
+
+_BASE_ENTRY_KEYS = {
+    "source_id",
+    "relative_path",
+    "sha256",
+    "source_dependencies",
+    "invalidation_fingerprints",
+    "records",
+}
+
+
+def _entry_keys_for(version: str) -> set[str]:
+    keys = set(_BASE_ENTRY_KEYS)
+    if version in _LANGUAGE_MANIFEST_VERSIONS:
+        keys.add("language")
+    if version == INCREMENTAL_MANIFEST_VERSION:
+        keys.add("workspace_sensitive")
+    elif version == "evidence-graph-incremental/v3":
+        keys.add("workspace_sensitive_sources")
+    return keys
+
+
+def _is_bounded_string_list(value: object) -> bool:
+    if not isinstance(value, list):
+        return False
+    return all(isinstance(item, str) and item for item in value)
+
+
+def _require_sorted_unique_list(value: object, message: str) -> None:
+    if not _is_bounded_string_list(value):
+        raise ValueError(message)
+    if value != sorted(set(value)):
+        raise ValueError(message)
+
+
+def _require_manifest_version(version: object) -> None:
     if version not in {
         INCREMENTAL_MANIFEST_VERSION,
         *_LEGACY_INCREMENTAL_MANIFEST_VERSIONS,
     }:
         raise ValueError("incremental manifest has an unsupported version")
-    config = value["reuse_config"]
-    if not isinstance(config, Mapping) or set(config) != set(IncrementalReuseConfig.__dataclass_fields__):
+
+
+def _require_reuse_config(config: object) -> None:
+    if not isinstance(config, Mapping) or set(config) != set(
+        IncrementalReuseConfig.__dataclass_fields__
+    ):
         raise ValueError("incremental reuse config must be a closed object")
     IncrementalReuseConfig(**config)
+
+
+def _require_closed_entry(entry: object, version: str) -> None:
+    if not isinstance(entry, Mapping) or set(entry) != _entry_keys_for(version):
+        raise ValueError("incremental source entries must be closed objects")
+
+
+def _require_unique_source_id(entry: Mapping[str, object], seen_sources: set[str]) -> None:
+    source_id = entry["source_id"]
+    if not isinstance(source_id, str) or not source_id or source_id in seen_sources:
+        raise ValueError("incremental source IDs must be unique non-empty strings")
+    seen_sources.add(source_id)
+
+
+def _require_entry_path(entry: Mapping[str, object]) -> None:
+    if not isinstance(entry["relative_path"], str) or not entry["relative_path"]:
+        raise ValueError("incremental source paths must be non-empty strings")
+
+
+def _require_entry_language(entry: Mapping[str, object], version: str) -> None:
+    if version not in _LANGUAGE_MANIFEST_VERSIONS:
+        return
+    if entry["language"] is None or isinstance(entry["language"], str):
+        return
+    raise ValueError("incremental source language must be a string or null")
+
+
+def _require_legacy_sensitive_sources(sensitive_sources: object) -> None:
+    message = "incremental workspace-sensitive sources must be bounded, sorted, and unique"
+    _require_sorted_unique_list(sensitive_sources, message)
+    if len(sensitive_sources) > MAX_LEGACY_WORKSPACE_SENSITIVE_SOURCES:
+        raise ValueError(message)
+
+
+def _require_entry_workspace(entry: Mapping[str, object], version: str) -> None:
+    if version == INCREMENTAL_MANIFEST_VERSION:
+        if not isinstance(entry["workspace_sensitive"], bool):
+            raise TypeError("incremental workspace_sensitive must be a boolean")
+        return
+    if version != "evidence-graph-incremental/v3":
+        return
+    _require_legacy_sensitive_sources(entry["workspace_sensitive_sources"])
+
+
+def _require_entry_fingerprints(fingerprints: object) -> None:
+    if not isinstance(fingerprints, Mapping) or set(fingerprints) != _INVALIDATION_KEYS:
+        raise ValueError("incremental invalidation fingerprints are malformed")
+    if any(not _is_digest(item) for item in fingerprints.values()):
+        raise ValueError("incremental invalidation fingerprints are malformed")
+
+
+def _require_entry_records(records: object) -> None:
+    if not isinstance(records, Mapping) or set(records) != set(_RECORD_COLLECTIONS):
+        raise ValueError("incremental source record membership must be a closed object")
+    for record_ids in records.values():
+        _require_sorted_unique_list(
+            record_ids, "incremental record IDs must be sorted and unique"
+        )
+
+
+def _require_source_entry(
+    entry: object, version: str, seen_sources: set[str]
+) -> None:
+    _require_closed_entry(entry, version)
+    _require_unique_source_id(entry, seen_sources)
+    _require_entry_path(entry)
+    _require_entry_language(entry, version)
+    if not _is_digest(entry["sha256"]):
+        raise ValueError("incremental source hashes must be lowercase SHA-256 digests")
+    _require_sorted_unique_list(
+        entry["source_dependencies"],
+        "incremental source dependencies must be sorted and unique",
+    )
+    _require_entry_workspace(entry, version)
+    _require_entry_fingerprints(entry["invalidation_fingerprints"])
+    _require_entry_records(entry["records"])
+
+
+def _validated_incremental_manifest(value: Mapping[str, object]) -> Mapping[str, object]:
+    if set(value) != {"version", "reuse_config", "sources", "record_dependencies"}:
+        raise ValueError("incremental manifest must be a closed object")
+    version = value["version"]
+    _require_manifest_version(version)
+    _require_reuse_config(value["reuse_config"])
     sources = value["sources"]
     if not isinstance(sources, list):
         raise TypeError("incremental manifest sources must be an array")
     seen_sources: set[str] = set()
     for entry in sources:
-        entry_keys = {
-            "source_id",
-            "relative_path",
-            "sha256",
-            "source_dependencies",
-            "invalidation_fingerprints",
-            "records",
-        }
-        if version in {
-            INCREMENTAL_MANIFEST_VERSION,
-            "evidence-graph-incremental/v2",
-            "evidence-graph-incremental/v3",
-        }:
-            entry_keys.add("language")
-        if version == INCREMENTAL_MANIFEST_VERSION:
-            entry_keys.add("workspace_sensitive")
-        elif version == "evidence-graph-incremental/v3":
-            entry_keys.add("workspace_sensitive_sources")
-        if not isinstance(entry, Mapping) or set(entry) != entry_keys:
-            raise ValueError("incremental source entries must be closed objects")
-        source_id = entry["source_id"]
-        if not isinstance(source_id, str) or not source_id or source_id in seen_sources:
-            raise ValueError("incremental source IDs must be unique non-empty strings")
-        seen_sources.add(source_id)
-        if not isinstance(entry["relative_path"], str) or not entry["relative_path"]:
-            raise ValueError("incremental source paths must be non-empty strings")
-        if version in {
-            INCREMENTAL_MANIFEST_VERSION,
-            "evidence-graph-incremental/v2",
-            "evidence-graph-incremental/v3",
-        } and not (
-            entry["language"] is None or isinstance(entry["language"], str)
-        ):
-            raise ValueError("incremental source language must be a string or null")
-        if not isinstance(entry["sha256"], str) or _SHA256_RE.fullmatch(entry["sha256"]) is None:
-            raise ValueError("incremental source hashes must be lowercase SHA-256 digests")
-        dependencies = entry["source_dependencies"]
-        if (
-            not isinstance(dependencies, list)
-            or any(not isinstance(item, str) or not item for item in dependencies)
-            or dependencies != sorted(set(dependencies))
-        ):
-            raise ValueError("incremental source dependencies must be sorted and unique")
-        if version == INCREMENTAL_MANIFEST_VERSION:
-            if not isinstance(entry["workspace_sensitive"], bool):
-                raise TypeError("incremental workspace_sensitive must be a boolean")
-        elif version == "evidence-graph-incremental/v3":
-            sensitive_sources = entry["workspace_sensitive_sources"]
-            if (
-                not isinstance(sensitive_sources, list)
-                or any(not isinstance(item, str) or not item for item in sensitive_sources)
-                or sensitive_sources != sorted(set(sensitive_sources))
-                or len(sensitive_sources) > MAX_LEGACY_WORKSPACE_SENSITIVE_SOURCES
-            ):
-                raise ValueError(
-                    "incremental workspace-sensitive sources must be bounded, sorted, and unique"
-                )
-        fingerprints = entry["invalidation_fingerprints"]
-        if (
-            not isinstance(fingerprints, Mapping)
-            or set(fingerprints) != _INVALIDATION_KEYS
-            or any(
-                not isinstance(item, str) or _SHA256_RE.fullmatch(item) is None
-                for item in fingerprints.values()
-            )
-        ):
-            raise ValueError("incremental invalidation fingerprints are malformed")
-        records = entry["records"]
-        if not isinstance(records, Mapping) or set(records) != set(_RECORD_COLLECTIONS):
-            raise ValueError("incremental source record membership must be a closed object")
-        for record_ids in records.values():
-            if (
-                not isinstance(record_ids, list)
-                or any(not isinstance(item, str) or not item for item in record_ids)
-                or record_ids != sorted(set(record_ids))
-            ):
-                raise ValueError("incremental record IDs must be sorted and unique")
+        _require_source_entry(entry, version, seen_sources)
     if not isinstance(value["record_dependencies"], list):
         raise TypeError("incremental record dependencies must be an array")
     return value
@@ -999,26 +1504,47 @@ def _workspace_sensitive_source_ids(
     }
 
 
+def _node_row_record(row: sqlite3.Row) -> dict[str, object]:
+    return {
+        "node_id": row["node_id"],
+        "kind": row["kind"],
+        "identity_scheme": row["identity_scheme"],
+        "identity_key": row["identity_key"],
+        "metadata": json.loads(row["metadata_json"]),
+    }
+
+
+def _decoded_literal(value: object) -> object:
+    if value is None:
+        return None
+    return json.loads(value)
+
+
+def _assertion_row_record(row: sqlite3.Row) -> dict[str, object]:
+    record = dict(row)
+    record["literal"] = _decoded_literal(record.pop("literal_json"))
+    return record
+
+
+def _plain_row_record(row: sqlite3.Row) -> dict[str, object]:
+    return dict(row)
+
+
+_ROW_RECORD_BUILDERS = {
+    "nodes": _node_row_record,
+    "occurrences": _plain_row_record,
+    "assertions": _assertion_row_record,
+    "evidence": _plain_row_record,
+    "observations": _plain_row_record,
+    "dependencies": _plain_row_record,
+}
+
+
 def _row_record(collection: str, row: sqlite3.Row) -> dict[str, object]:
-    if collection == "nodes":
-        return {
-            "node_id": row["node_id"],
-            "kind": row["kind"],
-            "identity_scheme": row["identity_scheme"],
-            "identity_key": row["identity_key"],
-            "metadata": json.loads(row["metadata_json"]),
-        }
-    if collection == "occurrences":
-        return dict(row)
-    if collection == "assertions":
-        record = dict(row)
-        record["literal"] = (
-            None if record.pop("literal_json") is None else json.loads(row["literal_json"])
-        )
-        return record
-    if collection == "evidence" or collection == "observations" or collection == "dependencies":
-        return dict(row)
-    raise AssertionError(f"unknown record collection: {collection}")
+    builder = _ROW_RECORD_BUILDERS.get(collection)
+    if builder is None:
+        raise AssertionError(f"unknown record collection: {collection}")
+    return builder(row)
 
 
 def _parent_records(
@@ -1029,14 +1555,7 @@ def _parent_records(
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
 ) -> dict[str, dict[str, Mapping[str, object]]]:
-    wanted = {
-        collection: {
-            str(record_id)
-            for source_id in reused_sources
-            for record_id in source_entries[source_id]["records"][collection]
-        }
-        for collection in _RECORD_COLLECTIONS
-    }
+    wanted = _wanted_record_ids(source_entries, reused_sources)
     loaded: dict[str, dict[str, Mapping[str, object]]] = {
         collection: {} for collection in _RECORD_COLLECTIONS
     }
@@ -1044,33 +1563,98 @@ def _parent_records(
     with closing(sqlite3.connect(uri, uri=True, timeout=0)) as database:
         database.row_factory = sqlite3.Row
         database.set_progress_handler(
-            lambda: int(
-                bool(cancelled and cancelled())
-                or (deadline is not None and time.monotonic() >= deadline)
-            ),
-            evidence_graph.PROGRESS_OPCODES,
+            _progress_guard(deadline, cancelled), evidence_graph.PROGRESS_OPCODES
         )
-        try:
-            for collection in _RECORD_COLLECTIONS:
-                table = "dependency" if collection == "dependencies" else collection.removesuffix("s")
-                key = _RECORD_KEYS[collection]
-                for row in database.execute(f"SELECT * FROM {table} ORDER BY {key}"):
-                    _check_stop(deadline, cancelled)
-                    record_id = str(row[key])
-                    if record_id in wanted[collection]:
-                        loaded[collection][record_id] = _row_record(collection, row)
-        except sqlite3.OperationalError as exc:
-            if bool(cancelled and cancelled()) or (
-                deadline is not None and time.monotonic() >= deadline
-            ):
-                raise TimeoutError("incremental parent read cancelled or deadline reached") from exc
-            raise
-        finally:
-            database.set_progress_handler(None, 0)
+        _read_parent_records(database, wanted, loaded, deadline, cancelled)
+    _require_complete_parent_records(loaded, wanted)
+    return loaded
+
+
+def _wanted_record_ids(
+    source_entries: Mapping[str, Mapping[str, object]], reused_sources: set[str]
+) -> dict[str, set[str]]:
+    return {
+        collection: {
+            str(record_id)
+            for source_id in reused_sources
+            for record_id in source_entries[source_id]["records"][collection]
+        }
+        for collection in _RECORD_COLLECTIONS
+    }
+
+
+def _stop_requested(
+    deadline: float | None, cancelled: Callable[[], bool] | None
+) -> bool:
+    if bool(cancelled and cancelled()):
+        return True
+    return deadline is not None and time.monotonic() >= deadline
+
+
+def _progress_guard(deadline: float | None, cancelled: Callable[[], bool] | None):
+    def guard() -> int:
+        return int(_stop_requested(deadline, cancelled))
+
+    return guard
+
+
+def _collection_table(collection: str) -> str:
+    if collection == "dependencies":
+        return "dependency"
+    return collection.removesuffix("s")
+
+
+def _load_collection_records(
+    database: sqlite3.Connection,
+    collection: str,
+    wanted: set[str],
+    loaded: dict[str, Mapping[str, object]],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    key = _RECORD_KEYS[collection]
+    table = _collection_table(collection)
+    for row in database.execute(f"SELECT * FROM {table} ORDER BY {key}"):
+        _check_stop(deadline, cancelled)
+        record_id = str(row[key])
+        if record_id in wanted:
+            loaded[record_id] = _row_record(collection, row)
+
+
+def _read_parent_records(
+    database: sqlite3.Connection,
+    wanted: Mapping[str, set[str]],
+    loaded: Mapping[str, dict[str, Mapping[str, object]]],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    try:
+        for collection in _RECORD_COLLECTIONS:
+            _load_collection_records(
+                database,
+                collection,
+                wanted[collection],
+                loaded[collection],
+                deadline,
+                cancelled,
+            )
+    except sqlite3.OperationalError as exc:
+        if _stop_requested(deadline, cancelled):
+            raise TimeoutError(
+                "incremental parent read cancelled or deadline reached"
+            ) from exc
+        raise
+    finally:
+        database.set_progress_handler(None, 0)
+
+
+def _require_complete_parent_records(
+    loaded: Mapping[str, dict[str, Mapping[str, object]]],
+    wanted: Mapping[str, set[str]],
+) -> None:
     for collection in _RECORD_COLLECTIONS:
         if set(loaded[collection]) != wanted[collection]:
             raise ValueError("incremental manifest references missing parent records")
-    return loaded
 
 
 def _renames(
@@ -1079,24 +1663,40 @@ def _renames(
     added: set[str],
     deleted: set[str],
 ) -> tuple[tuple[str, str], ...]:
-    old_by_hash: dict[str, list[str]] = {}
-    new_by_hash: dict[str, list[str]] = {}
-    for source_id in deleted:
-        old_by_hash.setdefault(str(previous[source_id]["sha256"]), []).append(source_id)
-    for source_id in added:
-        new_by_hash.setdefault(str(current[source_id]["sha256"]), []).append(source_id)
-    pairs = []
-    pairs.extend(
+    old_by_hash = _grouped_by_hash(previous, deleted)
+    new_by_hash = _grouped_by_hash(current, added)
+    pairs = [
         (source_id, source_id)
         for source_id in sorted(previous.keys() & current.keys())
-        if previous[source_id].get("sha256") == current[source_id].get("sha256")
-        and previous[source_id].get("relative_path") != current[source_id].get("relative_path")
-    )
+        if _same_content_moved(previous, current, source_id)
+    ]
     for digest in sorted(old_by_hash.keys() & new_by_hash.keys()):
         old = sorted(old_by_hash[digest])
         new = sorted(new_by_hash[digest])
         pairs.extend(zip(old, new, strict=False))
     return tuple(sorted(pairs))
+
+
+def _grouped_by_hash(
+    entries: Mapping[str, Mapping[str, object]], source_ids: Iterable[str]
+) -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {}
+    for source_id in source_ids:
+        grouped.setdefault(str(entries[source_id]["sha256"]), []).append(source_id)
+    return grouped
+
+
+def _same_content_moved(
+    previous: Mapping[str, Mapping[str, object]],
+    current: Mapping[str, Mapping[str, object]],
+    source_id: str,
+) -> bool:
+    """The same bytes under a new path: a rename, not an edit."""
+    if previous[source_id].get("sha256") != current[source_id].get("sha256"):
+        return False
+    return previous[source_id].get("relative_path") != current[source_id].get(
+        "relative_path"
+    )
 
 
 def _record_ids_by_owner(
@@ -1113,13 +1713,26 @@ def _record_ids_by_owner(
     }
     for (collection, record_id), owners in ownership.items():
         _check_stop(deadline, cancelled)
-        for source_id in owners:
-            grouped[source_id][collection].append(record_id)
+        _add_record_owners(grouped, collection, record_id, owners)
     for records in grouped.values():
         _check_stop(deadline, cancelled)
-        for record_ids in records.values():
-            record_ids.sort()
+        _sort_record_ids(records)
     return grouped
+
+
+def _add_record_owners(
+    grouped: Mapping[str, dict[str, list[str]]],
+    collection: str,
+    record_id: str,
+    owners: Iterable[str],
+) -> None:
+    for source_id in owners:
+        grouped[source_id][collection].append(record_id)
+
+
+def _sort_record_ids(records: Mapping[str, list[str]]) -> None:
+    for record_ids in records.values():
+        record_ids.sort()
 
 
 def build_incremental_generation(
@@ -1144,16 +1757,9 @@ def build_incremental_generation(
     coordinator: object | None = None,
 ) -> IncrementalBuildResult:
     """Build a complete immutable generation while reusing exact parent records."""
-    if not isinstance(catalog, generation_catalog.GenerationCatalog):
-        raise TypeError("catalog must be a GenerationCatalog")
-    if not isinstance(reuse_config, IncrementalReuseConfig):
-        raise TypeError("reuse_config must be IncrementalReuseConfig")
-    if not callable(extractor):
-        raise TypeError("extractor must be callable")
-    if repository_scope is not None and not isinstance(repository_scope, RepositoryScope):
-        raise TypeError("repository_scope must be a RepositoryScope or None")
-    if repository_scope is not None:
-        repository_scope = RepositoryScope.from_dict(repository_scope.as_dict())
+    repository_scope = _validated_incremental_inputs(
+        catalog, reuse_config, extractor, repository_scope
+    )
     repository_scope_object = (
         None if repository_scope is None else repository_scope.as_dict()
     )
@@ -1170,258 +1776,60 @@ def build_incremental_generation(
     source_snapshot = _verify_source_snapshot(
         sources_list, source_bytes, deadline=deadline, cancelled=cancelled
     )
-    current = {str(source["source_id"]): source for source in sources_list}
-    if len(current) != len(sources_list):
-        raise ValueError("captured sources must have unique source IDs")
-    immutable_sources = tuple(MappingProxyType(source) for source in sources_list)
-    immutable_source_by_id = {
-        str(source["source_id"]): source for source in immutable_sources
-    }
-    immutable_source_bytes = MappingProxyType(source_snapshot)
-
-    parent_manifest = None
-    parent_sources: dict[str, Mapping[str, object]] = {}
-    parent_entries: dict[str, Mapping[str, object]] = {}
-    config_matches = False
-    if parent_generation_id is not None:
-        parent_manifest, parent_generation_manifest = _load_incremental_manifest(
+    current = _current_sources(sources_list)
+    parent_manifest, parent_entries, config_matches = _incremental_parent_state(
+        catalog,
+        parent_generation_id,
+        reuse_config,
+        repository_scope_object,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    delta = _incremental_delta(
+        current, parent_entries, parent_manifest, reuse_config, config_matches
+    )
+    runner = _IncrementalExtractor(
+        extractor,
+        sources_list,
+        source_snapshot,
+        set(current),
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    rebuild = delta["rebuild"]
+    runner.run_all(rebuild)
+    _expanded_rebuild(runner, delta, config_matches=config_matches)
+    current_ids = set(current)
+    reused = current_ids - rebuild
+    merged, ownership = _merged_records(
+        _reused_parent_records(
             catalog,
             parent_generation_id,
-            deadline=deadline,
-            cancelled=cancelled,
-        )
-        if parent_manifest is not None:
-            parent_entries = {
-                str(entry["source_id"]): entry for entry in parent_manifest.get("sources", [])
-            }
-            parent_sources = parent_entries
-            parent_config = parent_manifest.get("reuse_config")
-            config_matches = (
-                parent_manifest.get("version") == INCREMENTAL_MANIFEST_VERSION
-                and isinstance(parent_config, Mapping)
-                and {
-                    key: value
-                    for key, value in parent_config.items()
-                    if key != "workspace_manifest_sha256"
-                }
-                == {
-                    key: value
-                    for key, value in asdict(reuse_config).items()
-                    if key != "workspace_manifest_sha256"
-                }
-                and parent_generation_manifest is not None
-                and parent_generation_manifest.get("repository_scope")
-                == repository_scope_object
-            )
-
-    current_ids = set(current)
-    previous_ids = set(parent_sources)
-    added = current_ids - previous_ids
-    deleted = previous_ids - current_ids
-    changed = {
-        source_id
-        for source_id in current_ids & previous_ids
-        if (
-            current[source_id]["sha256"] != parent_sources[source_id].get("sha256")
-            or current[source_id]["relative_path"] != parent_sources[source_id].get("relative_path")
-            or current[source_id].get("language") != parent_sources[source_id].get("language")
-        )
-    }
-    renamed = _renames(parent_sources, current, added, deleted)
-    current_workspace_ids = {
-        source_id
-        for source_id, source in current.items()
-        if not str(source["relative_path"]).startswith("knowledge/")
-    }
-    previous_workspace_ids = {
-        source_id
-        for source_id, source in parent_sources.items()
-        if not str(source["relative_path"]).startswith("knowledge/")
-    }
-    workspace_ids = current_workspace_ids | previous_workspace_ids
-    workspace_membership_changed = False
-    if config_matches:
-        parent_workspace_manifest = str(
-            parent_manifest["reuse_config"]["workspace_manifest_sha256"]
-        )
-        workspace_membership_changed = bool(
-            parent_workspace_manifest != reuse_config.workspace_manifest_sha256
-            or added & current_workspace_ids
-            or deleted & previous_workspace_ids
-            or any(
-                source_id in workspace_ids
-                and (
-                    current[source_id]["relative_path"]
-                    != parent_sources[source_id].get("relative_path")
-                    or current[source_id].get("language")
-                    != parent_sources[source_id].get("language")
-                )
-                for source_id in changed
-            )
-        )
-    rebuild = set(current_ids if not config_matches else added | changed)
-    if workspace_membership_changed:
-        rebuild.update(current_workspace_ids)
-    extracted: dict[str, SourceExtraction] = {}
-
-    def extract(source_id: str) -> SourceExtraction:
-        _check_stop(deadline, cancelled)
-        result = _validated_extraction(
-            extractor(
-                immutable_source_by_id[source_id],
-                source_snapshot[source_id],
-                sources=immutable_sources,
-                source_bytes=immutable_source_bytes,
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-        )
-        unknown = set(result.source_dependencies) - current_ids
-        if unknown:
-            raise ValueError(f"source extraction has unknown dependencies: {sorted(unknown)!r}")
-        extracted[source_id] = result
-        return result
-
-    for source_id in sorted(rebuild):
-        extract(source_id)
-
-    if config_matches:
-        semantic_changes = {
-            source_id
-            for source_id in changed
-            if dict(extracted[source_id].invalidation_fingerprints or {})
-            != parent_entries[source_id].get("invalidation_fingerprints")
-        }
-        workspace_surface_changed = bool(
-            semantic_changes and not workspace_membership_changed
-        )
-        workspace_invalidated = (
-            (_workspace_sensitive_source_ids(parent_entries) & current_ids) - rebuild
-            if workspace_surface_changed
-            else set()
-        )
-        for source_id in sorted(workspace_invalidated):
-            extract(source_id)
-        rebuild.update(workspace_invalidated)
-        invalidated = set(semantic_changes | deleted | workspace_invalidated)
-        while invalidated:
-            newly_invalidated = {
-                source_id
-                for source_id in current_ids - rebuild
-                if set(parent_entries[source_id].get("source_dependencies", ())) & invalidated
-            }
-            if not newly_invalidated:
-                break
-            for source_id in sorted(newly_invalidated):
-                extract(source_id)
-            rebuild.update(newly_invalidated)
-            invalidated = newly_invalidated
-
-    reused = current_ids - rebuild
-    parent_records = (
-        _parent_records(
-            catalog.generations_path / parent_generation_id / "evidence.sqlite3",
             parent_entries,
             reused,
             deadline=deadline,
             cancelled=cancelled,
-        )
-        if reused and parent_generation_id is not None
-        else {collection: {} for collection in _RECORD_COLLECTIONS}
+        ),
+        parent_entries,
+        reused,
+        rebuild,
+        runner.extracted,
     )
-    merged: dict[str, dict[str, Mapping[str, object]]] = {
-        collection: dict(parent_records[collection]) for collection in _RECORD_COLLECTIONS
-    }
-    ownership: dict[tuple[str, str], set[str]] = {}
-    for source_id in reused:
-        for collection in _RECORD_COLLECTIONS:
-            for record_id in parent_entries[source_id]["records"][collection]:
-                ownership.setdefault((collection, str(record_id)), set()).add(source_id)
-    for source_id in sorted(rebuild):
-        result = extracted[source_id]
-        for collection in _RECORD_COLLECTIONS:
-            key = _RECORD_KEYS[collection]
-            for record in getattr(result, collection):
-                record_id = str(record[key])
-                existing = merged[collection].get(record_id)
-                candidate = dict(record)
-                if existing is not None and existing != candidate:
-                    raise ValueError(f"conflicting {collection} record {record_id!r}")
-                merged[collection][record_id] = candidate
-                ownership.setdefault((collection, record_id), set()).add(source_id)
-
     records_by_owner = _record_ids_by_owner(
         ownership,
         sorted(current_ids),
         deadline=deadline,
         cancelled=cancelled,
     )
-    source_entries = []
-    for source_id in sorted(current_ids):
-        result = extracted.get(source_id)
-        if result is None:
-            entry = parent_entries[source_id]
-            source_dependencies = list(entry["source_dependencies"])
-            fingerprints = dict(entry["invalidation_fingerprints"])
-            workspace_sensitive = bool(entry["workspace_sensitive"])
-        else:
-            source_dependencies = list(result.source_dependencies)
-            fingerprints = dict(result.invalidation_fingerprints or {})
-            workspace_sensitive = result.workspace_sensitive
-        source_entries.append(
-            {
-                "source_id": source_id,
-                "relative_path": str(current[source_id]["relative_path"]),
-                "sha256": str(current[source_id]["sha256"]),
-                "source_dependencies": source_dependencies,
-                "invalidation_fingerprints": fingerprints,
-                "records": records_by_owner[source_id],
-                **(
-                    {"language": current[source_id].get("language")}
-                    if INCREMENTAL_MANIFEST_VERSION
-                    in {
-                        "evidence-graph-incremental/v2",
-                        "evidence-graph-incremental/v3",
-                        "evidence-graph-incremental/v4",
-                    }
-                    else {}
-                ),
-                **(
-                    {"workspace_sensitive": workspace_sensitive}
-                    if INCREMENTAL_MANIFEST_VERSION == "evidence-graph-incremental/v4"
-                    else {
-                        "workspace_sensitive_sources": []
-                    }
-                    if INCREMENTAL_MANIFEST_VERSION == "evidence-graph-incremental/v3"
-                    else {}
-                ),
-            }
-        )
+    source_entries = _manifest_source_entries(
+        current_ids, current, runner.extracted, parent_entries, records_by_owner
+    )
     entry_by_id = {str(entry["source_id"]): entry for entry in source_entries}
-    record_dependencies = []
-    for (collection, record_id), owners in sorted(ownership.items()):
-        dependencies = set(owners)
-        for owner in owners:
-            dependencies.update(map(str, entry_by_id[owner]["source_dependencies"]))
-        record_dependencies.append(
-            {
-                "collection": collection,
-                "record_id": record_id,
-                "source_ids": sorted(dependencies),
-                "status": "rebuilt" if owners & rebuild else "reused",
-            }
-        )
-    incremental_manifest = {
-        "version": INCREMENTAL_MANIFEST_VERSION,
-        "reuse_config": asdict(reuse_config),
-        "sources": source_entries,
-        "record_dependencies": record_dependencies,
-    }
-    # A manifest too large to store is not a reason to refuse the generation.
-    # It only buys the next pass its reuse, so the generation is built without
-    # one and the pass after this starts from a full build instead.
-    if len(canonical_json_bytes(incremental_manifest)) > MAX_STORED_INCREMENTAL_MANIFEST_BYTES:
-        incremental_manifest = None
+    incremental_manifest = _stored_incremental_manifest(
+        reuse_config,
+        source_entries,
+        _record_dependency_rows(ownership, entry_by_id, rebuild),
+    )
     _check_stop(deadline, cancelled)
     built = build_full_generation(
         catalog,
@@ -1437,9 +1845,7 @@ def build_incremental_generation(
         parent_generation_id=parent_generation_id,
         policy=policy,
         collector_version=collector_version,
-        extractor_version=(
-            snapshot.extractor_version if snapshot is not None else reuse_config.extractor_version
-        ),
+        extractor_version=_incremental_extractor_version(snapshot, reuse_config),
         graph_extractor_version=reuse_config.extractor_version,
         expected_active=expected_active,
         activate=activate,
@@ -1457,10 +1863,538 @@ def build_incremental_generation(
         generation_path=built.generation_path,
         manifest=built.manifest,
         activated=built.activated,
-        added_sources=tuple(sorted(added)),
-        changed_sources=tuple(sorted(changed)),
-        deleted_sources=tuple(sorted(deleted)),
-        renamed_sources=renamed,
+        added_sources=tuple(sorted(delta["added"])),
+        changed_sources=tuple(sorted(delta["changed"])),
+        deleted_sources=tuple(sorted(delta["deleted"])),
+        renamed_sources=delta["renamed"],
         reused_sources=tuple(sorted(reused)),
         rebuilt_sources=tuple(sorted(rebuild)),
     )
+
+
+def _validated_incremental_inputs(
+    catalog: object,
+    reuse_config: object,
+    extractor: object,
+    repository_scope: RepositoryScope | None,
+) -> RepositoryScope | None:
+    _require_type(
+        catalog,
+        generation_catalog.GenerationCatalog,
+        "catalog must be a GenerationCatalog",
+    )
+    _require_type(
+        reuse_config, IncrementalReuseConfig, "reuse_config must be IncrementalReuseConfig"
+    )
+    if not callable(extractor):
+        raise TypeError("extractor must be callable")
+    _require_optional_type(
+        repository_scope,
+        RepositoryScope,
+        "repository_scope must be a RepositoryScope or None",
+    )
+    if repository_scope is None:
+        return None
+    return RepositoryScope.from_dict(repository_scope.as_dict())
+
+
+def _current_sources(
+    sources_list: list[Mapping[str, object]],
+) -> dict[str, Mapping[str, object]]:
+    current = {str(source["source_id"]): source for source in sources_list}
+    if len(current) != len(sources_list):
+        raise ValueError("captured sources must have unique source IDs")
+    return current
+
+
+def _comparable_reuse_config(config: Mapping[str, object]) -> dict[str, object]:
+    return {
+        key: value for key, value in config.items() if key != "workspace_manifest_sha256"
+    }
+
+
+def _reuse_config_matches(
+    parent_manifest: Mapping[str, object],
+    parent_generation_manifest: Mapping[str, object] | None,
+    reuse_config: IncrementalReuseConfig,
+    repository_scope_object: Mapping[str, object] | None,
+) -> bool:
+    """Records may be reused only when the parent was built the same way."""
+    if parent_manifest.get("version") != INCREMENTAL_MANIFEST_VERSION:
+        return False
+    parent_config = parent_manifest.get("reuse_config")
+    if not isinstance(parent_config, Mapping):
+        return False
+    if _comparable_reuse_config(parent_config) != _comparable_reuse_config(
+        asdict(reuse_config)
+    ):
+        return False
+    if parent_generation_manifest is None:
+        return False
+    return parent_generation_manifest.get("repository_scope") == repository_scope_object
+
+
+def _incremental_parent_state(
+    catalog: generation_catalog.GenerationCatalog,
+    parent_generation_id: str | None,
+    reuse_config: IncrementalReuseConfig,
+    repository_scope_object: Mapping[str, object] | None,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+):
+    if parent_generation_id is None:
+        return None, {}, False
+    parent_manifest, parent_generation_manifest = _load_incremental_manifest(
+        catalog, parent_generation_id, deadline=deadline, cancelled=cancelled
+    )
+    if parent_manifest is None:
+        return None, {}, False
+    parent_entries = {
+        str(entry["source_id"]): entry for entry in parent_manifest.get("sources", [])
+    }
+    config_matches = _reuse_config_matches(
+        parent_manifest, parent_generation_manifest, reuse_config, repository_scope_object
+    )
+    return parent_manifest, parent_entries, config_matches
+
+
+def _source_differs(
+    current_source: Mapping[str, object], parent_source: Mapping[str, object]
+) -> bool:
+    if current_source["sha256"] != parent_source.get("sha256"):
+        return True
+    if current_source["relative_path"] != parent_source.get("relative_path"):
+        return True
+    return current_source.get("language") != parent_source.get("language")
+
+
+def _workspace_surface_moved(
+    current_source: Mapping[str, object], parent_source: Mapping[str, object]
+) -> bool:
+    if current_source["relative_path"] != parent_source.get("relative_path"):
+        return True
+    return current_source.get("language") != parent_source.get("language")
+
+
+def _workspace_source_ids(sources: Mapping[str, Mapping[str, object]]) -> set[str]:
+    return {
+        source_id
+        for source_id, source in sources.items()
+        if not str(source["relative_path"]).startswith("knowledge/")
+    }
+
+
+def _workspace_membership_changed(
+    parent_manifest: Mapping[str, object],
+    reuse_config: IncrementalReuseConfig,
+    current: Mapping[str, Mapping[str, object]],
+    parent_sources: Mapping[str, Mapping[str, object]],
+    changed: set[str],
+    added: set[str],
+    deleted: set[str],
+) -> bool:
+    """Whether the workspace surface itself moved, not only its file contents."""
+    parent_workspace_manifest = str(
+        parent_manifest["reuse_config"]["workspace_manifest_sha256"]
+    )
+    if parent_workspace_manifest != reuse_config.workspace_manifest_sha256:
+        return True
+    current_workspace_ids = _workspace_source_ids(current)
+    previous_workspace_ids = _workspace_source_ids(parent_sources)
+    if added & current_workspace_ids or deleted & previous_workspace_ids:
+        return True
+    workspace_ids = current_workspace_ids | previous_workspace_ids
+    return any(
+        _workspace_entry_moved(source_id, workspace_ids, current, parent_sources)
+        for source_id in changed
+    )
+
+
+def _workspace_entry_moved(
+    source_id: str,
+    workspace_ids: set[str],
+    current: Mapping[str, Mapping[str, object]],
+    parent_sources: Mapping[str, Mapping[str, object]],
+) -> bool:
+    if source_id not in workspace_ids:
+        return False
+    return _workspace_surface_moved(current[source_id], parent_sources[source_id])
+
+
+def _incremental_delta(
+    current: Mapping[str, Mapping[str, object]],
+    parent_entries: Mapping[str, Mapping[str, object]],
+    parent_manifest: Mapping[str, object] | None,
+    reuse_config: IncrementalReuseConfig,
+    config_matches: bool,
+) -> dict[str, object]:
+    """What changed since the parent, and therefore what has to be rebuilt."""
+    current_ids = set(current)
+    previous_ids = set(parent_entries)
+    added = current_ids - previous_ids
+    deleted = previous_ids - current_ids
+    changed = {
+        source_id
+        for source_id in current_ids & previous_ids
+        if _source_differs(current[source_id], parent_entries[source_id])
+    }
+    membership_changed = config_matches and _workspace_membership_changed(
+        parent_manifest, reuse_config, current, parent_entries, changed, added, deleted
+    )
+    rebuild = _initial_rebuild(config_matches, current_ids, added, changed)
+    if membership_changed:
+        rebuild.update(_workspace_source_ids(current))
+    return {
+        "added": added,
+        "deleted": deleted,
+        "changed": changed,
+        "renamed": _renames(parent_entries, current, added, deleted),
+        "rebuild": rebuild,
+        "membership_changed": membership_changed,
+        "parent_entries": parent_entries,
+        "current_ids": current_ids,
+    }
+
+
+def _initial_rebuild(
+    config_matches: bool, current_ids: set[str], added: set[str], changed: set[str]
+) -> set[str]:
+    if not config_matches:
+        return set(current_ids)
+    return set(added | changed)
+
+
+class _IncrementalExtractor:
+    """Runs the extractor once per source and remembers what it produced."""
+
+    def __init__(
+        self,
+        extractor: Callable[..., SourceExtraction],
+        sources_list: list[Mapping[str, object]],
+        source_snapshot: Mapping[str, bytes],
+        current_ids: set[str],
+        *,
+        deadline: float | None,
+        cancelled: Callable[[], bool] | None,
+    ) -> None:
+        self._extractor = extractor
+        self._sources = tuple(MappingProxyType(source) for source in sources_list)
+        self._source_by_id = {
+            str(source["source_id"]): source for source in self._sources
+        }
+        self._source_snapshot = source_snapshot
+        self._source_bytes = MappingProxyType(source_snapshot)
+        self._current_ids = current_ids
+        self._deadline = deadline
+        self._cancelled = cancelled
+        self.extracted: dict[str, SourceExtraction] = {}
+
+    def run(self, source_id: str) -> SourceExtraction:
+        _check_stop(self._deadline, self._cancelled)
+        result = _validated_extraction(
+            self._extractor(
+                self._source_by_id[source_id],
+                self._source_snapshot[source_id],
+                sources=self._sources,
+                source_bytes=self._source_bytes,
+                deadline=self._deadline,
+                cancelled=self._cancelled,
+            )
+        )
+        unknown = set(result.source_dependencies) - self._current_ids
+        if unknown:
+            raise ValueError(
+                f"source extraction has unknown dependencies: {sorted(unknown)!r}"
+            )
+        self.extracted[source_id] = result
+        return result
+
+    def run_all(self, source_ids: Iterable[str]) -> None:
+        for source_id in sorted(source_ids):
+            self.run(source_id)
+
+
+def _semantic_changes(
+    extracted: Mapping[str, SourceExtraction],
+    changed: set[str],
+    parent_entries: Mapping[str, Mapping[str, object]],
+) -> set[str]:
+    return {
+        source_id
+        for source_id in changed
+        if dict(extracted[source_id].invalidation_fingerprints or {})
+        != parent_entries[source_id].get("invalidation_fingerprints")
+    }
+
+
+def _workspace_invalidated(
+    semantic_changes: set[str],
+    membership_changed: bool,
+    parent_entries: Mapping[str, Mapping[str, object]],
+    current_ids: set[str],
+    rebuild: set[str],
+) -> set[str]:
+    if not semantic_changes or membership_changed:
+        return set()
+    return (_workspace_sensitive_source_ids(parent_entries) & current_ids) - rebuild
+
+
+def _newly_invalidated(
+    current_ids: set[str],
+    rebuild: set[str],
+    parent_entries: Mapping[str, Mapping[str, object]],
+    invalidated: set[str],
+) -> set[str]:
+    return {
+        source_id
+        for source_id in current_ids - rebuild
+        if set(parent_entries[source_id].get("source_dependencies", ())) & invalidated
+    }
+
+
+def _expanded_rebuild(
+    runner: _IncrementalExtractor, delta: Mapping[str, object], *, config_matches: bool
+) -> None:
+    """Follow invalidation through dependencies until nothing new falls out."""
+    if not config_matches:
+        return
+    parent_entries = delta["parent_entries"]
+    current_ids = delta["current_ids"]
+    rebuild = delta["rebuild"]
+    semantic_changes = _semantic_changes(
+        runner.extracted, delta["changed"], parent_entries
+    )
+    workspace_invalidated = _workspace_invalidated(
+        semantic_changes,
+        bool(delta["membership_changed"]),
+        parent_entries,
+        current_ids,
+        rebuild,
+    )
+    runner.run_all(workspace_invalidated)
+    rebuild.update(workspace_invalidated)
+    invalidated = set(semantic_changes | delta["deleted"] | workspace_invalidated)
+    while invalidated:
+        newly = _newly_invalidated(current_ids, rebuild, parent_entries, invalidated)
+        if not newly:
+            break
+        runner.run_all(newly)
+        rebuild.update(newly)
+        invalidated = newly
+
+
+def _reused_parent_records(
+    catalog: generation_catalog.GenerationCatalog,
+    parent_generation_id: str | None,
+    parent_entries: Mapping[str, Mapping[str, object]],
+    reused: set[str],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> dict[str, dict[str, Mapping[str, object]]]:
+    if not reused or parent_generation_id is None:
+        return {collection: {} for collection in _RECORD_COLLECTIONS}
+    return _parent_records(
+        catalog.generations_path / parent_generation_id / "evidence.sqlite3",
+        parent_entries,
+        reused,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+
+
+def _require_consistent_record(
+    existing: Mapping[str, object] | None,
+    candidate: Mapping[str, object],
+    collection: str,
+    record_id: str,
+) -> None:
+    if existing is not None and existing != candidate:
+        raise ValueError(f"conflicting {collection} record {record_id!r}")
+
+
+def _merge_collection_records(
+    target: dict[str, Mapping[str, object]],
+    ownership: dict[tuple[str, str], set[str]],
+    collection: str,
+    records: Iterable[Mapping[str, object]],
+    source_id: str,
+) -> None:
+    key = _RECORD_KEYS[collection]
+    for record in records:
+        record_id = str(record[key])
+        candidate = dict(record)
+        _require_consistent_record(
+            target.get(record_id), candidate, collection, record_id
+        )
+        target[record_id] = candidate
+        ownership.setdefault((collection, record_id), set()).add(source_id)
+
+
+def _claim_reused_records(
+    ownership: dict[tuple[str, str], set[str]],
+    records: Mapping[str, Iterable[str]],
+    source_id: str,
+) -> None:
+    for collection in _RECORD_COLLECTIONS:
+        for record_id in records[collection]:
+            ownership.setdefault((collection, str(record_id)), set()).add(source_id)
+
+
+def _merged_records(
+    parent_records: Mapping[str, dict[str, Mapping[str, object]]],
+    parent_entries: Mapping[str, Mapping[str, object]],
+    reused: set[str],
+    rebuild: set[str],
+    extracted: Mapping[str, SourceExtraction],
+):
+    merged: dict[str, dict[str, Mapping[str, object]]] = {
+        collection: dict(parent_records[collection])
+        for collection in _RECORD_COLLECTIONS
+    }
+    ownership: dict[tuple[str, str], set[str]] = {}
+    for source_id in reused:
+        _claim_reused_records(ownership, parent_entries[source_id]["records"], source_id)
+    for source_id in sorted(rebuild):
+        result = extracted[source_id]
+        for collection in _RECORD_COLLECTIONS:
+            _merge_collection_records(
+                merged[collection],
+                ownership,
+                collection,
+                getattr(result, collection),
+                source_id,
+            )
+    return merged, ownership
+
+
+_LANGUAGE_ENTRY_VERSIONS = {
+    "evidence-graph-incremental/v2",
+    "evidence-graph-incremental/v3",
+    "evidence-graph-incremental/v4",
+}
+
+
+def _entry_source_facts(
+    source_id: str,
+    extracted: Mapping[str, SourceExtraction],
+    parent_entries: Mapping[str, Mapping[str, object]],
+):
+    result = extracted.get(source_id)
+    if result is None:
+        entry = parent_entries[source_id]
+        return (
+            list(entry["source_dependencies"]),
+            dict(entry["invalidation_fingerprints"]),
+            bool(entry["workspace_sensitive"]),
+        )
+    return (
+        list(result.source_dependencies),
+        dict(result.invalidation_fingerprints or {}),
+        result.workspace_sensitive,
+    )
+
+
+def _entry_language_field(source: Mapping[str, object]) -> dict[str, object]:
+    if INCREMENTAL_MANIFEST_VERSION not in _LANGUAGE_ENTRY_VERSIONS:
+        return {}
+    return {"language": source.get("language")}
+
+
+def _entry_workspace_field(workspace_sensitive: bool) -> dict[str, object]:
+    if INCREMENTAL_MANIFEST_VERSION == "evidence-graph-incremental/v4":
+        return {"workspace_sensitive": workspace_sensitive}
+    if INCREMENTAL_MANIFEST_VERSION == "evidence-graph-incremental/v3":
+        return {"workspace_sensitive_sources": []}
+    return {}
+
+
+def _manifest_source_entries(
+    current_ids: set[str],
+    current: Mapping[str, Mapping[str, object]],
+    extracted: Mapping[str, SourceExtraction],
+    parent_entries: Mapping[str, Mapping[str, object]],
+    records_by_owner: Mapping[str, dict[str, list[str]]],
+) -> list[dict[str, object]]:
+    entries: list[dict[str, object]] = []
+    for source_id in sorted(current_ids):
+        dependencies, fingerprints, workspace_sensitive = _entry_source_facts(
+            source_id, extracted, parent_entries
+        )
+        source = current[source_id]
+        entries.append(
+            {
+                "source_id": source_id,
+                "relative_path": str(source["relative_path"]),
+                "sha256": str(source["sha256"]),
+                "source_dependencies": dependencies,
+                "invalidation_fingerprints": fingerprints,
+                "records": records_by_owner[source_id],
+                **_entry_language_field(source),
+                **_entry_workspace_field(workspace_sensitive),
+            }
+        )
+    return entries
+
+
+def _record_source_ids(
+    owners: set[str], entry_by_id: Mapping[str, Mapping[str, object]]
+) -> list[str]:
+    dependencies = set(owners)
+    for owner in owners:
+        dependencies.update(map(str, entry_by_id[owner]["source_dependencies"]))
+    return sorted(dependencies)
+
+
+def _record_status(owners: set[str], rebuild: set[str]) -> str:
+    if owners & rebuild:
+        return "rebuilt"
+    return "reused"
+
+
+def _record_dependency_rows(
+    ownership: Mapping[tuple[str, str], set[str]],
+    entry_by_id: Mapping[str, Mapping[str, object]],
+    rebuild: set[str],
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for (collection, record_id), owners in sorted(ownership.items()):
+        rows.append(
+            {
+                "collection": collection,
+                "record_id": record_id,
+                "source_ids": _record_source_ids(owners, entry_by_id),
+                "status": _record_status(owners, rebuild),
+            }
+        )
+    return rows
+
+
+def _stored_incremental_manifest(
+    reuse_config: IncrementalReuseConfig,
+    source_entries: list[dict[str, object]],
+    record_dependencies: list[dict[str, object]],
+) -> dict[str, object] | None:
+    """A manifest too large to store is not a reason to refuse the generation.
+
+    It only buys the next pass its reuse, so the generation is built without one
+    and the pass after this starts from a full build instead.
+    """
+    manifest = {
+        "version": INCREMENTAL_MANIFEST_VERSION,
+        "reuse_config": asdict(reuse_config),
+        "sources": source_entries,
+        "record_dependencies": record_dependencies,
+    }
+    if len(canonical_json_bytes(manifest)) > MAX_STORED_INCREMENTAL_MANIFEST_BYTES:
+        return None
+    return manifest
+
+
+def _incremental_extractor_version(
+    snapshot: corpus_snapshot.CorpusSnapshot | None, reuse_config: IncrementalReuseConfig
+) -> str:
+    if snapshot is None:
+        return reuse_config.extractor_version
+    return snapshot.extractor_version
