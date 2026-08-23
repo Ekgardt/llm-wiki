@@ -159,3 +159,7 @@ state.json.lock
 
 # === Backups ===
 *.bak-*
+
+# Corpora built from this machine's real sessions: real transcript text, never
+# published. Only the aggregate numbers they produce are.
+benchmark/flush-classification-live*.json

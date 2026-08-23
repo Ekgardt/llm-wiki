@@ -2579,6 +2579,33 @@ def _publish_durable_capture_intent(
     return intent_id
 
 
+def _fallback_trigger(event_type: str, payload: Mapping[str, Any]) -> str | None:
+    if event_type != "session_end":
+        return _string(payload.get("trigger"))
+    return _string(_session_end_trigger(_string(payload.get("trigger")), payload))
+
+
+def publish_capture_intent_from_payload(
+    source: str, event_type: str, payload: Mapping[str, Any]
+) -> str | None:
+    """Durable fallback for the thin lifecycle hooks; never raises.
+
+    The hooks hand the heavy work to a detached process. When that spawn fails,
+    and the hook was invoked directly rather than through this adapter, nothing
+    else has published an intent and the session is lost with it. Publishing the
+    intent here keeps the work: the queue replays the flush at the next session,
+    which is what "no user action required" has to mean on the failure path too.
+    """
+    try:
+        envelope = normalize_event(source, event_type, dict(payload))
+        canonical = _canonical_capture_payload(envelope)
+        slug, _project_dir = _project_context(envelope)
+        trigger = _fallback_trigger(event_type, canonical)
+        return _publish_durable_capture_intent(envelope, canonical, slug, trigger)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _record_capture_intent(result: dict[str, Any], intent_id: str | None) -> None:
     if intent_id is not None:
         result["capture_intent_ids"] = [intent_id]

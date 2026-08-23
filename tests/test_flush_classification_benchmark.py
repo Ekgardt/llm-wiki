@@ -100,3 +100,55 @@ def test_an_invalid_corpus_is_rejected(tmp_path: Path):
 
     with pytest.raises(SchemaValidationError):
         stand.load_corpus(path)
+
+
+def test_a_live_corpus_is_accepted_and_reported_as_provisional(tmp_path):
+    """Real sessions carry model-produced labels until a human confirms them."""
+    corpus = {
+        "corpus_id": "live-test",
+        "schema_version": "flush-classification/v2",
+        "thresholds": {
+            "tier_accuracy": 0.8,
+            "durable_content_recall": 0.8,
+            "false_promotion_rate": 0.2,
+        },
+        "cases": [
+            {
+                "case_id": "live-001-example",
+                "language": "EN",
+                "event": "session-end",
+                "content_classes": ["decision"],
+                "transcript": "user: pick one\nassistant: rollback journal, WAL breaks",
+                "expected_tier": "major",
+                "required_markers": ["rollback journal"],
+                "label_provenance": "judge",
+                "label_reviewed": False,
+            }
+        ],
+    }
+    path = tmp_path / "live.json"
+    path.write_text(json.dumps(corpus), encoding="utf-8")
+
+    loaded = stand.load_corpus(path)
+    report = stand.run(loaded, lambda case: "FLUSH_MAJOR\n\n- rollback journal wins\n")
+
+    assert report["labels"] == {
+        "case_count": 1,
+        "reviewed_count": 0,
+        "provisional": True,
+    }
+    assert report["metrics"]["tier_accuracy"] == 1.0
+
+
+def test_the_shipped_corpus_counts_as_reviewed():
+    corpus = stand.load_corpus(stand.CORPUS)
+
+    assert stand.label_state(corpus)["provisional"] is False
+
+
+def test_an_unknown_schema_version_is_refused(tmp_path):
+    path = tmp_path / "corpus.json"
+    path.write_text(json.dumps({"schema_version": "flush-classification/v9"}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unknown corpus schema"):
+        stand.load_corpus(path)

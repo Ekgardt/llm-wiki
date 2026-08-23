@@ -88,7 +88,7 @@ def test_session_end_ephemeral_transcript_is_cleaned_when_spawn_fails(
     assert rc == 0
     assert "--ephemeral-transcript" in spawned[0]
     assert not transient.exists()
-    assert json.loads(capsys.readouterr().out) == {"flush_started": False}
+    assert json.loads(capsys.readouterr().out)["flush_started"] is False
 
 
 def test_session_end_confirms_detached_flush_start(monkeypatch, capsys):
@@ -160,7 +160,7 @@ def test_precompact_ephemeral_transcript_propagates_and_cleans_failed_spawn(
     ) == 0
     assert "--ephemeral-transcript" in spawned[0]
     assert not transient.exists()
-    assert json.loads(capsys.readouterr().out) == {"flush_started": False}
+    assert json.loads(capsys.readouterr().out)["flush_started"] is False
 
 
 def test_capture_wrappers_forward_checkpoint_event_identity(monkeypatch, capsys):
@@ -1291,7 +1291,7 @@ def test_a_failed_direct_spawn_leaves_a_capture_failure_trace(monkeypatch, capsy
         assert _run_capture_with_stdin(
             module.__name__, {"session_id": "session-7", "transcript_path": "session.jsonl"}
         ) == 0
-        assert json.loads(capsys.readouterr().out) == {"flush_started": False}
+        assert json.loads(capsys.readouterr().out)["flush_started"] is False
         del event
 
     assert [item[0] for item in recorded] == ["session_end", "pre_compact"]
@@ -1334,3 +1334,147 @@ def test_operational_errors_survive_a_process_boundary():
         assert type(restored) is type(error)
         assert str(restored) == str(error)
         assert vars(restored) == vars(error)
+
+
+def _queue_capture_tasks(state_root: Path) -> list[dict]:
+    """Every capture task the queue holds, whatever its state."""
+    import sqlite3
+
+    database = state_root / "run" / "queue-v3.sqlite3"
+    if not database.exists():
+        return []
+    with sqlite3.connect(database) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute("SELECT * FROM tasks").fetchall()
+    return [{key: str(row[key]) for key in row.keys()} for row in rows]
+
+
+def test_session_end_publishes_a_durable_intent_when_the_spawn_fails(
+    monkeypatch, capsys
+):
+    """A failed spawn used to lose the session; now the queue replays it.
+
+    Through the adapter an intent already exists before this hook runs. Called
+    directly — an older configuration, or anyone running the script — nothing had
+    published one, so the work vanished with a printed `flush_started: false`.
+    """
+    import session_end_capture
+
+    published = []
+    monkeypatch.setattr(session_end_capture, "spawn_detached", lambda args: None)
+    monkeypatch.setattr(
+        "integration_adapter.publish_capture_intent_from_payload",
+        lambda source, event, payload: published.append((source, event, payload))
+        or "intent-1",
+    )
+
+    rc = _run_capture_with_stdin(
+        "session_end_capture",
+        {"session_id": "session-1", "transcript_path": "session.jsonl"},
+    )
+
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "flush_started": False,
+        "capture_intent": "intent-1",
+    }
+    assert published and published[0][1] == "session_end"
+
+
+def test_session_end_still_records_the_loss_when_the_fallback_fails(
+    monkeypatch, capsys
+):
+    import session_end_capture
+
+    failures = []
+    monkeypatch.setattr(session_end_capture, "spawn_detached", lambda args: None)
+    monkeypatch.setattr(
+        "integration_adapter.publish_capture_intent_from_payload",
+        lambda source, event, payload: None,
+    )
+    monkeypatch.setattr(
+        session_end_capture,
+        "record_capture_failure",
+        lambda kind, reason, **fields: failures.append((kind, reason, fields)),
+    )
+
+    rc = _run_capture_with_stdin(
+        "session_end_capture", {"session_id": "session-2", "transcript_path": "s.jsonl"}
+    )
+
+    assert rc == 0
+    assert failures == [
+        ("session_end", "flush_spawn_failed", {"session_id": "session-2"})
+    ]
+    assert json.loads(capsys.readouterr().out)["capture_intent"] is None
+
+
+def test_precompact_publishes_a_durable_intent_when_the_spawn_fails(
+    monkeypatch, capsys
+):
+    import precompact_capture
+
+    published = []
+    monkeypatch.setattr(precompact_capture, "spawn_detached", lambda args: None)
+    monkeypatch.setattr(
+        "integration_adapter.publish_capture_intent_from_payload",
+        lambda source, event, payload: published.append((source, event, payload))
+        or "intent-2",
+    )
+
+    rc = _run_capture_with_stdin(
+        "precompact_capture", {"session_id": "s", "transcript_path": "session.jsonl"}
+    )
+
+    assert rc == 0
+    assert published and published[0][1] == "pre_compact"
+    assert json.loads(capsys.readouterr().out)["capture_intent"] == "intent-2"
+
+
+def test_a_direct_session_end_call_reaches_the_real_queue(tmp_path, monkeypatch, capsys):
+    """End to end, with nothing stubbed but the failing spawn.
+
+    The transcript sits under the transient-transcript root because capture reads
+    transcripts only from the three roots it trusts; anywhere else is refused, and
+    that refusal is a separate, deliberate boundary.
+    """
+    import integration_adapter
+    import session_end_capture
+    from installed_memory_repair import repair_installed_vault
+
+    vault = tmp_path / "vault"
+    state_root = tmp_path / "state"
+    (vault / "knowledge/projects").mkdir(parents=True)
+    (vault / "scripts").mkdir()
+    (vault / "scripts/integration_adapter.py").write_bytes(
+        (Path(__file__).resolve().parent.parent / "scripts/integration_adapter.py").read_bytes()
+    )
+    report = repair_installed_vault(
+        root=vault,
+        state_root=state_root,
+        adopt_ownership_v3=True,
+        confirm_all_agents_stopped=True,
+    )
+    assert report["overall_status"] == "ok", report
+    monkeypatch.setattr(integration_adapter, "ROOT", vault)
+    monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
+    transcripts = state_root / "cache" / "transient-transcripts"
+    transcripts.mkdir(parents=True, exist_ok=True)
+    transcript = transcripts / "direct-call.jsonl"
+    transcript.write_text(
+        json.dumps({"type": "user", "message": {"content": "remember this"}}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(session_end_capture, "spawn_detached", lambda args: None)
+
+    rc = _run_capture_with_stdin(
+        "session_end_capture",
+        {"session_id": "session-3", "transcript_path": str(transcript)},
+    )
+
+    assert rc == 0
+    reported = json.loads(capsys.readouterr().out)
+    assert reported["flush_started"] is False
+    assert reported["capture_intent"], "the session must survive a failed spawn"
+    tasks = _queue_capture_tasks(state_root)
+    assert any(reported["capture_intent"] in str(task) for task in tasks), tasks
