@@ -1032,6 +1032,38 @@ def test_catalog_mutation_boundaries_reject_metadata_preserving_tampering(
     assert active is None
 
 
+class _TamperTrace:
+    """What the tamper hook saw, so a failure can name what stopped it.
+
+    A Windows run reported only `assert False` — the tamper never ran — and
+    nothing said whether the hook was reached, whether any read belonged to the
+    file being hashed, or whether the operating system refused the mutation
+    because the catalog was holding the file open.
+    """
+
+    def __init__(self) -> None:
+        self.acquiring = False
+        self.acquisitions = 0
+        self.reads = 0
+        self.tampered = False
+        self.refusal: str | None = None
+
+    def run(self, mutate) -> None:
+        try:
+            mutate()
+        except OSError as exc:
+            self.refusal = f"{type(exc).__name__}: {exc}"
+            raise
+        self.tampered = True
+
+    def why(self) -> str:
+        return (
+            "the tamper never ran: "
+            f"acquisitions={self.acquisitions}, reads_while_acquiring={self.reads}, "
+            f"refusal={self.refusal or 'none'}"
+        )
+
+
 def _tamper_ready(acquiring: bool, chunk: bytes, tampered: bool) -> bool:
     return acquiring and bool(chunk) and not tampered
 
@@ -1063,26 +1095,25 @@ def test_catalog_mutation_boundaries_reject_earlier_member_change_during_later_h
     os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
     real_read = generation_catalog.os.read
     real_acquire = catalog._acquire_seal_capability
-    acquiring = False
-    tampered = False
+    trace = _TamperTrace()
 
     def read_and_tamper(descriptor, size):
-        nonlocal tampered
         chunk = real_read(descriptor, size)
-        if _tamper_ready(acquiring, chunk, tampered) and _is_descriptor_for(
-            descriptor, later
-        ):
-            _apply_artifact_mutation(mutation, earlier, changed, replacement)
-            tampered = True
+        if not _tamper_ready(trace.acquiring, chunk, trace.tampered):
+            return chunk
+        trace.reads += 1
+        if not _is_descriptor_for(descriptor, later):
+            return chunk
+        trace.run(lambda: _apply_artifact_mutation(mutation, earlier, changed, replacement))
         return chunk
 
     def tracked_acquire(*args, **kwargs):
-        nonlocal acquiring
-        acquiring = True
+        trace.acquiring = True
+        trace.acquisitions += 1
         try:
             return real_acquire(*args, **kwargs)
         finally:
-            acquiring = False
+            trace.acquiring = False
 
     monkeypatch.setattr(generation_catalog.os, "read", read_and_tamper)
     monkeypatch.setattr(catalog, "_acquire_seal_capability", tracked_acquire)
@@ -1090,7 +1121,7 @@ def test_catalog_mutation_boundaries_reject_earlier_member_change_during_later_h
     with pytest.raises((PermissionError, ValueError)):
         _reach_boundary(catalog, generation_id, boundary, candidate)
 
-    assert tampered
+    assert trace.tampered, trace.why()
 
 
 def test_catalog_writer_is_not_held_while_publication_content_hash_blocks(
