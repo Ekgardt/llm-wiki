@@ -67,7 +67,21 @@ def _refresh_generation(log, *, ownership: OwnerLease | None = None) -> int:
         f"  generation: {status} (id={generation}, "
         f"partial={bool(result.get('partial'))}, reason={result.get('reason') or 'none'})"
     )
+    _log_generation_details(log, result)
     return 0 if status in {"built", "current"} else 1
+
+
+def _log_generation_details(log, result: dict) -> None:
+    """A deferred refresh must say what it saw, not only that it stopped.
+
+    A lost maintenance fence carries which check saw it and what the owner row
+    held. The nightly log used to drop that on the floor, so the one place where
+    the loss actually happens was also the one place with no evidence.
+    """
+    details = result.get("details")
+    if not details:
+        return
+    log(f"  generation: details {details}")
 
 
 def _record_nightly_result(today: str, failures: int, error: str | None = None) -> None:
