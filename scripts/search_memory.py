@@ -773,7 +773,13 @@ def _require_matching_repository(
     if not isinstance(expected_repository_scope, RepositoryScope):
         raise TypeError("expected_repository_scope must be a RepositoryScope")
     live_scope = resolve_repository_scope(vault, deadline=deadline, cancelled=cancelled)
-    if live_scope != expected_repository_scope:
+    # Identity, not equality: `RepositoryScope` carries `git_commit`, and this
+    # vault commits itself, so a four-minute build that ends after a commit was
+    # publishing into "a different repository" by that reading. The question
+    # here is only whether this is the same checkout — the same one `NEW-65`
+    # answered for generation eligibility. Measured 2026-08-24: every rebuild
+    # that spanned a commit died at publication with this message.
+    if not live_scope.same_repository(expected_repository_scope):
         raise ValueError("publication root does not match generation repository scope")
 
 

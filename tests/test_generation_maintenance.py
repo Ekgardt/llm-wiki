@@ -2172,3 +2172,62 @@ def test_a_vault_with_generations_but_none_active_is_degraded(tmp_path):
     assert report["details"]["active_generation"] is None
     assert report["details"]["recommended_action"] == "rebuild_generation"
     assert "1 are registered" in report["message"]
+
+
+def _git_scope(tmp_path: Path, name: str, commit: str):
+    """A Git-flavoured scope for a temporary checkout, at a chosen commit."""
+    from repository_scope import (
+        SCHEMA_VERSION,
+        RepositoryScope,
+        derive_checkout_id,
+        derive_repository_id,
+        resolve_repository_scope,
+    )
+
+    repository = tmp_path / name
+    repository.mkdir(exist_ok=True)
+    checkout_root = resolve_repository_scope(repository).checkout_root
+    git_common_dir = f"{checkout_root}/.git"
+    repository_id = derive_repository_id(
+        checkout_root=checkout_root, git_common_dir=git_common_dir
+    )
+    return RepositoryScope(
+        SCHEMA_VERSION,
+        repository_id,
+        derive_checkout_id(repository_id, checkout_root),
+        checkout_root,
+        git_common_dir,
+        commit,
+    )
+
+
+def test_a_build_that_spans_a_commit_still_publishes(tmp_path, monkeypatch):
+    """This vault commits itself; a four-minute build must survive that."""
+    import repository_scope
+    import search_memory
+
+    expected = _git_scope(tmp_path, "repository", "a" * 40)
+    moved = _git_scope(tmp_path, "repository", "b" * 40)
+    monkeypatch.setattr(
+        repository_scope, "resolve_repository_scope", lambda *a, **k: moved
+    )
+
+    search_memory._require_matching_repository(
+        tmp_path, expected, deadline=None, cancelled=None
+    )
+
+
+def test_publishing_into_another_checkout_is_still_refused(tmp_path, monkeypatch):
+    import repository_scope
+    import search_memory
+
+    expected = _git_scope(tmp_path, "repository", "a" * 40)
+    elsewhere = _git_scope(tmp_path, "elsewhere", "a" * 40)
+    monkeypatch.setattr(
+        repository_scope, "resolve_repository_scope", lambda *a, **k: elsewhere
+    )
+
+    with pytest.raises(ValueError, match="repository scope"):
+        search_memory._require_matching_repository(
+            tmp_path, expected, deadline=None, cancelled=None
+        )
