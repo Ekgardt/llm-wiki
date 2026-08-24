@@ -260,12 +260,16 @@ REAL-TIME (while you work)
   SessionStart → load project handoff + drain queue + background compile
 
 END OF SESSION (agent idle or you close)
+  A redacted copy of the session is written to knowledge/raw/sessions/<date>/
   LLM classifies transcript → FLUSH_MAJOR / FLUSH_MINOR / FLUSH_OK
   MAJOR/MINOR content → structured summary appended to daily log
   MAJOR triggers background compile (detached, doesn't block you)
 
 NIGHTLY 03:00 (scheduler, subject to the operating-system login policy)
-  Drain deferred queue → compile all pending → structural lint → prune old reports
+  Drain deferred queue → consolidate yesterday's session records into the daily
+  log → compile all pending → structural lint → add owed backlinks → rebuild the
+  FTS index → refresh the immutable evidence generation (and its vectors) →
+  compact retrieval telemetry → prune old reports → fast-forward the checkout
 
 SUNDAY 04:00 (scheduler)
   Everything nightly does + OKF conformance sweep + archive stale + prune failed queue tasks
