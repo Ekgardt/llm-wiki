@@ -505,6 +505,26 @@ def test_matching_hash_v2_with_missing_search_is_rebuilt(tmp_path):
     ).is_file()
 
 
+def _generation_directories(path) -> set[str]:
+    return {item.name for item in path.iterdir() if item.is_dir()}
+
+
+def _ok_checks(names) -> list[dict]:
+    return [
+        {"id": name, "status": "ok", "message": "ok", "details": {}} for name in names
+    ]
+
+
+_SYNC_CHECK_NAMES = (
+    "environment",
+    "runtime",
+    "filesystem",
+    "integrations",
+    "transactions",
+    "queue",
+)
+
+
 def test_fts_failure_preserves_prior_and_removes_candidate(tmp_path, monkeypatch):
     import doctor
     import search_memory
@@ -517,11 +537,7 @@ def test_fts_failure_preserves_prior_and_removes_candidate(tmp_path, monkeypatch
     (root / "knowledge/notes/new.md").write_text(
         "---\ntype: concept\n---\n# New\nnew term\n", encoding="utf-8"
     )
-    before = {
-        path.name
-        for path in (state / "cache/evidence-graph/generations").iterdir()
-        if path.is_dir()
-    }
+    before = _generation_directories(state / "cache/evidence-graph/generations")
     monkeypatch.setattr(
         search_memory,
         "build_generation_fts",
@@ -539,13 +555,8 @@ def test_fts_failure_preserves_prior_and_removes_candidate(tmp_path, monkeypatch
         )
 
     catalog = GenerationCatalog(state)
-    after = {
-        path.name
-        for path in catalog.generations_path.iterdir()
-        if path.is_dir()
-    }
     assert catalog.get_active()["generation_id"] == prior["generation_id"]
-    assert after == before
+    assert _generation_directories(catalog.generations_path) == before
 
 
 def test_incremental_search_contains_new_chunks_and_no_old_text(tmp_path):
@@ -1073,6 +1084,28 @@ def test_package_init_relative_import_incremental_equals_clean_rebuild(tmp_path)
     ]
 
 
+def _entries_by_path(manifest: dict) -> dict:
+    return {entry["relative_path"]: entry for entry in manifest["sources"]}
+
+
+def _apply_dependency_change(change: str, dependency, package) -> None:
+    if change == "rename":
+        dependency.rename(package / "renamed.py")
+        return
+    dependency.unlink()
+
+
+def _import_assertions(tables: dict) -> list:
+    return [row for row in tables["assertion"] if row[2] == "IMPORTS"]
+
+
+def _has_missing_dependency_observation(tables: dict) -> bool:
+    return any(
+        row[2] == "IMPORTS" and row[4] == "missing_dependency"
+        for row in tables["observation"]
+    )
+
+
 @pytest.mark.parametrize("change", ["delete", "rename"])
 def test_from_dot_import_dependency_invalidates_and_matches_clean_rebuild(
     tmp_path, change
@@ -1095,17 +1128,12 @@ def test_from_dot_import_dependency_invalidates_and_matches_clean_rebuild(
     first_manifest = json.loads(
         (first_generation / "incremental-manifest.json").read_bytes()
     )
-    first_entries = {
-        entry["relative_path"]: entry for entry in first_manifest["sources"]
-    }
+    first_entries = _entries_by_path(first_manifest)
     assert first_entries["scripts/pkg/__init__.py"]["source_dependencies"] == [
         first_entries["scripts/pkg/dep.py"]["source_id"]
     ]
 
-    if change == "rename":
-        dependency.rename(package / "renamed.py")
-    else:
-        dependency.unlink()
+    _apply_dependency_change(change, dependency, package)
     incremental = doctor.run_generation_maintenance(
         root=root,
         state_root=incremental_state,
@@ -1124,11 +1152,8 @@ def test_from_dot_import_dependency_invalidates_and_matches_clean_rebuild(
         clean_state, clean["generation_id"]
     )
     tables = _graph_tables(incremental_state, incremental["generation_id"])
-    assert not [row for row in tables["assertion"] if row[2] == "IMPORTS"]
-    assert any(
-        row[2] == "IMPORTS" and row[4] == "missing_dependency"
-        for row in tables["observation"]
-    )
+    assert not _import_assertions(tables)
+    assert _has_missing_dependency_observation(tables)
 
 
 def test_maintenance_ambiguous_candidates_invalidate_referencing_source(tmp_path):
@@ -1541,9 +1566,7 @@ def test_shared_structural_nodes_survive_owner_removal_and_match_clean_rebuild(
     first_manifest = json.loads(
         (first_generation / "incremental-manifest.json").read_bytes()
     )
-    first_entries = {
-        entry["relative_path"]: entry for entry in first_manifest["sources"]
-    }
+    first_entries = _entries_by_path(first_manifest)
 
     if change == "rename":
         first_file.rename(shared / "z.py")
@@ -1587,6 +1610,62 @@ def test_shared_structural_nodes_survive_owner_removal_and_match_clean_rebuild(
         )
 
 
+def _partition_nodes(source_ids) -> list[dict]:
+    return [
+        {"node_id": "node:shared"},
+        *({"node_id": f"node:{index}"} for index in range(len(source_ids))),
+    ]
+
+
+def _partition_occurrences(source_ids) -> list[dict]:
+    return [
+        {
+            "occurrence_id": f"occurrence:{index}",
+            "node_id": f"node:{index}",
+            "source_id": source_id,
+        }
+        for index, source_id in enumerate(source_ids)
+    ]
+
+
+def _partition_assertions(source_ids) -> list[dict]:
+    return [
+        {
+            "assertion_id": f"assertion:{index}",
+            "source_node_id": "node:shared",
+            "target_node_id": f"node:{index}",
+        }
+        for index in range(len(source_ids))
+    ]
+
+
+def _partition_evidence(source_ids) -> list[dict]:
+    return [
+        {
+            "evidence_id": f"evidence:{index}",
+            "assertion_id": f"assertion:{index}",
+            "observation_id": None,
+            "source_id": source_id,
+        }
+        for index, source_id in enumerate(source_ids)
+    ]
+
+
+def _partition_dependencies(source_ids) -> list[dict]:
+    return [
+        {"dependency_id": f"dependency:{index}", "source_id": source_id}
+        for index, source_id in enumerate(source_ids)
+    ]
+
+
+def _assert_partition_of(partition, index: int) -> None:
+    assert {node["node_id"] for node in partition.nodes} == {
+        "node:shared",
+        f"node:{index}",
+    }
+    assert partition.dependencies[0]["dependency_id"] == f"dependency:{index}"
+
+
 def test_workspace_partition_indexes_each_record_collection_once():
     from types import SimpleNamespace
 
@@ -1607,45 +1686,12 @@ def test_workspace_partition_indexes_each_record_collection_once():
         for source_id in source_ids
     )
     collections = {
-        "nodes": CountingRecords(
-            [
-                {"node_id": "node:shared"},
-                *(
-                    {"node_id": f"node:{index}"}
-                    for index in range(len(source_ids))
-                ),
-            ]
-        ),
-        "occurrences": CountingRecords(
-            {
-                "occurrence_id": f"occurrence:{index}",
-                "node_id": f"node:{index}",
-                "source_id": source_id,
-            }
-            for index, source_id in enumerate(source_ids)
-        ),
-        "assertions": CountingRecords(
-            {
-                "assertion_id": f"assertion:{index}",
-                "source_node_id": "node:shared",
-                "target_node_id": f"node:{index}",
-            }
-            for index in range(len(source_ids))
-        ),
-        "evidence": CountingRecords(
-            {
-                "evidence_id": f"evidence:{index}",
-                "assertion_id": f"assertion:{index}",
-                "observation_id": None,
-                "source_id": source_id,
-            }
-            for index, source_id in enumerate(source_ids)
-        ),
+        "nodes": CountingRecords(_partition_nodes(source_ids)),
+        "occurrences": CountingRecords(_partition_occurrences(source_ids)),
+        "assertions": CountingRecords(_partition_assertions(source_ids)),
+        "evidence": CountingRecords(_partition_evidence(source_ids)),
         "observations": CountingRecords(()),
-        "dependencies": CountingRecords(
-            {"dependency_id": f"dependency:{index}", "source_id": source_id}
-            for index, source_id in enumerate(source_ids)
-        ),
+        "dependencies": CountingRecords(_partition_dependencies(source_ids)),
     }
     result = SimpleNamespace(
         **collections,
@@ -1657,11 +1703,7 @@ def test_workspace_partition_indexes_each_record_collection_once():
     assert all(records.iterations == 1 for records in collections.values())
     assert tuple(partitions) == source_ids
     for index, source_id in enumerate(source_ids):
-        assert {node["node_id"] for node in partitions[source_id].nodes} == {
-            "node:shared",
-            f"node:{index}",
-        }
-        assert partitions[source_id].dependencies[0]["dependency_id"] == f"dependency:{index}"
+        _assert_partition_of(partitions[source_id], index)
 
 
 def test_workspace_partition_receives_generation_deadline_and_cancellation(
@@ -1980,6 +2022,35 @@ def test_edited_wikilink_is_visible_after_nightly_in_fresh_processes(
     assert fresh_neighbors() == ["knowledge/notes/target-b.md"]
 
 
+def _recording_kwargs(calls, value):
+    """A stub that remembers the call it was made with."""
+
+    def stub(**kwargs):
+        calls.append(kwargs)
+        return value
+
+    return stub
+
+
+def _recording_name(calls, name, value):
+    """A stub that remembers only that it ran, in order."""
+
+    def stub(**kwargs):
+        calls.append(name)
+        return value
+
+    return stub
+
+
+def _action_of(result: dict, action_id: str) -> dict:
+    return next(item for item in result["actions"] if item["id"] == action_id)
+
+
+def _stub_sync_report(monkeypatch, sync_memory, report, dependency) -> None:
+    monkeypatch.setattr(sync_memory.doctor, "run_doctor", lambda **kwargs: report)
+    monkeypatch.setattr(sync_memory, "_dependency_action", lambda **kwargs: dependency)
+
+
 def test_sync_check_reports_stale_generation_and_apply_uses_shared_builder(tmp_path, monkeypatch):
     import sync_memory
 
@@ -1999,53 +2070,30 @@ def test_sync_check_reports_stale_generation_and_apply_uses_shared_builder(tmp_p
     report = {
         "overall_status": "degraded",
         "repaired": [],
-        "checks": [
-            {"id": name, "status": "ok", "message": "ok", "details": {}}
-            for name in (
-                "environment",
-                "runtime",
-                "filesystem",
-                "integrations",
-                "transactions",
-                "queue",
-            )
-        ]
-        + [generation, index],
+        "checks": _ok_checks(_SYNC_CHECK_NAMES) + [generation, index],
     }
-    monkeypatch.setattr(sync_memory.doctor, "run_doctor", lambda **kwargs: report)
+    dependency = {"id": "dependencies", "status": "ok", "message": "ok", "details": {}}
+    refreshed = {
+        "id": "indexes",
+        "status": "changed",
+        "message": "Generation refreshed.",
+        "details": {"generation": "gen-2", "partial": False},
+    }
+    _stub_sync_report(monkeypatch, sync_memory, report, dependency)
     monkeypatch.setattr(
-        sync_memory,
-        "_dependency_action",
-        lambda **kwargs: {
-            "id": "dependencies",
-            "status": "ok",
-            "message": "ok",
-            "details": {},
-        },
-    )
-    monkeypatch.setattr(
-        sync_memory,
-        "_run_generation_builder",
-        lambda **kwargs: (
-            calls.append(kwargs)
-            or {
-                "id": "indexes",
-                "status": "changed",
-                "message": "Generation refreshed.",
-                "details": {"generation": "gen-2", "partial": False},
-            }
-        ),
+        sync_memory, "_run_generation_builder", _recording_kwargs(calls, refreshed)
     )
 
     checked = sync_memory.run_sync(root=tmp_path, state_root=tmp_path, home=tmp_path, apply=False)
     applied = sync_memory.run_sync(root=tmp_path, state_root=tmp_path, home=tmp_path, apply=True)
 
-    checked_index = next(item for item in checked["actions"] if item["id"] == "indexes")
-    applied_index = next(item for item in applied["actions"] if item["id"] == "indexes")
+    checked_index = _action_of(checked, "indexes")
+    applied_index = _action_of(applied, "indexes")
     assert checked_index["status"] == "skipped"
     assert checked_index["details"]["checks"]["generation"] == "degraded"
     assert applied_index["status"] == "changed"
-    assert calls and calls[0]["max_sources"] > 0
+    assert calls, "apply must reach the shared generation builder"
+    assert calls[0]["max_sources"] > 0
 
 
 def test_sync_apply_refreshes_generation_and_legacy_index_when_both_are_stale(
@@ -2054,64 +2102,73 @@ def test_sync_apply_refreshes_generation_and_legacy_index_when_both_are_stale(
     import sync_memory
 
     calls = []
+    stale = {"freshness": "stale", "repairable": True}
     report = {
         "overall_status": "degraded",
         "repaired": [],
-        "checks": [
-            {
-                "id": name,
-                "status": "ok",
-                "message": "ok",
-                "details": {},
-            }
-            for name in (
-                "environment",
-                "runtime",
-                "filesystem",
-                "integrations",
-                "transactions",
-                "queue",
-            )
-        ]
+        "checks": _ok_checks(_SYNC_CHECK_NAMES)
         + [
-            {
-                "id": "generation",
-                "status": "degraded",
-                "message": "stale",
-                "details": {"freshness": "stale", "repairable": True},
-            },
-            {
-                "id": "index",
-                "status": "degraded",
-                "message": "stale",
-                "details": {"freshness": "stale", "repairable": True},
-            },
+            {"id": "generation", "status": "degraded", "message": "stale", "details": stale},
+            {"id": "index", "status": "degraded", "message": "stale", "details": stale},
         ],
     }
-    monkeypatch.setattr(sync_memory.doctor, "run_doctor", lambda **kwargs: report)
-    monkeypatch.setattr(
+    _stub_sync_report(
+        monkeypatch,
         sync_memory,
-        "_dependency_action",
-        lambda **kwargs: sync_memory._result("dependencies", "ok", "ok", {}),
+        report,
+        sync_memory._result("dependencies", "ok", "ok", {}),
     )
     monkeypatch.setattr(
         sync_memory,
         "_run_generation_builder",
-        lambda **kwargs: (
-            calls.append("generation")
-            or sync_memory._result("indexes", "changed", "generation", {})
+        _recording_name(
+            calls, "generation", sync_memory._result("indexes", "changed", "generation", {})
         ),
     )
     monkeypatch.setattr(
         sync_memory,
         "_run_index_builder",
-        lambda **kwargs: (
-            calls.append("index") or sync_memory._result("indexes", "changed", "index", {})
+        _recording_name(
+            calls, "index", sync_memory._result("indexes", "changed", "index", {})
         ),
     )
 
     applied = sync_memory.run_sync(root=tmp_path, state_root=tmp_path, home=tmp_path, apply=True)
 
-    action = next(item for item in applied["actions"] if item["id"] == "indexes")
+    action = _action_of(applied, "indexes")
     assert calls == ["generation", "index"]
     assert action["status"] == "changed"
+
+
+def test_a_vault_with_generations_but_none_active_is_degraded(tmp_path):
+    """Built and then deactivated is an outage; never built is just young.
+
+    Measured on 2026-08-24: a corpus rule change invalidated every candidate, the
+    catalog cleared the active pointer, search returned zero rows — and the report
+    still said `ok, legacy retrieval remains available`.
+    """
+    import doctor
+    from generation_catalog import GenerationCatalog
+
+    root, state = _vault(tmp_path)
+    catalog = GenerationCatalog(state)
+    with sqlite3.connect(catalog.catalog_path) as database:
+        database.execute(
+            "INSERT INTO generations("
+            "generation_id, parent_generation_id, manifest_json, manifest_sha256,"
+            " registered_at) VALUES (?, NULL, ?, ?, ?)",
+            ("generation-1111111111111111-22222222", b"{}", "a" * 64, "2026-08-24T00:00:00Z"),
+        )
+
+    report = doctor._generation_check(
+        root,
+        state,
+        datetime.now(timezone.utc),
+        deadline=time.monotonic() + 1,
+        max_sources=10,
+    )
+
+    assert report["status"] == "degraded"
+    assert report["details"]["active_generation"] is None
+    assert report["details"]["recommended_action"] == "rebuild_generation"
+    assert "1 are registered" in report["message"]

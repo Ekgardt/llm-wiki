@@ -3731,6 +3731,48 @@ def _active_pointer(database: sqlite3.Connection) -> object:
     return row[0]
 
 
+def _registered_generation_count(database) -> int:
+    row = database.execute("SELECT COUNT(*) FROM generations").fetchone()
+    if row is None:
+        return 0
+    return int(row[0])
+
+
+def _no_active_generation(registered: int) -> dict:
+    """Nothing to answer from: never built is fine, deactivated is not.
+
+    A vault that has never published a generation is simply young, and legacy
+    retrieval is all it ever had. A vault that published some and now points at
+    none has lost its main read path — measured here on 2026-08-24, when a corpus
+    rule change invalidated every candidate and the pointer was cleared: search
+    returned zero rows while the report still said `ok`. The finding clears
+    itself as soon as a generation is activated again.
+    """
+    if registered == 0:
+        return _generation_result(
+            "ok",
+            "Evidence generation has not been activated; legacy retrieval remains available.",
+            catalog="valid",
+            catalog_schema="valid",
+            freshness="missing",
+            repairable=True,
+            recommended_action="rebuild_generation",
+        )
+    return _generation_result(
+        "degraded",
+        (
+            f"No evidence generation is active while {registered} are registered; "
+            "retrieval has fallen back and semantic search is off until one is "
+            "activated."
+        ),
+        catalog="valid",
+        catalog_schema="valid",
+        freshness="missing",
+        repairable=True,
+        recommended_action="rebuild_generation",
+    )
+
+
 def _catalog_active_generation(
     catalog_path: Path, state_root: Path, deadline: float, state: dict
 ) -> tuple[dict | None, str | None]:
@@ -3741,18 +3783,7 @@ def _catalog_active_generation(
         _require_catalog_durability(database)
         active = _active_pointer(database)
         if not isinstance(active, str) or not active:
-            return (
-                _generation_result(
-                    "ok",
-                    "Evidence generation has not been activated; legacy retrieval remains available.",
-                    catalog="valid",
-                    catalog_schema="valid",
-                    freshness="missing",
-                    repairable=True,
-                    recommended_action="rebuild_generation",
-                ),
-                None,
-            )
+            return _no_active_generation(_registered_generation_count(database)), None
         registered = database.execute(
             "SELECT 1 FROM generations WHERE generation_id=?",
             (active,),
