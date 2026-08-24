@@ -2569,22 +2569,43 @@ def _place_by_page(
     first.append(candidate)
 
 
-def _page_diverse(
-    candidates: Sequence[RetrievalCandidate],
-) -> tuple[RetrievalCandidate, ...]:
-    """One chunk per page first, then the rest in the order they already had.
+def _supporting(candidate: RetrievalCandidate) -> bool:
+    """Kinds the trust table puts below neutral: raw evidence and gap stubs.
 
-    Nothing is dropped — the extra chunks follow the first pass — so a caller
-    that wanted every chunk of one page still receives them, in order. The
-    remedies that compare candidates to each other (maximal marginal relevance,
-    semantic deduplication) are not needed here: the duplication is structural.
+    They support an answer rather than leading it, which is the vault's own
+    retrieval rule — answer from the compiled pages, read raw material only when
+    the pages are missing, stale or contradictory. Measured: importing 236 past
+    sessions filled every place with transcripts of the discussions the decision
+    pages were compiled from, and the stand fell from hit@5 0.7 to 0.0.
     """
+    return candidate.type_weight < 1.0
+
+
+def _first_per_page(
+    candidates: Sequence[RetrievalCandidate],
+) -> list[RetrievalCandidate]:
     first: list[RetrievalCandidate] = []
     extras: list[RetrievalCandidate] = []
     seen: set[str] = set()
     for candidate in candidates:
         _place_by_page(candidate, seen, first, extras)
-    return tuple(first + extras)
+    return first + extras
+
+
+def _page_diverse(
+    candidates: Sequence[RetrievalCandidate],
+) -> tuple[RetrievalCandidate, ...]:
+    """One chunk per page first, compiled pages before raw evidence.
+
+    Nothing is dropped — the extra chunks follow the first pass, and the
+    supporting kinds follow those — so a caller that wanted every chunk of one
+    page, or the raw session behind a page, still receives them, in order. The
+    remedies that compare candidates to each other (maximal marginal relevance,
+    semantic deduplication) are not needed here: the duplication is structural.
+    """
+    leading = [item for item in candidates if not _supporting(item)]
+    supporting = [item for item in candidates if _supporting(item)]
+    return tuple(_first_per_page(leading) + _first_per_page(supporting))
 
 
 def _require_bounded_int(value: object, low: int, high: int, name: str) -> None:

@@ -49,6 +49,13 @@ TYPE_WEIGHTS: dict[str, float] = {
     "skill": 1.05,
     "rule": 1.05,
     "gap": 0.8,
+    # Raw session evidence: kept because it holds what exists nowhere else, and
+    # ranked below every curated page because there are hundreds of them, each up
+    # to half a megabyte of the same conversations the pages were compiled from.
+    # Measured: importing 236 past sessions at neutral weight took the vault
+    # stand from hit@5 0.7 to 0.0 — every place taken by a transcript of the
+    # discussion instead of the decision it produced.
+    "raw-source": 0.6,
 }
 
 DEFAULT_TYPE_WEIGHT = 1.0

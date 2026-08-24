@@ -220,12 +220,22 @@ def test_the_record_declares_the_session_authority() -> None:
     assert "source_authority: session" in document
 
 
-def test_the_corpus_collects_session_records(tmp_path: Path) -> None:
-    """MEM-01: the records are members of the corpus, so retrieval can see them."""
+def test_the_corpus_leaves_session_records_alone(tmp_path: Path) -> None:
+    """Kept on disk, read by consolidation, and deliberately not indexed.
+
+    They were collected until 2026-08-24, when importing 236 past sessions took
+    the vault stand from hit@5 0.7 to 0.0: hundreds of half-megabyte transcripts
+    of the same conversations the pages were compiled from crowded the compiled
+    pages out of the candidate pool entirely. Neither a below-neutral trust
+    weight nor ordering compiled pages first recovered more than 0.4.
+    """
     import corpus_snapshot
 
     vault = tmp_path / "vault"
     (vault / "knowledge/notes").mkdir(parents=True)
+    (vault / "knowledge/notes/page.md").write_text(
+        "---\ntype: decision\n---\n# Page\nContent.\n", encoding="utf-8"
+    )
     record = vault / "knowledge/raw/sessions/2026-08-23/abc123.md"
     record.parent.mkdir(parents=True)
     record.write_text(
@@ -238,9 +248,8 @@ def test_the_corpus_collects_session_records(tmp_path: Path) -> None:
     snapshot = corpus_snapshot.collect_corpus(vault)
 
     paths = [source.record.relative_path for source in snapshot.sources]
-    assert "knowledge/raw/sessions/2026-08-23/abc123.md" in paths
-    kept = next(item for item in snapshot.sources if "sessions" in item.record.relative_path)
-    assert kept.metadata.authority == "session"
+    assert paths == ["knowledge/notes/page.md"]
+    assert record.exists()
 
 
 def test_a_session_chunk_carries_the_session_kind(tmp_path: Path) -> None:

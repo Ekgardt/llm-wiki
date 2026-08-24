@@ -93,11 +93,21 @@ def grep_ranking(vault: Path, question: str, limit: int = TOP_K) -> list[str]:
     return [item[2] for item in sorted(scored)[:limit]]
 
 
+# The question sheet lives in the vault like everything else, so a question that
+# appears in it verbatim retrieves it first. That is the measurement looking at
+# itself, not the product working, so this one path is dropped from the ranking.
+_SELF = "benchmark/vault-retrieval-v1.json"
+
+
+def _result_path(item: dict) -> str:
+    return str(item.get("path") or item.get("relative_path") or "")
+
+
 def product_ranking(question: str, limit: int = TOP_K) -> list[str]:
     from search_memory import search
 
-    results = search(question, limit=limit)
-    return [str(item.get("path") or item.get("relative_path") or "") for item in results]
+    paths = [_result_path(item) for item in search(question, limit=limit + 1)]
+    return [path for path in paths if path != _SELF][:limit]
 
 
 def _rank_of(gold: str, paths: list[str]) -> int | None:

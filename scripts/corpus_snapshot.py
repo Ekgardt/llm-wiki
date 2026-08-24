@@ -1302,9 +1302,19 @@ class _Discovery:
 def _walk_knowledge(discovery: _Discovery, vault: Path) -> None:
     discovery.walk(vault / "knowledge/notes", "note")
     discovery.walk(vault / "knowledge/projects", "project")
-    # Session records are the raw layer: kept verbatim so that relevance is decided
-    # when a question is asked rather than when the session ended.
-    discovery.walk(vault / SESSION_RECORD_ROOT, "session")
+    # Session records are deliberately NOT collected. They are kept verbatim on
+    # disk, they are read by the nightly consolidation, and they are greppable —
+    # but they are not part of the retrieval corpus, because measurement says
+    # they take it over: importing 236 past sessions (about 10 MB of the same
+    # conversations the pages were compiled from) moved the vault stand from
+    # hit@5 0.7 to 0.0, and neither a below-neutral trust weight nor ordering
+    # compiled pages first brought it back past 0.4 — by then the decision page
+    # was no longer in the candidate pool at all.
+    #
+    # What would make them safe to index is a second tier consulted when the
+    # compiled pages do not answer, or a per-source quota in the pool. Neither is
+    # built, so the honest state is: kept, not indexed. See MEM-01 in
+    # docs/DEVELOPER-AUDIT-STATUS-2026-08-18.md.
 
 
 def _existing_path(vault: Path, relative: str) -> Path:

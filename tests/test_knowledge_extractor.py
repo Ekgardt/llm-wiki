@@ -33,6 +33,47 @@ def _source(path: str, content: bytes, *, kind: str = "concept"):
     )
 
 
+def _edges(result) -> set[tuple[str, str, str]]:
+    return {
+        (row["edge_type"], row["source_node_id"], row["target_node_id"])
+        for row in result.assertions
+    }
+
+
+def _has_link(edges, target_suffix: str) -> bool:
+    return any(
+        edge[0] == "LINKS_TO" and edge[2].endswith(target_suffix) for edge in edges
+    )
+
+
+def _has_project(edges, project_node: str) -> bool:
+    return any(
+        edge[0] == "BELONGS_TO_PROJECT" and edge[2] == project_node for edge in edges
+    )
+
+
+def _has_supersession(edges, newer_suffix: str, older_suffix: str) -> bool:
+    return any(_supersedes(edge, newer_suffix, older_suffix) for edge in edges)
+
+
+def _supersedes(edge, newer_suffix: str, older_suffix: str) -> bool:
+    return (
+        edge[0] == "SUPERSEDES"
+        and edge[1].endswith(newer_suffix)
+        and edge[2].endswith(older_suffix)
+    )
+
+
+def _assert_spans_are_exact(result, sources) -> None:
+    """Every evidence row must name the bytes it says it names."""
+    content = {source.record.logical_id: source.content for source in sources}
+    for evidence in result.evidence:
+        span = content[evidence["source_id"]][
+            evidence["byte_start"] : evidence["byte_end"]
+        ]
+        assert hashlib.sha256(span).hexdigest() == evidence["span_sha256"]
+
+
 def test_extracts_typed_pages_projects_links_supersession_and_exact_spans():
     from knowledge_extractor import extract_knowledge
 
@@ -59,23 +100,18 @@ def test_extracts_typed_pages_projects_links_supersession_and_exact_spans():
         "debugging-note",
         "project",
     }
-    edges = {(row["edge_type"], row["source_node_id"], row["target_node_id"]) for row in result.assertions}
-    assert any(edge[0] == "LINKS_TO" and edge[2].endswith("debug-note.md") for edge in edges)
-    assert any(edge[0] == "BELONGS_TO_PROJECT" and edge[2] == "project:atlas" for edge in edges)
-    assert any(
-        edge[0] == "SUPERSEDES"
-        and edge[1].endswith("new-choice.md")
-        and edge[2].endswith("old-choice.md")
-        for edge in edges
+    edges = _edges(result)
+    assert _has_link(edges, "debug-note.md")
+    assert _has_project(edges, "project:atlas")
+    assert _has_supersession(edges, "new-choice.md", "old-choice.md")
+    _assert_spans_are_exact(
+        result,
+        (
+            _source("knowledge/notes/old-choice.md", old, kind="decision"),
+            _source("knowledge/notes/new-choice.md", new, kind="decision"),
+            _source("knowledge/notes/debug-note.md", debugging, kind="debugging"),
+        ),
     )
-    sources = {source.record.logical_id: source.content for source in (
-        _source("knowledge/notes/old-choice.md", old, kind="decision"),
-        _source("knowledge/notes/new-choice.md", new, kind="decision"),
-        _source("knowledge/notes/debug-note.md", debugging, kind="debugging"),
-    )}
-    for evidence in result.evidence:
-        span = sources[evidence["source_id"]][evidence["byte_start"] : evidence["byte_end"]]
-        assert hashlib.sha256(span).hexdigest() == evidence["span_sha256"]
 
 
 def test_symbol_references_require_explicit_identity_and_observe_bare_ambiguity():
@@ -290,3 +326,29 @@ def test_output_is_directly_accepted_by_evidence_graph_v1(tmp_path):
         observations=result.observations,
         dependencies=result.dependencies,
     )
+
+
+def test_a_quoted_line_is_not_taken_for_a_symbol() -> None:
+    """A backticked span can be a whole transcript line; a symbol it is not.
+
+    One session record carried a 20,000-character escaped-JSON line inside
+    backticks. The extractor called it a symbol reference, and the generation
+    writer — which refuses any target over 4096 characters — killed the whole
+    nightly build over one quoted line.
+    """
+    from knowledge_extractor import MAX_SYMBOL_REFERENCE_CHARS, extract_knowledge
+
+    long_span = "x" * (MAX_SYMBOL_REFERENCE_CHARS + 1)
+    content = (
+        f"---\ntype: raw-source\n---\n# Session\n\n"
+        f"`{long_span}`\n`short_symbol`\n"
+    ).encode()
+    source = _source(
+        "knowledge/raw/sessions/2026-08-24/s1.md", content, kind="raw-source"
+    )
+
+    result = extract_knowledge([source])
+
+    targets = [str(row["target_text"]) for row in result.observations]
+    assert "short_symbol" in targets
+    assert all(len(target) <= MAX_SYMBOL_REFERENCE_CHARS for target in targets)

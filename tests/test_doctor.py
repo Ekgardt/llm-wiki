@@ -1260,6 +1260,43 @@ def test_maintenance_heartbeat_runs_during_long_operation(tmp_path, monkeypatch)
     assert len(beats) >= 2
 
 
+def test_a_busy_database_is_not_a_lost_fence(tmp_path, monkeypatch):
+    """A locked database threw away seven-minute generation builds on this vault.
+
+    The lease outlives two missed beats, so a transient failure is retried; a
+    fence genuinely taken by someone else still ends the pass at once.
+    """
+    import doctor
+
+    root, state_root, _ = _build_root(tmp_path)
+    acquired = doctor._acquire_maintenance_owner(root, state_root, datetime.now(timezone.utc))
+    assert acquired is not None
+    coordinator, lease = acquired
+    guard = doctor._MaintenanceHeartbeat(
+        coordinator, lease, deadline=time.monotonic() + 60
+    )
+
+    monkeypatch.setattr(
+        doctor,
+        "_heartbeat_maintenance_owner",
+        lambda *args, **kwargs: (_ for _ in ()).throw(sqlite3.OperationalError("locked")),
+    )
+    assert guard._beat_once() is False
+    assert guard.cancelled() is False
+
+    monkeypatch.setattr(
+        doctor,
+        "_heartbeat_maintenance_owner",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("maintenance_owner_fence_lost")
+        ),
+    )
+    assert guard._beat_once() is False
+    assert guard.cancelled() is True
+
+    doctor._release_maintenance_owner(coordinator, lease)
+
+
 def test_ownerless_stale_lease_is_degraded_and_not_repaired(tmp_path):
     from doctor import run_doctor
 

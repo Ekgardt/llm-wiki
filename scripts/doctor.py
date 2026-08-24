@@ -93,6 +93,8 @@ QUEUE_STATES = ("ready", "leased", "blocked", "succeeded", "dead", "cancelled")
 UNDO_RETENTION_DAYS = 30
 MAINTENANCE_LEASE_SECONDS = 120
 MAINTENANCE_HEARTBEAT_SECONDS = 40.0
+# Two missed beats still leave the 120-second lease alive; the third would not.
+MAX_HEARTBEAT_FAILURES = 2
 FILESYSTEM_PROBE_SECONDS = 1.0
 TRANSACTION_REQUIRED_COLUMNS = {
     "id",
@@ -5989,12 +5991,33 @@ class _MaintenanceHeartbeat:
         _release_maintenance_owner(self.coordinator, self.lease)
 
     def _heartbeat_loop(self) -> None:
+        failures = 0
         while not self._stop.wait(MAINTENANCE_HEARTBEAT_SECONDS):
-            try:
-                _heartbeat_maintenance_owner(self.coordinator, self.lease)
-            except Exception:  # noqa: BLE001 - observed by the foreground fence check
+            if self._beat_once():
+                failures = 0
+                continue
+            failures += 1
+            if failures >= MAX_HEARTBEAT_FAILURES:
                 self._lost.set()
                 return
+
+    def _beat_once(self) -> bool:
+        """True when the lease was renewed; False on a transient failure.
+
+        A fence genuinely taken by someone else ends the pass at once. Anything
+        else — a busy database, a lock held by a writer — is retried: the lease
+        outlives two missed beats, and treating a locked database as a lost fence
+        threw away whole seven-minute generation builds on this vault while its
+        own capture workers were writing.
+        """
+        try:
+            _heartbeat_maintenance_owner(self.coordinator, self.lease)
+        except RuntimeError:
+            self._lost.set()
+            return False
+        except Exception:  # noqa: BLE001 - transient; the lease still holds
+            return False
+        return True
 
     def cancelled(self) -> bool:
         return self._lost.is_set() or _deadline_reached(self.deadline)
