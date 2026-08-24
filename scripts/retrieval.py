@@ -1437,6 +1437,23 @@ def _check_stopped(
         raise TimeoutError("retrieval cancelled")
 
 
+# An optional stage may spend this share of what is left of the operation
+# budget, never all of it. Spending all of it is how an optional signal turns
+# into a failed answer: the mandatory legs and the caller's own fallback are then
+# left with nothing. Measured on this vault: a cold embedding model load takes
+# about ten seconds against a ten-second MCP budget, and the lexical answer that
+# was ready in 1.3 s was lost with it.
+OPTIONAL_STAGE_BUDGET_SHARE = 0.5
+
+
+def _optional_stage_deadline(deadline: float) -> float:
+    """The slice an optional stage may use before it is abandoned."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return deadline
+    return time.monotonic() + remaining * OPTIONAL_STAGE_BUDGET_SHARE
+
+
 def _call_dense(
     dense_backend: BackendFn,
     filters: Mapping[str, Any],
@@ -1448,7 +1465,7 @@ def _call_dense(
         return dense_backend(**filters)
     return _run_optional_bounded(
         lambda: dense_backend(**filters),
-        deadline=deadline_monotonic,
+        deadline=_optional_stage_deadline(deadline_monotonic),
         cancelled=cancelled,
     )
 
@@ -1728,7 +1745,9 @@ def _run_reranker(
     if deadline_monotonic is None:
         return call()
     return _run_optional_bounded(
-        call, deadline=deadline_monotonic, cancelled=cancelled
+        call,
+        deadline=_optional_stage_deadline(deadline_monotonic),
+        cancelled=cancelled,
     )
 
 

@@ -47,6 +47,20 @@ NEVER_ARCHIVE_TYPES: frozenset[str] = frozenset({
     "bootstrap-context",
 })
 
+# How long a page of each type stays current. The archiver decides what to move
+# out of the way with these, and the answer path uses the same numbers to say
+# that a cited page is past its own window — one set, two readers.
+TYPE_AGE_DAYS: dict[str, int] = {
+    "debugging": 60,       # old debugging notes go stale fast
+    "gap": 90,             # gaps close when a real page is created (AGENTS.md §5)
+    "pattern": 180,        # patterns live longer
+    "workflow": 365,       # workflows are durable
+    "qa": 365,             # Q&A stays relevant
+}
+
+# Default for untyped pages.
+DEFAULT_AGE_DAYS = 180
+
 TYPE_ALIASES: dict[str, str] = {
     "comparison": "synthesis",
     "connection": "synthesis",

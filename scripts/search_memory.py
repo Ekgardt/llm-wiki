@@ -30,8 +30,10 @@ import sqlite3
 import stat
 import sys
 import tempfile
+import threading
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, closing, contextmanager, nullcontext
 from pathlib import Path
@@ -2164,6 +2166,77 @@ def _connectable_generation(
     return bool(_generation_artifact(manifest, GENERATION_FTS_ARTIFACT))
 
 
+# Validating the FTS artifact walks every chunk row it holds — 1.95 s on this
+# vault — and the verdict is a pure function of those bytes: the rows are checked
+# against the artifact's own metadata, and the caller already holds a
+# consumption seal proving the bytes match the digest the manifest names. So the
+# answer is remembered per set of bytes, for this process, and a different digest
+# is a different question. See docs/research/2026-08-24-verify-the-same-bytes-once.md.
+_MAX_REMEMBERED_FTS_VERDICTS = 8
+_VALID_FTS_ARTIFACTS: OrderedDict[tuple[str, str], bool] = OrderedDict()
+_FTS_VERDICT_LOCK = threading.Lock()
+
+
+def _named_artifact_digest(artifacts: object, name: str) -> str:
+    if not isinstance(artifacts, list):
+        return ""
+    for artifact in artifacts:
+        if _artifact_named(artifact, name):
+            return str(artifact.get("sha256") or "")
+    return ""
+
+
+def _artifact_named(artifact: object, name: str) -> bool:
+    return isinstance(artifact, dict) and artifact.get("path") == name
+
+
+def _fts_verdict_key(manifest: dict[str, object]) -> tuple[str, str] | None:
+    """(generation, digest of search.sqlite3), or None when either is unnamed."""
+    generation_id = str(manifest.get("generation_id") or "")
+    digest = _named_artifact_digest(
+        manifest.get("artifacts"), GENERATION_FTS_ARTIFACT
+    )
+    if not generation_id or not digest:
+        return None
+    return generation_id, digest
+
+
+def _fts_already_valid(key: tuple[str, str] | None) -> bool:
+    if key is None:
+        return False
+    with _FTS_VERDICT_LOCK:
+        if key not in _VALID_FTS_ARTIFACTS:
+            return False
+        _VALID_FTS_ARTIFACTS.move_to_end(key)
+        return True
+
+
+def _remember_valid_fts(key: tuple[str, str] | None) -> None:
+    if key is None:
+        return
+    with _FTS_VERDICT_LOCK:
+        _VALID_FTS_ARTIFACTS[key] = True
+        while len(_VALID_FTS_ARTIFACTS) > _MAX_REMEMBERED_FTS_VERDICTS:
+            _VALID_FTS_ARTIFACTS.popitem(last=False)
+
+
+def _fts_contents_hold(
+    connection: sqlite3.Connection,
+    manifest: dict[str, object],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    key = _fts_verdict_key(manifest)
+    if _fts_already_valid(key):
+        return True
+    if not _valid_generation_fts(
+        connection, manifest, deadline=deadline, cancelled=cancelled
+    ):
+        return False
+    _remember_valid_fts(key)
+    return True
+
+
 def _validated_generation_connection(
     artifact: Path,
     manifest: dict[str, object],
@@ -2178,9 +2251,7 @@ def _validated_generation_connection(
     )
     try:
         _check_generation_stop(deadline, cancelled)
-        if not _valid_generation_fts(
-            connection, manifest, deadline=deadline, cancelled=cancelled
-        ):
+        if not _fts_contents_hold(connection, manifest, deadline, cancelled):
             connection.close()
             return None
         return connection

@@ -3642,13 +3642,74 @@ def _verified_claim_ratio(data: dict) -> float:
     return verified / len(claims) if claims else 0.0
 
 
+# The ceiling the grounded path has always applied: a verified citation says the
+# span exists and shares content with the claim, never that it entails it.
+GROUNDED_CONFIDENCE_CEILING = 0.8
+
+
+def _cited_paths(data: dict) -> list[str]:
+    citations = [item for item in data.get("citations", []) if isinstance(item, dict)]
+    return sorted({str(item.get("relative_path") or "") for item in citations})
+
+
+def _cited_page_facts(data: dict) -> list:
+    """What the vault knows about each page this answer cites."""
+    from memory_state import ROOT
+    from page_facts import read_page_facts
+
+    facts = [read_page_facts(ROOT, path) for path in _cited_paths(data)]
+    return [item for item in facts if item is not None]
+
+
+def _weakest_stated_confidence(facts: list) -> float:
+    """A chain of claims is worth its weakest evidence, not its average."""
+    from page_facts import UNSTATED_CONFIDENCE
+
+    if not facts:
+        return UNSTATED_CONFIDENCE
+    return min(item.stated_confidence() for item in facts)
+
+
+def _page_warnings(item) -> list[str]:
+    warnings = []
+    if item.confidence == "low":
+        warnings.append(f"{item.relative_path} states confidence: low.")
+    if item.authority == "inferred":
+        warnings.append(f"{item.relative_path} is inferred, not stated by anyone.")
+    if item.aging:
+        warnings.append(
+            f"{item.relative_path} is {item.age_days} days old; a {item.page_type} "
+            f"page stays current for {item.age_limit_days}."
+        )
+    return warnings
+
+
+def _provenance_warnings(facts: list) -> list[str]:
+    warnings: list[str] = []
+    for item in facts:
+        warnings.extend(_page_warnings(item))
+    return warnings
+
+
 def _grounded_answer_quality(data: dict) -> dict:
+    """Coverage and confidence from the answer and its sources, not from a constant.
+
+    Coverage is the share of claims whose citations all came back verified.
+    Confidence multiplies that by the weakest cited page's own stated
+    confidence, so an answer resting on a `confidence: low` page cannot report
+    more than that page does. Warnings name the page and the reason; a warning
+    that appears on every answer is one nobody reads.
+    """
     ratio = _verified_claim_ratio(data)
+    facts = _cited_page_facts(data)
+    confidence = min(
+        GROUNDED_CONFIDENCE_CEILING, ratio * _weakest_stated_confidence(facts)
+    )
     return {
-        "coverage": 0.0,
-        "confidence": min(0.8, ratio),
+        "coverage": round(ratio, 4),
+        "confidence": round(confidence, 4),
         "partial": ratio < 1.0,
-        "warnings": ["Grounded answer coverage is unknown."],
+        "warnings": _provenance_warnings(facts),
     }
 
 

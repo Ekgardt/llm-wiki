@@ -10,7 +10,9 @@ import re
 import shutil
 import sqlite3
 import stat
+import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import closing, contextmanager
 from dataclasses import InitVar, dataclass, replace
@@ -1542,6 +1544,80 @@ def _require_stable_scan(
     return final_seal
 
 
+# Semantic validation of a generation is a pure function of its bytes: the
+# sources it is checked against come from the generation's own source manifest
+# and evidence database, never from the live vault, and every call hashes every
+# artifact against the manifest before the semantic check runs. The same bytes
+# therefore cannot produce a different verdict — while on this vault one check
+# cost 1.95 s and one query ran five of them, which put the 10-second MCP budget
+# out of reach. See docs/research/2026-08-24-verify-the-same-bytes-once.md.
+_MAX_REMEMBERED_VALIDATIONS = 8
+_VALIDATED_GENERATIONS: OrderedDict[tuple, bool] = OrderedDict()
+_VALIDATION_MEMORY_LOCK = threading.Lock()
+
+
+def _validation_key(
+    generation_path: Path,
+    generation_id: str,
+    manifest_digest: str,
+    digests: dict[str, str],
+) -> tuple:
+    """Identity earned by hashing, not assumed: id, manifest, every artifact.
+
+    The path is part of it so two vaults that happen to hold identical bytes are
+    still each answered for themselves.
+    """
+    return (
+        str(generation_path),
+        generation_id,
+        manifest_digest,
+        tuple(sorted(digests.items())),
+    )
+
+
+def _already_validated(key: tuple) -> bool:
+    with _VALIDATION_MEMORY_LOCK:
+        if key not in _VALIDATED_GENERATIONS:
+            return False
+        _VALIDATED_GENERATIONS.move_to_end(key)
+        return True
+
+
+def _remember_validated(key: tuple) -> None:
+    with _VALIDATION_MEMORY_LOCK:
+        _VALIDATED_GENERATIONS[key] = True
+        while len(_VALIDATED_GENERATIONS) > _MAX_REMEMBERED_VALIDATIONS:
+            _VALIDATED_GENERATIONS.popitem(last=False)
+
+
+def _validate_databases_once(
+    key: tuple,
+    generation_path: Path,
+    normalized: dict[str, object],
+    graph_schema: str | None,
+    state_root: Path,
+    *,
+    deadline: float | None,
+    monotonic: Callable[[], float],
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    """The expensive half, skipped only for bytes already proven identical."""
+    if _already_validated(key):
+        return
+    _validate_artifact_databases(
+        generation_path,
+        normalized,
+        graph_schema,
+        state_root,
+        deadline=deadline,
+        monotonic=monotonic,
+        cancelled=cancelled,
+    )
+    if "code_capture" in normalized:
+        _validate_code_capture_membership(generation_path, normalized, state_root)
+    _remember_validated(key)
+
+
 def _validate_generation(
     generation_path: Path,
     state_root: Path,
@@ -1573,7 +1649,8 @@ def _validate_generation(
         value["vector_state"], scan.seen, embedding_present
     )
     _require_schema_contract(normalized, graph_schema, scan.seen)
-    _validate_artifact_databases(
+    _validate_databases_once(
+        _validation_key(generation_path, expected_id, sha256_bytes(raw), scan.digests),
         generation_path,
         normalized,
         graph_schema,
@@ -1582,8 +1659,6 @@ def _validate_generation(
         monotonic=monotonic,
         cancelled=cancelled,
     )
-    if "code_capture" in normalized:
-        _validate_code_capture_membership(generation_path, normalized, state_root)
     final_seal = _require_stable_scan(
         generation_path, initial_seal, initial_files, scan.seen, **stop
     )

@@ -819,6 +819,14 @@ def test_generic_register_and_activate_still_run_real_semantic_validators(
     catalog.register("generic-full-validation")
     assert catalog.activate("generic-full-validation", expected_active=None)
 
+    # Activation proves the same bytes rather than re-deriving what they mean:
+    # every artifact was hashed against the manifest again, and a verdict about
+    # identical bytes cannot differ. Different bytes are checked for themselves.
+    assert calls == {"evidence": 1, "fts": 1}
+
+    _publish_v2(catalog, "generic-full-validation-other")
+    catalog.register("generic-full-validation-other")
+
     assert calls == {"evidence": 2, "fts": 2}
 
 

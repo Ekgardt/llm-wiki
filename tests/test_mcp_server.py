@@ -1396,9 +1396,13 @@ class TestHandleToolCall:
         assert calls[0][1]["deadline"] > started
         assert envelope["partial"] is False
         assert all("abstain" not in warning.lower() for warning in envelope["warnings"])
-        assert envelope["coverage"] == 0
+        # Coverage is the share of claims whose citations all came back, and the
+        # warnings name a page or say nothing at all.
+        assert envelope["coverage"] == 1.0
         assert 0 < envelope["confidence"] <= 0.8
-        assert any("coverage is unknown" in warning.lower() for warning in envelope["warnings"])
+        assert not any(
+            "unknown" in warning.lower() for warning in envelope["warnings"]
+        )
         assert envelope["components"] == {}
 
     @pytest.mark.parametrize(
