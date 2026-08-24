@@ -136,6 +136,19 @@ def test_nightly_source_compacts_telemetry_and_never_flushes_frontmatter():
     assert "from access_tracking import flush_all" not in source
 
 
+def test_the_nightly_pass_pays_the_backlinks_the_vault_owes():
+    """The repair only helps if the pass that runs unattended actually calls it."""
+    import scheduled_nightly
+
+    steps = scheduled_nightly._post_compile_steps()
+    labels = [step.label for step in steps]
+    backlinks = next(step for step in steps if step.label == "backlinks")
+
+    assert labels.index("backlinks") > labels.index("lint")
+    assert backlinks.command[-1] == "--apply"
+    assert backlinks.command[-2].endswith("repair_backlinks.py")
+
+
 @pytest.mark.parametrize("status", ["deferred", "error"])
 def test_generation_refresh_never_treats_deferred_or_error_as_success(monkeypatch, status):
     import scheduled_nightly
