@@ -56,6 +56,12 @@ TYPE_WEIGHTS: dict[str, float] = {
     # stand from hit@5 0.7 to 0.0 — every place taken by a transcript of the
     # discussion instead of the decision it produced.
     "raw-source": 0.6,
+    # Prose under a code root — research notes, status registers, design
+    # write-ups. It is commentary on the decisions, and the vault's own rule is
+    # to answer from the compiled pages first and read the commentary after.
+    # Measured: with it at neutral, the audit register was the first result on
+    # all ten stand questions and hit@5 fell from 0.7 to 0.4.
+    "doc": 0.8,
 }
 
 DEFAULT_TYPE_WEIGHT = 1.0

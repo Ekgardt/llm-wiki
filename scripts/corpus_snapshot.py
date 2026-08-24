@@ -1454,9 +1454,22 @@ _DEFAULT_SOURCE_TYPES = {
 }
 
 
+# Prose under a code root is commentary, not code: research notes, status
+# registers, design write-ups. Calling it `code` gave it the neutral trust
+# weight, and on this vault the audit register — one long Russian document that
+# discusses every decision — then outranked the decision pages themselves.
+_PROSE_SUFFIXES = frozenset({".md", ".markdown", ".rst", ".txt"})
+
+
 def _default_source_type(candidate: _Candidate) -> str:
-    if candidate.kind != "project":
-        return _DEFAULT_SOURCE_TYPES[candidate.kind]
+    if candidate.kind == "project":
+        return _project_source_type(candidate)
+    if candidate.kind == "code" and candidate.path.suffix.casefold() in _PROSE_SUFFIXES:
+        return "doc"
+    return _DEFAULT_SOURCE_TYPES[candidate.kind]
+
+
+def _project_source_type(candidate: _Candidate) -> str:
     if candidate.path.name == "state.md":
         return "project-state"
     return "project-context"
