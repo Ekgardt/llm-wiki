@@ -8,6 +8,28 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A compiled page's citation resolves again. A day longer than 16 KiB is
+  compiled in parts, and the page cites the part it was written from, but the
+  resolver only ever compared the whole file — so every page compiled from a
+  split day failed its own evidence check. The reader now accepts an
+  entry-aligned slice that starts where a part starts and still hashes to what
+  the page recorded; an edit inside the cited region still fails.
+
+- The nightly pass adds the backlinks the vault owes instead of leaving them as
+  findings for a person to clear. Compile writes pages that link outward and
+  cannot edit the pages they name; the repair appends the missing link through
+  the same transaction machinery as every other automatic writer, and never
+  names a private page inside a published one. A superseded or archived page is
+  history and is no longer asked to link forward.
+
+- `doctor` calls a vault with registered generations and no active one
+  degraded. An empty pointer used to read as "not activated yet", which is true
+  for a young vault and false for one whose main read path just went away.
+
+- A lost maintenance fence names itself: which check saw it, and what the owner
+  row held at that moment. Three checks used to raise the same bare string, so a
+  deferred nightly rebuild could only say that the fence was gone.
+
 - Completing a blackboard task and resolving a blackboard conflict survive a
   retry. Both publish under a stable operation id but stamped the record with
   the moment of the write, so a caller retrying after a transient failure was
