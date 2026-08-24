@@ -99,3 +99,4 @@ multilingual, or it reorders cross-language hits badly and undoes this.
   generation contract this stays inside.
 - [[knowledge/notes/self-resolving-health-findings-decision]] — the same rule
   applied to health: a report must describe what is true now.
+- [[knowledge/notes/session-evidence-retention-decision]] — links to this page.

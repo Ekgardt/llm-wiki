@@ -414,15 +414,25 @@ def _pair_owes_backlink(source: Path, target: Path) -> bool:
     return not _is_backlink_exempt(target)
 
 
-def check_missing_backlinks(pages: list[Path], search_roots: list[Path]) -> list[str]:
-    """Within a set of pages, A->B must be matched by B->A."""
+def missing_backlink_pairs(
+    pages: list[Path], search_roots: list[Path]
+) -> list[tuple[Path, Path]]:
+    """Every (source, target) where the target still owes a link back."""
     page_set = set(pages)
     link_map = {md: _resolved_page_links(md, page_set, search_roots) for md in pages}
     return [
-        f"{_rel(source)} -> {_rel(target)} (no backlink)"
+        (source, target)
         for source, target in _backlink_pairs(link_map)
         if source not in link_map.get(target, [])
         and _backlink_is_publishable(source, target)
+    ]
+
+
+def check_missing_backlinks(pages: list[Path], search_roots: list[Path]) -> list[str]:
+    """Within a set of pages, A->B must be matched by B->A."""
+    return [
+        f"{_rel(source)} -> {_rel(target)} (no backlink)"
+        for source, target in missing_backlink_pairs(pages, search_roots)
     ]
 
 

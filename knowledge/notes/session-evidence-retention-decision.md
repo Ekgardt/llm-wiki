@@ -131,6 +131,16 @@ Research: `docs/research/2026-08-23-memory-architectures-second-pass.md`.
   depends on it. Measure first: the stand from `OPEN-034` scores promotion, and
   retrieval benchmarks score whether the answer can now be found at all.
 
+## Source / Evidence
+
+- `scripts/session_evidence.py` — the write path this decision describes.
+- `docs/research/2026-08-23-what-a-session-should-leave-behind.md` — the
+  measurement that a conversation kept whole beats a summary of it.
+- `docs/research/2026-08-23-memory-architectures-second-pass.md` — the audit of
+  published memory-system records that this decision leans on.
+- `docs/DEVELOPER-AUDIT-STATUS-2026-08-18.md` — `OPEN-034`, `NEW-62`: the 40
+  real sessions on which the product kept one.
+
 ## Related
 
 - [[knowledge/notes/nightly-builds-generation-vectors-decision]] — the retrieval

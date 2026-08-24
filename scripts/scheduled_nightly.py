@@ -181,6 +181,12 @@ def _post_compile_steps() -> list[_Step]:
             120,
         ),
         _Step(
+            "Step 3a: repairing owed backlinks...",
+            "backlinks",
+            _script("repair_backlinks.py") + ["--apply"],
+            120,
+        ),
+        _Step(
             "Step 3b: rebuilding FTS5 search index...",
             "search",
             _script("search_memory.py") + ["--rebuild"],

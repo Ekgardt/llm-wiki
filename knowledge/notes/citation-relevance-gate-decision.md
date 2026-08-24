@@ -77,3 +77,4 @@ rule below is still the one that runs within one language.
 - [[classification-measurement-stand-decision]]
 - [[daily-entry-boundary-decision]]
 - [[part-scoped-evidence-decision]]
+- [[knowledge/notes/daily-entry-quote-anchor-decision]] — links to this page.
