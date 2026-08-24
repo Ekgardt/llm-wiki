@@ -72,11 +72,14 @@ def _isolate_test_state_root():
 # writes into their memory. By 2026-08-24 that had left 384 project journals from
 # past pytest sessions in `knowledge/projects`, and they were coming back as
 # answers to real questions. The guard makes the next one impossible to miss.
+# `knowledge/daily` and `knowledge/raw/sessions` are deliberately not watched:
+# on the machine that is also the vault, the live capture appends to today's log
+# and writes session records while the suite runs, so a guard over them would
+# report the owner's own work as a test leak. Measured 2026-08-24: today's daily
+# log was appended by another agent's session in the middle of a run.
 _WATCHED_KNOWLEDGE = (
     "knowledge/projects",
-    "knowledge/daily",
     "knowledge/notes",
-    "knowledge/raw/sessions",
 )
 
 
