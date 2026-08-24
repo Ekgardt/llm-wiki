@@ -316,3 +316,55 @@ def test_archive_directory_limit_is_enforced_while_iterating(
 
     with pytest.raises(evidence_resolver.EvidenceResolutionError, match="entry scan limit"):
         evidence_resolver.EvidenceResolver(vault)._resolve_archive(ref)
+
+
+def _long_day(entries: int, *, filler: int = 400) -> bytes:
+    """A day the compiler must split: many entries, each one marker plus a heading."""
+    parts = []
+    for index in range(entries):
+        parts.append(
+            f"<!-- llm-wiki-operation: op-{index} -->\n"
+            f"## [evt-{index}] entry {index}\n"
+            f"quote-{index} " + "x" * filler + "\n"
+        )
+    return "".join(parts).encode()
+
+
+def test_evidence_from_one_compile_part_resolves_after_the_day_grows(vault: Path) -> None:
+    """A page is written from one part; every later reader must still find those bytes."""
+    from evidence_resolver import (
+        EvidenceRef,
+        EvidenceResolutionError,
+        EvidenceResolver,
+        _daily_part_bounds,
+    )
+
+    day = _long_day(150)
+    bounds = _daily_part_bounds(day)
+    assert len(bounds) > 2, "the fixture must be long enough to be split"
+    start, end = bounds[1]
+    part = day[start:end]
+    marker = part.index(b"quote-")
+    quote = part[marker : part.index(b"\n", marker)]
+    block = part[part.index(b"## [") + 4 : part.index(b"]")].decode()
+    path = vault / "knowledge" / "daily" / "2026-01-02.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(day + _long_day(20))
+
+    result = EvidenceResolver(vault).resolve(
+        EvidenceRef.parse(
+            _reference("2026-01-02", part, block, marker, marker + len(quote))
+        )
+    )
+
+    assert result.bytes == quote
+    assert result.source_sha256 == _sha(part)
+    assert result.location == "flat-part"
+
+    path.write_bytes((day + _long_day(20)).replace(quote, b"t" + quote[1:], 1))
+    with pytest.raises(EvidenceResolutionError, match="hash mismatch"):
+        EvidenceResolver(vault).resolve(
+            EvidenceRef.parse(
+                _reference("2026-01-02", part, block, marker, marker + len(quote))
+            )
+        )

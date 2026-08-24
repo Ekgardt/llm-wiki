@@ -1225,6 +1225,38 @@ def test_live_pid_prevents_expired_maintenance_owner_reclaim(tmp_path, monkeypat
     doctor._release_maintenance_owner(coordinator, lease)
 
 
+def test_a_lost_fence_names_the_check_and_the_owner_it_found(tmp_path):
+    """A deferred nightly rebuild must say who took the fence, not just that it went."""
+    import doctor
+
+    root, state_root, _ = _build_root(tmp_path)
+    now = datetime.now(timezone.utc)
+    acquired = doctor._acquire_maintenance_owner(root, state_root, now)
+    assert acquired is not None
+    coordinator, lease = acquired
+    with coordinator._connect() as database:
+        database.execute(
+            "UPDATE maintenance_owners SET owner_token='thief',process_id=?,"
+            "fencing_epoch=? WHERE owner_name='doctor'",
+            (os.getpid() + 1, int(lease["epoch"]) + 1),
+        )
+        database.commit()
+
+    with pytest.raises(doctor.MaintenanceFenceLost) as required:
+        doctor._require_maintenance_owner(coordinator, lease)
+    with pytest.raises(doctor.MaintenanceFenceLost) as beaten:
+        doctor._heartbeat_maintenance_owner(coordinator, lease)
+
+    assert str(required.value) == "maintenance_owner_fence_lost"
+    assert required.value.where == "require"
+    assert beaten.value.where == "heartbeat"
+    observed = required.value.observed
+    assert observed["process_id"] == os.getpid() + 1
+    assert observed["fencing_epoch"] == int(lease["epoch"]) + 1
+    assert observed["held_epoch"] == lease["epoch"]
+    assert doctor._fence_loss_details(required.value)["where"] == "require"
+
+
 def test_maintenance_heartbeat_runs_during_long_operation(tmp_path, monkeypatch):
     import doctor
 

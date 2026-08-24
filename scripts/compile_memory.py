@@ -62,8 +62,10 @@ from contradiction_pipeline import (  # noqa: E402
     default_secondary_search,
 )
 from evidence_resolver import (  # noqa: E402
+    MAX_DAILY_PART_BYTES,  # noqa: F401 - re-exported: callers read the writer's bound here
     EvidenceRef,
     EvidenceResolver,
+    _daily_part_bounds,
     daily_entries,
 )
 from llm_client import call_candidate, probe_candidate, provider_candidates  # noqa: E402
@@ -435,43 +437,6 @@ def compile_receipt_path(source_identity: str) -> Path:
     if re.fullmatch(r"[0-9a-f]{64}", source_identity) is None:
         raise ValueError("source identity must be lowercase 64-hex")
     return DAILY_DIR / "receipts" / f"v3-{source_identity}.md"
-
-
-# How much of one day the compiler takes at a time. A day longer than this is
-# split at entry boundaries: a single long session used to fail the whole pass,
-# leaving every other day uncompiled with it. The bound is bytes rather than
-# tokens so the same file always splits the same way, which is what lets a run
-# interrupted halfway resume from the parts it already committed.
-MAX_DAILY_PART_BYTES = 16 * 1024
-
-# What separates one captured entry from the next in a daily log.
-_DAILY_ENTRY_MARKER = b"<!-- llm-wiki-operation:"
-
-
-def _daily_entry_offsets(content: bytes) -> list[int]:
-    """Where each entry starts, the first one covering whatever precedes it."""
-    offsets = [0]
-    position = content.find(_DAILY_ENTRY_MARKER)
-    while position != -1:
-        if position != 0:
-            offsets.append(position)
-        position = content.find(_DAILY_ENTRY_MARKER, position + 1)
-    return offsets
-
-
-def _daily_part_bounds(content: bytes) -> list[tuple[int, int]]:
-    """The byte ranges this day is compiled in, split only where an entry ends."""
-    if len(content) <= MAX_DAILY_PART_BYTES:
-        return [(0, len(content))]
-    offsets = [*_daily_entry_offsets(content), len(content)]
-    bounds: list[tuple[int, int]] = []
-    start = 0
-    for index in range(1, len(offsets)):
-        if offsets[index] - start > MAX_DAILY_PART_BYTES and offsets[index - 1] > start:
-            bounds.append((start, offsets[index - 1]))
-            start = offsets[index - 1]
-    bounds.append((start, len(content)))
-    return bounds
 
 
 def _daily_parts(

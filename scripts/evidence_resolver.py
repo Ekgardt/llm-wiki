@@ -1,6 +1,7 @@
 """Resolve content-addressed daily evidence from flat files or sealed bags."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -912,6 +913,88 @@ def _require_bag_immutable(
         raise EvidenceResolutionError("archive bag is not immutable")
 
 
+# How much of one day the compiler takes at a time. A day longer than this is
+# split at entry boundaries: a single long session used to fail the whole pass,
+# leaving every other day uncompiled with it. The bound is bytes rather than
+# tokens so the same file always splits the same way, which is what lets a run
+# interrupted halfway resume from the parts it already committed.
+#
+# The splitter lives here, next to the reader, because the writer and the reader
+# must cut a day in exactly the same places. It was in `compile_memory` until
+# 2026-08-24, and that is why every page compiled from a split day carried
+# evidence no reader could resolve.
+MAX_DAILY_PART_BYTES = 16 * 1024
+
+# What separates one captured entry from the next in a daily log.
+_DAILY_ENTRY_MARKER = b"<!-- llm-wiki-operation:"
+
+# A day is bounded, but the scan for a historical slice must be bounded too.
+MAX_EVIDENCE_SLICE_CANDIDATES = 4096
+
+
+def _daily_entry_offsets(content: bytes) -> list[int]:
+    """Where each entry starts, the first one covering whatever precedes it."""
+    offsets = [0]
+    position = content.find(_DAILY_ENTRY_MARKER)
+    while position != -1:
+        if position != 0:
+            offsets.append(position)
+        position = content.find(_DAILY_ENTRY_MARKER, position + 1)
+    return offsets
+
+
+def _daily_part_bounds(content: bytes) -> list[tuple[int, int]]:
+    """The byte ranges this day is compiled in, split only where an entry ends."""
+    if len(content) <= MAX_DAILY_PART_BYTES:
+        return [(0, len(content))]
+    offsets = [*_daily_entry_offsets(content), len(content)]
+    bounds: list[tuple[int, int]] = []
+    start = 0
+    for index in range(1, len(offsets)):
+        if offsets[index] - start > MAX_DAILY_PART_BYTES and offsets[index - 1] > start:
+            bounds.append((start, offsets[index - 1]))
+            start = offsets[index - 1]
+    bounds.append((start, len(content)))
+    return bounds
+
+
+def _slice_boundaries(content: bytes, start: int) -> list[int]:
+    """Where a historical slice beginning at `start` could have ended."""
+    ends = [offset for offset in _daily_entry_offsets(content) if offset > start]
+    ends.append(len(content))
+    return ends[:MAX_EVIDENCE_SLICE_CANDIDATES]
+
+
+def _slice_from(content: bytes, start: int, digest: str) -> bytes | None:
+    running = hashlib.sha256()
+    cursor = start
+    for boundary in _slice_boundaries(content, start):
+        running.update(content[cursor:boundary])
+        cursor = boundary
+        if running.hexdigest() == digest:
+            return content[start:boundary]
+    return None
+
+
+def compile_part_slice(content: bytes, digest: str) -> bytes | None:
+    """The exact bytes one compile part held, in a day that has grown since.
+
+    A page is written from one part of a day, so its evidence names that part's
+    digest and offsets inside it — not the whole file. A day also keeps growing
+    after it was compiled, so what was the last part then is the head of a
+    longer part now. Both are one question: is there an entry-aligned slice,
+    starting where a part starts, whose bytes still hash to what the page
+    recorded? Nothing weaker is accepted — the historical bytes must still be
+    present verbatim and in place, which is the append-only argument a
+    transparency log makes with a consistency proof (RFC 6962).
+    """
+    for start, _end in _daily_part_bounds(content):
+        found = _slice_from(content, start, digest)
+        if found is not None:
+            return found
+    return None
+
+
 class EvidenceResolver:
     def __init__(self, vault: Path, *, state_root: Path | None = None):
         self.vault = Path(vault).resolve(strict=True)
@@ -927,9 +1010,15 @@ class EvidenceResolver:
         content = _flat_source(flat)
         if content is None:
             return self._resolve_archive(ref)
-        if sha256_bytes(content) != ref.source_sha256:
+        return self._resolve_flat(ref, content, flat)
+
+    def _resolve_flat(self, ref: EvidenceRef, content: bytes, flat: Path):
+        if sha256_bytes(content) == ref.source_sha256:
+            return self._slice(ref, content, flat, "flat")
+        part = compile_part_slice(content, ref.source_sha256)
+        if part is None:
             raise EvidenceResolutionError("flat daily source hash mismatch")
-        return self._slice(ref, content, flat, "flat")
+        return self._slice(ref, part, flat, "flat-part")
 
     def resolve_bytes(
         self,

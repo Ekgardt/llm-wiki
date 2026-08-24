@@ -5884,6 +5884,48 @@ def _ensure_maintenance_schema(database: sqlite3.Connection) -> None:
             database.execute(f"ALTER TABLE maintenance_owners ADD COLUMN {name} {declaration}")
 
 
+class MaintenanceFenceLost(RuntimeError):
+    """The maintenance fence is no longer ours, with what the row held.
+
+    Three separate checks raise this, and until 2026-08-24 all three raised the
+    same bare string, so a deferred nightly rebuild said only that the fence was
+    lost — never which check saw it, nor who held the row instead. `where` names
+    the check and `observed` carries the row, so the next occurrence identifies
+    the other owner instead of starting the investigation from zero.
+    """
+
+    def __init__(self, where: str, observed: dict[str, object]) -> None:
+        super().__init__("maintenance_owner_fence_lost")
+        self.where = where
+        self.observed = observed
+
+
+_OWNER_ROW_FIELDS = ("process_id", "fencing_epoch", "acquired_at", "heartbeat_at", "expires_at")
+
+
+def _observed_owner_row(row: sqlite3.Row | None) -> dict[str, object]:
+    if row is None:
+        return {"present": False}
+    columns = set(row.keys())
+    observed: dict[str, object] = {"present": True}
+    for field in _OWNER_ROW_FIELDS:
+        observed[field] = row[field] if field in columns else None
+    return observed
+
+
+def _read_owner_row(database: Any) -> sqlite3.Row | None:
+    return database.execute(
+        "SELECT * FROM maintenance_owners WHERE owner_name='doctor'"
+    ).fetchone()
+
+
+def _fence_lost(where: str, database: Any, lease: dict[str, object]) -> MaintenanceFenceLost:
+    observed = _observed_owner_row(_read_owner_row(database))
+    observed["held_epoch"] = lease.get("epoch")
+    observed["held_by_process"] = os.getpid()
+    return MaintenanceFenceLost(where, observed)
+
+
 def _acquire_maintenance_owner(
     root: Path, state_root: Path, now: datetime
 ) -> tuple[Any, dict[str, object]] | None:
@@ -5947,24 +5989,26 @@ def _heartbeat_maintenance_owner(
             ),
         ).rowcount
         if changed != 1:
+            lost = _fence_lost("heartbeat", database, lease)
             database.rollback()
-            raise RuntimeError("maintenance_owner_fence_lost")
+            raise lost
         database.commit()
+
+
+def _owner_row_is_ours(row: sqlite3.Row | None, lease: dict[str, object]) -> bool:
+    if row is None:
+        return False
+    if row["owner_token"] != lease["token"] or row["fencing_epoch"] != lease["epoch"]:
+        return False
+    return row["process_id"] == os.getpid()
 
 
 def _require_maintenance_owner(coordinator: Any, lease: dict[str, object]) -> None:
     with coordinator._connect() as database:
-        row = database.execute(
-            "SELECT owner_token,process_id,fencing_epoch FROM maintenance_owners "
-            "WHERE owner_name='doctor'"
-        ).fetchone()
-    if (
-        row is None
-        or row["owner_token"] != lease["token"]
-        or row["fencing_epoch"] != lease["epoch"]
-        or row["process_id"] != os.getpid()
-    ):
-        raise RuntimeError("maintenance_owner_fence_lost")
+        row = _read_owner_row(database)
+        if _owner_row_is_ours(row, lease):
+            return
+        raise _fence_lost("require", database, lease)
 
 
 def _release_maintenance_owner(coordinator: Any, lease: dict[str, object]) -> None:
@@ -5983,8 +6027,9 @@ def _release_maintenance_owner(coordinator: Any, lease: dict[str, object]) -> No
             ),
         ).rowcount
         if changed != 1:
+            lost = _fence_lost("release", database, lease)
             database.rollback()
-            raise RuntimeError("maintenance_owner_fence_lost")
+            raise lost
         database.commit()
 
 
@@ -6787,7 +6832,12 @@ def _build_or_refresh_generation(
 
 
 def _maintenance_outcome(
-    status: str, reason: str, *, partial: bool, repairs: list[dict] | None = None
+    status: str,
+    reason: str,
+    *,
+    partial: bool,
+    repairs: list[dict] | None = None,
+    details: dict[str, object] | None = None,
 ) -> dict:
     outcome = {
         "status": status,
@@ -6798,7 +6848,16 @@ def _maintenance_outcome(
     }
     if repairs is not None:
         outcome["repairs"] = repairs
+    if details is not None:
+        outcome["details"] = details
     return outcome
+
+
+def _fence_loss_details(exc: BaseException) -> dict[str, object] | None:
+    """What the lost fence saw, when the raiser bothered to say."""
+    if not isinstance(exc, MaintenanceFenceLost):
+        return None
+    return {"where": exc.where, "observed": exc.observed}
 
 
 def _require_positive_time_budget(time_budget_seconds: object) -> None:
@@ -6920,7 +6979,11 @@ def _rebuild_after_corpus_change(
         if str(exc) != "maintenance_owner_fence_lost":
             raise
         return _maintenance_outcome(
-            "deferred", "maintenance_owner_lost", partial=True, repairs=repaired
+            "deferred",
+            "maintenance_owner_lost",
+            partial=True,
+            repairs=repaired,
+            details=_fence_loss_details(exc),
         )
 
 
@@ -6970,7 +7033,11 @@ def _fence_lost_outcome(exc: RuntimeError, repaired: list[dict]) -> dict:
     if str(exc) != "maintenance_owner_fence_lost":
         raise exc
     return _maintenance_outcome(
-        "deferred", "maintenance_owner_lost", partial=True, repairs=repaired
+        "deferred",
+        "maintenance_owner_lost",
+        partial=True,
+        repairs=repaired,
+        details=_fence_loss_details(exc),
     )
 
 
