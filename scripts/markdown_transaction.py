@@ -69,6 +69,13 @@ _ALLOWED_DIRECTORIES = (
     "knowledge/projects",
     "knowledge/inbox",
     "knowledge/feedback",
+    # Session records, by the 2026-08-23 retention decision. Only this subtree of
+    # `knowledge/raw/` is writable: the rest of raw holds immutable sources that
+    # no automatic writer may touch. Without this line every session record was
+    # refused as "outside every allowed root" and the writer, which never raises
+    # by contract, dropped it silently — 234 transcripts on disk and not one
+    # record in the vault.
+    "knowledge/raw/sessions",
 )
 _ALLOWED_FILES = {
     "knowledge/guardrails.md",

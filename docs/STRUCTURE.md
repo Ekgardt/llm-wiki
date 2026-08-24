@@ -521,7 +521,10 @@ or nonzero active state remains fail-closed.
   uncompressed BagIt-style daily-log bags and
   a derived archive index. Archive means move, never delete; evidence resolves by
   logical ID, source hash, and byte span.
-- `knowledge/raw/` — immutable sources. Gitignored (personal).
+- `knowledge/raw/` — immutable sources. Gitignored (personal). One subtree is
+  writable by the runtime: `knowledge/raw/sessions/<date>/<session>.md`, the
+  session records of the 2026-08-23 retention decision. It is the only part of
+  `raw/` inside the Markdown transaction's allowed roots.
 - `knowledge/inbox/` — unprocessed staging. Gitignored.
 - `knowledge/feedback/` — correction candidates (JSON). Gitignored.
 

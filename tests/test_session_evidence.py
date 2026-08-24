@@ -262,3 +262,29 @@ def test_a_session_chunk_carries_the_session_kind(tmp_path: Path) -> None:
     # it rank below a compiled page.
     assert all(chunk.type == "raw-source" for chunk in chunks)
     assert all(chunk.authority == "session" for chunk in chunks)
+
+
+def test_the_record_reaches_disk_through_the_real_transaction(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """No stub here, and that is the point.
+
+    Every other test in this file replaces `mutate_knowledge`, which is how a
+    whole feature shipped and wrote nothing for a day: `knowledge/raw/sessions`
+    was outside the writer's allowed roots, and the write — which never raises,
+    by contract — dropped every session record in silence.
+    """
+    vault = tmp_path / "vault"
+    (vault / "knowledge/raw").mkdir(parents=True)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(vault))
+
+    path = session_evidence.write_session_evidence(
+        vault,
+        {"session": "real-write", "captured_at": "2026-08-24T09:00:00Z"},
+        TRANSCRIPT,
+    )
+
+    assert path == vault / "knowledge/raw/sessions/2026-08-24/real-write.md"
+    assert path.exists()
+    assert "why systemd and not cron?" in path.read_text(encoding="utf-8")
