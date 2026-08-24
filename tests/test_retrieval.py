@@ -535,7 +535,7 @@ def test_typed_provenance_weighs_on_every_path_from_one_table():
     from retrieval import fuse_rrf
 
     # One table, imported by both paths: the lexical scorer and the fusion.
-    assert search_memory.authority_weight is provenance.authority_weight
+    assert search_memory.trust_weight is provenance.trust_weight
 
     lexical = [
         {"path": "knowledge/notes/guess.md", "authority": "inferred", "score": 9.0},
@@ -655,3 +655,34 @@ def test_page_diverse_order_drops_nothing() -> None:
     assert retrieval._candidate_pool(0) == retrieval.MIN_CANDIDATE_POOL
     assert retrieval._candidate_pool(1000) == retrieval.MAX_CANDIDATE_POOL
     assert retrieval._backend_limit(1000, 25) == 25
+
+
+def test_what_a_page_is_weighs_on_the_order_too() -> None:
+    """A decision page outranks a status log that matched one rank better."""
+    import provenance
+    from retrieval import fuse_rrf
+
+    lexical = [
+        {"path": "docs/status.md", "type": "code", "score": 9.0},
+        {"path": "knowledge/notes/decision.md", "type": "decision", "score": 9.0},
+    ]
+    fused, meta = fuse_rrf(lexical=lexical, dense=None, graph=None)
+
+    by_path = {candidate.relative_path: candidate for candidate in fused}
+    decision = by_path["knowledge/notes/decision.md"]
+    status = by_path["docs/status.md"]
+
+    assert decision.type_weight == provenance.TYPE_WEIGHTS["decision"]
+    assert status.type_weight == provenance.DEFAULT_TYPE_WEIGHT
+    assert fused[0].relative_path == "knowledge/notes/decision.md"
+    assert decision.rrf_score < status.rrf_score
+    assert meta[decision.candidate_id]["type_weight"] == decision.type_weight
+
+
+def test_a_gap_stub_does_not_answer_ahead_of_a_written_page() -> None:
+    import provenance
+
+    assert provenance.type_weight("gap") < provenance.DEFAULT_TYPE_WEIGHT
+    assert provenance.trust_weight("user", "decision") > provenance.trust_weight(
+        "user", "code"
+    )

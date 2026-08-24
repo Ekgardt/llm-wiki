@@ -19,6 +19,7 @@ from typing import Any
 import yaml
 from bounded_io import read_stable_bytes
 from code_languages import language_for_path
+from page_status import is_retired
 from vault_editorial import EDITORIAL_NAMES
 
 COLLECTOR_VERSION = "corpus-collector/v1"
@@ -1528,7 +1529,7 @@ def _within_validity(metadata: SourceMetadata, instant: datetime) -> bool:
 
 def _included(metadata: SourceMetadata, policy: SnapshotPolicy) -> bool:
     if policy.as_of is None:
-        return policy.include_historical or metadata.status in {"", "active"}
+        return policy.include_historical or not is_retired(metadata.status)
     instant = _as_datetime(policy.as_of)
     assert instant is not None
     return _within_validity(metadata, instant)

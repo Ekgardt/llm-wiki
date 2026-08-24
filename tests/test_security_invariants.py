@@ -380,10 +380,19 @@ class TestStatusFiltering:
         )
 
     def test_rebuild_memory_index_excludes_superseded(self):
-        """rebuild_memory_index must skip superseded/archived."""
-        src = (SCRIPTS / "rebuild_memory_index.py").read_text(encoding="utf-8")
-        assert "superseded" in src or "archived" in src, (
-            "rebuild_memory_index.py does not filter superseded/archived"
+        """rebuild_memory_index must skip superseded/archived — and only those.
+
+        Asked of the code rather than of the source text: the rule now lives in
+        one shared module, so the word no longer appears in this file, and a
+        page marked `accepted` must stay in the map.
+        """
+        import rebuild_memory_index
+
+        assert rebuild_memory_index._is_retired(self.SUPERSEDED_FM)
+        assert rebuild_memory_index._is_retired(self.ARCHIVED_FM)
+        assert not rebuild_memory_index._is_retired(self.ACTIVE_FM)
+        assert not rebuild_memory_index._is_retired(
+            "---\nstatus: accepted\ntype: decision\n---\n\n# Page\n"
         )
 
     def test_build_context_excludes_superseded(self):

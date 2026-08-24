@@ -1244,6 +1244,14 @@ def _assert_orchestrated_legacy_fallback(results, expected_reasons):
     assert results[0]["signals_used"] == ["lexical"]
 
 
+def _column(rows, index: int) -> list:
+    return [row[index] for row in rows]
+
+
+def _chunk_field(chunks, name: str) -> list:
+    return [getattr(chunk, name) for chunk in chunks]
+
+
 def test_generation_fts_preserves_exact_snapshot_chunks_and_typed_duplicate_paths(tmp_path):
     import search_memory
 
@@ -1274,18 +1282,18 @@ def test_generation_fts_preserves_exact_snapshot_chunks_and_typed_duplicate_path
             "SELECT chunk_id, source_path, heading_ancestry, type, authority, "
             "confidence, source_sha256 FROM chunks ORDER BY rowid"
         ).fetchall()
-    assert [row[0] for row in rows] == [chunk.id for chunk in snapshot.chunks]
-    assert [row[1] for row in rows] == [chunk.source_path for chunk in snapshot.chunks]
-    assert {row[1] for row in rows} == {
+    assert _column(rows, 0) == _chunk_field(snapshot.chunks, "id")
+    assert _column(rows, 1) == _chunk_field(snapshot.chunks, "source_path")
+    assert set(_column(rows, 1)) == {
         "knowledge/notes/concept/same.md",
         "knowledge/notes/pattern/same.md",
     }
     assert json.loads(rows[1][2]) == ["Alpha", "Child"]
-    assert {(row[3], row[4], row[5]) for row in rows} == {
+    assert {tuple(row[3:6]) for row in rows} == {
         ("concept", "user", "high"),
         ("pattern", "web", "low"),
     }
-    assert [row[6] for row in rows] == [chunk.source_sha256 for chunk in snapshot.chunks]
+    assert _column(rows, 6) == _chunk_field(snapshot.chunks, "source_sha256")
     assert not (vault / "cache/index.sqlite").exists()
 
 
@@ -1439,8 +1447,8 @@ def test_search_prefers_valid_generation_without_rereading_live_markdown(
     )
     monkeypatch.setattr(
         search_memory,
-        "_authority_weight",
-        lambda path: pytest.fail("generation search reread authority metadata"),
+        "_page_trust_weight",
+        lambda path: pytest.fail("generation search reread trust metadata"),
     )
 
     results = search_memory.search(
@@ -1990,12 +1998,7 @@ def test_generation_numpy_metadata_mismatch_falls_back_to_base(
     )
     metadata_path = generation / "vectors.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    if isinstance(metadata[field], list):
-        metadata[field] = ["mismatch"] * len(metadata[field])
-    elif field == "dimensions":
-        metadata[field] = 3
-    else:
-        metadata[field] = "mismatch"
+    metadata[field] = _mismatched_value(metadata[field], field)
     metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
     updated_metadata = search_memory._artifact_descriptor(
         metadata_path, metadata_path.name
@@ -2045,11 +2048,7 @@ def test_generation_numpy_metadata_mismatch_falls_back_to_base(
     )
 
     assert results
-    assert all(result["effective_mode"] == "BASE" for result in results)
-    assert all(
-        result["fallback_reason"] == "generation_vectors_unavailable"
-        for result in results
-    )
+    _assert_base_without_vectors(results)
     assert query_embedder_called is False
 
 
@@ -2299,6 +2298,54 @@ def test_malformed_generation_fts_falls_back_legacy(
     )
 
 
+def _mismatched_value(current: object, field: str) -> object:
+    """A value of the right shape that no longer matches the generation."""
+    if isinstance(current, list):
+        return ["mismatch"] * len(current)
+    if field == "dimensions":
+        return 3
+    return "mismatch"
+
+
+def _assert_base_without_vectors(results) -> None:
+    for result in results:
+        assert result["effective_mode"] == "BASE"
+        assert result["fallback_reason"] == "generation_vectors_unavailable"
+
+
+def _without_language_column(rows) -> list:
+    return [row[:19] + row[20:] for row in rows]
+
+
+_SCHEMA_DAMAGE = {
+    "tokenizer": lambda schema, rows: (
+        schema.replace("porter unicode61", "unicode61"),
+        rows,
+    ),
+    "column": lambda schema, rows: (
+        schema.replace("language UNINDEXED,", ""),
+        _without_language_column(rows),
+    ),
+    "option": lambda schema, rows: (
+        schema.rstrip().removesuffix(")") + ", detail=none)",
+        rows,
+    ),
+}
+
+
+def _damaged_schema(schema: str, rows: list, damage: str) -> tuple[str, list]:
+    apply = _SCHEMA_DAMAGE.get(damage)
+    if apply is None:
+        return schema, rows
+    return apply(schema, rows)
+
+
+def _metadata_table_sql(damage: str) -> str:
+    if damage == "metadata-table":
+        return "CREATE TABLE generation_metadata(key TEXT, value TEXT)"
+    return "CREATE TABLE generation_metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+
+
 @pytest.mark.parametrize(
     "schema_damage", ["tokenizer", "column", "option", "metadata-table"]
 )
@@ -2316,25 +2363,9 @@ def test_generation_fts_rejects_inexact_schema(tmp_path, monkeypatch, schema_dam
         schema = source.execute(
             "SELECT sql FROM sqlite_schema WHERE type='table' AND name='chunks'"
         ).fetchone()[0]
-    if schema_damage == "tokenizer":
-        schema = schema.replace("porter unicode61", "unicode61")
-        selected_rows = rows
-    elif schema_damage == "column":
-        schema = schema.replace("language UNINDEXED,", "")
-        selected_rows = [row[:19] + row[20:] for row in rows]
-    elif schema_damage == "option":
-        schema = schema.rstrip().removesuffix(")") + ", detail=none)"
-        selected_rows = rows
-    else:
-        selected_rows = rows
+    schema, selected_rows = _damaged_schema(schema, rows, schema_damage)
     with closing(sqlite3.connect(replacement)) as database, database:
-        if schema_damage == "metadata-table":
-            database.execute("CREATE TABLE generation_metadata(key TEXT, value TEXT)")
-        else:
-            database.execute(
-                "CREATE TABLE generation_metadata("
-                "key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-            )
+        database.execute(_metadata_table_sql(schema_damage))
         database.executemany(
             "INSERT INTO generation_metadata(key, value) VALUES (?, ?)", metadata
         )

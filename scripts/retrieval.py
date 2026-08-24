@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from provenance import authority_weight
+from provenance import authority_weight, type_weight
 
 MAX_OPTIONAL_STRAGGLERS = 2
 OPTIONAL_STAGE_MAX_SECONDS = 0.5
@@ -342,6 +342,9 @@ class RetrievalCandidate:
     # Typed provenance weighs on the score that decides the order; see
     # scripts/provenance.py. 1.0 means unknown or unweighted provenance.
     authority_weight: float = 1.0
+    # What the page is — the second factor of the same weight. 1.0 means a type
+    # this table does not rank, which includes code.
+    type_weight: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -1003,19 +1006,22 @@ def expand_evidence_graph(
     return tuple(results[:global_limit])
 
 
-def _weigh_by_authority(
+def _weigh_by_trust(
     scores: Mapping[str, float],
     meta: dict[str, dict[str, Any]],
 ) -> dict[str, float]:
-    """Multiply each fused score by its typed-provenance weight.
+    """Multiply each fused score by who said it and by what the page is.
 
-    The weight is recorded on the candidate so the ordering can be explained.
+    Both factors are recorded on the candidate, separately, so the ordering can
+    be explained by name rather than by one opaque number.
     """
     weighted: dict[str, float] = {}
     for key, value in scores.items():
-        weight = authority_weight(meta[key].get("authority"))
-        meta[key]["authority_weight"] = weight
-        weighted[key] = value * weight
+        authority = authority_weight(meta[key].get("authority"))
+        page = type_weight(meta[key].get("type"))
+        meta[key]["authority_weight"] = authority
+        meta[key]["type_weight"] = page
+        weighted[key] = value * authority * page
     return weighted
 
 
@@ -1245,6 +1251,7 @@ def _fused_candidate(
         final_score=final,
         evidence_ids=info["evidence_ids"],
         authority_weight=info["authority_weight"],
+        type_weight=info["type_weight"],
     )
 
 
@@ -1278,7 +1285,7 @@ def fuse_rrf(
                 scores=scores,
                 meta=meta,
             )
-    weighted = _weigh_by_authority(scores, meta)
+    weighted = _weigh_by_trust(scores, meta)
     ordered = sorted(weighted, key=lambda item: (-weighted[item], item))
     candidates = [
         _fused_candidate(key, meta[key], round(scores[key], 6), round(weighted[key], 6))
@@ -1615,6 +1622,7 @@ def _rerank_row(
         "lance_distance": info.get("lance_distance"),
         "authority": info.get("authority"),
         "authority_weight": candidate.authority_weight,
+        "type_weight": candidate.type_weight,
     }
 
 
@@ -1674,6 +1682,7 @@ def _candidate_from_rerank_row(row: Mapping[str, Any]) -> RetrievalCandidate:
         rrf_score=float(_first_present(row, ("rrf_score",), 0.0)),
         rerank_score=_as_float(row.get("rerank_score")),
         authority_weight=float(_first_present(row, ("authority_weight",), 1.0)),
+        type_weight=float(_first_present(row, ("type_weight",), 1.0)),
         final_score=float(_first_present(row, ("final_score", "rrf_score"), 0.0)),
         evidence_ids=_evidence_ids_of(row),
     )

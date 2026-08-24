@@ -58,6 +58,7 @@ from okf_types import (
     INBOX_TYPES,  # noqa: E402
     TYPE_ALIASES,  # noqa: E402
 )
+from page_status import is_retired  # noqa: E402
 from reliable_memory import canonical_json_bytes, validate_schema  # noqa: E402
 from vault_editorial import (  # noqa: E402
     BACKLINK_EXEMPT_NAMES,
@@ -300,7 +301,6 @@ def _indexed(md: Path, index_text: str) -> bool:
     return md.stem in index_text or relative in index_text
 
 
-RETIRED_STATUSES = {"superseded", "archived"}
 STATUS_FIELD_RE = re.compile(r"^status:\s*(.+?)\s*$", re.MULTILINE)
 
 
@@ -317,7 +317,7 @@ def _is_retired(md: Path) -> bool:
     match = STATUS_FIELD_RE.search(frontmatter)
     if match is None:
         return False
-    return match.group(1).strip().strip("`\"'") in RETIRED_STATUSES
+    return is_retired(match.group(1))
 
 
 def _is_published(md: Path) -> bool:

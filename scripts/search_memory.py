@@ -50,7 +50,8 @@ from corpus_snapshot import (  # noqa: E402
 )
 from generation_catalog import GenerationCatalog  # noqa: E402
 from memory_state import ROOT, STATE_ROOT, _is_pid_alive, atomic_write  # noqa: E402
-from provenance import authority_weight  # noqa: E402
+from page_status import current_status_sql, is_retired  # noqa: E402
+from provenance import trust_weight  # noqa: E402
 from reliable_memory import (  # noqa: E402
     canonical_json_bytes,
     fsync_directory,
@@ -1073,7 +1074,7 @@ def _is_retired_page(content: str) -> bool:
     if not frontmatter:
         return False
     status = re.search(r"^status:\s*(.+?)\s*$", frontmatter.group(1), re.MULTILINE)
-    return bool(status) and status.group(1).strip() in ("superseded", "archived")
+    return is_retired(status.group(1)) if status else False
 
 
 def _searchable_page(md: Path, name: str, seen: set[Path]) -> bool:
@@ -1180,6 +1181,9 @@ def _extract_frontmatter_field(content: str, pattern: re.Pattern) -> str | None:
 # Patterns for metadata extraction
 PROJECT_FIELD_RE = re.compile(r"^project:\s*[\"']?([^\"'\n]+)[\"']?\s*$", re.MULTILINE)
 TIMESTAMP_FIELD_RE = re.compile(r"^timestamp:\s*(.+?)\s*$", re.MULTILINE)
+PAGE_TYPE_FIELD_RE = re.compile(
+    r"^type:\s*[\"']?([^\"'\n]+)[\"']?\s*$", re.MULTILINE
+)
 AUTHORITY_FIELD_RE = re.compile(
     r"^source_authority:\s*[\"']?([^\"'\n]+)[\"']?\s*$", re.MULTILINE
 )
@@ -1650,14 +1654,21 @@ def _build_index(
             pass
 
 
-def _authority_weight(path: str) -> float:
-    """Read source_authority from page frontmatter; default 1.0."""
+def _page_trust_weight(path: str) -> float:
+    """Who said it and what the page is, read once from its frontmatter.
+
+    Both factors are the same table the generation and hybrid paths use, so a
+    page keeps its place in the order whichever path answered.
+    """
     try:
         p = ROOT / path if not Path(path).is_absolute() else Path(path)
         content = p.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return 1.0
-    return authority_weight(_extract_frontmatter_field(content, AUTHORITY_FIELD_RE))
+    return trust_weight(
+        _extract_frontmatter_field(content, AUTHORITY_FIELD_RE),
+        _extract_frontmatter_field(content, PAGE_TYPE_FIELD_RE),
+    )
 
 
 def _valid_as_of(path: str, as_of: str) -> bool:
@@ -2859,7 +2870,7 @@ def _generation_filters(
         )
         values.extend((as_of[:10], as_of[:10]))
     else:
-        clauses.append("(status IS NULL OR status = '' OR lower(status) = 'active')")
+        clauses.append(current_status_sql())
     if since:
         clauses.append(
             "(valid_from IS NULL OR valid_from = '' OR substr(valid_from, 1, 10) >= ?)"
@@ -2918,9 +2929,8 @@ def _outside_as_of(row: Mapping[str, object], timestamp: str, as_of: str) -> boo
 
 
 def _superseded_now(row: Mapping[str, object]) -> bool:
-    """Without an as-of date only currently active pages answer."""
-    status = str(row.get("status") or "").casefold()
-    return bool(status) and status != "active"
+    """Without an as-of date a retired page is history, not an answer."""
+    return is_retired(row.get("status"))
 
 
 def _temporally_excluded(row: Mapping[str, object], since: str | None, as_of: str | None) -> bool:
@@ -3012,7 +3022,7 @@ def _boosted_lexical_score(
     score *= _title_boost(title, query_lower, query_words)
     score *= _filename_boost(path, query_lower, query_words)
     score *= _notes_boost(path)
-    return score * _authority_weight(path)
+    return score * _page_trust_weight(path)
 
 
 def apply_hard_filters(
@@ -3053,7 +3063,7 @@ def _first_line(content: str) -> str:
 
 def _generation_result(row: sqlite3.Row, generation_id: str) -> dict[str, object]:
     authority = _row_text(row, "authority")
-    score = -float(row["rank"]) * authority_weight(authority)
+    score = -float(row["rank"]) * trust_weight(authority, _row_text(row, "type"))
     content = _row_text(row, "content")
     return {
         "path": row["source_path"],
@@ -3831,6 +3841,11 @@ class _PageRead(NamedTuple):
     project: str
     timestamp: str
     authority: str
+    page_type: str = ""
+
+
+def _frontmatter_text(content: str, pattern: re.Pattern[str]) -> str:
+    return _extract_frontmatter_field(content, pattern) or ""
 
 
 def _read_page(page: Path, label: str) -> _PageRead | None:
@@ -3848,9 +3863,10 @@ def _read_page(page: Path, label: str) -> _PageRead | None:
         content=content,
         title=title,
         summary=summary,
-        project=_extract_frontmatter_field(content, PROJECT_FIELD_RE) or "",
-        timestamp=(_extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or "")[:10],
-        authority=_extract_frontmatter_field(content, AUTHORITY_FIELD_RE) or "",
+        project=_frontmatter_text(content, PROJECT_FIELD_RE),
+        timestamp=_frontmatter_text(content, TIMESTAMP_FIELD_RE)[:10],
+        authority=_frontmatter_text(content, AUTHORITY_FIELD_RE),
+        page_type=_frontmatter_text(content, PAGE_TYPE_FIELD_RE),
     )
 
 
@@ -3902,7 +3918,7 @@ def _exact_page_hit(
         return None
     if not _page_read_eligible(read, project=project, since=since, as_of=as_of):
         return None
-    score = round(10.0 * authority_weight(read.authority), 2)
+    score = round(10.0 * trust_weight(read.authority, read.page_type), 2)
     return _page_hit(read, score=score, bm25_score=0.0)
 
 
@@ -4074,7 +4090,7 @@ def _document_terms(page: Path, title: str, summary: str, body: str) -> set[str]
 
 
 def _direct_match_score(
-    page: Path, title: str, authority: str, query_terms: set[str]
+    page: Path, title: str, read: _PageRead, query_terms: set[str]
 ) -> float:
     """Literal matching has no BM25, so the term count carries the base score."""
     score = float(len(query_terms))
@@ -4082,7 +4098,7 @@ def _direct_match_score(
         score *= 3.0
     if query_terms.issubset(set(re.findall(r"\w+", page.stem.casefold()))):
         score *= 4.0
-    return score * authority_weight(authority)
+    return score * trust_weight(read.authority, read.page_type)
 
 
 def _direct_page_hit(
@@ -4103,7 +4119,7 @@ def _direct_page_hit(
         return None
     if not _page_read_eligible(read, project=project, since=since, as_of=as_of):
         return None
-    score = round(_direct_match_score(page, read.title, read.authority, query_terms), 2)
+    score = round(_direct_match_score(page, read.title, read, query_terms), 2)
     return {
         **_page_hit(read, score=score, bm25_score=score),
         "fallback_reason": "legacy_sqlite_unavailable",
@@ -5075,9 +5091,8 @@ def _legacy_vector_excluded(
         return True
     if as_of:
         return False
-    # Without an as-of date, a superseded page is history.
-    status = _page_status(path)
-    return bool(status) and status != "active"
+    # Without an as-of date, a retired page is history.
+    return is_retired(_page_status(path))
 
 
 def _vector_cache_matrix(vectors_data: Mapping[str, object]) -> object | None:
