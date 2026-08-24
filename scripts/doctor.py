@@ -6905,8 +6905,16 @@ def _value_error_outcome(exc: ValueError, repaired: list[dict]) -> dict:
         return _maintenance_outcome(
             "deferred", _bounded_reason(message), partial=True, repairs=repaired
         )
+    # `ValueError` alone tells the operator nothing: a refresh that ends this way
+    # names only the exception class, and the nightly log then carries a word
+    # with no cause behind it. Measured 2026-08-24 on this vault, where a refresh
+    # ended `error: ValueError` after 275 seconds and nothing said why.
     return _maintenance_outcome(
-        "error", type(exc).__name__, partial=False, repairs=repaired
+        "error",
+        type(exc).__name__,
+        partial=False,
+        repairs=repaired,
+        details={"message": message[:400]},
     )
 
 
