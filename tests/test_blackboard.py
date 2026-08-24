@@ -83,6 +83,21 @@ def _write_blackboard_batch(vault: str, state_root: str, worker: int, count: int
     return completed
 
 
+# The default claim lease is thirty seconds. Most tests here are about what a
+# claim records, not about when it expires, and a loaded hosted runner can spend
+# longer than that between claiming and completing — measured on CI 2026-08-24,
+# where `test_a_claim_whose_record_landed_before_the_failure_stands` failed with
+# "blackboard claim lease expired" on Windows. The multiprocess helper above
+# already asks for a longer lease for exactly this reason.
+_LONG_TTL_SECONDS = 900
+
+
+def _claim(*arguments, **keywords):
+    """Claim a task with a lease long enough that expiry is not the subject."""
+    keywords.setdefault("ttl_seconds", _LONG_TTL_SECONDS)
+    return blackboard.claim_task(*arguments, **keywords)
+
+
 def _read_blackboard_status(vault: str, state_root: str, count: int) -> int:
     os.environ["LLM_WIKI_ROOT"] = vault
     os.environ["LLM_WIKI_STATE_ROOT"] = state_root
@@ -267,7 +282,7 @@ def test_claim_is_all_or_none_when_one_resource_is_busy(
     blackboard_vault: tuple[Path, Path],
 ) -> None:
     _vault_root, state_root = blackboard_vault
-    first = blackboard.claim_task(
+    first = _claim(
         "demo",
         "own auth",
         "opencode",
@@ -275,7 +290,7 @@ def test_claim_is_all_or_none_when_one_resource_is_busy(
     )
 
     with pytest.raises(blackboard.BlackboardConflictError) as raised:
-        blackboard.claim_task(
+        _claim(
             "demo",
             "change auth and catalog",
             "codex",
@@ -299,7 +314,7 @@ def test_heartbeat_expiry_reclaim_and_stale_fencing(
     blackboard_vault: tuple[Path, Path],
 ) -> None:
     now = datetime(2026, 8, 15, tzinfo=timezone.utc)
-    first = blackboard.claim_task(
+    first = _claim(
         "demo",
         "own graph",
         "opencode",
@@ -310,7 +325,7 @@ def test_heartbeat_expiry_reclaim_and_stale_fencing(
     renewed = blackboard.heartbeat_claim(first, now=now + timedelta(seconds=20))
 
     with pytest.raises(blackboard.BlackboardConflictError):
-        blackboard.claim_task(
+        _claim(
             "demo",
             "competing graph",
             "codex",
@@ -318,7 +333,7 @@ def test_heartbeat_expiry_reclaim_and_stale_fencing(
             now=now + timedelta(seconds=40),
         )
 
-    successor = blackboard.claim_task(
+    successor = _claim(
         "demo",
         "reclaimed graph",
         "codex",
@@ -334,11 +349,11 @@ def test_conflict_and_resolution_are_immutable_events(
     blackboard_vault: tuple[Path, Path],
 ) -> None:
     vault, _state_root = blackboard_vault
-    blackboard.claim_task(
+    _claim(
         "demo", "own queue", "opencode", resources=["scripts/memory_queue.py"]
     )
     with pytest.raises(blackboard.BlackboardConflictError) as raised:
-        blackboard.claim_task(
+        _claim(
             "demo", "also own queue", "codex", resources=["scripts/memory_queue.py"]
         )
 
@@ -360,7 +375,7 @@ def test_conflict_and_resolution_are_immutable_events(
 
 def test_a_retried_completion_keeps_the_first_published_record(blackboard_vault):
     """A completion is published once; a retry must not re-stamp or be refused."""
-    claim = blackboard.claim_task(
+    claim = _claim(
         "demo", "shared task", "agent-a", resources=["src/one.py"]
     )
     published = blackboard._completion_record(claim, blackboard._utc_now(None))
@@ -422,13 +437,13 @@ def test_a_claim_whose_record_fails_releases_its_resources(
 
     monkeypatch.setattr(blackboard, "_append_jsonl", failing_append)
     with pytest.raises(TimeoutError):
-        blackboard.claim_task(
+        _claim(
             "demo", "task", "agent-a", resources=["shared/resource"]
         )
     assert len(failures) == 1
 
     monkeypatch.setattr(blackboard, "_append_jsonl", real_append)
-    claim = blackboard.claim_task(
+    claim = _claim(
         "demo", "task", "agent-a", resources=["shared/resource"]
     )
     assert claim.resources == ("shared/resource",)
@@ -450,7 +465,7 @@ def test_a_claim_whose_record_landed_before_the_failure_stands(
             raise TimeoutError("Markdown writer gate deadline expired")
 
     monkeypatch.setattr(blackboard, "_append_jsonl", append_then_fail)
-    claim = blackboard.claim_task(
+    claim = _claim(
         "demo", "task", "agent-a", resources=["shared/resource"]
     )
     assert len(failures) == 1
