@@ -280,9 +280,17 @@ def test_invalid_input_fails_closed_but_host_cli_exits_safely(capsys):
     assert secret not in capsys.readouterr().err
 
 
-def test_delegate_receives_only_normalized_redacted_payload(monkeypatch, capsys):
+def test_delegate_receives_only_normalized_redacted_payload(monkeypatch, capsys, tmp_path):
     import integration_adapter
 
+    # This one runs the adapter for real, so it writes a project journal. Without
+    # its own root that lands in the live vault under the redacted slug.
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setattr(integration_adapter, "ROOT", vault)
+    monkeypatch.setattr(integration_adapter, "STATE_ROOT", tmp_path / "state")
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
     secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
     observed = {}
 
