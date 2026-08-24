@@ -2025,3 +2025,41 @@ def test_the_retry_chain_is_bounded(vault, monkeypatch):
 
     with pytest.raises(ValueError, match="exhausted its quarantined retry ordinals"):
         coordinator.attempt_operation_id(base)
+
+
+def test_critique_batches_split_until_each_one_fits(monkeypatch):
+    """More operations than one review can hold are reviewed in several.
+
+    Measured on this vault: a draft of sixteen operations makes a critique prompt
+    of 40,543 tokens against a 27,744 budget, and the whole plan used to be
+    thrown away for it.
+    """
+    import compile_memory
+
+    monkeypatch.setattr(
+        compile_memory, "_critique_prompt", lambda inputs, batch: "x" * len(batch)
+    )
+    attempt = compile_memory._CompileAttempt.__new__(compile_memory._CompileAttempt)
+    attempt.inputs = None
+    attempt._fits = lambda prompt, system, schema, descriptor: len(prompt) <= 2
+
+    batches = compile_memory._CompileAttempt._critique_batches(
+        attempt, None, ["a", "b", "c", "d", "e"]
+    )
+
+    assert [len(batch) for batch in batches] == [2, 2, 1]
+    assert [item for batch in batches for item in batch] == ["a", "b", "c", "d", "e"]
+
+
+def test_one_operation_that_cannot_be_reviewed_alone_is_refused(monkeypatch):
+    import compile_memory
+
+    monkeypatch.setattr(
+        compile_memory, "_critique_prompt", lambda inputs, batch: "x" * len(batch)
+    )
+    attempt = compile_memory._CompileAttempt.__new__(compile_memory._CompileAttempt)
+    attempt.inputs = None
+    attempt._fits = lambda prompt, system, schema, descriptor: False
+
+    with pytest.raises(compile_memory._ProviderStageFailure):
+        compile_memory._CompileAttempt._critique_batches(attempt, None, ["a"])

@@ -1145,17 +1145,60 @@ class _CompileAttempt:
         return self._normalized(descriptor, with_critique, reviewed, "normalize")
 
     def _review(self, descriptor: object, operations: list[object]) -> list[object]:
-        prompt = _critique_prompt(self.inputs, operations)
-        if not self._fits(prompt, CRITIQUE_SYSTEM, CRITIQUE_SCHEMA, descriptor):
-            # A prompt that does not fit will not fit next time either. Saying
-            # `validation_error` here called a deterministic refusal a
-            # stochastic one, which read as a bad generation in the lineage and
-            # would have spent the retry budget on it.
-            raise _ProviderStageFailure("input_budget")
+        """Review every operation, in as many batches as the budget requires.
+
+        Sixteen operations of a long day cost about twice the draft prompt, so
+        one review of all of them cannot fit and the whole plan used to be
+        thrown away. Each batch is reviewed whole, with its evidence, and the
+        drop lists are merged; nothing is reviewed twice and nothing goes
+        unreviewed. See docs/research/2026-08-24-reviewing-more-than-fits.md.
+        """
+        dropped: set[str] = set()
+        for batch in self._critique_batches(descriptor, operations):
+            dropped |= self._reviewed_batch(descriptor, batch)
+        return _without_dropped(operations, dropped)
+
+    def _reviewed_batch(self, descriptor: object, batch: list[object]) -> set[str]:
+        prompt = _critique_prompt(self.inputs, batch)
         critique = self._call(descriptor, prompt, CRITIQUE_SYSTEM, CRITIQUE_SCHEMA)
         if critique.text is None:
             raise _ProviderStageFailure(critique.failure_class or "provider_error")
-        return _without_dropped(operations, _dropped_slugs(critique.text))
+        return set(_dropped_slugs(critique.text))
+
+    def _critique_batches(
+        self, descriptor: object, operations: list[object]
+    ) -> list[list[object]]:
+        """Greedy batches whose prompt fits; one that cannot fit alone refuses.
+
+        A single operation the reviewer cannot hold is a deterministic refusal,
+        and it happens before any provider call — calling `validation_error`
+        would have read as a bad generation and spent the retry budget on it.
+        """
+        batches: list[list[object]] = []
+        current: list[object] = []
+        for operation in operations:
+            current = self._extended_batch(descriptor, batches, current, operation)
+        if current:
+            batches.append(current)
+        return batches
+
+    def _extended_batch(
+        self,
+        descriptor: object,
+        batches: list[list[object]],
+        current: list[object],
+        operation: object,
+    ) -> list[object]:
+        if self._batch_fits(descriptor, [*current, operation]):
+            return [*current, operation]
+        if not self._batch_fits(descriptor, [operation]):
+            raise _ProviderStageFailure("input_budget")
+        batches.append(current)
+        return [operation]
+
+    def _batch_fits(self, descriptor: object, batch: list[object]) -> bool:
+        prompt = _critique_prompt(self.inputs, batch)
+        return self._fits(prompt, CRITIQUE_SYSTEM, CRITIQUE_SCHEMA, descriptor)
 
     def _normalized(
         self,

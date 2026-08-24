@@ -1166,3 +1166,34 @@ def test_non_string_envelope_text_fails_safely_without_losing_usage(monkeypatch)
     assert result.failure_class == "empty_response"
     assert result.usage == usage
     assert result.input_token_count == TokenCount(5, "reported")
+
+
+def test_the_claude_call_does_not_inherit_the_operator_persona(monkeypatch):
+    """A programmatic call must not answer in the user's configured voice.
+
+    Measured on this machine: `claude -p` loads the user's settings, including
+    the output style, and treats a `<system>` block in the prompt as text. The
+    compile's draft came back three times as a chat reply — "От вас ничего не
+    нужно" — instead of the JSON plan the schema asked for.
+    """
+    monkeypatch.setattr(
+        llm_client, "_claude_cli_flags", lambda: frozenset({"--system-prompt", "--setting-sources"})
+    )
+
+    command = llm_client._claude_command("/usr/bin/claude", "some-model", "BE A COMPILER")
+
+    assert "--system-prompt" in command
+    assert command[command.index("--system-prompt") + 1] == "BE A COMPILER"
+    assert "--setting-sources" in command
+    assert command[command.index("--setting-sources") + 1] == ""
+    # The system text travels once, through the flag rather than the prompt.
+    assert llm_client._claude_stdin("BE A COMPILER", "work") == "work"
+
+
+def test_an_older_claude_cli_still_gets_the_system_text(monkeypatch):
+    monkeypatch.setattr(llm_client, "_claude_cli_flags", lambda: frozenset())
+
+    command = llm_client._claude_command("/usr/bin/claude", None, "BE A COMPILER")
+
+    assert "--system-prompt" not in command
+    assert "<system>BE A COMPILER</system>" in llm_client._claude_stdin("BE A COMPILER", "work")
