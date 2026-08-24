@@ -78,6 +78,12 @@ The principles below summarize the non-negotiable invariants.
 - Every new code path gets at least one happy-path test and one failure-path test
 - Concurrency-sensitive code (`maybe_compile.py`, `memory_queue.py`) needs explicit race-condition tests
 - Tests must be hermetic — no dependency on a real LLM, real network, or pre-existing state beyond what conftest.py bootstraps
+- This checkout is also the running vault, so a test must never write knowledge
+  into it. `conftest.py` fails the session when `knowledge/projects` or
+  `knowledge/notes` changes during a run. Give a test its own vault with both
+  `monkeypatch.setattr(module, "ROOT", vault)` **and**
+  `monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))` — child processes read the
+  environment, not the patched global
 - **Minimum coverage**: all scripts with ranking/scoring/archival logic MUST have dedicated tests. This includes: `search_memory.py`, `graph_neighbors.py`, `feedback_capture.py`, `archive_stale.py`, `build_guardrails.py`
 - The full regression suite is the release gate; see `tests/` for patterns.
 
