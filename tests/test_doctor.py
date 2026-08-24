@@ -4238,30 +4238,44 @@ def test_a_vault_without_lost_captures_reports_the_capture_check_as_ok(tmp_path)
     assert check["details"]["lost"] == 0
     del home
 
+def _stubbed_maintenance(doctor, monkeypatch, releases: list[object]) -> None:
+    """One acquirable owner, and a record of every release of it."""
+    monkeypatch.setattr(
+        doctor, "_acquire_maintenance_owner", lambda *a, **k: (object(), {"epoch": 1})
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_release_maintenance_owner",
+        lambda coordinator, lease: releases.append(lease),
+    )
+    monkeypatch.setattr(doctor, "_require_maintenance_owner", lambda *a, **k: None)
+    monkeypatch.setattr(doctor, "_heartbeat_maintenance_owner", lambda *a, **k: None)
+    monkeypatch.setattr(doctor, "_repair_generation_catalog", lambda *a, **k: None)
+    monkeypatch.setattr(doctor, "_unusable_filesystem_outcome", lambda *a, **k: None)
+
+
 def test_a_vault_written_to_mid_capture_is_captured_again(tmp_path, monkeypatch):
     """An active vault changes while it is read; deferring would never refresh it."""
     import doctor
     from corpus_snapshot import CorpusChanged
 
     calls: list[bool] = []
+    releases: list[object] = []
 
-    def refresh(root, state, coordinator, lease, deadline, max_sources, force, repaired):
-        calls.append(force)
+    def build(root, state, **kwargs):
+        calls.append(kwargs["force_rebuild"])
         if len(calls) == 1:
             raise CorpusChanged("live corpus membership or source hashes changed")
         return {"status": "built", "generation_id": "gen-2"}
 
-    monkeypatch.setattr(doctor, "_refreshed_generation", refresh)
-    monkeypatch.setattr(
-        doctor, "_acquire_maintenance_owner", lambda *a, **k: (object(), object())
-    )
-    monkeypatch.setattr(doctor, "_release_maintenance_owner", lambda *a, **k: None)
-    monkeypatch.setattr(doctor, "_unusable_filesystem_outcome", lambda *a, **k: None)
+    _stubbed_maintenance(doctor, monkeypatch, releases)
+    monkeypatch.setattr(doctor, "_build_or_refresh_generation", build)
 
     result = doctor.run_generation_maintenance(tmp_path, tmp_path, time_budget_seconds=30)
 
     assert result["status"] == "built"
     assert calls == [False, True]
+    assert len(releases) == 1, "the fence must outlive the recapture, not be released between"
 
 def test_losing_the_maintenance_fence_is_reported_not_raised(tmp_path, monkeypatch):
     """The nightly timer and a manual run collide; the loser reports, not crashes."""
@@ -4301,29 +4315,48 @@ def test_an_unrelated_runtime_error_still_escapes(tmp_path, monkeypatch):
         doctor.run_generation_maintenance(tmp_path, tmp_path, time_budget_seconds=30)
 
 def test_losing_the_fence_during_the_recapture_is_also_reported(tmp_path, monkeypatch):
-    """The recapture runs inside an except block, out of reach of its handlers."""
+    """A fence genuinely lost during the second capture still reaches the report."""
     import doctor
     from corpus_snapshot import CorpusChanged
 
     calls: list[bool] = []
+    releases: list[object] = []
 
-    def refresh(root, state, coordinator, lease, deadline, max_sources, force, repaired):
-        calls.append(force)
+    def build(root, state, **kwargs):
+        calls.append(kwargs["force_rebuild"])
         if len(calls) == 1:
             raise CorpusChanged("live corpus membership or source hashes changed")
         raise RuntimeError("maintenance_owner_fence_lost")
 
-    monkeypatch.setattr(doctor, "_refreshed_generation", refresh)
-    monkeypatch.setattr(
-        doctor, "_acquire_maintenance_owner", lambda *a, **k: (object(), object())
-    )
-    monkeypatch.setattr(doctor, "_release_maintenance_owner", lambda *a, **k: None)
-    monkeypatch.setattr(doctor, "_unusable_filesystem_outcome", lambda *a, **k: None)
+    _stubbed_maintenance(doctor, monkeypatch, releases)
+    monkeypatch.setattr(doctor, "_build_or_refresh_generation", build)
 
     result = doctor.run_generation_maintenance(tmp_path, tmp_path, time_budget_seconds=30)
 
     assert result["status"] == "deferred"
     assert result["reason"] == "maintenance_owner_lost"
+    assert calls == [False, True]
+
+
+def test_a_second_change_during_the_recapture_defers_to_the_next_pass(tmp_path, monkeypatch):
+    """Written to faster than it can be read: the next pass takes it."""
+    import doctor
+    from corpus_snapshot import CorpusChanged
+
+    calls: list[bool] = []
+    releases: list[object] = []
+
+    def build(root, state, **kwargs):
+        calls.append(kwargs["force_rebuild"])
+        raise CorpusChanged("live corpus membership or source hashes changed")
+
+    _stubbed_maintenance(doctor, monkeypatch, releases)
+    monkeypatch.setattr(doctor, "_build_or_refresh_generation", build)
+
+    result = doctor.run_generation_maintenance(tmp_path, tmp_path, time_budget_seconds=30)
+
+    assert result["status"] == "deferred"
+    assert result["reason"] == "corpus_changed"
     assert calls == [False, True]
 
 def test_the_host_markers_are_ones_the_shipped_templates_actually_write() -> None:

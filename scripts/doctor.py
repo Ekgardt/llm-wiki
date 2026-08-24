@@ -6937,12 +6937,11 @@ def _refreshed_generation(
             cancelled=guard.cancelled,
             repaired=repaired,
         )
-        result = guard.run(
-            _build_or_refresh_generation,
+        result = _built_or_recaptured(
+            guard,
             root_path,
             state_path,
             deadline=deadline,
-            cancelled=guard.cancelled,
             max_sources=max_sources,
             force_rebuild=force_rebuild,
             coordinator=coordinator,
@@ -6951,47 +6950,36 @@ def _refreshed_generation(
         return result
 
 
-def _rebuild_after_corpus_change(
-    root_path: Path,
-    state_path: Path,
-    coordinator: object,
-    lease: object,
-    deadline: float,
-    max_sources: int,
-    repaired: list[dict],
+def _built_generation(guard, root_path, state_path, *, force_rebuild, **stop) -> dict:
+    return guard.run(
+        _build_or_refresh_generation,
+        root_path,
+        state_path,
+        cancelled=guard.cancelled,
+        force_rebuild=force_rebuild,
+        **stop,
+    )
+
+
+def _built_or_recaptured(
+    guard, root_path, state_path, *, force_rebuild, **stop
 ) -> dict:
-    """Capture the vault again, once. A second change defers to the next pass."""
+    """Build once; a vault written to mid-capture is captured again, same fence.
+
+    The recapture used to happen one level up, after the first attempt's guard
+    had already exited — and exiting releases the maintenance owner. The retry
+    then presented the same, now-released lease and was told the fence was lost.
+    On a vault whose capture appends while the corpus is being read, that is the
+    ordinary case, not an edge: it defeated three of five rebuilds and the
+    nightly pass of 2026-08-24, each time after four minutes of work.
+    """
     try:
-        return _refreshed_generation(
-            root_path,
-            state_path,
-            coordinator,
-            lease,
-            deadline,
-            max_sources,
-            True,
-            repaired,
+        return _built_generation(
+            guard, root_path, state_path, force_rebuild=force_rebuild, **stop
         )
     except _corpus_changed_error():
-        return _maintenance_outcome(
-            "deferred", "corpus_changed", partial=True, repairs=repaired
-        )
-    except TimeoutError:
-        return _maintenance_outcome(
-            "deferred", "time_limit", partial=True, repairs=repaired
-        )
-    except RuntimeError as exc:
-        # This runs inside the caller's `except`, so the caller's own handlers
-        # can no longer see what happens here. The fence can be lost during the
-        # recapture just as easily as during the first pass.
-        if str(exc) != "maintenance_owner_fence_lost":
-            raise
-        return _maintenance_outcome(
-            "deferred",
-            "maintenance_owner_lost",
-            partial=True,
-            repairs=repaired,
-            details=_fence_loss_details(exc),
+        return _built_generation(
+            guard, root_path, state_path, force_rebuild=True, **stop
         )
 
 
@@ -7071,8 +7059,11 @@ def _attempted_generation_refresh(
         # The vault was written to while its snapshot was being validated. That
         # is the normal state of a vault in use, so it is captured again rather
         # than deferred: deferring would leave an active vault never refreshed.
-        return _rebuild_after_corpus_change(
-            root_path, state_path, coordinator, lease, deadline, max_sources, repaired
+        # The recapture already happened under this fence; a second change
+        # means the vault is being written to faster than it can be read, so
+        # the next pass takes it.
+        return _maintenance_outcome(
+            "deferred", "corpus_changed", partial=True, repairs=repaired
         )
     except RuntimeError as exc:
         return _fence_lost_outcome(exc, repaired)
