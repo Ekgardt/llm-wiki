@@ -81,26 +81,41 @@ def _identity(prefix: str, purpose: str, values: Sequence[str]) -> str:
     return f"{prefix}:{hashlib.sha256(payload).hexdigest()}"
 
 
+def _bounded_path_text(value: object) -> bool:
+    if not isinstance(value, str) or not value or len(value) > MAX_PATH_LENGTH:
+        return False
+    return not any(character in value for character in "\x00\r\n")
+
+
+def _windows_components(name: str, value: str) -> list[str]:
+    if re.fullmatch(r"[A-Z]:/(?:[^/\\]+(?:/[^/\\]+)*)?", value) is None:
+        raise ValueError(f"{name} must be a canonical drive-letter absolute path")
+    if len(value) > 3:
+        return value[3:].split("/")
+    return []
+
+
+def _posix_components(name: str, value: str) -> list[str]:
+    if not value.startswith("/") or value.startswith("//"):
+        raise ValueError(f"{name} must be a canonical POSIX absolute path")
+    if len(value) > 1:
+        return value[1:].split("/")
+    return []
+
+
+def _path_components(name: str, value: str) -> list[str]:
+    if re.match(r"[A-Za-z]:", value):
+        return _windows_components(name, value)
+    return _posix_components(name, value)
+
+
 def _serialized_path(name: str, value: object) -> str:
-    if (
-        not isinstance(value, str)
-        or not value
-        or len(value) > MAX_PATH_LENGTH
-        or any(character in value for character in "\x00\r\n")
-    ):
+    if not _bounded_path_text(value):
         raise ValueError(f"{name} must be a bounded canonical absolute path")
-    windows = re.match(r"[A-Za-z]:", value)
-    if windows:
-        if re.fullmatch(r"[A-Z]:/(?:[^/\\]+(?:/[^/\\]+)*)?", value) is None:
-            raise ValueError(f"{name} must be a canonical drive-letter absolute path")
-        components = value[3:].split("/") if len(value) > 3 else []
-    else:
-        if not value.startswith("/") or value.startswith("//"):
-            raise ValueError(f"{name} must be a canonical POSIX absolute path")
-        components = value[1:].split("/") if len(value) > 1 else []
+    components = _path_components(name, str(value))
     if any(component in {"", ".", ".."} for component in components):
         raise ValueError(f"{name} must not contain noncanonical path components")
-    return value
+    return str(value)
 
 
 def _local_serialized_path(path: Path, *, strict: bool) -> str:
@@ -159,6 +174,10 @@ class RepositoryScope:
     git_commit: str | None
 
     def __post_init__(self) -> None:
+        self._require_fields()
+        self._require_derived_identity()
+
+    def _require_fields(self) -> None:
         if self.schema_version != SCHEMA_VERSION:
             raise ValueError(f"schema_version must be {SCHEMA_VERSION}")
         _validated_id("repository_id", self.repository_id, _REPOSITORY_ID_RE)
@@ -168,6 +187,8 @@ class RepositoryScope:
         _validated_commit(self.git_commit)
         if self.git_common_dir is None and self.git_commit is not None:
             raise ValueError("non-Git repository scope must not contain git_commit")
+
+    def _require_derived_identity(self) -> None:
         expected_repository = derive_repository_id(
             checkout_root=self.checkout_root,
             git_common_dir=self.git_common_dir,
@@ -177,6 +198,29 @@ class RepositoryScope:
             raise ValueError("repository_id is not derived from the canonical repository path")
         if not hmac.compare_digest(self.checkout_id, expected_checkout):
             raise ValueError("checkout_id is not derived from the canonical checkout path")
+
+    def identity(self) -> tuple[str, str, str, str, str | None]:
+        """Which repository and checkout this is — the part a commit cannot change.
+
+        `git_commit` is provenance: it says what a generation was built from, not
+        which repository it belongs to. Comparing whole scopes made every
+        generation ineligible after the next commit, which on a vault that commits
+        its own runtime meant semantic retrieval fell back to the legacy index
+        almost always. See NEW-65.
+        """
+        return (
+            self.schema_version,
+            self.repository_id,
+            self.checkout_id,
+            self.checkout_root,
+            self.git_common_dir,
+        )
+
+    def same_repository(self, other: object) -> bool:
+        """True when both scopes name the same repository checkout."""
+        if not isinstance(other, RepositoryScope):
+            return False
+        return self.identity() == other.identity()
 
     def as_dict(self) -> dict[str, str | None]:
         """Return the canonical closed JSON object."""
@@ -204,18 +248,24 @@ class RepositoryScope:
         )
 
 
+def _finite_deadline(deadline: object) -> bool:
+    if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
+        return False
+    return float("-inf") < deadline < float("inf")
+
+
+def _require_stop_arguments(deadline: float | None, cancelled: object) -> None:
+    if deadline is not None and not _finite_deadline(deadline):
+        raise ValueError("deadline must be a finite monotonic timestamp or None")
+    if cancelled is not None and not callable(cancelled):
+        raise TypeError("cancelled must be callable or None")
+
+
 def _check_stop(
     deadline: float | None,
     cancelled: object,
 ) -> None:
-    if deadline is not None and (
-        isinstance(deadline, bool)
-        or not isinstance(deadline, (int, float))
-        or not float("-inf") < deadline < float("inf")
-    ):
-        raise ValueError("deadline must be a finite monotonic timestamp or None")
-    if cancelled is not None and not callable(cancelled):
-        raise TypeError("cancelled must be callable or None")
+    _require_stop_arguments(deadline, cancelled)
     if cancelled is not None and cancelled():
         raise TimeoutError("repository scope resolution cancelled")
     if deadline is not None and time.monotonic() >= deadline:
@@ -230,6 +280,94 @@ def _has_git_marker(requested: Path) -> bool:
     return False
 
 
+def _git_probe_process(root: Path, command: list[str]) -> subprocess.Popen:
+    return subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        shell=False,
+        env=sanitized_git_environment(),
+    )
+
+
+class _GitWatch:
+    """Kills the probe when its deadline passes or the caller cancels."""
+
+    def __init__(self, process: subprocess.Popen, effective_deadline: float, cancelled) -> None:
+        self.process = process
+        self.deadline = effective_deadline
+        self.cancelled = cancelled
+        self.stopped = threading.Event()
+        self.reason: list[str] = []
+        self.thread = threading.Thread(target=self._monitor, daemon=True)
+
+    def _stop_reason(self) -> str | None:
+        if self.cancelled is not None and self.cancelled():
+            return "cancelled"
+        if self.deadline - time.monotonic() <= 0:
+            return "deadline"
+        return None
+
+    def _monitor(self) -> None:
+        while not self.stopped.is_set() and self.process.poll() is None:
+            reason = self._stop_reason()
+            if reason is not None:
+                self.reason.append(reason)
+                self.process.kill()
+                return
+            self.stopped.wait(min(0.01, max(self.deadline - time.monotonic(), 0.0)))
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def finish(self) -> None:
+        self.stopped.set()
+        self.thread.join(timeout=0.1)
+
+
+def _read_probe_output(process: subprocess.Popen) -> bytes:
+    assert process.stdout is not None
+    output = process.stdout.read(MAX_GIT_OUTPUT_BYTES + 1)
+    if len(output) > MAX_GIT_OUTPUT_BYTES and process.poll() is None:
+        process.kill()
+    process.wait()
+    return output
+
+
+def _close_probe(process: subprocess.Popen) -> None:
+    if process.poll() is None:
+        process.kill()
+        process.wait()
+    close = getattr(process.stdout, "close", None)
+    if close is not None:
+        close()
+
+
+def _require_probe_success(
+    watch: _GitWatch, process: subprocess.Popen, command: list[str], output: bytes
+) -> None:
+    if watch.reason:
+        raise TimeoutError(f"repository scope {watch.reason[0]} reached during Git probe")
+    if len(output) > MAX_GIT_OUTPUT_BYTES:
+        raise ValueError("Git command output exceeds the byte ceiling")
+    if process.returncode != 0:
+        raise subprocess.CalledProcessError(process.returncode, command)
+
+
+def _clean_probe_text(value: str) -> bool:
+    return len(value) <= MAX_PATH_LENGTH and "\x00" not in value and "\n" not in value
+
+
+def _probe_value(output: bytes, allow_empty: bool) -> str:
+    value = output.decode("utf-8", errors="strict").strip()
+    if not value and not allow_empty:
+        raise ValueError("Git command returned an invalid value")
+    if not _clean_probe_text(value):
+        raise ValueError("Git command returned an invalid value")
+    return value
+
+
 def _git_output(
     root: Path,
     subcommand: str,
@@ -239,67 +377,21 @@ def _git_output(
     allow_empty: bool = False,
 ) -> str:
     _check_stop(deadline, cancelled)
-    environment = sanitized_git_environment()
     command = ["git", "-C", str(root), subcommand, *arguments]
-    process = subprocess.Popen(
-        command,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        shell=False,
-        env=environment,
-    )
-    stopped = threading.Event()
-    stop_reason: list[str] = []
+    process = _git_probe_process(root, command)
     local_deadline = time.monotonic() + GIT_TIMEOUT_SECONDS
-    effective_deadline = local_deadline if deadline is None else min(local_deadline, deadline)
-
-    def monitor() -> None:
-        while not stopped.is_set() and process.poll() is None:
-            if cancelled is not None and cancelled():
-                stop_reason.append("cancelled")
-                process.kill()
-                return
-            remaining = effective_deadline - time.monotonic()
-            if remaining <= 0:
-                stop_reason.append("deadline")
-                process.kill()
-                return
-            stopped.wait(min(0.01, remaining))
-
-    watcher = threading.Thread(target=monitor, daemon=True)
-    watcher.start()
+    effective = local_deadline if deadline is None else min(local_deadline, deadline)
+    watch = _GitWatch(process, effective, cancelled)
+    watch.start()
     output = b""
     try:
-        assert process.stdout is not None
-        output = process.stdout.read(MAX_GIT_OUTPUT_BYTES + 1)
-        if len(output) > MAX_GIT_OUTPUT_BYTES and process.poll() is None:
-            process.kill()
-        process.wait()
+        output = _read_probe_output(process)
     finally:
-        stopped.set()
-        if process.poll() is None:
-            process.kill()
-            process.wait()
-        close = getattr(process.stdout, "close", None)
-        if close is not None:
-            close()
-        watcher.join(timeout=0.1)
-    if stop_reason:
-        raise TimeoutError(f"repository scope {stop_reason[0]} reached during Git probe")
-    if len(output) > MAX_GIT_OUTPUT_BYTES:
-        raise ValueError("Git command output exceeds the byte ceiling")
-    if process.returncode != 0:
-        raise subprocess.CalledProcessError(process.returncode, command)
-    value = output.decode("utf-8", errors="strict").strip()
-    if (
-        (not value and not allow_empty)
-        or len(value) > MAX_PATH_LENGTH
-        or "\x00" in value
-        or "\n" in value
-    ):
-        raise ValueError("Git command returned an invalid value")
-    return value
+        watch.stopped.set()
+        _close_probe(process)
+        watch.finish()
+    _require_probe_success(watch, process, command, output)
+    return _probe_value(output, allow_empty)
 
 
 def _git_value(
@@ -317,64 +409,78 @@ def _git_value(
     )
 
 
-def resolve_repository_scope(
-    directory: Path,
-    *,
-    deadline: float | None = None,
-    cancelled=None,
-) -> RepositoryScope:
-    """Resolve a directory to a stable local repository and checkout scope."""
-    _check_stop(deadline, cancelled)
-    requested = Path(directory).resolve(strict=True)
-    if not requested.is_dir():
-        raise NotADirectoryError(requested)
-    local_root = _local_serialized_path(requested, strict=True)
-    try:
-        checkout_path = Path(
-            _git_value(
-                requested,
-                "--path-format=absolute",
-                "--show-toplevel",
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-        ).resolve(strict=True)
-        if not checkout_path.is_dir():
-            raise ValueError("Git checkout root must be a directory")
-        requested.relative_to(checkout_path)
-        checkout_root = _local_serialized_path(
-            checkout_path,
-            strict=True,
+def _non_git_scope(local_root: str) -> RepositoryScope:
+    repository_id = derive_repository_id(checkout_root=local_root, git_common_dir=None)
+    return RepositoryScope(
+        schema_version=SCHEMA_VERSION,
+        repository_id=repository_id,
+        checkout_id=derive_checkout_id(repository_id, local_root),
+        checkout_root=local_root,
+        git_common_dir=None,
+        git_commit=None,
+    )
+
+
+def _git_roots(
+    requested: Path, deadline: float | None, cancelled
+) -> tuple[str, str]:
+    """(checkout root, common dir) for the checkout that contains `requested`."""
+    checkout_path = Path(
+        _git_value(
+            requested,
+            "--path-format=absolute",
+            "--show-toplevel",
+            deadline=deadline,
+            cancelled=cancelled,
         )
-        git_common_dir = _local_serialized_path(
-            Path(
-                _git_value(
-                    requested,
-                    "--path-format=absolute",
-                    "--git-common-dir",
-                    deadline=deadline,
-                    cancelled=cancelled,
-                )
-            ),
-            strict=True,
+    ).resolve(strict=True)
+    if not checkout_path.is_dir():
+        raise ValueError("Git checkout root must be a directory")
+    requested.relative_to(checkout_path)
+    common = Path(
+        _git_value(
+            requested,
+            "--path-format=absolute",
+            "--git-common-dir",
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+    )
+    return (
+        _local_serialized_path(checkout_path, strict=True),
+        _local_serialized_path(common, strict=True),
+    )
+
+
+def _commit_without_head(
+    requested: Path, head_error: Exception, deadline: float | None, cancelled
+) -> None:
+    """An empty repository has no commit; anything else is an uncertain identity."""
+    try:
+        ref = _git_output(
+            requested,
+            "for-each-ref",
+            "--count=1",
+            "--format=%(objectname)",
+            "refs",
+            deadline=deadline,
+            cancelled=cancelled,
+            allow_empty=True,
         )
     except TimeoutError:
         raise
     except (OSError, subprocess.SubprocessError, UnicodeError, ValueError) as exc:
-        if _has_git_marker(requested):
-            raise RepositoryScopeUnavailable(
-                "Git checkout marker exists but repository identity is unavailable"
-            ) from exc
-        repository_id = derive_repository_id(checkout_root=local_root, git_common_dir=None)
-        return RepositoryScope(
-            schema_version=SCHEMA_VERSION,
-            repository_id=repository_id,
-            checkout_id=derive_checkout_id(repository_id, local_root),
-            checkout_root=local_root,
-            git_common_dir=None,
-            git_commit=None,
-        )
+        raise RepositoryScopeUnavailable(
+            "Git commit identity is uncertain because refs could not be inspected"
+        ) from exc
+    if ref:
+        raise RepositoryScopeUnavailable(
+            "Git commit identity is uncertain because HEAD failed while refs exist"
+        ) from head_error
+    return None
 
+
+def _git_commit_of(requested: Path, deadline: float | None, cancelled) -> str | None:
     try:
         git_commit = _git_value(
             requested,
@@ -384,34 +490,43 @@ def resolve_repository_scope(
             cancelled=cancelled,
         )
         _validated_commit(git_commit)
+        return git_commit
     except subprocess.CalledProcessError as head_error:
-        try:
-            ref = _git_output(
-                requested,
-                "for-each-ref",
-                "--count=1",
-                "--format=%(objectname)",
-                "refs",
-                deadline=deadline,
-                cancelled=cancelled,
-                allow_empty=True,
-            )
-        except TimeoutError:
-            raise
-        except (OSError, subprocess.SubprocessError, UnicodeError, ValueError) as exc:
-            raise RepositoryScopeUnavailable(
-                "Git commit identity is uncertain because refs could not be inspected"
-            ) from exc
-        if ref:
-            raise RepositoryScopeUnavailable(
-                "Git commit identity is uncertain because HEAD failed while refs exist"
-            ) from head_error
-        git_commit = None
+        return _commit_without_head(requested, head_error, deadline, cancelled)
     except TimeoutError:
         raise
     except (OSError, UnicodeError, ValueError) as exc:
         raise RepositoryScopeUnavailable("Git commit identity is unavailable") from exc
 
+
+def _requested_directory(directory: Path) -> Path:
+    requested = Path(directory).resolve(strict=True)
+    if not requested.is_dir():
+        raise NotADirectoryError(requested)
+    return requested
+
+
+def resolve_repository_scope(
+    directory: Path,
+    *,
+    deadline: float | None = None,
+    cancelled=None,
+) -> RepositoryScope:
+    """Resolve a directory to a stable local repository and checkout scope."""
+    _check_stop(deadline, cancelled)
+    requested = _requested_directory(directory)
+    local_root = _local_serialized_path(requested, strict=True)
+    try:
+        checkout_root, git_common_dir = _git_roots(requested, deadline, cancelled)
+    except TimeoutError:
+        raise
+    except (OSError, subprocess.SubprocessError, UnicodeError, ValueError) as exc:
+        if _has_git_marker(requested):
+            raise RepositoryScopeUnavailable(
+                "Git checkout marker exists but repository identity is unavailable"
+            ) from exc
+        return _non_git_scope(local_root)
+    git_commit = _git_commit_of(requested, deadline, cancelled)
     repository_id = derive_repository_id(
         checkout_root=checkout_root,
         git_common_dir=git_common_dir,

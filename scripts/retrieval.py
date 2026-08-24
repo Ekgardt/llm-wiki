@@ -148,6 +148,12 @@ PROFILE_SIGNALS: dict[str, tuple[str, ...]] = {
 }
 
 RRF_K = 60
+# A short answer needs a long candidate pool: several chunks of one page are
+# one answer repeated, and only a pool wider than the answer can hold the
+# pages the page-diverse order then leads with.
+CANDIDATE_FANOUT = 8
+MIN_CANDIDATE_POOL = 40
+MAX_CANDIDATE_POOL = 200
 BM25_WEIGHT = 2.0
 DENSE_WEIGHT = 1.0
 GRAPH_WEIGHT = 0.5
@@ -1067,6 +1073,10 @@ def _digest_of_page(relative_path: str) -> str | None:
         return None
 
 
+def _is_real_digest(sha: object) -> bool:
+    return isinstance(sha, str) and len(sha) == 64 and sha != _UNKNOWN_DIGEST
+
+
 def _source_sha256(row: Mapping[str, Any]) -> str:
     """The digest of the row's source.
 
@@ -1076,8 +1086,8 @@ def _source_sha256(row: Mapping[str, Any]) -> str:
     left for the case where the file genuinely cannot be read.
     """
     sha = row.get("source_sha256") or row.get("sha256")
-    if isinstance(sha, str) and len(sha) == 64 and sha != _UNKNOWN_DIGEST:
-        return sha
+    if _is_real_digest(sha):
+        return str(sha)
     return _digest_of_page(_hit_path(row)) or _UNKNOWN_DIGEST
 
 
@@ -2301,6 +2311,27 @@ def _record_impressions(
         pass
 
 
+def _impression_event(
+    item: Mapping[str, Any],
+    rank: int,
+    *,
+    query: str,
+    corpus_generation: str,
+    source_tool: str,
+):
+    from retrieval_telemetry import best_effort_make_event
+
+    return best_effort_make_event(
+        event_kind="impression",
+        query=query,
+        retrieval_mode=str(item.get("effective_mode") or "base").lower(),
+        candidate_id=_impression_candidate_id(item),
+        rank=rank,
+        generation=str(item.get("generation") or corpus_generation),
+        source_tool=source_tool,
+    )
+
+
 def _emit_impressions(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -2308,16 +2339,14 @@ def _emit_impressions(
     corpus_generation: str,
     source_tool: str,
 ) -> None:
-    from retrieval_telemetry import best_effort_make_event, best_effort_record_events
+    from retrieval_telemetry import best_effort_record_events
 
     events = [
-        best_effort_make_event(
-            event_kind="impression",
+        _impression_event(
+            item,
+            rank,
             query=query,
-            retrieval_mode=str(item.get("effective_mode") or "base").lower(),
-            candidate_id=_impression_candidate_id(item),
-            rank=rank,
-            generation=str(item.get("generation") or corpus_generation),
+            corpus_generation=corpus_generation,
             source_tool=source_tool,
         )
         for rank, item in enumerate(rows, start=1)
@@ -2344,36 +2373,26 @@ def _generation_dense_hits(
     """
     import search_memory
 
-    connection = context["connection"]
     owned = None
     try:
         require_seal()
-        if own_connection:
-            owned = search_memory._generation_connection(catalog, context["manifest"], **stop)
-            if owned is None:
-                context["dense_fallback"] = "generation_vectors_unavailable"
-                return None
-            connection = owned
-        rows = search_memory._generation_vectors_search(
-            filters["query"],
-            catalog,
-            context["manifest"],
-            connection,
+        connection, owned = _dense_connection(
+            search_memory, catalog, context, stop, own_connection
+        )
+        if connection is None:
+            return None
+        return _dense_hits_or_none(
+            search_memory,
+            filters,
+            catalog=catalog,
+            context=context,
+            connection=connection,
             embedder=embedder,
             model_id=model_id,
             model_revision=model_revision,
-            scope=filters["scope"],
-            limit=filters["limit"],
-            project=filters["project"],
-            since=filters["since"],
-            as_of=filters["as_of"],
-            **stop,
+            stop=stop,
+            require_seal=require_seal,
         )
-        require_seal()
-        if rows is None:
-            context["dense_fallback"] = "generation_vectors_unavailable"
-            return None
-        return _dense_filtered_hits(rows, filters)
     except (GenerationSealChanged, TimeoutError):
         raise
     except Exception:  # noqa: BLE001 - unreadable vectors degrade one signal
@@ -2381,8 +2400,64 @@ def _generation_dense_hits(
         context["dense_fallback"] = "generation_vectors_unavailable"
         return None
     finally:
-        if owned is not None:
-            owned.close()
+        _close_quietly(owned)
+
+
+def _close_quietly(handle: Any) -> None:
+    if handle is not None:
+        handle.close()
+
+
+def _dense_connection(
+    search_memory: Any,
+    catalog: Any,
+    context: dict[str, Any],
+    stop: Mapping[str, Any],
+    own_connection: bool,
+) -> tuple[Any, Any]:
+    """(connection, owned) — `owned` is the caller's to close; None means unusable."""
+    if not own_connection:
+        return context["connection"], None
+    owned = search_memory._generation_connection(catalog, context["manifest"], **stop)
+    if owned is None:
+        context["dense_fallback"] = "generation_vectors_unavailable"
+        return None, None
+    return owned, owned
+
+
+def _dense_hits_or_none(
+    search_memory: Any,
+    filters: Mapping[str, Any],
+    *,
+    catalog: Any,
+    context: dict[str, Any],
+    connection: Any,
+    embedder: object,
+    model_id: object,
+    model_revision: object,
+    stop: Mapping[str, Any],
+    require_seal: Callable[[], None],
+) -> Sequence[Mapping[str, Any]] | None:
+    rows = search_memory._generation_vectors_search(
+        filters["query"],
+        catalog,
+        context["manifest"],
+        connection,
+        embedder=embedder,
+        model_id=model_id,
+        model_revision=model_revision,
+        scope=filters["scope"],
+        limit=filters["limit"],
+        project=filters["project"],
+        since=filters["since"],
+        as_of=filters["as_of"],
+        **stop,
+    )
+    require_seal()
+    if rows is None:
+        context["dense_fallback"] = "generation_vectors_unavailable"
+        return None
+    return _dense_filtered_hits(rows, filters)
 
 
 def _generation_lexical_hits(
@@ -2410,12 +2485,78 @@ def _generation_lexical_hits(
     return _filtered_hits(rows, filters)
 
 
+def _requested_or_recommended(requested_profile: object, analysis: QueryAnalysis) -> str:
+    return _normalize_profile(requested_profile) or analysis.recommended_profile
+
+
+def _exact_query(analysis: QueryAnalysis) -> str:
+    return analysis.normalized_query or analysis.query
+
+
+def _any_true(*flags: object) -> bool:
+    return any(bool(flag) for flag in flags)
+
+
+def _first_reason(*reasons: object) -> Any:
+    """The first reason that says something; None when none of them does."""
+    for reason in reasons:
+        if reason:
+            return reason
+    return None
+
+
+def _candidate_pool(limit: int) -> int:
+    """How many chunks to ask each backend for, so `limit` pages can exist.
+
+    Several chunks of one page are one answer repeated, not several answers. A
+    pool the size of the answer therefore cannot hold `limit` distinct pages:
+    measured on this vault, twenty-five chunks carried three to seven pages. The
+    pool is what makes the page-diverse order downstream have anything to choose
+    from, and it costs one bounded index read per backend.
+    """
+    if limit <= 0:
+        return MIN_CANDIDATE_POOL
+    return max(MIN_CANDIDATE_POOL, min(limit * CANDIDATE_FANOUT, MAX_CANDIDATE_POOL))
+
+
 def _backend_limit(limit: int, max_candidates: int | None) -> int:
     """How many rows each backend may return before fusion trims them."""
+    pool = _candidate_pool(limit)
     if max_candidates is None or int(max_candidates) <= 0:
-        return limit
-    wanted = limit if limit > 0 else int(max_candidates)
-    return min(wanted, int(max_candidates))
+        return pool
+    return min(pool, int(max_candidates))
+
+
+def _place_by_page(
+    candidate: RetrievalCandidate,
+    seen: set[str],
+    first: list[RetrievalCandidate],
+    extras: list[RetrievalCandidate],
+) -> None:
+    page = candidate.relative_path
+    if page in seen:
+        extras.append(candidate)
+        return
+    seen.add(page)
+    first.append(candidate)
+
+
+def _page_diverse(
+    candidates: Sequence[RetrievalCandidate],
+) -> tuple[RetrievalCandidate, ...]:
+    """One chunk per page first, then the rest in the order they already had.
+
+    Nothing is dropped — the extra chunks follow the first pass — so a caller
+    that wanted every chunk of one page still receives them, in order. The
+    remedies that compare candidates to each other (maximal marginal relevance,
+    semantic deduplication) are not needed here: the duplication is structural.
+    """
+    first: list[RetrievalCandidate] = []
+    extras: list[RetrievalCandidate] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        _place_by_page(candidate, seen, first, extras)
+    return tuple(first + extras)
 
 
 def _require_bounded_int(value: object, low: int, high: int, name: str) -> None:
@@ -2543,7 +2684,7 @@ def retrieve(
     """
     _check_stopped(deadline_monotonic, cancelled)
     analysis = analyze_query(query)
-    requested = _normalize_profile(requested_profile) or analysis.recommended_profile
+    requested = _requested_or_recommended(requested_profile, analysis)
     backend_limit = _backend_limit(limit, max_candidates)
     filters = {
         "query": analysis.normalized_query or analysis.query,
@@ -2575,7 +2716,7 @@ def retrieve(
         cancelled=cancelled,
     )
     optional_failure = backends.optional_failure
-    partial = partial or backends.partial
+    partial = _any_true(partial, backends.partial)
 
     effective, fallback, signals = _resolve_effective_mode(
         requested,
@@ -2587,10 +2728,10 @@ def retrieve(
         graph_available=backends.graph_available,
         graph_enabled=graph_enabled,
     )
-    fallback = backends.graph_failure or fallback
+    fallback = _first_reason(backends.graph_failure, fallback)
 
     candidates, display_meta = _fused_candidates(backends, signals)
-    exact_query = analysis.normalized_query or analysis.query
+    exact_query = _exact_query(analysis)
     candidates = _promote_exact_filename(candidates, exact_query)
     _check_stopped(deadline_monotonic, cancelled)
     candidates = _capped(candidates, max_candidates)
@@ -2610,11 +2751,11 @@ def retrieve(
     )
     signal_list = [*signals, *_rerank_signals(rerank_trace)]
     optional_failure = _rerank_failure(rerank_trace, optional_failure)
-    partial = partial or rerank_trace.optional_timeout
+    partial = _any_true(partial, rerank_trace.optional_timeout)
 
     candidates = _promote_exact_filename(candidates, exact_query)
     _check_stopped(deadline_monotonic, cancelled)
-    candidates = _capped(candidates, limit)
+    candidates = _capped(_page_diverse(candidates), limit)
 
     return RetrievalResult(
         candidates=candidates,
@@ -2622,7 +2763,7 @@ def retrieve(
             requested=requested,
             effective=effective,
             signals=signal_list,
-            fallback=optional_failure or fallback,
+            fallback=_first_reason(optional_failure, fallback),
             corpus_generation=corpus_generation,
             partial=partial,
             rerank_trace=rerank_trace,
@@ -2900,6 +3041,207 @@ def _wanted_signals(requested: str, *, semantic: bool) -> tuple[str, ...]:
     return tuple(signal for signal in wanted if signal != "dense") or ("lexical",)
 
 
+def _selected_catalog(catalog: Any, search_memory: Any) -> Any:
+    if catalog is not None:
+        return catalog
+    return search_memory._active_generation_catalog()
+
+
+def _generation_stop(
+    deadline_monotonic: float | None, cancelled: Callable[[], bool] | None
+) -> dict[str, Any]:
+    stop: dict[str, Any] = {}
+    if deadline_monotonic is not None:
+        stop["deadline"] = deadline_monotonic
+    if cancelled is not None:
+        stop["cancelled"] = cancelled
+    return stop
+
+
+def _optional_stop(hard_deadline: bool, stop: dict[str, Any]) -> dict[str, Any]:
+    """Optional stages get no deadline of their own under a hard one."""
+    if hard_deadline:
+        return {}
+    return stop
+
+
+def _optional_value(hard_deadline: bool, value: Any) -> Any:
+    if hard_deadline:
+        return None
+    return value
+
+
+def _catalog_requested(catalog: Any, force_rebuild: bool, page_paths: Any) -> bool:
+    return catalog is not None and not force_rebuild and page_paths is None
+
+
+def _wants_vectors(wanted: Sequence[str], semantic: bool) -> bool:
+    return "dense" in wanted and semantic
+
+
+def _generation_naming(
+    use_generation: bool,
+    catalog_requested: bool,
+    context: Mapping[str, Any],
+    corpus_generation: str,
+) -> tuple[str, str | None]:
+    """(corpus generation, generation fallback) as the trace must report them."""
+    if use_generation:
+        return str(context["manifest"]["generation_id"]), None
+    if catalog_requested:
+        # Always continue through retrieve(); report truthful generation failure.
+        return corpus_generation, "generation_unavailable"
+    return corpus_generation, None
+
+
+def _active_manifest_for(
+    catalog: Any,
+    search_memory: Any,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+    stop: Mapping[str, Any],
+) -> tuple[Any, Any] | None:
+    try:
+        from repository_scope import resolve_repository_scope
+
+        scope = resolve_repository_scope(
+            search_memory.ROOT, deadline=deadline, cancelled=cancelled
+        )
+        manifest = catalog.get_active_for_repository(scope, **stop)
+    except TimeoutError:
+        raise
+    except Exception:  # noqa: BLE001 - no usable generation is not an error
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    return scope, manifest
+
+
+def _note_stale_vectors(
+    context: dict[str, Any], manifest: Mapping[str, Any], want_vectors: bool
+) -> None:
+    if not want_vectors or manifest.get("vector_state") != "stale":
+        return
+    context["dense_fallback"] = "generation_vectors_unavailable"
+    context["legacy_dense_blocked"] = True
+
+
+def _generation_lexical_or_raise(
+    filters: Mapping[str, Any],
+    *,
+    catalog: Any,
+    context: Mapping[str, Any],
+    stop: Mapping[str, Any],
+    note: Callable[[str], None],
+) -> Sequence[Mapping[str, Any]]:
+    """Lexical hits from the generation; any failure sends the caller to legacy."""
+    try:
+        return _generation_lexical_hits(
+            filters, catalog=catalog, context=context, stop=stop
+        )
+    except GenerationSealChanged:
+        note("generation_seal_changed")
+        raise
+    except TimeoutError:
+        raise
+    except Exception:
+        note("generation_corrupt")
+        raise GenerationSealChanged
+
+
+def _generation_dense_backend_hits(
+    filters: Mapping[str, Any],
+    *,
+    catalog: Any,
+    context: dict[str, Any],
+    stop: Mapping[str, Any],
+    require_seal: Callable[[], None],
+    own_connection: bool,
+    generation_fallback: str | None,
+    embedder: object,
+    model_id: object,
+    model_revision: object,
+) -> Sequence[Mapping[str, Any]] | None:
+    unusable = _generation_dense_unusable(
+        generation_fallback,
+        embedder=embedder,
+        model_id=model_id,
+        model_revision=model_revision,
+    )
+    if unusable is not None:
+        context["dense_fallback"] = unusable
+        return None
+    return _generation_dense_hits(
+        filters,
+        catalog=catalog,
+        context=context,
+        stop=stop,
+        require_seal=require_seal,
+        own_connection=own_connection,
+        embedder=embedder,
+        model_id=model_id,
+        model_revision=model_revision,
+    )
+
+
+def _legacy_dense_backend_hits(
+    search_memory: Any,
+    filters: Mapping[str, Any],
+    *,
+    page_paths: Any,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> Sequence[Mapping[str, Any]] | None:
+    rows = search_memory._legacy_dense_hits(
+        filters["query"],
+        scope=filters["scope"],
+        limit=filters["limit"],
+        project=filters["project"],
+        since=filters["since"],
+        as_of=filters["as_of"],
+        page_paths=page_paths,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    if rows is None:
+        return None
+    return _dense_filtered_hits(rows, filters)
+
+
+def _generation_graph_backend_hits(
+    filters: Mapping[str, Any],
+    *,
+    catalog: Any,
+    context: Mapping[str, Any],
+    stop: Mapping[str, Any],
+    cancelled: Callable[[], bool] | None,
+) -> Sequence[Mapping[str, Any]] | None:
+    active_graph = context.get("graph")
+    if active_graph is None:
+        return None
+    return _generation_graph_hits(
+        active_graph,
+        filters,
+        catalog=catalog,
+        context=context,
+        stop=stop,
+        cancelled=cancelled,
+    )
+
+
+def _neighbour_boost_or_none(
+    lexical_backend: Callable[..., Sequence[Mapping[str, Any]]],
+    filters: Mapping[str, Any],
+) -> Sequence[Mapping[str, Any]] | None:
+    try:
+        return _neighbour_boost_hits(lexical_backend, filters)
+    except TimeoutError:
+        raise
+    except Exception:  # noqa: BLE001 - the graph signal degrades on its own
+        return None
+
+
 def retrieve_via_search_memory(
     query: str,
     *,
@@ -2936,7 +3278,7 @@ def retrieve_via_search_memory(
     wanted_tuple = _wanted_signals(requested, semantic=semantic)
     hard_deadline = deadline_monotonic is not None
 
-    selected_catalog = catalog if catalog is not None else search_memory._active_generation_catalog()
+    selected_catalog = _selected_catalog(catalog, search_memory)
     corpus_generation = "legacy"
     generation_ctx: dict[str, Any] = {
         "manifest": None,
@@ -2946,12 +3288,10 @@ def retrieve_via_search_memory(
         "dense_fallback": None,
         "legacy_dense_blocked": False,
     }
-    generation_stop = {}
-    if deadline_monotonic is not None:
-        generation_stop["deadline"] = deadline_monotonic
-    if cancelled is not None:
-        generation_stop["cancelled"] = cancelled
-    optional_generation_stop = {} if hard_deadline else generation_stop
+    generation_stop = _generation_stop(deadline_monotonic, cancelled)
+    optional_generation_stop = _optional_stop(hard_deadline, generation_stop)
+    optional_deadline = _optional_value(hard_deadline, deadline_monotonic)
+    optional_cancelled = _optional_value(hard_deadline, cancelled)
 
     def _artifact_names_for(manifest: dict[str, object], *, want_vectors: bool) -> tuple[str, ...]:
         names: list[str] = [search_memory.GENERATION_FTS_ARTIFACT]
@@ -2965,27 +3305,17 @@ def retrieve_via_search_memory(
 
     def _resolved_manifest(want_vectors: bool) -> tuple[Any, Any] | None:
         """(scope, manifest) for the active generation, or None when unusable."""
-        try:
-            from repository_scope import resolve_repository_scope
-
-            scope = resolve_repository_scope(
-                search_memory.ROOT,
-                deadline=deadline_monotonic,
-                cancelled=cancelled,
-            )
-            manifest = selected_catalog.get_active_for_repository(
-                scope, **generation_stop
-            )
-        except TimeoutError:
-            raise
-        except Exception:  # noqa: BLE001 - no usable generation is not an error
+        resolved = _active_manifest_for(
+            selected_catalog,
+            search_memory,
+            deadline=deadline_monotonic,
+            cancelled=cancelled,
+            stop=generation_stop,
+        )
+        if resolved is None:
             return None
-        if not isinstance(manifest, dict):
-            return None
-        if want_vectors and manifest.get("vector_state") == "stale":
-            generation_ctx["dense_fallback"] = "generation_vectors_unavailable"
-            generation_ctx["legacy_dense_blocked"] = True
-        return scope, manifest
+        _note_stale_vectors(generation_ctx, resolved[1], want_vectors)
+        return resolved
 
     def _attach_graph(repository_scope: Any, connection: Any) -> bool:
         try:
@@ -3010,7 +3340,7 @@ def retrieve_via_search_memory(
         return True
 
     def _open_generation(*, want_vectors: bool) -> bool:
-        if selected_catalog is None or force_rebuild or page_paths is not None:
+        if not _catalog_requested(selected_catalog, force_rebuild, page_paths):
             return False
         resolved = _resolved_manifest(want_vectors)
         if resolved is None:
@@ -3033,37 +3363,28 @@ def retrieve_via_search_memory(
             return True
         return _attach_graph(repository_scope, connection)
 
-    catalog_requested = (
-        selected_catalog is not None and not force_rebuild and page_paths is None
-    )
-    want_vectors = "dense" in wanted_tuple and semantic
+    catalog_requested = _catalog_requested(selected_catalog, force_rebuild, page_paths)
+    want_vectors = _wants_vectors(wanted_tuple, semantic)
     use_generation = _open_generation(want_vectors=want_vectors)
-    generation_fallback: str | None = None
     legacy_fallback: str | None = None
-    if use_generation:
-        corpus_generation = str(generation_ctx["manifest"]["generation_id"])
-    elif catalog_requested:
-        # Always continue through retrieve(); report truthful generation failure.
-        generation_fallback = "generation_unavailable"
+    corpus_generation, generation_fallback = _generation_naming(
+        use_generation, catalog_requested, generation_ctx, corpus_generation
+    )
+
+    def _note_generation_fallback(reason: str) -> None:
+        nonlocal generation_fallback
+        generation_fallback = generation_fallback or reason
 
     def lexical_backend(**filters: Any) -> Sequence[Mapping[str, Any]]:
-        nonlocal generation_fallback, legacy_fallback, use_generation
+        nonlocal legacy_fallback
         if use_generation:
-            try:
-                return _generation_lexical_hits(
-                    filters,
-                    catalog=selected_catalog,
-                    context=generation_ctx,
-                    stop=generation_stop,
-                )
-            except _GenerationSealChanged:
-                generation_fallback = generation_fallback or "generation_seal_changed"
-                raise
-            except TimeoutError:
-                raise
-            except Exception:
-                generation_fallback = generation_fallback or "generation_corrupt"
-                raise _GenerationSealChanged
+            return _generation_lexical_or_raise(
+                filters,
+                catalog=selected_catalog,
+                context=generation_ctx,
+                stop=generation_stop,
+                note=_note_generation_fallback,
+            )
         rows = search_memory._legacy_lexical_hits(
             filters["query"],
             scope=filters["scope"],
@@ -3095,62 +3416,38 @@ def retrieve_via_search_memory(
         if "dense" not in wanted_tuple or generation_ctx["legacy_dense_blocked"]:
             return None
         if use_generation:
-            unusable = _generation_dense_unusable(
-                generation_fallback,
-                embedder=generation_embedder,
-                model_id=generation_model_id,
-                model_revision=generation_model_revision,
-            )
-            if unusable is not None:
-                generation_ctx["dense_fallback"] = unusable
-                return None
-            return _generation_dense_hits(
+            return _generation_dense_backend_hits(
                 filters,
                 catalog=selected_catalog,
                 context=generation_ctx,
                 stop=optional_generation_stop,
                 require_seal=require_seal,
                 own_connection=hard_deadline,
+                generation_fallback=generation_fallback,
                 embedder=generation_embedder,
                 model_id=generation_model_id,
                 model_revision=generation_model_revision,
             )
-        rows = search_memory._legacy_dense_hits(
-            filters["query"],
-            scope=filters["scope"],
-            limit=filters["limit"],
-            project=filters["project"],
-            since=filters["since"],
-            as_of=filters["as_of"],
+        return _legacy_dense_backend_hits(
+            search_memory,
+            filters,
             page_paths=page_paths,
-            deadline=None if hard_deadline else deadline_monotonic,
-            cancelled=None if hard_deadline else cancelled,
+            deadline=optional_deadline,
+            cancelled=optional_cancelled,
         )
-        if rows is None:
-            return None
-        return _dense_filtered_hits(rows, filters)
 
     def graph_backend(**filters: Any) -> Sequence[Mapping[str, Any]] | None:
         if not graph or "graph" not in wanted_tuple:
             return None
         if use_generation:
-            active_graph = generation_ctx.get("graph")
-            if active_graph is None:
-                return None
-            return _generation_graph_hits(
-                active_graph,
+            return _generation_graph_backend_hits(
                 filters,
                 catalog=selected_catalog,
                 context=generation_ctx,
                 stop=generation_stop,
                 cancelled=cancelled,
             )
-        try:
-            return _neighbour_boost_hits(lexical_backend, filters)
-        except TimeoutError:
-            raise
-        except Exception:  # noqa: BLE001 - the graph signal degrades on its own
-            return None
+        return _neighbour_boost_or_none(lexical_backend, filters)
 
     def run_retrieval() -> RetrievalResult:
         return retrieve(
@@ -3201,7 +3498,9 @@ def retrieve_via_search_memory(
     result = _with_reported_trace(
         result,
         query=query,
-        dense_fallback=generation_ctx.get("dense_fallback") or generation_fallback,
+        dense_fallback=_first_reason(
+            generation_ctx.get("dense_fallback"), generation_fallback
+        ),
         generation_fallback=generation_fallback,
         legacy_fallback=legacy_fallback,
     )

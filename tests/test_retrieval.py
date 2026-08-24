@@ -263,7 +263,9 @@ def test_retrieve_uses_identical_hard_filters_for_lexical_and_dense() -> None:
     assert seen[0] == {
         "query": "needle",
         "scope": "wiki",
-        "limit": 7,
+        # Backends are asked for the candidate pool, not the answer: a pool the
+        # size of the answer cannot hold `limit` distinct pages.
+        "limit": retrieval._candidate_pool(7),
         "project": "demo",
         "since": "2024-01-01",
         "as_of": "2025-06-01",
@@ -620,3 +622,36 @@ def test_a_row_without_a_digest_is_hashed_rather_than_given_zeros(tmp_path, monk
     # A page that cannot be read is the one case the placeholder is for.
     missing = {"path": "knowledge/notes/gone.md"}
     assert retrieval._source_sha256(missing) == "0" * 64
+
+
+def test_the_answer_leads_with_one_chunk_per_page() -> None:
+    """Several chunks of one page are one answer repeated, not several answers."""
+    import retrieval
+
+    hits = [
+        _hit(candidate_id="c-1", path="long.md", score=5.0),
+        _hit(candidate_id="c-2", path="long.md", score=4.0),
+        _hit(candidate_id="c-3", path="long.md", score=3.0),
+        _hit(candidate_id="c-4", path="answer.md", score=2.0),
+    ]
+
+    def lexical(**_kwargs):
+        return hits
+
+    result = retrieval.retrieve(
+        "needle",
+        requested_profile="BASE",
+        limit=2,
+        lexical_backend=lexical,
+        corpus_generation="gen-diverse",
+    )
+
+    assert [item.relative_path for item in result.candidates] == ["long.md", "answer.md"]
+
+
+def test_page_diverse_order_drops_nothing() -> None:
+    import retrieval
+
+    assert retrieval._candidate_pool(0) == retrieval.MIN_CANDIDATE_POOL
+    assert retrieval._candidate_pool(1000) == retrieval.MAX_CANDIDATE_POOL
+    assert retrieval._backend_limit(1000, 25) == 25

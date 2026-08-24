@@ -1,0 +1,61 @@
+{
+  "corpus_id": "vault-retrieval-v1",
+  "schema_version": "vault-retrieval/v1",
+  "note": "Questions in Russian about published English decision pages: the vault's own cross-language case. The gold page is fixed by construction, so scoring needs no judge.",
+  "thresholds": {
+    "min_hit_at_5": 0.6,
+    "min_gain_over_grep_at_5": 0.1
+  },
+  "cases": [
+    {
+      "case_id": "retry-after-quarantine",
+      "question": "что происходит с записью, которую отклонила защита данных, если повторить её ещё раз",
+      "gold_path": "knowledge/notes/idempotent-retry-after-quarantine-decision.md"
+    },
+    {
+      "case_id": "lsp-owner-lease",
+      "question": "зачем языковому серверу отдельная аренда владельца и как часто она обновляется",
+      "gold_path": "knowledge/notes/lsp-live-lease-decision.md"
+    },
+    {
+      "case_id": "self-update",
+      "question": "при каких условиях хранилище само обновляет свой код из удалённого репозитория",
+      "gold_path": "knowledge/notes/automatic-code-update-decision.md"
+    },
+    {
+      "case_id": "citation-relevance",
+      "question": "что делать, если цитата в ответе никак не связана с утверждением",
+      "gold_path": "knowledge/notes/citation-relevance-gate-decision.md"
+    },
+    {
+      "case_id": "dead-task-restore",
+      "question": "как вернуть в работу задачу, у которой кончились попытки",
+      "gold_path": "knowledge/notes/dead-task-retirement-and-restore-decision.md"
+    },
+    {
+      "case_id": "self-resolving-health",
+      "question": "почему предупреждение о состоянии системы не должно висеть, пока человек его не снимет",
+      "gold_path": "knowledge/notes/self-resolving-health-findings-decision.md"
+    },
+    {
+      "case_id": "nightly-vectors",
+      "question": "кто строит векторы для смыслового поиска и что будет, если модели нет",
+      "gold_path": "knowledge/notes/nightly-builds-generation-vectors-decision.md"
+    },
+    {
+      "case_id": "symlink-ancestor",
+      "question": "можно ли читать файл, если в пути встретилась ссылка на каталог",
+      "gold_path": "knowledge/notes/system-symlink-ancestor-decision.md"
+    },
+    {
+      "case_id": "daily-entry-boundary",
+      "question": "где начинается и где заканчивается одна запись в дневнике",
+      "gold_path": "knowledge/notes/daily-entry-boundary-decision.md"
+    },
+    {
+      "case_id": "warm-navigation-gate",
+      "question": "какой порог накладных расходов у тёплой навигации и на какой машине он измерен",
+      "gold_path": "knowledge/notes/warm-navigation-overhead-threshold-decision.md"
+    }
+  ]
+}
