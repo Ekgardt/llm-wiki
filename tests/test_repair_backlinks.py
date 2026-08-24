@@ -81,3 +81,29 @@ def test_the_owed_backlink_is_written_through_a_transaction(tmp_path, monkeypatc
     assert applied == ["LINKED: knowledge/notes/target.md → source"]
     assert "[[knowledge/notes/source]]" in target.read_text(encoding="utf-8")
     assert repair_backlinks.repair(apply=False) == []
+
+
+def test_a_superseded_page_is_not_asked_to_link_forward(tmp_path, monkeypatch):
+    """History is not rewritten to satisfy a linter."""
+    import lint_memory
+
+    notes = tmp_path / "knowledge" / "notes"
+    notes.mkdir(parents=True)
+    monkeypatch.setattr(lint_memory, "ROOT", tmp_path)
+    monkeypatch.setattr(lint_memory, "VAULT", tmp_path / "knowledge")
+    monkeypatch.setattr(lint_memory, "NOTES", notes)
+    successor = notes / "successor.md"
+    retired = notes / "retired.md"
+    successor.write_text(
+        "---\ntype: decision\n---\n# Successor\n\nSee [[knowledge/notes/retired]].\n",
+        encoding="utf-8",
+    )
+    retired.write_text(
+        "---\ntype: decision\nstatus: superseded\n---\n# Retired\n", encoding="utf-8"
+    )
+
+    pairs = lint_memory.missing_backlink_pairs(
+        [successor, retired], [tmp_path / "knowledge", notes]
+    )
+
+    assert pairs == []

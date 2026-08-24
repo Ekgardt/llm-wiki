@@ -411,6 +411,12 @@ def _backlink_pairs(link_map: dict[Path, list[Path]]) -> list[tuple[Path, Path]]
 def _pair_owes_backlink(source: Path, target: Path) -> bool:
     if source == target or _is_backlink_exempt(source):
         return False
+    if _is_retired(target):
+        # A superseded or archived page is history. Making it link forward to
+        # every later page that mentions it would rewrite that history, which
+        # the vault forbids for decisions — and the repair pass would have to
+        # edit an immutable page to clear a finding nobody wants cleared.
+        return False
     return not _is_backlink_exempt(target)
 
 
