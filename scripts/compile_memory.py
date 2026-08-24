@@ -570,6 +570,22 @@ def _deduplicated_sources(
     return sources
 
 
+MAX_FAILURE_DETAIL_CHARS = 300
+
+
+def _detail_of(error: BaseException) -> str:
+    return f"{type(error).__name__}: {error}"
+
+
+def _report_stage_detail(stage: str, failure: str, detail: str) -> None:
+    if not detail:
+        return
+    print(
+        f"compile_memory: {stage} {failure}: {detail[:MAX_FAILURE_DETAIL_CHARS]}",
+        file=sys.stderr,
+    )
+
+
 def _record_oversized_daily(logical_path: str) -> None:
     """Leave a durable trace of a daily log the compiler cannot take as one piece."""
     try:
@@ -1044,10 +1060,17 @@ class _CompileAttempt:
         return None
 
     def _record(
-        self, stage: str, descriptor: object, failure: str
+        self, stage: str, descriptor: object, failure: str, detail: str = ""
     ) -> ResolvedCompilePlan | None:
-        """Remember why this stage yielded nothing, and yield nothing."""
+        """Remember why this stage yielded nothing, and yield nothing.
+
+        The lineage keeps the failure class alone, because the retry rule reads
+        it; the detail goes to stderr, because `validation_error` names a stage
+        and not the check that refused, and a run that fails three times in a row
+        should say what it disagreed with.
+        """
         self.lineage += (_failure_lineage(stage, descriptor, failure),)
+        _report_stage_detail(stage, failure, detail)
         return None
 
     def _actions(self, descriptor: object) -> tuple[object, object]:
@@ -1096,8 +1119,10 @@ class _CompileAttempt:
     ) -> ResolvedCompilePlan | None:
         try:
             operations = _draft_operations(draft_text)
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-            return self._record("draft", descriptor, "validation_error")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            return self._record(
+                "draft", descriptor, "validation_error", _detail_of(error)
+            )
         return self._critiqued(descriptor, actions, operations)
 
     def _critiqued(
@@ -1113,8 +1138,10 @@ class _CompileAttempt:
             reviewed = self._review(descriptor, operations)
         except _ProviderStageFailure as stage_failure:
             return self._record("critique", descriptor, stage_failure.failure)
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-            return self._record("critique", descriptor, "validation_error")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            return self._record(
+                "critique", descriptor, "validation_error", _detail_of(error)
+            )
         return self._normalized(descriptor, with_critique, reviewed, "normalize")
 
     def _review(self, descriptor: object, operations: list[object]) -> list[object]:
@@ -1140,8 +1167,8 @@ class _CompileAttempt:
         try:
             plan = _normalize_plan(operations, self.inputs)
             validate_compile_plan(plan, self.inputs)
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-            return self._record(stage, descriptor, "validation_error")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            return self._record(stage, descriptor, "validation_error", _detail_of(error))
         return self._published(descriptor, action, plan)
 
     def _published(

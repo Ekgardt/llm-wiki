@@ -30,6 +30,9 @@ from memory_state import ROOT, update_state  # noqa: E402
 from session_evidence import SESSION_EVIDENCE_DIR  # noqa: E402
 
 MAX_RECORDS = 12
+# Twenty calls is a very busy day and still a bounded one.
+MAX_BATCHES_PER_DAY = 20
+MAX_RECORDS_PER_DAY = MAX_RECORDS * MAX_BATCHES_PER_DAY
 # One budget for the day, shared between its records, instead of a fixed slice
 # per record: a real session record runs to hundreds of kilobytes, and a 12 000
 # character head showed the model the setup and none of the work — it answered
@@ -98,7 +101,19 @@ def session_records(vault: Path, day: str) -> list[Path]:
     directory = session_day_directory(vault, day)
     if not directory.is_dir():
         return []
-    return sorted(path for path in directory.glob("*.md") if path.is_file())[:MAX_RECORDS]
+    found = sorted(path for path in directory.glob("*.md") if path.is_file())
+    return found[:MAX_RECORDS_PER_DAY]
+
+
+def record_batches(paths: list[Path]) -> list[list[Path]]:
+    """One prompt's worth at a time.
+
+    A day used to be truncated to the first twelve records, which was invisible
+    and wrong the moment a day held more: the imported history has a day with 171
+    sessions, and everything past the twelfth was marked consolidated without
+    ever being read. Each batch is one call, and the number of them is bounded.
+    """
+    return [paths[index : index + MAX_RECORDS] for index in range(0, len(paths), MAX_RECORDS)]
 
 
 def _record_text(path: Path) -> str:
@@ -302,6 +317,16 @@ def _write_block(day: str, lessons: list[Lesson], moment: datetime) -> Path:
     )
 
 
+def _consolidate_batch(
+    day: str, batch: list[Path], call, moment: datetime
+) -> tuple[int, str | None]:
+    """(durable items written, path) for one prompt's worth of records."""
+    lessons = grounded_lessons(call(build_prompt(day, batch)), batch)
+    if not lessons:
+        return 0, None
+    return len(lessons), str(_write_block(day, lessons, moment))
+
+
 def consolidate_day(
     vault: Path,
     day: str,
@@ -315,13 +340,55 @@ def consolidate_day(
     if skipped is not None:
         return {"status": "skipped", "reason": skipped, "items": 0}
     paths = session_records(vault, day)
-    lessons = grounded_lessons(call(build_prompt(day, paths)), paths)
-    if not lessons:
-        _record_consolidation(day, 0, len(paths))
-        return {"status": "empty", "reason": None, "items": 0}
-    path = _write_block(day, lessons, moment or datetime.now())
-    _record_consolidation(day, len(lessons), len(paths))
-    return {"status": "written", "reason": None, "items": len(lessons), "path": str(path)}
+    batches = record_batches(paths)[:MAX_BATCHES_PER_DAY]
+    items, written = _consolidate_batches(day, batches, call, moment or datetime.now())
+    _record_consolidation(day, items, len(paths))
+    return _day_outcome(items, len(batches), written)
+
+
+def _consolidate_batches(
+    day: str, batches: list[list[Path]], call, when: datetime
+) -> tuple[int, str | None]:
+    """Each batch gets its own moment: two entries in one second are ambiguous.
+
+    A daily entry is located by its timestamp, and the compile refuses evidence
+    whose timestamp names more than one entry. Batches finish in well under a
+    second, so a shared moment made twelve entries indistinguishable and no
+    compile of that day could ever bind its evidence.
+    """
+    items = 0
+    written: str | None = None
+    for index, batch in enumerate(batches):
+        count, path = _consolidate_batch(
+            day, batch, call, when + timedelta(seconds=index)
+        )
+        items += count
+        written = path or written
+    return items, written
+
+
+def _day_outcome(items: int, batches: int, written: str | None) -> dict[str, object]:
+    if not items:
+        return {"status": "empty", "reason": None, "items": 0, "batches": batches}
+    return {
+        "status": "written",
+        "reason": None,
+        "items": items,
+        "batches": batches,
+        "path": written,
+    }
+
+
+def _record_days(vault: Path) -> list[str]:
+    directory = Path(vault) / SESSION_EVIDENCE_DIR
+    if not directory.is_dir():
+        return []
+    return sorted(item.name for item in directory.iterdir() if item.is_dir())
+
+
+def pending_days(vault: Path, state: dict) -> list[str]:
+    """Days that have records and have never been consolidated, oldest first."""
+    return [day for day in _record_days(vault) if not _already_consolidated(state, day)]
 
 
 def _skip_reason(vault: Path, day: str, state: dict | None) -> str | None:
@@ -341,6 +408,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--day", default=None, help="YYYY-MM-DD (default: yesterday)")
     parser.add_argument("--vault", type=Path, default=ROOT)
+    parser.add_argument(
+        "--all-pending",
+        action="store_true",
+        help="Catch up every day that has records and was never consolidated",
+    )
+    parser.add_argument(
+        "--limit", type=int, default=0, help="With --all-pending: stop after N days"
+    )
     return parser.parse_args(argv)
 
 
@@ -353,15 +428,29 @@ def _safe_state() -> dict:
         return {}
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
-    day = args.day or _default_day()
+def _consolidate_reported(vault: Path, day: str) -> None:
+    """One day, with its outcome printed; a failure ends that day, not the run."""
     try:
-        outcome = consolidate_day(args.vault, day, state=_safe_state())
+        outcome = consolidate_day(vault, day, state=_safe_state())
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"episode consolidation skipped: {type(error).__name__}", file=sys.stderr)
-        return 0
+        return
     print(json.dumps({"day": day, **outcome}, ensure_ascii=False))
+
+
+def _selected_days(args: argparse.Namespace) -> list[str]:
+    if not args.all_pending:
+        return [args.day or _default_day()]
+    days = pending_days(args.vault, _safe_state())
+    if args.limit > 0:
+        return days[: args.limit]
+    return days
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    for day in _selected_days(args):
+        _consolidate_reported(args.vault, day)
     return 0
 
 

@@ -16,7 +16,7 @@ This index catalogs durable memory distilled from AI agent sessions
 ## Decisions
 - [[knowledge/notes/agent-native-mcp-foundation]] — LLM Wiki uses MCP as the common read/action interface for every agent while host-specific hooks remain thin lifecycle-event adapters.
 - [[knowledge/notes/audit-closure-security-recovery-control-plane-decision]] — Audit closure retires the unsupported Cognee bridge and adds one fail-closed DLP, recovery, install, scheduling, coordination, and evidence contract without another daemon, database, or MCP tool.
-- [[knowledge/notes/automatic-code-update-decision]] — the nightly pass may advance the checkout to the remote branch when that is a strict fast-forward and touches no file the owner has modified, and may do nothing else with git.
+- [[knowledge/notes/automatic-code-update-decision]] — the nightly pass may advance the checkout to the remote
 - [[knowledge/notes/baseline-environment-binding-decision]] — The frozen retrieval-v2 baseline is bound to the exact
 - [[knowledge/notes/blackboard-fenced-resource-claims-decision]] — Blackboard coordination uses two bounded tables in the existing coordinator-v3 database for atomic resource claims while immutable coordination history remains authoritative Markdown.
 - [[knowledge/notes/centralized-memory-subsystem]] — The memory subsystem (`run/state.json`, `knowledge/daily/`, `knowledge/notes/`) resolves to a single canonical location regardless of whether Claude Code runs from the main checkout or a git worktree.
@@ -35,7 +35,7 @@ This index catalogs durable memory distilled from AI agent sessions
 - [[knowledge/notes/lsp-live-lease-decision]] — Live LSP lifecycle ownership is represented by one bounded mutable lease anchored inside the immutable owner directory.
 - [[knowledge/notes/lsp-process-containment-decision]] — Windows Job Objects own assigned LSP trees, while POSIX process groups cover only pinned Pyright descendants that remain in the group.
 - [[knowledge/notes/managed-ide-hooks-install-update-decision]] — Cursor and Antigravity user hooks use canonical lifecycle adapters and bounded structural fragments owned by one resumable install v2 update, rollback, and uninstall control plane.
-- [[knowledge/notes/nightly-builds-generation-vectors-decision]] — semantic retrieval stops being code that only tests exercise: the maintenance pass that publishes a generation also builds its vectors, so a question in any language can reach a page written in another.
+- [[knowledge/notes/nightly-builds-generation-vectors-decision]] — semantic retrieval stops being code that only tests
 - [[knowledge/notes/no-gitkeep-in-inbox-articles]] — Do not add `.gitkeep` to `knowledge/inbox/articles/` — the directory will be created on demand by scripts at first use.
 - [[knowledge/notes/observable-capture-and-bounded-maintenance-decision]] — A failed capture is recorded durably instead of vanishing,
 - [[knowledge/notes/one-trust-weight-across-retrieval-paths-decision]] — Typed provenance multiplies the score that decides the order on every retrieval path, from one shared table, and the weight is reported.
@@ -43,8 +43,8 @@ This index catalogs durable memory distilled from AI agent sessions
 - [[knowledge/notes/read-only-lsp-navigation-engine-decision]] — LLM Wiki will keep its structural Evidence Graph and add an owned read-only LSP engine for precise live navigation, starting with production-quality Python support.
 - [[knowledge/notes/reliability-v3-runtime-adoption-implementation-decision]] — The approved Reliability V3 operational database pair may now be implemented with explicit offline adoption, retained v2 evidence, immutable tombstones, and no change to Markdown authority or runtime roots.
 - [[knowledge/notes/reliable-memory-stage-2]] — Stage 2 keeps Markdown authoritative while adding recoverable transactions, durable checkpoints, safe archives, versioned compile caching, a fenced priority queue, and evidence-backed claims.
-- [[knowledge/notes/self-resolving-health-findings-decision]] — a health finding describes a live condition and returns to green on its own when that condition ends, so no report ever waits on a human action.
-- [[knowledge/notes/session-evidence-retention-decision]] — every session leaves a redacted, searchable copy of itself, and the classifier decides only whether it also deserves a compiled page.
+- [[knowledge/notes/self-resolving-health-findings-decision]] — a health finding describes a live condition and returns to
+- [[knowledge/notes/session-evidence-retention-decision]] — every session leaves a redacted, searchable copy of itself
 - [[knowledge/notes/single-directory-vault-decision]] — The vault and the public source live in one directory;
 - [[knowledge/notes/solo-operator-superset-product-decision]] — LLM Wiki is the single local-first memory, code-intelligence, and agent-control product for one operator managing many agents and sessions.
 - [[knowledge/notes/state-md-exempt-from-lint]] — `state.md` files under `knowledge/projects/<slug>/` are added to `EDITORIAL_NAMES` in `lint_memory.py` and exempted from backlink-obligation and sparse-floor checks, for the same reason that `index.md` and `log.md` are exempt.

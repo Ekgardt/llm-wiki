@@ -277,3 +277,93 @@ def test_a_rule_summary_is_shaped_for_the_session_start_surface(vault: Path) -> 
     assert re.search(
         r"\b(do not|don'?t|always|never|must|should)\b", block, re.IGNORECASE
     )
+
+
+def test_a_busy_day_is_read_in_batches_not_truncated(tmp_path, monkeypatch):
+    """Every record of a day is read; a day used to stop at the twelfth.
+
+    The imported history has a day with 171 sessions. Truncating silently marked
+    the other 159 consolidated without ever reading them.
+    """
+    import episode_consolidation
+
+    vault = tmp_path / "vault"
+    day = "2026-08-23"
+    directory = vault / "knowledge/raw/sessions" / day
+    directory.mkdir(parents=True)
+    for index in range(episode_consolidation.MAX_RECORDS * 2 + 1):
+        (directory / f"s{index:03d}.md").write_text(
+            f"---\ntype: raw-source\n---\n# Session s{index:03d}\n\nuser: line {index}\n",
+            encoding="utf-8",
+        )
+
+    seen: list[int] = []
+
+    def call(prompt: str) -> str:
+        seen.append(prompt.count("=== session "))
+        return "[]"
+
+    outcome = episode_consolidation.consolidate_day(vault, day, call=call, state={})
+
+    assert outcome["batches"] == 3
+    assert seen == [episode_consolidation.MAX_RECORDS, episode_consolidation.MAX_RECORDS, 1]
+
+
+def test_pending_days_are_the_ones_never_consolidated(tmp_path):
+    import episode_consolidation
+
+    vault = tmp_path / "vault"
+    for day in ("2026-08-06", "2026-08-08", "2026-08-16"):
+        directory = vault / "knowledge/raw/sessions" / day
+        directory.mkdir(parents=True)
+        (directory / "s.md").write_text("---\ntype: raw-source\n---\n# S\n", encoding="utf-8")
+
+    state = {"consolidated_session_days": {"2026-08-08": {"items": 0}}}
+
+    assert episode_consolidation.pending_days(vault, state) == [
+        "2026-08-06",
+        "2026-08-16",
+    ]
+
+
+def test_two_batches_of_one_day_get_distinct_timestamps(tmp_path, monkeypatch):
+    """A timestamp locates an entry, so two entries must not share one.
+
+    Twelve consolidation entries landed in the same second on 2026-08-24, and the
+    compile refused every piece of evidence that named it: the timestamp was
+    ambiguous, so no plan for that day could validate.
+    """
+    import episode_consolidation
+
+    vault = tmp_path / "vault"
+    day = "2026-08-23"
+    directory = vault / "knowledge/raw/sessions" / day
+    directory.mkdir(parents=True)
+    for index in range(episode_consolidation.MAX_RECORDS + 1):
+        (directory / f"s{index:03d}.md").write_text(
+            f"---\ntype: raw-source\n---\n# Session\n\nuser: line {index}\n",
+            encoding="utf-8",
+        )
+
+    moments: list = []
+    monkeypatch.setattr(
+        episode_consolidation,
+        "_write_block",
+        lambda day, lessons, moment: moments.append(moment) or Path("daily.md"),
+    )
+    monkeypatch.setattr(episode_consolidation, "_record_consolidation", lambda *a: None)
+    monkeypatch.setattr(
+        episode_consolidation,
+        "grounded_lessons",
+        lambda raw, paths: [
+            episode_consolidation.Lesson("lesson", "text", "quote", "session")
+        ],
+    )
+
+    episode_consolidation.consolidate_day(
+        vault, day, call=lambda prompt: "[]", state={},
+        moment=datetime(2026, 8, 24, 13, 25, 41),
+    )
+
+    assert len(moments) == 2
+    assert moments[0] != moments[1]
