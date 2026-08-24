@@ -1501,6 +1501,18 @@ def _daily_for_evidence(inputs: CompileInputs, date: str) -> DailySnapshot | Non
     return matches[0] if len(matches) == 1 else None
 
 
+def _dailies_for_evidence(inputs: CompileInputs, date: str) -> list[DailySnapshot]:
+    """Every part of that day the run carries.
+
+    A long day is compiled in parts, and a part is a unit of *work*, not a
+    boundary for evidence: the quoted line lives in exactly one of them. Asking
+    for a single snapshot per date silently returned nothing as soon as a day
+    was split, so no evidence from a long day could ever bind.
+    """
+    suffix = f"/{date}.md"
+    return [item for item in inputs.dailies if item.logical_path.endswith(suffix)]
+
+
 def _target_snapshot(inputs: CompileInputs, path: str) -> TargetSnapshot | None:
     return next((item for item in inputs.targets if item.logical_path == path), None)
 
@@ -1622,12 +1634,32 @@ def _require_evidence_shape(evidence: object) -> None:
         raise ValueError("compile operation requires evidence")
 
 
+def _bound_part(
+    sources: list[DailySnapshot], timestamp: str, quote_bytes: bytes
+) -> tuple[DailySnapshot, bytes, int]:
+    """The one part whose entry declares this timestamp and holds this quote."""
+    bound = []
+    for source in sources:
+        try:
+            block, marker_at = _evidence_block(source, timestamp, quote_bytes)
+        except ValueError:
+            continue
+        bound.append((source, block, marker_at))
+    if len(bound) != 1:
+        raise ValueError(
+            "compile evidence timestamp block is ambiguous or missing: "
+            f"timestamp {timestamp!r} bound in {len(bound)} of {len(sources)} part(s)"
+        )
+    return bound[0]
+
+
 def _evidence_binding(item: object, inputs: CompileInputs) -> dict[str, str]:
     """Bind one quoted line to an exact byte span of an immutable daily source."""
     date, timestamp, quote = _require_evidence_fields(item)
-    source = _daily_for_evidence(inputs, date)
-    block, marker_at = _evidence_block(source, timestamp)
     quote_bytes = quote.encode("utf-8")
+    source, block, marker_at = _bound_part(
+        _dailies_for_evidence(inputs, date), timestamp, quote_bytes
+    )
     quote_offset = _sole_quote_offset(block, quote_bytes)
     _require_complete_line(block, quote_offset, quote_bytes, quote)
     quote_start = marker_at + quote_offset
@@ -1705,23 +1737,70 @@ def _require_calendar_date(date: str) -> None:
         raise ValueError("compile evidence date is invalid") from exc
 
 
-def _evidence_block(source: object, timestamp: str) -> tuple[bytes, int]:
-    """The one entry a timestamp names, as bytes plus its offset in the source.
+def _source_content(source: object) -> bytes:
+    if source is None:
+        return b""
+    return source.content
 
-    Entries are delimited by `evidence_resolver.daily_entries`, the one
-    definition. Exactly one entry must declare the timestamp: none and several
-    are both refused.
-    """
-    content = source.content if source is not None else b""
-    matched = [
+
+def _declaring_entries(content: bytes, timestamp: str) -> list[tuple[int, int]]:
+    return [
         (start, end)
         for block_id, start, end in daily_entries(content)
         if block_id == timestamp
     ]
+
+
+def _quote_bearing(
+    content: bytes, matched: list[tuple[int, int]], quote_bytes: bytes
+) -> list[tuple[int, int]]:
+    """Of the entries a timestamp names, those holding the quote exactly once.
+
+    Without a quote there is nothing to settle the address with, so the
+    candidates are returned untouched and the caller refuses them as ambiguous.
+    """
+    if not quote_bytes:
+        return matched
+    return [
+        (start, end)
+        for start, end in matched
+        if content.count(quote_bytes, start, end) == 1
+    ]
+
+
+def _evidence_block(
+    source: object, timestamp: str, quote_bytes: bytes = b""
+) -> tuple[bytes, int]:
+    """The entry this evidence belongs to, as bytes plus its offset in the source.
+
+    Entries are delimited by `evidence_resolver.daily_entries`, the one
+    definition. The timestamp selects the candidates; when several entries
+    declare it, the quote settles which one — the address is fragile, the quote
+    is the proof, and a daily log is append-only, so twelve entries written in
+    one second stay that way. Zero candidates, or a quote that no single
+    candidate holds exactly once, are refused as before. See
+    knowledge/notes/daily-entry-quote-anchor-decision.md.
+    """
+    content = _source_content(source)
+    declared = _declaring_entries(content, timestamp)
+    matched = declared
+    if len(matched) > 1:
+        matched = _quote_bearing(content, matched, quote_bytes)
     if len(matched) != 1:
-        raise ValueError("compile evidence timestamp block is ambiguous or missing")
+        raise ValueError(_ambiguous_block_message(timestamp, declared, matched))
     start, end = matched[0]
     return content[start:end], start
+
+
+def _ambiguous_block_message(
+    timestamp: str, declared: list[tuple[int, int]], matched: list[tuple[int, int]]
+) -> str:
+    """Say which of the two failures happened; the class alone taught nobody."""
+    return (
+        "compile evidence timestamp block is ambiguous or missing: "
+        f"timestamp {timestamp!r} declared by {len(declared)} entr(y/ies), "
+        f"quote found in {len(matched)} of them"
+    )
 
 
 def _sole_quote_offset(block: bytes, quote_bytes: bytes) -> int:
@@ -2006,7 +2085,7 @@ def _receipt_v3_bytes(
                     **item,
                 }
                 for item in evidence
-                if item["source_path"] == source.logical_path
+                if _evidence_of_source(item, source)
             ),
             key=lambda item: (
                 item["operation_path"],
@@ -2209,6 +2288,20 @@ def _require_v3_identity(record: Mapping[str, object]) -> None:
         record["dispositions"],
     ):
         raise ValueError("compile receipt operation identity is invalid")
+
+
+def _evidence_of_source(item: Mapping[str, str], source: object) -> bool:
+    """Evidence belongs to the part it was bound in, not to the day.
+
+    Every part of a split day carries the same logical path, so matching on the
+    path alone put part five's evidence into part one's receipt, where the digest
+    check refused it: `compile receipt evidence scope is invalid`. The digest is
+    what tells the parts apart.
+    """
+    return (
+        item["source_path"] == source.logical_path
+        and item["source_digest"] == source.sha256
+    )
 
 
 def _require_v3_evidence_scope(
@@ -3003,6 +3096,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--file", type=str, default=None)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument(
+        "--discard-unusable-receipts",
+        action="store_true",
+        help=(
+            "Remove compile receipts that no longer parse and exit. A corrupt "
+            "receipt is an error by contract; this is the deliberate way out."
+        ),
+    )
+    p.add_argument(
         "--trigger",
         choices=["auto", "manual"],
         default="manual",
@@ -3040,6 +3141,61 @@ def _receipt_predicate(
         )
 
     return compiled
+
+
+def _receipt_source_fields(raw: bytes) -> tuple[str, str] | None:
+    """The source a receipt claims, read from the receipt itself."""
+    try:
+        payload = json.loads(raw.split(b"```json", 1)[1].split(b"```", 1)[0])
+        source = payload["source"]
+        return str(source["logical_path"]), str(source["sha256"])
+    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _unusable_receipt_reason(path: Path) -> str:
+    """Why this receipt cannot be read, or "" when it reads fine."""
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        return str(error)[:MAX_FAILURE_DETAIL_CHARS]
+    fields = _receipt_source_fields(raw)
+    if fields is None:
+        return "receipt does not declare the source it belongs to"
+    return _parse_failure_reason(raw, fields)
+
+
+def _parse_failure_reason(raw: bytes, fields: tuple[str, str]) -> str:
+    try:
+        parse_compile_receipt_v3(raw, logical_path=fields[0], source_sha256=fields[1])
+    except ValueError as error:
+        return str(error)[:MAX_FAILURE_DETAIL_CHARS]
+    return ""
+
+
+def discard_unusable_receipts() -> list[str]:
+    """Remove receipts that no longer parse, naming each one. Operator-only.
+
+    A receipt is evidence that a source was compiled, and the contract is that
+    an unreadable one is an error rather than a quiet "not compiled" — a
+    corruption must not be papered over by recompiling. But a receipt written by
+    a defective writer then blocks every later compile of the whole vault, so
+    there has to be a way out that a person takes deliberately: this is it. What
+    is lost is the record of a compile, not the pages, which the next pass
+    rebuilds from the immutable daily.
+    """
+    directory = DAILY_DIR / "receipts"
+    if not directory.is_dir():
+        return []
+    discarded: list[str] = []
+    for path in sorted(directory.glob("*.md")):
+        reason = _unusable_receipt_reason(path)
+        if not reason:
+            continue
+        print(f"compile_memory: discarding {path.name}: {reason}", file=sys.stderr)
+        path.unlink()
+        discarded.append(path.name)
+    return discarded
 
 
 def _repair_compile_mirror(coordinator: MarkdownCoordinator) -> None:
@@ -3421,6 +3577,10 @@ def _unlink_quietly(path: Path) -> None:
 
 def main() -> int:
     args = parse_args()
+    if args.discard_unusable_receipts:
+        discarded = discard_unusable_receipts()
+        print(f"discarded {len(discarded)} unusable receipt(s)")
+        return 0
     _mark_started(args.trigger)
     lock_acquired = _acquire_compile_lock()
     if lock_acquired is None:

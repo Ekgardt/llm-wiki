@@ -5,7 +5,8 @@ description: "A daily entry starts at a timestamp heading or at an operation mar
 date: 2026-08-21
 confidence: high
 source_authority: user
-status: active
+status: superseded
+superseded_by: "[[daily-entry-quote-anchor-decision]]"
 ---
 # What Delimits One Daily Entry
 

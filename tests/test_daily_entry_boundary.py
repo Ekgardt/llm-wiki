@@ -10,6 +10,8 @@ See `docs/research/2026-08-21-daily-entry-boundary.md`.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 
@@ -184,3 +186,42 @@ def test_a_captured_entry_binds_end_to_end(vault) -> None:
     assert bindings[0]["source_path"] == "knowledge/daily/2026-07-14.md"
     assert bindings[0]["reference"].startswith("daily:2026-07-14 sha256:")
     assert "block:10:00:00" in bindings[0]["reference"]
+
+
+def test_a_shared_timestamp_is_settled_by_the_quote(tmp_path):
+    """The timestamp addresses the entry; the quote proves which one.
+
+    Twelve consolidation entries landed in one second on 2026-08-24, and a daily
+    log is append-only, so no compile of that day could bind evidence at all.
+    """
+    from compile_memory import _evidence_block
+
+    content = (
+        b"<!-- llm-wiki-operation:aaa -->\n"
+        b"- `[13:25:41] episodes | 2026-08-06` 8 durable item(s)\n"
+        b"  - **Decision** first item\n"
+        b"<!-- llm-wiki-operation:bbb -->\n"
+        b"- `[13:25:41] episodes | 2026-08-08` 3 durable item(s)\n"
+        b"  - **Decision** second item\n"
+    )
+    source = SimpleNamespace(content=content)
+
+    block, offset = _evidence_block(source, "13:25:41", b"  - **Decision** second item")
+
+    assert b"second item" in block
+    assert b"first item" not in block
+    assert content[offset : offset + len(block)] == block
+
+
+def test_a_quote_in_two_shared_entries_is_still_refused(tmp_path):
+    from compile_memory import _evidence_block
+
+    content = (
+        b"<!-- llm-wiki-operation:aaa -->\n"
+        b"- `[13:25:41] episodes | one` said the same thing\n"
+        b"<!-- llm-wiki-operation:bbb -->\n"
+        b"- `[13:25:41] episodes | two` said the same thing\n"
+    )
+
+    with pytest.raises(ValueError, match="ambiguous or missing"):
+        _evidence_block(SimpleNamespace(content=content), "13:25:41", b"said the same thing")
