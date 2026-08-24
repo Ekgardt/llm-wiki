@@ -80,20 +80,38 @@ _WATCHED_KNOWLEDGE = (
 )
 
 
-def _knowledge_entries() -> dict[str, set[str]]:
+def _file_identity(path: Path) -> tuple[int, int]:
+    info = path.stat()
+    return (info.st_size, info.st_mtime_ns)
+
+
+def _knowledge_entries() -> dict[str, tuple[int, int]]:
+    """Every knowledge file under watch, by size and modification time.
+
+    Names alone were not enough: three tests appended to an existing project
+    journal, which changed nothing about the directory listing and slipped past
+    the first version of this guard.
+    """
+    seen: dict[str, tuple[int, int]] = {}
+    for relative in _WATCHED_KNOWLEDGE:
+        seen.update(_files_under(VAULT_ROOT / relative))
+    return seen
+
+
+def _files_under(root: Path) -> dict[str, tuple[int, int]]:
+    if not root.is_dir():
+        return {}
     return {
-        relative: {entry.name for entry in (VAULT_ROOT / relative).iterdir()}
-        for relative in _WATCHED_KNOWLEDGE
-        if (VAULT_ROOT / relative).is_dir()
+        str(path.relative_to(VAULT_ROOT)): _file_identity(path)
+        for path in root.rglob("*")
+        if path.is_file()
     }
 
 
-def _leaked_entries(before: dict[str, set[str]], after: dict[str, set[str]]) -> list[str]:
-    return sorted(
-        f"{relative}/{name}"
-        for relative, names in after.items()
-        for name in names - before.get(relative, set())
-    )
+def _leaked_entries(
+    before: dict[str, tuple[int, int]], after: dict[str, tuple[int, int]]
+) -> list[str]:
+    return sorted(name for name, identity in after.items() if before.get(name) != identity)
 
 
 @pytest.fixture(scope="session", autouse=True)
