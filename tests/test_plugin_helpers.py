@@ -1091,9 +1091,12 @@ def test_transient_cleanup_after_durable_publication(tmp_path, monkeypatch, even
     import integration_adapter
 
     state_root = tmp_path / "state"
+    vault = tmp_path / "vault"
+    vault.mkdir()
     project = tmp_path / "project"
     project.mkdir()
     monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
+    monkeypatch.setattr(integration_adapter, "ROOT", vault)
     monkeypatch.setattr(
         integration_adapter,
         "_publish_durable_capture_intent",
@@ -1155,9 +1158,12 @@ def test_precompact_transcript_text_materializes_and_confirms_start(tmp_path, mo
     import integration_adapter
 
     state_root = tmp_path / "state"
+    vault = tmp_path / "vault"
+    vault.mkdir()
     project = tmp_path / "project"
     project.mkdir()
     monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
+    monkeypatch.setattr(integration_adapter, "ROOT", vault)
     calls = []
     monkeypatch.setattr(
         integration_adapter,

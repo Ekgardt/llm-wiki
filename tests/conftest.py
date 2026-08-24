@@ -67,5 +67,43 @@ def _isolate_test_state_root():
         shutil.rmtree(_EARLY_STATE_ROOT, ignore_errors=True)
 
 
+# This checkout *is* the owner's vault since the two directories were merged on
+# 2026-08-21, so a test that writes knowledge through the pinned LLM_WIKI_ROOT
+# writes into their memory. By 2026-08-24 that had left 384 project journals from
+# past pytest sessions in `knowledge/projects`, and they were coming back as
+# answers to real questions. The guard makes the next one impossible to miss.
+_WATCHED_KNOWLEDGE = (
+    "knowledge/projects",
+    "knowledge/daily",
+    "knowledge/notes",
+    "knowledge/raw/sessions",
+)
+
+
+def _knowledge_entries() -> dict[str, set[str]]:
+    return {
+        relative: {entry.name for entry in (VAULT_ROOT / relative).iterdir()}
+        for relative in _WATCHED_KNOWLEDGE
+        if (VAULT_ROOT / relative).is_dir()
+    }
+
+
+def _leaked_entries(before: dict[str, set[str]], after: dict[str, set[str]]) -> list[str]:
+    return sorted(
+        f"{relative}/{name}"
+        for relative, names in after.items()
+        for name in names - before.get(relative, set())
+    )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_writes_into_the_live_vault():
+    """Fail the session when a test leaves knowledge behind in this checkout."""
+    before = _knowledge_entries()
+    yield
+    leaked = _leaked_entries(before, _knowledge_entries())
+    assert not leaked, "tests wrote into the live vault: " + ", ".join(leaked[:20])
+
+
 # Default fake provider for any accidental live LLM calls in unit tests.
 os.environ.setdefault("MEMORY_LLM_PROVIDER", "fake")
