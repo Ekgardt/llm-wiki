@@ -95,6 +95,43 @@ unset, so `reranker_applied` was false in every measurement quoted here. Turning
 it on costs a model download and per-query latency, which is the owner's call to
 make, not this pass's.
 
+## Turning the cross-encoder on (2026-08-24, after the owner asked for it)
+
+It could not be turned on. `scripts/reranker.py` loaded the model through
+optimum with `file_name="onnx/model.onnx"`, and the only reranker the product
+approves — `BAAI/bge-reranker-v2-m3` at the pinned revision
+`953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e`, the one entry in
+`benchmark/model-matrix-v1.json` — ships no ONNX at that revision: config,
+safetensors, tokenizer, nothing else. Checked against the Hub API for that exact
+sha. So the runtime reranker could never have loaded the only model it is allowed
+to load, on any machine, and the failure was silent by design: an unloadable
+bundle returns None and search keeps the fused order.
+
+The loader now uses `transformers`, which is what the matrix entry names
+(`native_library: transformers`) and what `benchmark/run_retrieval_v2.py` has
+always used, with the same guarantees kept: pinned revision, `local_files_only`,
+`trust_remote_code=False`, and `AutoModelForSequenceClassification` for the
+declared `tokenizer_pair_sequence_classification` contract at 512 tokens.
+
+Measured on this vault, both runs against the same generation
+(`generation-18ce9e926776e5d7-96171cc2`, 1222 sources), ten questions:
+
+| | hit@1 | hit@5 | seconds for ten |
+|---|---|---|---|
+| fused order only | 0.0 | 0.6 | 120 |
+| with the cross-encoder | 0.1 | 0.7 | 334 |
+
+Per pair on this four-core CPU: 1.15–1.45 s at 512 tokens, so a depth of twenty
+costs about 23 s of the ~21 s per query the stand shows. Depth 8 was measured
+too: identical quality (0.1 / 0.7) and only 19 s faster over ten questions, so
+the gain comes from the first few candidates and the depth default was left at
+20 rather than tuned on ten cases.
+
+What it buys is real and small: one question of ten moves into first place and
+one more into the top five. What it costs is roughly a threefold increase in
+answer latency. That is the trade the owner asked to see; the model is now
+configured in `~/.claude/settings.json` for this machine.
+
 ## Sources
 
 - [AI Search now has hybrid search and relevance boosting, Cloudflare changelog, 2026-04-16](https://developers.cloudflare.com/changelog/post/2026-04-16-hybrid-search-and-relevance-boosting/) — boosting on custom metadata fields as a first-class control.

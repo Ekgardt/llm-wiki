@@ -65,16 +65,16 @@ def test_partial_or_mutable_identity_is_rejected(
 
 
 def _fake_reranker_modules(monkeypatch: pytest.MonkeyPatch, calls: list[tuple]) -> None:
-    optimum = ModuleType("optimum")
-    optimum.__path__ = []
-    optimum_onnx = ModuleType("optimum.onnxruntime")
+    """Stand in for `transformers` and `torch`, recording how they were called."""
     transformers = ModuleType("transformers")
+    torch = ModuleType("torch")
+    torch.float32 = "float32"
 
     class Model:
         @classmethod
         def from_pretrained(cls, model: str, **options):
             calls.append(("model", model, options))
-            return object()
+            return _LoadedModel()
 
     class Tokenizer:
         @classmethod
@@ -82,11 +82,18 @@ def _fake_reranker_modules(monkeypatch: pytest.MonkeyPatch, calls: list[tuple]) 
             calls.append(("tokenizer", model, options))
             return object()
 
-    optimum_onnx.ORTModelForSequenceClassification = Model
+    transformers.AutoModelForSequenceClassification = Model
     transformers.AutoTokenizer = Tokenizer
-    monkeypatch.setitem(sys.modules, "optimum", optimum)
-    monkeypatch.setitem(sys.modules, "optimum.onnxruntime", optimum_onnx)
     monkeypatch.setitem(sys.modules, "transformers", transformers)
+    monkeypatch.setitem(sys.modules, "torch", torch)
+
+
+class _LoadedModel:
+    def __init__(self) -> None:
+        self.evaluated = False
+
+    def eval(self) -> None:
+        self.evaluated = True
 
 
 def test_explicit_immutable_model_load_is_local_only(
@@ -104,29 +111,19 @@ def test_explicit_immutable_model_load_is_local_only(
 
     bundle = reranker._get_reranker_bundle()
 
+    pinned = {
+        "revision": revision,
+        "local_files_only": True,
+        "trust_remote_code": False,
+    }
+
     assert bundle is not None
     assert bundle["model_id"] == "org/model"
     assert bundle["model_revision"] == revision
+    assert bundle["model"].evaluated is True
     assert calls == [
-        (
-            "model",
-            "org/model",
-            {
-                "file_name": "onnx/model.onnx",
-                "revision": revision,
-                "local_files_only": True,
-                "trust_remote_code": False,
-            },
-        ),
-        (
-            "tokenizer",
-            "org/model",
-            {
-                "revision": revision,
-                "local_files_only": True,
-                "trust_remote_code": False,
-            },
-        ),
+        ("tokenizer", "org/model", pinned),
+        ("model", "org/model", {**pinned, "torch_dtype": "float32"}),
     ]
 
 
@@ -147,9 +144,7 @@ def test_missing_local_artifact_degrades_without_network(
         calls.append(("missing", model, options))
         raise OSError("not cached")
 
-    sys.modules[
-        "optimum.onnxruntime"
-    ].ORTModelForSequenceClassification.from_pretrained = missing
+    sys.modules["transformers"].AutoTokenizer.from_pretrained = missing
 
     assert reranker._get_reranker_bundle() is None
     assert len(calls) == 1

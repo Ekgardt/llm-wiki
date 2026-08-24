@@ -22,6 +22,8 @@ _reranker_bundle: dict[str, Any] | None = None
 
 IMMUTABLE_REVISION = re.compile(r"^[0-9a-f]{40}$")
 DEFAULT_RERANK_DEPTH = 20
+# The approved matrix entry for BAAI/bge-reranker-v2-m3 declares 512 tokens.
+RERANK_MAX_TOKENS = 512
 RERANK_BLEND_RERANK = 0.6
 RERANK_BLEND_RRF = 0.4
 
@@ -41,13 +43,42 @@ def configured_reranker_identity() -> tuple[str, str] | None:
 
 def _have_reranker_deps() -> bool:
     try:
-        import onnxruntime  # noqa: F401
-        import optimum.onnxruntime  # noqa: F401
-        import tokenizers  # noqa: F401
+        import torch  # noqa: F401
+        import transformers  # noqa: F401
 
         return True
     except ImportError:
         return False
+
+
+def _loaded_bundle(model_name: str, revision: str) -> dict[str, Any]:
+    """The pinned cross-encoder, loaded from local files only.
+
+    Loaded through `transformers`, the library the approved model matrix names
+    for this architecture and the one the benchmark already uses. The previous
+    loader asked optimum for `onnx/model.onnx`, and the approved revision of
+    `BAAI/bge-reranker-v2-m3` ships no ONNX at all — so the runtime reranker
+    could never load the only reranker the product approves.
+    """
+    import torch
+    from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+    common = {
+        "revision": revision,
+        "local_files_only": True,
+        "trust_remote_code": False,
+    }
+    tokenizer = AutoTokenizer.from_pretrained(model_name, **common)
+    model = AutoModelForSequenceClassification.from_pretrained(
+        model_name, torch_dtype=torch.float32, **common
+    )
+    model.eval()
+    return {
+        "model": model,
+        "tokenizer": tokenizer,
+        "model_id": model_name,
+        "model_revision": revision,
+    }
 
 
 def _get_reranker_bundle() -> dict[str, Any] | None:
@@ -56,37 +87,13 @@ def _get_reranker_bundle() -> dict[str, Any] | None:
     if _reranker_bundle is not None:
         return _reranker_bundle
     identity = configured_reranker_identity()
-    if identity is None:
-        return None
-    if not _have_reranker_deps():
+    if identity is None or not _have_reranker_deps():
         return None
     try:
-        from optimum.onnxruntime import ORTModelForSequenceClassification
-        from transformers import AutoTokenizer
-
-        model_name, revision = identity
-        model = ORTModelForSequenceClassification.from_pretrained(
-            model_name,
-            file_name="onnx/model.onnx",
-            revision=revision,
-            local_files_only=True,
-            trust_remote_code=False,
-        )
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_name,
-            revision=revision,
-            local_files_only=True,
-            trust_remote_code=False,
-        )
-        _reranker_bundle = {
-            "model": model,
-            "tokenizer": tokenizer,
-            "model_id": model_name,
-            "model_revision": revision,
-        }
-        return _reranker_bundle
-    except Exception:
+        _reranker_bundle = _loaded_bundle(*identity)
+    except Exception:  # noqa: BLE001 - an unloadable reranker degrades one stage
         return None
+    return _reranker_bundle
 
 
 def _recorded_weight(item: dict, key: str, fallback: float) -> float:
@@ -244,13 +251,21 @@ def _score_with_scorer(
 
 
 def _cross_encoder_scores(bundle: Mapping[str, Any], pairs: list) -> list[float]:
+    """Raw logits for (query, passage) pairs; the caller squashes them."""
     import torch
 
+    queries = [pair[0] for pair in pairs]
+    documents = [pair[1] for pair in pairs]
     inputs = bundle["tokenizer"](
-        pairs, padding=True, truncation=True, max_length=512, return_tensors="pt"
+        queries,
+        documents,
+        padding=True,
+        truncation="longest_first",
+        max_length=RERANK_MAX_TOKENS,
+        return_tensors="pt",
     )
-    with torch.no_grad():
-        logits = bundle["model"](**inputs).logits.squeeze(-1).tolist()
+    with torch.inference_mode():
+        logits = bundle["model"](**inputs).logits.float().reshape(-1).tolist()
     if isinstance(logits, float):
         return [float(logits)]
     return [float(value) for value in logits]
