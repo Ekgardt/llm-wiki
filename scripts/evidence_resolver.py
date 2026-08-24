@@ -959,10 +959,14 @@ def _daily_part_bounds(content: bytes) -> list[tuple[int, int]]:
 
 
 def _slice_boundaries(content: bytes, start: int) -> list[int]:
-    """Where a historical slice beginning at `start` could have ended."""
+    """Where a historical slice beginning at `start` could have ended.
+
+    The end of the file is always a candidate, even when a day carries more
+    entries than the scan is allowed to try: the whole tail is the one slice a
+    compile part is most likely to have been.
+    """
     ends = [offset for offset in _daily_entry_offsets(content) if offset > start]
-    ends.append(len(content))
-    return ends[:MAX_EVIDENCE_SLICE_CANDIDATES]
+    return [*ends[: MAX_EVIDENCE_SLICE_CANDIDATES - 1], len(content)]
 
 
 def _slice_from(content: bytes, start: int, digest: str) -> bytes | None:
