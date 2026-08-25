@@ -3300,7 +3300,11 @@ def retrieve_via_search_memory(
     project: str | None = None,
     since: str | None = None,
     as_of: str | None = None,
-    semantic: bool = False,
+    # The two entry points disagreed until 2026-08-25: `search_memory.search`
+    # asks for the semantic leg, this one did not, so a caller reaching the
+    # lower entry directly got lexical-only answers and no sign of it. Every
+    # real caller passes the flag explicitly, so this only closes a trap.
+    semantic: bool = True,
     page_paths: list[Path] | None = None,
     graph: bool = True,
     rerank: bool = True,

@@ -81,3 +81,16 @@ def test_weekly_keeps_outer_owner_and_marker_while_running_nested_nightly_work(
         operational_ownership.release_marker_owner(lease, marker)
 
     assert not marker_path.exists()
+
+
+def test_the_weekly_pass_ages_session_records_out_of_the_active_tree():
+    """The archiver only helps if the pass that runs unattended calls it."""
+    import scheduled_weekly
+
+    steps = scheduled_weekly._script_steps()
+    labels = [label for _message, label, _command, _timeout in steps]
+    sessions = next(step for step in steps if step[1] == "sessions")
+
+    assert labels.index("sessions") > labels.index("archive")
+    assert sessions[2][-1] == "--apply"
+    assert sessions[2][-2].endswith("archive_sessions.py")
