@@ -504,14 +504,16 @@ def _anchor_tokens(tokens: set[str]) -> set[str]:
     return {token for token in tokens if _is_anchor(token, dominant)}
 
 
-# What an operator would act on: a figure, a version, a flag, a quoted
-# identifier. These are the parts of a claim where being cited from the right
-# page but the wrong sentence changes what someone does.
-_FIGURE = re.compile(r"(?<![\w.])\d+(?:[.,]\d+)*(?![\w.])|--[a-z][a-z0-9-]{2,}|`[^`\n]{2,40}`")
+# What an operator would act on and cannot paraphrase: a number, a version, a
+# flag. Backticked identifiers were deliberately left out — this vault's pages
+# are dense with paths and function names, and a supporting span routinely
+# names different ones than the claim does. For memory, refusing a correct
+# answer costs more than accepting a weak citation.
+_FIGURE = re.compile(r"(?<![\w.])\d+(?:[.,]\d+)*(?![\w.])|--[a-z][a-z0-9-]{2,}")
 
 
 def _hard_tokens(text: str) -> set[str]:
-    return {match.casefold().strip("`") for match in _FIGURE.findall(str(text))}
+    return {match.casefold() for match in _FIGURE.findall(str(text))}
 
 
 def _require_figures_agree(claim_text: str, span_text: str) -> None:
