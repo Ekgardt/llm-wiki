@@ -373,7 +373,7 @@ state, including everything found and fixed during the audit week.
 - **SessionStart impact advisory** — stale wiki pages from code changes.
 - **MCP config in install scripts** — Claude Code + OpenCode auto-config.
 - **Optional extras** — `hybrid`, `code-graph`, `mcp-server`, `reranker`, `full`.
-- **4489 tests**.
+- **7018 tests** at release (4489 when the v4 platform work landed).
 
 ## [3.4.0] — 2026-07-11
 
