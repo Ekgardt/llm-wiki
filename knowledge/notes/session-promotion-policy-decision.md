@@ -43,8 +43,8 @@ of tier.
    and hands the result to the ordinary compile with its receipts and
    transactions. That path has evidence; the end-of-session hook does not.
 3. **The end-of-session classifier keeps one job** — whether to append a daily
-   entry now — and it reads the same head-and-tail sample the consolidation
-   already uses, instead of the bare tail.
+   entry now. Its input window was left as the tail. Moving it was tried and
+   measured on the same day and did not earn its place; see below.
 4. **`OPEN-034` stops being a gate.** The unstable labels were gating a number
    that no longer decides retention. `benchmark/run_flush_classification.py`
    stays as a regression check on the hint, and its accuracy figures stay
@@ -52,14 +52,41 @@ of tier.
 
 ## What this decision does not claim
 
-- Not that head+tail is optimal. It is better than tail-only for a document
-  that decides in its middle, and it makes one convention where there were two.
+- Not that the tail is the right window. It is the window that nothing
+  measured beats, which is a weaker and truer statement.
 - Not that the classifier is accurate. That number is still unmeasured against
   trustworthy labels, and this decision removes the need to trust it, rather
   than the need to measure it.
 - Not that nothing is ever lost. A session whose record fails to write is still
   lost; that path is covered by `record_capture_failure` and its counter, not
   by this decision.
+
+## Measured and not adopted: moving the classifier's window
+
+The mechanism proposed with this decision was to sample head and tail instead
+of the tail alone, on the reasoning that a session states its problem at the
+start, decides in the middle, and ends in tool noise. It was measured before
+being claimed, on forty real sessions, through the product's own prompt and
+provider — eighty calls, no provider failures:
+
+- tail-only promoted **24 of 40** (major 22, minor 2, ok 16);
+- head+tail promoted **24 of 40** (major 21, minor 3, ok 16);
+- **two** sessions changed tier, in opposite directions; five were shorter than
+  the budget and saw byte-identical prompts.
+
+The session that got worse is the reason the change was reverted rather than
+kept for tidiness: its decisions sat 31 814 characters from the end — inside a
+60 000-character tail, outside a 30 000-character half — so splitting the
+window dropped precisely the band that carried them. A change with one gain,
+one loss and no net movement is not an improvement; it is a coin.
+
+This does not refute `NEW-62`. That finding counted durable content captured
+against a labelled corpus; this counts promotion tier. They are different
+quantities and only the second one was measured here. What can be said is that
+the tier distribution is insensitive to where this window points, which is a
+reason to stop treating the window as the important question — and the rest of
+this decision is what makes it unimportant: the record is already retained in
+full, and the page is made by consolidation reading all of it.
 
 ## Consequences
 

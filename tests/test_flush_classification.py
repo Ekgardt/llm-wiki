@@ -471,40 +471,36 @@ def test_maybe_trigger_compile_respects_cooldown(monkeypatch):
     assert spawned == [], "cooldown should have prevented spawn"
 
 
-def test_the_classifier_sees_both_ends_of_a_long_transcript(tmp_path, monkeypatch):
-    """A tail-only window shows the least decisive part of a long session.
+def test_the_classification_window_is_the_tail_and_that_is_deliberate(tmp_path, monkeypatch):
+    """Head-and-tail was measured on 2026-08-25 and not adopted.
 
-    Measured on forty real sessions (`NEW-62`): the full budget promoted one,
-    a third of the budget promoted four. Work states its problem at the start
-    and decides in the middle; the tail is tool output. This asserts the shape
-    of the sample, not a tier — the tier is what the stand measures.
+    Both windows promoted 24 of the same 40 real sessions; two changed tier in
+    opposite directions. The regression case decided it: its decisions were
+    31 814 characters from the end, inside a 60 000 tail and outside a 30 000
+    one. This test exists so the next person to try the split finds the
+    measurement instead of repeating it.
     """
     import flush_memory
 
     transcript = tmp_path / "session.jsonl"
-    opening = "OPENING-DECISION " * 200
-    closing = "CLOSING-NOISE " * 200
-    middle = "filler " * 20_000
-    transcript.write_text(opening + middle + closing, encoding="utf-8")
+    opening = "OPENING-BRIEF "
+    closing = "CLOSING-WORK "
+    transcript.write_text(opening + "filler " * 20_000 + closing, encoding="utf-8")
     monkeypatch.setattr(flush_memory, "_transcript_path_allowed", lambda path: True)
 
-    excerpt = flush_memory.read_transcript_excerpt(transcript, max_chars=4_000)
+    excerpt = flush_memory.read_transcript_tail(transcript, max_chars=4_000)
 
-    assert len(excerpt) <= 4_000 + len(flush_memory.TRANSCRIPT_GAP_NOTE)
-    assert "OPENING-DECISION" in excerpt
-    assert "CLOSING-NOISE" in excerpt
-    assert flush_memory.TRANSCRIPT_GAP_NOTE in excerpt
+    assert len(excerpt) == 4_000
+    assert "CLOSING-WORK" in excerpt
+    assert "OPENING-BRIEF" not in excerpt
 
 
 def test_a_transcript_within_budget_is_passed_through_whole(tmp_path, monkeypatch):
-    """No gap marker where nothing was dropped: the note must mean something."""
+    """Nothing is dropped when nothing needs to be."""
     import flush_memory
 
     transcript = tmp_path / "short.jsonl"
     transcript.write_text("one\ntwo\nthree\n", encoding="utf-8")
     monkeypatch.setattr(flush_memory, "_transcript_path_allowed", lambda path: True)
 
-    excerpt = flush_memory.read_transcript_excerpt(transcript, max_chars=4_000)
-
-    assert excerpt == "one\ntwo\nthree\n"
-    assert flush_memory.TRANSCRIPT_GAP_NOTE not in excerpt
+    assert flush_memory.read_transcript_tail(transcript, max_chars=4_000) == "one\ntwo\nthree\n"

@@ -49,6 +49,19 @@ corpus, which is exactly the shape `NEW-62` measured.
   Markdown in git, and a parametric store cannot be reviewed, diffed, or
   superseded.
 
+## What happened when the truncation claim was tested here (same day)
+
+The head+tail literature did not transfer. Forty real sessions through the
+product's own prompt and provider, eighty calls: tail-only promoted 24, head+
+tail promoted 24, two sessions changed tier in opposite directions. One
+regressed because its decisions sat 31 814 characters from the end — inside a
+60 000 tail, outside a 30 000 half. The change was reverted.
+
+The general lesson is the one this repository keeps relearning: a result
+measured on other corpora is a hypothesis about this one, and the cheap
+experiment is worth more than the citation. The retention half of the decision
+did not depend on it and stands.
+
 ## Sources
 
 - [Memory Depth, Not Memory Access: Selective Parametric Consolidation for Long-Running Language Agents](https://arxiv.org/abs/2606.26806)
