@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import errno
-import functools
 import hashlib
 import importlib.util
 import json
@@ -7535,38 +7534,54 @@ def _deferrable_checks(
     state_path: Path,
     home_path: Path,
     generated_at: datetime,
-    deadline: float,
-) -> tuple[tuple[str, Callable[[], dict]], ...]:
-    partial = functools.partial
+) -> tuple[tuple[str, Callable[[float], dict]], ...]:
+    """Each deferrable check, cheapest first, taking the deadline it may spend.
+
+    Order is the budget policy. The generation check re-collects the whole
+    corpus — 1.4 s on this vault on 2026-08-24, and it grows with the vault —
+    while every other check reads one file or one table. Running it first meant
+    it spent the entire budget and the six checks after it reported "not
+    completed", which describes the clock rather than the vault. Last, it gets
+    whatever the cheap checks did not need, and only it defers.
+    """
     return (
         (
-            "generation",
-            partial(_generation_check, root_path, state_path, generated_at, deadline),
-        ),
-        (
             "index",
-            partial(_index_check, state_path, generated_at, deadline, root=root_path),
+            lambda budget: _index_check(
+                state_path, generated_at, budget, root=root_path
+            ),
         ),
         (
             "scheduler",
-            partial(_scheduler_check, root_path, state_path, generated_at, deadline),
+            lambda budget: _scheduler_check(
+                root_path, state_path, generated_at, budget
+            ),
         ),
-        ("capture", partial(_capture_check, state_path, deadline)),
-        ("mcp", partial(_mcp_check, root_path)),
+        ("capture", lambda budget: _capture_check(state_path, budget)),
+        ("mcp", lambda _budget: _mcp_check(root_path)),
         (
             "integrations",
-            partial(_integration_check, root_path, home_path, deadline=deadline),
+            lambda budget: _integration_check(root_path, home_path, deadline=budget),
         ),
-        ("pyright", partial(_pyright_check, root_path, state_path, deadline=deadline)),
+        (
+            "pyright",
+            lambda budget: _pyright_check(root_path, state_path, deadline=budget),
+        ),
         (
             "lsp",
-            partial(_lsp_runtime_check, state_path, generated_at, deadline=deadline),
+            lambda budget: _lsp_runtime_check(state_path, generated_at, deadline=budget),
+        ),
+        (
+            "generation",
+            lambda budget: _generation_check(
+                root_path, state_path, generated_at, budget
+            ),
         ),
     )
 
 
 def _completed_or_deferred(
-    check_id: str, operation: Callable[[], dict], deadline: float
+    check_id: str, operation: Callable[[float], dict], deadline: float, share: float
 ) -> dict:
     """The LSP check owns its own budget; the rest defer once time is up."""
     if check_id != "lsp" and time.monotonic() >= deadline:
@@ -7576,7 +7591,7 @@ def _completed_or_deferred(
             "Check not completed because the doctor time budget was exhausted.",
             {"budget_exhausted": True},
         )
-    return operation()
+    return operation(share)
 
 
 def _collect_checks(
@@ -7596,9 +7611,9 @@ def _collect_checks(
         _claim_check(root_path, state_path, deadline),
     ]
     for check_id, operation in _deferrable_checks(
-        root_path, state_path, home_path, generated_at, deadline
+        root_path, state_path, home_path, generated_at
     ):
-        checks.append(_completed_or_deferred(check_id, operation, deadline))
+        checks.append(_completed_or_deferred(check_id, operation, deadline, deadline))
     return checks
 
 

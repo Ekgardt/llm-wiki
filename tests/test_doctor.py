@@ -4710,3 +4710,59 @@ def test_state_without_a_nightly_timestamp_keeps_the_old_day_rule(
     )
 
     assert check["status"] == "ok"
+
+
+def test_the_corpus_wide_check_runs_after_the_cheap_ones(monkeypatch):
+    """Order is the budget policy: the expensive check must not starve the rest."""
+    import doctor
+
+    order: list[str] = []
+
+    def record(check_id):
+        def check(budget):
+            order.append(check_id)
+            return doctor._result(check_id, "ok", "ok", {})
+
+        return check
+
+    names = [
+        name
+        for name, _operation in doctor._deferrable_checks(
+            Path("."), Path("."), Path("."), datetime.now(timezone.utc)
+        )
+    ]
+    monkeypatch.setattr(
+        doctor,
+        "_deferrable_checks",
+        lambda *a, **k: tuple((name, record(name)) for name in names),
+    )
+    for attribute, check_id in (
+        ("_environment_check", "environment"),
+        ("_runtime_check", "runtime"),
+        ("_filesystem_check", "filesystem"),
+        ("_transaction_check", "transactions"),
+        ("_queue_check", "queue"),
+        ("_archive_check", "archives"),
+        ("_claim_check", "claims"),
+    ):
+        monkeypatch.setattr(
+            doctor, attribute, _fixed_ok(doctor, check_id), raising=True
+        )
+
+    doctor._collect_checks(
+        Path("."),
+        Path("."),
+        Path("."),
+        datetime.now(timezone.utc),
+        time.monotonic() + 8.0,
+    )
+
+    assert names[-1] == "generation", "the corpus-wide check must be scheduled last"
+    assert order[-1] == "generation"
+
+
+def _fixed_ok(doctor, check_id):
+    def check(*_args, **_keywords):
+        return doctor._result(check_id, "ok", "ok", {})
+
+    return check
