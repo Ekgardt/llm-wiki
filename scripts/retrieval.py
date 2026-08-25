@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from provenance import authority_weight, type_weight
+from provenance import authority_weight, curated_pages_first, source_type_weight
 
 MAX_OPTIONAL_STRAGGLERS = 2
 OPTIONAL_STAGE_MAX_SECONDS = 0.5
@@ -1009,16 +1009,24 @@ def expand_evidence_graph(
 def _weigh_by_trust(
     scores: Mapping[str, float],
     meta: dict[str, dict[str, Any]],
+    *,
+    curated_first: bool,
 ) -> dict[str, float]:
     """Multiply each fused score by who said it and by what the page is.
 
     Both factors are recorded on the candidate, separately, so the ordering can
-    be explained by name rather than by one opaque number.
+    be explained by name rather than by one opaque number. `curated_first` is
+    what the query analysis decided: a code-shaped question turns the
+    curated-knowledge prior off, and everything else keeps it.
     """
     weighted: dict[str, float] = {}
     for key, value in scores.items():
         authority = authority_weight(meta[key].get("authority"))
-        page = type_weight(meta[key].get("type"))
+        page = source_type_weight(
+            meta[key].get("type"),
+            meta[key].get("relative_path"),
+            curated_first=curated_first,
+        )
         meta[key]["authority_weight"] = authority
         meta[key]["type_weight"] = page
         weighted[key] = value * authority * page
@@ -1261,12 +1269,18 @@ def fuse_rrf(
     dense: Sequence[Mapping[str, Any]] | None,
     graph: Sequence[Mapping[str, Any]] | None,
     k: int = RRF_K,
+    intents: Sequence[str] | None = None,
 ) -> tuple[tuple[RetrievalCandidate, ...], dict[str, dict[str, Any]]]:
     """Fuse independent ranked lists with weighted rank-only RRF.
 
     Larger final_score wins. Raw backend magnitudes are preserved on the
     candidate but never enter the fusion formula. Equal RRF ties break by
     candidate_id ascending.
+
+    `intents` is what the query analysis read. `None` means the caller did not
+    analyse the query at all, and then this ranks exactly as it did before the
+    trust weight became conditional; an analysed query — including one whose
+    analysis found no intent — is answered under the vault's own rule.
     """
     scores: dict[str, float] = {}
     meta: dict[str, dict[str, Any]] = {}
@@ -1285,7 +1299,8 @@ def fuse_rrf(
                 scores=scores,
                 meta=meta,
             )
-    weighted = _weigh_by_trust(scores, meta)
+    analysed = intents is not None and curated_pages_first(intents)
+    weighted = _weigh_by_trust(scores, meta, curated_first=analysed)
     ordered = sorted(weighted, key=lambda item: (-weighted[item], item))
     candidates = [
         _fused_candidate(key, meta[key], round(scores[key], 6), round(weighted[key], 6))
@@ -2616,12 +2631,13 @@ def _require_bounded_int(value: object, low: int, high: int, name: str) -> None:
 
 
 def _fused_candidates(
-    backends: _BackendRun, signals: Sequence[str]
+    backends: _BackendRun, signals: Sequence[str], intents: Sequence[str] | None = None
 ) -> tuple[tuple[RetrievalCandidate, ...], dict[str, dict[str, Any]]]:
     return fuse_rrf(
         lexical=_fusion_input(backends.lexical_hits, "lexical", signals),
         dense=_fusion_input(backends.dense_hits, "dense", signals),
         graph=_fusion_input(backends.graph_hits, "graph", signals),
+        intents=intents,
     )
 
 
@@ -2779,7 +2795,7 @@ def retrieve(
     )
     fallback = _first_reason(backends.graph_failure, fallback)
 
-    candidates, display_meta = _fused_candidates(backends, signals)
+    candidates, display_meta = _fused_candidates(backends, signals, analysis.intents)
     exact_query = _exact_query(analysis)
     candidates = _promote_exact_filename(candidates, exact_query)
     _check_stopped(deadline_monotonic, cancelled)
