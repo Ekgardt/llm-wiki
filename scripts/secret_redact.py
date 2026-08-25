@@ -23,7 +23,28 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # Punctuation is still a boundary, so `KEY=sk-…`, `"sk-…"` and `(sk-…)` are
     # caught as before. See docs/research/2026-08-22-secret-prefix-boundaries.md.
     (re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9][A-Za-z0-9_-]{18,}"), "[REDACTED_API_KEY]"),
-    (re.compile(r"(?<![A-Za-z0-9])ghp_[A-Za-z0-9]{20,}"), "[REDACTED_GITHUB_TOKEN]"),
+    # GitHub ships six prefixes, not one, and the fine-grained tokens carry a
+    # seventh shape. See docs/research/2026-08-25-which-secret-shapes-are-worth-a-pattern.md.
+    (
+        re.compile(r"(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{20,}"),
+        "[REDACTED_GITHUB_TOKEN]",
+    ),
+    (
+        re.compile(r"(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{20,}"),
+        "[REDACTED_GITHUB_TOKEN]",
+    ),
+    # Underscore keys (Stripe and everyone who copied the shape). The existing
+    # `sk-` rule never saw these, and the prefix does not name the vendor, so
+    # the replacement does not claim one.
+    (
+        re.compile(r"(?<![A-Za-z0-9])[sr]k_(live|test)_[A-Za-z0-9]{16,}"),
+        "[REDACTED_API_KEY]",
+    ),
+    (re.compile(r"(?<![A-Za-z0-9])npm_[A-Za-z0-9]{30,}"), "[REDACTED_API_KEY]"),
+    (re.compile(r"(?<![A-Za-z0-9])hf_[A-Za-z0-9]{30,}"), "[REDACTED_API_KEY]"),
+    (re.compile(r"(?<![A-Za-z0-9])pypi-[A-Za-z0-9_-]{30,}"), "[REDACTED_API_KEY]"),
+    (re.compile(r"(?<![A-Za-z0-9])GOCSPX-[A-Za-z0-9_-]{20,}"), "[REDACTED_API_KEY]"),
+    (re.compile(r"(?<![A-Za-z0-9])xapp-[0-9]-[A-Za-z0-9-]{10,}"), "[REDACTED_SLACK_TOKEN]"),
     (re.compile(r"(?<![A-Za-z0-9])xox[baprs]-[A-Za-z0-9-]{10,}"), "[REDACTED_SLACK_TOKEN]"),
     (re.compile(r"(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}"), "[REDACTED_AWS_KEY]"),
     (re.compile(r"(?<![A-Za-z0-9])AIza[0-9A-Za-z_-]{35}"), "[REDACTED_GOOGLE_KEY]"),
