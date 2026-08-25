@@ -142,6 +142,7 @@ Research: `docs/research/2026-08-23-memory-architectures-second-pass.md`.
   real sessions on which the product kept one.
 
 ## Related
+- [[knowledge/notes/session-promotion-policy-decision]] — хранение безусловно; повышение до страницы решает консолидация по всей записи.
 
 - [[knowledge/notes/nightly-builds-generation-vectors-decision]] — the retrieval
   path this evidence enters.

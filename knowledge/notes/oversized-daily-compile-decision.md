@@ -89,3 +89,6 @@ it.
 - [[knowledge/notes/daily-entry-boundary-decision]] — what delimits one entry in the log this decision cuts.
 - [[knowledge/notes/part-scoped-evidence-decision]] — how a reader verifies a page written from one of these parts.
 - [[knowledge/notes/daily-entry-quote-anchor-decision]] — links to this page.
+
+## Related
+- [[knowledge/notes/session-promotion-policy-decision]] — хранение безусловно; повышение до страницы решает консолидация по всей записи.

@@ -226,7 +226,26 @@ def _cleanup_ephemeral_transcript(path: str) -> None:
         pass
 
 
-def read_transcript_tail(path: Path, max_chars: int = MAX_TRANSCRIPT_CHARS) -> str:
+# The same marker the nightly consolidation uses, so a model that sees both
+# reads one convention rather than two.
+TRANSCRIPT_GAP_NOTE = "\n\n… (middle of the session omitted) …\n\n"
+
+
+def read_transcript_excerpt(path: Path, max_chars: int = MAX_TRANSCRIPT_CHARS) -> str:
+    """Head and tail of the transcript, never the tail alone.
+
+    Measured on forty real sessions (`NEW-62`): at the full budget the product
+    kept one of them, at a third of the budget it kept four. Seeing more made
+    it keep less, which is the signature of a window aimed at the wrong part
+    of the file — a coding session states its problem at the start, decides in
+    the middle, and ends in tool noise, so the last 60k characters of a long
+    session are the least decisive bytes it has.
+
+    Head+tail is the ordinary answer to that in text classification, and the
+    nightly consolidation in `episode_consolidation.py` already samples these
+    same records that way. Tail-only wins where the outcome sits at the end;
+    that is not what a transcript of work looks like.
+    """
     if not path.exists():
         return ""
     if not _transcript_path_allowed(path):
@@ -235,9 +254,10 @@ def read_transcript_tail(path: Path, max_chars: int = MAX_TRANSCRIPT_CHARS) -> s
         data = path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return ""
-    if len(data) > max_chars:
-        data = data[-max_chars:]
-    return data
+    if len(data) <= max_chars:
+        return data
+    half = max_chars // 2
+    return data[:half] + TRANSCRIPT_GAP_NOTE + data[-half:]
 
 
 CLASSIFICATION_SYSTEM_PROMPT = (
@@ -473,7 +493,7 @@ def maybe_trigger_compile(state: dict, daily_path: Path, tier: str) -> None:
 def _flush_summary(args: argparse.Namespace) -> str | None:
     if not args.transcript:
         return ""
-    transcript = read_transcript_tail(Path(args.transcript))
+    transcript = read_transcript_excerpt(Path(args.transcript))
     if not transcript:
         return ""
     return summarize_with_llm(transcript, args.event, args.session_id)
@@ -1189,7 +1209,7 @@ def _keep_transcript_record(args: argparse.Namespace) -> None:
     # be tens of thousands of characters, so a 60k tail can start inside one and
     # leave no complete line to render. The record is for storage, not for a
     # context window, and the rendered result is bounded on its own.
-    transcript = read_transcript_tail(Path(args.transcript), max_chars=MAX_RECORD_CHARS)
+    transcript = read_transcript_excerpt(Path(args.transcript), max_chars=MAX_RECORD_CHARS)
     if not transcript:
         return
     fields = {

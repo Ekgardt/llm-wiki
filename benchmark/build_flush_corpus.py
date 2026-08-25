@@ -31,7 +31,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from flush_memory import MAX_TRANSCRIPT_CHARS, read_transcript_tail  # noqa: E402
+from flush_memory import MAX_TRANSCRIPT_CHARS, read_transcript_excerpt  # noqa: E402
 from reliable_memory import validate_schema  # noqa: E402
 
 SCHEMA = ROOT / "benchmark/flush-classification-v2.schema.json"
@@ -179,7 +179,7 @@ def _transcripts(directory: Path, limit: int) -> list[Path]:
 
 
 def _excerpt(path: Path) -> str:
-    text = read_transcript_tail(path, max_chars=MAX_CASE_CHARS)
+    text = read_transcript_excerpt(path, max_chars=MAX_CASE_CHARS)
     return text.strip()
 
 

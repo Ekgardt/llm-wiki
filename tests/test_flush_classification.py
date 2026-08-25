@@ -469,3 +469,42 @@ def test_maybe_trigger_compile_respects_cooldown(monkeypatch):
     }
     flush_memory.maybe_trigger_compile(state, Path("/tmp/x.md"), tier="major")
     assert spawned == [], "cooldown should have prevented spawn"
+
+
+def test_the_classifier_sees_both_ends_of_a_long_transcript(tmp_path, monkeypatch):
+    """A tail-only window shows the least decisive part of a long session.
+
+    Measured on forty real sessions (`NEW-62`): the full budget promoted one,
+    a third of the budget promoted four. Work states its problem at the start
+    and decides in the middle; the tail is tool output. This asserts the shape
+    of the sample, not a tier — the tier is what the stand measures.
+    """
+    import flush_memory
+
+    transcript = tmp_path / "session.jsonl"
+    opening = "OPENING-DECISION " * 200
+    closing = "CLOSING-NOISE " * 200
+    middle = "filler " * 20_000
+    transcript.write_text(opening + middle + closing, encoding="utf-8")
+    monkeypatch.setattr(flush_memory, "_transcript_path_allowed", lambda path: True)
+
+    excerpt = flush_memory.read_transcript_excerpt(transcript, max_chars=4_000)
+
+    assert len(excerpt) <= 4_000 + len(flush_memory.TRANSCRIPT_GAP_NOTE)
+    assert "OPENING-DECISION" in excerpt
+    assert "CLOSING-NOISE" in excerpt
+    assert flush_memory.TRANSCRIPT_GAP_NOTE in excerpt
+
+
+def test_a_transcript_within_budget_is_passed_through_whole(tmp_path, monkeypatch):
+    """No gap marker where nothing was dropped: the note must mean something."""
+    import flush_memory
+
+    transcript = tmp_path / "short.jsonl"
+    transcript.write_text("one\ntwo\nthree\n", encoding="utf-8")
+    monkeypatch.setattr(flush_memory, "_transcript_path_allowed", lambda path: True)
+
+    excerpt = flush_memory.read_transcript_excerpt(transcript, max_chars=4_000)
+
+    assert excerpt == "one\ntwo\nthree\n"
+    assert flush_memory.TRANSCRIPT_GAP_NOTE not in excerpt
