@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/vault-application-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["corpus_id", "schema_version", "thresholds", "cases"],
+  "properties": {
+    "corpus_id": {"type": "string", "minLength": 1},
+    "schema_version": {"const": "vault-application/v1"},
+    "note": {"type": "string", "maxLength": 700},
+    "thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min_applied_at_5", "min_gain_over_grep_at_5"],
+      "properties": {
+        "min_applied_at_5": {"type": "number", "minimum": 0, "maximum": 1},
+        "min_gain_over_grep_at_5": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 200,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["case_id", "task", "expected_tokens", "gold_path"],
+        "properties": {
+          "case_id": {"type": "string", "pattern": "^[a-z0-9-]{3,64}$"},
+          "task": {"type": "string", "minLength": 5, "maxLength": 300},
+          "expected_tokens": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 4,
+            "items": {"type": "string", "minLength": 2, "maxLength": 60}
+          },
+          "gold_path": {"type": "string", "minLength": 5, "maxLength": 200}
+        }
+      }
+    }
+  }
+}

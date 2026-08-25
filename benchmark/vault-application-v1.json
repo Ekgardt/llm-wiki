@@ -1,0 +1,53 @@
+{
+  "corpus_id": "vault-application-v1",
+  "schema_version": "vault-application/v1",
+  "note": "Applying memory, not recalling text: each task names something an operator would have to do, and the answer is scored on whether the exact token needed to act — a flag, an interval, a bound — reached the reader. Tokens are verified to appear verbatim in the gold page, so a correct retrieval always can pass. What this does not measure is whether an agent then acts on it.",
+  "thresholds": {
+    "min_applied_at_5": 0.5,
+    "min_gain_over_grep_at_5": 0.1
+  },
+  "cases": [
+    {
+      "case_id": "merge-mode-of-self-update",
+      "task": "каким способом ночной проход сливает обновление кода, чтобы не разрешать конфликты",
+      "expected_tokens": ["--ff-only"],
+      "gold_path": "knowledge/notes/automatic-code-update-decision.md"
+    },
+    {
+      "case_id": "retire-dead-tasks",
+      "task": "чем убрать из очереди задачи, у которых кончились попытки",
+      "expected_tokens": ["--include-dead"],
+      "gold_path": "knowledge/notes/dead-task-retirement-and-restore-decision.md"
+    },
+    {
+      "case_id": "lease-heartbeat-interval",
+      "task": "как часто обновляется аренда владельца языкового сервера и когда она истекает",
+      "expected_tokens": ["10 seconds", "30 seconds"],
+      "gold_path": "knowledge/notes/lsp-live-lease-decision.md"
+    },
+    {
+      "case_id": "clear-capture-counters",
+      "task": "чем снять счётчик потерянных захватов, когда потеря разобрана",
+      "expected_tokens": ["--clear"],
+      "gold_path": "knowledge/notes/self-resolving-health-findings-decision.md"
+    },
+    {
+      "case_id": "compile-part-size",
+      "task": "с какого размера дневник режется на части при компиляции",
+      "expected_tokens": ["16 KiB"],
+      "gold_path": "knowledge/notes/part-scoped-evidence-decision.md"
+    },
+    {
+      "case_id": "classification-corpus-flag",
+      "task": "чем указать стенду классификации другой корпус сессий",
+      "expected_tokens": ["--corpus"],
+      "gold_path": "knowledge/notes/classification-measurement-stand-decision.md"
+    },
+    {
+      "case_id": "config-backup-retention",
+      "task": "сколько по времени и объёму хранятся резервные копии конфигураций агентов",
+      "expected_tokens": ["90 days", "100 MiB"],
+      "gold_path": "knowledge/notes/integration-config-backup-retention-decision.md"
+    }
+  ]
+}
