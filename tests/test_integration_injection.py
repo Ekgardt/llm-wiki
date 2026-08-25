@@ -2367,6 +2367,17 @@ def windows_fake_uv(tmp_path_factory):
     return executable
 
 
+def _child_state(directory: Path) -> str:
+    """What the stopped child left behind, for a failure that must explain itself."""
+    markers = ("child.started", "child.pid", "child.stopped", "child.completed")
+    seen = {
+        name: (directory / name).read_text(encoding="utf-8") or "yes"
+        for name in markers
+        if (directory / name).exists()
+    }
+    return f"child markers: {seen or 'none'}"
+
+
 def _write_blocking_fake_uv(directory: Path) -> None:
     fake_uv = directory / "uv"
     fake_uv.write_text(
@@ -2380,9 +2391,16 @@ def _write_blocking_fake_uv(directory: Path) -> None:
         "trap stop_child HUP INT TERM\n"
         "printf '%s' \"$$\" > child.pid\n"
         ": > child.started\n"
-        "i=0\n"
-        # Long enough that the installer's own timer, not the loop, ends it.
-        'while [ "$i" -lt 600 ]; do sleep 0.1; i=$((i + 1)); done\n'
+        # `wait` is interruptible by a trap; a foreground command is not. With
+        # the sleep in the foreground the shell reached its handler only after
+        # the sleep returned, which spent part of the installer's half-second
+        # escalation window on nothing. Backgrounding it costs the test nothing
+        # and hands the whole window to the handler.
+        # Long enough that the installer's own timer, not the sleep, ends it,
+        # and short enough that a missed signal still ends the run with the
+        # assertion that names the cause instead of the caller's wall clock.
+        "sleep 60 &\n"
+        "wait\n"
         ": > child.completed\n",
         encoding="utf-8",
     )
@@ -2556,10 +2574,14 @@ def test_unix_installer_timeout_stops_tests_and_aborts(tmp_path):
     assert (tmp_path / "failed.message").read_text() == (
         "Production smoke timed out after 15s; installation aborted"
     )
-    assert (tmp_path / "child.stopped").exists()
     assert not (tmp_path / "child.completed").exists()
     assert not (tmp_path / "passed.marker").exists()
     assert not (tmp_path / "continued.marker").exists()
+    # Named last and with its evidence: this is the assertion that fails when a
+    # loaded machine keeps the child off the CPU for the whole half-second the
+    # installer waits before escalating to KILL. Without the evidence the
+    # failure reads `assert False` and says nothing about which happened.
+    assert (tmp_path / "child.stopped").exists(), _child_state(tmp_path)
 
 
 @pytest.mark.parametrize(

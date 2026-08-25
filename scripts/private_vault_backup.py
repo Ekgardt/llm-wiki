@@ -1392,6 +1392,88 @@ def restore_private_vault(
         raise
 
 
+# Where each half of a restored image belongs on the target machine.
+_IMAGE_ROOTS = (("vault", "vault_root"), ("state", "state_root"))
+
+
+def _publication_targets(image: Path, vault_root: Path, state_root: Path) -> list[tuple[Path, Path]]:
+    """(source file, destination) for every regular file in the image."""
+    destinations = {"vault_root": vault_root, "state_root": state_root}
+    pairs: list[tuple[Path, Path]] = []
+    for half, key in _IMAGE_ROOTS:
+        source_root = image / half
+        if not source_root.is_dir():
+            continue
+        pairs.extend(_files_under(source_root, destinations[key]))
+    return pairs
+
+
+def _files_under(source_root: Path, destination_root: Path) -> list[tuple[Path, Path]]:
+    return [
+        (path, destination_root / path.relative_to(source_root))
+        for path in sorted(source_root.rglob("*"))
+        if path.is_file() and not path.is_symlink()
+    ]
+
+
+def _same_bytes(source: Path, destination: Path) -> bool:
+    return _hash_file(source, float("inf")) == _hash_file(destination, float("inf"))
+
+
+def _publish_one(source: Path, destination: Path) -> str:
+    """Create the destination exclusively; an identical file is not a conflict.
+
+    The exclusive create is what makes this safe against anything that appeared
+    between the check and the write: it becomes the same refusal, never an
+    overwrite.
+    """
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(destination, "xb") as handle:
+            handle.write(source.read_bytes())
+    except FileExistsError:
+        if _same_bytes(source, destination):
+            return "identical"
+        raise BackupError("publish_conflict", (str(destination),)) from None
+    return "published"
+
+
+def publish_restored_image(
+    *,
+    image: Path,
+    vault_root: Path,
+    state_root: Path,
+    expected_manifest_sha256: str,
+    deadline: float = float("inf"),
+) -> dict[str, object]:
+    """Put a validated restore image into an installed vault, overwriting nothing.
+
+    This is the step that used to be a manual `cp -r`: the one part of moving
+    memory to a new machine with no verification, no refusal and no record. The
+    image is validated again here — an image edited between restore and publish
+    is refused — and every destination must be absent or byte-identical, so a
+    populated vault is refused by the first conflicting path rather than merged.
+    """
+    staged = Path(image).resolve(strict=True)
+    _validate_restored_image(staged, expected_manifest_sha256, deadline=deadline)
+    published = identical = 0
+    for source, destination in _publication_targets(
+        staged, Path(vault_root).resolve(), Path(state_root).resolve()
+    ):
+        _deadline(deadline)
+        if _publish_one(source, destination) == "identical":
+            identical += 1
+        else:
+            published += 1
+    _harden_runtime_owner_only(Path(state_root).resolve() / "run", 0o700)
+    return {
+        "schema_version": "private-vault-publish-receipt/v1",
+        "manifest_sha256": expected_manifest_sha256,
+        "published_files": published,
+        "identical_files": identical,
+    }
+
+
 def _timeout_seconds(value: str) -> float:
     try:
         timeout = float(value)
@@ -1425,6 +1507,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     restore.add_argument("--snapshot-id", required=True)
     restore.add_argument("--manifest-sha256", required=True)
     _add_restic_arguments(restore)
+    publish = commands.add_parser(
+        "publish", help="put a validated restore image into an installed vault"
+    )
+    publish.add_argument("--image", type=Path, required=True)
+    publish.add_argument("--manifest-sha256", required=True)
+    publish.add_argument(
+        "--timeout-seconds", type=_timeout_seconds, default=3600.0
+    )
     return parser.parse_args(argv)
 
 
@@ -1449,6 +1539,14 @@ def _run_cli_command(
             staging_parent=args.staging,
             restic_binary=args.restic_binary,
             repository_file=args.repository_file,
+            deadline=deadline,
+        )
+    if args.command == "publish":
+        return publish_restored_image(
+            image=args.image,
+            vault_root=root,
+            state_root=state_root,
+            expected_manifest_sha256=args.manifest_sha256,
             deadline=deadline,
         )
     return restore_private_vault(

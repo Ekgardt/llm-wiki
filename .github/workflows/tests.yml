@@ -343,3 +343,36 @@ jobs:
       - name: Fixed 100 KLOC Python qualification gate
         if: matrix.os == 'ubuntu-24.04'
         run: uv run --locked --no-sync python benchmark/run_code_navigation.py --fixture --qualification --require-gates
+
+  # Branch protection requires status checks by name. Naming all forty-nine
+  # matrix jobs by hand is both tedious and silently wrong the moment the
+  # matrix changes: a job added later is simply not required, and a red one
+  # merges. This job depends on every other job, fails on any result that is
+  # not `success`, and is the only name the protection rule has to know.
+  # `if: always()` is what makes a skipped or cancelled dependency reach this
+  # check instead of skipping it too — a skipped required check never turns
+  # the pull request green, but a silently skipped gate would.
+  all-green:
+    name: all-green
+    if: always()
+    needs:
+      - gitleaks
+      - lint
+      - pytest-full
+      - clean-production
+      - clean-hybrid
+      - clean-code-graph
+      - installer
+      - pyright-navigation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Refuse any result that is not a clean pass
+        run: |
+          results='${{ join(needs.*.result, " ") }}'
+          echo "job results: ${results}"
+          for result in ${results}; do
+            [ "${result}" = "success" ] && continue
+            echo "::error::a required job reported ${result}"
+            exit 1
+          done

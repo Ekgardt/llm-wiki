@@ -4,6 +4,28 @@ All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- The grounded answer now captures the same corpus retrieval searched. It read
+  the vault without the approved code roots, so every candidate under `docs/`
+  or `scripts/` fell out of the snapshot and the answer refused itself for lack
+  of evidence on questions search had just answered.
+- A grounded answer sheds its weakest retrieved span instead of refusing when
+  the selection overflows the context budget. Long pages made the mandatory set
+  exceed the budget outright.
+- The grounded-answer deadline is 120 s, measured: one provider round trip for
+  a 4 KiB evidence prompt takes 32.5 s and the previous 30 s bound could not
+  complete a single real call.
+- A cited span must agree with the claim's own figures. Entailment is still not
+  verified and not claimed; what is refused is the citation from the right page
+  and the wrong sentence — "expires after 30 seconds" supported by the line
+  about refreshing every 10.
+- The installer-timeout test no longer depends on the kernel scheduling the
+  child inside the installer's half-second escalation window, and its failure
+  now reports which markers the child left behind.
+
 ## [4.0.0] — 2026-08-25
 
 First release of the v4 line. The version has carried 4.0.0 since the platform

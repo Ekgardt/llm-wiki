@@ -166,3 +166,6 @@ state.json.lock
 # Corpora built from this machine's real sessions: real transcript text, never
 # published. Only the aggregate numbers they produce are.
 benchmark/flush-classification-live*.json
+
+# Agent worktrees are throwaway checkouts, never repository content.
+.claude/worktrees/
