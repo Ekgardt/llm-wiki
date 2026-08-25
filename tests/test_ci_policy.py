@@ -25,60 +25,77 @@ def _commands(job: dict[str, object]) -> str:
     return "\n".join(str(step.get("run", "")) for step in job["steps"])
 
 
+def _step_uses() -> list[str]:
+    return [
+        str(step["uses"])
+        for job in _workflow()["jobs"].values()
+        for step in job.get("steps", [])
+        if step.get("uses")
+    ]
+
+
+def _steps_using(prefix: str) -> list[dict[str, object]]:
+    return [
+        step
+        for job in _workflow()["jobs"].values()
+        for step in job.get("steps", [])
+        if str(step.get("uses", "")).startswith(prefix)
+    ]
+
+
+def _assert_pinned_by_sha(value: str) -> None:
+    owner, revision = value.rsplit("@", 1)
+    assert re.fullmatch(r"[0-9a-f]{40}", revision), value
+    assert revision == ACTION_PINS[owner], value
+
+
+def _assert_release_comment(value: str, source_lines: list[str]) -> None:
+    matching = [line for line in source_lines if value in line]
+    assert matching and all(re.search(r"# v\d", line) for line in matching)
+
+
 def test_every_external_action_is_full_sha_pinned_with_release_comment() -> None:
-    workflow = _workflow()
     source_lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
-    uses = []
-    for job in workflow["jobs"].values():
-        for step in job.get("steps", []):
-            value = step.get("uses")
-            if value:
-                uses.append(value)
+    uses = _step_uses()
 
     assert uses
     for value in uses:
-        owner, revision = value.rsplit("@", 1)
-        assert re.fullmatch(r"[0-9a-f]{40}", revision), value
-        assert revision == ACTION_PINS[owner], value
-        matching_lines = [line for line in source_lines if value in line]
-        assert matching_lines and all(re.search(r"# v\d", line) for line in matching_lines)
+        _assert_pinned_by_sha(value)
+        _assert_release_comment(value, source_lines)
 
 
 def test_every_checkout_drops_credentials_and_uv_is_exactly_pinned() -> None:
-    checkout_steps = []
-    setup_uv_steps = []
-    for job in _workflow()["jobs"].values():
-        for step in job.get("steps", []):
-            value = str(step.get("uses", ""))
-            if value.startswith("actions/checkout@"):
-                checkout_steps.append(step)
-            if value.startswith("astral-sh/setup-uv@"):
-                setup_uv_steps.append(step)
+    checkout_steps = _steps_using("actions/checkout@")
+    setup_uv_steps = _steps_using("astral-sh/setup-uv@")
 
     assert checkout_steps and setup_uv_steps
     assert all(step.get("with", {}).get("persist-credentials") is False for step in checkout_steps)
     assert all(step["with"] == {"version": "0.12.3", "enable-cache": True} for step in setup_uv_steps)
 
 
+def _runner_values(job: dict[str, object]) -> set[str]:
+    """Every runner a job can land on: one literal, or the matrix it expands to."""
+    runner = job["runs-on"]
+    if not isinstance(runner, str):
+        raise AssertionError(f"unsupported runner expression: {runner!r}")
+    if not runner.startswith("${{"):
+        return {runner}
+    return {entry["os"] for entry in job["strategy"]["matrix"]["include"]}
+
+
 def test_every_runner_is_an_explicit_supported_generation() -> None:
     for job in _workflow()["jobs"].values():
-        runner = job["runs-on"]
-        if isinstance(runner, str) and runner.startswith("${{"):
-            matrix_values = {entry["os"] for entry in job["strategy"]["matrix"]["include"]}
-            assert matrix_values <= RUNNERS
-        elif isinstance(runner, str) and runner.startswith("${{") is False:
-            assert runner in RUNNERS
-        else:
-            raise AssertionError(f"unsupported runner expression: {runner!r}")
+        assert _runner_values(job) <= RUNNERS
     assert "-latest" not in WORKFLOW.read_text(encoding="utf-8")
 
 
 def test_job_level_env_avoids_contexts_unavailable_before_runner_assignment() -> None:
-    invalid = []
-    for job_name, job in _workflow()["jobs"].items():
-        for variable, value in job.get("env", {}).items():
-            if "${{ runner." in str(value):
-                invalid.append((job_name, variable, value))
+    invalid = [
+        (job_name, variable, value)
+        for job_name, job in _workflow()["jobs"].items()
+        for variable, value in job.get("env", {}).items()
+        if "${{ runner." in str(value)
+    ]
 
     assert invalid == []
 
@@ -181,28 +198,30 @@ def test_the_shards_cover_every_test_file_exactly_once() -> None:
     assert all(shard for shard in shards)
 
 
+CLEAN_PROFILES = (
+    ("clean-production", None),
+    ("clean-hybrid", "hybrid"),
+    ("clean-code-graph", "code-graph"),
+)
+
+
+def _assert_clean_profile(job: dict[str, object], extra: str | None) -> None:
+    assert job["runs-on"] == "ubuntu-24.04"
+    assert job["timeout-minutes"] == 20
+    assert job["strategy"]["matrix"]["python"] == ["3.10", "3.14"]
+    commands = _commands(job)
+    assert "uv sync --locked --no-default-groups" in commands
+    assert extra is None or f"--extra {extra}" in commands
+    runs = [line for line in commands.splitlines() if line.strip().startswith("uv run")]
+    assert all("--locked --no-sync" in line for line in runs)
+
+
 def test_clean_profiles_are_isolated_and_never_auto_sync() -> None:
     jobs = _workflow()["jobs"]
-    environments = set()
-    for name, extra in (
-        ("clean-production", None),
-        ("clean-hybrid", "hybrid"),
-        ("clean-code-graph", "code-graph"),
-    ):
-        job = jobs[name]
-        assert job["runs-on"] == "ubuntu-24.04"
-        assert job["timeout-minutes"] == 20
-        assert job["strategy"]["matrix"]["python"] == ["3.10", "3.14"]
-        environment = job["env"]["UV_PROJECT_ENVIRONMENT"]
-        assert environment not in environments
-        environments.add(environment)
-        commands = _commands(job)
-        assert "uv sync --locked --no-default-groups" in commands
-        if extra is not None:
-            assert f"--extra {extra}" in commands
-        for line in commands.splitlines():
-            if line.strip().startswith("uv run"):
-                assert "--locked --no-sync" in line
+    for name, extra in CLEAN_PROFILES:
+        _assert_clean_profile(jobs[name], extra)
+    environments = {jobs[name]["env"]["UV_PROJECT_ENVIRONMENT"] for name, _extra in CLEAN_PROFILES}
+    assert len(environments) == len(CLEAN_PROFILES)
 
     production = _commands(jobs["clean-production"])
     assert "install_smoke.py" in production
@@ -276,20 +295,45 @@ def test_compileall_excludes_the_intentionally_invalid_parser_fixture() -> None:
     ) in commands
 
 
+def _named_step(job: dict[str, object], name: str) -> dict[str, object]:
+    return next(step for step in job["steps"] if step.get("name") == name)
+
+
 def test_pyright_state_passing_is_shell_independent() -> None:
     job = _workflow()["jobs"]["pyright-navigation"]
-    install = next(step for step in job["steps"] if step.get("name") == "Explicit Pyright install")
+    install = _named_step(job, "Explicit Pyright install")
     assert job["env"]["LLM_WIKI_STATE_ROOT"] == (
         "${{ github.workspace }}/../llm-wiki-state"
     )
     assert '"${{ env.LLM_WIKI_STATE_ROOT }}"' in install["run"]
     assert "shell" not in install
-    tests = next(
-        step
-        for step in job["steps"]
-        if step.get("name") == "Protocol, process-tree, and security tests"
+    inherit_state_from_the_job = (
+        "Protocol, process-tree, and security tests",
+        "Correctness benchmark gate",
+        "Fixed 100 KLOC Python qualification gate",
     )
-    assert "LLM_WIKI_STATE_ROOT" not in tests.get("env", {})
-    for name in ("Correctness benchmark gate", "Fixed 100 KLOC Python qualification gate"):
-        step = next(step for step in job["steps"] if step.get("name") == name)
-        assert "LLM_WIKI_STATE_ROOT" not in step.get("env", {})
+    for name in inherit_state_from_the_job:
+        assert "LLM_WIKI_STATE_ROOT" not in _named_step(job, name).get("env", {})
+
+
+def test_one_aggregate_check_depends_on_every_other_job() -> None:
+    """Branch protection requires names, so exactly one name must cover them all.
+
+    Requiring forty-nine matrix names by hand fails the day the matrix changes:
+    a new job is simply not required, and a red one merges. This binds the
+    aggregate to the job list itself, so adding a job without adding it to
+    `needs` fails here instead of silently leaving a hole in the gate.
+    """
+    jobs = _workflow()["jobs"]
+    aggregate = jobs["all-green"]
+
+    assert aggregate["name"] == "all-green"
+    assert aggregate["if"] == "always()"
+    assert set(aggregate["needs"]) == set(jobs) - {"all-green"}
+    # A dependency that is skipped or cancelled must fail this check, not pass
+    # it: `always()` runs the job, and only an explicit success comparison
+    # keeps a non-success result from merging.
+    commands = _commands(aggregate)
+    assert 'join(needs.*.result, " ")' in commands
+    assert '"${result}" = "success"' in commands
+    assert "exit 1" in commands
