@@ -67,5 +67,70 @@ def _isolate_test_state_root():
         shutil.rmtree(_EARLY_STATE_ROOT, ignore_errors=True)
 
 
+# This checkout *is* the owner's vault since the two directories were merged on
+# 2026-08-21, so a test that writes knowledge through the pinned LLM_WIKI_ROOT
+# writes into their memory. By 2026-08-24 that had left 384 project journals from
+# past pytest sessions in `knowledge/projects`, and they were coming back as
+# answers to real questions. The guard makes the next one impossible to miss.
+# What a test may not do is leave knowledge behind in this checkout, which has
+# been the owner's live vault since the two directories merged on 2026-08-21. By
+# 2026-08-24 that had left 384 project journals from past pytest sessions, and
+# they were coming back as answers to real questions.
+#
+# The watch is deliberately uneven, because the live runtime writes here too:
+#   * `knowledge/projects` is compared by name only — a real session working in
+#     `agenticos` or `fix-pip` appends to its own journal while the suite runs,
+#     and that is the owner's work, not a leak. A leaking test creates a project
+#     of its own, which shows up as a new name.
+#   * `knowledge/notes` is compared file by file — only a nightly compile writes
+#     there, so any change during a run is worth stopping for.
+#   * `knowledge/daily` and `knowledge/raw/sessions` are not watched at all: the
+#     capture appends to today's log continuously, measured mid-run today.
+_WATCHED_PROJECTS = "knowledge/projects"
+_WATCHED_NOTES = "knowledge/notes"
+
+
+def _file_identity(path: Path) -> tuple[int, int]:
+    info = path.stat()
+    return (info.st_size, info.st_mtime_ns)
+
+
+def _files_under(root: Path) -> dict[str, tuple[int, int]]:
+    if not root.is_dir():
+        return {}
+    return {
+        str(path.relative_to(VAULT_ROOT)): _file_identity(path)
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+
+
+def _names_under(root: Path) -> dict[str, tuple[int, int]]:
+    if not root.is_dir():
+        return {}
+    return {str(entry.relative_to(VAULT_ROOT)): (0, 0) for entry in root.iterdir()}
+
+
+def _knowledge_entries() -> dict[str, tuple[int, int]]:
+    seen = _names_under(VAULT_ROOT / _WATCHED_PROJECTS)
+    seen.update(_files_under(VAULT_ROOT / _WATCHED_NOTES))
+    return seen
+
+
+def _leaked_entries(
+    before: dict[str, tuple[int, int]], after: dict[str, tuple[int, int]]
+) -> list[str]:
+    return sorted(name for name, identity in after.items() if before.get(name) != identity)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_writes_into_the_live_vault():
+    """Fail the session when a test leaves knowledge behind in this checkout."""
+    before = _knowledge_entries()
+    yield
+    leaked = _leaked_entries(before, _knowledge_entries())
+    assert not leaked, "tests wrote into the live vault: " + ", ".join(leaked[:20])
+
+
 # Default fake provider for any accidental live LLM calls in unit tests.
 os.environ.setdefault("MEMORY_LLM_PROVIDER", "fake")

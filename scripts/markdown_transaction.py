@@ -69,6 +69,13 @@ _ALLOWED_DIRECTORIES = (
     "knowledge/projects",
     "knowledge/inbox",
     "knowledge/feedback",
+    # Session records, by the 2026-08-23 retention decision. Only this subtree of
+    # `knowledge/raw/` is writable: the rest of raw holds immutable sources that
+    # no automatic writer may touch. Without this line every session record was
+    # refused as "outside every allowed root" and the writer, which never raises
+    # by contract, dropped it silently — 234 transcripts on disk and not one
+    # record in the vault.
+    "knowledge/raw/sessions",
 )
 _ALLOWED_FILES = {
     "knowledge/guardrails.md",
@@ -592,6 +599,20 @@ def _coordinator_v3_statements() -> tuple[MigrationStatement, ...]:
         )
         for name, sql in _COORDINATOR_V3_TABLE_SQL
     )
+
+
+# A quarantined attempt may be followed by another, but a hundred of them is an
+# operator's problem rather than something to keep numbering.
+MAX_ATTEMPT_ORDINAL = 100
+
+LIKE_ESCAPE = "\\"
+
+
+def _like_prefix(value: str) -> str:
+    """Quote an operation id so LIKE reads it as literal text."""
+    for character in (LIKE_ESCAPE, "%", "_"):
+        value = value.replace(character, LIKE_ESCAPE + character)
+    return value
 
 
 def _coordinator_migration_error(
@@ -4849,6 +4870,56 @@ class MarkdownCoordinator:
         if len(paths) != len(set(paths)):
             raise ValueError("duplicate transaction target")
         return normalized
+
+    def committed_attempt(self, operation_id: str):
+        """The attempt of this operation that committed, ordinals included.
+
+        Evidence written by a compile names the operation identity derived from
+        its inputs, not the row that wrote it: the receipt readers recompute
+        that identity from the receipt's own fields and refuse anything else.
+        When an attempt is refused, the next one carries the same identity with
+        the next ordinal, so the committed writer is a sibling of the named row.
+        Callers still have to prove the bytes: this only says which attempt to
+        ask.
+        """
+        record = self._record_for_operation_id(operation_id)
+        if record is not None and record.state == "committed":
+            return record
+        return self._committed_attempt_by_ordinal(operation_id)
+
+    def _committed_attempt_by_ordinal(self, operation_id: str):
+        with self._connect() as database:
+            row = database.execute(
+                'SELECT id FROM "transaction" WHERE operation_id LIKE ? ESCAPE ? '
+                "AND state = 'committed' ORDER BY created_at DESC, rowid DESC "
+                "LIMIT 1",
+                (_like_prefix(operation_id) + "#%", LIKE_ESCAPE),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._record(row["id"])
+
+    def attempt_operation_id(self, operation_id: str) -> tuple[str, str | None]:
+        """The id this attempt must use, and the quarantined one it follows.
+
+        A key is never reused for a different payload — that refusal stays. What
+        changes is that it stops being a dead end: a quarantined attempt wrote
+        nothing durable, so the next one is a new operation and takes the next
+        ordinal, naming the refused transaction as its parent. Project
+        checkpoints in this file have always retried this way.
+
+        An unchanged payload still resolves to the same id, so crash resume and
+        ordinary idempotency are untouched.
+        """
+        candidate = operation_id
+        parent: str | None = None
+        for ordinal in range(2, MAX_ATTEMPT_ORDINAL + 2):
+            record = self._record_for_operation_id(candidate)
+            if record is None or record.state != "quarantined":
+                return candidate, parent
+            parent = record.id
+            candidate = f"{operation_id}#{ordinal}"
+        raise ValueError("operation has exhausted its quarantined retry ordinals")
 
     def _existing_bound_record(
         self, operation_id: str, request_hash: str

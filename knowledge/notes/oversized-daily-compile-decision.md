@@ -87,3 +87,5 @@ it.
 
 - [[knowledge/notes/reliable-memory-stage-2]]
 - [[knowledge/notes/daily-entry-boundary-decision]] — what delimits one entry in the log this decision cuts.
+- [[knowledge/notes/part-scoped-evidence-decision]] — how a reader verifies a page written from one of these parts.
+- [[knowledge/notes/daily-entry-quote-anchor-decision]] — links to this page.

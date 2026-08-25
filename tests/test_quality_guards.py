@@ -469,7 +469,7 @@ def test_architecture_no_recall_at_2():
     assert "manual dependency selection" in arch.casefold()
 
     guide = (ROOT / "docs" / "USER-GUIDE.md").read_text(encoding="utf-8")
-    assert "BAAI/bge-small-en-v1.5" in guide
+    assert "intfloat/multilingual-e5-small" in guide
     assert "cache/vectors.npy" in guide
     assert "vectors_meta.json" in guide
     assert "MiniLM" not in guide

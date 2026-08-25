@@ -58,6 +58,7 @@ from okf_types import (
     INBOX_TYPES,  # noqa: E402
     TYPE_ALIASES,  # noqa: E402
 )
+from page_status import is_retired  # noqa: E402
 from reliable_memory import canonical_json_bytes, validate_schema  # noqa: E402
 from vault_editorial import (  # noqa: E402
     BACKLINK_EXEMPT_NAMES,
@@ -300,7 +301,6 @@ def _indexed(md: Path, index_text: str) -> bool:
     return md.stem in index_text or relative in index_text
 
 
-RETIRED_STATUSES = {"superseded", "archived"}
 STATUS_FIELD_RE = re.compile(r"^status:\s*(.+?)\s*$", re.MULTILINE)
 
 
@@ -317,11 +317,25 @@ def _is_retired(md: Path) -> bool:
     match = STATUS_FIELD_RE.search(frontmatter)
     if match is None:
         return False
-    return match.group(1).strip().strip("`\"'") in RETIRED_STATUSES
+    return is_retired(match.group(1))
+
+
+def _is_published(md: Path) -> bool:
+    """Whether this repository publishes the page, by the same rule the index uses."""
+    from rebuild_memory_index import published_paths
+
+    named, _hidden = published_paths(ROOT, [_rel(md)])
+    return bool(named)
 
 
 def _expects_an_index_entry(md: Path) -> bool:
     if md.name in EDITORIAL_NAMES:
+        return False
+    if not _is_published(md):
+        # `knowledge/index.md` is tracked and names only published pages, so
+        # demanding a private page's presence there demands a leak. The first
+        # successful compile of this vault raised exactly that on the page it
+        # had just written.
         return False
     return not _is_retired(md)
 
@@ -397,18 +411,47 @@ def _backlink_pairs(link_map: dict[Path, list[Path]]) -> list[tuple[Path, Path]]
 def _pair_owes_backlink(source: Path, target: Path) -> bool:
     if source == target or _is_backlink_exempt(source):
         return False
+    if _is_retired(target):
+        # A superseded or archived page is history. Making it link forward to
+        # every later page that mentions it would rewrite that history, which
+        # the vault forbids for decisions — and the repair pass would have to
+        # edit an immutable page to clear a finding nobody wants cleared.
+        return False
     return not _is_backlink_exempt(target)
+
+
+def missing_backlink_pairs(
+    pages: list[Path], search_roots: list[Path]
+) -> list[tuple[Path, Path]]:
+    """Every (source, target) where the target still owes a link back."""
+    page_set = set(pages)
+    link_map = {md: _resolved_page_links(md, page_set, search_roots) for md in pages}
+    return [
+        (source, target)
+        for source, target in _backlink_pairs(link_map)
+        if source not in link_map.get(target, [])
+        and _backlink_is_publishable(source, target)
+    ]
 
 
 def check_missing_backlinks(pages: list[Path], search_roots: list[Path]) -> list[str]:
     """Within a set of pages, A->B must be matched by B->A."""
-    page_set = set(pages)
-    link_map = {md: _resolved_page_links(md, page_set, search_roots) for md in pages}
     return [
         f"{_rel(source)} -> {_rel(target)} (no backlink)"
-        for source, target in _backlink_pairs(link_map)
-        if source not in link_map.get(target, [])
+        for source, target in missing_backlink_pairs(pages, search_roots)
     ]
+
+
+def _backlink_is_publishable(source: Path, target: Path) -> bool:
+    """The obligation sits on the target, so the target must be able to carry it.
+
+    A published page naming a private one would put a private slug into a
+    tracked file, which is the leak the whole publication boundary exists to
+    prevent. The reverse direction is already reported as a broken link.
+    """
+    if _is_published(source):
+        return True
+    return not _is_published(target)
 
 
 def check_sparse_pages(pages: list[Path], min_words: int) -> list[str]:

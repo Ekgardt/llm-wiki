@@ -86,3 +86,4 @@ undo artifacts retain their existing protections.
 - [[persistent-code-intelligence-kernel-decision]]
 - [[solo-operator-superset-product-decision]]
 - [[knowledge/notes/baseline-environment-binding-decision]]
+- [[knowledge/notes/nightly-builds-generation-vectors-decision]] — what the maintenance pass must build so the published generation can answer in any language.

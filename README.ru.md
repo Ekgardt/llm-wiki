@@ -159,6 +159,22 @@ production smoke, создаёт runtime-директории и подключ�
 сохраняют все Git remotes; `--protect-push` или `-ProtectPush` заменяет push URL каждого
 remote на `no-push`.
 
+### Проверка выпуска
+
+Выпуск называет точный коммит, который принимает удалённый bootstrap — имена
+веток и тегов отклоняются, — и SHA-256 каждого файла, который bootstrap
+запускает. Напечатать их для любого тега из локального клона:
+
+```bash
+uv run python scripts/release_manifest.py v4.0.0 --markdown
+```
+
+Установить именно этот коммит:
+
+```bash
+LLM_WIKI_COMMIT=$(git rev-parse v4.0.0^{commit}) bash ./install.sh
+```
+
 ### Профили зависимостей
 
 MCP входит в production baseline; `mcp-server` остаётся compatibility alias. Свежая

@@ -79,23 +79,47 @@ def _cleanup_failed_ephemeral(payload: dict, spawned: int | None) -> None:
         _cleanup_ephemeral(str(payload.get("transcript_path", "")))
 
 
+def _durable_fallback(payload: dict, event: str) -> str | None:
+    """Keep the session when the detached spawn failed.
+
+    Through the integration adapter a durable intent already exists before this
+    hook runs. Called directly, nothing has published one, so the failed spawn
+    used to lose the session outright. The queue replays this intent at the next
+    session; no one has to notice or act.
+    """
+    try:
+        from integration_adapter import publish_capture_intent_from_payload
+    except Exception:  # noqa: BLE001
+        return None
+    return publish_capture_intent_from_payload(
+        str(payload.get("agent") or "claude"), event, payload
+    )
+
+
 def _capture(payload: dict) -> None:
     args = _flush_args(payload)
     ephemeral = payload.get("ephemeral_transcript") is True
     if ephemeral:
         args.append("--ephemeral-transcript")
     spawned = _spawn_flush(args)
-    _cleanup_failed_ephemeral(payload, spawned)
-    if spawned is None:
-        # Called directly rather than through the integration adapter there is
-        # no durable intent behind this hook, so a failed spawn would lose the
-        # session without a trace. Leave one.
+    if spawned is not None:
+        print(json.dumps({"flush_started": True}))
+        return
+    _report_failed_spawn(payload)
+
+
+def _report_failed_spawn(payload: dict) -> None:
+    # The intent is published before the transcript is cleaned up: it copies the
+    # text it needs out of the file, and after that the file is disposable.
+    intent_id = _durable_fallback(payload, "session_end")
+    _cleanup_failed_ephemeral(payload, None)
+    if intent_id is None:
         record_capture_failure(
             "session_end",
             "flush_spawn_failed",
             session_id=str(payload.get("session_id", "")),
         )
-    print(json.dumps({"flush_started": spawned is not None}))
+    print(json.dumps({"flush_started": False, "capture_intent": intent_id}))
 
 
 def main() -> int:

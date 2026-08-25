@@ -4488,23 +4488,102 @@ def _posix_scheduler_resource(
         raise InstallControlError("install_scheduler_backend_invalid") from exc
 
 
+def _config_platform() -> str:
+    """`opencode_global_dir` speaks posix/windows, not `sys.platform` names."""
+    if sys.platform.startswith("win"):
+        return "windows"
+    return "posix"
+
+
+def _opencode_plugin_destination(home: Path) -> Path:
+    from installer_config import opencode_global_dir
+
+    directory = opencode_global_dir(
+        home, os.environ.get("XDG_CONFIG_HOME"), platform=_config_platform()
+    )
+    return directory / "plugins" / "llm-wiki-memory.js"
+
+
+def _claude_settings_destination(home: Path) -> Path:
+    return home / ".claude" / "settings.json"
+
+
+def _codex_hooks_destination(home: Path) -> Path:
+    return home / ".codex" / "hooks.json"
+
+
+def _recorded_config_existed(
+    metadata: Mapping[str, Mapping[str, object]], resource_id: str
+) -> bool | None:
+    recorded = metadata.get(resource_id)
+    if not isinstance(recorded, Mapping) or "config_existed" not in recorded:
+        return None
+    return bool(recorded["config_existed"])
+
+
+def _ide_hook_factories(
+    root: Path,
+    home: Path,
+    state_root: Path | None,
+    metadata: Mapping[str, Mapping[str, object]],
+) -> dict[str, Callable[[], ManagedResource]]:
+    """One factory per owned IDE resource, built only when it is selected."""
+    from integration_hook_config import (
+        claude_settings_resource,
+        claude_settings_template,
+        codex_hooks_resource,
+        codex_hooks_template,
+        managed_ide_hook_resources,
+        opencode_plugin_resource,
+    )
+
+    def _managed(resource_id: str) -> ManagedResource:
+        for resource in managed_ide_hook_resources(root, home):
+            if resource.resource_id == resource_id:
+                return resource
+        raise InstallControlError("install_resource_unknown")
+
+    return {
+        "cursor-user-hooks": lambda: _managed("cursor-user-hooks"),
+        "antigravity-user-hooks": lambda: _managed("antigravity-user-hooks"),
+        "opencode-plugin": lambda: opencode_plugin_resource(
+            root, _opencode_plugin_destination(home)
+        ),
+        "claude-user-settings": lambda: claude_settings_resource(
+            _claude_settings_destination(home),
+            claude_settings_template(root),
+            root,
+            state_root or root,
+            config_existed=_recorded_config_existed(metadata, "claude-user-settings"),
+        ),
+        "codex-user-hooks": lambda: codex_hooks_resource(
+            _codex_hooks_destination(home),
+            codex_hooks_template(root),
+            config_existed=_recorded_config_existed(metadata, "codex-user-hooks"),
+        ),
+    }
+
+
 def _selected_ide_hook_resources(
     root: Path,
     home: Path,
     cursor_hooks: bool,
     antigravity_hooks: bool,
+    opencode_plugin: bool = False,
+    claude_settings: bool = False,
+    codex_hooks: bool = False,
+    state_root: Path | None = None,
+    metadata: Mapping[str, Mapping[str, object]] | None = None,
 ) -> list[ManagedResource]:
-    from integration_hook_config import managed_ide_hook_resources
-
-    resources = {
-        resource.resource_id: resource for resource in managed_ide_hook_resources(root, home)
+    wanted = {
+        "cursor-user-hooks": cursor_hooks,
+        "antigravity-user-hooks": antigravity_hooks,
+        "opencode-plugin": opencode_plugin,
+        "claude-user-settings": claude_settings,
+        "codex-user-hooks": codex_hooks,
     }
-    selected: list[ManagedResource] = []
-    if cursor_hooks:
-        selected.append(resources["cursor-user-hooks"])
-    if antigravity_hooks:
-        selected.append(resources["antigravity-user-hooks"])
-    return selected
+    factories = _ide_hook_factories(root, home, state_root, metadata or {})
+    return [factories[key]() for key, selected in wanted.items() if selected]
 
 
 def _posix_install_resources(
@@ -4592,6 +4671,9 @@ def build_install_resources(
     powershell_path: str | None,
     cursor_hooks: bool = False,
     antigravity_hooks: bool = False,
+    opencode_plugin: bool = False,
+    claude_settings: bool = False,
+    codex_hooks: bool = False,
     ownership_metadata: Mapping[str, Mapping[str, object]] | None = None,
 ) -> list[ManagedResource]:
     metadata = ownership_metadata or {}
@@ -4610,6 +4692,11 @@ def build_install_resources(
             home,
             cursor_hooks,
             antigravity_hooks,
+            opencode_plugin,
+            claude_settings,
+            codex_hooks,
+            state_root,
+            metadata,
         ),
     ]
 
@@ -4637,6 +4724,9 @@ def _install_from_args(args: argparse.Namespace) -> dict[str, object]:
         powershell_path=args.powershell_path,
         cursor_hooks=args.cursor_hooks,
         antigravity_hooks=args.antigravity_hooks,
+        opencode_plugin=args.opencode_plugin,
+        claude_settings=args.claude_settings,
+        codex_hooks=args.codex_hooks,
         ownership_metadata=None,
     )
     manifest = install_resources(
@@ -4706,6 +4796,9 @@ def _resources_from_existing_args(args: argparse.Namespace, command: str) -> lis
         powershell_path=args.powershell_path,
         cursor_hooks="cursor-user-hooks" in identifiers,
         antigravity_hooks="antigravity-user-hooks" in identifiers,
+        opencode_plugin="opencode-plugin" in identifiers,
+        claude_settings="claude-user-settings" in identifiers,
+        codex_hooks="codex-user-hooks" in identifiers,
         ownership_metadata=_record_metadata(record),
     )
 
@@ -4754,6 +4847,9 @@ def _parser() -> argparse.ArgumentParser:
     install.add_argument("--powershell-path")
     install.add_argument("--cursor-hooks", action="store_true")
     install.add_argument("--antigravity-hooks", action="store_true")
+    install.add_argument("--opencode-plugin", action="store_true")
+    install.add_argument("--claude-settings", action="store_true")
+    install.add_argument("--codex-hooks", action="store_true")
     _add_existing_arguments(subparsers.add_parser("rollback"))
     _add_existing_arguments(subparsers.add_parser("uninstall"))
     return parser

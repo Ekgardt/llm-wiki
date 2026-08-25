@@ -143,7 +143,7 @@ successful cutover and do not remove v2 state manually.
 
 | Agent | How to wire |
 |-------|-------------|
-| **Claude Code** | Configure MCP for reads/actions, then run `uv run python scripts/merge_claude_settings.py` for five thin lifecycle hooks. |
+| **Claude Code** | Configure MCP for reads/actions; the installer's ownership transaction writes the thin lifecycle hooks into `~/.claude/settings.json` and takes them back on uninstall. |
 | **OpenCode** | Configure MCP, then copy `scripts/llm-wiki-memory-opencode.js` for lifecycle events. |
 | **Codex CLI** | Configure MCP; on Windows add `. "$env:LLM_WIKI_ROOT\scripts\codex-memory-wrapper.ps1"` to `$PROFILE` for lifecycle capture. |
 | **Cursor** | Configure MCP for reads/actions, install Cursor locally, then rerun the native installer. It manages exact LLM-Wiki handlers in `~/.cursor/hooks.json`; the rules file is optional guidance. |
@@ -260,12 +260,16 @@ REAL-TIME (while you work)
   SessionStart → load project handoff + drain queue + background compile
 
 END OF SESSION (agent idle or you close)
+  A redacted copy of the session is written to knowledge/raw/sessions/<date>/
   LLM classifies transcript → FLUSH_MAJOR / FLUSH_MINOR / FLUSH_OK
   MAJOR/MINOR content → structured summary appended to daily log
   MAJOR triggers background compile (detached, doesn't block you)
 
 NIGHTLY 03:00 (scheduler, subject to the operating-system login policy)
-  Drain deferred queue → compile all pending → structural lint → prune old reports
+  Drain deferred queue → consolidate yesterday's session records into the daily
+  log → compile all pending → structural lint → add owed backlinks → rebuild the
+  FTS index → refresh the immutable evidence generation (and its vectors) →
+  compact retrieval telemetry → prune old reports → fast-forward the checkout
 
 SUNDAY 04:00 (scheduler)
   Everything nightly does + OKF conformance sweep + archive stale + prune failed queue tasks
@@ -317,7 +321,7 @@ the LLM cannot fabricate citations.
 ### Linting and maintenance
 
 ```bash
-uv run python scripts/lint_memory.py --scope all           # 15 structural checks
+uv run python scripts/lint_memory.py --scope all           # 16 structural checks
 uv run python scripts/lint_memory.py --contradictions      # + LLM-judged contradictions
 uv run python scripts/archive_stale.py --apply           # archive old pages by type
 uv run python scripts/lookup_mode.py                       # show direct/base/hybrid mode
@@ -546,7 +550,7 @@ don't match:
 uv sync --extra semantic
 ```
 
-This installs `sentence-transformers` with `BAAI/bge-small-en-v1.5`.
+This installs `sentence-transformers` with `intfloat/multilingual-e5-small` — 384 dimensions over 100 languages, so a question in one language reaches a page written in another. The English-only model it replaces scored every candidate alike on non-English questions.
 Embeddings are cached in `cache/vectors.npy` with metadata in
 `cache/vectors_meta.json` (both gitignored) and rebuilt automatically when
 pages change.

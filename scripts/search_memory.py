@@ -30,8 +30,10 @@ import sqlite3
 import stat
 import sys
 import tempfile
+import threading
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, closing, contextmanager, nullcontext
 from pathlib import Path
@@ -50,7 +52,8 @@ from corpus_snapshot import (  # noqa: E402
 )
 from generation_catalog import GenerationCatalog  # noqa: E402
 from memory_state import ROOT, STATE_ROOT, _is_pid_alive, atomic_write  # noqa: E402
-from provenance import authority_weight  # noqa: E402
+from page_status import current_status_sql, is_retired  # noqa: E402
+from provenance import trust_weight  # noqa: E402
 from reliable_memory import (  # noqa: E402
     canonical_json_bytes,
     fsync_directory,
@@ -144,13 +147,15 @@ SUMMARY_RE = re.compile(
     r"^One-sentence summary:\s*(.+?)\s*$", re.MULTILINE | re.IGNORECASE
 )
 
-# Embedding model — bge-small-en-v1.5 (MIT, MTEB 62.17, +25% over MiniLM).
-# Same 384d as all-MiniLM-L6-v2 — no dimension change needed.
-# Query instruction prefix improves retrieval accuracy (per BGE model card).
-EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
-EMBEDDING_MODEL_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
-EMBEDDING_DIM = 384
-QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages:"
+# The model, its revision and its prefixes live in one module, because the
+# LanceDB store and its rebuild encode with the same model and a drifting copy
+# would embed questions and pages with different ones.
+from embedding_model import (  # noqa: E402
+    EMBEDDING_DIM,
+    EMBEDDING_MODEL,
+    EMBEDDING_MODEL_REVISION,
+    prefixed_texts,
+)
 
 
 def _have_sentence_transformers() -> bool:
@@ -588,6 +593,100 @@ def build_generation_numpy_vectors(
     ]
 
 
+def _generation_embedder(embedder, *, is_query: bool):
+    """The generation paths want a callable, and E5 wants each side told apart.
+
+    A page is a passage and a question is a query; encoding either with the
+    other's prefix costs accuracy the model was trained to give.
+    """
+
+    def encode(texts) -> list[list[float]]:
+        vectors = embedder.encode(
+            prefixed_texts(list(texts), is_query),
+            show_progress_bar=False,
+            convert_to_numpy=True,
+        )
+        return vectors.tolist()
+
+    return encode
+
+
+def _resolved_generation_embedder(
+    semantic: bool,
+    embedder: object | None,
+    model_id: str | None,
+    model_revision: str | None,
+):
+    """Give generation search the encoder it needs when no caller supplied one.
+
+    These three arguments had no default and no caller, so the dense leg of
+    generation search never ran in any installed vault: every question was
+    answered by token overlap alone, and a question asked in another language
+    than the pages could not be answered at all.
+    """
+    if not semantic:
+        return None, None, None
+    if embedder is not None:
+        return embedder, model_id, model_revision
+    loaded = _get_embedder()
+    if loaded is None:
+        return None, None, None
+    return (
+        _generation_embedder(loaded, is_query=True),
+        EMBEDDING_MODEL,
+        EMBEDDING_MODEL_REVISION,
+    )
+
+
+def build_generation_vectors_if_available(
+    snapshot: CorpusSnapshot,
+    generation_directory: Path,
+    *,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> dict[str, object] | None:
+    """Build this generation's vectors, or say plainly that they cannot be built.
+
+    Semantic retrieval is the only leg that can answer a question asked in a
+    language the pages are not written in, and it stayed unbuilt in every
+    installed vault because nothing outside the tests ever called the builder.
+
+    Returning None is a real answer, not a swallowed error: the generation is
+    then published with `vector_state: absent`, exactly as before, and the
+    doctor reports it. A vault without the optional model keeps working on
+    lexical search alone.
+    """
+    _check_generation_stop(deadline, cancelled)
+    if not snapshot.chunks:
+        return None
+    embedder = _get_embedder()
+    if embedder is None:
+        return None
+    try:
+        artifacts = build_generation_numpy_vectors(
+            snapshot,
+            generation_directory,
+            embedder=_generation_embedder(embedder, is_query=False),
+            model_id=EMBEDDING_MODEL,
+            model_revision=EMBEDDING_MODEL_REVISION,
+            dimensions=EMBEDDING_DIM,
+        )
+    except TimeoutError:
+        raise
+    except Exception:  # noqa: BLE001 - vectors are optional, a generation is not
+        # Losing the whole generation because its optional vectors could not be
+        # built would trade a working lexical index for nothing. The generation
+        # is published with `vector_state: absent` and the doctor reports it.
+        return None
+    _check_generation_stop(deadline, cancelled)
+    return {
+        "artifacts": artifacts,
+        "model_id": EMBEDDING_MODEL,
+        "model_revision": EMBEDDING_MODEL_REVISION,
+        "dimensions": EMBEDDING_DIM,
+    }
+
+
 def publish_generation(
     snapshot: CorpusSnapshot,
     vault: Path,
@@ -674,7 +773,13 @@ def _require_matching_repository(
     if not isinstance(expected_repository_scope, RepositoryScope):
         raise TypeError("expected_repository_scope must be a RepositoryScope")
     live_scope = resolve_repository_scope(vault, deadline=deadline, cancelled=cancelled)
-    if live_scope != expected_repository_scope:
+    # Identity, not equality: `RepositoryScope` carries `git_commit`, and this
+    # vault commits itself, so a four-minute build that ends after a commit was
+    # publishing into "a different repository" by that reading. The question
+    # here is only whether this is the same checkout — the same one `NEW-65`
+    # answered for generation eligibility. Measured 2026-08-24: every rebuild
+    # that spanned a commit died at publication with this message.
+    if not live_scope.same_repository(expected_repository_scope):
         raise ValueError("publication root does not match generation repository scope")
 
 
@@ -846,9 +951,8 @@ def _check_legacy_stop(
 
 
 def _prefixed_for_query(texts: list[str], is_query: bool) -> list[str]:
-    if not is_query or not QUERY_INSTRUCTION:
-        return texts
-    return [f"{QUERY_INSTRUCTION} {text}" for text in texts]
+    """Both sides carry their E5 prefix; the model is trained to expect them."""
+    return prefixed_texts(texts, is_query)
 
 
 def _embed_texts(
@@ -860,8 +964,7 @@ def _embed_texts(
 ) -> list[list[float]] | None:
     """Embed a list of texts. Returns None if model unavailable.
 
-    For bge-small-en-v1.5, queries are prefixed with a retrieval instruction
-    for better accuracy. Documents are embedded without prefix.
+    Both sides carry an E5 prefix: questions are queries, pages are passages.
     """
     _check_legacy_stop(deadline, cancelled)
     embedder = _get_embedder()
@@ -979,7 +1082,7 @@ def _is_retired_page(content: str) -> bool:
     if not frontmatter:
         return False
     status = re.search(r"^status:\s*(.+?)\s*$", frontmatter.group(1), re.MULTILINE)
-    return bool(status) and status.group(1).strip() in ("superseded", "archived")
+    return is_retired(status.group(1)) if status else False
 
 
 def _searchable_page(md: Path, name: str, seen: set[Path]) -> bool:
@@ -1086,6 +1189,9 @@ def _extract_frontmatter_field(content: str, pattern: re.Pattern) -> str | None:
 # Patterns for metadata extraction
 PROJECT_FIELD_RE = re.compile(r"^project:\s*[\"']?([^\"'\n]+)[\"']?\s*$", re.MULTILINE)
 TIMESTAMP_FIELD_RE = re.compile(r"^timestamp:\s*(.+?)\s*$", re.MULTILINE)
+PAGE_TYPE_FIELD_RE = re.compile(
+    r"^type:\s*[\"']?([^\"'\n]+)[\"']?\s*$", re.MULTILINE
+)
 AUTHORITY_FIELD_RE = re.compile(
     r"^source_authority:\s*[\"']?([^\"'\n]+)[\"']?\s*$", re.MULTILINE
 )
@@ -1556,14 +1662,21 @@ def _build_index(
             pass
 
 
-def _authority_weight(path: str) -> float:
-    """Read source_authority from page frontmatter; default 1.0."""
+def _page_trust_weight(path: str) -> float:
+    """Who said it and what the page is, read once from its frontmatter.
+
+    Both factors are the same table the generation and hybrid paths use, so a
+    page keeps its place in the order whichever path answered.
+    """
     try:
         p = ROOT / path if not Path(path).is_absolute() else Path(path)
         content = p.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return 1.0
-    return authority_weight(_extract_frontmatter_field(content, AUTHORITY_FIELD_RE))
+    return trust_weight(
+        _extract_frontmatter_field(content, AUTHORITY_FIELD_RE),
+        _extract_frontmatter_field(content, PAGE_TYPE_FIELD_RE),
+    )
 
 
 def _valid_as_of(path: str, as_of: str) -> bool:
@@ -2059,6 +2172,77 @@ def _connectable_generation(
     return bool(_generation_artifact(manifest, GENERATION_FTS_ARTIFACT))
 
 
+# Validating the FTS artifact walks every chunk row it holds — 1.95 s on this
+# vault — and the verdict is a pure function of those bytes: the rows are checked
+# against the artifact's own metadata, and the caller already holds a
+# consumption seal proving the bytes match the digest the manifest names. So the
+# answer is remembered per set of bytes, for this process, and a different digest
+# is a different question. See docs/research/2026-08-24-verify-the-same-bytes-once.md.
+_MAX_REMEMBERED_FTS_VERDICTS = 8
+_VALID_FTS_ARTIFACTS: OrderedDict[tuple[str, str], bool] = OrderedDict()
+_FTS_VERDICT_LOCK = threading.Lock()
+
+
+def _named_artifact_digest(artifacts: object, name: str) -> str:
+    if not isinstance(artifacts, list):
+        return ""
+    for artifact in artifacts:
+        if _artifact_named(artifact, name):
+            return str(artifact.get("sha256") or "")
+    return ""
+
+
+def _artifact_named(artifact: object, name: str) -> bool:
+    return isinstance(artifact, dict) and artifact.get("path") == name
+
+
+def _fts_verdict_key(manifest: dict[str, object]) -> tuple[str, str] | None:
+    """(generation, digest of search.sqlite3), or None when either is unnamed."""
+    generation_id = str(manifest.get("generation_id") or "")
+    digest = _named_artifact_digest(
+        manifest.get("artifacts"), GENERATION_FTS_ARTIFACT
+    )
+    if not generation_id or not digest:
+        return None
+    return generation_id, digest
+
+
+def _fts_already_valid(key: tuple[str, str] | None) -> bool:
+    if key is None:
+        return False
+    with _FTS_VERDICT_LOCK:
+        if key not in _VALID_FTS_ARTIFACTS:
+            return False
+        _VALID_FTS_ARTIFACTS.move_to_end(key)
+        return True
+
+
+def _remember_valid_fts(key: tuple[str, str] | None) -> None:
+    if key is None:
+        return
+    with _FTS_VERDICT_LOCK:
+        _VALID_FTS_ARTIFACTS[key] = True
+        while len(_VALID_FTS_ARTIFACTS) > _MAX_REMEMBERED_FTS_VERDICTS:
+            _VALID_FTS_ARTIFACTS.popitem(last=False)
+
+
+def _fts_contents_hold(
+    connection: sqlite3.Connection,
+    manifest: dict[str, object],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    key = _fts_verdict_key(manifest)
+    if _fts_already_valid(key):
+        return True
+    if not _valid_generation_fts(
+        connection, manifest, deadline=deadline, cancelled=cancelled
+    ):
+        return False
+    _remember_valid_fts(key)
+    return True
+
+
 def _validated_generation_connection(
     artifact: Path,
     manifest: dict[str, object],
@@ -2073,9 +2257,7 @@ def _validated_generation_connection(
     )
     try:
         _check_generation_stop(deadline, cancelled)
-        if not _valid_generation_fts(
-            connection, manifest, deadline=deadline, cancelled=cancelled
-        ):
+        if not _fts_contents_hold(connection, manifest, deadline, cancelled):
             connection.close()
             return None
         return connection
@@ -2765,7 +2947,7 @@ def _generation_filters(
         )
         values.extend((as_of[:10], as_of[:10]))
     else:
-        clauses.append("(status IS NULL OR status = '' OR lower(status) = 'active')")
+        clauses.append(current_status_sql())
     if since:
         clauses.append(
             "(valid_from IS NULL OR valid_from = '' OR substr(valid_from, 1, 10) >= ?)"
@@ -2824,9 +3006,8 @@ def _outside_as_of(row: Mapping[str, object], timestamp: str, as_of: str) -> boo
 
 
 def _superseded_now(row: Mapping[str, object]) -> bool:
-    """Without an as-of date only currently active pages answer."""
-    status = str(row.get("status") or "").casefold()
-    return bool(status) and status != "active"
+    """Without an as-of date a retired page is history, not an answer."""
+    return is_retired(row.get("status"))
 
 
 def _temporally_excluded(row: Mapping[str, object], since: str | None, as_of: str | None) -> bool:
@@ -2918,7 +3099,7 @@ def _boosted_lexical_score(
     score *= _title_boost(title, query_lower, query_words)
     score *= _filename_boost(path, query_lower, query_words)
     score *= _notes_boost(path)
-    return score * _authority_weight(path)
+    return score * _page_trust_weight(path)
 
 
 def apply_hard_filters(
@@ -2959,7 +3140,7 @@ def _first_line(content: str) -> str:
 
 def _generation_result(row: sqlite3.Row, generation_id: str) -> dict[str, object]:
     authority = _row_text(row, "authority")
-    score = -float(row["rank"]) * authority_weight(authority)
+    score = -float(row["rank"]) * trust_weight(authority, _row_text(row, "type"))
     content = _row_text(row, "content")
     return {
         "path": row["source_path"],
@@ -3398,6 +3579,29 @@ def _generation_vectors_search(
         return None
 
 
+def _page_diverse_order(
+    ordered: list[str], metadata: Mapping[str, Mapping[str, object]]
+) -> list[str]:
+    """One chunk per page first, then the rest in the order they already had.
+
+    Retrieved chunks cluster: several passages of one page are one answer
+    repeated, not several answers, and they crowd every other page out of the
+    result. Nothing is dropped here — the extra chunks follow the first pass —
+    so a caller that wanted them still receives them.
+    """
+    first_by_page: list[str] = []
+    extras: list[str] = []
+    seen: set[str] = set()
+    for chunk_id in ordered:
+        page = str(metadata[chunk_id].get("path") or "")
+        if page in seen:
+            extras.append(chunk_id)
+            continue
+        seen.add(page)
+        first_by_page.append(chunk_id)
+    return first_by_page + extras
+
+
 def _fuse_generation_results(
     lexical: list[dict[str, object]], vectors: list[dict[str, object]], limit: int
 ) -> list[dict[str, object]]:
@@ -3411,7 +3615,9 @@ def _fuse_generation_results(
         chunk_id = str(result["chunk_id"])
         scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (60 + rank)
         metadata.setdefault(chunk_id, result)
-    ordered = sorted(scores, key=lambda key: (-scores[key], key))
+    ordered = _page_diverse_order(
+        sorted(scores, key=lambda key: (-scores[key], key)), metadata
+    )
     results = []
     for chunk_id in ordered[:limit]:
         result = dict(metadata[chunk_id])
@@ -3482,7 +3688,7 @@ def search(
     project: str | None = None,
     since: str | None = None,
     as_of: str | None = None,
-    semantic: bool = False,
+    semantic: bool = True,
     page_paths: list[Path] | None = None,
     graph: bool = True,
     rerank: bool = True,
@@ -3503,6 +3709,12 @@ def search(
     if _blank_query(query):
         return []
     from retrieval import retrieve_via_search_memory
+
+    generation_embedder, generation_model_id, generation_model_revision = (
+        _resolved_generation_embedder(
+            semantic, generation_embedder, generation_model_id, generation_model_revision
+        )
+    )
 
     return retrieve_via_search_memory(
         query,
@@ -3706,6 +3918,11 @@ class _PageRead(NamedTuple):
     project: str
     timestamp: str
     authority: str
+    page_type: str = ""
+
+
+def _frontmatter_text(content: str, pattern: re.Pattern[str]) -> str:
+    return _extract_frontmatter_field(content, pattern) or ""
 
 
 def _read_page(page: Path, label: str) -> _PageRead | None:
@@ -3723,9 +3940,10 @@ def _read_page(page: Path, label: str) -> _PageRead | None:
         content=content,
         title=title,
         summary=summary,
-        project=_extract_frontmatter_field(content, PROJECT_FIELD_RE) or "",
-        timestamp=(_extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or "")[:10],
-        authority=_extract_frontmatter_field(content, AUTHORITY_FIELD_RE) or "",
+        project=_frontmatter_text(content, PROJECT_FIELD_RE),
+        timestamp=_frontmatter_text(content, TIMESTAMP_FIELD_RE)[:10],
+        authority=_frontmatter_text(content, AUTHORITY_FIELD_RE),
+        page_type=_frontmatter_text(content, PAGE_TYPE_FIELD_RE),
     )
 
 
@@ -3777,7 +3995,7 @@ def _exact_page_hit(
         return None
     if not _page_read_eligible(read, project=project, since=since, as_of=as_of):
         return None
-    score = round(10.0 * authority_weight(read.authority), 2)
+    score = round(10.0 * trust_weight(read.authority, read.page_type), 2)
     return _page_hit(read, score=score, bm25_score=0.0)
 
 
@@ -3949,7 +4167,7 @@ def _document_terms(page: Path, title: str, summary: str, body: str) -> set[str]
 
 
 def _direct_match_score(
-    page: Path, title: str, authority: str, query_terms: set[str]
+    page: Path, title: str, read: _PageRead, query_terms: set[str]
 ) -> float:
     """Literal matching has no BM25, so the term count carries the base score."""
     score = float(len(query_terms))
@@ -3957,7 +4175,7 @@ def _direct_match_score(
         score *= 3.0
     if query_terms.issubset(set(re.findall(r"\w+", page.stem.casefold()))):
         score *= 4.0
-    return score * authority_weight(authority)
+    return score * trust_weight(read.authority, read.page_type)
 
 
 def _direct_page_hit(
@@ -3978,7 +4196,7 @@ def _direct_page_hit(
         return None
     if not _page_read_eligible(read, project=project, since=since, as_of=as_of):
         return None
-    score = round(_direct_match_score(page, read.title, read.authority, query_terms), 2)
+    score = round(_direct_match_score(page, read.title, read, query_terms), 2)
     return {
         **_page_hit(read, score=score, bm25_score=score),
         "fallback_reason": "legacy_sqlite_unavailable",
@@ -4463,7 +4681,7 @@ def _search_backends(
     project: str | None = None,
     since: str | None = None,
     as_of: str | None = None,
-    semantic: bool = False,
+    semantic: bool = True,
     page_paths: list[Path] | None = None,
     graph: bool = True,
     rerank: bool = True,
@@ -4482,6 +4700,11 @@ def _search_backends(
     if _blank_query(query):
         return []
     selected_catalog = catalog if catalog is not None else _active_generation_catalog()
+    generation_embedder, generation_model_id, generation_model_revision = (
+        _resolved_generation_embedder(
+            semantic, generation_embedder, generation_model_id, generation_model_revision
+        )
+    )
     stop_options = _stop_options(deadline, cancelled)
     _check_generation_stop(deadline, cancelled)
     if _generation_search_allowed(selected_catalog, force_rebuild, page_paths):
@@ -4713,7 +4936,7 @@ def _legacy_search(
     project: str | None = None,
     since: str | None = None,
     as_of: str | None = None,
-    semantic: bool = False,
+    semantic: bool = True,
     page_paths: list[Path] | None = None,
     graph: bool = True,
     rerank: bool = True,
@@ -4945,9 +5168,8 @@ def _legacy_vector_excluded(
         return True
     if as_of:
         return False
-    # Without an as-of date, a superseded page is history.
-    status = _page_status(path)
-    return bool(status) and status != "active"
+    # Without an as-of date, a retired page is history.
+    return is_retired(_page_status(path))
 
 
 def _vector_cache_matrix(vectors_data: Mapping[str, object]) -> object | None:
@@ -5248,7 +5470,11 @@ def _encoded_page_vectors(
         import numpy as np
 
         vectors = np.asarray(
-            embedder.encode(texts, show_progress_bar=False, convert_to_numpy=True)
+            embedder.encode(
+                _prefixed_for_query(texts, False),
+                show_progress_bar=False,
+                convert_to_numpy=True,
+            )
         )
         _check_legacy_stop(deadline, cancelled)
     except TimeoutError:
@@ -5306,7 +5532,16 @@ def main() -> int:
     p.add_argument("--project", default=None, help="Boost results from this project slug")
     p.add_argument("--since", default=None, help="Only results since YYYY-MM-DD")
     p.add_argument("--as-of", dest="as_of", default=None, help="Only results valid on YYYY-MM-DD")
-    p.add_argument("--semantic", action="store_true", help="Enable vector search (needs sentence-transformers)")
+    # On by default: measured on this vault, "почему systemd таймер, а не cron"
+    # returns nothing without it and four results with it. The dense leg costs
+    # about three seconds once the model is warm, and it fails soft — no model or
+    # no vectors in the active generation simply means the lexical answer.
+    p.add_argument(
+        "--semantic",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Vector search over the active generation (default: on)",
+    )
     p.add_argument(
         "--profile",
         choices=[
@@ -5325,7 +5560,21 @@ def main() -> int:
         help="Requested retrieval profile (Task 11 planner)",
     )
     p.add_argument("--no-graph", action="store_true", help="Disable graph-neighbor signal")
-    p.add_argument("--no-rerank", action="store_true", help="Disable cross-encoder reranker")
+    # The cross-encoder costs about twenty seconds to load in a fresh process
+    # and buys `hit@1` 0.0 → 0.1 and `hit@5` 0.6 → 0.7 on this vault's stand
+    # (measured 2026-08-24). A resident MCP server pays that once and keeps it;
+    # a one-shot CLI call pays it every time, which is why the CLI leaves it off
+    # unless asked. Measured 2026-08-25: 30.3 s with it, 10.7 s without.
+    p.add_argument(
+        "--rerank",
+        action="store_true",
+        help="Load the cross-encoder reranker (about 20s in a cold process)",
+    )
+    p.add_argument(
+        "--no-rerank",
+        action="store_true",
+        help="Kept for compatibility: the CLI already skips the reranker",
+    )
     p.add_argument("--rebuild", action="store_true", help="Force index rebuild")
     p.add_argument("--status", action="store_true", help="Show index stats")
     p.add_argument("--stdin", action="store_true", help="Read query from stdin (injection-safe)")
@@ -5384,7 +5633,7 @@ def _run_cli_search(args: argparse.Namespace) -> int:
             semantic=args.semantic,
             profile=args.profile,
             graph=not args.no_graph,
-            rerank=not args.no_rerank,
+            rerank=args.rerank and not args.no_rerank,
         )
     except LegacySearchUnavailable as error:
         print(f"search_memory: {error}", file=sys.stderr)

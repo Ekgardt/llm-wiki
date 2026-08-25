@@ -457,17 +457,27 @@ def test_atx_headings_ignore_fences_and_preserve_meaningful_hashes(vault: Path):
     assert "### Also not a heading" in snapshot.chunks[1].text
 
 
+def _chunks_of(snapshot, source) -> list:
+    return [
+        chunk
+        for chunk in snapshot.chunks
+        if chunk.source_id == source.record.logical_id
+    ]
+
+
+def _chunks_by_source(snapshot) -> dict:
+    return {
+        source.record.relative_path: _chunks_of(snapshot, source)
+        for source in snapshot.sources
+    }
+
+
 def test_heading_free_markdown_and_code_emit_one_unique_chunk_each(vault: Path):
     write(vault / "knowledge/notes/plain.md", "Plain Markdown content.\n")
     write(vault / "scripts/plain.py", "print('plain')\n")
 
     snapshot = collect_corpus(vault, code_roots=("scripts/plain.py",))
-    chunks_by_source = {
-        source.record.relative_path: [
-            chunk for chunk in snapshot.chunks if chunk.source_id == source.record.logical_id
-        ]
-        for source in snapshot.sources
-    }
+    chunks_by_source = _chunks_by_source(snapshot)
 
     assert {path: len(chunks) for path, chunks in chunks_by_source.items()} == {
         "knowledge/notes/plain.md": 1,
@@ -762,25 +772,31 @@ def test_posix_directory_handle_ignores_transient_swap_and_restore(
     real_scandir = corpus_snapshot.os.scandir
     attacks = 0
 
+    def targets_safe(directory: object) -> bool:
+        if isinstance(directory, int):
+            opened = os.fstat(directory)
+            return (opened.st_dev, opened.st_ino) == (
+                safe_identity.st_dev,
+                safe_identity.st_ino,
+            )
+        return Path(directory) == safe
+
+    def scandir_while_swapped(directory: object):
+        safe.rename(held)
+        outside.rename(safe)
+        try:
+            return real_scandir(directory)
+        finally:
+            safe.rename(outside)
+            held.rename(safe)
+
     def swapping_scandir(directory: object):
         nonlocal attacks
-        descriptor_target = (
-            isinstance(directory, int)
-            and os.fstat(directory).st_dev == safe_identity.st_dev
-            and os.fstat(directory).st_ino == safe_identity.st_ino
-        )
-        pathname_target = not isinstance(directory, int) and Path(directory) == safe
-        if descriptor_target or pathname_target:
-            safe.rename(held)
-            outside.rename(safe)
-            try:
-                iterator = real_scandir(directory)
-            finally:
-                safe.rename(outside)
-                held.rename(safe)
-            attacks += 1
-            return iterator
-        return real_scandir(directory)
+        if not targets_safe(directory):
+            return real_scandir(directory)
+        iterator = scandir_while_swapped(directory)
+        attacks += 1
+        return iterator
 
     monkeypatch.setattr(corpus_snapshot.os, "scandir", swapping_scandir)
     snapshot = collect_corpus(vault)
@@ -972,3 +988,28 @@ def test_one_binary_under_a_code_root_does_not_fail_the_whole_corpus(vault: Path
     paths = {source.record.relative_path for source in snapshot.sources}
     assert "scripts/app.py" in paths
     assert not [path for path in paths if path.endswith((".pyc", ".bin"))]
+
+
+def test_prose_under_a_code_root_is_a_doc_not_code(vault: Path):
+    """A status register is commentary; calling it code gave it a neutral weight.
+
+    Measured on this vault: with `docs/*.md` typed `code`, the audit register was
+    the first result on all ten stand questions and hit@5 fell from 0.7 to 0.4.
+    """
+    write(vault / "docs/notes.md", "# Design note\nProse about a decision.\n")
+    write(vault / "scripts/tool.py", "def run():\n    return 1\n")
+
+    snapshot = collect_corpus(vault, code_roots=("docs", "scripts"))
+
+    types = {
+        source.record.relative_path: source.metadata.type for source in snapshot.sources
+    }
+    assert types["docs/notes.md"] == "doc"
+    assert types["scripts/tool.py"] == "code"
+
+
+def test_a_doc_ranks_below_a_compiled_page_and_below_code() -> None:
+    import provenance
+
+    assert provenance.type_weight("doc") < provenance.DEFAULT_TYPE_WEIGHT
+    assert provenance.type_weight("doc") < provenance.type_weight("decision")

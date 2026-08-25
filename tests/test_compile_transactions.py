@@ -1760,3 +1760,306 @@ def test_the_log_names_pages_in_a_vault_that_publishes_them(vault):
 
     log = (root / "knowledge/log.md").read_text(encoding="utf-8")
     assert "knowledge/notes/exact-byte-pattern.md" in log
+
+
+def _quarantine_next_compile(root: Path, state_root: Path, daily: Path):
+    """Drive one compile into quarantine the way the DLP boundary did."""
+    import compile_memory
+    import markdown_transaction
+
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    coordinator = MarkdownCoordinator(root, state_root)
+    original = markdown_transaction.require_safe_publication
+
+    def refuse(content: bytes) -> None:
+        del content
+        raise markdown_transaction.DLPContentBlocked("content contains protected data")
+
+    markdown_transaction.require_safe_publication = refuse
+    try:
+        with pytest.raises(Exception):
+            compile_memory.apply_compile_plan(
+                inputs,
+                _semantic_plan(),
+                action_key="9" * 64,
+                trigger="manual",
+                coordinator=coordinator,
+                completed_at="2026-07-14T12:00:00Z",
+            )
+    finally:
+        markdown_transaction.require_safe_publication = original
+    return inputs
+
+
+def test_a_quarantined_attempt_does_not_lock_its_inputs_out_of_compiling(vault):
+    """A refused attempt is evidence, not a life sentence for those dailies.
+
+    The operation id comes from the inputs, so a retry after the refusal was
+    fixed carries the same id with a different request hash and the coordinator
+    refused it. That refusal is right — an idempotency key must never be reused
+    for a different payload — so the retry takes the next attempt id instead,
+    exactly as project checkpoints already do.
+    """
+    root, state_root = vault
+    daily = _daily(root)
+    _quarantine_next_compile(root, state_root, daily)
+    import compile_memory
+
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    result = compile_memory.apply_compile_plan(
+        inputs,
+        _semantic_plan(),
+        action_key="9" * 64,
+        trigger="manual",
+        coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T12:30:00Z",
+    )
+
+    assert result.state == "committed"
+    assert (root / "knowledge/notes/exact-byte-pattern.md").is_file()
+
+
+def test_a_split_day_is_recorded_by_the_whole_file_not_its_last_part(
+    vault, monkeypatch
+):
+    """The mirror must mean what its cheap readers assume it means.
+
+    A long day is compiled part by part. Recording the last part's digest under
+    the file name made the lint, the MCP status and the compile trigger call a
+    fully compiled day stale for ever — no compile would ever revisit it, so
+    nothing could correct the record.
+    """
+    root, state_root = vault
+    import compile_memory
+    from memory_state import load_state
+
+    daily = root / "knowledge/daily/2026-07-14.md"
+    entry = b"<!-- llm-wiki-operation: session -->\n" + b"session text\n" * 300
+    daily.write_bytes(b"# 2026-07-14\n\n" + entry * 12)
+    content = daily.read_bytes()
+    bounds = compile_memory._daily_part_bounds(content)
+    assert len(bounds) > 1, "this day is supposed to split into parts"
+    monkeypatch.setattr(
+        compile_memory, "_receipt_predicate", lambda _coordinator: lambda *_a: True
+    )
+
+    compile_memory._repair_compile_mirror(object())
+
+    mirror = load_state().get("compiled_daily_hashes", {})
+    last_part = compile_memory.sha256_bytes(content[bounds[-1][0] : bounds[-1][1]])
+    assert mirror["2026-07-14.md"] == compile_memory.sha256_bytes(content)
+    assert mirror["2026-07-14.md"] != last_part
+    del state_root
+
+
+def test_a_day_without_receipts_for_every_part_is_left_alone(vault, monkeypatch):
+    """Only the receipts decide; the repair merely writes down what they say."""
+    root, state_root = vault
+    import compile_memory
+    from memory_state import load_state
+
+    daily = root / "knowledge/daily/2026-07-15.md"
+    daily.write_bytes(b"# 2026-07-15\n\nshort day\n")
+    monkeypatch.setattr(
+        compile_memory, "_receipt_predicate", lambda _coordinator: lambda *_a: False
+    )
+
+    compile_memory._repair_compile_mirror(object())
+
+    assert "2026-07-15.md" not in load_state().get("compiled_daily_hashes", {})
+    del state_root
+
+
+def test_a_corrupt_receipt_says_which_one_and_why(vault):
+    """One message for four causes explains nothing to whoever meets it.
+
+    The live vault stopped compiling behind this message and the only way to
+    learn the reason was to reproduce the failure through the reader.
+    """
+    root, state_root = vault
+    daily = _daily(root)
+    import compile_memory
+
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    compile_memory.apply_compile_plan(
+        inputs,
+        _semantic_plan(),
+        action_key="9" * 64,
+        trigger="manual",
+        coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T12:00:00Z",
+    )
+    digest = inputs.dailies[0].sha256
+    path = root / "knowledge/daily/receipts" / f"{digest}.md"
+    path.write_bytes(
+        path.read_bytes().replace(b'"state":"completed"', b'"state":"broken"')
+    )
+
+    with pytest.raises(ValueError) as failure:
+        compile_memory.read_compile_receipt(
+            digest, MarkdownCoordinator(root, state_root)
+        )
+
+    message = str(failure.value)
+    prefix, separator, reason = message.partition(": ")
+    assert prefix.startswith("compile receipt is corrupt")
+    assert path.name in prefix
+    assert separator and reason.strip()
+
+
+def test_the_retry_receipt_names_the_transaction_that_committed_it(vault):
+    """A receipt is evidence only when the operation it names actually wrote it.
+
+    The retry ordinal used to be chosen at the commit, after the receipts had
+    been rendered with the refused id. Those receipts then pointed at a
+    quarantined transaction, the reader called them corrupt, and every later
+    compile of the same sources failed on reading them. That is how the live
+    vault stopped compiling on 2026-08-22 while its own log said the compile
+    had succeeded.
+    """
+    root, state_root = vault
+    daily = _daily(root)
+    _quarantine_next_compile(root, state_root, daily)
+    import compile_memory
+
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    result = compile_memory.apply_compile_plan(
+        inputs,
+        _semantic_plan(),
+        action_key="9" * 64,
+        trigger="manual",
+        coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T12:30:00Z",
+    )
+    assert result.state == "committed"
+
+    coordinator = MarkdownCoordinator(root, state_root)
+    digest = inputs.dailies[0].sha256
+    record = compile_memory.read_compile_receipt(digest, coordinator)
+    assert record is not None
+
+    identity = str(record["operation_id"])
+    assert "#" not in identity, "the receipt names the identity, not the attempt"
+    committed = coordinator.committed_attempt(identity)
+    assert committed is not None
+    assert committed.state == "committed"
+    assert committed.operation_id.startswith(f"{identity}#")
+
+
+def test_the_quarantined_attempt_is_kept_and_named_as_the_parent(vault):
+    """The refused attempt stays exactly as it was, and the retry points at it."""
+    root, state_root = vault
+    daily = _daily(root)
+    _quarantine_next_compile(root, state_root, daily)
+    import sqlite3
+
+    import compile_memory
+
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    compile_memory.apply_compile_plan(
+        inputs,
+        _semantic_plan(),
+        action_key="9" * 64,
+        trigger="manual",
+        coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T12:30:00Z",
+    )
+
+    database = sqlite3.connect(state_root / "run" / "markdown-transactions.sqlite3")
+    database.row_factory = sqlite3.Row
+    rows = list(
+        database.execute(
+            'SELECT operation_id, state, parent_transaction_id FROM "transaction" '
+            "WHERE operation_id LIKE 'compile:%' ORDER BY created_at"
+        )
+    )
+    database.close()
+
+    quarantined = [row for row in rows if row["state"] == "quarantined"]
+    committed = [row for row in rows if row["state"] == "committed"]
+    assert len(quarantined) == 1
+    assert committed
+    assert committed[-1]["operation_id"] != quarantined[0]["operation_id"]
+    assert committed[-1]["parent_transaction_id"] is not None
+
+
+def test_a_second_refusal_takes_the_next_ordinal_again(vault):
+    """Attempts form a chain, so two refusals do not become a dead end either."""
+    root, state_root = vault
+    daily = _daily(root)
+    _quarantine_next_compile(root, state_root, daily)
+    _quarantine_next_compile(root, state_root, daily)
+    import compile_memory
+
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    result = compile_memory.apply_compile_plan(
+        inputs,
+        _semantic_plan(),
+        action_key="9" * 64,
+        trigger="manual",
+        coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T13:00:00Z",
+    )
+
+    assert result.state == "committed"
+
+
+def test_the_retry_chain_is_bounded(vault, monkeypatch):
+    """A hundred refusals is an operator's problem, not a numbering exercise."""
+    root, state_root = vault
+    daily = _daily(root)
+    import markdown_transaction
+
+    monkeypatch.setattr(markdown_transaction, "MAX_ATTEMPT_ORDINAL", 1)
+    _quarantine_next_compile(root, state_root, daily)
+    _quarantine_next_compile(root, state_root, daily)
+    coordinator = MarkdownCoordinator(root, state_root)
+    import sqlite3
+
+    database = sqlite3.connect(state_root / "run" / "markdown-transactions.sqlite3")
+    base = database.execute(
+        'SELECT operation_id FROM "transaction" '
+        "WHERE state = 'quarantined' AND operation_id NOT LIKE '%#%' LIMIT 1"
+    ).fetchone()[0]
+    database.close()
+
+    with pytest.raises(ValueError, match="exhausted its quarantined retry ordinals"):
+        coordinator.attempt_operation_id(base)
+
+
+def test_critique_batches_split_until_each_one_fits(monkeypatch):
+    """More operations than one review can hold are reviewed in several.
+
+    Measured on this vault: a draft of sixteen operations makes a critique prompt
+    of 40,543 tokens against a 27,744 budget, and the whole plan used to be
+    thrown away for it.
+    """
+    import compile_memory
+
+    monkeypatch.setattr(
+        compile_memory, "_critique_prompt", lambda inputs, batch: "x" * len(batch)
+    )
+    attempt = compile_memory._CompileAttempt.__new__(compile_memory._CompileAttempt)
+    attempt.inputs = None
+    attempt._fits = lambda prompt, system, schema, descriptor: len(prompt) <= 2
+
+    batches = compile_memory._CompileAttempt._critique_batches(
+        attempt, None, ["a", "b", "c", "d", "e"]
+    )
+
+    assert [len(batch) for batch in batches] == [2, 2, 1]
+    assert [item for batch in batches for item in batch] == ["a", "b", "c", "d", "e"]
+
+
+def test_one_operation_that_cannot_be_reviewed_alone_is_refused(monkeypatch):
+    import compile_memory
+
+    monkeypatch.setattr(
+        compile_memory, "_critique_prompt", lambda inputs, batch: "x" * len(batch)
+    )
+    attempt = compile_memory._CompileAttempt.__new__(compile_memory._CompileAttempt)
+    attempt.inputs = None
+    attempt._fits = lambda prompt, system, schema, descriptor: False
+
+    with pytest.raises(compile_memory._ProviderStageFailure):
+        compile_memory._CompileAttempt._critique_batches(attempt, None, ["a"])

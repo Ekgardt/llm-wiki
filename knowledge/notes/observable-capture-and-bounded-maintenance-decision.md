@@ -110,3 +110,5 @@ redacted error reach the trail.
 - [[knowledge/notes/v4-reliability-contracts-decision]]
 - [[knowledge/notes/reliable-memory-stage-2]]
 - [[knowledge/notes/system-symlink-ancestor-decision]]
+- [[knowledge/notes/self-resolving-health-findings-decision]] — what bounds the finding this decision made visible, so it can end.
+- [[knowledge/notes/session-evidence-retention-decision]] — links to this page.

@@ -285,6 +285,32 @@ class TestRedactionBeforePersistence:
         assert key not in out
         assert "[REDACTED_API_KEY]" in out
 
+    def test_redact_keeps_a_key_prefix_that_is_part_of_a_word(self):
+        """`task-` ends in `sk-`, and that blocked every compile this vault ran.
+
+        The page slug `dead-task-retirement-and-restore-decision` contains
+        `sk-retirement-and-restore-decision`, which the provider-key pattern
+        matched. The fail-closed DLP boundary then quarantined the transaction,
+        so the memory pipeline could not write at all. A real key starts a
+        token; a suffix inside a word does not.
+        """
+        from secret_redact import redact_secrets
+
+        for text in (
+            "- [[knowledge/notes/dead-task-retirement-and-restore-decision]] — a page",
+            "Recorded in `dead-task-retirement-and-restore-decision.md`.",
+            "see risk-assessment-and-mitigation-plan for the rest",
+        ):
+            assert redact_secrets(text) == text
+
+    def test_redact_still_catches_a_key_after_punctuation(self):
+        """Boundary means token start, not whitespace: `=`, quotes and `(` count."""
+        from secret_redact import redact_secrets
+
+        key = "sk-ant-api03-QWERTYUIOPASDFGHJKLZXCVBNM1234"
+        for text in (f"OPENAI_API_KEY={key}", f'value "{key}"', f"({key})"):
+            assert key not in redact_secrets(text)
+
     def test_redact_keeps_hyphenated_prose(self):
         """A long hyphenated identifier is not a key just because it is long."""
         from secret_redact import redact_secrets
@@ -354,10 +380,19 @@ class TestStatusFiltering:
         )
 
     def test_rebuild_memory_index_excludes_superseded(self):
-        """rebuild_memory_index must skip superseded/archived."""
-        src = (SCRIPTS / "rebuild_memory_index.py").read_text(encoding="utf-8")
-        assert "superseded" in src or "archived" in src, (
-            "rebuild_memory_index.py does not filter superseded/archived"
+        """rebuild_memory_index must skip superseded/archived — and only those.
+
+        Asked of the code rather than of the source text: the rule now lives in
+        one shared module, so the word no longer appears in this file, and a
+        page marked `accepted` must stay in the map.
+        """
+        import rebuild_memory_index
+
+        assert rebuild_memory_index._is_retired(self.SUPERSEDED_FM)
+        assert rebuild_memory_index._is_retired(self.ARCHIVED_FM)
+        assert not rebuild_memory_index._is_retired(self.ACTIVE_FM)
+        assert not rebuild_memory_index._is_retired(
+            "---\nstatus: accepted\ntype: decision\n---\n\n# Page\n"
         )
 
     def test_build_context_excludes_superseded(self):

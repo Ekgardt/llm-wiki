@@ -67,3 +67,29 @@ def test_a_relative_state_root_is_made_absolute(
 
     assert markdown_transaction._default_coordinator().state_root == state.resolve()
     assert memory_queue._state_root() == state.resolve()
+
+
+def test_the_state_file_is_kept_inside_the_bound_its_readers_use(tmp_path, monkeypatch):
+    """A state file past the reader's bound blinds two health checks."""
+    import memory_state
+
+    monkeypatch.setattr(memory_state, "MAX_STATE_TARGET_BYTES", 4096)
+    state = {
+        "tool_capture_dedupe": {f"key-{index}": "x" * 200 for index in range(64)},
+        "last_compile_status": "ok",
+    }
+
+    dropped = memory_state.trim_state_to_budget(state)
+
+    assert dropped > 0
+    assert memory_state._state_bytes(state) <= 4096
+    assert state["last_compile_status"] == "ok", "only growth maps may be evicted"
+
+
+def test_trimming_stops_when_nothing_is_left_to_evict(monkeypatch):
+    """An oversized state with no growth maps is written, not looped over."""
+    import memory_state
+
+    monkeypatch.setattr(memory_state, "MAX_STATE_TARGET_BYTES", 8)
+
+    assert memory_state.trim_state_to_budget({"only": "x" * 100}) == 0

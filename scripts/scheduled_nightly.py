@@ -16,7 +16,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -67,7 +67,21 @@ def _refresh_generation(log, *, ownership: OwnerLease | None = None) -> int:
         f"  generation: {status} (id={generation}, "
         f"partial={bool(result.get('partial'))}, reason={result.get('reason') or 'none'})"
     )
+    _log_generation_details(log, result)
     return 0 if status in {"built", "current"} else 1
+
+
+def _log_generation_details(log, result: dict) -> None:
+    """A deferred refresh must say what it saw, not only that it stopped.
+
+    A lost maintenance fence carries which check saw it and what the owner row
+    held. The nightly log used to drop that on the floor, so the one place where
+    the loss actually happens was also the one place with no evidence.
+    """
+    details = result.get("details")
+    if not details:
+        return
+    log(f"  generation: details {details}")
 
 
 def _record_nightly_result(today: str, failures: int, error: str | None = None) -> None:
@@ -89,6 +103,11 @@ def _record_nightly_result(today: str, failures: int, error: str | None = None) 
         else:
             state["last_nightly_status"] = "success"
             state["last_nightly_date"] = today
+            # The date alone cannot say whether a 03:00 run is late; the health
+            # check needs an instant to measure an interval against.
+            state["last_nightly_at"] = datetime.now(timezone.utc).isoformat(
+                timespec="seconds"
+            )
             state.pop("last_nightly_failure", None)
 
     update_state(_mutate)
@@ -143,6 +162,21 @@ def _queue_step() -> _Step:
     )
 
 
+def _episode_step() -> _Step:
+    """Consolidate yesterday's sessions before compile reads the daily log.
+
+    Sessions are kept verbatim whatever the classifier thought of them; this is
+    where a day of them becomes durable knowledge, in the window where nobody is
+    waiting. Every promoted item must quote the record it came from.
+    """
+    return _Step(
+        "Step 1b: consolidating yesterday's sessions...",
+        "episodes",
+        _script("episode_consolidation.py"),
+        300,
+    )
+
+
 def _compile_step() -> _Step:
     return _Step(
         "Step 2: triggering compile (if needed)...",
@@ -158,6 +192,12 @@ def _post_compile_steps() -> list[_Step]:
             "Step 3: structural lint...",
             "lint",
             _script("lint_memory.py"),
+            120,
+        ),
+        _Step(
+            "Step 3a: repairing owed backlinks...",
+            "backlinks",
+            _script("repair_backlinks.py") + ["--apply"],
             120,
         ),
         _Step(
@@ -249,6 +289,20 @@ def _post_compile_pass(run_step, log, ownership: OwnerLease | None) -> int:
     return failures
 
 
+def _update_code(log) -> None:
+    """Advance the checkout last, so changed code takes effect next pass.
+
+    An update is never a reason to fail the night: a diverged branch, an offline
+    machine and a file the owner is editing are ordinary states, and the step
+    names which one it met.
+    """
+    from self_update import update_checkout
+
+    log("Step 5: updating the vault code...")
+    outcome = update_checkout(ROOT)
+    log(f"  update: {outcome['status']} ({outcome.get('reason') or 'none'})")
+
+
 def _prune_reports(log) -> None:
     """Retention over every maintenance report family and its artifacts."""
     log("Step 4: pruning maintenance reports and artifacts...")
@@ -256,7 +310,7 @@ def _prune_reports(log) -> None:
 
 
 def _nightly_steps(run_step, log, ownership: OwnerLease | None) -> int:
-    failures = _run_steps(run_step, log, [_queue_step()])
+    failures = _run_steps(run_step, log, [_queue_step(), _episode_step()])
 
     # Step 2 must not skip compile just because a hook-triggered one runs.
     _wait_for_compile_idle(log)
@@ -322,6 +376,7 @@ def _run_nightly_body(*, ownership: OwnerLease | None) -> int:
 
         failures = _nightly_steps(run_step, log, ownership)
         _prune_reports(log)
+        _update_code(log)
 
         log(f"=== Nightly pass complete (failures={failures}) ===")
         return 1 if failures else 0

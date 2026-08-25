@@ -156,6 +156,22 @@ creates runtime directories, and wires supported agents. The full regression sui
 a separate development and release gate. Existing checkouts keep all Git remote settings;
 pass `--protect-push` or `-ProtectPush` to replace every remote's push URLs with `no-push`.
 
+### Verifying a release
+
+A published release states the exact commit the remote bootstrap accepts —
+branch and tag names are rejected — together with the SHA-256 of every file the
+bootstrap runs. Print them for any tag from a local checkout:
+
+```bash
+uv run python scripts/release_manifest.py v4.0.0 --markdown
+```
+
+Install that exact commit:
+
+```bash
+LLM_WIKI_COMMIT=$(git rev-parse v4.0.0^{commit}) bash ./install.sh
+```
+
 ### Dependency profiles
 
 MCP is part of the production baseline; `mcp-server` remains a compatibility alias. Fresh

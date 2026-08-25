@@ -280,9 +280,17 @@ def test_invalid_input_fails_closed_but_host_cli_exits_safely(capsys):
     assert secret not in capsys.readouterr().err
 
 
-def test_delegate_receives_only_normalized_redacted_payload(monkeypatch, capsys):
+def test_delegate_receives_only_normalized_redacted_payload(monkeypatch, capsys, tmp_path):
     import integration_adapter
 
+    # This one runs the adapter for real, so it writes a project journal. Without
+    # its own root that lands in the live vault under the redacted slug.
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setattr(integration_adapter, "ROOT", vault)
+    monkeypatch.setattr(integration_adapter, "STATE_ROOT", tmp_path / "state")
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
     secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
     observed = {}
 
@@ -820,6 +828,9 @@ def test_shared_ingest_persists_heartbeat_with_derived_slug(
     (vault / "knowledge" / "projects").mkdir(parents=True)
     project.mkdir()
     monkeypatch.setattr(integration_adapter, "ROOT", vault)
+    # Child processes read the root from the environment, and conftest pins it
+    # to this checkout — which is the owner's live vault.
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
     monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
@@ -848,6 +859,9 @@ def test_shared_ingest_materializes_redacted_transient_and_delegates(tmp_path, m
     (vault / "knowledge" / "projects").mkdir(parents=True)
     project.mkdir()
     monkeypatch.setattr(integration_adapter, "ROOT", vault)
+    # Child processes read the root from the environment, and conftest pins it
+    # to this checkout — which is the owner's live vault.
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
     calls = []
     captured = []
@@ -909,6 +923,9 @@ def test_shared_ingest_publishes_durable_intent_before_delegate_and_replays(
     )
     assert report["overall_status"] == "ok"
     monkeypatch.setattr(integration_adapter, "ROOT", vault)
+    # Child processes read the root from the environment, and conftest pins it
+    # to this checkout — which is the owner's live vault.
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
     calls = []
 
@@ -980,6 +997,9 @@ def test_durable_session_end_wakes_v3_worker_without_legacy_flush(
     )
     assert report["overall_status"] == "ok"
     monkeypatch.setattr(integration_adapter, "ROOT", vault)
+    # Child processes read the root from the environment, and conftest pins it
+    # to this checkout — which is the owner's live vault.
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
     spawned = []
     monkeypatch.setattr(
@@ -1054,6 +1074,9 @@ def test_active_capture_worker_completes_published_intent(tmp_path, monkeypatch)
     )
     assert report["overall_status"] == "ok"
     monkeypatch.setattr(integration_adapter, "ROOT", vault)
+    # Child processes read the root from the environment, and conftest pins it
+    # to this checkout — which is the owner's live vault.
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
     monkeypatch.setattr(integration_adapter, "spawn_detached", lambda _args: 123)
     monkeypatch.setattr(
@@ -1091,9 +1114,15 @@ def test_transient_cleanup_after_durable_publication(tmp_path, monkeypatch, even
     import integration_adapter
 
     state_root = tmp_path / "state"
+    vault = tmp_path / "vault"
+    vault.mkdir()
     project = tmp_path / "project"
     project.mkdir()
     monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
+    monkeypatch.setattr(integration_adapter, "ROOT", vault)
+    # Child processes read the root from the environment, and conftest pins it
+    # to this checkout — which is the owner's live vault.
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setattr(
         integration_adapter,
         "_publish_durable_capture_intent",
@@ -1155,9 +1184,15 @@ def test_precompact_transcript_text_materializes_and_confirms_start(tmp_path, mo
     import integration_adapter
 
     state_root = tmp_path / "state"
+    vault = tmp_path / "vault"
+    vault.mkdir()
     project = tmp_path / "project"
     project.mkdir()
     monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
+    monkeypatch.setattr(integration_adapter, "ROOT", vault)
+    # Child processes read the root from the environment, and conftest pins it
+    # to this checkout — which is the owner's live vault.
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     calls = []
     monkeypatch.setattr(
         integration_adapter,

@@ -1225,6 +1225,38 @@ def test_live_pid_prevents_expired_maintenance_owner_reclaim(tmp_path, monkeypat
     doctor._release_maintenance_owner(coordinator, lease)
 
 
+def test_a_lost_fence_names_the_check_and_the_owner_it_found(tmp_path):
+    """A deferred nightly rebuild must say who took the fence, not just that it went."""
+    import doctor
+
+    root, state_root, _ = _build_root(tmp_path)
+    now = datetime.now(timezone.utc)
+    acquired = doctor._acquire_maintenance_owner(root, state_root, now)
+    assert acquired is not None
+    coordinator, lease = acquired
+    with coordinator._connect() as database:
+        database.execute(
+            "UPDATE maintenance_owners SET owner_token='thief',process_id=?,"
+            "fencing_epoch=? WHERE owner_name='doctor'",
+            (os.getpid() + 1, int(lease["epoch"]) + 1),
+        )
+        database.commit()
+
+    with pytest.raises(doctor.MaintenanceFenceLost) as required:
+        doctor._require_maintenance_owner(coordinator, lease)
+    with pytest.raises(doctor.MaintenanceFenceLost) as beaten:
+        doctor._heartbeat_maintenance_owner(coordinator, lease)
+
+    assert str(required.value) == "maintenance_owner_fence_lost"
+    assert required.value.where == "require"
+    assert beaten.value.where == "heartbeat"
+    observed = required.value.observed
+    assert observed["process_id"] == os.getpid() + 1
+    assert observed["fencing_epoch"] == int(lease["epoch"]) + 1
+    assert observed["held_epoch"] == lease["epoch"]
+    assert doctor._fence_loss_details(required.value)["where"] == "require"
+
+
 def test_maintenance_heartbeat_runs_during_long_operation(tmp_path, monkeypatch):
     import doctor
 
@@ -1258,6 +1290,43 @@ def test_maintenance_heartbeat_runs_during_long_operation(tmp_path, monkeypatch)
         guard.run(wait_for_two_heartbeats)
 
     assert len(beats) >= 2
+
+
+def test_a_busy_database_is_not_a_lost_fence(tmp_path, monkeypatch):
+    """A locked database threw away seven-minute generation builds on this vault.
+
+    The lease outlives two missed beats, so a transient failure is retried; a
+    fence genuinely taken by someone else still ends the pass at once.
+    """
+    import doctor
+
+    root, state_root, _ = _build_root(tmp_path)
+    acquired = doctor._acquire_maintenance_owner(root, state_root, datetime.now(timezone.utc))
+    assert acquired is not None
+    coordinator, lease = acquired
+    guard = doctor._MaintenanceHeartbeat(
+        coordinator, lease, deadline=time.monotonic() + 60
+    )
+
+    monkeypatch.setattr(
+        doctor,
+        "_heartbeat_maintenance_owner",
+        lambda *args, **kwargs: (_ for _ in ()).throw(sqlite3.OperationalError("locked")),
+    )
+    assert guard._beat_once() is False
+    assert guard.cancelled() is False
+
+    monkeypatch.setattr(
+        doctor,
+        "_heartbeat_maintenance_owner",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("maintenance_owner_fence_lost")
+        ),
+    )
+    assert guard._beat_once() is False
+    assert guard.cancelled() is True
+
+    doctor._release_maintenance_owner(coordinator, lease)
 
 
 def test_ownerless_stale_lease_is_degraded_and_not_repaired(tmp_path):
@@ -4086,6 +4155,10 @@ def test_doctor_repair_preserves_lsp_runtime_bytes(tmp_path, monkeypatch) -> Non
     assert _snapshot(lsp_root) == before
 
 
+def _moment_days_ago(days: float) -> str:
+    return (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
+
+
 def test_lost_captures_are_reported_as_a_degraded_capture_check(tmp_path):
     """A capture the hooks lost must show up in health, not only at session start."""
     import doctor
@@ -4096,8 +4169,16 @@ def test_lost_captures_are_reported_as_a_degraded_capture_check(tmp_path):
         json.dumps(
             {
                 "capture_failures": {
-                    "session_end": {"count": 2, "last_reason": "spawn_failed"},
-                    "pre_compact": {"count": 1, "last_reason": "spawn_failed"},
+                    "session_end": {
+                        "count": 2,
+                        "last_reason": "spawn_failed",
+                        "last_at": _moment_days_ago(0),
+                    },
+                    "pre_compact": {
+                        "count": 1,
+                        "last_reason": "spawn_failed",
+                        "last_at": _moment_days_ago(0),
+                    },
                 }
             }
         ),
@@ -4113,6 +4194,39 @@ def test_lost_captures_are_reported_as_a_degraded_capture_check(tmp_path):
     del home
 
 
+def test_a_loss_that_stopped_happening_returns_the_capture_check_to_green(tmp_path):
+    """Nothing may require a human to make a report green again.
+
+    The counter is evidence and stays; the finding covers the last seven days,
+    so a vault whose loss was diagnosed and fixed recovers on its own.
+    """
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    (state_root / "run").mkdir(parents=True, exist_ok=True)
+    (state_root / "run" / "state.json").write_text(
+        json.dumps(
+            {
+                "capture_failures": {
+                    "session_end": {
+                        "count": 2,
+                        "last_reason": "spawn_failed",
+                        "last_at": _moment_days_ago(30),
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "capture")
+
+    assert check["status"] == "ok"
+    assert check["details"]["lost"] == 2
+    assert check["details"]["live"] is False
+    del home
+
+
 def test_a_vault_without_lost_captures_reports_the_capture_check_as_ok(tmp_path):
     import doctor
 
@@ -4124,30 +4238,44 @@ def test_a_vault_without_lost_captures_reports_the_capture_check_as_ok(tmp_path)
     assert check["details"]["lost"] == 0
     del home
 
+def _stubbed_maintenance(doctor, monkeypatch, releases: list[object]) -> None:
+    """One acquirable owner, and a record of every release of it."""
+    monkeypatch.setattr(
+        doctor, "_acquire_maintenance_owner", lambda *a, **k: (object(), {"epoch": 1})
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_release_maintenance_owner",
+        lambda coordinator, lease: releases.append(lease),
+    )
+    monkeypatch.setattr(doctor, "_require_maintenance_owner", lambda *a, **k: None)
+    monkeypatch.setattr(doctor, "_heartbeat_maintenance_owner", lambda *a, **k: None)
+    monkeypatch.setattr(doctor, "_repair_generation_catalog", lambda *a, **k: None)
+    monkeypatch.setattr(doctor, "_unusable_filesystem_outcome", lambda *a, **k: None)
+
+
 def test_a_vault_written_to_mid_capture_is_captured_again(tmp_path, monkeypatch):
     """An active vault changes while it is read; deferring would never refresh it."""
     import doctor
     from corpus_snapshot import CorpusChanged
 
     calls: list[bool] = []
+    releases: list[object] = []
 
-    def refresh(root, state, coordinator, lease, deadline, max_sources, force, repaired):
-        calls.append(force)
+    def build(root, state, **kwargs):
+        calls.append(kwargs["force_rebuild"])
         if len(calls) == 1:
             raise CorpusChanged("live corpus membership or source hashes changed")
         return {"status": "built", "generation_id": "gen-2"}
 
-    monkeypatch.setattr(doctor, "_refreshed_generation", refresh)
-    monkeypatch.setattr(
-        doctor, "_acquire_maintenance_owner", lambda *a, **k: (object(), object())
-    )
-    monkeypatch.setattr(doctor, "_release_maintenance_owner", lambda *a, **k: None)
-    monkeypatch.setattr(doctor, "_unusable_filesystem_outcome", lambda *a, **k: None)
+    _stubbed_maintenance(doctor, monkeypatch, releases)
+    monkeypatch.setattr(doctor, "_build_or_refresh_generation", build)
 
     result = doctor.run_generation_maintenance(tmp_path, tmp_path, time_budget_seconds=30)
 
     assert result["status"] == "built"
     assert calls == [False, True]
+    assert len(releases) == 1, "the fence must outlive the recapture, not be released between"
 
 def test_losing_the_maintenance_fence_is_reported_not_raised(tmp_path, monkeypatch):
     """The nightly timer and a manual run collide; the loser reports, not crashes."""
@@ -4187,29 +4315,48 @@ def test_an_unrelated_runtime_error_still_escapes(tmp_path, monkeypatch):
         doctor.run_generation_maintenance(tmp_path, tmp_path, time_budget_seconds=30)
 
 def test_losing_the_fence_during_the_recapture_is_also_reported(tmp_path, monkeypatch):
-    """The recapture runs inside an except block, out of reach of its handlers."""
+    """A fence genuinely lost during the second capture still reaches the report."""
     import doctor
     from corpus_snapshot import CorpusChanged
 
     calls: list[bool] = []
+    releases: list[object] = []
 
-    def refresh(root, state, coordinator, lease, deadline, max_sources, force, repaired):
-        calls.append(force)
+    def build(root, state, **kwargs):
+        calls.append(kwargs["force_rebuild"])
         if len(calls) == 1:
             raise CorpusChanged("live corpus membership or source hashes changed")
         raise RuntimeError("maintenance_owner_fence_lost")
 
-    monkeypatch.setattr(doctor, "_refreshed_generation", refresh)
-    monkeypatch.setattr(
-        doctor, "_acquire_maintenance_owner", lambda *a, **k: (object(), object())
-    )
-    monkeypatch.setattr(doctor, "_release_maintenance_owner", lambda *a, **k: None)
-    monkeypatch.setattr(doctor, "_unusable_filesystem_outcome", lambda *a, **k: None)
+    _stubbed_maintenance(doctor, monkeypatch, releases)
+    monkeypatch.setattr(doctor, "_build_or_refresh_generation", build)
 
     result = doctor.run_generation_maintenance(tmp_path, tmp_path, time_budget_seconds=30)
 
     assert result["status"] == "deferred"
     assert result["reason"] == "maintenance_owner_lost"
+    assert calls == [False, True]
+
+
+def test_a_second_change_during_the_recapture_defers_to_the_next_pass(tmp_path, monkeypatch):
+    """Written to faster than it can be read: the next pass takes it."""
+    import doctor
+    from corpus_snapshot import CorpusChanged
+
+    calls: list[bool] = []
+    releases: list[object] = []
+
+    def build(root, state, **kwargs):
+        calls.append(kwargs["force_rebuild"])
+        raise CorpusChanged("live corpus membership or source hashes changed")
+
+    _stubbed_maintenance(doctor, monkeypatch, releases)
+    monkeypatch.setattr(doctor, "_build_or_refresh_generation", build)
+
+    result = doctor.run_generation_maintenance(tmp_path, tmp_path, time_budget_seconds=30)
+
+    assert result["status"] == "deferred"
+    assert result["reason"] == "corpus_changed"
     assert calls == [False, True]
 
 def test_the_host_markers_are_ones_the_shipped_templates_actually_write() -> None:
@@ -4221,16 +4368,23 @@ def test_the_host_markers_are_ones_the_shipped_templates_actually_write() -> Non
         "claude": root / "integrations" / "claude-code" / "settings.json",
     }
     configs = doctor._integration_host_configs(Path.home())
-    missing: dict[str, list[str]] = {}
-    for name, template in shipped.items():
-        text = template.read_text(encoding="utf-8")
-        _host_dir, files = configs[name]
-        for _path, markers in files:
-            absent = [marker for marker in markers if marker not in text]
-            if absent:
-                missing[name] = absent
 
-    assert missing == {}
+    missing = {
+        name: _absent_markers(configs[name], template.read_text(encoding="utf-8"))
+        for name, template in shipped.items()
+    }
+
+    assert {name: absent for name, absent in missing.items() if absent} == {}
+
+
+def _absent_markers(config: tuple, text: str) -> list[str]:
+    _host_dir, files = config
+    return [
+        marker
+        for _path, markers in files
+        for marker in markers
+        if marker not in text
+    ]
 
 def test_the_pyright_advice_names_what_would_change_the_outcome() -> None:
     """Reinstalling cannot fix a repository that declares no Pyright settings."""
@@ -4267,3 +4421,348 @@ def test_a_file_that_will_not_parse_is_named_not_treated_as_ill_health() -> None
     assert doctor._generation_message(True, 3) == (
         "Evidence generation requires refresh."
     )
+
+
+def test_the_doctor_reads_the_z_suffix_this_runtime_writes():
+    """Python 3.10 rejects `Z`, and 3.10 is the lowest version supported here.
+
+    Transactions and state are written with it, so on 3.10 every timestamp a
+    check touched looked unparseable and the transaction check called healthy
+    rows `transaction_metadata_corrupt`. CI run 32579866020 failed exactly that
+    way on py3.10 while every 3.11+ job passed.
+    """
+    from datetime import timezone
+
+    import doctor
+
+    assert doctor._iso_text("2026-08-22T00:00:00Z") == "2026-08-22T00:00:00+00:00"
+    assert doctor._iso_text("2026-08-22T00:00:00+00:00") == "2026-08-22T00:00:00+00:00"
+
+    parsed = doctor._parse_utc("2026-08-22T07:28:49.755941Z")
+    assert parsed is not None
+    assert parsed.tzinfo is not None
+    assert parsed.utcoffset() == timezone.utc.utcoffset(parsed)
+
+
+class _FixedScope:
+    def __init__(self, scope: dict) -> None:
+        self._scope = scope
+
+    def as_dict(self) -> dict:
+        return dict(self._scope)
+
+
+_LIVE_SCOPE = {
+    "schema_version": "repository-scope/v1",
+    "repository_id": "repository:" + "a" * 64,
+    "checkout_id": "checkout:" + "b" * 64,
+    "checkout_root": "/repo",
+    "git_common_dir": "/repo/.git",
+    "git_commit": "c" * 40,
+}
+
+
+def test_a_generation_from_an_earlier_commit_is_superseded_not_mismatched():
+    """`mismatched` reads as "this belongs to another repository". It did not.
+
+    Comparing the whole scope made every commit report a mismatch, so the field
+    was wrong far more often than right and said nothing when it mattered.
+    """
+    import doctor
+
+    scope = _FixedScope(_LIVE_SCOPE)
+    earlier = {**_LIVE_SCOPE, "git_commit": "d" * 40}
+    elsewhere = {**_LIVE_SCOPE, "checkout_id": "checkout:" + "e" * 64}
+
+    assert doctor._scope_state({"repository_scope": dict(_LIVE_SCOPE)}, scope) == "current"
+    assert doctor._scope_state({"repository_scope": earlier}, scope) == "superseded"
+    assert doctor._scope_state({"repository_scope": elsewhere}, scope) == "mismatched"
+    assert doctor._scope_state({}, scope) == "missing"
+
+
+def _transaction_database(
+    state_root: Path,
+    rows: list[tuple[str, str, str | None]],
+    creates: dict[str, list[str]] | None = None,
+) -> None:
+    """A minimal coordinator database holding just the rows a check reads."""
+    import sqlite3
+
+    path = state_root / "run" / "markdown-transactions.sqlite3"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    database = sqlite3.connect(path)
+    database.execute(
+        'CREATE TABLE "transaction" (id TEXT PRIMARY KEY, operation_id TEXT, '
+        "request_hash TEXT, state TEXT, preconditions_json TEXT, plan_hash TEXT, "
+        "created_at TEXT, updated_at TEXT, parent_transaction_id TEXT, "
+        "error_code TEXT, artifacts_pruned_at TEXT, owner_pid INTEGER)"
+    )
+    database.execute(
+        "CREATE TABLE operation (transaction_id TEXT, position INTEGER, kind TEXT, "
+        "path TEXT, before_hash TEXT, after_hash TEXT, parent_device INTEGER, "
+        "parent_inode INTEGER, applied INTEGER)"
+    )
+    for identifier, state, parent in rows:
+        database.execute(
+            'INSERT INTO "transaction" (id, operation_id, request_hash, state, '
+            "preconditions_json, plan_hash, created_at, updated_at, "
+            "parent_transaction_id) VALUES (?, ?, ?, ?, '{}', ?, ?, ?, ?)",
+            (
+                identifier,
+                f"compile:{identifier}",
+                identifier * 2,
+                state,
+                identifier * 2,
+                "2026-08-22T00:00:00Z",
+                "2026-08-22T00:00:00Z",
+                parent,
+            ),
+        )
+        # Every state but preparing and discarded must carry its operations, or
+        # the scan calls the row corrupt and the whole check turns error.
+        database.execute(
+            "INSERT INTO operation (transaction_id, position, kind, path, "
+            "before_hash, after_hash, parent_device, parent_inode, applied) "
+            "VALUES (?, 0, 'replace', 'knowledge/notes/page.md', ?, ?, 0, 0, 1)",
+            (identifier, "c" * 64, "d" * 64),
+        )
+        for position, path in enumerate((creates or {}).get(identifier, ()), start=1):
+            database.execute(
+                "INSERT INTO operation (transaction_id, position, kind, path, "
+                "before_hash, after_hash, parent_device, parent_inode, applied) "
+                "VALUES (?, ?, 'create', ?, 'absent', ?, 0, 0, 1)",
+                (identifier, position, path, "e" * 64),
+            )
+        (state_root / "run" / "transactions" / identifier).mkdir(parents=True, exist_ok=True)
+    database.commit()
+    database.close()
+
+
+def test_a_quarantined_attempt_a_later_one_committed_is_history_not_a_problem(
+    tmp_path, monkeypatch
+):
+    """Quarantine is retained evidence, so it must not be a permanent red light.
+
+    Once a retry in the same chain commits, the refused attempt is history. The
+    live vault would otherwise report `error` for as long as it keeps the
+    evidence, which is exactly how an operator learns to stop reading it.
+    """
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
+    _transaction_database(
+        state_root,
+        [("a" * 32, "quarantined", None), ("b" * 32, "committed", "a" * 32)],
+    )
+
+    check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "transactions")
+
+    assert check["details"]["quarantined_unresolved"] == 0, check["details"]
+    assert check["details"]["states"]["quarantined"] == 1, check["details"]
+    assert check["status"] == "ok", check["details"]
+
+
+def test_a_refused_attempt_whose_pages_another_commit_wrote_is_history(
+    tmp_path, monkeypatch
+):
+    """The ordinary recovery is a new attempt, not a retry of the same chain.
+
+    Once the refusal is fixed the compile runs again with different inputs or
+    dispositions, so it legitimately carries a different operation identity and
+    the refused attempt gets no successor in its own chain — ever. What proves
+    the work happened is the outcome: everything it meant to create exists,
+    because a transaction that committed created it.
+    """
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
+    receipt = "knowledge/daily/receipts/v3-written.md"
+    _transaction_database(
+        state_root,
+        [("d" * 32, "quarantined", None), ("e" * 32, "committed", None)],
+        creates={"d" * 32: [receipt], "e" * 32: [receipt]},
+    )
+
+    check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "transactions")
+
+    assert check["details"]["quarantined_unresolved"] == 0, check["details"]
+    assert check["details"]["states"]["quarantined"] == 1, check["details"]
+    assert check["status"] == "ok", check["details"]
+    del home
+
+
+def test_a_refused_attempt_whose_pages_nobody_wrote_still_needs_attention(
+    tmp_path, monkeypatch
+):
+    """A page that exists nowhere is a real loss, and stays a finding."""
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
+    _transaction_database(
+        state_root,
+        [("f" * 32, "quarantined", None), ("a" * 32, "committed", None)],
+        creates={"f" * 32: ["knowledge/notes/never-written.md"]},
+    )
+
+    check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "transactions")
+
+    assert check["details"]["quarantined_unresolved"] == 1, check["details"]
+    assert check["status"] == "error", check["details"]
+    del home
+
+
+def test_a_quarantined_attempt_with_no_successor_still_needs_attention(
+    tmp_path, monkeypatch
+):
+    """The exemption is a successful retry, not the passage of time."""
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
+    _transaction_database(state_root, [("c" * 32, "quarantined", None)])
+
+    check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "transactions")
+
+    assert check["details"]["quarantined_unresolved"] == 1, check["details"]
+    assert check["status"] == "error", check["details"]
+
+
+def _nightly_state(state_root: Path, payload: dict) -> None:
+    (state_root / "run").mkdir(parents=True, exist_ok=True)
+    (state_root / "run" / "state.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_a_nightly_that_ran_last_night_is_current_before_tonight_runs(
+    tmp_path, monkeypatch
+):
+    """The nightly runs at 03:00, so midnight to three is not staleness.
+
+    Measured on this machine at 2026-08-22T00:06Z: the timer had run 21 hours
+    earlier and would run again in under three, `last_nightly_status` was
+    success, and the check said degraded at that same moment.
+    """
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
+    now = datetime(2026, 8, 22, 0, 6, tzinfo=timezone.utc)
+    _nightly_state(
+        state_root,
+        {
+            "last_nightly_status": "success",
+            "last_nightly_date": "2026-08-21",
+            "last_nightly_at": "2026-08-21T03:00:40+00:00",
+        },
+    )
+
+    check = _check(
+        doctor.run_doctor(root=root, state_root=state_root, home=home, now=now),
+        "scheduler",
+    )
+
+    assert check["status"] == "ok"
+
+
+def test_a_nightly_that_missed_its_window_is_still_stale(tmp_path, monkeypatch):
+    """The buffer is a day plus slack, not an amnesty."""
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
+    now = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
+    _nightly_state(
+        state_root,
+        {
+            "last_nightly_status": "success",
+            "last_nightly_date": "2026-08-21",
+            "last_nightly_at": "2026-08-21T03:00:40+00:00",
+        },
+    )
+
+    check = _check(
+        doctor.run_doctor(root=root, state_root=state_root, home=home, now=now),
+        "scheduler",
+    )
+
+    assert check["status"] == "degraded"
+
+
+def test_state_without_a_nightly_timestamp_keeps_the_old_day_rule(
+    tmp_path, monkeypatch
+):
+    """An upgraded vault must not get noisier for lacking a new field."""
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
+    now = datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc)
+    _nightly_state(
+        state_root,
+        {"last_nightly_status": "success", "last_nightly_date": "2026-08-22"},
+    )
+
+    check = _check(
+        doctor.run_doctor(root=root, state_root=state_root, home=home, now=now),
+        "scheduler",
+    )
+
+    assert check["status"] == "ok"
+
+
+def test_the_corpus_wide_check_runs_after_the_cheap_ones(monkeypatch):
+    """Order is the budget policy: the expensive check must not starve the rest."""
+    import doctor
+
+    order: list[str] = []
+
+    def record(check_id):
+        def check(budget):
+            order.append(check_id)
+            return doctor._result(check_id, "ok", "ok", {})
+
+        return check
+
+    names = [
+        name
+        for name, _operation in doctor._deferrable_checks(
+            Path("."), Path("."), Path("."), datetime.now(timezone.utc)
+        )
+    ]
+    monkeypatch.setattr(
+        doctor,
+        "_deferrable_checks",
+        lambda *a, **k: tuple((name, record(name)) for name in names),
+    )
+    for attribute, check_id in (
+        ("_environment_check", "environment"),
+        ("_runtime_check", "runtime"),
+        ("_filesystem_check", "filesystem"),
+        ("_transaction_check", "transactions"),
+        ("_queue_check", "queue"),
+        ("_archive_check", "archives"),
+        ("_claim_check", "claims"),
+    ):
+        monkeypatch.setattr(
+            doctor, attribute, _fixed_ok(doctor, check_id), raising=True
+        )
+
+    doctor._collect_checks(
+        Path("."),
+        Path("."),
+        Path("."),
+        datetime.now(timezone.utc),
+        time.monotonic() + 8.0,
+    )
+
+    assert names[-1] == "generation", "the corpus-wide check must be scheduled last"
+    assert order[-1] == "generation"
+
+
+def _fixed_ok(doctor, check_id):
+    def check(*_args, **_keywords):
+        return doctor._result(check_id, "ok", "ok", {})
+
+    return check

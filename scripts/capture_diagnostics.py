@@ -32,6 +32,11 @@ MAX_FAILURE_LOG_BYTES = 256 * 1024
 MAX_FAILURE_KINDS = 32
 MAX_REASON_CHARS = 200
 STATE_KEY = "capture_failures"
+
+# How long a lost capture stays a live finding. A day plus the working week: a
+# loss that has not recurred inside it has been dealt with or has stopped
+# happening, and either way it is history rather than something to act on.
+CAPTURE_RECENT_SECONDS = 7 * 24 * 3600
 STATE_LOCK_TIMEOUT = 0.5
 
 
@@ -164,13 +169,42 @@ def _recorded_moment(entry: object) -> str:
     return str(entry.get("last_at", ""))
 
 
-def _last_failure_at(state: dict) -> str:
+def last_capture_failure_at(state: dict) -> str:
     """The most recent moment any kind was recorded, or an empty string."""
     counters = state.get(STATE_KEY)
     if not isinstance(counters, dict):
         return ""
     moments = [_recorded_moment(entry) for entry in counters.values()]
     return max(moments, default="")
+
+
+def _moment_age_seconds(moment: str, now: datetime) -> float | None:
+    try:
+        recorded = datetime.fromisoformat(moment)
+    except ValueError:
+        return None
+    return (now - recorded).total_seconds()
+
+
+def capture_failure_is_live(state: dict, now: datetime | None = None) -> bool:
+    """Whether a lost capture is a live finding rather than history.
+
+    The counter is evidence of a real loss and nothing zeroes it on its own, so
+    a finding tied to the count alone could never return to green — and a report
+    that is always red stops being read, which is the opposite of why the
+    counter exists. The finding therefore covers the last seven days: a new loss
+    makes it true again at once, and a quiet week returns it to green while the
+    totals stay visible.
+
+    State written before the moment was recorded has no timestamp to judge, and
+    counts as history.
+    """
+    if not sum(capture_failure_totals(state).values()):
+        return False
+    age = _moment_age_seconds(last_capture_failure_at(state), now or datetime.now())
+    if age is None:
+        return False
+    return age <= CAPTURE_RECENT_SECONDS
 
 
 def capture_failure_line(state: dict) -> str:
@@ -180,12 +214,12 @@ def capture_failure_line(state: dict) -> str:
     say when this last happened. Without that, a loss fixed months ago reads
     exactly like one from this morning.
     """
+    if not capture_failure_is_live(state):
+        return ""
     totals = capture_failure_totals(state)
     lost = sum(totals.values())
-    if not lost:
-        return ""
     detail = ", ".join(f"{kind} {count}" for kind, count in sorted(totals.items()))
-    last_at = _last_failure_at(state)
+    last_at = last_capture_failure_at(state)
     when = f", last at {last_at}" if last_at else ""
     return (
         f"- **Capture**: ⚠️ {lost} capture(s) lost ({detail}{when}) — "

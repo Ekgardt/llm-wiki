@@ -34,78 +34,110 @@ class ConfigMergeResult:
     backup: Path | None
 
 
+class _StringState:
+    """Tracks whether the scanner currently sits inside a JSON string."""
+
+    def __init__(self) -> None:
+        self.quoted = False
+        self._escaped = False
+
+    def consume(self, character: str) -> bool:
+        """Report whether this character belongs to a string, and advance."""
+        if self.quoted:
+            self._advance_quoted(character)
+            return True
+        if character == '"':
+            self.quoted = True
+            return True
+        return False
+
+    def _advance_quoted(self, character: str) -> None:
+        if self._escaped:
+            self._escaped = False
+            return
+        if character == "\\":
+            self._escaped = True
+            return
+        if character == '"':
+            self.quoted = False
+
+
+class _JsoncScanner:
+    """Blank out JSONC comments while preserving offsets and string contents."""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self._output: list[str] = []
+        self._index = 0
+        self._state = _StringState()
+
+    def run(self) -> str:
+        while self._index < len(self._text):
+            self._step()
+        if self._state.quoted:
+            raise ValueError("unterminated JSON string")
+        return "".join(self._output)
+
+    def _step(self) -> None:
+        current = self._text[self._index]
+        if self._state.consume(current):
+            self._emit(current)
+            return
+        if self._at("//"):
+            self._skip_line_comment()
+            return
+        if self._at("/*"):
+            self._skip_block_comment()
+            return
+        self._emit(current)
+
+    def _emit(self, character: str) -> None:
+        self._output.append(character)
+        self._index += 1
+
+    def _at(self, marker: str) -> bool:
+        return self._text[self._index : self._index + 2] == marker
+
+    def _skip_line_comment(self) -> None:
+        self._output.extend((" ", " "))
+        self._index += 2
+        while self._index < len(self._text) and self._text[self._index] not in "\r\n":
+            self._output.append(" ")
+            self._index += 1
+
+    def _skip_block_comment(self) -> None:
+        self._output.extend((" ", " "))
+        self._index += 2
+        while self._index + 1 < len(self._text) and not self._at("*/"):
+            character = self._text[self._index]
+            self._output.append(character if character in "\r\n" else " ")
+            self._index += 1
+        if self._index + 1 >= len(self._text):
+            raise ValueError("unterminated JSONC block comment")
+        self._output.extend((" ", " "))
+        self._index += 2
+
+
 def _without_comments(text: str) -> str:
-    output: list[str] = []
-    index = 0
-    quoted = False
-    escaped = False
-    while index < len(text):
-        current = text[index]
-        following = text[index + 1] if index + 1 < len(text) else ""
-        if quoted:
-            output.append(current)
-            if escaped:
-                escaped = False
-            elif current == "\\":
-                escaped = True
-            elif current == '"':
-                quoted = False
-            index += 1
-            continue
-        if current == '"':
-            quoted = True
-            output.append(current)
-            index += 1
-            continue
-        if current == "/" and following == "/":
-            output.extend((" ", " "))
-            index += 2
-            while index < len(text) and text[index] not in "\r\n":
-                output.append(" ")
-                index += 1
-            continue
-        if current == "/" and following == "*":
-            output.extend((" ", " "))
-            index += 2
-            while index + 1 < len(text) and text[index : index + 2] != "*/":
-                output.append(text[index] if text[index] in "\r\n" else " ")
-                index += 1
-            if index + 1 >= len(text):
-                raise ValueError("unterminated JSONC block comment")
-            output.extend((" ", " "))
-            index += 2
-            continue
-        output.append(current)
-        index += 1
-    if quoted:
-        raise ValueError("unterminated JSON string")
-    return "".join(output)
+    return _JsoncScanner(text).run()
+
+
+def _trailing_comma_at(text: str, index: int) -> bool:
+    lookahead = index + 1
+    while lookahead < len(text) and text[lookahead].isspace():
+        lookahead += 1
+    return lookahead < len(text) and text[lookahead] in "}]"
 
 
 def _without_trailing_commas(text: str) -> str:
     output: list[str] = []
-    quoted = False
-    escaped = False
+    state = _StringState()
     for index, current in enumerate(text):
-        if quoted:
-            output.append(current)
-            if escaped:
-                escaped = False
-            elif current == "\\":
-                escaped = True
-            elif current == '"':
-                quoted = False
-            continue
-        if current == '"':
-            quoted = True
+        if state.consume(current):
             output.append(current)
             continue
-        if current == ",":
-            lookahead = index + 1
-            while lookahead < len(text) and text[lookahead].isspace():
-                lookahead += 1
-            if lookahead < len(text) and text[lookahead] in "}]":
-                continue
+        if current == "," and _trailing_comma_at(text, index):
+            continue
         output.append(current)
     return "".join(output)
 
@@ -219,19 +251,26 @@ def selected_global_file(config_dir: Path) -> Path:
     return Path(config_dir) / "opencode.jsonc"
 
 
+def _require_regular_config(path: Path) -> None:
+    if not path.is_file():
+        raise ValueError("selected OpenCode config must be a regular file")
+
+
+def _require_config_size(size: int) -> None:
+    if size > MAX_CONFIG_BYTES:
+        raise ValueError("selected OpenCode config exceeds the size limit")
+
+
 def _read_config_bytes(path: Path) -> bytes:
+    """The size is checked twice: the file may grow between stat and read."""
     if path.is_symlink():
         raise ValueError("selected OpenCode config must not be a symlink")
     if not path.exists():
         return b""
-    if not path.is_file():
-        raise ValueError("selected OpenCode config must be a regular file")
-    size = path.stat().st_size
-    if size > MAX_CONFIG_BYTES:
-        raise ValueError("selected OpenCode config exceeds the size limit")
+    _require_regular_config(path)
+    _require_config_size(path.stat().st_size)
     value = path.read_bytes()
-    if len(value) > MAX_CONFIG_BYTES:
-        raise ValueError("selected OpenCode config exceeds the size limit")
+    _require_config_size(len(value))
     return value
 
 
@@ -270,24 +309,39 @@ def merge_opencode_user_config(
     config_dir = Path(config_dir)
     config = selected_global_file(config_dir)
     original = _read_config_bytes(config)
-    if original:
-        try:
-            document = parse_jsonc(original.decode("utf-8"))
-        except UnicodeDecodeError as exc:
-            raise ValueError("selected OpenCode config is not UTF-8") from exc
-    else:
-        document = {}
+    document = _config_document(original)
+    mcp = _mcp_section(document)
+    if mcp.get("llm-wiki") == expected:
+        return ConfigMergeResult(False, config, None)
+    mcp["llm-wiki"] = dict(expected)
+    normalized = _normalized_config_bytes(document)
+    config_dir.mkdir(parents=True, exist_ok=True)
+    backup = _create_backup(config, original) if original else None
+    _atomic_write(config, normalized)
+    return ConfigMergeResult(True, config, backup)
+
+
+def _config_document(original: bytes) -> dict[str, Any]:
+    if not original:
+        return {}
+    try:
+        return parse_jsonc(original.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        raise ValueError("selected OpenCode config is not UTF-8") from exc
+
+
+def _mcp_section(document: dict[str, Any]) -> dict[str, Any]:
     mcp = document.get("mcp")
     if mcp is None:
         mcp = {}
         document["mcp"] = mcp
     if not isinstance(mcp, dict):
         raise ValueError("OpenCode mcp config must be an object")
-    if mcp.get("llm-wiki") == expected:
-        return ConfigMergeResult(False, config, None)
+    return mcp
 
-    mcp["llm-wiki"] = dict(expected)
-    normalized = (
+
+def _normalized_config_bytes(document: dict[str, Any]) -> bytes:
+    value = (
         json.dumps(
             document,
             ensure_ascii=False,
@@ -297,12 +351,9 @@ def merge_opencode_user_config(
         )
         + "\n"
     ).encode("utf-8")
-    if len(normalized) > MAX_CONFIG_BYTES:
+    if len(value) > MAX_CONFIG_BYTES:
         raise ValueError("merged OpenCode config exceeds the size limit")
-    config_dir.mkdir(parents=True, exist_ok=True)
-    backup = _create_backup(config, original) if original else None
-    _atomic_write(config, normalized)
-    return ConfigMergeResult(True, config, backup)
+    return value
 
 
 def verify_effective_entry(
@@ -316,11 +367,23 @@ def verify_effective_entry(
 def replace_profile_block(profile: Path, root: Path, state: Path) -> None:
     profile = Path(profile)
     existing = profile.read_text(encoding="utf-8") if profile.exists() else ""
+    _require_single_profile_block(existing)
+    updated = _profile_with_block(existing, _profile_block(root, state))
+    if updated == existing:
+        return
+    profile.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(profile, updated.encode("utf-8"))
+
+
+def _require_single_profile_block(existing: str) -> None:
     start_count = existing.count(PROFILE_START)
     end_count = existing.count(PROFILE_END)
     if start_count != end_count or start_count > 1:
         raise ValueError("invalid LLM-Wiki profile block ownership")
-    block = "\n".join(
+
+
+def _profile_block(root: Path, state: Path) -> str:
+    return "\n".join(
         (
             PROFILE_START,
             f"export LLM_WIKI_ROOT={shlex.quote(root.as_posix())}",
@@ -328,17 +391,171 @@ def replace_profile_block(profile: Path, root: Path, state: Path) -> None:
             PROFILE_END,
         )
     )
-    if PROFILE_START in existing:
-        start = existing.index(PROFILE_START)
-        end = existing.index(PROFILE_END, start) + len(PROFILE_END)
-        updated = existing[:start] + block + existing[end:]
-    else:
-        separator = "" if not existing else "\n" if existing.endswith("\n") else "\n\n"
-        updated = existing + separator + block + "\n"
-    if updated == existing:
-        return
-    profile.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write(profile, updated.encode("utf-8"))
+
+
+def _appended_separator(existing: str) -> str:
+    if not existing:
+        return ""
+    if existing.endswith("\n"):
+        return "\n"
+    return "\n\n"
+
+
+def _profile_with_block(existing: str, block: str) -> str:
+    if PROFILE_START not in existing:
+        return existing + _appended_separator(existing) + block + "\n"
+    start = existing.index(PROFILE_START)
+    end = existing.index(PROFILE_END, start) + len(PROFILE_END)
+    return existing[:start] + block + existing[end:]
+
+
+CLEANUP_SECONDS = 2.0
+
+READ_CHUNK_BYTES = 64 * 1024
+
+POLL_SECONDS = 0.005
+
+
+class _BoundedReader:
+    """Reads both streams into one buffer and stops at the byte ceiling."""
+
+    def __init__(self, process: object, max_bytes: int) -> None:
+        self._process = process
+        self._max_bytes = max_bytes
+        self._lock = threading.Lock()
+        self._overflow = threading.Event()
+        self.chunks: dict[str, bytearray] = {
+            "stdout": bytearray(),
+            "stderr": bytearray(),
+        }
+        self.total = 0
+
+    def overflowed(self) -> bool:
+        return self._overflow.is_set()
+
+    def read(self, name: str) -> None:
+        stream = getattr(self._process, name)
+        if stream is None:
+            return
+        while True:
+            data = stream.read(READ_CHUNK_BYTES)
+            if not data:
+                return
+            if self._store(name, data):
+                return
+
+    def _store(self, name: str, data: bytes) -> bool:
+        """Return True when the ceiling is reached and reading must stop."""
+        with self._lock:
+            remaining = self._max_bytes + 1 - self.total
+            if remaining > 0:
+                captured = data[:remaining]
+                self.chunks[name].extend(captured)
+                self.total += len(captured)
+            if len(data) > remaining or self.total > self._max_bytes:
+                self._overflow.set()
+                return True
+        return False
+
+
+def _close_stdin(process: object) -> None:
+    if process.stdin is not None:
+        process.stdin.close()
+
+
+def _started_readers(reader: _BoundedReader) -> list[threading.Thread]:
+    threads = [
+        threading.Thread(target=reader.read, args=(name,), daemon=True)
+        for name in ("stdout", "stderr")
+    ]
+    for thread in threads:
+        thread.start()
+    return threads
+
+
+def _awaited_process(
+    process: object,
+    threads: list[threading.Thread],
+    reader: _BoundedReader,
+    deadline: float,
+) -> bool:
+    """True only when the process exited and both readers finished in time."""
+    while time.monotonic() < deadline:
+        if reader.overflowed():
+            return False
+        if _process_settled(process, threads):
+            return True
+        time.sleep(POLL_SECONDS)
+    return False
+
+
+def _readers_finished(threads: list[threading.Thread]) -> bool:
+    return all(not thread.is_alive() for thread in threads)
+
+
+def _process_settled(process: object, threads: list[threading.Thread]) -> bool:
+    return process.poll() is not None and _readers_finished(threads)
+
+
+def _remaining_cleanup(state: dict[str, float | None]) -> float:
+    cleanup_deadline = state["cleanup_deadline"]
+    if cleanup_deadline is None:
+        return 0.0
+    return max(0.0, cleanup_deadline - time.monotonic())
+
+
+def _terminated_tree(tree: object, state: dict[str, float | None]) -> bool:
+    state["cleanup_deadline"] = time.monotonic() + CLEANUP_SECONDS
+    try:
+        tree.terminate(deadline=state["cleanup_deadline"])
+    except (OSError, RuntimeError, TimeoutError):
+        return False
+    return True
+
+
+def _joined_readers(
+    threads: list[threading.Thread], state: dict[str, float | None]
+) -> None:
+    for thread in threads:
+        thread.join(timeout=_remaining_cleanup(state))
+
+
+def _bounded_result(
+    process: object,
+    reader: _BoundedReader,
+    threads: list[threading.Thread],
+    verified: bool,
+) -> tuple[int, bytes] | None:
+    if any(thread.is_alive() for thread in threads):
+        return None
+    if not verified or reader.overflowed():
+        return None
+    return process.returncode, bytes(reader.chunks["stdout"])
+
+
+def _terminate_quietly(tree: object, state: dict[str, float | None]) -> None:
+    if state["cleanup_deadline"] is None:
+        state["cleanup_deadline"] = time.monotonic() + CLEANUP_SECONDS
+    try:
+        tree.terminate(deadline=state["cleanup_deadline"])
+    except (OSError, RuntimeError, TimeoutError):
+        pass
+
+
+def _closed_tree(
+    tree: object, process: object, state: dict[str, float | None]
+) -> None:
+    if process.poll() is None:
+        _terminate_quietly(tree, state)
+    try:
+        tree.close()
+    except (OSError, RuntimeError):
+        pass
+
+
+def _require_process_bounds(timeout_seconds: float, max_bytes: int) -> None:
+    if timeout_seconds <= 0 or max_bytes <= 0:
+        raise ValueError("process bounds must be positive")
 
 
 def _bounded_process_output(
@@ -349,8 +566,7 @@ def _bounded_process_output(
     timeout_seconds: float,
     max_bytes: int,
 ) -> tuple[int, bytes] | None:
-    if timeout_seconds <= 0 or max_bytes <= 0:
-        raise ValueError("process bounds must be positive")
+    _require_process_bounds(timeout_seconds, max_bytes)
     deadline = time.monotonic() + timeout_seconds
     tree = ProcessTree.spawn_with_deadline(
         command,
@@ -359,79 +575,18 @@ def _bounded_process_output(
         deadline=deadline,
     )
     process = tree.process
-    if process.stdin is not None:
-        process.stdin.close()
-    chunks: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
-    total = 0
-    lock = threading.Lock()
-    overflow = threading.Event()
-
-    def read_stream(name: str) -> None:
-        nonlocal total
-        stream = getattr(process, name)
-        if stream is None:
-            return
-        while True:
-            data = stream.read(64 * 1024)
-            if not data:
-                return
-            with lock:
-                remaining = max_bytes + 1 - total
-                if remaining > 0:
-                    captured = data[:remaining]
-                    chunks[name].extend(captured)
-                    total += len(captured)
-                if len(data) > remaining or total > max_bytes:
-                    overflow.set()
-                    return
-
-    readers = [
-        threading.Thread(target=read_stream, args=(name,), daemon=True)
-        for name in ("stdout", "stderr")
-    ]
-    for reader in readers:
-        reader.start()
-
-    verified = False
-    cleanup_deadline: float | None = None
+    _close_stdin(process)
+    reader = _BoundedReader(process, max_bytes)
+    threads = _started_readers(reader)
+    state: dict[str, float | None] = {"cleanup_deadline": None}
     try:
-        while time.monotonic() < deadline:
-            if overflow.is_set():
-                break
-            if process.poll() is not None and all(not reader.is_alive() for reader in readers):
-                verified = True
-                break
-            time.sleep(0.005)
-        if not verified:
-            cleanup_deadline = time.monotonic() + 2.0
-            try:
-                tree.terminate(deadline=cleanup_deadline)
-            except (OSError, RuntimeError, TimeoutError):
-                return None
-        for reader in readers:
-            remaining = (
-                max(0.0, cleanup_deadline - time.monotonic())
-                if cleanup_deadline is not None
-                else 0.0
-            )
-            reader.join(timeout=remaining)
-        if any(reader.is_alive() for reader in readers):
+        verified = _awaited_process(process, threads, reader, deadline)
+        if not verified and not _terminated_tree(tree, state):
             return None
-        if not verified or overflow.is_set():
-            return None
-        return process.returncode, bytes(chunks["stdout"])
+        _joined_readers(threads, state)
+        return _bounded_result(process, reader, threads, verified)
     finally:
-        if process.poll() is None:
-            if cleanup_deadline is None:
-                cleanup_deadline = time.monotonic() + 2.0
-            try:
-                tree.terminate(deadline=cleanup_deadline)
-            except (OSError, RuntimeError, TimeoutError):
-                pass
-        try:
-            tree.close()
-        except (OSError, RuntimeError):
-            pass
+        _closed_tree(tree, process, state)
 
 
 def probe_effective_entry(
@@ -455,15 +610,22 @@ def probe_effective_entry(
         )
     except (OSError, RuntimeError, TimeoutError, ValueError):
         return "configured_unverified"
-    if completed is None or completed[0] != 0:
+    document = _probe_document(completed)
+    if document is None:
         return "configured_unverified"
+    return verify_effective_entry(document, expected)
+
+
+def _probe_document(completed: tuple[int, bytes] | None) -> dict[str, Any] | None:
+    if completed is None or completed[0] != 0:
+        return None
     try:
         document = json.loads(completed[1].decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
-        return "configured_unverified"
+        return None
     if not isinstance(document, dict):
-        return "configured_unverified"
-    return verify_effective_entry(document, expected)
+        return None
+    return document
 
 
 EMBEDDED_ROOT_MARKER = "// llm-wiki:embedded-root"
@@ -513,8 +675,7 @@ def configure_opencode(
 ) -> dict[str, str | None]:
     config_dir = opencode_global_dir(home, xdg_config_home, platform=platform)
     executable = shutil.which("opencode")
-    detected = debug_command is not None or executable is not None or config_dir.exists()
-    if not detected:
+    if not _opencode_detected(config_dir, executable, debug_command):
         return {"config_file": None, "plugin_file": None, "status": "not_detected"}
 
     root = Path(root)
@@ -522,26 +683,58 @@ def configure_opencode(
     merged = merge_opencode_user_config(config_dir, expected)
     plugin = config_dir / "plugins" / "llm-wiki-memory.js"
     _copy_plugin(root / "scripts" / "llm-wiki-memory-opencode.js", plugin, root)
-    if debug_command is None and executable is not None:
-        debug_command = [executable, "debug", "config"]
-    status = "configured_unverified"
-    if debug_command is not None:
-        child_environment = {
-            "LLM_WIKI_ROOT": str(root),
-            "LLM_WIKI_STATE_ROOT": str(state_root),
-            **dict(environment or {}),
-        }
-        status = probe_effective_entry(
-            debug_command,
-            cwd=cwd,
-            environment=child_environment,
-            expected=expected,
-        )
     return {
         "config_file": str(merged.config_file),
         "plugin_file": str(plugin),
-        "status": status,
+        "status": _opencode_status(
+            _opencode_debug_command(debug_command, executable),
+            cwd=cwd,
+            root=root,
+            state_root=state_root,
+            environment=environment,
+            expected=expected,
+        ),
     }
+
+
+def _opencode_detected(
+    config_dir: Path, executable: str | None, debug_command: Sequence[str] | None
+) -> bool:
+    return debug_command is not None or executable is not None or config_dir.exists()
+
+
+def _opencode_debug_command(
+    debug_command: Sequence[str] | None, executable: str | None
+) -> Sequence[str] | None:
+    if debug_command is not None:
+        return debug_command
+    if executable is None:
+        return None
+    return [executable, "debug", "config"]
+
+
+def _opencode_status(
+    debug_command: Sequence[str] | None,
+    *,
+    cwd: Path,
+    root: Path,
+    state_root: Path,
+    environment: Mapping[str, str] | None,
+    expected: Mapping[str, Any],
+) -> str:
+    if debug_command is None:
+        return "configured_unverified"
+    child_environment = {
+        "LLM_WIKI_ROOT": str(root),
+        "LLM_WIKI_STATE_ROOT": str(state_root),
+        **dict(environment or {}),
+    }
+    return probe_effective_entry(
+        debug_command,
+        cwd=cwd,
+        environment=child_environment,
+        expected=expected,
+    )
 
 
 def _parser() -> argparse.ArgumentParser:

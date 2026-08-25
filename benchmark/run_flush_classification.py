@@ -29,7 +29,10 @@ from flush_memory import (  # noqa: E402
 from reliable_memory import validate_schema  # noqa: E402
 
 CORPUS = ROOT / "benchmark/flush-classification-v1.json"
-SCHEMA = ROOT / "benchmark/flush-classification-v1.schema.json"
+SCHEMAS = {
+    "flush-classification/v1": ROOT / "benchmark/flush-classification-v1.schema.json",
+    "flush-classification/v2": ROOT / "benchmark/flush-classification-v2.schema.json",
+}
 MAX_TOKENS = 1500
 
 
@@ -62,8 +65,28 @@ ADAPTERS: dict[str, Callable[[dict], str]] = {
 
 def load_corpus(path: Path) -> dict:
     corpus = json.loads(path.read_text(encoding="utf-8"))
-    validate_schema(corpus, SCHEMA)
+    schema = SCHEMAS.get(str(corpus.get("schema_version")))
+    if schema is None:
+        raise ValueError("unknown corpus schema version")
+    validate_schema(corpus, schema)
     return corpus
+
+
+def label_state(corpus: dict) -> dict[str, object]:
+    """How much of this corpus a human has actually confirmed.
+
+    A v1 corpus is hand-written and counts as reviewed. A corpus built from real
+    sessions carries model-produced labels until somebody says otherwise, and a
+    number measured against those is provisional — current practice calibrates a
+    judge against human labels rather than substituting one for the other.
+    """
+    cases = corpus["cases"]
+    reviewed = sum(1 for case in cases if case.get("label_reviewed", True))
+    return {
+        "case_count": len(cases),
+        "reviewed_count": reviewed,
+        "provisional": reviewed < len(cases),
+    }
 
 
 def score_case(case: dict, response: str) -> CaseOutcome:
@@ -136,6 +159,7 @@ def run(corpus: dict, adapter: Callable[[dict], str]) -> dict[str, object]:
     metrics = measure(outcomes)
     return {
         "corpus_id": corpus["corpus_id"],
+        "labels": label_state(corpus),
         "gates": evaluate(metrics, corpus["thresholds"]),
         "metrics": metrics,
         "misses": [
@@ -167,6 +191,12 @@ def main(argv: list[str] | None = None) -> int:
         for name in ("tier_accuracy", "durable_content_recall", "false_promotion_rate"):
             print(f"{name}: {metrics[name]}")
         print(f"gates passed: {report['gates']['passed']}")
+        labels = report["labels"]
+        if labels["provisional"]:
+            print(
+                f"labels: {labels['reviewed_count']}/{labels['case_count']} reviewed "
+                "— these numbers are provisional"
+            )
     return 0 if report["gates"]["passed"] else 1
 
 

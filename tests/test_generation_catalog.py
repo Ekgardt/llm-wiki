@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -32,19 +33,35 @@ class _Monotonic:
         return self.value
 
 
+def _write_preserving_times(path: Path, content: bytes, before) -> None:
+    path.write_bytes(content)
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+
+def _require_before_deadline(deadline: float) -> None:
+    if time.monotonic() >= deadline:
+        raise AssertionError("filesystem did not expose the test mutation")
+
+
 def _rewrite_preserving_metadata(path: Path, content: bytes) -> None:
     before = path.stat(follow_symlinks=False)
     assert len(content) == before.st_size
-    path.write_bytes(content)
-    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
-    if os.name == "posix":
-        deadline = time.monotonic() + 1
-        while path.stat(follow_symlinks=False).st_ctime_ns == before.st_ctime_ns:
-            if time.monotonic() >= deadline:
-                raise AssertionError("filesystem did not expose the test mutation")
-            time.sleep(0.001)
-            path.write_bytes(content)
-            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    _write_preserving_times(path, content, before)
+    if os.name != "posix":
+        return
+    deadline = time.monotonic() + 1
+    while path.stat(follow_symlinks=False).st_ctime_ns == before.st_ctime_ns:
+        _require_before_deadline(deadline)
+        time.sleep(0.001)
+        _write_preserving_times(path, content, before)
+
+
+def _apply_artifact_mutation(mutation: str, target: Path, changed: bytes, replacement: Path) -> None:
+    """Change the bytes while keeping every stat field a reader could compare."""
+    if mutation == "in-place":
+        _rewrite_preserving_metadata(target, changed)
+        return
+    os.replace(replacement, target)
 
 
 def _catalog(tmp_path: Path):
@@ -507,60 +524,56 @@ def test_catalog_rejects_v3_database_with_v2_manifest(tmp_path: Path) -> None:
         _catalog(tmp_path).register("mismatch")
 
 
-@pytest.mark.parametrize(
-    "damage",
-    [
-        "missing",
-        "unknown-top",
-        "unknown-nested",
-        "membership-hash",
-        "directory-order",
-        "source-id",
-        "source-hash",
-        "stat-mtime",
-        "policy-nfc",
-    ],
-)
+_V3_CAPTURE_DAMAGE = {
+    "missing": lambda manifest, capture: manifest.pop("code_capture"),
+    "unknown-top": lambda manifest, capture: capture.update(unknown=True),
+    "unknown-nested": lambda manifest, capture: capture["limits"].update(unknown=1),
+    "membership-hash": lambda manifest, capture: capture.update(
+        membership_sha256="0" * 64
+    ),
+    "directory-order": lambda manifest, capture: capture.update(
+        directories=list(reversed(capture["directories"]))
+    ),
+    "source-id": lambda manifest, capture: capture["files"][0].update(
+        source_id="source:wrong.py"
+    ),
+    "source-hash": lambda manifest, capture: capture["files"][0].update(
+        sha256="f" * 64
+    ),
+    "policy-nfc": lambda manifest, capture: capture["policy"].update(
+        include_globs=["cafe\u0301/**"]
+    ),
+    "stat-mtime": lambda manifest, capture: capture["files"][0]["stat"].update(
+        mtime_ns=capture["files"][0]["stat"]["mtime_ns"] + 1
+    ),
+}
+
+
+def _write_damaged_manifest(manifest_path: Path, manifest: dict, damage: str) -> None:
+    """Only the NFC case must bypass canonical encoding — that is its point."""
+    from reliable_memory import canonical_json_bytes
+
+    if damage != "policy-nfc":
+        manifest_path.write_bytes(canonical_json_bytes(manifest))
+        return
+    manifest_path.write_bytes(
+        json.dumps(
+            manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    )
+
+
+@pytest.mark.parametrize("damage", sorted(_V3_CAPTURE_DAMAGE))
 def test_catalog_rejects_damaged_or_noncanonical_v3_code_capture(
     tmp_path: Path, damage: str
 ) -> None:
-    from reliable_memory import canonical_json_bytes
-
     from tests.code_kernel_helpers import publish_v3_fixture
 
     result = publish_v3_fixture(tmp_path, generation_id=f"capture-{damage}")
     manifest_path = result.generation_path / "manifest.json"
     manifest = json.loads(manifest_path.read_bytes())
-    capture = manifest.get("code_capture")
-    if damage == "missing":
-        manifest.pop("code_capture")
-    elif damage == "unknown-top":
-        capture["unknown"] = True
-    elif damage == "unknown-nested":
-        capture["limits"]["unknown"] = 1
-    elif damage == "membership-hash":
-        capture["membership_sha256"] = "0" * 64
-    elif damage == "directory-order":
-        capture["directories"] = list(reversed(capture["directories"]))
-    elif damage == "source-id":
-        capture["files"][0]["source_id"] = "source:wrong.py"
-    elif damage == "source-hash":
-        capture["files"][0]["sha256"] = "f" * 64
-    elif damage == "policy-nfc":
-        capture["policy"]["include_globs"] = ["cafe\u0301/**"]
-    else:
-        capture["files"][0]["stat"]["mtime_ns"] += 1
-    if damage == "policy-nfc":
-        manifest_path.write_bytes(
-            json.dumps(
-                manifest,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        )
-    else:
-        manifest_path.write_bytes(canonical_json_bytes(manifest))
+    _V3_CAPTURE_DAMAGE[damage](manifest, manifest.get("code_capture"))
+    _write_damaged_manifest(manifest_path, manifest, damage)
 
     with pytest.raises(
         ValueError,
@@ -603,9 +616,34 @@ def test_catalog_matches_capture_identity_and_hash_to_source_manifest(
         _catalog(tmp_path).register(result.generation_id)
 
 
-@pytest.mark.parametrize(
-    "damage", ["missing", "extra", "source_id", "relative_path", "sha256", "size"]
-)
+def _v2_damage_extra(capture: dict, file: dict) -> None:
+    extra = copy.deepcopy(file)
+    extra.update(source_id="source:extra", relative_path="extra.py", sha256="e" * 64)
+    capture["files"].append(extra)
+    capture["files"].sort(key=lambda item: item["relative_path"])
+    capture["policy"]["roots"] = sorted((*capture["policy"]["roots"], "extra.py"))
+
+
+def _v2_damage_relative_path(capture: dict, file: dict) -> None:
+    old_path = file["relative_path"]
+    file["relative_path"] = "other.py"
+    capture["policy"]["roots"] = sorted(
+        "other.py" if root == old_path else root
+        for root in capture["policy"]["roots"]
+    )
+
+
+_V2_CAPTURE_DAMAGE = {
+    "missing": lambda capture, file: capture.update(files=[]),
+    "extra": _v2_damage_extra,
+    "source_id": lambda capture, file: file.update(source_id="source:other"),
+    "relative_path": _v2_damage_relative_path,
+    "sha256": lambda capture, file: file.update(sha256="f" * 64),
+    "size": lambda capture, file: file["stat"].update(size=file["stat"]["size"] + 1),
+}
+
+
+@pytest.mark.parametrize("damage", sorted(_V2_CAPTURE_DAMAGE))
 def test_catalog_binds_present_v2_capture_to_exact_source_membership(
     tmp_path: Path, damage: str
 ) -> None:
@@ -634,28 +672,7 @@ def test_catalog_binds_present_v2_capture_to_exact_source_membership(
     manifest_path = result.generation_path / "manifest.json"
     manifest = json.loads(manifest_path.read_bytes())
     capture = manifest["code_capture"]
-    file = capture["files"][0]
-    if damage == "missing":
-        capture["files"] = []
-    elif damage == "extra":
-        extra = __import__("copy").deepcopy(file)
-        extra.update(source_id="source:extra", relative_path="extra.py", sha256="e" * 64)
-        capture["files"].append(extra)
-        capture["files"].sort(key=lambda item: item["relative_path"])
-        capture["policy"]["roots"] = sorted((*capture["policy"]["roots"], "extra.py"))
-    elif damage == "source_id":
-        file["source_id"] = "source:other"
-    elif damage == "relative_path":
-        old_path = file["relative_path"]
-        file["relative_path"] = "other.py"
-        capture["policy"]["roots"] = sorted(
-            "other.py" if root == old_path else root
-            for root in capture["policy"]["roots"]
-        )
-    elif damage == "sha256":
-        file["sha256"] = "f" * 64
-    else:
-        file["stat"]["size"] += 1
+    _V2_CAPTURE_DAMAGE[damage](capture, capture["files"][0])
     capture["membership_sha256"] = hashlib.sha256(
         canonical_json_bytes(
             {"files": capture["files"], "directories": capture["directories"]}
@@ -802,6 +819,14 @@ def test_generic_register_and_activate_still_run_real_semantic_validators(
     catalog.register("generic-full-validation")
     assert catalog.activate("generic-full-validation", expected_active=None)
 
+    # Activation proves the same bytes rather than re-deriving what they mean:
+    # every artifact was hashed against the manifest again, and a verdict about
+    # identical bytes cannot differ. Different bytes are checked for themselves.
+    assert calls == {"evidence": 1, "fts": 1}
+
+    _publish_v2(catalog, "generic-full-validation-other")
+    catalog.register("generic-full-validation-other")
+
     assert calls == {"evidence": 2, "fts": 2}
 
 
@@ -918,10 +943,49 @@ def test_validated_candidate_rechecks_replacement_inside_registration_transactio
         assert database.execute("SELECT COUNT(*) FROM generations").fetchone()[0] == 0
 
 
-@pytest.mark.parametrize(
-    "boundary",
-    ["candidate-register", "candidate-activate", "public-register", "public-activate"],
+_MUTATION_BOUNDARIES = (
+    "candidate-register",
+    "candidate-activate",
+    "public-register",
+    "public-activate",
 )
+
+_BOUNDARY_CALLS = {
+    "candidate-register": lambda catalog, generation_id, candidate: (
+        catalog._register_validated(candidate)
+    ),
+    "candidate-activate": lambda catalog, generation_id, candidate: (
+        catalog._activate_validated(candidate, expected_active=None)
+    ),
+    "public-register": lambda catalog, generation_id, candidate: (
+        catalog.register(generation_id)
+    ),
+    "public-activate": lambda catalog, generation_id, candidate: (
+        catalog.activate(generation_id, expected_active=None)
+    ),
+}
+
+
+def _prepared_candidate(catalog, generation_id: str, boundary: str):
+    if not boundary.startswith("candidate"):
+        return None
+    return catalog._validate_candidate(generation_id)
+
+
+def _register_before_activation(catalog, generation_id: str, boundary: str, candidate) -> None:
+    if not boundary.endswith("activate"):
+        return
+    if candidate is None:
+        catalog.register(generation_id)
+        return
+    catalog._register_validated(candidate)
+
+
+def _reach_boundary(catalog, generation_id: str, boundary: str, candidate) -> None:
+    _BOUNDARY_CALLS[boundary](catalog, generation_id, candidate)
+
+
+@pytest.mark.parametrize("boundary", _MUTATION_BOUNDARIES)
 @pytest.mark.parametrize("mutation", ["in-place", "replacement"])
 def test_catalog_mutation_boundaries_reject_metadata_preserving_tampering(
     tmp_path, monkeypatch, boundary, mutation
@@ -929,14 +993,8 @@ def test_catalog_mutation_boundaries_reject_metadata_preserving_tampering(
     catalog = _catalog(tmp_path)
     generation_id = boundary
     directory, _manifest = _publish(catalog, generation_id)
-    candidate = None
-    if boundary.startswith("candidate"):
-        candidate = catalog._validate_candidate(generation_id)
-    if boundary.endswith("activate"):
-        if candidate is None:
-            catalog.register(generation_id)
-        else:
-            catalog._register_validated(candidate)
+    candidate = _prepared_candidate(catalog, generation_id, boundary)
+    _register_before_activation(catalog, generation_id, boundary, candidate)
 
     artifact = directory / "search.sqlite3"
     before = artifact.stat(follow_symlinks=False)
@@ -949,10 +1007,7 @@ def test_catalog_mutation_boundaries_reject_metadata_preserving_tampering(
     @contextmanager
     def tamper_inside_transaction(deadline):
         with real_transaction(deadline) as database:
-            if mutation == "in-place":
-                _rewrite_preserving_metadata(artifact, changed)
-            else:
-                os.replace(replacement, artifact)
+            _apply_artifact_mutation(mutation, artifact, changed, replacement)
             after = artifact.stat(follow_symlinks=False)
             assert os.path.samestat(before, after) is (mutation == "in-place")
             assert (after.st_size, after.st_mtime_ns) == (
@@ -964,14 +1019,7 @@ def test_catalog_mutation_boundaries_reject_metadata_preserving_tampering(
     monkeypatch.setattr(catalog, "_write_transaction", tamper_inside_transaction)
 
     with pytest.raises((PermissionError, ValueError)):
-        if boundary == "candidate-register":
-            catalog._register_validated(candidate)
-        elif boundary == "candidate-activate":
-            catalog._activate_validated(candidate, expected_active=None)
-        elif boundary == "public-register":
-            catalog.register(generation_id)
-        else:
-            catalog.activate(generation_id, expected_active=None)
+        _reach_boundary(catalog, generation_id, boundary, candidate)
 
     with closing(sqlite3.connect(catalog.catalog_path)) as database:
         registered = database.execute(
@@ -984,10 +1032,58 @@ def test_catalog_mutation_boundaries_reject_metadata_preserving_tampering(
     assert active is None
 
 
-@pytest.mark.parametrize(
-    "boundary",
-    ["candidate-register", "candidate-activate", "public-register", "public-activate"],
-)
+class _TamperTrace:
+    """What the tamper hook saw, so a failure can name what stopped it.
+
+    A Windows run reported only `assert False` — the tamper never ran — and
+    nothing said whether the hook was reached, whether any read belonged to the
+    file being hashed, or whether the operating system refused the mutation
+    because the catalog was holding the file open.
+    """
+
+    def __init__(self) -> None:
+        self.acquiring = False
+        self.acquisitions = 0
+        self.reads = 0
+        self.tampered = False
+        self.refusal: str | None = None
+
+    def run(self, mutate) -> None:
+        try:
+            mutate()
+        except OSError as exc:
+            self.refusal = f"{type(exc).__name__}: {exc}"
+            raise
+        self.tampered = True
+
+    def blocked_by_the_platform(self) -> bool:
+        """Windows denies replacing a file the catalog holds open.
+
+        Python opens without `FILE_SHARE_DELETE`, so the rename this test tries
+        is refused by the operating system rather than by the seal — measured on
+        CI 2026-08-24: `WinError 5` on `artifact-0000.bin` while it was held.
+        That is the same guarantee the seal gives, reached one layer lower. On
+        POSIX the rename succeeds, so there the seal must still catch it.
+        """
+        return os.name == "nt" and self.refusal is not None
+
+    def why(self) -> str:
+        return (
+            "the tamper never ran: "
+            f"acquisitions={self.acquisitions}, reads_while_acquiring={self.reads}, "
+            f"refusal={self.refusal or 'none'}"
+        )
+
+
+def _tamper_ready(acquiring: bool, chunk: bytes, tampered: bool) -> bool:
+    return acquiring and bool(chunk) and not tampered
+
+
+def _is_descriptor_for(descriptor: int, path: Path) -> bool:
+    return os.path.samestat(os.fstat(descriptor), path.stat(follow_symlinks=False))
+
+
+@pytest.mark.parametrize("boundary", _MUTATION_BOUNDARIES)
 @pytest.mark.parametrize("mutation", ["in-place", "replacement"])
 def test_catalog_mutation_boundaries_reject_earlier_member_change_during_later_hash(
     tmp_path, monkeypatch, boundary, mutation
@@ -997,14 +1093,8 @@ def test_catalog_mutation_boundaries_reject_earlier_member_change_during_later_h
     catalog = _catalog(tmp_path)
     generation_id = f"coherent-{boundary}-{mutation}"
     directory, _manifest = _publish(catalog, generation_id, extra_artifacts=1)
-    candidate = None
-    if boundary.startswith("candidate"):
-        candidate = catalog._validate_candidate(generation_id)
-    if boundary.endswith("activate"):
-        if candidate is None:
-            catalog.register(generation_id)
-        else:
-            catalog._register_validated(candidate)
+    candidate = _prepared_candidate(catalog, generation_id, boundary)
+    _register_before_activation(catalog, generation_id, boundary, candidate)
 
     earlier = directory / "artifact-0000.bin"
     later = directory / "search.sqlite3"
@@ -1016,48 +1106,33 @@ def test_catalog_mutation_boundaries_reject_earlier_member_change_during_later_h
     os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
     real_read = generation_catalog.os.read
     real_acquire = catalog._acquire_seal_capability
-    acquiring = False
-    tampered = False
+    trace = _TamperTrace()
 
     def read_and_tamper(descriptor, size):
-        nonlocal tampered
         chunk = real_read(descriptor, size)
-        if (
-            acquiring
-            and chunk
-            and not tampered
-            and os.path.samestat(os.fstat(descriptor), later.stat(follow_symlinks=False))
-        ):
-            if mutation == "in-place":
-                _rewrite_preserving_metadata(earlier, changed)
-            else:
-                tampered = True
-                os.replace(replacement, earlier)
-            tampered = True
+        if not _tamper_ready(trace.acquiring, chunk, trace.tampered):
+            return chunk
+        trace.reads += 1
+        if not _is_descriptor_for(descriptor, later):
+            return chunk
+        trace.run(lambda: _apply_artifact_mutation(mutation, earlier, changed, replacement))
         return chunk
 
     def tracked_acquire(*args, **kwargs):
-        nonlocal acquiring
-        acquiring = True
+        trace.acquiring = True
+        trace.acquisitions += 1
         try:
             return real_acquire(*args, **kwargs)
         finally:
-            acquiring = False
+            trace.acquiring = False
 
     monkeypatch.setattr(generation_catalog.os, "read", read_and_tamper)
     monkeypatch.setattr(catalog, "_acquire_seal_capability", tracked_acquire)
 
     with pytest.raises((PermissionError, ValueError)):
-        if boundary == "candidate-register":
-            catalog._register_validated(candidate)
-        elif boundary == "candidate-activate":
-            catalog._activate_validated(candidate, expected_active=None)
-        elif boundary == "public-register":
-            catalog.register(generation_id)
-        else:
-            catalog.activate(generation_id, expected_active=None)
+        _reach_boundary(catalog, generation_id, boundary, candidate)
 
-    assert tampered
+    assert trace.tampered or trace.blocked_by_the_platform(), trace.why()
 
 
 def test_catalog_writer_is_not_held_while_publication_content_hash_blocks(
@@ -2944,3 +3019,45 @@ def test_a_reader_waits_out_an_exclusive_lock_instead_of_failing(tmp_path):
     assert released.is_set()
     assert active is not None
     assert active["generation_id"] == "gen-1"
+
+
+def _scope_at_commit(tmp_path: Path, commit: str):
+    """A Git-flavoured scope for a temporary checkout, at a chosen commit."""
+    from repository_scope import (
+        SCHEMA_VERSION,
+        RepositoryScope,
+        derive_checkout_id,
+        derive_repository_id,
+        resolve_repository_scope,
+    )
+
+    repository = tmp_path / "repository"
+    repository.mkdir(exist_ok=True)
+    checkout_root = resolve_repository_scope(repository).checkout_root
+    git_common_dir = f"{checkout_root}/.git"
+    repository_id = derive_repository_id(
+        checkout_root=checkout_root, git_common_dir=git_common_dir
+    )
+    return RepositoryScope(
+        SCHEMA_VERSION,
+        repository_id,
+        derive_checkout_id(repository_id, checkout_root),
+        checkout_root,
+        git_common_dir,
+        commit,
+    )
+
+
+def test_a_generation_stays_eligible_after_the_repository_moves_to_a_new_commit(tmp_path):
+    """A commit says when a generation was built, not where it belongs (NEW-65)."""
+    built_at = _scope_at_commit(tmp_path, "a" * 40)
+    asked_at = _scope_at_commit(tmp_path, "b" * 40)
+    catalog = _catalog(tmp_path)
+    _publish(catalog, "gen-1", repository_scope=built_at.as_dict())
+    catalog.register("gen-1")
+    assert catalog.activate("gen-1", expected_active=None)
+
+    selected = catalog.get_active_for_repository(asked_at)
+
+    assert selected is not None
+    assert selected["generation_id"] == "gen-1"

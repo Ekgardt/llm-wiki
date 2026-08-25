@@ -62,8 +62,10 @@ from contradiction_pipeline import (  # noqa: E402
     default_secondary_search,
 )
 from evidence_resolver import (  # noqa: E402
+    MAX_DAILY_PART_BYTES,  # noqa: F401 - re-exported: callers read the writer's bound here
     EvidenceRef,
     EvidenceResolver,
+    _daily_part_bounds,
     daily_entries,
 )
 from llm_client import call_candidate, probe_candidate, provider_candidates  # noqa: E402
@@ -97,6 +99,11 @@ LOG = MEMORY / "log.md"
 COMPILE_PLAN_SCHEMA = Path(__file__).with_name("schemas") / "compile-plan-v2.json"
 COMPILE_RECEIPT_SCHEMA = Path(__file__).with_name("schemas") / "compile-receipt-v2.json"
 COMPILE_RECEIPT_V3_SCHEMA = Path(__file__).with_name("schemas") / "compile-receipt-v3.json"
+# One malformed generation used to lose a whole compile. Current practice caps
+# structured-output retries at about three attempts in total, because a prompt
+# that needs more than that needs work rather than more calls.
+VALIDATION_RETRIES = 2
+
 COMPILER_VERSION = "2.0.0"
 NORMALIZATION_VERSION = "normalize-v2"
 MAX_SOURCE_BYTES = 4 * 1024 * 1024
@@ -432,43 +439,6 @@ def compile_receipt_path(source_identity: str) -> Path:
     return DAILY_DIR / "receipts" / f"v3-{source_identity}.md"
 
 
-# How much of one day the compiler takes at a time. A day longer than this is
-# split at entry boundaries: a single long session used to fail the whole pass,
-# leaving every other day uncompiled with it. The bound is bytes rather than
-# tokens so the same file always splits the same way, which is what lets a run
-# interrupted halfway resume from the parts it already committed.
-MAX_DAILY_PART_BYTES = 16 * 1024
-
-# What separates one captured entry from the next in a daily log.
-_DAILY_ENTRY_MARKER = b"<!-- llm-wiki-operation:"
-
-
-def _daily_entry_offsets(content: bytes) -> list[int]:
-    """Where each entry starts, the first one covering whatever precedes it."""
-    offsets = [0]
-    position = content.find(_DAILY_ENTRY_MARKER)
-    while position != -1:
-        if position != 0:
-            offsets.append(position)
-        position = content.find(_DAILY_ENTRY_MARKER, position + 1)
-    return offsets
-
-
-def _daily_part_bounds(content: bytes) -> list[tuple[int, int]]:
-    """The byte ranges this day is compiled in, split only where an entry ends."""
-    if len(content) <= MAX_DAILY_PART_BYTES:
-        return [(0, len(content))]
-    offsets = [*_daily_entry_offsets(content), len(content)]
-    bounds: list[tuple[int, int]] = []
-    start = 0
-    for index in range(1, len(offsets)):
-        if offsets[index] - start > MAX_DAILY_PART_BYTES and offsets[index - 1] > start:
-            bounds.append((start, offsets[index - 1]))
-            start = offsets[index - 1]
-    bounds.append((start, len(content)))
-    return bounds
-
-
 def _daily_parts(
     logical_path: str,
     content: bytes,
@@ -563,6 +533,22 @@ def _deduplicated_sources(
         seen_paths.add(item.logical_path)
         sources.append(SourceSnapshot(item.logical_path, item.content, item.sha256))
     return sources
+
+
+MAX_FAILURE_DETAIL_CHARS = 300
+
+
+def _detail_of(error: BaseException) -> str:
+    return f"{type(error).__name__}: {error}"
+
+
+def _report_stage_detail(stage: str, failure: str, detail: str) -> None:
+    if not detail:
+        return
+    print(
+        f"compile_memory: {stage} {failure}: {detail[:MAX_FAILURE_DETAIL_CHARS]}",
+        file=sys.stderr,
+    )
 
 
 def _record_oversized_daily(logical_path: str) -> None:
@@ -750,6 +736,17 @@ def _receipt_path(digest: str) -> Path:
     return DAILY_DIR / "receipts" / f"{digest}.md"
 
 
+def _corrupt_receipt(reason: BaseException, path: Path | None = None) -> ValueError:
+    """Say which receipt failed and why, not merely that one did.
+
+    The bare message was the same for four different causes, so the only way to
+    learn what happened was to reproduce it through the reader. Receipt paths
+    and these reasons are our own text, never page content.
+    """
+    named = "" if path is None else f" {path.name}"
+    return ValueError(f"compile receipt is corrupt{named}: {reason}")
+
+
 def parse_compile_receipt_v2(raw_bytes: bytes, digest: str) -> dict[str, object]:
     """Validate canonical receipt bytes without requiring live transaction state."""
     try:
@@ -762,7 +759,7 @@ def parse_compile_receipt_v2(raw_bytes: bytes, digest: str) -> dict[str, object]
         UnicodeDecodeError,
         json.JSONDecodeError,
     ) as exc:
-        raise ValueError("compile receipt is corrupt") from exc
+        raise _corrupt_receipt(exc) from exc
 
 
 def _parsed_receipt_v2(raw_bytes: bytes, digest: str) -> dict[str, object]:
@@ -884,7 +881,7 @@ def read_compile_receipt_v2(
         UnicodeDecodeError,
         json.JSONDecodeError,
     ) as exc:
-        raise ValueError("compile receipt is corrupt") from exc
+        raise _corrupt_receipt(exc, path) from exc
 
 
 def _require_transaction_authority(
@@ -895,8 +892,8 @@ def _require_transaction_authority(
     raw_bytes: bytes,
 ) -> None:
     """A receipt is evidence only when a committed transaction wrote those bytes."""
-    transaction = coordinator._record_for_operation_id(str(record["operation_id"]))
-    if transaction is None or transaction.state != "committed":
+    transaction = coordinator.committed_attempt(str(record["operation_id"]))
+    if transaction is None:
         raise ValueError("compile receipt has no committed transaction authority")
     operations = _transaction_operations(transaction)
     receipt_operation = operations.get(path.relative_to(vault).as_posix())
@@ -947,7 +944,22 @@ def resolve_compile_plan(
         resolved = attempt.resolve(candidate)
         if resolved is not None:
             return resolved
-    raise RuntimeError("no LLM provider produced a validated compile plan")
+    raise RuntimeError(_no_plan_message(attempt.lineage))
+
+
+def _no_plan_message(lineage: Sequence[str]) -> str:
+    """Say which provider failed at which stage, not merely that none worked.
+
+    The chain records `stage:provider:code` for every attempt and used to drop
+    it on the floor, so a live vault that could not compile reported the same
+    sentence whether no provider existed, one refused, or a plan failed its
+    critique.
+    """
+    if not lineage:
+        return "no LLM provider produced a validated compile plan: none was tried"
+    return (
+        "no LLM provider produced a validated compile plan: " + "; ".join(lineage)
+    )
 
 
 class _ProviderStageFailure(Exception):
@@ -992,13 +1004,38 @@ class _CompileAttempt:
         cached = self._cached(actions, descriptor)
         if cached is not None:
             return cached
-        return self._drafted(descriptor, actions)
+        return self._drafted_with_retries(descriptor, actions)
+
+    def _drafted_with_retries(
+        self, descriptor: object, actions: tuple[object, object]
+    ) -> ResolvedCompilePlan | None:
+        """A malformed generation is stochastic; a bounded retry is the remedy.
+
+        Only a validation error is tried again: an input budget or a provider
+        that is down repeats itself, and retrying either would just spend
+        tokens. Every attempt stays in the lineage, so the extra calls are
+        visible rather than a silent cost.
+        """
+        for _attempt in range(VALIDATION_RETRIES + 1):
+            resolved = self._drafted(descriptor, actions)
+            if resolved is not None:
+                return resolved
+            if not self.lineage[-1].endswith(":validation_error"):
+                return None
+        return None
 
     def _record(
-        self, stage: str, descriptor: object, failure: str
+        self, stage: str, descriptor: object, failure: str, detail: str = ""
     ) -> ResolvedCompilePlan | None:
-        """Remember why this stage yielded nothing, and yield nothing."""
+        """Remember why this stage yielded nothing, and yield nothing.
+
+        The lineage keeps the failure class alone, because the retry rule reads
+        it; the detail goes to stderr, because `validation_error` names a stage
+        and not the check that refused, and a run that fails three times in a row
+        should say what it disagreed with.
+        """
         self.lineage += (_failure_lineage(stage, descriptor, failure),)
+        _report_stage_detail(stage, failure, detail)
         return None
 
     def _actions(self, descriptor: object) -> tuple[object, object]:
@@ -1047,8 +1084,10 @@ class _CompileAttempt:
     ) -> ResolvedCompilePlan | None:
         try:
             operations = _draft_operations(draft_text)
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-            return self._record("draft", descriptor, "validation_error")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            return self._record(
+                "draft", descriptor, "validation_error", _detail_of(error)
+            )
         return self._critiqued(descriptor, actions, operations)
 
     def _critiqued(
@@ -1064,18 +1103,67 @@ class _CompileAttempt:
             reviewed = self._review(descriptor, operations)
         except _ProviderStageFailure as stage_failure:
             return self._record("critique", descriptor, stage_failure.failure)
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-            return self._record("critique", descriptor, "validation_error")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            return self._record(
+                "critique", descriptor, "validation_error", _detail_of(error)
+            )
         return self._normalized(descriptor, with_critique, reviewed, "normalize")
 
     def _review(self, descriptor: object, operations: list[object]) -> list[object]:
-        prompt = _critique_prompt(self.inputs, operations)
-        if not self._fits(prompt, CRITIQUE_SYSTEM, CRITIQUE_SCHEMA, descriptor):
-            raise ValueError("compile critique exceeds input budget")
+        """Review every operation, in as many batches as the budget requires.
+
+        Sixteen operations of a long day cost about twice the draft prompt, so
+        one review of all of them cannot fit and the whole plan used to be
+        thrown away. Each batch is reviewed whole, with its evidence, and the
+        drop lists are merged; nothing is reviewed twice and nothing goes
+        unreviewed. See docs/research/2026-08-24-reviewing-more-than-fits.md.
+        """
+        dropped: set[str] = set()
+        for batch in self._critique_batches(descriptor, operations):
+            dropped |= self._reviewed_batch(descriptor, batch)
+        return _without_dropped(operations, dropped)
+
+    def _reviewed_batch(self, descriptor: object, batch: list[object]) -> set[str]:
+        prompt = _critique_prompt(self.inputs, batch)
         critique = self._call(descriptor, prompt, CRITIQUE_SYSTEM, CRITIQUE_SCHEMA)
         if critique.text is None:
             raise _ProviderStageFailure(critique.failure_class or "provider_error")
-        return _without_dropped(operations, _dropped_slugs(critique.text))
+        return set(_dropped_slugs(critique.text))
+
+    def _critique_batches(
+        self, descriptor: object, operations: list[object]
+    ) -> list[list[object]]:
+        """Greedy batches whose prompt fits; one that cannot fit alone refuses.
+
+        A single operation the reviewer cannot hold is a deterministic refusal,
+        and it happens before any provider call — calling `validation_error`
+        would have read as a bad generation and spent the retry budget on it.
+        """
+        batches: list[list[object]] = []
+        current: list[object] = []
+        for operation in operations:
+            current = self._extended_batch(descriptor, batches, current, operation)
+        if current:
+            batches.append(current)
+        return batches
+
+    def _extended_batch(
+        self,
+        descriptor: object,
+        batches: list[list[object]],
+        current: list[object],
+        operation: object,
+    ) -> list[object]:
+        if self._batch_fits(descriptor, [*current, operation]):
+            return [*current, operation]
+        if not self._batch_fits(descriptor, [operation]):
+            raise _ProviderStageFailure("input_budget")
+        batches.append(current)
+        return [operation]
+
+    def _batch_fits(self, descriptor: object, batch: list[object]) -> bool:
+        prompt = _critique_prompt(self.inputs, batch)
+        return self._fits(prompt, CRITIQUE_SYSTEM, CRITIQUE_SCHEMA, descriptor)
 
     def _normalized(
         self,
@@ -1087,8 +1175,8 @@ class _CompileAttempt:
         try:
             plan = _normalize_plan(operations, self.inputs)
             validate_compile_plan(plan, self.inputs)
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-            return self._record(stage, descriptor, "validation_error")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            return self._record(stage, descriptor, "validation_error", _detail_of(error))
         return self._published(descriptor, action, plan)
 
     def _published(
@@ -1421,6 +1509,18 @@ def _daily_for_evidence(inputs: CompileInputs, date: str) -> DailySnapshot | Non
     return matches[0] if len(matches) == 1 else None
 
 
+def _dailies_for_evidence(inputs: CompileInputs, date: str) -> list[DailySnapshot]:
+    """Every part of that day the run carries.
+
+    A long day is compiled in parts, and a part is a unit of *work*, not a
+    boundary for evidence: the quoted line lives in exactly one of them. Asking
+    for a single snapshot per date silently returned nothing as soon as a day
+    was split, so no evidence from a long day could ever bind.
+    """
+    suffix = f"/{date}.md"
+    return [item for item in inputs.dailies if item.logical_path.endswith(suffix)]
+
+
 def _target_snapshot(inputs: CompileInputs, path: str) -> TargetSnapshot | None:
     return next((item for item in inputs.targets if item.logical_path == path), None)
 
@@ -1542,12 +1642,32 @@ def _require_evidence_shape(evidence: object) -> None:
         raise ValueError("compile operation requires evidence")
 
 
+def _bound_part(
+    sources: list[DailySnapshot], timestamp: str, quote_bytes: bytes
+) -> tuple[DailySnapshot, bytes, int]:
+    """The one part whose entry declares this timestamp and holds this quote."""
+    bound = []
+    for source in sources:
+        try:
+            block, marker_at = _evidence_block(source, timestamp, quote_bytes)
+        except ValueError:
+            continue
+        bound.append((source, block, marker_at))
+    if len(bound) != 1:
+        raise ValueError(
+            "compile evidence timestamp block is ambiguous or missing: "
+            f"timestamp {timestamp!r} bound in {len(bound)} of {len(sources)} part(s)"
+        )
+    return bound[0]
+
+
 def _evidence_binding(item: object, inputs: CompileInputs) -> dict[str, str]:
     """Bind one quoted line to an exact byte span of an immutable daily source."""
     date, timestamp, quote = _require_evidence_fields(item)
-    source = _daily_for_evidence(inputs, date)
-    block, marker_at = _evidence_block(source, timestamp)
     quote_bytes = quote.encode("utf-8")
+    source, block, marker_at = _bound_part(
+        _dailies_for_evidence(inputs, date), timestamp, quote_bytes
+    )
     quote_offset = _sole_quote_offset(block, quote_bytes)
     _require_complete_line(block, quote_offset, quote_bytes, quote)
     quote_start = marker_at + quote_offset
@@ -1625,23 +1745,70 @@ def _require_calendar_date(date: str) -> None:
         raise ValueError("compile evidence date is invalid") from exc
 
 
-def _evidence_block(source: object, timestamp: str) -> tuple[bytes, int]:
-    """The one entry a timestamp names, as bytes plus its offset in the source.
+def _source_content(source: object) -> bytes:
+    if source is None:
+        return b""
+    return source.content
 
-    Entries are delimited by `evidence_resolver.daily_entries`, the one
-    definition. Exactly one entry must declare the timestamp: none and several
-    are both refused.
-    """
-    content = source.content if source is not None else b""
-    matched = [
+
+def _declaring_entries(content: bytes, timestamp: str) -> list[tuple[int, int]]:
+    return [
         (start, end)
         for block_id, start, end in daily_entries(content)
         if block_id == timestamp
     ]
+
+
+def _quote_bearing(
+    content: bytes, matched: list[tuple[int, int]], quote_bytes: bytes
+) -> list[tuple[int, int]]:
+    """Of the entries a timestamp names, those holding the quote exactly once.
+
+    Without a quote there is nothing to settle the address with, so the
+    candidates are returned untouched and the caller refuses them as ambiguous.
+    """
+    if not quote_bytes:
+        return matched
+    return [
+        (start, end)
+        for start, end in matched
+        if content.count(quote_bytes, start, end) == 1
+    ]
+
+
+def _evidence_block(
+    source: object, timestamp: str, quote_bytes: bytes = b""
+) -> tuple[bytes, int]:
+    """The entry this evidence belongs to, as bytes plus its offset in the source.
+
+    Entries are delimited by `evidence_resolver.daily_entries`, the one
+    definition. The timestamp selects the candidates; when several entries
+    declare it, the quote settles which one — the address is fragile, the quote
+    is the proof, and a daily log is append-only, so twelve entries written in
+    one second stay that way. Zero candidates, or a quote that no single
+    candidate holds exactly once, are refused as before. See
+    knowledge/notes/daily-entry-quote-anchor-decision.md.
+    """
+    content = _source_content(source)
+    declared = _declaring_entries(content, timestamp)
+    matched = declared
+    if len(matched) > 1:
+        matched = _quote_bearing(content, matched, quote_bytes)
     if len(matched) != 1:
-        raise ValueError("compile evidence timestamp block is ambiguous or missing")
+        raise ValueError(_ambiguous_block_message(timestamp, declared, matched))
     start, end = matched[0]
     return content[start:end], start
+
+
+def _ambiguous_block_message(
+    timestamp: str, declared: list[tuple[int, int]], matched: list[tuple[int, int]]
+) -> str:
+    """Say which of the two failures happened; the class alone taught nobody."""
+    return (
+        "compile evidence timestamp block is ambiguous or missing: "
+        f"timestamp {timestamp!r} declared by {len(declared)} entr(y/ies), "
+        f"quote found in {len(matched)} of them"
+    )
 
 
 def _sole_quote_offset(block: bytes, quote_bytes: bytes) -> int:
@@ -1926,7 +2093,7 @@ def _receipt_v3_bytes(
                     **item,
                 }
                 for item in evidence
-                if item["source_path"] == source.logical_path
+                if _evidence_of_source(item, source)
             ),
             key=lambda item: (
                 item["operation_path"],
@@ -2048,7 +2215,7 @@ def parse_compile_receipt_v3(
         UnicodeDecodeError,
         json.JSONDecodeError,
     ) as exc:
-        raise ValueError("compile receipt is corrupt") from exc
+        raise _corrupt_receipt(exc) from exc
 
 
 def _parsed_receipt_v3(
@@ -2131,6 +2298,20 @@ def _require_v3_identity(record: Mapping[str, object]) -> None:
         raise ValueError("compile receipt operation identity is invalid")
 
 
+def _evidence_of_source(item: Mapping[str, str], source: object) -> bool:
+    """Evidence belongs to the part it was bound in, not to the day.
+
+    Every part of a split day carries the same logical path, so matching on the
+    path alone put part five's evidence into part one's receipt, where the digest
+    check refused it: `compile receipt evidence scope is invalid`. The digest is
+    what tells the parts apart.
+    """
+    return (
+        item["source_path"] == source.logical_path
+        and item["source_digest"] == source.sha256
+    )
+
+
 def _require_v3_evidence_scope(
     record: Mapping[str, object],
     source_identity: str,
@@ -2194,7 +2375,7 @@ def read_compile_receipt_v3(
         UnicodeDecodeError,
         json.JSONDecodeError,
     ) as exc:
-        raise ValueError("compile receipt is corrupt") from exc
+        raise _corrupt_receipt(exc, path) from exc
 
 
 def _require_receipt_name(path: Path, source_identity: str) -> None:
@@ -2309,6 +2490,7 @@ class _ApplyPlan:
         self.evidence_bindings: list[dict[str, str]] = []
         self.dispositions: list[dict[str, str]] = []
         self.operation_id = ""
+        self.parent_transaction_id: str | None = None
 
     # -- claim assessment, outside the writer gate ---------------------------
 
@@ -2744,13 +2926,21 @@ class _ApplyPlan:
         )
 
     def _commit(self) -> CompileApplyResult:
+        # A refused attempt keeps its id and its evidence; this one takes the
+        # next ordinal so the same dailies stay compilable. The receipts keep
+        # naming the derived identity, because their own readers recompute it
+        # from the record; the committed attempt is found through that identity.
+        attempt_id, self.parent_transaction_id = (
+            self.coordinator.attempt_operation_id(self.operation_id)
+        )
         transaction = self.coordinator.prepare(
             self.changes,
-            operation_id=self.operation_id,
+            operation_id=attempt_id,
             content_guard="model_output",
             preconditions=self.preconditions,
             deadline=self.deadline,
             cancelled=self.cancelled,
+            _parent_transaction_id=self.parent_transaction_id,
         )
         self.coordinator.apply(
             transaction.id, deadline=self.deadline, cancelled=self.cancelled
@@ -2895,8 +3085,8 @@ def _discard_claim_index(claim_index: ClaimIndex) -> None:
 def _transaction_authority(
     coordinator: MarkdownCoordinator, operation_id: str
 ) -> tuple[object, int]:
-    transaction = coordinator._record_for_operation_id(operation_id)
-    if transaction is None or transaction.state != "committed":
+    transaction = coordinator.committed_attempt(operation_id)
+    if transaction is None:
         raise ValueError("compile transaction is not committed")
     with coordinator._connect() as database:
         row = database.execute(
@@ -2913,6 +3103,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--all", action="store_true")
     p.add_argument("--file", type=str, default=None)
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument(
+        "--discard-unusable-receipts",
+        action="store_true",
+        help=(
+            "Remove compile receipts that no longer parse and exit. A corrupt "
+            "receipt is an error by contract; this is the deliberate way out."
+        ),
+    )
     p.add_argument(
         "--trigger",
         choices=["auto", "manual"],
@@ -2951,6 +3149,85 @@ def _receipt_predicate(
         )
 
     return compiled
+
+
+def _receipt_source_fields(raw: bytes) -> tuple[str, str] | None:
+    """The source a receipt claims, read from the receipt itself."""
+    try:
+        payload = json.loads(raw.split(b"```json", 1)[1].split(b"```", 1)[0])
+        source = payload["source"]
+        return str(source["logical_path"]), str(source["sha256"])
+    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _unusable_receipt_reason(path: Path) -> str:
+    """Why this receipt cannot be read, or "" when it reads fine."""
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        return str(error)[:MAX_FAILURE_DETAIL_CHARS]
+    fields = _receipt_source_fields(raw)
+    if fields is None:
+        return "receipt does not declare the source it belongs to"
+    return _parse_failure_reason(raw, fields)
+
+
+def _parse_failure_reason(raw: bytes, fields: tuple[str, str]) -> str:
+    try:
+        parse_compile_receipt_v3(raw, logical_path=fields[0], source_sha256=fields[1])
+    except ValueError as error:
+        return str(error)[:MAX_FAILURE_DETAIL_CHARS]
+    return ""
+
+
+def discard_unusable_receipts() -> list[str]:
+    """Remove receipts that no longer parse, naming each one. Operator-only.
+
+    A receipt is evidence that a source was compiled, and the contract is that
+    an unreadable one is an error rather than a quiet "not compiled" — a
+    corruption must not be papered over by recompiling. But a receipt written by
+    a defective writer then blocks every later compile of the whole vault, so
+    there has to be a way out that a person takes deliberately: this is it. What
+    is lost is the record of a compile, not the pages, which the next pass
+    rebuilds from the immutable daily.
+    """
+    directory = DAILY_DIR / "receipts"
+    if not directory.is_dir():
+        return []
+    discarded: list[str] = []
+    for path in sorted(directory.glob("*.md")):
+        reason = _unusable_receipt_reason(path)
+        if not reason:
+            continue
+        print(f"compile_memory: discarding {path.name}: {reason}", file=sys.stderr)
+        path.unlink()
+        discarded.append(path.name)
+    return discarded
+
+
+def _repair_compile_mirror(coordinator: MarkdownCoordinator) -> None:
+    """Make the diagnostic mirror agree with the receipts, every pass.
+
+    A vault that already carries the wrong digest would keep reporting a phantom
+    backlog for ever, because the day is compiled and no compile will ever
+    revisit it. Nothing here decides anything: the receipts already did, and
+    this only writes down what they say.
+    """
+    compiled = _receipt_predicate(coordinator)
+    corrected = {}
+    for path in _canonical_dailies():
+        whole = _whole_daily_digest(path.relative_to(ROOT).as_posix(), compiled)
+        if whole is not None:
+            corrected[path.name] = whole
+    if corrected:
+        update_state(lambda state: _apply_mirror_repair(state, corrected))
+
+
+def _apply_mirror_repair(state: dict, corrected: dict) -> None:
+    mirror = _require_state_mapping(state, "compiled_daily_hashes")
+    for name, digest in corrected.items():
+        mirror[name] = digest
 
 
 def select_dailies(
@@ -3308,6 +3585,10 @@ def _unlink_quietly(path: Path) -> None:
 
 def main() -> int:
     args = parse_args()
+    if args.discard_unusable_receipts:
+        discarded = discard_unusable_receipts()
+        print(f"discarded {len(discarded)} unusable receipt(s)")
+        return 0
     _mark_started(args.trigger)
     lock_acquired = _acquire_compile_lock()
     if lock_acquired is None:
@@ -3381,6 +3662,7 @@ def _run(
     state = load_state()
     coordinator = MarkdownCoordinator(ROOT, STATE_ROOT)
     dailies = select_dailies(args, state, coordinator=coordinator)
+    _repair_compile_mirror(coordinator)
     _require_compile_active(deadline, cancelled)
     if not dailies:
         print("compile_memory: no changed daily logs; nothing to do.")
@@ -3503,7 +3785,7 @@ def _apply_batch(
             args, batch.inputs, exc, prefix="transaction not committed: "
         )
     _require_compile_active(deadline, cancelled)
-    _record_batch_diagnostics(batch, result, args)
+    _record_batch_diagnostics(batch, result, args, coordinator)
     return 0
 
 
@@ -3516,12 +3798,47 @@ def _transactional_owner(
     return owner
 
 
-def _record_batch_diagnostics(
-    batch: CompileBatch, result: CompileApplyResult, args: argparse.Namespace
-) -> None:
-    hashes = {
+def _whole_daily_digest(logical_path: str, compiled) -> str | None:
+    """The digest of the file itself, once every part of it has a receipt."""
+    try:
+        content = read_stable_bytes(
+            ROOT / logical_path, MAX_SOURCE_BYTES, label="daily source"
+        )
+    except (OSError, ValueError):
+        return None
+    if not daily_is_compiled(logical_path, content, compiled):
+        return None
+    return sha256_bytes(content)
+
+
+def _mirror_digests(batch: CompileBatch, coordinator: MarkdownCoordinator) -> dict:
+    """What the diagnostic mirror should say about each daily after this commit.
+
+    Receipts are the authority. The mirror exists so cheap readers — the lint,
+    the MCP status, the compile trigger — can ask "is this day compiled" without
+    opening the coordinator. A long day is compiled part by part, and recording
+    the last part's digest under the file name made every one of those readers
+    call a fully compiled day stale for ever. The mirror now names the whole
+    file, and only once every part of it carries a receipt.
+    """
+    compiled = _receipt_predicate(coordinator)
+    digests = {
         Path(item.logical_path).name: item.sha256 for item in batch.inputs.dailies
     }
+    for logical_path in sorted({item.logical_path for item in batch.inputs.dailies}):
+        whole = _whole_daily_digest(logical_path, compiled)
+        if whole is not None:
+            digests[Path(logical_path).name] = whole
+    return digests
+
+
+def _record_batch_diagnostics(
+    batch: CompileBatch,
+    result: CompileApplyResult,
+    args: argparse.Namespace,
+    coordinator: MarkdownCoordinator,
+) -> None:
+    hashes = _mirror_digests(batch, coordinator)
 
     def mutate(state: dict) -> None:
         merge_compile_diagnostics(

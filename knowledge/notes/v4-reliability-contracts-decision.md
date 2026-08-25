@@ -132,3 +132,4 @@ three-zone and authority model limits migration risk for installed vaults.
 - [[knowledge/notes/reliability-v3-runtime-adoption-implementation-decision]]
 - [[knowledge/notes/observable-capture-and-bounded-maintenance-decision]]
 - [[knowledge/notes/dead-task-retirement-and-restore-decision]]
+- [[knowledge/notes/idempotent-retry-after-quarantine-decision]]

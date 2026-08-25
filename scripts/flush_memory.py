@@ -37,8 +37,8 @@ import json
 import os
 import sys
 import time
-from collections.abc import Callable, Mapping
-from datetime import datetime
+from collections.abc import Callable, Mapping, Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -55,6 +55,9 @@ from secret_redact import redact_secrets  # noqa: E402
 DAILY_DIR = ROOT / "knowledge" / "daily"
 DEDUPE_WINDOW_SECONDS = 60
 MAX_TRANSCRIPT_CHARS = 60_000
+# What a session record may read from a transcript file; the record itself is
+# bounded again after rendering.
+MAX_RECORD_CHARS = 4_000_000
 MAX_CAPTURE_INTENT_BYTES = 1024 * 1024
 MAX_CAPTURE_DECISION_BYTES = 1024 * 1024
 MAX_CAPTURE_TERMINAL_BYTES = 64 * 1024
@@ -89,6 +92,32 @@ TIERS = ("FLUSH_MAJOR", "FLUSH_MINOR", "FLUSH_OK")
 LEGACY_SENTINELS = ("FLUSH_OK", "(no durable content)", "NO_DURABLE_CONTENT")
 
 
+_NON_FLUSH_PREFIXES = ("(summary failed", '{"operations"', '{"audit"')
+
+
+def _tier_token(first_line_raw: str) -> str:
+    """The first line without the decoration a model likes to add."""
+    token = first_line_raw.upper().rstrip(".")
+    while token.startswith("`") and token.endswith("`") and len(token) > 1:
+        token = token[1:-1]
+    return token
+
+
+def _legacy_ok(stripped: str) -> bool:
+    """The old protocol: a bare FLUSH_OK, alone or on a line of its own."""
+    norm = stripped.strip(" .\n\t*`").upper()
+    if norm in {sentinel.upper() for sentinel in LEGACY_SENTINELS}:
+        return True
+    return any(line.strip().upper() in LEGACY_SENTINELS for line in stripped.splitlines())
+
+
+def _untiered_response(stripped: str) -> tuple[str, str]:
+    """No tier line: the old sentinel, a non-flush payload, or content to keep."""
+    if _legacy_ok(stripped) or stripped.startswith(_NON_FLUSH_PREFIXES):
+        return "ok", ""
+    return "minor", stripped
+
+
 def _classify_response(raw: str) -> tuple[str, str]:
     """Split the LLM response into (tier, body).
 
@@ -99,40 +128,18 @@ def _classify_response(raw: str) -> tuple[str, str]:
         ("FLUSH_MAJOR" | "FLUSH_MINOR" | "FLUSH_OK", remaining_text)
 
     The remaining_text is the structured summary for MAJOR/MINOR tiers
-    and is empty for OK.
+    and is empty for OK. An unrecognised answer becomes MINOR on purpose:
+    better to keep content that may be useful than to lose it as OK.
     """
-    if not raw or not raw.strip():
+    stripped = (raw or "").strip()
+    if not stripped:
         return "ok", ""
-    stripped = raw.strip()
     first_line_raw = stripped.splitlines()[0].strip()
-    first_line = first_line_raw.upper().rstrip(".")
-    # Strip surrounding backticks the LLM may have added around the token.
-    while first_line.startswith("`") and first_line.endswith("`") and len(first_line) > 1:
-        first_line = first_line[1:-1]
-    # New protocol: first line is exactly one of the tiers
-    if first_line in TIERS:
-        # Body = everything after the first line, cleaned.
+    token = _tier_token(first_line_raw)
+    if token in TIERS:
         body = stripped[len(first_line_raw) :].strip(" \n\t*`")
-        return first_line.lower().replace("flush_", ""), body
-    # Legacy protocol: FLUSH_OK as a single-word line anywhere
-    norm = stripped.strip(" .\n\t*`").upper()
-    for sentinel in LEGACY_SENTINELS:
-        if norm == sentinel.upper():
-            return "ok", ""
-    for ln in stripped.splitlines():
-        if ln.strip().upper() in LEGACY_SENTINELS:
-            return "ok", ""
-    # Failure sentinel from summarizer crash
-    if stripped.startswith("(summary failed"):
-        return "ok", ""
-    # Detect compile-plan JSON masquerading as flush response
-    if stripped.startswith('{"operations"') or stripped.startswith('{"audit"'):
-        return "ok", ""
-    # No recognized sentinel: treat as MINOR (preserve content, don't
-    # auto-compile — operator can manually trigger compile if needed).
-    # This is a defensive default: better to save potentially-useful
-    # content as MINOR than to lose it as OK.
-    return "minor", stripped
+        return token.lower().replace("flush_", ""), body
+    return _untiered_response(stripped)
 
 
 def parse_args() -> argparse.Namespace:
@@ -152,6 +159,47 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _transcript_prefixes() -> list[Path]:
+    home = Path.home()
+    return [
+        home / ".claude" / "projects",
+        home / ".codex" / "sessions",
+        STATE_ROOT / "cache" / "transient-transcripts",
+    ]
+
+
+def _is_beneath(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _beneath_any(path: Path, prefixes: list[Path]) -> bool:
+    for prefix in prefixes:
+        try:
+            resolved = prefix.resolve()
+        except OSError:
+            continue
+        if _is_beneath(path, resolved):
+            return True
+    return False
+
+
+def _readable_transcript(path: Path) -> Path | None:
+    """The resolved path, or None when it is not a plain file we may read."""
+    try:
+        absolute = path.absolute()
+        if not absolute.is_file():
+            return None
+        if any(candidate.is_symlink() for candidate in (absolute, *absolute.parents)):
+            return None
+        return path.resolve()
+    except OSError:
+        return None
+
+
 def _transcript_path_allowed(path: Path) -> bool:
     """Only allow transcript paths from known agent session directories.
 
@@ -161,38 +209,12 @@ def _transcript_path_allowed(path: Path) -> bool:
     restrict to exact Claude/Codex session subtrees and the dedicated
     state-root transient cache.
     """
-    try:
-        absolute = path.absolute()
-        if not absolute.is_file() or any(
-            candidate.is_symlink() for candidate in (absolute, *absolute.parents)
-        ):
-            return False
-        p = path.resolve()
-    except OSError:
+    resolved = _readable_transcript(path)
+    if resolved is None:
         return False
-
-    allowed_prefixes: list[Path] = []
-    home = Path.home()
-    allowed_prefixes.append(home / ".claude" / "projects")
-    allowed_prefixes.append(home / ".codex" / "sessions")
-    allowed_prefixes.append(STATE_ROOT / "cache" / "transient-transcripts")
-
-    # Must also have a known transcript extension.
-    if p.suffix not in (".jsonl", ".json", ".txt", ".log"):
+    if resolved.suffix not in (".jsonl", ".json", ".txt", ".log"):
         return False
-
-    # Must be under one of the allowed directories.
-    for prefix in allowed_prefixes:
-        try:
-            prefix_resolved = prefix.resolve()
-        except OSError:
-            continue
-        try:
-            p.relative_to(prefix_resolved)
-            return True
-        except ValueError:
-            continue
-    return False
+    return _beneath_any(resolved, _transcript_prefixes())
 
 
 def _cleanup_ephemeral_transcript(path: str) -> None:
@@ -367,50 +389,54 @@ def record_flush(state: dict, session_id: str, event: str) -> None:
         del dedupe[k]
 
 
-def maybe_trigger_compile(state: dict, daily_path: Path, tier: str) -> None:
-    """Spawn compile only for FLUSH_MAJOR content, after the hour cutoff.
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
 
-    Always goes through `maybe_compile.spawn_compile_if_idle` so the PID
-    lock is the single concurrency gate (hooks / wrappers / schedulers
-    must not spawn `compile_memory.py` directly).
+
+def _elapsed_since(text: str) -> float:
+    try:
+        last = datetime.fromisoformat(text)
+    except (ValueError, TypeError):
+        return float("inf")
+    return (datetime.now() - last).total_seconds()
+
+
+def _within_cooldown(state: dict) -> bool:
+    """On a busy day every session-end after the cutoff would else re-spawn compile.
+
+    Tune with MEMORY_COMPILE_COOLDOWN_SECONDS (default 900); 0 disables it.
     """
+    cooldown_seconds = _env_int("MEMORY_COMPILE_COOLDOWN_SECONDS", 900)
+    if cooldown_seconds <= 0:
+        return False
+    last_spawned = state.get("last_compile_spawned_at")
+    if not last_spawned:
+        return False
+    return _elapsed_since(str(last_spawned)) < cooldown_seconds
+
+
+def _compile_is_due(state: dict, daily_path: Path, tier: str) -> bool:
     if tier != "major":
-        return
-    try:
-        hour_cutoff = int(os.environ.get("MEMORY_COMPILE_AFTER_HOUR", "18"))
-    except ValueError:
-        hour_cutoff = 18
-    if datetime.now().hour < hour_cutoff:
-        return
-    current_hash = file_hash(daily_path)
+        return False
+    if datetime.now().hour < _env_int("MEMORY_COMPILE_AFTER_HOUR", 18):
+        return False
     compiled = state.get("compiled_daily_hashes", {}).get(daily_path.name)
-    if compiled == current_hash:
-        return
+    if compiled == file_hash(daily_path):
+        return False
+    return not _within_cooldown(state)
 
-    # Cooldown: on a busy day every session-end after 18:00 mutates the
-    # daily log (hash changes) and would otherwise re-spawn a compile
-    # process each time. Rate-limit to one spawn per cooldown window.
-    # Tune via MEMORY_COMPILE_COOLDOWN_SECONDS (default 900 = 15 min).
-    # Set to 0 to disable cooldown entirely.
-    try:
-        cooldown_s = int(os.environ.get("MEMORY_COMPILE_COOLDOWN_SECONDS", "900"))
-    except ValueError:
-        cooldown_s = 900
-    if cooldown_s > 0:
-        last_spawned_raw = state.get("last_compile_spawned_at")
-        if last_spawned_raw:
-            try:
-                last_spawned = datetime.fromisoformat(last_spawned_raw)
-                elapsed = (datetime.now() - last_spawned).total_seconds()
-                if elapsed < cooldown_s:
-                    return
-            except (ValueError, TypeError):
-                pass
 
-    spawned_at = datetime.now().isoformat(timespec="seconds")
-    spawned, reason = spawn_compile_if_idle(force=False)
-    if spawned:
-        state["last_compile_spawned_at"] = spawned_at
+def _record_compile_trigger(
+    state: dict,
+    daily_path: Path,
+    tier: str,
+    spawned_at: str,
+    spawned: bool,
+    reason: str,
+) -> None:
     state["last_compile_spawned_trigger"] = "auto"
     state["last_compile_spawned_daily"] = daily_path.name
     state["last_compile_spawned_tier"] = tier
@@ -426,6 +452,22 @@ def maybe_trigger_compile(state: dict, daily_path: Path, tier: str) -> None:
         }
     )
     state["compile_triggers"] = state["compile_triggers"][-20:]
+
+
+def maybe_trigger_compile(state: dict, daily_path: Path, tier: str) -> None:
+    """Spawn compile only for FLUSH_MAJOR content, after the hour cutoff.
+
+    Always goes through `maybe_compile.spawn_compile_if_idle` so the PID
+    lock is the single concurrency gate (hooks / wrappers / schedulers
+    must not spawn `compile_memory.py` directly).
+    """
+    if not _compile_is_due(state, daily_path, tier):
+        return
+    spawned_at = datetime.now().isoformat(timespec="seconds")
+    spawned, reason = spawn_compile_if_idle(force=False)
+    if spawned:
+        state["last_compile_spawned_at"] = spawned_at
+    _record_compile_trigger(state, daily_path, tier, spawned_at, spawned, reason)
 
 
 def _flush_summary(args: argparse.Namespace) -> str | None:
@@ -1109,6 +1151,57 @@ def _complete_capture_decision(
     )
 
 
+def _keep_session_record(
+    record: Mapping[str, object], now: Callable[[], datetime]
+) -> None:
+    """Keep the session itself before anything judges it.
+
+    Retention must not depend on the tier: measured on this vault's own sessions,
+    the classifier answered "nothing worth keeping" 39 times out of 40, and a
+    controlled 2026 ablation puts a 16-to-22-point retrieval cost on deciding
+    relevance at write time. See knowledge/notes/session-evidence-retention-decision.md.
+    """
+    from session_evidence import evidence_text, intent_fields, write_session_evidence
+
+    evidence = record.get("evidence")
+    if not isinstance(evidence, Sequence):
+        return
+    captured_at = _capture_time_text(now)
+    write_session_evidence(
+        ROOT, intent_fields(record, captured_at), evidence_text(evidence)
+    )
+
+
+def _capture_time_text(now: Callable[[], datetime]) -> str:
+    try:
+        return _require_capture_time(now()).isoformat()
+    except Exception:  # noqa: BLE001
+        return datetime.now(timezone.utc).isoformat()
+
+
+def _keep_transcript_record(args: argparse.Namespace) -> None:
+    """The same record for the detached flush path, which reads the file itself."""
+    from session_evidence import write_session_evidence
+
+    if not args.transcript:
+        return
+    # The whole file, not the classifier's tail: a transcript's entries can each
+    # be tens of thousands of characters, so a 60k tail can start inside one and
+    # leave no complete line to render. The record is for storage, not for a
+    # context window, and the rendered result is bounded on its own.
+    transcript = read_transcript_tail(Path(args.transcript), max_chars=MAX_RECORD_CHARS)
+    if not transcript:
+        return
+    fields = {
+        "session": args.session_id,
+        "host": getattr(args, "agent", None),
+        "event": args.event,
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "source_event_id": getattr(args, "source_event_id", None),
+    }
+    write_session_evidence(ROOT, fields, transcript)
+
+
 def process_new_capture(
     queue: object,
     coordinator: object,
@@ -1122,6 +1215,7 @@ def process_new_capture(
     now: Callable[[], datetime] = _capture_now,
 ) -> object:
     record = _read_capture_intent(queue, lease, active)
+    _keep_session_record(record, now)
     _ensure_capture_results_directory(queue)
     resolved = _existing_capture_decision(
         queue, coordinator, lease, active, task_fence, intent_fence, owner, record
@@ -1315,6 +1409,7 @@ def _trigger_deferred_compiles(deferred: list[tuple[Path, str]]) -> None:
 def _run_flush(args: argparse.Namespace) -> int:
     if should_skip(load_state(), args.session_id, args.event):
         return 0
+    _keep_transcript_record(args)
     raw_summary = _flush_summary(args)
     if raw_summary is None:
         return 0

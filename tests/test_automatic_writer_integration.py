@@ -34,7 +34,8 @@ WRITER_TARGETS = [
 
 TASK14_BEHAVIORAL_ENTRYPOINTS = {
     "scripts/access_tracking.py:flush_access_to_frontmatter",
-    "scripts/archive_stale.py:_archive_page",
+    "scripts/archive_stale.py:_committed_archive",
+    "scripts/archive_stale.py:_committed_restore",
     "scripts/blackboard.py:_append_jsonl",
     "scripts/bootstrap_project.py:bootstrap",
     "scripts/build_guardrails.py:main",
@@ -44,7 +45,7 @@ TASK14_BEHAVIORAL_ENTRYPOINTS = {
     "scripts/feedback_capture.py:capture_from_text",
     "scripts/feedback_capture.py:promote_candidate",
     "scripts/flush_memory.py:append_daily",
-    "scripts/migrate_to_okf.py:main",
+    "scripts/migrate_to_okf.py:_write_page",
     "scripts/query_memory.py:append_log",
     "scripts/query_memory.py:file_back",
     "scripts/rebuild_memory_index.py:main",
@@ -57,10 +58,11 @@ TASK14_BEHAVIORAL_ENTRYPOINTS = {
 
 TASK14_READ_TRANSFORM_WRITE_ENTRYPOINTS = {
     "scripts/access_tracking.py:flush_access_to_frontmatter",
-    "scripts/archive_stale.py:_archive_page",
+    "scripts/archive_stale.py:_committed_archive",
+    "scripts/archive_stale.py:_committed_restore",
     "scripts/build_guardrails.py:main",
     "scripts/feedback_capture.py:promote_candidate",
-    "scripts/migrate_to_okf.py:main",
+    "scripts/migrate_to_okf.py:_write_page",
     "scripts/rebuild_memory_index.py:main",
     "scripts/reflection.py:reflect_page",
 }
@@ -216,12 +218,302 @@ def test_scanner_writer_set_equals_behavioral_matrix():
     )
 
 
+class _Drive:
+    """Everything one entrypoint needs to be driven at its own boundary."""
+
+    def __init__(self, entrypoint, module, tmp_path, monkeypatch, boundary, secret):
+        self.entrypoint = entrypoint
+        self.module = module
+        self.function_name = entrypoint.split(":", 1)[1]
+        self.function = getattr(module, self.function_name)
+        self.tmp_path = tmp_path
+        self.vault = tmp_path / "vault"
+        self.monkeypatch = monkeypatch
+        self.boundary = boundary
+        self.secret = secret
+
+
+def _drive_access_tracking(d: _Drive) -> None:
+    import retrieval_telemetry
+
+    module, monkeypatch, vault = d.module, d.monkeypatch, d.vault
+    page = vault / "knowledge/notes/page.md"
+    page.write_text("---\ntype: concept\n---\n# Page\n", encoding="utf-8")
+    database = d.tmp_path / "state/cache/evidence-graph/telemetry.sqlite3"
+    monkeypatch.setattr(module, "KNOWLEDGE_DIR", page.parent)
+    monkeypatch.setattr(module, "mutate_knowledge", d.boundary)
+    monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
+    retrieval_telemetry.record_event(
+        retrieval_telemetry.make_event(
+            event_kind="page_read",
+            query=None,
+            retrieval_mode="direct",
+            candidate_id="page",
+            rank=None,
+            generation="legacy",
+            source_tool="writer-test",
+        ),
+        db_path=database,
+    )
+    d.function("page")
+
+
+def _drive_archive_stale(d: _Drive) -> None:
+    """Both directions of the archive: putting a page to sleep and waking it."""
+    module, monkeypatch, vault = d.module, d.monkeypatch, d.vault
+    page = vault / "knowledge/notes/page.md"
+    body = f"---\ntype: debugging\nstatus: archived\n---\n# Page\n{d.secret}\n"
+    page.write_text(body, encoding="utf-8")
+    monkeypatch.setattr(module, "ROOT", vault)
+    monkeypatch.setattr(module, "KNOWLEDGE", page.parent)
+    monkeypatch.setattr(module, "ARCHIVE_ROOT", page.parent / "archive")
+    monkeypatch.setattr(module, "mutate_knowledge", d.boundary)
+    archived = page.parent / "archive/2026/page.md"
+    if d.entrypoint.endswith(":_committed_restore"):
+        d.function(archived, page, body.encode("utf-8"))
+        return
+    d.function(page, archived, body.encode("utf-8"), body)
+
+
+def _drive_blackboard(d: _Drive) -> None:
+    d.monkeypatch.setattr(d.module, "append_knowledge", d.boundary)
+    d.function(
+        d.vault / "knowledge/projects/demo/.blackboard/signals.jsonl",
+        {"message": d.secret},
+    )
+
+
+def _drive_bootstrap_project(d: _Drive) -> None:
+    module, monkeypatch, vault, secret = d.module, d.monkeypatch, d.vault, d.secret
+    monkeypatch.setattr(module, "ROOT", vault)
+    monkeypatch.setattr(module, "PROJECTS_DIR", vault / "knowledge/projects")
+    monkeypatch.setattr(module, "_compute_slug", lambda cwd: "demo")
+    monkeypatch.setattr(module, "_extract_git_timeline", lambda cwd: [])
+    monkeypatch.setattr(module, "_extract_readme_summary", lambda cwd: secret)
+    monkeypatch.setattr(module, "_extract_tech_stack", lambda cwd: [])
+    monkeypatch.setattr(module, "_extract_docs_structure", lambda cwd: [])
+    monkeypatch.setattr(module, "_run_git", lambda *args: "")
+    monkeypatch.setattr(module, "mutate_knowledge", d.boundary)
+    d.function(str(d.tmp_path), apply=True)
+
+
+def _drive_build_guardrails(d: _Drive) -> None:
+    module, monkeypatch, vault = d.module, d.monkeypatch, d.vault
+    page = vault / "knowledge/notes/page.md"
+    page.write_text(
+        "---\ntype: pattern\n---\n# Page\n\nOne-sentence summary: Always use safe storage\n",
+        encoding="utf-8",
+    )
+    target = vault / "knowledge/guardrails.md"
+    target.write_bytes(b"old\n")
+    monkeypatch.setattr(module, "ROOT", vault)
+    monkeypatch.setattr(module, "KNOWLEDGE", page.parent)
+    monkeypatch.setattr(module, "FEEDBACK_DIR", vault / "knowledge/feedback")
+    monkeypatch.setattr(module, "GUARDRAILS_FILE", target)
+    monkeypatch.setattr(module, "mutate_knowledge", d.boundary, raising=False)
+    monkeypatch.setattr(sys, "argv", ["build_guardrails.py", "--apply"])
+    d.function()
+
+
+def _drive_build_context(d: _Drive) -> None:
+    module, monkeypatch, vault, secret = d.module, d.monkeypatch, d.vault, d.secret
+    monkeypatch.setattr(module, "ROOT", vault)
+    monkeypatch.setattr(module, "PROJECTS_DIR", vault / "knowledge/projects")
+    monkeypatch.setattr(module, "build_context", lambda *args: secret)
+    monkeypatch.setattr(module, "mutate_knowledge", d.boundary)
+    monkeypatch.setattr(sys, "argv", ["build_context.py", "demo", "--write"])
+    d.function()
+
+
+def _drive_daily_log_append(d: _Drive) -> None:
+    d.monkeypatch.setattr(d.module, "append_knowledge", d.boundary)
+    path = d.vault / "knowledge/daily/2026-07-15.md"
+    if d.function_name == "locked_append_once":
+        d.function(path, d.secret, "event-1")
+        return
+    d.function(path, d.secret)
+
+
+def _promoted_candidate(d: _Drive) -> None:
+    candidate = d.vault / "knowledge/feedback/abcdef123456.json"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_text(
+        json.dumps(
+            {
+                "id": "abcdef123456",
+                "type": "correction",
+                "confidence": 0.7,
+                "text": d.secret,
+                "session_id": d.secret,
+                "project": d.secret,
+                "trigger": d.secret,
+                "captured_at": "2026-01-01",
+                "status": "candidate",
+            }
+        ),
+        encoding="utf-8",
+    )
+    d.function("abcdef123456")
+
+
+def _drive_feedback_capture(d: _Drive) -> None:
+    module, monkeypatch, vault, secret = d.module, d.monkeypatch, d.vault, d.secret
+    monkeypatch.setattr(module, "ROOT", vault)
+    monkeypatch.setattr(module, "FEEDBACK_DIR", vault / "knowledge/feedback")
+    monkeypatch.setattr(module, "mutate_knowledge", d.boundary)
+    if d.function_name != "capture_from_text":
+        _promoted_candidate(d)
+        return
+    d.function("No, use safe storage", session_id=secret, slug=secret, trigger=secret)
+
+
+def _drive_flush_memory(d: _Drive) -> None:
+    d.monkeypatch.setattr(d.module, "DAILY_DIR", d.vault / "knowledge/daily")
+    d.monkeypatch.setattr("daily_log_append.locked_append", d.boundary)
+    d.function("2026-07-15", "safe", operation_id="event-1")
+
+
+def _drive_migrate_to_okf(d: _Drive) -> None:
+    page = d.vault / "knowledge/notes/page.md"
+    page.write_text("# Page\n", encoding="utf-8")
+    d.monkeypatch.setattr(d.module, "ROOT", d.vault)
+    d.monkeypatch.setattr(d.module, "mutate_knowledge", d.boundary)
+    d.function(page, "safe", "0" * 64)
+
+
+def _drive_query_memory(d: _Drive) -> None:
+    module, monkeypatch, vault, secret = d.module, d.monkeypatch, d.vault, d.secret
+    monkeypatch.setattr(module, "ROOT", vault)
+    monkeypatch.setattr(module, "QA_DIR", vault / "knowledge/notes")
+    monkeypatch.setattr(module, "LOG", vault / "knowledge/log.md")
+    monkeypatch.setattr(module, "mutate_knowledge", d.boundary)
+    monkeypatch.setattr("markdown_transaction.append_knowledge", d.boundary)
+    if d.function_name == "file_back":
+        d.function(secret, secret)
+        return
+    d.function(secret)
+
+
+def _drive_rebuild_memory_index(d: _Drive) -> None:
+    module, monkeypatch, vault = d.module, d.monkeypatch, d.vault
+    monkeypatch.setattr(module, "out", vault / "knowledge/index.md")
+    monkeypatch.setattr(module, "ROOT", vault)
+    monkeypatch.setattr(module, "build_index_bytes", lambda root, **kwargs: b"safe")
+    monkeypatch.setattr(module, "mutate_knowledge", d.boundary)
+    d.function()
+
+
+def _drive_reflection(d: _Drive) -> None:
+    module, monkeypatch, vault, secret = d.module, d.monkeypatch, d.vault, d.secret
+    page = vault / "knowledge/notes/page.md"
+    page.write_text(
+        "---\ntype: concept\n---\n# Page\n\n## Update (2026-01-01)\na\n## Update (2026-01-02)\nb\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "ROOT", vault)
+    monkeypatch.setattr("llm_client.call_llm", lambda *args, **kwargs: f"# Page\n\n{secret}")
+    monkeypatch.setattr(module, "mutate_knowledge", d.boundary)
+    d.function(page, apply=True)
+
+
+def _drive_session_end_project_tag(d: _Drive) -> None:
+    d.monkeypatch.setattr("daily_log_append.append_knowledge", d.boundary)
+    d.function(d.vault / "knowledge/daily/2026-07-15.md", d.secret, "event-1")
+
+
+def _drive_session_start_project_state(d: _Drive) -> None:
+    module, monkeypatch, vault = d.module, d.monkeypatch, d.vault
+    project = d.tmp_path / "project"
+    (project / ".git").mkdir(parents=True)
+    template = vault / "knowledge/projects/_template/state.md"
+    template.parent.mkdir(parents=True)
+    template.write_text(
+        "# <Project Name>\n- Project root: `<absolute-path>`\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+    monkeypatch.setattr(module, "ProjectStore", lambda *args: object())
+    monkeypatch.setattr(
+        module,
+        "recover_project_handoff",
+        lambda *args, **kwargs: SimpleNamespace(context="", degraded=False, legacy=False),
+    )
+    monkeypatch.setattr(module, "mutate_knowledge", d.boundary)
+    d.function()
+
+
+def _drive_tool_breadcrumb_append(d: _Drive) -> None:
+    d.monkeypatch.setattr("daily_log_append.append_daily", d.boundary)
+    d.function(
+        {
+            "slug": "demo",
+            "sessionId": "s1",
+            "tool": "bash",
+            "target": d.secret,
+        }
+    )
+
+
+def _drive_user_prompt_capture(d: _Drive) -> None:
+    d.monkeypatch.setattr("daily_log_append.append_daily", d.boundary)
+    d.function("demo", "s1", d.secret, "event-1")
+
+
+# One driver per writer module: the dispatch used to be a 24-branch chain.
+_WRITER_DRIVERS = {
+    "access_tracking": _drive_access_tracking,
+    "archive_stale": _drive_archive_stale,
+    "blackboard": _drive_blackboard,
+    "bootstrap_project": _drive_bootstrap_project,
+    "build_guardrails": _drive_build_guardrails,
+    "build_context": _drive_build_context,
+    "daily_log_append": _drive_daily_log_append,
+    "feedback_capture": _drive_feedback_capture,
+    "flush_memory": _drive_flush_memory,
+    "migrate_to_okf": _drive_migrate_to_okf,
+    "query_memory": _drive_query_memory,
+    "rebuild_memory_index": _drive_rebuild_memory_index,
+    "reflection": _drive_reflection,
+    "session_end_project_tag": _drive_session_end_project_tag,
+    "session_start_project_state": _drive_session_start_project_state,
+    "tool_breadcrumb_append": _drive_tool_breadcrumb_append,
+    "user_prompt_capture": _drive_user_prompt_capture,
+}
+
+# These writers legitimately hand the boundary content read from disk, so the
+# secret they were seeded with is expected to appear in the recorded call.
+_SECRET_BEARING_WRITERS = frozenset({
+    "archive_stale",
+    "flush_memory",
+    "migrate_to_okf",
+    "rebuild_memory_index",
+})
+
+
+def _executable_of(command):
+    if isinstance(command, (list, tuple)) and command:
+        return command[0]
+    return command
+
+
+def _assert_no_git(command, *args, **kwargs):
+    assert str(_executable_of(command)).casefold() not in {"git", "git.exe"}
+    return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+
+def _assert_boundary_use(entrypoint: str, module_name: str, calls: list, secret: str) -> None:
+    assert calls, f"{entrypoint} did not delegate to the mutation boundary"
+    if entrypoint in TASK14_READ_TRANSFORM_WRITE_ENTRYPOINTS:
+        assert all(call_kwargs.get("preconditions") for _, call_kwargs in calls), (
+            f"{entrypoint} did not bind its source snapshot"
+        )
+    if module_name not in _SECRET_BEARING_WRITERS:
+        assert secret not in repr(calls), f"{entrypoint} leaked a secret before prepare"
+
+
 @pytest.mark.parametrize("entrypoint", sorted(TASK14_BEHAVIORAL_ENTRYPOINTS))
 def test_task14_actual_entrypoint_delegates_without_git(entrypoint, tmp_path, monkeypatch):
     module_name = Path(entrypoint.split(":", 1)[0]).stem
-    function_name = entrypoint.split(":", 1)[1]
     module = importlib.import_module(module_name)
-    function = getattr(module, function_name)
     vault, _ = _vault(tmp_path)
     secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
     calls = []
@@ -230,205 +522,15 @@ def test_task14_actual_entrypoint_delegates_without_git(entrypoint, tmp_path, mo
         calls.append((args, kwargs))
         return SimpleNamespace(id="tx", state="committed", preconditions={})
 
-    def guarded_run(command, *args, **kwargs):
-        executable = command[0] if isinstance(command, (list, tuple)) and command else command
-        assert str(executable).casefold() not in {"git", "git.exe"}
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(subprocess, "run", guarded_run)
+    monkeypatch.setattr(subprocess, "run", _assert_no_git)
     monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
 
-    if module_name == "access_tracking":
-        import retrieval_telemetry
+    driver = _WRITER_DRIVERS.get(module_name)
+    assert driver is not None, entrypoint
+    driver(_Drive(entrypoint, module, tmp_path, monkeypatch, boundary, secret))
 
-        page = vault / "knowledge/notes/page.md"
-        page.write_text("---\ntype: concept\n---\n# Page\n", encoding="utf-8")
-        database = tmp_path / "state/cache/evidence-graph/telemetry.sqlite3"
-        monkeypatch.setattr(module, "KNOWLEDGE_DIR", page.parent)
-        monkeypatch.setattr(module, "mutate_knowledge", boundary)
-        monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
-        retrieval_telemetry.record_event(
-            retrieval_telemetry.make_event(
-                event_kind="page_read",
-                query=None,
-                retrieval_mode="direct",
-                candidate_id="page",
-                rank=None,
-                generation="legacy",
-                source_tool="writer-test",
-            ),
-            db_path=database,
-        )
-        function("page")
-    elif module_name == "archive_stale":
-        page = vault / "knowledge/notes/page.md"
-        page.write_text("---\ntype: debugging\n---\n# Page\n", encoding="utf-8")
-        monkeypatch.setattr(module, "ROOT", vault)
-        monkeypatch.setattr(module, "KNOWLEDGE", page.parent)
-        monkeypatch.setattr(module, "ARCHIVE_ROOT", page.parent / "archive")
-        monkeypatch.setattr(module, "mutate_knowledge", boundary)
-        function(page, True)
-    elif module_name == "blackboard":
-        monkeypatch.setattr(module, "append_knowledge", boundary)
-        function(
-            vault / "knowledge/projects/demo/.blackboard/signals.jsonl",
-            {"message": secret},
-        )
-    elif module_name == "bootstrap_project":
-        monkeypatch.setattr(module, "ROOT", vault)
-        monkeypatch.setattr(module, "PROJECTS_DIR", vault / "knowledge/projects")
-        monkeypatch.setattr(module, "_compute_slug", lambda cwd: "demo")
-        monkeypatch.setattr(module, "_extract_git_timeline", lambda cwd: [])
-        monkeypatch.setattr(module, "_extract_readme_summary", lambda cwd: secret)
-        monkeypatch.setattr(module, "_extract_tech_stack", lambda cwd: [])
-        monkeypatch.setattr(module, "_extract_docs_structure", lambda cwd: [])
-        monkeypatch.setattr(module, "_run_git", lambda *args: "")
-        monkeypatch.setattr(module, "mutate_knowledge", boundary)
-        function(str(tmp_path), apply=True)
-    elif module_name == "build_guardrails":
-        page = vault / "knowledge/notes/page.md"
-        page.write_text(
-            "---\ntype: pattern\n---\n# Page\n\nOne-sentence summary: Always use safe storage\n",
-            encoding="utf-8",
-        )
-        target = vault / "knowledge/guardrails.md"
-        target.write_bytes(b"old\n")
-        monkeypatch.setattr(module, "ROOT", vault)
-        monkeypatch.setattr(module, "KNOWLEDGE", page.parent)
-        monkeypatch.setattr(module, "FEEDBACK_DIR", vault / "knowledge/feedback")
-        monkeypatch.setattr(module, "GUARDRAILS_FILE", target)
-        monkeypatch.setattr(module, "mutate_knowledge", boundary, raising=False)
-        monkeypatch.setattr(sys, "argv", ["build_guardrails.py", "--apply"])
-        function()
-    elif module_name == "build_context":
-        monkeypatch.setattr(module, "ROOT", vault)
-        monkeypatch.setattr(module, "PROJECTS_DIR", vault / "knowledge/projects")
-        monkeypatch.setattr(module, "build_context", lambda *args: secret)
-        monkeypatch.setattr(module, "mutate_knowledge", boundary)
-        monkeypatch.setattr(sys, "argv", ["build_context.py", "demo", "--write"])
-        function()
-    elif module_name == "daily_log_append":
-        monkeypatch.setattr(module, "append_knowledge", boundary)
-        path = vault / "knowledge/daily/2026-07-15.md"
-        if function_name == "locked_append_once":
-            function(path, secret, "event-1")
-        else:
-            function(path, secret)
-    elif module_name == "feedback_capture":
-        monkeypatch.setattr(module, "ROOT", vault)
-        monkeypatch.setattr(module, "FEEDBACK_DIR", vault / "knowledge/feedback")
-        monkeypatch.setattr(module, "mutate_knowledge", boundary)
-        if function_name == "capture_from_text":
-            function("No, use safe storage", session_id=secret, slug=secret, trigger=secret)
-        else:
-            candidate = vault / "knowledge/feedback/abcdef123456.json"
-            candidate.parent.mkdir(parents=True)
-            candidate.write_text(
-                json.dumps(
-                    {
-                        "id": "abcdef123456",
-                        "type": "correction",
-                        "confidence": 0.7,
-                        "text": secret,
-                        "session_id": secret,
-                        "project": secret,
-                        "trigger": secret,
-                        "captured_at": "2026-01-01",
-                        "status": "candidate",
-                    }
-                ),
-                encoding="utf-8",
-            )
-            function("abcdef123456")
-    elif module_name == "flush_memory":
-        monkeypatch.setattr(module, "DAILY_DIR", vault / "knowledge/daily")
-        monkeypatch.setattr("daily_log_append.locked_append", boundary)
-        function("2026-07-15", "safe", operation_id="event-1")
-    elif module_name == "migrate_to_okf":
-        page = vault / "knowledge/notes/page.md"
-        page.write_text("# Page\n", encoding="utf-8")
-        monkeypatch.setattr(module, "ROOT", vault)
-        monkeypatch.setattr(
-            module, "parse_args", lambda: SimpleNamespace(scope="wiki", apply=True, report=False)
-        )
-        monkeypatch.setattr(module, "collect_files", lambda scope: [page])
-        monkeypatch.setattr(module, "migrate_file", lambda path: ("migrate", "safe"))
-        monkeypatch.setattr(module, "mutate_knowledge", boundary)
-        function()
-    elif module_name == "query_memory":
-        monkeypatch.setattr(module, "ROOT", vault)
-        monkeypatch.setattr(module, "QA_DIR", vault / "knowledge/notes")
-        monkeypatch.setattr(module, "LOG", vault / "knowledge/log.md")
-        monkeypatch.setattr(module, "mutate_knowledge", boundary)
-        monkeypatch.setattr("markdown_transaction.append_knowledge", boundary)
-        if function_name == "file_back":
-            function(secret, secret)
-        else:
-            function(secret)
-    elif module_name == "rebuild_memory_index":
-        monkeypatch.setattr(module, "out", vault / "knowledge/index.md")
-        monkeypatch.setattr(module, "ROOT", vault)
-        monkeypatch.setattr(module, "build_index_bytes", lambda root, **kwargs: b"safe")
-        monkeypatch.setattr(module, "mutate_knowledge", boundary)
-        function()
-    elif module_name == "reflection":
-        page = vault / "knowledge/notes/page.md"
-        page.write_text(
-            "---\ntype: concept\n---\n# Page\n\n## Update (2026-01-01)\na\n## Update (2026-01-02)\nb\n",
-            encoding="utf-8",
-        )
-        monkeypatch.setattr(module, "ROOT", vault)
-        monkeypatch.setattr("llm_client.call_llm", lambda *args, **kwargs: f"# Page\n\n{secret}")
-        monkeypatch.setattr(module, "mutate_knowledge", boundary)
-        function(page, apply=True)
-    elif module_name == "session_end_project_tag":
-        monkeypatch.setattr("daily_log_append.append_knowledge", boundary)
-        function(vault / "knowledge/daily/2026-07-15.md", secret, "event-1")
-    elif module_name == "session_start_project_state":
-        project = tmp_path / "project"
-        (project / ".git").mkdir(parents=True)
-        template = vault / "knowledge/projects/_template/state.md"
-        template.parent.mkdir(parents=True)
-        template.write_text(
-            "# <Project Name>\n- Project root: `<absolute-path>`\n", encoding="utf-8"
-        )
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
-        monkeypatch.setattr(module, "ProjectStore", lambda *args: object())
-        monkeypatch.setattr(
-            module,
-            "recover_project_handoff",
-            lambda *args, **kwargs: SimpleNamespace(context="", degraded=False, legacy=False),
-        )
-        monkeypatch.setattr(module, "mutate_knowledge", boundary)
-        function()
-    elif module_name == "tool_breadcrumb_append":
-        monkeypatch.setattr("daily_log_append.append_daily", boundary)
-        payload = {
-            "slug": "demo",
-            "sessionId": "s1",
-            "tool": "bash",
-            "target": secret,
-        }
-        function(payload)
-    elif module_name == "user_prompt_capture":
-        monkeypatch.setattr("daily_log_append.append_daily", boundary)
-        function("demo", "s1", secret, "event-1")
-    else:
-        raise AssertionError(entrypoint)
-
-    assert calls, f"{entrypoint} did not delegate to the mutation boundary"
-    if entrypoint in TASK14_READ_TRANSFORM_WRITE_ENTRYPOINTS:
-        assert all(call_kwargs.get("preconditions") for _, call_kwargs in calls), (
-            f"{entrypoint} did not bind its source snapshot"
-        )
-    if module_name not in {
-        "archive_stale",
-        "flush_memory",
-        "migrate_to_okf",
-        "rebuild_memory_index",
-    }:
-        assert secret not in repr(calls), f"{entrypoint} leaked a secret before prepare"
+    _assert_boundary_use(entrypoint, module_name, calls, secret)
 
 
 def test_scanner_keeps_runtime_writes_outside_boundary():
@@ -1056,7 +1158,85 @@ def test_public_mutation_retries_initial_recovery_contention_without_dropping_ev
     assert target.read_bytes() == b"event\n"
 
 
-@pytest.mark.parametrize("entrypoint", ["feedback", "migration", "reflection"])
+def _conflict_feedback(vault, monkeypatch):
+    import feedback_capture as module
+
+    monkeypatch.setattr(module, "ROOT", vault)
+    monkeypatch.setattr(module, "FEEDBACK_DIR", vault / "knowledge/feedback")
+    module.FEEDBACK_DIR.mkdir()
+    source = module.FEEDBACK_DIR / "abcdef123456.json"
+    source.write_text(
+        json.dumps(
+            {
+                "id": "abcdef123456",
+                "type": "correction",
+                "confidence": 0.8,
+                "text": "Use safe storage",
+                "session_id": "s1",
+                "project": "demo",
+                "trigger": "test",
+                "captured_at": "2026-01-01",
+                "status": "candidate",
+            }
+        ),
+        encoding="utf-8",
+    )
+    destination = vault / "knowledge/notes/feedback-abcdef12.md"
+
+    def invoke():
+        return module.promote_candidate("abcdef123456")
+
+    return module, source, destination, invoke
+
+
+def _conflict_migration(vault, monkeypatch):
+    import migrate_to_okf as module
+
+    monkeypatch.setattr(module, "ROOT", vault)
+    source = vault / "knowledge/notes/page.md"
+    source.write_text("# Original\n", encoding="utf-8")
+    monkeypatch.setattr(
+        module, "parse_args", lambda: SimpleNamespace(scope="wiki", apply=True, report=False)
+    )
+    monkeypatch.setattr(module, "collect_files", lambda scope: [source])
+    return module, source, None, module.main
+
+
+def _conflict_reflection(vault, monkeypatch):
+    import reflection as module
+
+    monkeypatch.setattr(module, "ROOT", vault)
+    source = vault / "knowledge/notes/page.md"
+    source.write_text(
+        "---\ntype: concept\n---\n# Original\n\n"
+        "## Update (2026-01-01)\na\n## Update (2026-01-02)\nb\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("llm_client.call_llm", lambda *args, **kwargs: "# Reflected\n\nMerged")
+
+    def invoke():
+        return module.reflect_page(source, apply=True)
+
+    return module, source, None, invoke
+
+
+_CONFLICT_SETUPS = {
+    "feedback": _conflict_feedback,
+    "migration": _conflict_migration,
+    "reflection": _conflict_reflection,
+}
+
+
+def _assert_destination_absent(destination) -> None:
+    if destination is not None:
+        assert not destination.exists()
+
+
+def _refused(result) -> bool:
+    return result == 1 or "error" in str(result).casefold()
+
+
+@pytest.mark.parametrize("entrypoint", sorted(_CONFLICT_SETUPS))
 def test_read_transform_write_conflict_preserves_user_bytes(tmp_path, monkeypatch, entrypoint):
     import markdown_transaction
 
@@ -1065,61 +1245,7 @@ def test_read_transform_write_conflict_preserves_user_bytes(tmp_path, monkeypatc
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
     original_mutate = markdown_transaction.mutate_knowledge
     user_bytes = b"# Concurrent user edit\n"
-
-    if entrypoint == "feedback":
-        import feedback_capture as module
-
-        monkeypatch.setattr(module, "ROOT", vault)
-        monkeypatch.setattr(module, "FEEDBACK_DIR", vault / "knowledge/feedback")
-        module.FEEDBACK_DIR.mkdir()
-        source = module.FEEDBACK_DIR / "abcdef123456.json"
-        source.write_text(
-            json.dumps(
-                {
-                    "id": "abcdef123456",
-                    "type": "correction",
-                    "confidence": 0.8,
-                    "text": "Use safe storage",
-                    "session_id": "s1",
-                    "project": "demo",
-                    "trigger": "test",
-                    "captured_at": "2026-01-01",
-                    "status": "candidate",
-                }
-            ),
-            encoding="utf-8",
-        )
-        destination = vault / "knowledge/notes/feedback-abcdef12.md"
-
-        def invoke():
-            return module.promote_candidate("abcdef123456")
-    elif entrypoint == "migration":
-        import migrate_to_okf as module
-
-        monkeypatch.setattr(module, "ROOT", vault)
-        source = vault / "knowledge/notes/page.md"
-        source.write_text("# Original\n", encoding="utf-8")
-        destination = None
-        monkeypatch.setattr(
-            module, "parse_args", lambda: SimpleNamespace(scope="wiki", apply=True, report=False)
-        )
-        monkeypatch.setattr(module, "collect_files", lambda scope: [source])
-        invoke = module.main
-    else:
-        import reflection as module
-
-        monkeypatch.setattr(module, "ROOT", vault)
-        source = vault / "knowledge/notes/page.md"
-        source.write_text(
-            "---\ntype: concept\n---\n# Original\n\n"
-            "## Update (2026-01-01)\na\n## Update (2026-01-02)\nb\n",
-            encoding="utf-8",
-        )
-        destination = None
-        monkeypatch.setattr("llm_client.call_llm", lambda *args, **kwargs: "# Reflected\n\nMerged")
-
-        def invoke():
-            return module.reflect_page(source, apply=True)
+    module, source, destination, invoke = _CONFLICT_SETUPS[entrypoint](vault, monkeypatch)
 
     def race(operation_id, changes, **kwargs):
         source.write_bytes(user_bytes)
@@ -1131,10 +1257,9 @@ def test_read_transform_write_conflict_preserves_user_bytes(tmp_path, monkeypatc
     except ValueError:
         result = 1
 
-    assert result == 1 or "error" in str(result).casefold()
+    assert _refused(result)
     assert source.read_bytes() == user_bytes
-    if destination is not None:
-        assert not destination.exists()
+    _assert_destination_absent(destination)
 
 
 @pytest.mark.parametrize("race", ["add", "delete", "change"])

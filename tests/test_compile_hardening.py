@@ -266,7 +266,9 @@ def test_snapshot_and_provider_responses_enforce_byte_caps(vault, monkeypatch):
             descriptor, "x" * 33, True, None, "native"
         ),
     )
-    with pytest.raises(RuntimeError, match="validated compile plan"):
+    # The lineage is the whole diagnosis: without it this failure says only that
+    # nothing worked, which cost hours of guessing on a live vault.
+    with pytest.raises(RuntimeError, match=r"validated compile plan: \w+:"):
         compile_memory.resolve_compile_plan(
             inputs,
             CompileCache(state_root),
@@ -500,3 +502,34 @@ def test_legacy_direct_mutation_entry_points_are_removed():
     assert not hasattr(compile_memory, "run_compile")
     assert not hasattr(compile_memory, "_execute_plan")
     assert not hasattr(compile_memory, "_critique_plan")
+
+
+def test_unusable_receipts_are_discarded_only_when_asked(tmp_path, monkeypatch):
+    """A corrupt receipt stays an error; this is the deliberate way out of one.
+
+    Seven receipts written by a defective writer blocked every later compile of
+    this vault. Recompiling silently would paper over a corruption; leaving no
+    remedy would need a person to guess which file to delete.
+    """
+    import compile_memory
+
+    receipts = tmp_path / "knowledge/daily/receipts"
+    receipts.mkdir(parents=True)
+    good = receipts / "v3-good.md"
+    bad = receipts / "v3-bad.md"
+    good.write_text('---\n---\n```json\n{"source": {"logical_path": "d.md", "sha256": "a"}}\n```\n', encoding="utf-8")
+    bad.write_text('---\n---\n```json\n{"source": {"logical_path": "d.md", "sha256": "broken"}}\n```\n', encoding="utf-8")
+    monkeypatch.setattr(compile_memory, "DAILY_DIR", tmp_path / "knowledge/daily")
+
+    def parse(raw, *, logical_path, source_sha256):
+        if source_sha256 == "broken":
+            raise ValueError("compile receipt evidence scope is invalid")
+        return {"ok": True}
+
+    monkeypatch.setattr(compile_memory, "parse_compile_receipt_v3", parse)
+
+    discarded = compile_memory.discard_unusable_receipts()
+
+    assert discarded == ["v3-bad.md"]
+    assert good.exists()
+    assert not bad.exists()

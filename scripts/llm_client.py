@@ -34,6 +34,7 @@ Design:
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import math
@@ -51,6 +52,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
+from typing import NamedTuple
 
 from context_budget import TokenCount, TokenCounter, TokenUsage, count_tokens
 from model_dlp import (
@@ -123,6 +125,63 @@ class BackendResponse:
     usage: TokenUsage = field(default_factory=TokenUsage)
 
 
+def _wants_local_only(provider: str, forced: str) -> bool:
+    if provider != "ollama" or forced != "ollama":
+        return False
+    return os.environ.get("OLLAMA_NO_CLOUD") == "1"
+
+
+def _local_only_capabilities(
+    capabilities: Mapping[str, object], endpoint: str | None
+) -> dict[str, object]:
+    if endpoint is None or not _is_literal_loopback_endpoint(endpoint):
+        raise ValueError("local-only Ollama requires a literal loopback endpoint")
+    updated = dict(capabilities)
+    updated["local_only_enforced"] = True
+    updated["local_only_status"] = "external_runtime_unverified"
+    return updated
+
+
+def _resolved_descriptor(
+    provider: str, index: int, forced: str, max_tokens: int
+) -> ProviderDescriptor:
+    model, capabilities, settings, endpoint = _provider_configuration(
+        provider, max_tokens
+    )
+    if _wants_local_only(provider, forced):
+        capabilities = _local_only_capabilities(capabilities, endpoint)
+    return ProviderDescriptor(
+        provider=provider,
+        model=model,
+        capabilities=MappingProxyType(dict(capabilities)),
+        inference_settings=MappingProxyType(dict(settings)),
+        candidate_index=index,
+        fallback_from=(),
+        _endpoint=endpoint,
+    )
+
+
+def _unresolved_descriptor(provider: str, index: int) -> ProviderDescriptor:
+    return ProviderDescriptor(
+        provider=provider,
+        model=None,
+        capabilities=MappingProxyType({}),
+        inference_settings=MappingProxyType({}),
+        candidate_index=index,
+        fallback_from=(),
+        _resolution_failure="invalid_configuration",
+    )
+
+
+def _candidate_descriptor(
+    provider: str, index: int, forced: str, max_tokens: int
+) -> ProviderDescriptor:
+    try:
+        return _resolved_descriptor(provider, index, forced, max_tokens)
+    except ValueError:
+        return _unresolved_descriptor(provider, index)
+
+
 def provider_candidates(
     forced: str = "",
     *,
@@ -132,50 +191,10 @@ def provider_candidates(
     if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens <= 0:
         raise ValueError("max_tokens must be a positive integer")
     forced = forced.lower().strip()
-    candidates = _candidate_order(forced)
-    descriptors = []
-    for index, provider in enumerate(candidates):
-        try:
-            model, capabilities, settings, endpoint = _provider_configuration(
-                provider, max_tokens
-            )
-            if (
-                provider == "ollama"
-                and forced == "ollama"
-                and os.environ.get("OLLAMA_NO_CLOUD") == "1"
-            ):
-                if endpoint is None or not _is_literal_loopback_endpoint(endpoint):
-                    raise ValueError(
-                        "local-only Ollama requires a literal loopback endpoint"
-                    )
-                capabilities = dict(capabilities)
-                capabilities["local_only_enforced"] = True
-                capabilities["local_only_status"] = "external_runtime_unverified"
-        except ValueError:
-            descriptors.append(
-                ProviderDescriptor(
-                    provider=provider,
-                    model=None,
-                    capabilities=MappingProxyType({}),
-                    inference_settings=MappingProxyType({}),
-                    candidate_index=index,
-                    fallback_from=(),
-                    _resolution_failure="invalid_configuration",
-                )
-            )
-            continue
-        descriptors.append(
-            ProviderDescriptor(
-                provider=provider,
-                model=model,
-                capabilities=MappingProxyType(dict(capabilities)),
-                inference_settings=MappingProxyType(dict(settings)),
-                candidate_index=index,
-                fallback_from=(),
-                _endpoint=endpoint,
-            )
-        )
-    return descriptors
+    return [
+        _candidate_descriptor(provider, index, forced, max_tokens)
+        for index, provider in enumerate(_candidate_order(forced))
+    ]
 
 
 def probe_candidate(descriptor: ProviderDescriptor) -> bool:
@@ -191,6 +210,203 @@ def probe_candidate(descriptor: ProviderDescriptor) -> bool:
         return False
 
 
+def _is_positive_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _require_enforced_tokens(effective: object, max_tokens: int | None) -> None:
+    if not _is_positive_int(effective):
+        raise ValueError("descriptor max_tokens must be a positive integer")
+    if max_tokens is not None and max_tokens != effective:
+        raise ValueError("max_tokens does not match the resolved provider descriptor")
+
+
+def _require_backend_default_tokens(effective: object, max_tokens: int | None) -> None:
+    if effective != "backend_default":
+        raise ValueError("descriptor must record the backend token default")
+    if max_tokens is None:
+        return
+    if not _is_positive_int(max_tokens):
+        raise ValueError("max_tokens request must be a positive integer")
+
+
+def _require_token_contract(
+    descriptor: ProviderDescriptor, max_tokens: int | None
+) -> None:
+    effective = descriptor.inference_settings.get("max_tokens")
+    enforced = descriptor.capabilities.get("max_tokens_enforced")
+    if enforced is True:
+        _require_enforced_tokens(effective, max_tokens)
+        return
+    if enforced is False:
+        _require_backend_default_tokens(effective, max_tokens)
+        return
+    raise ValueError("descriptor must declare whether max_tokens is enforced")
+
+
+def _structured_mode(
+    descriptor: ProviderDescriptor, schema: Mapping[str, object] | None
+) -> str:
+    if schema is None:
+        return "prompt"
+    if descriptor.capabilities.get("structured_output") == "native":
+        return "native"
+    return "prompt"
+
+
+def _prompted_system(
+    system_prompt: str, schema: Mapping[str, object] | None, mode: str
+) -> str:
+    """The schema goes into the system prompt when the backend cannot take it."""
+    if schema is None or mode != "prompt":
+        return system_prompt
+    schema_json = json.dumps(schema, sort_keys=True, separators=(",", ":"))
+    instruction = f"Output only JSON matching this schema: {schema_json}"
+    if system_prompt:
+        return f"{system_prompt}\n\n{instruction}"
+    return instruction
+
+
+def _native_schema_json(schema: Mapping[str, object] | None, mode: str) -> str | None:
+    if schema is None or mode != "native":
+        return None
+    try:
+        return json.dumps(schema, sort_keys=True, separators=(",", ":"))
+    except Exception:  # noqa: BLE001 - counting must not replace provider validation
+        return None
+
+
+class _Transport(NamedTuple):
+    """Call inputs after the DLP boundary has seen them."""
+
+    system_prompt: str
+    prompt: str
+    schema: object
+    policy: object
+
+
+def _protected_transport(
+    system_prompt: str, prompt: str, schema: Mapping[str, object] | None
+) -> _Transport | str:
+    """Redacted inputs, or the failure class that blocks transport."""
+    try:
+        policy = load_policy()
+        return _Transport(
+            redact_for_transport(system_prompt, policy),
+            redact_for_transport(prompt, policy),
+            redact_transport_value(schema, policy),
+            policy,
+        )
+    except DLPPolicyError:
+        return "dlp_policy_error"
+    except Exception:  # noqa: BLE001 - scanner failure must block transport
+        return "dlp_scan_error"
+
+
+def _counted_tokens(
+    descriptor: ProviderDescriptor,
+    transport: _Transport,
+    native_schema_json: str | None,
+    schema: Mapping[str, object] | None,
+    mode: str,
+    token_adapters: Mapping[str, TokenCounter] | None,
+) -> TokenCount:
+    """What we will send, counted — unless the native schema could not be shown."""
+    if _schema_unshown(schema, mode, native_schema_json):
+        return TokenCount()
+    parts = [
+        part
+        for part in (transport.system_prompt, native_schema_json, transport.prompt)
+        if part
+    ]
+    return count_tokens(
+        "\n\n".join(parts), model=descriptor.model, adapters=token_adapters
+    )
+
+
+def _schema_unshown(
+    schema: Mapping[str, object] | None, mode: str, native_schema_json: str | None
+) -> bool:
+    return schema is not None and mode == "native" and native_schema_json is None
+
+
+def _invoked_backend(
+    caller, descriptor: ProviderDescriptor, transport: _Transport, mode: str
+):
+    if mode == "native":
+        return caller(
+            descriptor, transport.prompt, transport.system_prompt, transport.schema
+        )
+    return caller(descriptor, transport.prompt, transport.system_prompt, None)
+
+
+def _response_text_and_usage(response: object) -> tuple[object, TokenUsage]:
+    if isinstance(response, BackendResponse):
+        return response.text, response.usage
+    return response, TokenUsage()
+
+
+def _input_count(usage: TokenUsage, pre_call_count: TokenCount) -> TokenCount:
+    if usage.input_tokens is not None:
+        return TokenCount(usage.input_tokens, "reported")
+    return pre_call_count
+
+
+def _unsafe_output_failure(text: str, policy: object) -> str | None:
+    try:
+        require_safe_model_output(text, policy)
+    except DLPContentBlocked:
+        return "dlp_output_blocked"
+    except Exception:  # noqa: BLE001 - scanner failure must block publication
+        return "dlp_scan_error"
+    return None
+
+
+def _completed_call(
+    descriptor: ProviderDescriptor,
+    caller,
+    transport: _Transport,
+    mode: str,
+    pre_call_count: TokenCount,
+) -> LLMResult:
+    try:
+        response = _invoked_backend(caller, descriptor, transport, mode)
+    except Exception as exc:  # noqa: BLE001 - providers must not crash callers
+        print(
+            f"llm_client: {descriptor.provider} backend failed: {type(exc).__name__}",
+            file=sys.stderr,
+        )
+        return LLMResult(
+            descriptor, None, True, "provider_error", mode, TokenUsage(), pre_call_count
+        )
+    return _outcome_of(descriptor, transport, mode, pre_call_count, response)
+
+
+def _outcome_of(
+    descriptor: ProviderDescriptor,
+    transport: _Transport,
+    mode: str,
+    pre_call_count: TokenCount,
+    response: object,
+) -> LLMResult:
+    text, usage = _response_text_and_usage(response)
+    count = _input_count(usage, pre_call_count)
+    if not isinstance(text, str) or not text.strip():
+        return LLMResult(descriptor, None, True, "empty_response", mode, usage, count)
+    failure = _unsafe_output_failure(text, transport.policy)
+    if failure is not None:
+        return LLMResult(descriptor, None, True, failure, mode, usage, count)
+    return LLMResult(descriptor, text.strip(), True, None, mode, usage, count)
+
+
+def _candidate_available(
+    descriptor: ProviderDescriptor, available: bool | None
+) -> bool:
+    if available is None or descriptor.capabilities.get("local_only_enforced") is True:
+        return probe_candidate(descriptor)
+    return available
+
+
 def call_candidate(
     descriptor: ProviderDescriptor,
     prompt: str,
@@ -204,166 +420,31 @@ def call_candidate(
     """Probe and call one resolved candidate, returning a stable outcome."""
     if descriptor.resolution_failure is not None:
         return LLMResult(
-            descriptor,
-            None,
-            False,
-            descriptor.resolution_failure,
-            "prompt",
+            descriptor, None, False, descriptor.resolution_failure, "prompt"
         )
-    effective_max_tokens = descriptor.inference_settings.get("max_tokens")
-    max_tokens_enforced = descriptor.capabilities.get("max_tokens_enforced")
-    if max_tokens_enforced is True:
-        if (
-            not isinstance(effective_max_tokens, int)
-            or isinstance(effective_max_tokens, bool)
-            or effective_max_tokens <= 0
-        ):
-            raise ValueError("descriptor max_tokens must be a positive integer")
-        if max_tokens is not None and max_tokens != effective_max_tokens:
-            raise ValueError("max_tokens does not match the resolved provider descriptor")
-    elif max_tokens_enforced is False:
-        if effective_max_tokens != "backend_default":
-            raise ValueError("descriptor must record the backend token default")
-        if max_tokens is not None and (
-            not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens <= 0
-        ):
-            raise ValueError("max_tokens request must be a positive integer")
-    else:
-        raise ValueError("descriptor must declare whether max_tokens is enforced")
-    structured_output = (
-        "native"
-        if schema is not None
-        and descriptor.capabilities.get("structured_output") == "native"
-        else "prompt"
-    )
+    _require_token_contract(descriptor, max_tokens)
+    mode = _structured_mode(descriptor, schema)
     caller = _BACKENDS.get(descriptor.provider)
     if caller is None:
-        return LLMResult(descriptor, None, False, "unsupported", structured_output)
-    if (
-        available is None
-        or descriptor.capabilities.get("local_only_enforced") is True
-    ):
-        available = probe_candidate(descriptor)
-    if not available:
-        return LLMResult(descriptor, None, False, "unavailable", structured_output)
-
-    call_system_prompt = system_prompt
-    if schema is not None and structured_output == "prompt":
-        schema_json = json.dumps(schema, sort_keys=True, separators=(",", ":"))
-        instruction = f"Output only JSON matching this schema: {schema_json}"
-        call_system_prompt = (
-            f"{system_prompt}\n\n{instruction}" if system_prompt else instruction
-        )
-    native_schema_json = None
-    if schema is not None and structured_output == "native":
-        try:
-            native_schema_json = json.dumps(
-                schema, sort_keys=True, separators=(",", ":")
-            )
-        except Exception:  # noqa: BLE001 - counting must not replace provider validation
-            pass
-    try:
-        dlp_policy = load_policy()
-        call_system_prompt = redact_for_transport(call_system_prompt, dlp_policy)
-        prompt = redact_for_transport(prompt, dlp_policy)
-        protected_schema = redact_transport_value(schema, dlp_policy)
-    except DLPPolicyError:
-        return LLMResult(
-            descriptor,
-            None,
-            False,
-            "dlp_policy_error",
-            structured_output,
-        )
-    except Exception:  # noqa: BLE001 - scanner failure must block transport
-        return LLMResult(
-            descriptor,
-            None,
-            False,
-            "dlp_scan_error",
-            structured_output,
-        )
-    counted_parts = [part for part in (call_system_prompt, native_schema_json, prompt) if part]
-    pre_call_count = (
-        count_tokens(
-            "\n\n".join(counted_parts),
-            model=descriptor.model,
-            adapters=token_adapters,
-        )
-        if schema is None or structured_output != "native" or native_schema_json is not None
-        else TokenCount()
+        return LLMResult(descriptor, None, False, "unsupported", mode)
+    if not _candidate_available(descriptor, available):
+        return LLMResult(descriptor, None, False, "unavailable", mode)
+    transport = _protected_transport(
+        _prompted_system(system_prompt, schema, mode), prompt, schema
     )
-    try:
-        if structured_output == "native":
-            response = caller(descriptor, prompt, call_system_prompt, protected_schema)
-        else:
-            response = caller(descriptor, prompt, call_system_prompt, None)
-    except Exception as exc:  # noqa: BLE001 - providers must not crash callers
-        print(
-            f"llm_client: {descriptor.provider} backend failed: {type(exc).__name__}",
-            file=sys.stderr,
-        )
-        return LLMResult(
-            descriptor,
-            None,
-            True,
-            "provider_error",
-            structured_output,
-            TokenUsage(),
-            pre_call_count,
-        )
-    if isinstance(response, BackendResponse):
-        text = response.text
-        usage = response.usage
-    else:
-        text = response
-        usage = TokenUsage()
-    input_token_count = (
-        TokenCount(usage.input_tokens, "reported")
-        if usage.input_tokens is not None
-        else pre_call_count
-    )
-    if not isinstance(text, str) or not text.strip():
-        return LLMResult(
-            descriptor,
-            None,
-            True,
-            "empty_response",
-            structured_output,
-            usage,
-            input_token_count,
-        )
-    try:
-        require_safe_model_output(text, dlp_policy)
-    except DLPContentBlocked:
-        return LLMResult(
-            descriptor,
-            None,
-            True,
-            "dlp_output_blocked",
-            structured_output,
-            usage,
-            input_token_count,
-        )
-    except Exception:  # noqa: BLE001 - scanner failure must block publication
-        return LLMResult(
-            descriptor,
-            None,
-            True,
-            "dlp_scan_error",
-            structured_output,
-            usage,
-            input_token_count,
-        )
-    return LLMResult(
+    if isinstance(transport, str):
+        return LLMResult(descriptor, None, False, transport, mode)
+    native_schema_json = _native_schema_json(schema, mode)
+    return _completed_call(
         descriptor,
-        text.strip(),
-        True,
-        None,
-        structured_output,
-        usage,
-        input_token_count,
+        caller,
+        transport,
+        mode,
+        _counted_tokens(
+            descriptor, transport, native_schema_json, schema, mode, token_adapters
+        ),
     )
+
 
 def _llm_prompt_is_empty(prompt: str) -> bool:
     if not prompt:
@@ -457,96 +538,128 @@ def _candidate_order(forced: str) -> list[str]:
     return defaults
 
 
-def _provider_configuration(
-    provider: str,
-    max_tokens: int,
-) -> tuple[str | None, Mapping[str, object], Mapping[str, object], str | None]:
+ProviderConfiguration = tuple[
+    "str | None", Mapping[str, object], Mapping[str, object], "str | None"
+]
+
+
+def _base_capabilities(provider: str) -> dict[str, object]:
     native = provider in {"openai", "ollama"}
-    capabilities: Mapping[str, object] = {
-        "structured_output": "native" if native else "prompt",
-    }
-    if provider == "fake":
-        capabilities = dict(capabilities)
-        capabilities["max_tokens_enforced"] = True
-        return "fake-v1", capabilities, {"max_tokens": max_tokens}, None
-    if provider == "opencode":
-        capabilities = dict(capabilities)
-        capabilities["max_tokens_enforced"] = False
-        return None, capabilities, {"max_tokens": "backend_default"}, None
-    if provider == "codex":
-        capabilities = dict(capabilities)
-        capabilities["max_tokens_enforced"] = False
-        return (
-            os.environ.get("MEMORY_CODEX_MODEL") or None,
-            capabilities,
-            {
-                "max_tokens": "backend_default",
-                "reasoning": os.environ.get("MEMORY_CODEX_REASONING", "low"),
-            },
-            None,
+    return {"structured_output": "native" if native else "prompt"}
+
+
+def _cli_configuration(
+    provider: str, model_variable: str, extra: Mapping[str, object] | None = None
+) -> ProviderConfiguration:
+    """A subscription CLI: the backend decides the token ceiling, not us."""
+    capabilities = _base_capabilities(provider)
+    capabilities["max_tokens_enforced"] = False
+    settings: dict[str, object] = {"max_tokens": "backend_default"}
+    settings.update(extra or {})
+    return os.environ.get(model_variable) or None, capabilities, settings, None
+
+
+def _http_configuration(
+    provider: str, default_endpoint: str, default_model: str, max_tokens: int
+) -> ProviderConfiguration:
+    endpoint, endpoint_identity = _resolve_endpoint(
+        os.environ.get("MEMORY_LLM_BASE_URL", default_endpoint)
+    )
+    capabilities = _base_capabilities(provider)
+    capabilities["endpoint_sha256"] = endpoint_identity
+    capabilities["max_tokens_enforced"] = True
+    return (
+        os.environ.get("MEMORY_LLM_MODEL", default_model),
+        capabilities,
+        {"max_tokens": max_tokens, "temperature_milli": 200},
+        endpoint,
+    )
+
+
+def _fake_configuration(max_tokens: int) -> ProviderConfiguration:
+    capabilities = _base_capabilities("fake")
+    capabilities["max_tokens_enforced"] = True
+    return "fake-v1", capabilities, {"max_tokens": max_tokens}, None
+
+
+def _opencode_configuration() -> ProviderConfiguration:
+    capabilities = _base_capabilities("opencode")
+    capabilities["max_tokens_enforced"] = False
+    return None, capabilities, {"max_tokens": "backend_default"}, None
+
+
+_PROVIDER_CONFIGURATIONS = {
+    "fake": lambda max_tokens: _fake_configuration(max_tokens),
+    "opencode": lambda max_tokens: _opencode_configuration(),
+    "codex": lambda max_tokens: _cli_configuration(
+        "codex",
+        "MEMORY_CODEX_MODEL",
+        {"reasoning": os.environ.get("MEMORY_CODEX_REASONING", "low")},
+    ),
+    "claude": lambda max_tokens: _cli_configuration("claude", "MEMORY_CLAUDE_MODEL"),
+    "openai": lambda max_tokens: _http_configuration(
+        "openai", "https://api.openai.com/v1", "gpt-4o-mini", max_tokens
+    ),
+    "ollama": lambda max_tokens: _http_configuration(
+        "ollama", "http://localhost:11434/v1", "qwen3:0.6b", max_tokens
+    ),
+}
+
+
+def _provider_configuration(provider: str, max_tokens: int) -> ProviderConfiguration:
+    build = _PROVIDER_CONFIGURATIONS.get(provider)
+    if build is None:
+        return None, _base_capabilities(provider), {"max_tokens": max_tokens}, None
+    return build(max_tokens)
+
+
+def _split_endpoint(endpoint: str):
+    try:
+        return urllib.parse.urlsplit(endpoint)
+    except ValueError as exc:
+        raise ValueError("MEMORY_LLM_BASE_URL is not a valid HTTP endpoint") from exc
+
+
+def _require_plain_endpoint(parsed, endpoint: str) -> None:
+    """No credentials, no query, no fragment: an endpoint, not a request."""
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError(
+            "MEMORY_LLM_BASE_URL must not contain userinfo, query, or fragment"
         )
-    if provider == "claude":
-        capabilities = dict(capabilities)
-        capabilities["max_tokens_enforced"] = False
-        return (
-            os.environ.get("MEMORY_CLAUDE_MODEL") or None,
-            capabilities,
-            {"max_tokens": "backend_default"},
-            None,
+    if "?" in endpoint or "#" in endpoint:
+        raise ValueError(
+            "MEMORY_LLM_BASE_URL must not contain userinfo, query, or fragment"
         )
-    if provider == "openai":
-        endpoint, endpoint_identity = _resolve_endpoint(
-            os.environ.get("MEMORY_LLM_BASE_URL", "https://api.openai.com/v1")
-        )
-        capabilities = dict(capabilities)
-        capabilities["endpoint_sha256"] = endpoint_identity
-        capabilities["max_tokens_enforced"] = True
-        return (
-            os.environ.get("MEMORY_LLM_MODEL", "gpt-4o-mini"),
-            capabilities,
-            {"max_tokens": max_tokens, "temperature_milli": 200},
-            endpoint,
-        )
-    if provider == "ollama":
-        endpoint, endpoint_identity = _resolve_endpoint(
-            os.environ.get("MEMORY_LLM_BASE_URL", "http://localhost:11434/v1")
-        )
-        capabilities = dict(capabilities)
-        capabilities["endpoint_sha256"] = endpoint_identity
-        capabilities["max_tokens_enforced"] = True
-        return (
-            os.environ.get("MEMORY_LLM_MODEL", "qwen3:0.6b"),
-            capabilities,
-            {"max_tokens": max_tokens, "temperature_milli": 200},
-            endpoint,
-        )
-    return None, capabilities, {"max_tokens": max_tokens}, None
+
+
+def _bracketed_host(hostname: str) -> str:
+    lowered = hostname.casefold()
+    if ":" in lowered:
+        return f"[{lowered}]"
+    return lowered
 
 
 def _resolve_endpoint(endpoint: str) -> tuple[str, str]:
-    try:
-        parsed = urllib.parse.urlsplit(endpoint)
-        scheme = parsed.scheme.casefold()
-        hostname = parsed.hostname
-        port = parsed.port
-    except ValueError as exc:
-        raise ValueError("MEMORY_LLM_BASE_URL is not a valid HTTP endpoint") from exc
+    parsed = _split_endpoint(endpoint)
+    scheme = parsed.scheme.casefold()
+    hostname = parsed.hostname
     if scheme not in {"http", "https"} or not hostname:
         raise ValueError("MEMORY_LLM_BASE_URL must use HTTP(S) with a hostname")
-    if (
-        parsed.username is not None
-        or parsed.password is not None
-        or "?" in endpoint
-        or "#" in endpoint
-    ):
-        raise ValueError("MEMORY_LLM_BASE_URL must not contain userinfo, query, or fragment")
-    hostname = hostname.casefold()
-    if ":" in hostname:
-        hostname = f"[{hostname}]"
-    effective_port = port or (443 if scheme == "https" else 80)
-    path = parsed.path.rstrip("/")
-    normalized = f"{scheme}://{hostname}:{effective_port}{path}"
+    _require_plain_endpoint(parsed, endpoint)
+    effective_port = _endpoint_port(parsed, scheme)
+    normalized = (
+        f"{scheme}://{_bracketed_host(hostname)}:{effective_port}"
+        f"{parsed.path.rstrip('/')}"
+    )
     return normalized, hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _endpoint_port(parsed, scheme: str) -> int:
+    if parsed.port:
+        return parsed.port
+    if scheme == "https":
+        return 443
+    return 80
 
 
 def _is_literal_loopback_endpoint(endpoint: str) -> bool:
@@ -589,28 +702,33 @@ def _probe_openai(descriptor: ProviderDescriptor) -> bool:
     )
 
 
+def _ollama_tags_url(endpoint: str) -> str:
+    parsed = urllib.parse.urlsplit(endpoint)
+    path = parsed.path.rstrip("/")
+    if path.endswith("/v1"):
+        path = path[:-3]
+    tags_path = f"{path}/api/tags" if path else "/api/tags"
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, tags_path, "", ""))
+
+
+def _ollama_tags_answer(descriptor: ProviderDescriptor, response) -> bool:
+    if response.status != 200:
+        return False
+    if descriptor.capabilities.get("local_only_enforced") is not True:
+        return True
+    raw = response.read(1024 * 1024 + 1)
+    if len(raw) > 1024 * 1024:
+        return False
+    return _ollama_has_local_model(json.loads(raw.decode("utf-8")), descriptor.model)
+
+
 def _probe_ollama(descriptor: ProviderDescriptor) -> bool:
     if descriptor._endpoint is None:
         return False
     try:
-        parsed = urllib.parse.urlsplit(descriptor._endpoint)
-        path = parsed.path.rstrip("/")
-        if path.endswith("/v1"):
-            path = path[:-3]
-        tags_path = f"{path}/api/tags" if path else "/api/tags"
-        tags_url = urllib.parse.urlunsplit(
-            (parsed.scheme, parsed.netloc, tags_path, "", "")
-        )
-        request = urllib.request.Request(tags_url)
+        request = urllib.request.Request(_ollama_tags_url(descriptor._endpoint))
         with urllib.request.urlopen(request, timeout=1.0) as response:
-            if response.status != 200:
-                return False
-            if descriptor.capabilities.get("local_only_enforced") is not True:
-                return True
-            raw = response.read(1024 * 1024 + 1)
-            if len(raw) > 1024 * 1024:
-                return False
-            return _ollama_has_local_model(json.loads(raw.decode("utf-8")), descriptor.model)
+            return _ollama_tags_answer(descriptor, response)
     except (
         json.JSONDecodeError,
         OSError,
@@ -621,27 +739,35 @@ def _probe_ollama(descriptor: ProviderDescriptor) -> bool:
         return False
 
 
+def _is_local_ollama_entry(item: Mapping) -> bool:
+    """A model that lives on this machine: real bytes, a real digest, no remote."""
+    if item.get("remote_model") or item.get("remote_host"):
+        return False
+    return _has_local_size(item.get("size")) and _has_digest(item.get("digest"))
+
+
+def _has_local_size(size: object) -> bool:
+    return isinstance(size, int) and not isinstance(size, bool) and size > 0
+
+
+def _has_digest(digest: object) -> bool:
+    return isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
+
+
+def _named_ollama_entry(models: object, model: str) -> Mapping | None:
+    for item in models if isinstance(models, list) else []:
+        if isinstance(item, Mapping) and model in {item.get("name"), item.get("model")}:
+            return item
+    return None
+
+
 def _ollama_has_local_model(payload: object, model: str | None) -> bool:
     if not isinstance(payload, Mapping) or not isinstance(model, str) or not model:
         return False
-    models = payload.get("models")
-    if not isinstance(models, list):
+    item = _named_ollama_entry(payload.get("models"), model)
+    if item is None:
         return False
-    for item in models:
-        if not isinstance(item, Mapping) or model not in {item.get("name"), item.get("model")}:
-            continue
-        digest = item.get("digest")
-        size = item.get("size")
-        return bool(
-            not item.get("remote_model")
-            and not item.get("remote_host")
-            and isinstance(size, int)
-            and not isinstance(size, bool)
-            and size > 0
-            and isinstance(digest, str)
-            and re.fullmatch(r"[0-9a-f]{64}", digest)
-        )
-    return False
+    return _is_local_ollama_entry(item)
 
 
 def _probe_fake(descriptor: ProviderDescriptor) -> bool:
@@ -722,58 +848,91 @@ def _usage_from_opencode_tokens(tokens: object) -> TokenUsage:
     )
 
 
+def _mapping_or_empty(value: object) -> Mapping:
+    if isinstance(value, Mapping):
+        return value
+    return {}
+
+
+def _step_finish_tokens(part: object) -> Mapping | None:
+    if not isinstance(part, Mapping) or part.get("type") != "step-finish":
+        return None
+    tokens = part.get("tokens")
+    if not isinstance(tokens, Mapping):
+        return None
+    return tokens
+
+
+def _summed_part_usage(parts: object) -> TokenUsage:
+    """Usage added up over the finished steps, when no total is reported."""
+    totals: dict[str, int | None] = {
+        "input_tokens": None,
+        "output_tokens": None,
+        "cache_read_tokens": None,
+        "cache_write_tokens": None,
+    }
+    for part in parts if isinstance(parts, list) else []:
+        tokens = _step_finish_tokens(part)
+        if tokens is None:
+            continue
+        _add_usage(totals, _usage_from_opencode_tokens(tokens))
+    return TokenUsage(**totals)
+
+
+def _add_usage(totals: dict[str, int | None], usage: TokenUsage) -> None:
+    for name in totals:
+        value = getattr(usage, name)
+        if value is None:
+            continue
+        totals[name] = (totals[name] or 0) + value
+
+
+def _reported_usage(info: Mapping, root: Mapping) -> TokenUsage:
+    if isinstance(info.get("tokens"), Mapping):
+        return _usage_from_opencode_tokens(info["tokens"])
+    return _summed_part_usage(root.get("parts"))
+
+
+def _reported_cost(info: Mapping) -> float | None:
+    cost = _finite_number(info.get("cost"))
+    if cost is None or cost < 0:
+        return None
+    return cost
+
+
+def _ordered_instants(info: Mapping) -> tuple[float, float] | None:
+    time = _mapping_or_empty(info.get("time"))
+    created = _finite_number(time.get("created"))
+    completed = _finite_number(time.get("completed"))
+    if created is None or completed is None or created < 0 or completed < created:
+        return None
+    return created, completed
+
+
+def _elapsed_ms(info: Mapping) -> int | None:
+    """Milliseconds between the reported creation and completion instants."""
+    instants = _ordered_instants(info)
+    if instants is None:
+        return None
+    delta = _finite_number(instants[1] - instants[0])
+    if delta is None or delta < 0:
+        return None
+    return math.floor(delta)
+
+
 def _parse_opencode_usage(data: object) -> TokenUsage:
     if not isinstance(data, Mapping):
         return TokenUsage()
     root = data.get("data") if isinstance(data.get("data"), Mapping) else data
-    info = root.get("info") if isinstance(root.get("info"), Mapping) else {}
-    if isinstance(info.get("tokens"), Mapping):
-        token_usage = _usage_from_opencode_tokens(info["tokens"])
-    else:
-        totals: dict[str, int | None] = {
-            "input_tokens": None,
-            "output_tokens": None,
-            "cache_read_tokens": None,
-            "cache_write_tokens": None,
-        }
-        parts = root.get("parts")
-        if isinstance(parts, list):
-            for part in parts:
-                if (
-                    not isinstance(part, Mapping)
-                    or part.get("type") != "step-finish"
-                    or not isinstance(part.get("tokens"), Mapping)
-                ):
-                    continue
-                part_usage = _usage_from_opencode_tokens(part["tokens"])
-                for name in totals:
-                    value = getattr(part_usage, name)
-                    if value is not None:
-                        totals[name] = (totals[name] or 0) + value
-        token_usage = TokenUsage(**totals)
-
-    cost = _finite_number(info.get("cost"))
-    if cost is not None and cost < 0:
-        cost = None
-    time = info.get("time") if isinstance(info.get("time"), Mapping) else {}
-    created = _finite_number(time.get("created"))
-    completed = _finite_number(time.get("completed"))
-    delta = (
-        _finite_number(completed - created)
-        if created is not None
-        and completed is not None
-        and created >= 0
-        and completed >= 0
-        and completed >= created
-        else None
-    )
-    duration_ms = math.floor(delta) if delta is not None and delta >= 0 else None
+    info = _mapping_or_empty(root.get("info"))
+    token_usage = _reported_usage(info, root)
+    cost = _reported_cost(info)
     return TokenUsage(
         input_tokens=token_usage.input_tokens,
         output_tokens=token_usage.output_tokens,
         cache_read_tokens=token_usage.cache_read_tokens,
         cache_write_tokens=token_usage.cache_write_tokens,
-        duration_ms=duration_ms,
+        duration_ms=_elapsed_ms(info),
         estimated_cost=cost,
         cost_kind="reported" if cost is not None else "unknown",
     )
@@ -782,6 +941,78 @@ def _parse_opencode_usage(data: object) -> TokenUsage:
 # ---------------------------------------------------------------------------
 # Backend 1: OpenCode server (HTTP API) — uses your OpenCode subscription
 # ---------------------------------------------------------------------------
+
+
+def _opencode_post(url: str, payload: Mapping[str, object]) -> object:
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url, data=body, headers={"Content-Type": "application/json"}, method="POST"
+    )
+    with urllib.request.urlopen(request, timeout=_timeout_s()) as response:
+        raw = response.read().decode("utf-8")
+    if not raw:
+        return None
+    return json.loads(raw)
+
+
+def _opencode_session_id(data: object) -> str:
+    """Servers answer either {id} or {data: {id}}."""
+    if not isinstance(data, dict):
+        return ""
+    direct = data.get("id")
+    if direct:
+        return str(direct)
+    nested = data.get("data")
+    if isinstance(nested, Mapping) and nested.get("id"):
+        return str(nested["id"])
+    return ""
+
+
+def _opencode_parts(data: object) -> list:
+    root = data
+    if isinstance(data, dict) and isinstance(data.get("data"), dict):
+        root = data["data"]
+    if not isinstance(root, Mapping):
+        return []
+    parts = root.get("parts", [])
+    if not isinstance(parts, list):
+        return []
+    return parts
+
+
+def _opencode_text(data: object) -> str:
+    return "\n".join(
+        str(part["text"]) for part in _opencode_parts(data) if _is_text_part(part)
+    )
+
+
+def _is_text_part(part: object) -> bool:
+    if not isinstance(part, Mapping) or part.get("type") != "text":
+        return False
+    return isinstance(part.get("text"), str)
+
+
+def _opencode_delete(base: str, session_id: str) -> None:
+    try:
+        request = urllib.request.Request(
+            f"{base}/session/{session_id}", method="DELETE"
+        )
+        urllib.request.urlopen(request, timeout=5.0)
+    except (urllib.error.URLError, OSError):
+        pass
+
+
+def _opencode_answer(base: str, session_id: str, prompt: str, system_prompt: str):
+    if system_prompt:
+        _opencode_post(
+            f"{base}/session/{session_id}/prompt",
+            {"noReply": True, "parts": [{"type": "text", "text": system_prompt}]},
+        )
+    data = _opencode_post(
+        f"{base}/session/{session_id}/prompt",
+        {"parts": [{"type": "text", "text": prompt}]},
+    )
+    return BackendResponse(_opencode_text(data), _parse_opencode_usage(data))
 
 
 def _call_opencode(
@@ -793,74 +1024,15 @@ def _call_opencode(
     """Call OpenCode's HTTP API: create session → prompt → read → delete."""
     port = int(os.environ.get("OPENCODE_PORT", "4096"))
     base = f"http://127.0.0.1:{port}"
-
-    # 1. Create an ephemeral session.
-    body = json.dumps({"title": "memory-pipeline-ephemeral"}).encode("utf-8")
-    req = urllib.request.Request(
-        f"{base}/session",
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    session_id = _opencode_session_id(
+        _opencode_post(f"{base}/session", {"title": "memory-pipeline-ephemeral"})
     )
-    with urllib.request.urlopen(req, timeout=_timeout_s()) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    session_id = data.get("id") if isinstance(data, dict) else None
-    if not session_id:
-        # Some servers return {data: {id: ...}}.
-        session_id = (data.get("data") or {}).get("id")
     if not session_id:
         return ""
-
     try:
-        # 2. Inject system prompt as no-reply context.
-        if system_prompt:
-            body = json.dumps(
-                {"noReply": True, "parts": [{"type": "text", "text": system_prompt}]}
-            ).encode("utf-8")
-            req = urllib.request.Request(
-                f"{base}/session/{session_id}/prompt",
-                data=body,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=_timeout_s()):
-                pass
-
-        # 3. Real prompt.
-        body = json.dumps(
-            {"parts": [{"type": "text", "text": prompt}]}
-        ).encode("utf-8")
-        req = urllib.request.Request(
-            f"{base}/session/{session_id}/prompt",
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=_timeout_s()) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        # Extract text from response. Shape varies: {data: {parts: [...]}}
-        # or {parts: [...]} or {data: {info: ..., parts: [...]}}.
-        parts_root = data
-        if isinstance(data, dict) and isinstance(data.get("data"), dict):
-            parts_root = data["data"]
-        parts = parts_root.get("parts", []) if isinstance(parts_root, Mapping) else []
-        text = "\n".join(
-            part["text"]
-            for part in parts
-            if isinstance(part, Mapping)
-            and part.get("type") == "text"
-            and isinstance(part.get("text"), str)
-        )
-        return BackendResponse(text, _parse_opencode_usage(data))
+        return _opencode_answer(base, session_id, prompt, system_prompt)
     finally:
-        # 4. Delete session — best-effort cleanup.
-        try:
-            req = urllib.request.Request(
-                f"{base}/session/{session_id}", method="DELETE"
-            )
-            urllib.request.urlopen(req, timeout=5.0)
-        except (urllib.error.URLError, OSError):
-            pass
+        _opencode_delete(base, session_id)
 
 
 # ---------------------------------------------------------------------------
@@ -868,19 +1040,73 @@ def _call_opencode(
 # ---------------------------------------------------------------------------
 
 
+def _windows_codex_candidate() -> str | None:
+    appdata = os.environ.get("APPDATA", "")
+    if not appdata:
+        return None
+    for ext in (".cmd", ".ps1", ".exe"):
+        candidate = Path(appdata) / "npm" / f"codex{ext}"
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
 def _find_codex_binary() -> str | None:
     """Locate the codex executable. Returns path or None."""
     found = shutil.which("codex")
     if found:
         return found
-    if sys.platform == "win32":
-        appdata = os.environ.get("APPDATA", "")
-        if appdata:
-            for ext in (".cmd", ".ps1", ".exe"):
-                candidate = Path(appdata) / "npm" / f"codex{ext}"
-                if candidate.exists():
-                    return str(candidate)
-    return None
+    if sys.platform != "win32":
+        return None
+    return _windows_codex_candidate()
+
+
+def _codex_command(codex_bin: str, model: str | None, reasoning: str, out_path: str) -> list[str]:
+    command = [
+        codex_bin,
+        "exec",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "read-only",
+        "-c",
+        f"model_reasoning_effort={reasoning}",
+        "--output-last-message",
+        out_path,
+    ]
+    if model:
+        command.extend(["-m", model])
+    return command
+
+
+def _temp_text_file(content: str = "") -> str:
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", delete=False, encoding="utf-8"
+    ) as handle:
+        handle.write(content)
+        return handle.name
+
+
+def _remove_quietly(paths: tuple[str, ...]) -> None:
+    for path in paths:
+        try:
+            Path(path).unlink()
+        except OSError:
+            pass
+
+
+def _codex_last_message(command: list[str], prompt_path: str, out_path: str) -> str:
+    with open(prompt_path, "rb") as stdin_handle:
+        subprocess.run(
+            command,
+            stdin=stdin_handle,
+            capture_output=True,
+            timeout=_timeout_s(),
+            check=False,
+        )
+    try:
+        return Path(out_path).read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return ""
 
 
 def _call_codex(
@@ -890,65 +1116,79 @@ def _call_codex(
     schema: Mapping[str, object] | None = None,
 ) -> str:
     """Call `codex exec` and return the model's final message."""
-    reasoning = str(descriptor.inference_settings.get("reasoning", "low"))
-    model = descriptor.model
     codex_bin = _find_codex_binary()
     if not codex_bin:
         return ""
-
     combined = prompt
     if system_prompt:
         combined = f"SYSTEM: {system_prompt}\n\n---\n\nUSER: {prompt}"
-
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".txt", delete=False, encoding="utf-8"
-    ) as prompt_file:
-        prompt_file.write(combined)
-        prompt_path = prompt_file.name
-
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".txt", delete=False, encoding="utf-8"
-    ) as out_file:
-        out_path = out_file.name
-
+    prompt_path = _temp_text_file(combined)
+    out_path = _temp_text_file()
+    command = _codex_command(
+        codex_bin,
+        descriptor.model,
+        str(descriptor.inference_settings.get("reasoning", "low")),
+        out_path,
+    )
     try:
-        cmd = [
-            codex_bin,
-            "exec",
-            "--skip-git-repo-check",
-            "--sandbox",
-            "read-only",
-            "-c",
-            f"model_reasoning_effort={reasoning}",
-            "--output-last-message",
-            out_path,
-        ]
-        if model:
-            cmd.extend(["-m", model])
-
-        with open(prompt_path, "rb") as stdin_handle:
-            subprocess.run(
-                cmd,
-                stdin=stdin_handle,
-                capture_output=True,
-                timeout=_timeout_s(),
-                check=False,
-            )
-        try:
-            return Path(out_path).read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            return ""
+        return _codex_last_message(command, prompt_path, out_path)
     finally:
-        for p in (prompt_path, out_path):
-            try:
-                Path(p).unlink()
-            except OSError:
-                pass
+        _remove_quietly((prompt_path, out_path))
 
 
 # ---------------------------------------------------------------------------
 # Backend 3: Claude CLI — uses your Claude subscription
 # ---------------------------------------------------------------------------
+
+
+@functools.lru_cache(maxsize=1)
+def _claude_cli_flags() -> frozenset[str]:
+    """Which flags this Claude CLI understands, asked once per process."""
+    claude_bin = shutil.which("claude")
+    if not claude_bin:
+        return frozenset()
+    try:
+        result = subprocess.run(
+            [claude_bin, "--help"],
+            capture_output=True,
+            timeout=30,
+            check=False,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return frozenset()
+    return frozenset(re.findall(r"--[a-z][a-z-]+", result.stdout or ""))
+
+
+def _claude_command(claude_bin: str, model: str | None, system_prompt: str) -> list[str]:
+    """The call, isolated from the operator's interactive persona.
+
+    `claude -p` loads the user's settings, including the output style, and
+    treats a `<system>` block in the prompt as ordinary text. Measured on this
+    machine: the compile's draft came back as a chat reply in the operator's
+    configured voice — "От вас ничего не нужно" — instead of the JSON plan the
+    schema asked for, three times in a row. `--system-prompt` replaces the
+    assistant persona with ours; `--setting-sources` with nothing after it loads
+    no settings files at all. Both are used only when this CLI has them.
+    """
+    command = [claude_bin, "-p", "--output-format", "text"]
+    flags = _claude_cli_flags()
+    if system_prompt and "--system-prompt" in flags:
+        command.extend(["--system-prompt", system_prompt])
+    if "--setting-sources" in flags:
+        command.extend(["--setting-sources", ""])
+    if model:
+        command.extend(["--model", model])
+    return command
+
+
+def _claude_stdin(system_prompt: str, prompt: str) -> str:
+    """The prompt, carrying the system text only when the flag cannot."""
+    if not system_prompt or "--system-prompt" in _claude_cli_flags():
+        return prompt
+    return f"<system>{system_prompt}</system>\n\n{prompt}"
 
 
 def _call_claude(
@@ -961,32 +1201,16 @@ def _call_claude(
 
     Claude Code's `-p` flag runs a one-shot prompt and exits. Pair with
     `--output-format text` for clean text output. Uses your Claude
-    subscription auth (same login as `claude` interactive TUI).
+    subscription auth (same login as `claude` interactive TUI). The prompt goes
+    through stdin to avoid the Windows CreateProcess ~32K command-line ceiling.
     """
     claude_bin = shutil.which("claude")
     if not claude_bin:
         return ""
-
-    # Claude CLI accepts the prompt as a positional arg or via stdin.
-    # Combine system + user into one prompt and pass via stdin to avoid
-    # the Windows CreateProcess ~32K command-line ceiling on large compiles.
-    combined = prompt
-    if system_prompt:
-        combined = f"<system>{system_prompt}</system>\n\n{prompt}"
-
     try:
-        command = [
-            claude_bin,
-            "-p",  # print mode (non-interactive)
-            "--output-format",
-            "text",
-        ]
-        model = descriptor.model
-        if model:
-            command.extend(["--model", model])
         result = subprocess.run(
-            command,
-            input=combined,
+            _claude_command(claude_bin, descriptor.model, system_prompt),
+            input=_claude_stdin(system_prompt, prompt),
             capture_output=True,
             timeout=_timeout_s(),
             check=False,
@@ -1004,6 +1228,38 @@ def _call_claude(
 # ---------------------------------------------------------------------------
 
 
+def _openai_messages(system_prompt: str, prompt: str) -> list[dict[str, str]]:
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+    return messages
+
+
+def _openai_payload(
+    descriptor: ProviderDescriptor,
+    prompt: str,
+    system_prompt: str,
+    schema: Mapping[str, object] | None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "model": descriptor.model,
+        "messages": _openai_messages(system_prompt, prompt),
+        "max_tokens": int(descriptor.inference_settings["max_tokens"]),
+        "temperature": int(descriptor.inference_settings["temperature_milli"]) / 1000,
+    }
+    if schema is not None:
+        payload["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "memory_response",
+                "strict": True,
+                "schema": schema,
+            },
+        }
+    return payload
+
+
 def _call_openai(
     descriptor: ProviderDescriptor,
     prompt: str,
@@ -1015,33 +1271,11 @@ def _call_openai(
         return ""
     if descriptor._endpoint is None:
         raise ValueError("OpenAI endpoint was not resolved in the provider descriptor")
-    base_url = descriptor._endpoint
-    model = descriptor.model
-    max_tokens = int(descriptor.inference_settings["max_tokens"])
-    temperature = int(descriptor.inference_settings["temperature_milli"]) / 1000
-    url = f"{base_url.rstrip('/')}/chat/completions"
-    messages = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": prompt})
-    payload: dict[str, object] = {
-        "model": model,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-    }
-    if schema is not None:
-        payload["response_format"] = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "memory_response",
-                "strict": True,
-                "schema": schema,
-            },
-        }
-    body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url,
+    body = json.dumps(
+        _openai_payload(descriptor, prompt, system_prompt, schema)
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        f"{descriptor._endpoint.rstrip('/')}/chat/completions",
         data=body,
         headers={
             "Authorization": f"Bearer {api_key}",
@@ -1049,11 +1283,10 @@ def _call_openai(
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=_timeout_s()) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+    with urllib.request.urlopen(request, timeout=_timeout_s()) as response:
+        data = json.loads(response.read().decode("utf-8"))
     return BackendResponse(
-        data["choices"][0]["message"]["content"],
-        _parse_http_usage(data),
+        data["choices"][0]["message"]["content"], _parse_http_usage(data)
     )
 
 
@@ -1141,27 +1374,30 @@ _BACKENDS = {
 # ---------------------------------------------------------------------------
 
 
+def _backend_alive(name: str) -> bool:
+    try:
+        return probe_candidate(provider_candidates(name)[0])
+    except Exception:  # noqa: BLE001 - a broken probe is "not available"
+        return False
+
+
+def _print_availability() -> None:
+    for name in _PROBES:
+        alive = "ALIVE" if _backend_alive(name) else "not available"
+        print(f"  {name}: {alive}", file=sys.stderr)
+
+
 def _cli() -> int:
     """Quick CLI: `python llm_client.py "your prompt"` to test backends."""
     if len(sys.argv) < 2:
-        print("Usage: python llm_client.py \"<prompt>\"", file=sys.stderr)
+        print('Usage: python llm_client.py "<prompt>"', file=sys.stderr)
         print("\nBackend availability:", file=sys.stderr)
-        for name in _PROBES:
-            try:
-                alive = probe_candidate(provider_candidates(name)[0])
-            except Exception:  # noqa: BLE001
-                alive = False
-            print(f"  {name}: {'ALIVE' if alive else 'not available'}", file=sys.stderr)
+        _print_availability()
         return 1
     prompt = sys.argv[1]
     system = sys.argv[2] if len(sys.argv) > 2 else ""
     print("--- backend availability ---", file=sys.stderr)
-    for name in _PROBES:
-        try:
-            alive = probe_candidate(provider_candidates(name)[0])
-        except Exception:  # noqa: BLE001
-            alive = False
-        print(f"  {name}: {'ALIVE' if alive else 'not available'}", file=sys.stderr)
+    _print_availability()
     print("--- calling first alive backend ---", file=sys.stderr)
     response = call_llm(prompt, system)
     print(response)

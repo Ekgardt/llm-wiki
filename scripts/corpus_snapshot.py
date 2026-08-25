@@ -19,6 +19,7 @@ from typing import Any
 import yaml
 from bounded_io import read_stable_bytes
 from code_languages import language_for_path
+from page_status import is_retired
 from vault_editorial import EDITORIAL_NAMES
 
 COLLECTOR_VERSION = "corpus-collector/v1"
@@ -35,6 +36,7 @@ MAX_CORPUS_CHUNKS = 100_000
 DEFAULT_DEADLINE_SECONDS = 30.0
 
 PROJECT_FILES = frozenset({"state.md", "journal.md", "context.md"})
+SESSION_RECORD_ROOT = "knowledge/raw/sessions"
 APPROVED_CODE_ROOTS = frozenset(
     {"benchmark", "docs", "integrations", "rules", "scripts", "skills", "tests"}
 )
@@ -50,6 +52,181 @@ _CLOSING_HASHES = re.compile(r"[ \t]+#+[ \t]*$")
 _CYRILLIC = re.compile(r"[\u0400-\u04ff]")
 _HAN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 _LATIN = re.compile(r"[A-Za-z]")
+
+
+_POLICY_BOUNDS = {
+    "roots": (1, 128),
+    "include_globs": (1, 256),
+    "ignore_globs": (0, 256),
+    "suffixes": (1, 128),
+}
+
+
+def _bounded_nfc_text(value: object, limit: int) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    return len(value) <= limit and value == unicodedata.normalize("NFC", value)
+
+
+def _normalized_text(value: str, limit: int) -> bool:
+    if not _bounded_nfc_text(value, limit):
+        return False
+    return "\\" not in value
+
+
+def _relative_parts_ok(pure: PurePosixPath) -> bool:
+    if pure.is_absolute():
+        return False
+    return not any(part in {"", ".", ".."} for part in pure.parts)
+
+
+def _normalized_values(name: str, values: tuple[str, ...]) -> tuple[str, ...]:
+    nfc_values = tuple(unicodedata.normalize("NFC", value) for value in values)
+    if len(set(nfc_values)) < len(set(values)):
+        raise ValueError(f"{name} contains a Unicode normalization collision")
+    if name == "suffixes":
+        return tuple(value.casefold() for value in nfc_values)
+    return nfc_values
+
+
+def _normalize_policy_tuples(policy: object) -> None:
+    for name in _POLICY_BOUNDS:
+        values = getattr(policy, name)
+        if isinstance(values, tuple) and all(isinstance(value, str) for value in values):
+            object.__setattr__(policy, name, _normalized_values(name, values))
+
+
+def _all_nonempty_strings(values: tuple) -> bool:
+    return all(isinstance(value, str) and value for value in values)
+
+
+def _bounded_unique_tuple(values: object, minimum: int, maximum: int) -> bool:
+    if not isinstance(values, tuple):
+        return False
+    if not minimum <= len(values) <= maximum:
+        return False
+    return values == tuple(sorted(set(values))) and _all_nonempty_strings(values)
+
+
+def _require_policy_tuples(policy: object) -> None:
+    for name, (minimum, maximum) in _POLICY_BOUNDS.items():
+        if not _bounded_unique_tuple(getattr(policy, name), minimum, maximum):
+            raise ValueError(f"{name} must be a bounded sorted unique tuple")
+
+
+def _normalized_relative_root(root: str) -> bool:
+    if not _normalized_text(root, 4096) or root == ".":
+        return False
+    return _relative_parts_ok(PurePosixPath(root))
+
+
+def _require_policy_roots(roots: tuple[str, ...]) -> None:
+    if any(not _normalized_relative_root(root) for root in roots):
+        raise ValueError("roots must contain normalized relative POSIX paths")
+
+
+def _windows_rooted(value: str) -> bool:
+    windows_path = PureWindowsPath(value)
+    return bool(windows_path.drive or windows_path.root)
+
+
+def _dot_segments(value: str) -> bool:
+    if value.startswith("./") or "//" in value:
+        return True
+    return any(part == "." for part in value.split("/"))
+
+
+def _normalized_glob(value: str) -> bool:
+    if not _normalized_text(value, 4096):
+        return False
+    if _windows_rooted(value) or _dot_segments(value):
+        return False
+    return _relative_parts_ok(PurePosixPath(value))
+
+
+def _require_policy_globs(policy: object) -> None:
+    for name in ("include_globs", "ignore_globs"):
+        if any(not _normalized_glob(value) for value in getattr(policy, name)):
+            raise ValueError(f"{name} must contain normalized relative POSIX globs")
+
+
+def _normalized_suffix(value: str) -> bool:
+    if not _normalized_text(value, 128):
+        return False
+    if value != value.casefold() or not value.startswith(".") or len(value) < 2:
+        return False
+    return "/" not in value
+
+
+def _require_policy_suffixes(suffixes: tuple[str, ...]) -> None:
+    if any(not _normalized_suffix(value) for value in suffixes):
+        raise ValueError("suffixes must contain normalized lowercase suffixes")
+
+
+def _encoded_source_id(source_id: object) -> bytes:
+    try:
+        return source_id.encode("utf-8")
+    except (AttributeError, UnicodeEncodeError) as exc:
+        raise ValueError("source_id must be valid UTF-8 text") from exc
+
+
+def _require_source_id(source_id: object) -> None:
+    encoded = _encoded_source_id(source_id)
+    if not encoded or not _bounded_nfc_text(source_id, 512):
+        raise ValueError("source_id must be normalized UTF-8 text of at most 512 characters")
+
+
+def _valid_relative_path(value: object, reject_dot: bool) -> bool:
+    if not _bounded_nfc_text(value, 4096):
+        return False
+    text = str(value)
+    if "\\" in text:
+        return False
+    if reject_dot and text == ".":
+        return False
+    return _relative_parts_ok(PurePosixPath(text))
+
+
+def _require_relative_path(value: object, *, reject_dot: bool = False) -> None:
+    if not _valid_relative_path(value, reject_dot):
+        raise ValueError("relative_path must be normalized relative POSIX text")
+
+
+def _require_sha256(value: object, label: str) -> None:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise ValueError(f"{label} must be lowercase SHA-256")
+
+
+def _ordered_by_path(items: object, kind: type) -> bool:
+    if not isinstance(items, tuple):
+        return False
+    if any(not isinstance(item, kind) for item in items):
+        return False
+    paths = tuple(item.relative_path for item in items)
+    return paths == tuple(sorted(paths))
+
+
+def _require_manifest_versions(collector_version: object, extractor_version: object) -> None:
+    if not isinstance(collector_version, str) or not collector_version:
+        raise ValueError("collector_version must be a non-empty string")
+    if not isinstance(extractor_version, str) or not extractor_version:
+        raise ValueError("extractor_version must be a non-empty string")
+
+
+def _require_unique_manifest_entries(entries: list[dict[str, str]]) -> None:
+    paths = [entry["relative_path"] for entry in entries]
+    logical_ids = [entry["logical_id"] for entry in entries]
+    if len(paths) != len(set(paths)) or len(logical_ids) != len(set(logical_ids)):
+        raise ValueError("canonical source membership paths and logical IDs must be unique")
+
+
+def _require_safe_entry(path: Path, info: os.stat_result, *, symlink: bool) -> None:
+    reparse = bool(
+        (getattr(info, "st_file_attributes", 0) or 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    )
+    if symlink or reparse:
+        raise PermissionError(f"unsafe corpus path: {path}")
 
 
 class CorpusChanged(RuntimeError):
@@ -180,70 +357,11 @@ class RepositoryCodePolicy:
     suffixes: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        bounds = {
-            "roots": (1, 128),
-            "include_globs": (1, 256),
-            "ignore_globs": (0, 256),
-            "suffixes": (1, 128),
-        }
-        for name in bounds:
-            values = getattr(self, name)
-            if not isinstance(values, tuple) or any(
-                not isinstance(value, str) for value in values
-            ):
-                continue
-            nfc_values = tuple(unicodedata.normalize("NFC", value) for value in values)
-            if len(set(nfc_values)) < len(set(values)):
-                raise ValueError(f"{name} contains a Unicode normalization collision")
-            if name == "suffixes":
-                nfc_values = tuple(value.casefold() for value in nfc_values)
-            object.__setattr__(self, name, nfc_values)
-        for name, (minimum, maximum) in bounds.items():
-            values = getattr(self, name)
-            if (
-                not isinstance(values, tuple)
-                or not minimum <= len(values) <= maximum
-                or values != tuple(sorted(set(values)))
-                or any(not isinstance(value, str) or not value for value in values)
-            ):
-                raise ValueError(f"{name} must be a bounded sorted unique tuple")
-        for root in self.roots:
-            pure = PurePosixPath(root)
-            if (
-                len(root) > 4096
-                or root != unicodedata.normalize("NFC", root)
-                or "\\" in root
-                or pure.is_absolute()
-                or root == "."
-                or any(part in {"", ".", ".."} for part in pure.parts)
-            ):
-                raise ValueError("roots must contain normalized relative POSIX paths")
-        for name in ("include_globs", "ignore_globs"):
-            if any(
-                len(value) > 4096
-                or value != unicodedata.normalize("NFC", value)
-                or "\\" in value
-                or PurePosixPath(value).is_absolute()
-                or PureWindowsPath(value).drive
-                or PureWindowsPath(value).root
-                or ".." in PurePosixPath(value).parts
-                or value.startswith("./")
-                or "//" in value
-                or any(part == "." for part in value.split("/"))
-                for value in getattr(self, name)
-            ):
-                raise ValueError(f"{name} must contain normalized relative POSIX globs")
-        if any(
-            len(value) > 128
-            or value != unicodedata.normalize("NFC", value)
-            or value != value.casefold()
-            or not value.startswith(".")
-            or len(value) < 2
-            or "/" in value
-            or "\\" in value
-            for value in self.suffixes
-        ):
-            raise ValueError("suffixes must contain normalized lowercase suffixes")
+        _normalize_policy_tuples(self)
+        _require_policy_tuples(self)
+        _require_policy_roots(self.roots)
+        _require_policy_globs(self)
+        _require_policy_suffixes(self.suffixes)
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,30 +388,9 @@ class CodeCaptureFile:
     stat: FileStatMetadata
 
     def __post_init__(self) -> None:
-        try:
-            encoded_source_id = self.source_id.encode("utf-8")
-        except (AttributeError, UnicodeEncodeError) as exc:
-            raise ValueError("source_id must be valid UTF-8 text") from exc
-        if (
-            not isinstance(self.source_id, str)
-            or not self.source_id
-            or not encoded_source_id
-            or len(self.source_id) > 512
-            or self.source_id != unicodedata.normalize("NFC", self.source_id)
-        ):
-            raise ValueError("source_id must be normalized UTF-8 text of at most 512 characters")
-        pure = PurePosixPath(self.relative_path)
-        if (
-            not self.relative_path
-            or len(self.relative_path) > 4096
-            or self.relative_path != unicodedata.normalize("NFC", self.relative_path)
-            or "\\" in self.relative_path
-            or pure.is_absolute()
-            or any(part in {"", ".", ".."} for part in pure.parts)
-        ):
-            raise ValueError("relative_path must be normalized relative POSIX text")
-        if re.fullmatch(r"[0-9a-f]{64}", self.sha256) is None:
-            raise ValueError("sha256 must be lowercase SHA-256")
+        _require_source_id(self.source_id)
+        _require_relative_path(self.relative_path)
+        _require_sha256(self.sha256, "sha256")
         if not isinstance(self.stat, FileStatMetadata):
             raise TypeError("stat must be FileStatMetadata")
 
@@ -305,25 +402,12 @@ class DirectoryMembership:
     entries_sha256: str
 
     def __post_init__(self) -> None:
-        pure = PurePosixPath(self.relative_path)
-        if (
-            not self.relative_path
-            or len(self.relative_path) > 4096
-            or self.relative_path != unicodedata.normalize("NFC", self.relative_path)
-            or "\\" in self.relative_path
-            or pure.is_absolute()
-            or self.relative_path == "."
-            or any(part in {"", ".", ".."} for part in pure.parts)
-        ):
-            raise ValueError("relative_path must be normalized relative POSIX text")
-        if (
-            isinstance(self.entry_count, bool)
-            or not isinstance(self.entry_count, int)
-            or self.entry_count < 0
-        ):
+        _require_relative_path(self.relative_path, reject_dot=True)
+        if isinstance(self.entry_count, bool) or not isinstance(self.entry_count, int):
             raise ValueError("entry_count must be a non-negative integer")
-        if re.fullmatch(r"[0-9a-f]{64}", self.entries_sha256) is None:
-            raise ValueError("entries_sha256 must be lowercase SHA-256")
+        if self.entry_count < 0:
+            raise ValueError("entry_count must be a non-negative integer")
+        _require_sha256(self.entries_sha256, "entries_sha256")
 
 
 @dataclass(frozen=True, slots=True)
@@ -335,30 +419,11 @@ class CodeCaptureContract:
     membership_sha256: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.policy, RepositoryCodePolicy):
-            raise TypeError("policy must be RepositoryCodePolicy")
-        if not isinstance(self.limits, RepositoryCodeLimits):
-            raise TypeError("limits must be RepositoryCodeLimits")
-        if (
-            not isinstance(self.files, tuple)
-            or any(not isinstance(item, CodeCaptureFile) for item in self.files)
-            or tuple(item.relative_path for item in self.files)
-            != tuple(sorted(item.relative_path for item in self.files))
-        ):
-            raise ValueError("files must be an ordered CodeCaptureFile tuple")
-        file_paths = [item.relative_path.casefold() for item in self.files]
-        source_ids = [item.source_id for item in self.files]
-        if len(file_paths) != len(set(file_paths)) or len(source_ids) != len(set(source_ids)):
-            raise ValueError("files contain a path or source ID collision")
-        if (
-            not isinstance(self.directories, tuple)
-            or any(not isinstance(item, DirectoryMembership) for item in self.directories)
-            or tuple(item.relative_path for item in self.directories)
-            != tuple(sorted(item.relative_path for item in self.directories))
-        ):
+        _require_capture_types(self.policy, self.limits)
+        _require_capture_files(self.files)
+        if not _ordered_by_path(self.directories, DirectoryMembership):
             raise ValueError("directories must be an ordered DirectoryMembership tuple")
-        if re.fullmatch(r"[0-9a-f]{64}", self.membership_sha256) is None:
-            raise ValueError("membership_sha256 must be lowercase SHA-256")
+        _require_sha256(self.membership_sha256, "membership_sha256")
 
 
 @dataclass(frozen=True, slots=True)
@@ -432,55 +497,90 @@ def canonical_chunk_id(
     )
 
 
-def _manifest_source(record: SourceRecord | Mapping[str, object]) -> dict[str, str]:
+def _require_capture_types(policy: object, limits: object) -> None:
+    if not isinstance(policy, RepositoryCodePolicy):
+        raise TypeError("policy must be RepositoryCodePolicy")
+    if not isinstance(limits, RepositoryCodeLimits):
+        raise TypeError("limits must be RepositoryCodeLimits")
+
+
+def _unique_capture_identity(files: tuple) -> bool:
+    file_paths = [item.relative_path.casefold() for item in files]
+    source_ids = [item.source_id for item in files]
+    return len(file_paths) == len(set(file_paths)) and len(source_ids) == len(set(source_ids))
+
+
+def _require_capture_files(files: object) -> None:
+    if not _ordered_by_path(files, CodeCaptureFile):
+        raise ValueError("files must be an ordered CodeCaptureFile tuple")
+    if not _unique_capture_identity(files):
+        raise ValueError("files contain a path or source ID collision")
+
+
+def _manifest_source_fields(
+    record: SourceRecord | Mapping[str, object],
+) -> tuple[object, object, object]:
     if isinstance(record, SourceRecord):
-        logical_id = record.logical_id
-        relative_path = record.relative_path
-        digest = record.sha256
-    elif isinstance(record, Mapping):
-        if set(record) != {"logical_id", "relative_path", "sha256"}:
-            raise ValueError("canonical source manifest entries must be closed objects")
-        logical_id = record["logical_id"]
-        relative_path = record["relative_path"]
-        digest = record["sha256"]
-    else:
+        return record.logical_id, record.relative_path, record.sha256
+    if not isinstance(record, Mapping):
         raise TypeError("canonical source manifest entries must be SourceRecord values or objects")
-    if not isinstance(logical_id, str) or not logical_id or len(logical_id) > 4096:
+    if set(record) != {"logical_id", "relative_path", "sha256"}:
+        raise ValueError("canonical source manifest entries must be closed objects")
+    return record["logical_id"], record["relative_path"], record["sha256"]
+
+
+def _bounded_manifest_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value) and len(value) <= 4096
+
+
+def _manifest_source(record: SourceRecord | Mapping[str, object]) -> dict[str, str]:
+    logical_id, relative_path, digest = _manifest_source_fields(record)
+    if not _bounded_manifest_string(logical_id):
         raise ValueError("canonical source logical_id must be a bounded non-empty string")
-    if not isinstance(relative_path, str) or not relative_path or len(relative_path) > 4096:
+    if not _bounded_manifest_string(relative_path):
         raise ValueError("canonical source relative_path must be a bounded non-empty string")
     if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
         raise ValueError("canonical source sha256 must be a lowercase SHA-256 digest")
     return {"relative_path": relative_path, "sha256": digest, "logical_id": logical_id}
 
 
-def _manifest_policy(policy: SnapshotPolicy | Mapping[str, object]) -> dict[str, object]:
+def _policy_manifest_fields(
+    policy: SnapshotPolicy | Mapping[str, object],
+) -> tuple[object, object, object, object]:
     if isinstance(policy, SnapshotPolicy):
-        daily_paths = policy.daily_paths
-        code_roots = policy.code_roots
-        include_historical = policy.include_historical
-        as_of = policy.as_of
-    elif isinstance(policy, Mapping):
-        if set(policy) != {"daily_paths", "code_roots", "include_historical", "as_of"}:
-            raise ValueError("canonical source manifest policy must be a closed object")
-        daily_paths = policy["daily_paths"]
-        code_roots = policy["code_roots"]
-        include_historical = policy["include_historical"]
-        as_of = policy["as_of"]
-    else:
+        return policy.daily_paths, policy.code_roots, policy.include_historical, policy.as_of
+    if not isinstance(policy, Mapping):
         raise TypeError("canonical source manifest policy must be SnapshotPolicy or an object")
-    if not isinstance(daily_paths, (list, tuple)) or not all(
-        isinstance(value, str) for value in daily_paths
-    ):
-        raise ValueError("canonical daily_paths must be an array of strings")
-    if not isinstance(code_roots, (list, tuple)) or not all(
-        isinstance(value, str) for value in code_roots
-    ):
-        raise ValueError("canonical code_roots must be an array of strings")
+    if set(policy) != {"daily_paths", "code_roots", "include_historical", "as_of"}:
+        raise ValueError("canonical source manifest policy must be a closed object")
+    return (
+        policy["daily_paths"],
+        policy["code_roots"],
+        policy["include_historical"],
+        policy["as_of"],
+    )
+
+
+def _string_sequence(value: object) -> bool:
+    if not isinstance(value, (list, tuple)):
+        return False
+    return all(isinstance(item, str) for item in value)
+
+
+def _require_manifest_flags(include_historical: object, as_of: object) -> None:
     if not isinstance(include_historical, bool):
         raise ValueError("canonical include_historical must be boolean")
     if as_of is not None and not isinstance(as_of, str):
         raise ValueError("canonical as_of must be null or a string")
+
+
+def _manifest_policy(policy: SnapshotPolicy | Mapping[str, object]) -> dict[str, object]:
+    daily_paths, code_roots, include_historical, as_of = _policy_manifest_fields(policy)
+    if not _string_sequence(daily_paths):
+        raise ValueError("canonical daily_paths must be an array of strings")
+    if not _string_sequence(code_roots):
+        raise ValueError("canonical code_roots must be an array of strings")
+    _require_manifest_flags(include_historical, as_of)
     return {
         "daily_paths": list(daily_paths),
         "code_roots": list(code_roots),
@@ -497,18 +597,12 @@ def canonical_source_manifest(
     extractor_version: str = EXTRACTOR_VERSION,
 ) -> dict[str, object]:
     """Return the one canonical source manifest shared by every generation consumer."""
-    if not isinstance(collector_version, str) or not collector_version:
-        raise ValueError("collector_version must be a non-empty string")
-    if not isinstance(extractor_version, str) or not extractor_version:
-        raise ValueError("extractor_version must be a non-empty string")
+    _require_manifest_versions(collector_version, extractor_version)
     entries = sorted(
         (_manifest_source(source) for source in sources),
         key=lambda item: (item["relative_path"], item["logical_id"]),
     )
-    paths = [entry["relative_path"] for entry in entries]
-    logical_ids = [entry["logical_id"] for entry in entries]
-    if len(paths) != len(set(paths)) or len(logical_ids) != len(set(logical_ids)):
-        raise ValueError("canonical source membership paths and logical IDs must be unique")
+    _require_unique_manifest_entries(entries)
     return {
         "collector": collector_version,
         "extractor": extractor_version,
@@ -565,17 +659,25 @@ def _positive_limit(value: object, name: str, *, allow_zero: bool = False) -> in
     return value
 
 
+def _require_monotonic(deadline: object) -> float:
+    if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
+        raise ValueError("deadline must be a monotonic timestamp")
+    return float(deadline)
+
+
+def _require_seconds(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        raise ValueError("deadline_seconds must be non-negative")
+    return float(value)
+
+
 def _deadline_value(deadline: float | None, deadline_seconds: float | None) -> float:
     if deadline is not None and deadline_seconds is not None:
         raise ValueError("deadline and deadline_seconds are mutually exclusive")
     if deadline is not None:
-        if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
-            raise ValueError("deadline must be a monotonic timestamp")
-        return float(deadline)
+        return _require_monotonic(deadline)
     seconds = DEFAULT_DEADLINE_SECONDS if deadline_seconds is None else deadline_seconds
-    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or seconds < 0:
-        raise ValueError("deadline_seconds must be non-negative")
-    return time.monotonic() + float(seconds)
+    return time.monotonic() + _require_seconds(seconds)
 
 
 def _check_deadline(deadline: float) -> None:
@@ -592,26 +694,37 @@ def _check_processing_stop(
         _check_deadline(deadline)
 
 
+def _under_prefix(normalized: str, prefixes: tuple[str, ...]) -> bool:
+    return any(
+        normalized == prefix or normalized.startswith(prefix + "/") for prefix in prefixes
+    )
+
+
+def _valid_source_path(raw: str, pure: PurePosixPath, normalized: str) -> bool:
+    if not raw or "\\" in raw:
+        return False
+    if normalized != raw:
+        return False
+    return _relative_parts_ok(pure)
+
+
 def _relative_posix(value: str | Path, *, prefixes: tuple[str, ...]) -> str:
     raw = str(value)
-    if not raw or "\\" in raw:
-        raise ValueError("source path must be a normalized relative POSIX path")
     pure = PurePosixPath(raw)
     normalized = unicodedata.normalize("NFC", pure.as_posix())
-    if (
-        pure.is_absolute()
-        or normalized != raw
-        or any(part in {"", ".", ".."} for part in pure.parts)
-        or not any(normalized == prefix or normalized.startswith(prefix + "/") for prefix in prefixes)
-    ):
+    if not _valid_source_path(raw, pure, normalized) or not _under_prefix(normalized, prefixes):
         raise ValueError("source path must be a normalized relative POSIX path")
     return normalized
 
 
+def _windows_shaped(raw: str) -> bool:
+    windows_path = PureWindowsPath(raw)
+    return "\\" in raw or ":" in raw or bool(windows_path.drive or windows_path.root)
+
+
 def _code_root(value: str | Path) -> str:
     raw = str(value)
-    windows_path = PureWindowsPath(raw)
-    if "\\" in raw or ":" in raw or windows_path.drive or windows_path.root:
+    if _windows_shaped(raw):
         raise ValueError("code root must be a normalized approved relative POSIX path")
     try:
         return _relative_posix(value, prefixes=tuple(sorted(APPROVED_CODE_ROOTS)))
@@ -666,6 +779,54 @@ def _seal_path(
     return seal
 
 
+def _relative_within(vault: Path, path: Path) -> Path:
+    try:
+        return path.relative_to(vault)
+    except ValueError as exc:
+        raise PermissionError("corpus path escapes the resolved vault") from exc
+
+
+def _component_paths(vault: Path, relative: Path) -> list[Path]:
+    components = [vault]
+    current = vault
+    for part in relative.parts:
+        current /= part
+        components.append(current)
+    return components
+
+
+def _require_component_kind(
+    component: Path, info: os.stat_result, *, expect_directory: bool, allow_regular: bool
+) -> None:
+    if expect_directory != stat.S_ISDIR(info.st_mode):
+        expected = "directory" if expect_directory else "regular file"
+        raise PermissionError(f"corpus path component must be a {expected}: {component}")
+    if allow_regular and not stat.S_ISREG(info.st_mode):
+        raise PermissionError(f"corpus source must be a regular file: {component}")
+
+
+def _require_inside(component: Path, vault: Path) -> None:
+    try:
+        component.resolve(strict=True).relative_to(vault)
+    except ValueError as exc:
+        raise PermissionError("corpus path resolves outside the vault") from exc
+
+
+def _sealed_component(
+    component: Path, vault: Path, *, is_target: bool, target_directory: bool
+) -> _PathIdentity:
+    info = _safe_info(component)
+    expect_directory = not is_target or target_directory
+    _require_component_kind(
+        component,
+        info,
+        expect_directory=expect_directory,
+        allow_regular=is_target and not target_directory,
+    )
+    _require_inside(component, vault)
+    return _identity(component, info)
+
+
 def _build_path_seal(
     vault: Path,
     path: Path,
@@ -673,33 +834,20 @@ def _build_path_seal(
     target_directory: bool,
     max_components: int,
 ) -> tuple[_PathIdentity, ...]:
-    try:
-        relative = path.relative_to(vault)
-    except ValueError as exc:
-        raise PermissionError("corpus path escapes the resolved vault") from exc
+    relative = _relative_within(vault, path)
     if len(relative.parts) > max_components:
         raise ValueError("corpus ancestor depth limit exceeded")
-    components = [vault]
-    current = vault
-    for part in relative.parts:
-        current /= part
-        components.append(current)
-    seal = []
-    for index, component in enumerate(components):
-        info = _safe_info(component)
-        is_target = index == len(components) - 1
-        expected_directory = not is_target or target_directory
-        if expected_directory != stat.S_ISDIR(info.st_mode):
-            expected = "directory" if expected_directory else "regular file"
-            raise PermissionError(f"corpus path component must be a {expected}: {component}")
-        if is_target and not target_directory and not stat.S_ISREG(info.st_mode):
-            raise PermissionError(f"corpus source must be a regular file: {component}")
-        try:
-            component.resolve(strict=True).relative_to(vault)
-        except ValueError as exc:
-            raise PermissionError("corpus path resolves outside the vault") from exc
-        seal.append(_identity(component, info))
-    return tuple(seal)
+    components = _component_paths(vault, relative)
+    last = len(components) - 1
+    return tuple(
+        _sealed_component(
+            component,
+            vault,
+            is_target=index == last,
+            target_directory=target_directory,
+        )
+        for index, component in enumerate(components)
+    )
 
 
 def _open_sealed_posix_path(
@@ -754,24 +902,44 @@ def _verify_descriptor_chain(
     os.close(descriptor)
 
 
+def _child_descriptor_flags(expected: _PathIdentity, flags: int) -> int:
+    if stat.S_ISDIR(expected.mode):
+        return flags | getattr(os, "O_DIRECTORY", 0)
+    return flags
+
+
+def _open_sealed_root(expected: _PathIdentity, flags: int, changed_error) -> int:
+    descriptor = os.open(expected.path, flags | getattr(os, "O_DIRECTORY", 0))
+    if _identity(expected.path, os.fstat(descriptor)) != expected:
+        os.close(descriptor)
+        raise changed_error(f"corpus ancestor changed: {expected.path}")
+    return descriptor
+
+
+def _descend(descriptor: int, expected: _PathIdentity, flags: int, changed_error) -> int:
+    """Open the next component; the descriptor handed in is closed either way."""
+    try:
+        child = os.open(
+            expected.path.name, _child_descriptor_flags(expected, flags), dir_fd=descriptor
+        )
+    finally:
+        os.close(descriptor)
+    if _identity(expected.path, os.fstat(child)) != expected:
+        os.close(child)
+        raise changed_error(f"corpus ancestor changed: {expected.path}")
+    return child
+
+
 def _open_descriptor_chain(
     seal: tuple[_PathIdentity, ...], *, changed_error: type[Exception]
 ) -> int:
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = -1
     try:
-        descriptor = os.open(seal[0].path, flags | getattr(os, "O_DIRECTORY", 0))
-        if _identity(seal[0].path, os.fstat(descriptor)) != seal[0]:
-            raise changed_error(f"corpus ancestor changed: {seal[0].path}")
+        descriptor = _open_sealed_root(seal[0], flags, changed_error)
         for expected in seal[1:]:
-            child_flags = flags
-            if stat.S_ISDIR(expected.mode):
-                child_flags |= getattr(os, "O_DIRECTORY", 0)
-            child = os.open(expected.path.name, child_flags, dir_fd=descriptor)
-            os.close(descriptor)
-            descriptor = child
-            if _identity(expected.path, os.fstat(descriptor)) != expected:
-                raise changed_error(f"corpus ancestor changed: {expected.path}")
+            handed, descriptor = descriptor, -1
+            descriptor = _descend(handed, expected, flags, changed_error)
         result = descriptor
         descriptor = -1
         return result
@@ -815,13 +983,13 @@ def _descriptor_flags(*, directory: bool) -> int:
     return flags
 
 
-def _read_bounded_descriptor(descriptor: int, max_bytes: int) -> bytes:
-    before = os.fstat(descriptor)
-    if not stat.S_ISREG(before.st_mode):
-        raise PermissionError("corpus source descriptor must be a regular file")
-    if before.st_size > max_bytes:
+def _require_bounded_size(size: int, max_bytes: int) -> None:
+    if size > max_bytes:
         raise ValueError(f"corpus source exceeds {max_bytes} bytes")
-    chunks = []
+
+
+def _read_chunks(descriptor: int, max_bytes: int) -> bytes:
+    chunks: list[bytes] = []
     remaining = max_bytes + 1
     while remaining:
         chunk = os.read(descriptor, min(remaining, 1024 * 1024))
@@ -829,11 +997,17 @@ def _read_bounded_descriptor(descriptor: int, max_bytes: int) -> bytes:
             break
         chunks.append(chunk)
         remaining -= len(chunk)
-    content = b"".join(chunks)
-    if len(content) > max_bytes:
-        raise ValueError(f"corpus source exceeds {max_bytes} bytes")
-    after = os.fstat(descriptor)
-    if not _same_opened_object(before, after):
+    return b"".join(chunks)
+
+
+def _read_bounded_descriptor(descriptor: int, max_bytes: int) -> bytes:
+    before = os.fstat(descriptor)
+    if not stat.S_ISREG(before.st_mode):
+        raise PermissionError("corpus source descriptor must be a regular file")
+    _require_bounded_size(before.st_size, max_bytes)
+    content = _read_chunks(descriptor, max_bytes)
+    _require_bounded_size(len(content), max_bytes)
+    if not _same_opened_object(before, os.fstat(descriptor)):
         raise CorpusChanged("corpus source changed during descriptor read")
     return content
 
@@ -915,85 +1089,102 @@ class _Discovery:
         if os.name == "posix":
             self._walk_posix(root, kind)
             return
-        root_seal = _seal_path(
+        self._walk_windows(root, kind)
+
+    def _directory_seal(self, path: Path) -> tuple[_PathIdentity, ...]:
+        return _seal_path(
             self.vault,
-            root,
+            path,
             target_directory=True,
             max_components=self.max_depth + 3,
         )
-        stack = [(root, 0, root_seal)]
+
+    def _count_directory(self, depth: int) -> None:
+        self.directories += 1
+        if self.directories > self.max_directories:
+            raise ValueError("corpus directory limit exceeded")
+        if depth > self.max_depth:
+            raise ValueError("corpus depth limit exceeded")
+
+    def _count_entry(self) -> None:
+        self.entries += 1
+        if self.entries > self.max_entries:
+            raise ValueError("corpus traversal entry limit exceeded")
+
+    def _directory_excluded(self, name: str) -> bool:
+        if name in SKIP_DIRECTORIES:
+            return True
+        if name in ARCHIVE_DIRECTORIES:
+            return not self.include_archives
+        return name.startswith(".")
+
+    @staticmethod
+    def _project_of(path: Path, root: Path, kind: str) -> str | None:
+        if kind != "project":
+            return None
+        parts = path.relative_to(root).parts
+        if len(parts) > 1:
+            return parts[0]
+        return None
+
+    def _walk_windows(self, root: Path, kind: str) -> None:
+        stack = [(root, 0, self._directory_seal(root))]
         while stack:
             current, depth, current_seal = stack.pop()
-            _check_deadline(self.deadline)
-            _verify_seal(current_seal)
-            self.directories += 1
-            if self.directories > self.max_directories:
-                raise ValueError("corpus directory limit exceeded")
-            if depth > self.max_depth:
-                raise ValueError("corpus depth limit exceeded")
-            children: list[tuple[Path, tuple[_PathIdentity, ...]]] = []
-            entries = []
-            with os.scandir(current) as iterator:
-                iterator = iter(iterator)
-                while True:
-                    _check_deadline(self.deadline)
-                    try:
-                        entry = next(iterator)
-                    except StopIteration:
-                        break
-                    self.entries += 1
-                    if self.entries > self.max_entries:
-                        raise ValueError("corpus traversal entry limit exceeded")
-                    entries.append(entry)
-            _verify_seal(current_seal)
-            for entry in sorted(entries, key=lambda item: item.name):
+            children = self._walk_windows_directory(root, current, depth, current_seal, kind)
+            stack.extend((child, depth + 1, seal) for child, seal in reversed(children))
+
+    def _windows_entries(self, current: Path) -> list:
+        entries = []
+        with os.scandir(current) as iterator:
+            for entry in iterator:
                 _check_deadline(self.deadline)
-                path = Path(entry.path)
-                info = entry.stat(follow_symlinks=False)
-                unsafe = entry.is_symlink() or bool(
-                    (getattr(info, "st_file_attributes", 0) or 0)
-                    & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-                )
-                if unsafe:
-                    raise PermissionError(f"unsafe corpus path: {path}")
-                if stat.S_ISDIR(info.st_mode):
-                    is_archive = entry.name in ARCHIVE_DIRECTORIES
-                    excluded = (
-                        entry.name in SKIP_DIRECTORIES
-                        or (is_archive and not self.include_archives)
-                        or (entry.name.startswith(".") and not is_archive)
-                    )
-                    if not excluded:
-                        if depth >= self.max_depth:
-                            raise ValueError("corpus depth limit exceeded")
-                        children.append(
-                            (
-                                path,
-                                _seal_path(
-                                    self.vault,
-                                    path,
-                                    target_directory=True,
-                                    max_components=self.max_depth + 3,
-                                ),
-                            )
-                        )
-                    continue
-                if not stat.S_ISREG(info.st_mode):
-                    continue
-                if kind == "note":
-                    if path.suffix.casefold() == ".md" and path.name not in EDITORIAL_NAMES:
-                        self.add(path, kind)
-                elif kind == "project":
-                    if path.name in PROJECT_FILES:
-                        relative_project = path.relative_to(root).parts
-                        project = relative_project[0] if len(relative_project) > 1 else None
-                        self.add(path, kind, project)
-                else:
-                    self.add(path, kind)
-            _verify_seal(current_seal)
-            stack.extend(
-                (child, depth + 1, seal) for child, seal in reversed(children)
+                self._count_entry()
+                entries.append(entry)
+        return entries
+
+    def _walk_windows_directory(
+        self,
+        root: Path,
+        current: Path,
+        depth: int,
+        current_seal: tuple[_PathIdentity, ...],
+        kind: str,
+    ) -> list:
+        _check_deadline(self.deadline)
+        _verify_seal(current_seal)
+        self._count_directory(depth)
+        entries = self._windows_entries(current)
+        _verify_seal(current_seal)
+        children = [
+            child
+            for child in (
+                self._windows_entry(root, entry, depth, kind)
+                for entry in sorted(entries, key=lambda item: item.name)
             )
+            if child is not None
+        ]
+        _verify_seal(current_seal)
+        return children
+
+    def _windows_entry(self, root: Path, entry: os.DirEntry, depth: int, kind: str):
+        """The child directory to descend into, or None once the file is stored."""
+        _check_deadline(self.deadline)
+        path = Path(entry.path)
+        info = entry.stat(follow_symlinks=False)
+        _require_safe_entry(path, info, symlink=entry.is_symlink())
+        if stat.S_ISDIR(info.st_mode):
+            return self._windows_child(path, entry.name, depth)
+        if stat.S_ISREG(info.st_mode) and self._eligible(path, kind):
+            self.add(path, kind, self._project_of(path, root, kind))
+        return None
+
+    def _windows_child(self, path: Path, name: str, depth: int):
+        if self._directory_excluded(name):
+            return None
+        if depth >= self.max_depth:
+            raise ValueError("corpus depth limit exceeded")
+        return (path, self._directory_seal(path))
 
     def _walk_posix(self, root: Path, kind: str) -> None:
         _, descriptor = _open_sealed_posix_path(
@@ -1007,6 +1198,20 @@ class _Discovery:
         finally:
             os.close(descriptor)
 
+    def _posix_entries(self, descriptor: int) -> list:
+        entries = []
+        with os.scandir(descriptor) as iterator:
+            for entry in iterator:
+                _check_deadline(self.deadline)
+                self._count_entry()
+                entries.append(
+                    (
+                        entry.name,
+                        os.stat(entry.name, dir_fd=descriptor, follow_symlinks=False),
+                    )
+                )
+        return entries
+
     def _walk_posix_directory(
         self,
         root: Path,
@@ -1019,76 +1224,71 @@ class _Discovery:
         opened_directory = os.fstat(descriptor)
         if not stat.S_ISDIR(opened_directory.st_mode):
             raise PermissionError("corpus traversal descriptor must be a directory")
-        self.directories += 1
-        if self.directories > self.max_directories:
-            raise ValueError("corpus directory limit exceeded")
-        if depth > self.max_depth:
-            raise ValueError("corpus depth limit exceeded")
-        entries = []
-        with os.scandir(descriptor) as iterator:
-            iterator = iter(iterator)
-            while True:
-                _check_deadline(self.deadline)
-                try:
-                    entry = next(iterator)
-                except StopIteration:
-                    break
-                self.entries += 1
-                if self.entries > self.max_entries:
-                    raise ValueError("corpus traversal entry limit exceeded")
-                entries.append(
-                    (
-                        entry.name,
-                        os.stat(entry.name, dir_fd=descriptor, follow_symlinks=False),
-                    )
-                )
+        self._count_directory(depth)
+        entries = self._posix_entries(descriptor)
         if not _same_descriptor_identity(opened_directory, os.fstat(descriptor)):
             raise CorpusChanged("corpus directory descriptor changed during traversal")
-
-        directory_flags = _descriptor_flags(directory=True)
-        file_flags = _descriptor_flags(directory=False)
         for name, info in sorted(entries, key=lambda item: item[0]):
-            _check_deadline(self.deadline)
-            path = current / name
-            unsafe = stat.S_ISLNK(info.st_mode) or bool(
-                (getattr(info, "st_file_attributes", 0) or 0)
-                & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-            )
-            if unsafe:
-                raise PermissionError(f"unsafe corpus path: {path}")
-            if stat.S_ISDIR(info.st_mode):
-                is_archive = name in ARCHIVE_DIRECTORIES
-                excluded = (
-                    name in SKIP_DIRECTORIES
-                    or (is_archive and not self.include_archives)
-                    or (name.startswith(".") and not is_archive)
-                )
-                if excluded:
-                    continue
-                if depth >= self.max_depth:
-                    raise ValueError("corpus depth limit exceeded")
-                child = os.open(name, directory_flags, dir_fd=descriptor)
-                try:
-                    if not _same_descriptor_identity(info, os.fstat(child)):
-                        raise CorpusChanged("corpus child directory changed before open")
-                    self._walk_posix_directory(root, path, depth + 1, child, kind)
-                finally:
-                    os.close(child)
-                continue
-            if not stat.S_ISREG(info.st_mode) or not self._eligible(path, kind):
-                continue
-            source = os.open(name, file_flags, dir_fd=descriptor)
-            try:
-                if not _same_opened_object(info, os.fstat(source)):
-                    raise CorpusChanged("corpus source changed before descriptor open")
-                content = _read_bounded_descriptor(source, self.max_file_bytes)
-            finally:
-                os.close(source)
-            project = None
-            if kind == "project":
-                relative_project = path.relative_to(root).parts
-                project = relative_project[0] if len(relative_project) > 1 else None
-            self._store(path, kind, project, (), content)
+            self._posix_entry(root, current, depth, descriptor, kind, name, info)
+
+    def _posix_entry(
+        self,
+        root: Path,
+        current: Path,
+        depth: int,
+        descriptor: int,
+        kind: str,
+        name: str,
+        info: os.stat_result,
+    ) -> None:
+        _check_deadline(self.deadline)
+        path = current / name
+        _require_safe_entry(path, info, symlink=stat.S_ISLNK(info.st_mode))
+        if stat.S_ISDIR(info.st_mode):
+            self._posix_child(root, path, depth, descriptor, kind, name, info)
+            return
+        if stat.S_ISREG(info.st_mode) and self._eligible(path, kind):
+            self._posix_source(root, path, descriptor, kind, name, info)
+
+    def _posix_child(
+        self,
+        root: Path,
+        path: Path,
+        depth: int,
+        descriptor: int,
+        kind: str,
+        name: str,
+        info: os.stat_result,
+    ) -> None:
+        if self._directory_excluded(name):
+            return
+        if depth >= self.max_depth:
+            raise ValueError("corpus depth limit exceeded")
+        child = os.open(name, _descriptor_flags(directory=True), dir_fd=descriptor)
+        try:
+            if not _same_descriptor_identity(info, os.fstat(child)):
+                raise CorpusChanged("corpus child directory changed before open")
+            self._walk_posix_directory(root, path, depth + 1, child, kind)
+        finally:
+            os.close(child)
+
+    def _posix_source(
+        self,
+        root: Path,
+        path: Path,
+        descriptor: int,
+        kind: str,
+        name: str,
+        info: os.stat_result,
+    ) -> None:
+        source = os.open(name, _descriptor_flags(directory=False), dir_fd=descriptor)
+        try:
+            if not _same_opened_object(info, os.fstat(source)):
+                raise CorpusChanged("corpus source changed before descriptor open")
+            content = _read_bounded_descriptor(source, self.max_file_bytes)
+        finally:
+            os.close(source)
+        self._store(path, kind, self._project_of(path, root, kind), (), content)
 
     @staticmethod
     def _eligible(path: Path, kind: str) -> bool:
@@ -1097,6 +1297,57 @@ class _Discovery:
         if kind == "project":
             return path.name in PROJECT_FILES
         return True
+
+
+def _walk_knowledge(discovery: _Discovery, vault: Path) -> None:
+    discovery.walk(vault / "knowledge/notes", "note")
+    discovery.walk(vault / "knowledge/projects", "project")
+    # Session records are deliberately NOT collected. They are kept verbatim on
+    # disk, they are read by the nightly consolidation, and they are greppable —
+    # but they are not part of the retrieval corpus, because measurement says
+    # they take it over: importing 236 past sessions (about 10 MB of the same
+    # conversations the pages were compiled from) moved the vault stand from
+    # hit@5 0.7 to 0.0, and neither a below-neutral trust weight nor ordering
+    # compiled pages first brought it back past 0.4 — by then the decision page
+    # was no longer in the candidate pool at all.
+    #
+    # What would make them safe to index is a second tier consulted when the
+    # compiled pages do not answer, or a per-source quota in the pool. Neither is
+    # built, so the honest state is: kept, not indexed. See MEM-01 in
+    # docs/DEVELOPER-AUDIT-STATUS-2026-08-18.md.
+
+
+def _existing_path(vault: Path, relative: str) -> Path:
+    path = vault.joinpath(*PurePosixPath(relative).parts)
+    if not path.exists():
+        raise FileNotFoundError(relative)
+    return path
+
+
+def _add_daily_paths(
+    discovery: _Discovery, vault: Path, policy: SnapshotPolicy, deadline: float
+) -> None:
+    for relative in policy.daily_paths:
+        _check_deadline(deadline)
+        discovery.add(_existing_path(vault, relative), "daily")
+
+
+def _add_code_root(discovery: _Discovery, path: Path, relative: str) -> None:
+    info = _safe_info(path)
+    if stat.S_ISDIR(info.st_mode):
+        discovery.walk(path, "code")
+        return
+    if not stat.S_ISREG(info.st_mode):
+        raise PermissionError(f"code root must be a regular path: {relative}")
+    discovery.add(path, "code")
+
+
+def _add_code_roots(
+    discovery: _Discovery, vault: Path, policy: SnapshotPolicy, deadline: float
+) -> None:
+    for relative in policy.code_roots:
+        _check_deadline(deadline)
+        _add_code_root(discovery, _existing_path(vault, relative), relative)
 
 
 def _discover(vault: Path, policy: SnapshotPolicy, deadline: float) -> tuple[_Candidate, ...]:
@@ -1111,26 +1362,9 @@ def _discover(vault: Path, policy: SnapshotPolicy, deadline: float) -> tuple[_Ca
         deadline=deadline,
         include_archives=policy.include_historical or policy.as_of is not None,
     )
-    discovery.walk(vault / "knowledge/notes", "note")
-    discovery.walk(vault / "knowledge/projects", "project")
-    for relative in policy.daily_paths:
-        _check_deadline(deadline)
-        path = vault.joinpath(*PurePosixPath(relative).parts)
-        if not path.exists():
-            raise FileNotFoundError(relative)
-        discovery.add(path, "daily")
-    for relative in policy.code_roots:
-        _check_deadline(deadline)
-        path = vault.joinpath(*PurePosixPath(relative).parts)
-        if not path.exists():
-            raise FileNotFoundError(relative)
-        info = _safe_info(path)
-        if stat.S_ISDIR(info.st_mode):
-            discovery.walk(path, "code")
-        elif stat.S_ISREG(info.st_mode):
-            discovery.add(path, "code")
-        else:
-            raise PermissionError(f"code root must be a regular path: {relative}")
+    _walk_knowledge(discovery, vault)
+    _add_daily_paths(discovery, vault, policy, deadline)
+    _add_code_roots(discovery, vault, policy, deadline)
     return tuple(discovery.candidates[key] for key in sorted(discovery.candidates))
 
 
@@ -1157,6 +1391,26 @@ def _line_spans(content: bytes, start: int = 0) -> Iterable[tuple[int, int]]:
         offset = end
 
 
+def _frontmatter_close(
+    content: bytes,
+    lines,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> tuple[int, int] | None:
+    for line_start, line_end in lines:
+        _check_processing_stop(deadline, cancelled)
+        if content[line_start:line_end].strip() == b"---":
+            return line_start, line_end
+    return None
+
+
+def _frontmatter_mapping(raw: bytes) -> dict[str, Any]:
+    value = yaml.safe_load(raw.decode("utf-8", errors="strict"))
+    if not isinstance(value, Mapping):
+        raise ValueError("frontmatter must be a mapping")
+    return dict(value)
+
+
 def _frontmatter(
     content: bytes,
     *,
@@ -1165,37 +1419,26 @@ def _frontmatter(
 ) -> tuple[dict[str, Any], int]:
     content.decode("utf-8", errors="strict")
     lines = iter(_line_spans(content))
-    try:
-        first_start, first_end = next(lines)
-    except StopIteration:
+    first = next(lines, None)
+    if first is None or content[first[0] : first[1]].strip() != b"---":
         return {}, 0
-    if content[first_start:first_end].strip() != b"---":
-        return {}, 0
-    frontmatter_start = first_end
-    frontmatter_end = None
-    searchable_start = None
-    for line_start, line_end in lines:
-        _check_processing_stop(deadline, cancelled)
-        if content[line_start:line_end].strip() == b"---":
-            frontmatter_end = line_start
-            searchable_start = line_end
-            break
-    if frontmatter_end is None or searchable_start is None:
+    closing = _frontmatter_close(content, lines, deadline, cancelled)
+    if closing is None:
         raise ValueError("unterminated YAML frontmatter")
-    frontmatter_bytes = content[frontmatter_start:frontmatter_end]
-    value = yaml.safe_load(frontmatter_bytes.decode("utf-8", errors="strict"))
-    if not isinstance(value, Mapping):
-        raise ValueError("frontmatter must be a mapping")
-    return dict(value), searchable_start
+    return _frontmatter_mapping(content[first[1] : closing[0]]), closing[1]
+
+
+def _utc_text(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _metadata_value(value: object) -> str | None:
     if value is None:
         return None
     if isinstance(value, datetime):
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        return _utc_text(value)
     if isinstance(value, date):
         return value.isoformat()
     if isinstance(value, (str, int, float, bool)):
@@ -1203,78 +1446,135 @@ def _metadata_value(value: object) -> str | None:
     raise ValueError("corpus metadata values must be scalar")
 
 
-def _metadata(frontmatter: Mapping[str, object], candidate: _Candidate) -> SourceMetadata:
+_DEFAULT_SOURCE_TYPES = {
+    "note": "note",
+    "daily": "daily-evidence",
+    "session": "session-evidence",
+    "code": "code",
+}
+
+
+# Prose under a code root is commentary, not code: research notes, status
+# registers, design write-ups. Calling it `code` gave it the neutral trust
+# weight, and on this vault the audit register — one long Russian document that
+# discusses every decision — then outranked the decision pages themselves.
+_PROSE_SUFFIXES = frozenset({".md", ".markdown", ".rst", ".txt"})
+
+
+def _default_source_type(candidate: _Candidate) -> str:
+    if candidate.kind == "project":
+        return _project_source_type(candidate)
+    if candidate.kind == "code" and candidate.path.suffix.casefold() in _PROSE_SUFFIXES:
+        return "doc"
+    return _DEFAULT_SOURCE_TYPES[candidate.kind]
+
+
+def _project_source_type(candidate: _Candidate) -> str:
+    if candidate.path.name == "state.md":
+        return "project-state"
+    return "project-context"
+
+
+def _validity_mapping(frontmatter: Mapping[str, object]) -> Mapping[str, object]:
     validity = frontmatter.get("validity", {})
     if validity is None:
-        validity = {}
+        return {}
     if not isinstance(validity, Mapping):
         raise ValueError("validity metadata must be a mapping")
-    default_type = {
-        "note": "note",
-        "project": "project-state" if candidate.path.name == "state.md" else "project-context",
-        "daily": "daily-evidence",
-        "code": "code",
-    }[candidate.kind]
-    status = (_metadata_value(frontmatter.get("status")) or "active").casefold()
+    return validity
+
+
+def _metadata_status(frontmatter: Mapping[str, object]) -> str:
+    return (_metadata_value(frontmatter.get("status")) or "active").casefold()
+
+
+def _metadata_language(frontmatter: Mapping[str, object]) -> str | None:
     language = _metadata_value(frontmatter.get("language") or frontmatter.get("lang"))
+    if not language:
+        return None
+    return language.casefold()
+
+
+def _metadata(frontmatter: Mapping[str, object], candidate: _Candidate) -> SourceMetadata:
+    validity = _validity_mapping(frontmatter)
     return SourceMetadata(
-        type=_metadata_value(frontmatter.get("type")) or default_type,
+        type=_metadata_value(frontmatter.get("type")) or _default_source_type(candidate),
         project=_metadata_value(frontmatter.get("project")) or candidate.project,
         authority=_metadata_value(
             frontmatter.get("source_authority", frontmatter.get("authority"))
         ),
         confidence=_metadata_value(frontmatter.get("confidence")),
-        status=status,
+        status=_metadata_status(frontmatter),
         valid_from=_metadata_value(
             frontmatter.get("valid_from", validity.get("from"))
         ),
         valid_to=_metadata_value(frontmatter.get("valid_to", validity.get("to"))),
-        language=language.casefold() if language else None,
+        language=_metadata_language(frontmatter),
     )
+
+
+def _parsed_iso(text: str) -> datetime:
+    normalized = text.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        return datetime.combine(date.fromisoformat(normalized), datetime_time.min)
+
+
+def _naive_datetime(value: str | date | datetime) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime.combine(value, datetime_time.min)
+    if isinstance(value, str):
+        return _parsed_iso(value)
+    raise ValueError("as_of and validity values must be ISO dates or datetimes")
 
 
 def _as_datetime(value: str | date | datetime | None) -> datetime | None:
     if value is None:
         return None
-    if isinstance(value, datetime):
-        result = value
-    elif isinstance(value, date):
-        result = datetime.combine(value, datetime_time.min)
-    elif isinstance(value, str):
-        normalized = value.strip()
-        if normalized.endswith("Z"):
-            normalized = normalized[:-1] + "+00:00"
-        try:
-            result = datetime.fromisoformat(normalized)
-        except ValueError:
-            parsed_date = date.fromisoformat(normalized)
-            result = datetime.combine(parsed_date, datetime_time.min)
-    else:
-        raise ValueError("as_of and validity values must be ISO dates or datetimes")
+    result = _naive_datetime(value)
     if result.tzinfo is None:
         result = result.replace(tzinfo=timezone.utc)
     return result.astimezone(timezone.utc)
 
 
-def _included(metadata: SourceMetadata, policy: SnapshotPolicy) -> bool:
-    if policy.as_of is None:
-        return policy.include_historical or metadata.status in {"", "active"}
-    instant = _as_datetime(policy.as_of)
-    assert instant is not None
+def _within_validity(metadata: SourceMetadata, instant: datetime) -> bool:
     start = _as_datetime(metadata.valid_from)
     end = _as_datetime(metadata.valid_to)
-    return (start is None or start <= instant) and (end is None or instant < end)
+    if start is not None and start > instant:
+        return False
+    return end is None or instant < end
+
+
+def _included(metadata: SourceMetadata, policy: SnapshotPolicy) -> bool:
+    if policy.as_of is None:
+        return policy.include_historical or not is_retired(metadata.status)
+    instant = _as_datetime(policy.as_of)
+    assert instant is not None
+    return _within_validity(metadata, instant)
+
+
+def _dominant(count: int, others: tuple[int, ...]) -> bool:
+    return bool(count) and all(count >= other for other in others)
+
+
+def _latin_only(latin: int, cyrillic: int, han: int) -> bool:
+    return latin >= 3 and not cyrillic and not han
 
 
 def _infer_language(text: str) -> str | None:
     cyrillic = len(_CYRILLIC.findall(text))
     han = len(_HAN.findall(text))
     latin = len(_LATIN.findall(text))
-    if cyrillic and cyrillic >= han and cyrillic >= latin:
+    if _dominant(cyrillic, (han, latin)):
         return "ru"
-    if han and han >= cyrillic and han >= latin:
+    if _dominant(han, (cyrillic, latin)):
         return "zh"
-    if latin >= 3 and not cyrillic and not han:
+    if _latin_only(latin, cyrillic, han):
         return "en"
     return None
 
@@ -1288,6 +1588,59 @@ def _clean_heading(raw: bytes | None) -> str:
     return _CLOSING_HASHES.sub("", title)
 
 
+def _closing_fence(body: bytes, character: bytes, length: int) -> bool:
+    pattern = (
+        rb"[ ]{0,3}"
+        + re.escape(character)
+        + rb"{" + str(length).encode("ascii") + rb",}[ \t]*"
+    )
+    return re.fullmatch(pattern, body) is not None
+
+
+def _opening_fence(body: bytes):
+    """The fence that opens a block, or None — a backtick in the info string is not one."""
+    opening = _FENCE.fullmatch(body)
+    if opening is None:
+        return None
+    if opening.group(1).startswith(b"`") and b"`" in opening.group(2):
+        return None
+    return opening
+
+
+class _HeadingScan:
+    """The fence state machine that decides which lines may be headings."""
+
+    def __init__(self) -> None:
+        self.character: bytes | None = None
+        self.length = 0
+        self.headings: list[re.Match[bytes]] = []
+
+    def line(self, content: bytes, offset: int, end: int) -> None:
+        body = content[offset:end].rstrip(b"\r\n")
+        if self.character is not None:
+            self._maybe_close(body)
+            return
+        opening = _opening_fence(body)
+        if opening is not None:
+            self.character = opening.group(1)[:1]
+            self.length = len(opening.group(1))
+            return
+        self._maybe_heading(content, offset, end)
+
+    def _maybe_close(self, body: bytes) -> None:
+        if _closing_fence(body, self.character, self.length):
+            self.character = None
+            self.length = 0
+
+    def _maybe_heading(self, content: bytes, offset: int, end: int) -> None:
+        heading = _HEADING.match(content, offset, end)
+        if heading is None:
+            return
+        if len(self.headings) >= MAX_CORPUS_HEADINGS:
+            raise ValueError("corpus heading row ceiling exceeded")
+        self.headings.append(heading)
+
+
 def _markdown_headings(
     content: bytes,
     start: int,
@@ -1295,37 +1648,57 @@ def _markdown_headings(
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
 ) -> list[re.Match[bytes]]:
-    headings: list[re.Match[bytes]] = []
-    fence_character: bytes | None = None
-    fence_length = 0
+    scan = _HeadingScan()
     for offset, end in _line_spans(content, start):
         _check_processing_stop(deadline, cancelled)
-        line = content[offset:end]
-        body = line.rstrip(b"\r\n")
-        if fence_character is not None:
-            closing = re.fullmatch(
-                rb"[ ]{0,3}"
-                + re.escape(fence_character)
-                + rb"{" + str(fence_length).encode("ascii") + rb",}[ \t]*",
-                body,
-            )
-            if closing:
-                fence_character = None
-                fence_length = 0
-        else:
-            opening = _FENCE.fullmatch(body)
-            if opening and not (
-                opening.group(1).startswith(b"`") and b"`" in opening.group(2)
-            ):
-                fence_character = opening.group(1)[:1]
-                fence_length = len(opening.group(1))
-            else:
-                heading = _HEADING.match(content, offset, offset + len(line))
-                if heading:
-                    if len(headings) >= MAX_CORPUS_HEADINGS:
-                        raise ValueError("corpus heading row ceiling exceeded")
-                    headings.append(heading)
-    return headings
+        scan.line(content, offset, end)
+    return scan.headings
+
+
+def _headings_when_enabled(
+    content: bytes,
+    searchable_start: int,
+    heading_enabled: bool,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[re.Match[bytes]]:
+    if not heading_enabled:
+        return []
+    return _markdown_headings(
+        content, searchable_start, deadline=deadline, cancelled=cancelled
+    )
+
+
+def _leading_span(
+    content: bytes, searchable_start: int, first_heading: int
+) -> list[tuple[int, int, tuple[str, ...]]]:
+    if content[searchable_start:first_heading].strip():
+        return [(searchable_start, first_heading, ())]
+    return []
+
+
+def _heading_end(headings: list[re.Match[bytes]], index: int, content: bytes) -> int:
+    if index + 1 < len(headings):
+        return headings[index + 1].start()
+    return len(content)
+
+
+def _updated_ancestry(
+    ancestry: list[tuple[int, str]], level: int, title: str
+) -> list[tuple[int, str]]:
+    kept = [item for item in ancestry if item[0] < level]
+    kept.append((level, title))
+    return kept
+
+
+def _append_heading_span(
+    spans: list, content: bytes, heading: re.Match[bytes], end: int, ancestry: list
+) -> None:
+    if not content[heading.start():end].strip():
+        return
+    if len(spans) >= MAX_CORPUS_CHUNKS:
+        raise ValueError("corpus chunk row ceiling exceeded")
+    spans.append((heading.start(), end, tuple(item[1] for item in ancestry)))
 
 
 def _retrieval_spans(
@@ -1336,33 +1709,38 @@ def _retrieval_spans(
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
 ) -> tuple[tuple[int, int, tuple[str, ...]], ...]:
-    headings = (
-        _markdown_headings(
-            content,
-            searchable_start,
-            deadline=deadline,
-            cancelled=cancelled,
-        )
-        if heading_enabled
-        else []
+    headings = _headings_when_enabled(
+        content, searchable_start, heading_enabled, deadline, cancelled
     )
-    spans: list[tuple[int, int, tuple[str, ...]]] = []
     first_heading = headings[0].start() if headings else len(content)
-    if content[searchable_start:first_heading].strip():
-        spans.append((searchable_start, first_heading, ()))
+    spans = _leading_span(content, searchable_start, first_heading)
     ancestry: list[tuple[int, str]] = []
     for index, heading in enumerate(headings):
         _check_processing_stop(deadline, cancelled)
-        level = len(heading.group(1))
-        title = _clean_heading(heading.group(2))
-        ancestry = [item for item in ancestry if item[0] < level]
-        ancestry.append((level, title))
-        end = headings[index + 1].start() if index + 1 < len(headings) else len(content)
-        if content[heading.start():end].strip():
-            if len(spans) >= MAX_CORPUS_CHUNKS:
-                raise ValueError("corpus chunk row ceiling exceeded")
-            spans.append((heading.start(), end, tuple(item[1] for item in ancestry)))
+        ancestry = _updated_ancestry(
+            ancestry, len(heading.group(1)), _clean_heading(heading.group(2))
+        )
+        _append_heading_span(
+            spans, content, heading, _heading_end(headings, index, content), ancestry
+        )
     return tuple(spans)
+
+
+def _markdown_head(
+    source_path: str,
+    content: bytes,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> tuple[bool, int, dict[str, Any]]:
+    """(is markdown, where the searchable text starts, the frontmatter)."""
+    is_markdown = PurePosixPath(source_path).suffix.casefold() == ".md"
+    if not is_markdown:
+        content.decode("utf-8", errors="strict")
+        return False, 0, {}
+    frontmatter, searchable_start = _frontmatter(
+        content, deadline=deadline, cancelled=cancelled
+    )
+    return True, searchable_start, frontmatter
 
 
 def canonical_retrieval_spans(
@@ -1377,14 +1755,9 @@ def canonical_retrieval_spans(
         raise ValueError("source_path must be a non-empty string")
     if not isinstance(content, bytes) or len(content) > MAX_CORPUS_FILE_BYTES:
         raise ValueError("captured retrieval source must be bounded bytes")
-    is_markdown = PurePosixPath(source_path).suffix.casefold() == ".md"
-    if is_markdown:
-        _frontmatter_value, searchable_start = _frontmatter(
-            content, deadline=deadline, cancelled=cancelled
-        )
-    else:
-        content.decode("utf-8", errors="strict")
-        searchable_start = 0
+    is_markdown, searchable_start, _frontmatter_value = _markdown_head(
+        source_path, content, deadline, cancelled
+    )
     return _retrieval_spans(
         content,
         searchable_start,
@@ -1453,6 +1826,68 @@ def _chunks(
     return tuple(result)
 
 
+_SOURCE_KIND_PREFIXES = (
+    (("knowledge", "raw", "sessions"), "session"),
+    (("knowledge", "notes"), "note"),
+    (("knowledge", "daily"), "daily"),
+)
+
+
+def _project_part(path: PurePosixPath) -> str | None:
+    if len(path.parts) > 3:
+        return path.parts[2]
+    return None
+
+
+def _source_kind(path: PurePosixPath) -> tuple[str, str | None]:
+    for prefix, kind in _SOURCE_KIND_PREFIXES:
+        if path.parts[: len(prefix)] == prefix:
+            return kind, None
+    if path.parts[:2] == ("knowledge", "projects"):
+        return "project", _project_part(path)
+    return "code", None
+
+
+def _require_canonical_source(
+    source_id: str,
+    source_path: str,
+    path: PurePosixPath,
+    content: bytes,
+    source_sha256: str,
+) -> None:
+    if not source_id or source_id != f"source:{source_path}" or not path.parts:
+        raise ValueError("source identity is not canonical")
+    if _sha256(content) != source_sha256:
+        raise ValueError("source bytes do not match their canonical hash")
+
+
+def _canonical_source_record(
+    source_id: str,
+    source_path: str,
+    source_sha256: str,
+    content: bytes,
+    *,
+    is_markdown: bool,
+    metadata: SourceMetadata,
+    candidate: _Candidate,
+    searchable_start: int,
+) -> SourceRecord:
+    language = _classify_language(
+        explicit=metadata.language,
+        path=candidate.path,
+        text=content[searchable_start:].decode("utf-8", errors="strict"),
+    )
+    return SourceRecord(
+        source_id,
+        source_path,
+        source_sha256,
+        len(content),
+        "text/markdown" if is_markdown else "text/plain",
+        language,
+        None,
+    )
+
+
 def canonical_retrieval_chunks(
     *,
     source_id: str,
@@ -1465,42 +1900,22 @@ def canonical_retrieval_chunks(
 ) -> tuple[RetrievalChunk, ...]:
     """Reconstruct every canonical chunk field from authoritative source bytes."""
     path = PurePosixPath(source_path)
-    if not source_id or source_id != f"source:{source_path}" or not path.parts:
-        raise ValueError("source identity is not canonical")
-    if _sha256(content) != source_sha256:
-        raise ValueError("source bytes do not match their canonical hash")
-    if path.parts[:2] == ("knowledge", "notes"):
-        kind, project = "note", None
-    elif path.parts[:2] == ("knowledge", "projects"):
-        kind = "project"
-        project = path.parts[2] if len(path.parts) > 3 else None
-    elif path.parts[:2] == ("knowledge", "daily"):
-        kind, project = "daily", None
-    else:
-        kind, project = "code", None
-    is_markdown = path.suffix.casefold() == ".md"
-    if is_markdown:
-        frontmatter, searchable_start = _frontmatter(
-            content, deadline=deadline, cancelled=cancelled
-        )
-    else:
-        content.decode("utf-8", errors="strict")
-        frontmatter, searchable_start = {}, 0
+    _require_canonical_source(source_id, source_path, path, content, source_sha256)
+    kind, project = _source_kind(path)
+    is_markdown, searchable_start, frontmatter = _markdown_head(
+        source_path, content, deadline, cancelled
+    )
     candidate = _Candidate(Path(*path.parts), source_path, kind, project, ())
     metadata = _metadata(frontmatter, candidate)
-    language = _classify_language(
-        explicit=metadata.language,
-        path=candidate.path,
-        text=content[searchable_start:].decode("utf-8", errors="strict"),
-    )
-    source = SourceRecord(
+    source = _canonical_source_record(
         source_id,
         source_path,
         source_sha256,
-        len(content),
-        "text/markdown" if is_markdown else "text/plain",
-        language,
-        None,
+        content,
+        is_markdown=is_markdown,
+        metadata=metadata,
+        candidate=candidate,
+        searchable_start=searchable_start,
     )
     return _chunks(
         source,
@@ -1531,6 +1946,32 @@ def _normalize_explicit_paths(
     return tuple(sorted(normalized))
 
 
+def _require_daily_files(normalized_daily: tuple[str, ...]) -> None:
+    for path in normalized_daily:
+        if not path.endswith(".md") or path == "knowledge/daily":
+            raise ValueError("daily evidence must name an explicit Markdown file")
+
+
+def _require_no_nested_root(root: str, others: tuple[str, ...]) -> None:
+    for other in others:
+        if other.startswith(root + "/"):
+            raise ValueError(f"overlapping code roots are forbidden: {root}, {other}")
+
+
+def _require_disjoint_roots(normalized_code: tuple[str, ...]) -> None:
+    for index, root in enumerate(normalized_code):
+        _require_no_nested_root(root, normalized_code[index + 1 :])
+
+
+def _as_of_text(as_of: str | date | datetime | None) -> str | None:
+    value = _metadata_value(as_of)
+    if value is None:
+        return None
+    parsed = _as_datetime(value)
+    assert parsed is not None
+    return parsed.isoformat().replace("+00:00", "Z")
+
+
 def _policy(
     *,
     daily_paths: Iterable[str | Path],
@@ -1551,26 +1992,16 @@ def _policy(
         lambda path: _relative_posix(path, prefixes=("knowledge/daily",)),
         label="daily evidence path",
     )
-    for path in normalized_daily:
-        if not path.endswith(".md") or path == "knowledge/daily":
-            raise ValueError("daily evidence must name an explicit Markdown file")
+    _require_daily_files(normalized_daily)
     normalized_code = _normalize_explicit_paths(
         code_roots, _code_root, label="code root"
     )
-    for index, root in enumerate(normalized_code):
-        for other in normalized_code[index + 1 :]:
-            if other.startswith(root + "/"):
-                raise ValueError(f"overlapping code roots are forbidden: {root}, {other}")
-    as_of_value = _metadata_value(as_of)
-    if as_of_value is not None:
-        parsed = _as_datetime(as_of_value)
-        assert parsed is not None
-        as_of_value = parsed.isoformat().replace("+00:00", "Z")
+    _require_disjoint_roots(normalized_code)
     return SnapshotPolicy(
         daily_paths=normalized_daily,
         code_roots=normalized_code,
         include_historical=include_historical,
-        as_of=as_of_value,
+        as_of=_as_of_text(as_of),
         max_files=_positive_limit(max_files, "max_files"),
         max_file_bytes=_positive_limit(max_file_bytes, "max_file_bytes"),
         max_total_bytes=_positive_limit(max_total_bytes, "max_total_bytes"),
@@ -1580,6 +2011,129 @@ def _policy(
     )
 
 
+def _candidate_content(candidate: _Candidate, policy: SnapshotPolicy, label: str) -> bytes:
+    if candidate.content is not None:
+        return candidate.content
+    _verify_seal(candidate.seal)
+    content = read_stable_bytes(candidate.path, policy.max_file_bytes, label=label)
+    _verify_seal(candidate.seal)
+    return content
+
+
+def _captured_record(
+    candidate: _Candidate,
+    content: bytes,
+    metadata: SourceMetadata,
+    is_markdown: bool,
+    searchable_start: int,
+    digest: str,
+) -> SourceRecord:
+    language = _classify_language(
+        explicit=metadata.language,
+        path=candidate.path,
+        text=content[searchable_start:].decode("utf-8", errors="strict"),
+    )
+    return SourceRecord(
+        logical_id=f"source:{candidate.relative}",
+        relative_path=candidate.relative,
+        sha256=digest,
+        size=len(content),
+        media_type="text/markdown" if is_markdown else "text/plain",
+        language=language,
+        git_oid=None,
+    )
+
+
+class _Capture:
+    """Accumulates captured sources and their chunks under the policy limits."""
+
+    def __init__(
+        self,
+        policy: SnapshotPolicy,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> None:
+        self.policy = policy
+        self.deadline = deadline
+        self.cancelled = cancelled
+        self.captured: list[CapturedSource] = []
+        self.chunks: list[RetrievalChunk] = []
+        self.hashes: dict[str, str] = {}
+        self.total = 0
+
+    def add(self, candidate: _Candidate) -> None:
+        content = _candidate_content(candidate, self.policy, "corpus source")
+        self._count_bytes(len(content))
+        is_markdown = candidate.path.suffix.casefold() == ".md"
+        readable = is_markdown or _decodes_as_utf8(content)
+        frontmatter, searchable_start = self._head(content, is_markdown)
+        metadata = _metadata(frontmatter, candidate)
+        digest = _sha256(content)
+        self.hashes[candidate.relative] = digest
+        if readable and _included(metadata, self.policy):
+            self._store(candidate, content, metadata, is_markdown, searchable_start, digest)
+
+    def _head(self, content: bytes, is_markdown: bool) -> tuple[dict[str, Any], int]:
+        if not is_markdown:
+            return {}, 0
+        return _frontmatter(content, deadline=self.deadline, cancelled=self.cancelled)
+
+    def _count_bytes(self, size: int) -> None:
+        self.total += size
+        if self.total > self.policy.max_total_bytes:
+            raise ValueError("corpus total byte limit exceeded")
+
+    def _store(
+        self,
+        candidate: _Candidate,
+        content: bytes,
+        metadata: SourceMetadata,
+        is_markdown: bool,
+        searchable_start: int,
+        digest: str,
+    ) -> None:
+        record = _captured_record(
+            candidate, content, metadata, is_markdown, searchable_start, digest
+        )
+        self.captured.append(CapturedSource(record, metadata, content))
+        source_chunks = _chunks(
+            record,
+            metadata,
+            content,
+            searchable_start,
+            heading_enabled=is_markdown,
+            deadline=self.deadline,
+            cancelled=self.cancelled,
+        )
+        if len(self.chunks) + len(source_chunks) > MAX_CORPUS_CHUNKS:
+            raise ValueError("corpus chunk row ceiling exceeded")
+        self.chunks.extend(source_chunks)
+
+
+def _require_stable_membership(
+    candidates: tuple[_Candidate, ...], current: tuple[_Candidate, ...]
+) -> None:
+    if tuple(item.relative for item in candidates) != tuple(
+        item.relative for item in current
+    ):
+        raise CorpusChanged("corpus membership changed during collection")
+
+
+def _require_stable_content(
+    current: tuple[_Candidate, ...],
+    policy: SnapshotPolicy,
+    hashes: dict[str, str],
+    deadline: float,
+) -> None:
+    for candidate in current:
+        _check_deadline(deadline)
+        content = _candidate_content(candidate, policy, "corpus validation source")
+        if _sha256(content) != hashes[candidate.relative]:
+            raise CorpusChanged(
+                f"corpus source changed during collection: {candidate.relative}"
+            )
+
+
 def _capture(
     vault: Path,
     policy: SnapshotPolicy,
@@ -1587,88 +2141,20 @@ def _capture(
     cancelled: Callable[[], bool] | None,
 ) -> CorpusSnapshot:
     candidates = _discover(vault, policy, deadline)
-    captured: list[CapturedSource] = []
-    chunks: list[RetrievalChunk] = []
-    first_hashes: dict[str, str] = {}
-    total = 0
+    capture = _Capture(policy, deadline, cancelled)
     for candidate in candidates:
         _check_deadline(deadline)
-        if candidate.content is not None:
-            content = candidate.content
-        else:
-            _verify_seal(candidate.seal)
-            content = read_stable_bytes(
-                candidate.path, policy.max_file_bytes, label="corpus source"
-            )
-            _verify_seal(candidate.seal)
-        total += len(content)
-        if total > policy.max_total_bytes:
-            raise ValueError("corpus total byte limit exceeded")
-        is_markdown = candidate.path.suffix.casefold() == ".md"
-        readable = is_markdown or _decodes_as_utf8(content)
-        if is_markdown:
-            frontmatter, searchable_start = _frontmatter(
-                content, deadline=deadline, cancelled=cancelled
-            )
-        else:
-            frontmatter, searchable_start = {}, 0
-        metadata = _metadata(frontmatter, candidate)
-        digest = _sha256(content)
-        first_hashes[candidate.relative] = digest
-        if not readable or not _included(metadata, policy):
-            continue
-        language = _classify_language(
-            explicit=metadata.language,
-            path=candidate.path,
-            text=content[searchable_start:].decode("utf-8", errors="strict"),
-        )
-        record = SourceRecord(
-            logical_id=f"source:{candidate.relative}",
-            relative_path=candidate.relative,
-            sha256=digest,
-            size=len(content),
-            media_type="text/markdown" if is_markdown else "text/plain",
-            language=language,
-            git_oid=None,
-        )
-        captured_source = CapturedSource(record, metadata, content)
-        captured.append(captured_source)
-        source_chunks = _chunks(
-            record,
-            metadata,
-            content,
-            searchable_start,
-            heading_enabled=is_markdown,
-            deadline=deadline,
-            cancelled=cancelled,
-        )
-        if len(chunks) + len(source_chunks) > MAX_CORPUS_CHUNKS:
-            raise ValueError("corpus chunk row ceiling exceeded")
-        chunks.extend(source_chunks)
-
+        capture.add(candidate)
     _check_deadline(deadline)
     current = _discover(vault, policy, deadline)
-    if tuple(candidate.relative for candidate in candidates) != tuple(
-        candidate.relative for candidate in current
-    ):
-        raise CorpusChanged("corpus membership changed during collection")
-    for candidate in current:
-        _check_deadline(deadline)
-        if candidate.content is not None:
-            current_content = candidate.content
-        else:
-            _verify_seal(candidate.seal)
-            current_content = read_stable_bytes(
-                candidate.path, policy.max_file_bytes, label="corpus validation source"
-            )
-            _verify_seal(candidate.seal)
-        if _sha256(current_content) != first_hashes[candidate.relative]:
-            raise CorpusChanged(f"corpus source changed during collection: {candidate.relative}")
-
+    _require_stable_membership(candidates, current)
+    _require_stable_content(current, policy, capture.hashes, deadline)
     corpus_hash = canonical_source_manifest_sha256(
-        (source.record for source in captured), policy
+        (source.record for source in capture.captured), policy
     )
-    return CorpusSnapshot(tuple(captured), tuple(chunks), corpus_hash, policy)
+    return CorpusSnapshot(
+        tuple(capture.captured), tuple(capture.chunks), corpus_hash, policy
+    )
 
 
 def collect_corpus(
@@ -1717,6 +2203,30 @@ def collect_corpus(
         return _capture(root, selected_policy, selected_deadline, cancelled)
 
 
+def _override(value: object, fallback: object) -> object:
+    if value is None:
+        return fallback
+    return value
+
+
+def _snapshot_settings(
+    policy: SnapshotPolicy, values: Mapping[str, object]
+) -> dict[str, object]:
+    defaults = {
+        "daily_paths": policy.daily_paths,
+        "code_roots": policy.code_roots,
+        "include_historical": policy.include_historical,
+        "as_of": policy.as_of,
+        "max_files": policy.max_files,
+        "max_file_bytes": policy.max_file_bytes,
+        "max_total_bytes": policy.max_total_bytes,
+        "max_entries": policy.max_entries,
+        "max_directories": policy.max_directories,
+        "max_depth": policy.max_depth,
+    }
+    return {key: _override(values.get(key), default) for key, default in defaults.items()}
+
+
 def validate_live_snapshot(
     snapshot: CorpusSnapshot,
     vault: Path,
@@ -1739,30 +2249,25 @@ def validate_live_snapshot(
     """Rediscover and hash the live corpus immediately before publication."""
     if not isinstance(snapshot, CorpusSnapshot):
         raise TypeError("snapshot must be a CorpusSnapshot")
-    policy = snapshot.policy
+    settings = _snapshot_settings(
+        snapshot.policy,
+        {
+            "daily_paths": daily_paths,
+            "code_roots": code_roots,
+            "include_historical": include_historical,
+            "as_of": as_of,
+            "max_files": max_files,
+            "max_file_bytes": max_file_bytes,
+            "max_total_bytes": max_total_bytes,
+            "max_entries": max_entries,
+            "max_directories": max_directories,
+            "max_depth": max_depth,
+        },
+    )
     try:
         live = collect_corpus(
             vault,
-            daily_paths=policy.daily_paths if daily_paths is None else daily_paths,
-            code_roots=policy.code_roots if code_roots is None else code_roots,
-            include_historical=(
-                policy.include_historical
-                if include_historical is None
-                else include_historical
-            ),
-            as_of=policy.as_of if as_of is None else as_of,
-            max_files=policy.max_files if max_files is None else max_files,
-            max_file_bytes=(
-                policy.max_file_bytes if max_file_bytes is None else max_file_bytes
-            ),
-            max_total_bytes=(
-                policy.max_total_bytes if max_total_bytes is None else max_total_bytes
-            ),
-            max_entries=policy.max_entries if max_entries is None else max_entries,
-            max_directories=(
-                policy.max_directories if max_directories is None else max_directories
-            ),
-            max_depth=policy.max_depth if max_depth is None else max_depth,
+            **settings,
             deadline=deadline,
             deadline_seconds=deadline_seconds,
             coordinator=coordinator,

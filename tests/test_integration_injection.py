@@ -2274,7 +2274,7 @@ def test_codex_installers_use_official_hooks_and_request_trust_review():
     for installer in (shell, powershell):
         assert "integrations/codex/hooks.json" in installer.replace("\\", "/")
         assert "codex_memory.py" in installer
-        assert "merge-hooks" in installer
+        assert "hooks-state" in installer
         assert "--config" in installer
         assert "/hooks" in installer
         assert "trust" in installer.casefold()
@@ -3410,29 +3410,35 @@ def test_windows_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scena
     assert config.read_text(encoding="utf-8").count("[mcp_servers.") == 1
 
 
-def test_unix_installer_hook_function_executes_in_temp_home(tmp_path):
+def test_unix_installer_probe_reports_absent_without_touching_the_file(tmp_path):
+    """The probe replaced a merge: it must answer and change nothing.
+
+    The installer asks this before the ownership transaction and owns
+    `hooks.json` only when the answer is `absent`.
+    """
     bash = Path(r"C:\Program Files\Git\bin\bash.exe")
     if not bash.exists():
         pytest.skip("Git Bash unavailable")
     source = (ROOT / "install.sh").read_text(encoding="utf-8")
-    function = _shell_function(source, "install_codex_hooks")
+    function = _shell_function(source, "codex_inline_hooks_state")
     home = tmp_path / "home"
     codex_dir = home / ".codex"
     codex_dir.mkdir(parents=True)
     (codex_dir / "config.toml").write_text('model = "gpt-5.6"\n', encoding="utf-8")
-    (codex_dir / "hooks.json").write_text(
+    destination = codex_dir / "hooks.json"
+    destination.write_text(
         '{"custom":true,"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo user"}]}]}}\n',
         encoding="utf-8",
     )
+    before = destination.read_bytes()
     runner = tmp_path / "installer-contract.sh"
     runner.write_text(
         function
         + "\nuv() {\n"
-        + "  while [[ $# -gt 0 && $1 != merge-hooks ]]; do shift; done\n"
+        + "  while [[ $# -gt 0 && $1 != hooks-state ]]; do shift; done\n"
         + '  command "$TEST_PYTHON" "$TEST_VAULT/scripts/codex_memory.py" "$@"\n'
         + "}\n"
-        + 'install_codex_hooks "$TEST_VAULT" "$HOME/.codex"\n'
-        + 'install_codex_hooks "$TEST_VAULT" "$HOME/.codex"\n',
+        + 'codex_inline_hooks_state "$TEST_VAULT" "$HOME/.codex"\n',
         encoding="utf-8",
     )
     env = os.environ.copy()
@@ -3447,19 +3453,15 @@ def test_unix_installer_hook_function_executes_in_temp_home(tmp_path):
         check=False,
     )
 
-    assert result.returncode == 0, result.stderr
-    merged = json.loads((codex_dir / "hooks.json").read_text(encoding="utf-8"))
-    assert merged["custom"] is True
-    assert len(_codex_memory_handlers(merged)) == 4
-    assert "echo user" in _stop_hook_commands(merged)
+    assert result.stdout.strip() == "absent"
+    assert destination.read_bytes() == before
 
-
-def test_unix_installer_preserves_json_when_unrelated_inline_hooks_exist(tmp_path):
+def test_unix_installer_probe_reports_conflict_for_unrelated_inline_hooks(tmp_path):
     bash = Path(r"C:\Program Files\Git\bin\bash.exe")
     if not bash.exists():
         pytest.skip("Git Bash unavailable")
     function = _shell_function(
-        (ROOT / "install.sh").read_text(encoding="utf-8"), "install_codex_hooks"
+        (ROOT / "install.sh").read_text(encoding="utf-8"), "codex_inline_hooks_state"
     )
     home = tmp_path / "home"
     codex_dir = home / ".codex"
@@ -3475,11 +3477,10 @@ def test_unix_installer_preserves_json_when_unrelated_inline_hooks_exist(tmp_pat
     runner.write_text(
         function
         + "\nuv() {\n"
-        + "  while [[ $# -gt 0 && $1 != merge-hooks ]]; do shift; done\n"
+        + "  while [[ $# -gt 0 && $1 != hooks-state ]]; do shift; done\n"
         + '  command "$TEST_PYTHON" "$TEST_VAULT/scripts/codex_memory.py" "$@"\n'
         + "}\nset +e\n"
-        + 'install_codex_hooks "$TEST_VAULT" "$HOME/.codex"\n'
-        + "exit $?\n",
+        + 'codex_inline_hooks_state "$TEST_VAULT" "$HOME/.codex"\n',
         encoding="utf-8",
     )
     env = os.environ.copy()
@@ -3494,21 +3495,22 @@ def test_unix_installer_preserves_json_when_unrelated_inline_hooks_exist(tmp_pat
         check=False,
     )
 
-    assert result.returncode == 2
-    assert "manual merge and trust review" in result.stderr
+    assert result.stdout.strip() == "conflict"
     assert destination.read_bytes() == before
 
-
-def test_windows_installer_hook_function_executes_in_temp_home(tmp_path):
+def test_windows_installer_probe_reports_absent_without_touching_the_file(tmp_path):
+    """The probe replaced a merge: it must answer and change nothing."""
     source = ROOT / "install.ps1"
     home = tmp_path / "home"
     codex_dir = home / ".codex"
     codex_dir.mkdir(parents=True)
     (codex_dir / "config.toml").write_text('model = "gpt-5.6"\n', encoding="utf-8")
-    (codex_dir / "hooks.json").write_text(
+    destination = codex_dir / "hooks.json"
+    destination.write_text(
         '{"custom":true,"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo user"}]}]}}\n',
         encoding="utf-8",
     )
+    before = destination.read_bytes()
     command = textwrap.dedent(
         f"""
         $tokens = $null
@@ -3518,20 +3520,17 @@ def test_windows_installer_hook_function_executes_in_temp_home(tmp_path):
         if ($errors.Count) {{ throw ($errors | Out-String) }}
         $fn = $ast.Find({{ param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-            $node.Name -eq 'Install-CodexHooks'
+            $node.Name -eq 'Get-CodexInlineHooksState'
         }}, $true)
-        if ($null -eq $fn) {{ throw 'Install-CodexHooks missing' }}
+        if ($null -eq $fn) {{ throw 'Get-CodexInlineHooksState missing' }}
         Invoke-Expression $fn.Extent.Text
         function uv {{
             $all = @($args)
-            $index = [Array]::IndexOf($all, 'merge-hooks')
-            if ($index -lt 0) {{ throw 'merge-hooks missing' }}
+            $index = [Array]::IndexOf($all, 'hooks-state')
+            if ($index -lt 0) {{ throw 'hooks-state missing' }}
             & {json.dumps(sys.executable)} {json.dumps(str(ROOT / "scripts/codex_memory.py"))} $all[$index..($all.Count - 1)]
         }}
-        Install-CodexHooks -VaultRoot {json.dumps(str(ROOT))} -CodexDir {json.dumps(str(codex_dir))}
-        if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}
-        Install-CodexHooks -VaultRoot {json.dumps(str(ROOT))} -CodexDir {json.dumps(str(codex_dir))}
-        exit $LASTEXITCODE
+        Get-CodexInlineHooksState -VaultRoot {json.dumps(str(ROOT))} -CodexDir {json.dumps(str(codex_dir))}
         """
     )
 
@@ -3544,13 +3543,10 @@ def test_windows_installer_hook_function_executes_in_temp_home(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
-    merged = json.loads((codex_dir / "hooks.json").read_text(encoding="utf-8"))
-    assert merged["custom"] is True
-    assert len(_codex_memory_handlers(merged)) == 4
-    assert "echo user" in _stop_hook_commands(merged)
+    assert result.stdout.strip() == "absent"
+    assert destination.read_bytes() == before
 
-
-def test_windows_installer_preserves_json_when_partial_inline_hooks_exist(tmp_path):
+def test_windows_installer_probe_reports_conflict_for_partial_inline_hooks(tmp_path):
     source = ROOT / "install.ps1"
     home = tmp_path / "home"
     codex_dir = home / ".codex"
@@ -3570,16 +3566,17 @@ def test_windows_installer_preserves_json_when_partial_inline_hooks_exist(tmp_pa
         if ($errors.Count) {{ throw ($errors | Out-String) }}
         $fn = $ast.Find({{ param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-            $node.Name -eq 'Install-CodexHooks'
+            $node.Name -eq 'Get-CodexInlineHooksState'
         }}, $true)
+        if ($null -eq $fn) {{ throw 'Get-CodexInlineHooksState missing' }}
         Invoke-Expression $fn.Extent.Text
         function uv {{
             $all = @($args)
-            $index = [Array]::IndexOf($all, 'merge-hooks')
+            $index = [Array]::IndexOf($all, 'hooks-state')
+            if ($index -lt 0) {{ throw 'hooks-state missing' }}
             & {json.dumps(sys.executable)} {json.dumps(str(ROOT / "scripts/codex_memory.py"))} $all[$index..($all.Count - 1)]
         }}
-        $code = Install-CodexHooks -VaultRoot {json.dumps(str(ROOT))} -CodexDir {json.dumps(str(codex_dir))}
-        exit $code
+        Get-CodexInlineHooksState -VaultRoot {json.dumps(str(ROOT))} -CodexDir {json.dumps(str(codex_dir))}
         """
     )
 
@@ -3591,17 +3588,15 @@ def test_windows_installer_preserves_json_when_partial_inline_hooks_exist(tmp_pa
         check=False,
     )
 
-    assert result.returncode == 2
-    assert "manual merge and trust review" in result.stderr
+    assert result.stdout.strip() == "conflict"
     assert destination.read_bytes() == before
 
-
-def test_unix_installer_warns_and_preserves_json_when_hooks_feature_disabled(tmp_path):
+def test_unix_installer_probe_reports_disabled_when_the_feature_is_off(tmp_path):
     bash = Path(r"C:\Program Files\Git\bin\bash.exe")
     if not bash.exists():
         pytest.skip("Git Bash unavailable")
     function = _shell_function(
-        (ROOT / "install.sh").read_text(encoding="utf-8"), "install_codex_hooks"
+        (ROOT / "install.sh").read_text(encoding="utf-8"), "codex_inline_hooks_state"
     )
     home = tmp_path / "home"
     codex_dir = home / ".codex"
@@ -3614,11 +3609,10 @@ def test_unix_installer_warns_and_preserves_json_when_hooks_feature_disabled(tmp
     runner.write_text(
         function
         + "\nuv() {\n"
-        + "  while [[ $# -gt 0 && $1 != merge-hooks ]]; do shift; done\n"
+        + "  while [[ $# -gt 0 && $1 != hooks-state ]]; do shift; done\n"
         + '  command "$TEST_PYTHON" "$TEST_VAULT/scripts/codex_memory.py" "$@"\n'
         + "}\nset +e\n"
-        + 'install_codex_hooks "$TEST_VAULT" "$HOME/.codex"\n'
-        + "exit $?\n",
+        + 'codex_inline_hooks_state "$TEST_VAULT" "$HOME/.codex"\n',
         encoding="utf-8",
     )
     env = os.environ.copy()
@@ -3633,14 +3627,10 @@ def test_unix_installer_warns_and_preserves_json_when_hooks_feature_disabled(tmp
         check=False,
     )
 
-    assert result.returncode == 4
-    assert "hooks = true" in result.stderr
+    assert result.stdout.strip() == "disabled"
     assert destination.read_bytes() == before
 
-
-def test_windows_installer_warns_and_preserves_json_when_hooks_feature_disabled(
-    tmp_path,
-):
+def test_windows_installer_probe_reports_disabled_when_the_feature_is_off(tmp_path):
     source = ROOT / "install.ps1"
     codex_dir = tmp_path / "home" / ".codex"
     codex_dir.mkdir(parents=True)
@@ -3656,18 +3646,20 @@ def test_windows_installer_warns_and_preserves_json_when_hooks_feature_disabled(
         $errors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseFile(
             {json.dumps(str(source))}, [ref]$tokens, [ref]$errors)
+        if ($errors.Count) {{ throw ($errors | Out-String) }}
         $fn = $ast.Find({{ param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-            $node.Name -eq 'Install-CodexHooks'
+            $node.Name -eq 'Get-CodexInlineHooksState'
         }}, $true)
+        if ($null -eq $fn) {{ throw 'Get-CodexInlineHooksState missing' }}
         Invoke-Expression $fn.Extent.Text
         function uv {{
             $all = @($args)
-            $index = [Array]::IndexOf($all, 'merge-hooks')
+            $index = [Array]::IndexOf($all, 'hooks-state')
+            if ($index -lt 0) {{ throw 'hooks-state missing' }}
             & {json.dumps(sys.executable)} {json.dumps(str(ROOT / "scripts/codex_memory.py"))} $all[$index..($all.Count - 1)]
         }}
-        $code = Install-CodexHooks -VaultRoot {json.dumps(str(ROOT))} -CodexDir {json.dumps(str(codex_dir))}
-        exit $code
+        Get-CodexInlineHooksState -VaultRoot {json.dumps(str(ROOT))} -CodexDir {json.dumps(str(codex_dir))}
         """
     )
 
@@ -3679,10 +3671,8 @@ def test_windows_installer_warns_and_preserves_json_when_hooks_feature_disabled(
         check=False,
     )
 
-    assert result.returncode == 4
-    assert "hooks = true" in result.stderr
+    assert result.stdout.strip() == "disabled"
     assert destination.read_bytes() == before
-
 
 def test_codex_wrapper_is_labeled_compatibility_heartbeat_fallback():
     wrapper = (ROOT / "scripts" / "codex-memory-wrapper.ps1").read_text(encoding="utf-8")
@@ -4108,8 +4098,9 @@ def test_install_scripts_generate_context(tmp_path):
     assert 'args = [\\"run\\", \\"--locked\\", \\"--no-sync\\", \\"--directory\\"' in sh_codex_mcp
     assert "config.bak" in sh_codex_mcp
     assert "grep" not in sh_codex_mcp
-    assert "install_codex_hooks" in sh_codex
-    assert "merge-hooks" in install_sh
+    assert "$CODEX_HOOKS_STATE" in sh_codex
+    assert "codex_inline_hooks_state" in install_sh
+    assert "hooks-state" in install_sh
 
     assert '$claudeUserConfig = Join-Path $env:USERPROFILE ".claude.json"' in install_ps1
     assert "$claudeMcp = $claudeUserConfig" in ps_claude
@@ -4138,8 +4129,8 @@ def test_install_scripts_generate_context(tmp_path):
     assert "Copy-Item -LiteralPath $Config" in install_ps1
     assert "Config.bak" in install_ps1
     assert "codex-memory-wrapper" in ps_codex
-    assert "Install-CodexHooks" in ps_codex
-    assert "merge-hooks" in install_ps1
+    assert "$codexHooksState" in ps_codex
+    assert "hooks-state" in install_ps1
 
     assert "v4.0 optional features" not in install_sh
     assert "mcp-server" not in install_sh.split("Useful commands:", 1)[-1]

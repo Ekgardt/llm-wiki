@@ -78,3 +78,4 @@ contract applied everywhere rather than a new tuning exercise.
 - [[citation-relevance-gate-decision]]
 - [[cross-lingual-citation-relevance-decision]]
 - [[classification-measurement-stand-decision]]
+- [[knowledge/notes/session-evidence-retention-decision]] — links to this page.

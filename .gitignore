@@ -63,9 +63,20 @@ knowledge/notes/*
 !knowledge/notes/dead-task-retirement-and-restore-decision.md
 !knowledge/notes/citation-relevance-gate-decision.md
 !knowledge/notes/daily-entry-boundary-decision.md
+!knowledge/notes/daily-entry-quote-anchor-decision.md
 !knowledge/notes/cross-lingual-citation-relevance-decision.md
 !knowledge/notes/single-directory-vault-decision.md
 !knowledge/notes/classification-measurement-stand-decision.md
+!knowledge/notes/idempotent-retry-after-quarantine-decision.md
+!knowledge/notes/self-resolving-health-findings-decision.md
+!knowledge/notes/session-evidence-retention-decision.md
+!knowledge/notes/nightly-builds-generation-vectors-decision.md
+!knowledge/notes/automatic-code-update-decision.md
+!knowledge/notes/Ingestion Workflow.md
+!knowledge/notes/Retrieval Workflow.md
+!knowledge/notes/Review Workflow.md
+!knowledge/notes/blackboard-fenced-resource-claims-decision.md
+!knowledge/notes/managed-ide-hooks-install-update-decision.md
 !knowledge/notes/audit-closure-security-recovery-control-plane-decision.md
 !knowledge/notes/derived-evidence-generation-decision.md
 !knowledge/notes/lsp-live-lease-decision.md
@@ -80,6 +91,7 @@ knowledge/notes/*
 !knowledge/notes/install-ownership-control-plane-decision.md
 !knowledge/notes/solo-operator-superset-product-decision.md
 !knowledge/notes/oversized-daily-compile-decision.md
+!knowledge/notes/part-scoped-evidence-decision.md
 !knowledge/notes/reliable-memory-stage-2.md
 !knowledge/notes/v4-reliability-contracts-decision.md
 !knowledge/notes/docs-portability-absolute-paths.md
@@ -150,3 +162,7 @@ state.json.lock
 
 # === Backups ===
 *.bak-*
+
+# Corpora built from this machine's real sessions: real transcript text, never
+# published. Only the aggregate numbers they produce are.
+benchmark/flush-classification-live*.json
