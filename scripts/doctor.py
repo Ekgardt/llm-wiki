@@ -237,12 +237,14 @@ def _runtime_directory_state(state_root: Path) -> tuple[dict[str, object], tuple
 
 def _runtime_directory_result(counts: tuple[int, int, int]) -> tuple[str, str]:
     missing, unwritable, unsafe = counts
-    if unsafe:
-        return "error", "Runtime paths include unsafe entries."
-    if unwritable:
-        return "error", "Runtime directories are not writable."
-    if missing:
-        return "degraded", f"{missing} runtime directories are missing."
+    ordered = (
+        (unsafe, ("error", "Runtime paths include unsafe entries.")),
+        (unwritable, ("error", "Runtime directories are not writable.")),
+        (missing, ("degraded", f"{missing} runtime directories are missing.")),
+    )
+    for flagged, verdict in ordered:
+        if flagged:
+            return verdict
     return "ok", "Runtime directories exist and are writable."
 
 
@@ -272,16 +274,24 @@ def _runtime_check(state_root: Path) -> dict:
     return _result("runtime", status, message, details)
 
 
+def _bounded_json_entry_problem(path: Path, root: Path, deadline: float) -> str | None:
+    """Why the path cannot be opened at all, before its size is consulted."""
+    if time.monotonic() >= deadline:
+        return "budget"
+    if _safe_kind(path, root)[0] != "regular":
+        return "unsafe"
+    return None
+
+
 def _bounded_json_path_problem(
     path: Path,
     root: Path,
     max_bytes: int,
     deadline: float,
 ) -> str | None:
-    if time.monotonic() >= deadline:
-        return "budget"
-    if _safe_kind(path, root)[0] != "regular":
-        return "unsafe"
+    entry = _bounded_json_entry_problem(path, root, deadline)
+    if entry is not None:
+        return entry
     try:
         oversized = path.lstat().st_size > max_bytes
     except OSError:
@@ -548,9 +558,7 @@ def _adjusted_queue_status(status: str, artifacts: dict) -> str:
         return status
     if artifacts["artifact_error"]:
         return "error"
-    if status == "ok":
-        return "degraded"
-    return status
+    return "degraded" if status == "ok" else status
 
 
 def _legacy_queue_result(state_root: Path, now: datetime, deadline: float) -> dict:
@@ -563,19 +571,25 @@ def _legacy_queue_result(state_root: Path, now: datetime, deadline: float) -> di
     return _result("queue", _adjusted_queue_status(status, artifacts), message, details)
 
 
+def _unreadable_queue_reason(
+    database_kind: str, database_path: Path, state_root: Path
+) -> str | None:
+    """Why an absent queue database still cannot be read as absent."""
+    if database_kind != "missing":
+        return "Queue database is unsafe."
+    if _database_sidecar_present(database_path, state_root):
+        return "Queue sidecars lack a database."
+    return None
+
+
 def _queue_check(state_root: Path, now: datetime, deadline: float) -> dict:
     database_path = state_root / "run" / "queue.sqlite3"
     database_kind = _safe_kind(database_path, state_root)[0]
     if database_kind == "regular":
         return _queue_v2_check(state_root, now, deadline)
-    if database_kind != "missing":
-        return _unreadable_queue_result(
-            state_root, deadline, "Queue database is unsafe."
-        )
-    if _database_sidecar_present(database_path, state_root):
-        return _unreadable_queue_result(
-            state_root, deadline, "Queue sidecars lack a database."
-        )
+    unreadable = _unreadable_queue_reason(database_kind, database_path, state_root)
+    if unreadable is not None:
+        return _unreadable_queue_result(state_root, deadline, unreadable)
     return _legacy_queue_result(state_root, now, deadline)
 
 
@@ -931,9 +945,9 @@ def _collect_error_code(
     transaction_columns: set[str],
     codes: set[str],
 ) -> None:
-    if state not in {"conflicted", "quarantined"}:
-        return
-    if "error_code" not in transaction_columns:
+    if state not in {"conflicted", "quarantined"} or (
+        "error_code" not in transaction_columns
+    ):
         return
     code_row = database.execute(
         'SELECT error_code FROM "transaction" WHERE id=?', (row["id"],)
@@ -1046,6 +1060,21 @@ def _any_owner_row_unknown(rows: list[sqlite3.Row], require_token: bool) -> bool
     return any(_owner_row_unknown(row, require_token=require_token) for row in rows)
 
 
+def _append_owner_unknown_codes(
+    details: dict,
+    rows: list,
+    bounded: list,
+    *,
+    unknown_code: str,
+    require_token: bool,
+) -> None:
+    """Record the unknown-owner code once per reason, as the caller always did."""
+    if len(rows) > MAX_OPERATIONAL_ROWS:
+        details["deletion_codes"].append(unknown_code)
+    if _any_owner_row_unknown(bounded, require_token):
+        details["deletion_codes"].append(unknown_code)
+
+
 def _count_owner_table(
     database: sqlite3.Connection,
     tables: set[str],
@@ -1062,11 +1091,10 @@ def _count_owner_table(
     rows = database.execute(
         _OWNER_TABLE_QUERIES[table], (MAX_OPERATIONAL_ROWS + 1,)
     ).fetchall()
-    if len(rows) > MAX_OPERATIONAL_ROWS:
-        details["deletion_codes"].append(unknown_code)
     bounded = rows[:MAX_OPERATIONAL_ROWS]
-    if _any_owner_row_unknown(bounded, require_token):
-        details["deletion_codes"].append(unknown_code)
+    _append_owner_unknown_codes(
+        details, rows, bounded, unknown_code=unknown_code, require_token=require_token
+    )
     details[count_key] = sum(
         _live_owner(row, now, pid_column="process_id") for row in bounded
     )
@@ -1183,6 +1211,18 @@ def _transaction_schema_complete(
     ) and OPERATION_REQUIRED_COLUMNS.issubset(operation_columns)
 
 
+def _transaction_schema(
+    database: sqlite3.Connection, tables: set[str], deadline: float
+) -> tuple[set[str], set[str]]:
+    """The transaction and operation columns, refusing an absent table."""
+    if "transaction" not in tables:
+        raise sqlite3.DatabaseError("transaction table missing")
+    return (
+        _columns(database, "transaction", deadline),
+        _operation_columns(database, tables, deadline),
+    )
+
+
 def _scan_transaction_database(
     path: Path,
     state_root: Path,
@@ -1196,10 +1236,9 @@ def _scan_transaction_database(
         if _deadline_reached(deadline):
             raise TimeoutError("transaction check deadline")
         tables = _tables(database, deadline)
-        if "transaction" not in tables:
-            raise sqlite3.DatabaseError("transaction table missing")
-        transaction_columns = _columns(database, "transaction", deadline)
-        operation_columns = _operation_columns(database, tables, deadline)
+        transaction_columns, operation_columns = _transaction_schema(
+            database, tables, deadline
+        )
         if not _transaction_schema_complete(transaction_columns, operation_columns):
             details["codes"].append("transaction_metadata_missing")
             details["deletion_codes"].append("transaction_state_corrupt")
@@ -1363,12 +1402,17 @@ def _transaction_status(
 
 
 def _append_state_deletion_codes(details: dict, states: dict[str, int]) -> None:
-    if any(states.get(state, 0) for state in ("preparing", "prepared", "applying")):
-        details["deletion_codes"].append("transaction_nonterminal")
-    if states["conflicted"]:
-        details["deletion_codes"].append("transaction_conflicted")
-    if states["quarantined"]:
-        details["deletion_codes"].append("transaction_quarantined")
+    nonterminal = any(
+        states.get(state, 0) for state in ("preparing", "prepared", "applying")
+    )
+    ordered = (
+        (nonterminal, "transaction_nonterminal"),
+        (states["conflicted"], "transaction_conflicted"),
+        (states["quarantined"], "transaction_quarantined"),
+    )
+    for flagged, code in ordered:
+        if flagged:
+            details["deletion_codes"].append(code)
 
 
 def _append_live_deletion_codes(details: dict) -> None:
@@ -1425,14 +1469,26 @@ def _empty_transaction_details() -> tuple[dict, dict[str, int]]:
     return details, states
 
 
-def _transaction_check(state_root: Path, now: datetime, deadline: float = float("inf")) -> dict:
-    path = state_root / "run" / "markdown-transactions.sqlite3"
-    details, states = _empty_transaction_details()
-    kind, _ = _safe_kind(path, state_root)
+def _unusable_transaction_database(
+    kind: str, path: Path, state_root: Path, details: dict, deadline: float
+) -> dict | None:
+    """The result for a database that cannot be scanned, or None to scan it."""
     if kind == "missing":
         return _missing_transaction_database(path, state_root, details, deadline)
     if kind != "regular":
         return _unreadable_transactions(details, "Transaction database is unsafe.")
+    return None
+
+
+def _transaction_check(state_root: Path, now: datetime, deadline: float = float("inf")) -> dict:
+    path = state_root / "run" / "markdown-transactions.sqlite3"
+    details, states = _empty_transaction_details()
+    kind, _ = _safe_kind(path, state_root)
+    unusable = _unusable_transaction_database(
+        kind, path, state_root, details, deadline
+    )
+    if unusable is not None:
+        return unusable
     try:
         incomplete = _scan_transaction_database(
             path, state_root, now, deadline, details, states
@@ -1506,9 +1562,7 @@ def _failed_state_metadata(
         return False
     if state == "blocked":
         return isinstance(blocked_capability, str) and bool(blocked_capability)
-    if state == "dead":
-        return blocked_capability is None
-    return False
+    return state == "dead" and blocked_capability is None
 
 
 def _queue_error_metadata_valid(
@@ -1602,8 +1656,7 @@ def _scan_one_task_row(
     )
     _collect_task_codes(error_code, blocked_capability, codes, capabilities)
     _collect_task_result(row, row_columns, references, result_hashes)
-    if _task_lease_live(row, row_columns, state, now):
-        details["live_workers"] += 1
+    details["live_workers"] += int(_task_lease_live(row, row_columns, state, now))
     return _TaskVerdict(False, not matches)
 
 
@@ -1655,12 +1708,14 @@ def _bounded_task_rows(database: sqlite3.Connection, details: dict) -> list[sqli
 def _append_queue_scan_codes(
     details: dict, unknown_state: bool, corrupt_metadata: bool, rows: list
 ) -> None:
-    if unknown_state:
-        details["deletion_codes"].append("queue_state_unknown")
-    if corrupt_metadata:
-        details["deletion_codes"].append("queue_state_corrupt")
-    if rows:
-        details["deletion_codes"].append("queue_task_retained")
+    ordered = (
+        (unknown_state, "queue_state_unknown"),
+        (corrupt_metadata, "queue_state_corrupt"),
+        (bool(rows), "queue_task_retained"),
+    )
+    for flagged, code in ordered:
+        if flagged:
+            details["deletion_codes"].append(code)
 
 
 def _count_queue_rows(
@@ -1678,10 +1733,13 @@ def _count_queue_rows(
         _QUEUE_COUNT_QUERIES[table], (MAX_OPERATIONAL_ROWS + 1,)
     ).fetchall()
     details[table] = len(rows)
-    if rows:
-        details["deletion_codes"].append(retained_code)
-    if len(rows) > MAX_OPERATIONAL_ROWS:
-        details["deletion_codes"].append(unknown_code)
+    ordered = (
+        (bool(rows), retained_code),
+        (len(rows) > MAX_OPERATIONAL_ROWS, unknown_code),
+    )
+    for flagged, code in ordered:
+        if flagged:
+            details["deletion_codes"].append(code)
 
 
 def _count_owner_role(row: sqlite3.Row, details: dict) -> None:
@@ -1691,15 +1749,20 @@ def _count_owner_role(row: sqlite3.Row, details: dict) -> None:
         details["live_migrations"] += 1
 
 
+def _count_live_owner_role(row: sqlite3.Row, details: dict, now: datetime) -> None:
+    """Count the role of an owner row, when its lease is still live."""
+    if not _live_owner(row, now, pid_column="pid"):
+        return
+    _count_owner_role(row, details)
+
+
 def _count_one_queue_owner(row: sqlite3.Row, details: dict, now: datetime) -> None:
     if row["token"] is None:
         return
     if not _owner_row_known(row, pid_column="pid"):
         details["deletion_codes"].append("queue_owner_state_unknown")
         return
-    if not _live_owner(row, now, pid_column="pid"):
-        return
-    _count_owner_role(row, details)
+    _count_live_owner_role(row, details, now)
 
 
 def _count_queue_ownership(
@@ -1774,6 +1837,15 @@ def _validate_queue_results(
             details["results_invalid"] += 1
 
 
+def _queue_task_columns(
+    database: sqlite3.Connection, tables: set[str], deadline: float
+) -> set[str]:
+    """The task columns, refusing a database that has no tasks table."""
+    if "tasks" not in tables:
+        raise sqlite3.DatabaseError("tasks table missing")
+    return _columns(database, "tasks", deadline)
+
+
 def _scan_queue_database(
     path: Path,
     state_root: Path,
@@ -1786,9 +1858,7 @@ def _scan_queue_database(
         if _deadline_reached(deadline):
             raise TimeoutError("queue check deadline")
         tables = _tables(database, deadline)
-        if "tasks" not in tables:
-            raise sqlite3.DatabaseError("tasks table missing")
-        task_columns = _columns(database, "tasks", deadline)
+        task_columns = _queue_task_columns(database, tables, deadline)
         if not {"state", "error_code", "blocked_capability"}.issubset(task_columns):
             details["codes"].append("queue_metadata_missing")
             details["deletion_codes"].append("queue_state_corrupt")
@@ -1861,9 +1931,11 @@ def _queue_v2_check(state_root: Path, now: datetime, deadline: float) -> dict:
         details["budget_exhausted"] = True
     status = _queue_status(states, details, scan.unknown_state, scan.corrupt_metadata)
     _append_queue_deletion_codes(details)
-    message = "Queue state is healthy."
-    if status != "ok":
-        message = "Queue state requires operator attention."
+    message = (
+        "Queue state is healthy."
+        if status == "ok"
+        else "Queue state requires operator attention."
+    )
     return _result("queue", status, message, details)
 
 
@@ -1998,8 +2070,7 @@ def _scan_archive_manifests(
         key = _archive_manifest_key(bag, archive, details)
         if key is None:
             continue
-        if key in seen:
-            details["duplicates"] += 1
+        details["duplicates"] += int(key in seen)
         seen.add(key)
         bag_paths.add(bag.relative_to(root).as_posix())
     return bag_paths
@@ -2025,15 +2096,22 @@ def _index_paths_agree(indexed_paths: set[str], bag_paths: set[str], indexed) ->
     return indexed_paths == bag_paths and len(indexed_paths) == len(indexed)
 
 
-def _archive_index_state(
-    archive: Path, root: Path, bag_paths: set[str], deadline: float
-) -> str:
-    index_path = archive / "archive-index.json"
-    index_kind = _safe_kind(index_path, root)[0]
+def _archive_index_kind_state(index_kind: str) -> str | None:
+    """The index state settled by the entry alone, or None to read the file."""
     if index_kind == "missing":
         return "missing"
     if index_kind != "regular":
         return "invalid"
+    return None
+
+
+def _archive_index_state(
+    archive: Path, root: Path, bag_paths: set[str], deadline: float
+) -> str:
+    index_path = archive / "archive-index.json"
+    unreadable = _archive_index_kind_state(_safe_kind(index_path, root)[0])
+    if unreadable is not None:
+        return unreadable
     index, problem = _read_bounded_json(
         index_path,
         archive,
@@ -2469,11 +2547,11 @@ def _valid_lsp_owner_process(record: dict[str, Any]) -> bool:
 
 
 def _valid_lsp_owner(record: dict[str, Any], owner_nonce: str) -> bool:
-    if set(record) != _LSP_OWNER_FIELDS:
-        return False
-    if not _valid_lsp_command(record.get("command_basename")):
-        return False
-    if not _valid_lsp_nonces(record, owner_nonce):
+    if not (
+        set(record) == _LSP_OWNER_FIELDS
+        and _valid_lsp_command(record.get("command_basename"))
+        and _valid_lsp_nonces(record, owner_nonce)
+    ):
         return False
     return _valid_lsp_owner_process(record)
 
@@ -2508,14 +2586,19 @@ def _lsp_lease_identity_valid(record: dict[str, Any], owner_nonce: str) -> bool:
     return _lsp_generation_nonce_valid(record)
 
 
+def _lsp_lease_process_state(record: dict[str, Any]) -> bool:
+    """Both lease pids are positive and the lease still calls itself live."""
+    return (
+        _lsp_positive_pid(record.get("manager_pid"))
+        and _lsp_positive_pid(record.get("server_pid"))
+        and record.get("state") == "live"
+    )
+
+
 def _valid_lsp_lease(record: dict[str, Any], owner_nonce: str) -> bool:
     if not _lsp_lease_identity_valid(record, owner_nonce):
         return False
-    if not _lsp_positive_pid(record.get("manager_pid")):
-        return False
-    if not _lsp_positive_pid(record.get("server_pid")):
-        return False
-    if record.get("state") != "live":
+    if not _lsp_lease_process_state(record):
         return False
     return _lsp_lease_window_valid(record)
 
@@ -2532,14 +2615,19 @@ def _valid_lsp_failure_pid(record: dict[str, Any]) -> bool:
     return _lsp_positive_pid(record.get("server_pid"))
 
 
+def _valid_lsp_failure_evidence(record: dict[str, Any], owner_nonce: str) -> bool:
+    """The failure code, nonces and timestamp are each present and well formed."""
+    return (
+        _valid_lsp_failure_code(record.get("code"))
+        and _valid_lsp_nonces(record, owner_nonce)
+        and _parse_lsp_timestamp(record.get("timestamp")) is not None
+    )
+
+
 def _valid_lsp_failure(record: dict[str, Any], owner_nonce: str) -> bool:
     if set(record) not in (_LSP_FAILURE_FIELDS, _LSP_FAILURE_FIELDS | {"server_pid"}):
         return False
-    if not _valid_lsp_failure_code(record.get("code")):
-        return False
-    if not _valid_lsp_nonces(record, owner_nonce):
-        return False
-    if _parse_lsp_timestamp(record.get("timestamp")) is None:
+    if not _valid_lsp_failure_evidence(record, owner_nonce):
         return False
     return _valid_lsp_failure_pid(record)
 
@@ -3394,6 +3482,16 @@ def _lsp_nonces_match(owner: dict, lease: dict, entry_name: str) -> bool:
     return owner.get("generation_nonce") == lease.get("generation_nonce")
 
 
+def _lsp_start_within_window(
+    owner: dict, now: datetime, heartbeat_at: datetime | None
+) -> bool:
+    """The owner started no later than its own heartbeat, which is not in the future."""
+    started_at = _parse_lsp_timestamp(owner.get("started_at"))
+    if started_at is None or heartbeat_at is None:
+        return False
+    return started_at <= heartbeat_at <= now
+
+
 def _lsp_records_match(
     owner: dict,
     lease: dict,
@@ -3405,10 +3503,7 @@ def _lsp_records_match(
         return False
     if owner.get("owner_pid") != lease.get("server_pid"):
         return False
-    started_at = _parse_lsp_timestamp(owner.get("started_at"))
-    if started_at is None or heartbeat_at is None:
-        return False
-    return started_at <= heartbeat_at <= now
+    return _lsp_start_within_window(owner, now, heartbeat_at)
 
 
 def _valid_lsp_pid(pid: object) -> bool:
@@ -3877,9 +3972,8 @@ def _scope_state(manifest: dict, repository_scope: object) -> str:
     current = repository_scope.as_dict()
     if recorded == current:
         return "current"
-    if _scope_identity(recorded) == _scope_identity(current):
-        return "superseded"
-    return "mismatched"
+    same_identity = _scope_identity(recorded) == _scope_identity(current)
+    return "superseded" if same_identity else "mismatched"
 
 
 def _corpus_extraction_state(
@@ -4303,6 +4397,17 @@ def _unusable_index(kind: str, info) -> bool:
     return kind != "regular" or info is None or info.st_size == 0
 
 
+def _unusable_index_state(kind: str, info, deadline: float) -> dict | None:
+    """The result for an index that is present but cannot be trusted or timed."""
+    if _unusable_index(kind, info):
+        return _corrupt_index_result()
+    if time.monotonic() >= deadline:
+        return _index_deferred(
+            "FTS index check exceeded its time budget.", "budget_exhausted"
+        )
+    return None
+
+
 def _index_artifact_state(kind: str, info, deadline: float) -> dict | None:
     """The result to return when the index cannot be inspected at all."""
     if kind == "missing":
@@ -4317,13 +4422,7 @@ def _index_artifact_state(kind: str, info, deadline: float) -> dict | None:
                 "repairable": True,
             },
         )
-    if _unusable_index(kind, info):
-        return _corrupt_index_result()
-    if time.monotonic() >= deadline:
-        return _index_deferred(
-            "FTS index check exceeded its time budget.", "budget_exhausted"
-        )
-    return None
+    return _unusable_index_state(kind, info, deadline)
 
 
 def _require_index_schema(connection: sqlite3.Connection) -> None:
@@ -4364,6 +4463,17 @@ def _valid_manifest_paths(manifest_error: object, manifest_paths: object) -> boo
     return all(isinstance(item, str) for item in (manifest_paths or []))
 
 
+def _manifest_paths_state(
+    manifest_error: object, manifest_paths: object, indexed_paths: list[str]
+) -> _ManifestState:
+    """The manifest verdict, once the manifest itself has been read."""
+    if not _valid_manifest_paths(manifest_error, manifest_paths):
+        return _ManifestState("invalid", False, None)
+    if sorted(manifest_paths) != sorted(indexed_paths):
+        return _ManifestState("mismatch", False, None)
+    return _ManifestState("current", True, None)
+
+
 def _index_manifest_state(
     manifest: Path, state_root: Path, indexed_paths: list[str], deadline: float
 ) -> _ManifestState:
@@ -4382,11 +4492,7 @@ def _index_manifest_state(
             "FTS manifest check exceeded its time budget.", "budget_exhausted"
         )
         return _ManifestState("missing", False, deferred)
-    if not _valid_manifest_paths(manifest_error, manifest_paths):
-        return _ManifestState("invalid", False, None)
-    if sorted(manifest_paths) != sorted(indexed_paths):
-        return _ManifestState("mismatch", False, None)
-    return _ManifestState("current", True, None)
+    return _manifest_paths_state(manifest_error, manifest_paths, indexed_paths)
 
 
 def _inspect_index(
@@ -4487,6 +4593,13 @@ def _aged_index_result(age: int, manifest_state: str) -> dict:
     )
 
 
+def _index_age_result(age: int, rebuild_required: bool, inspection) -> dict:
+    """Stale when the sources moved or the manifest disagrees; aged otherwise."""
+    if rebuild_required or not inspection.manifest_matches:
+        return _stale_source_index_result(age, inspection.manifest_state)
+    return _aged_index_result(age, inspection.manifest_state)
+
+
 def _index_freshness_result(
     index: Path,
     state_root: Path,
@@ -4509,9 +4622,7 @@ def _index_freshness_result(
     if timestamp is None:
         return _corrupt_index_result()
     age = max(0, int((now - timestamp).total_seconds()))
-    if rebuild_required or not inspection.manifest_matches:
-        return _stale_source_index_result(age, inspection.manifest_state)
-    return _aged_index_result(age, inspection.manifest_state)
+    return _index_age_result(age, rebuild_required, inspection)
 
 
 def _index_check(
@@ -4560,6 +4671,20 @@ def _read_state(state_root: Path, deadline: float) -> tuple[dict, str | None]:
     return (value or {}, problem)
 
 
+def _capture_loss_result(lost: int, live: bool, details: dict) -> dict:
+    """The capture verdict, once the diagnostics themselves have been read."""
+    if live:
+        return _result("capture", "degraded", f"{lost} capture(s) were lost.", details)
+    if lost:
+        return _result(
+            "capture",
+            "ok",
+            f"{lost} capture(s) were lost, none recently.",
+            details,
+        )
+    return _result("capture", "ok", "No lost capture is recorded.", details)
+
+
 def _capture_check(state_root: Path, deadline: float) -> dict:
     """Report captures the hooks lost, so a silent loss is visible in health."""
     from capture_diagnostics import (
@@ -4587,16 +4712,7 @@ def _capture_check(state_root: Path, deadline: float) -> dict:
             "Capture diagnostics could not be read within safety bounds.",
             details,
         )
-    if live:
-        return _result("capture", "degraded", f"{lost} capture(s) were lost.", details)
-    if lost:
-        return _result(
-            "capture",
-            "ok",
-            f"{lost} capture(s) were lost, none recently.",
-            details,
-        )
-    return _result("capture", "ok", "No lost capture is recorded.", details)
+    return _capture_loss_result(lost, live, details)
 
 
 def _scheduler_check(root: Path, state_root: Path, now: datetime, deadline: float) -> dict:
@@ -4645,6 +4761,15 @@ def _nightly_is_current(state: dict, status: str, last_date: str, now: datetime)
     return (now - ran_at).total_seconds() <= NIGHTLY_FRESH_SECONDS
 
 
+def _nightly_freshness_result(
+    state: dict, status: object, last_date: str, now: datetime, details: dict
+) -> dict:
+    """Whether a recorded, non-failed nightly run is still current."""
+    if _nightly_is_current(state, status, last_date, now):
+        return _result("scheduler", "ok", "Nightly maintenance is current.", details)
+    return _result("scheduler", "degraded", "Nightly maintenance is stale.", details)
+
+
 def _nightly_result(state: dict, now: datetime, details: dict) -> dict:
     status = state.get("last_nightly_status")
     last_date = str(state.get("last_nightly_date", ""))[:10]
@@ -4652,9 +4777,7 @@ def _nightly_result(state: dict, now: datetime, details: dict) -> dict:
         return _result("scheduler", "error", "Last nightly maintenance failed.", details)
     if not status or not last_date:
         return _result("scheduler", "skipped", "Nightly maintenance status is unknown.", details)
-    if _nightly_is_current(state, status, last_date, now):
-        return _result("scheduler", "ok", "Nightly maintenance is current.", details)
-    return _result("scheduler", "degraded", "Nightly maintenance is stale.", details)
+    return _nightly_freshness_result(state, status, last_date, now, details)
 
 
 def _mcp_package_available() -> bool:
@@ -4755,15 +4878,20 @@ def _codex_table_state(document: dict) -> tuple[bool | None, str]:
     return False, "target_missing_or_invalid"
 
 
+def _codex_config_error_state(error: str) -> tuple[bool | None, str]:
+    """An absent TOML parser leaves the state unknown; anything else is a no."""
+    if error == "toml_parser_unavailable":
+        return None, error
+    return False, error
+
+
 def _codex_config_state(path: Path) -> tuple[bool | None, str]:
-    if not _readable_config(path):
-        return False, "config_missing_or_unsafe"
-    text = _codex_config_text(path)
+    text = _codex_config_text(path) if _readable_config(path) else None
     if text is None:
         return False, "config_missing_or_unsafe"
     document, error = _parse_toml_document(text)
     if error is not None:
-        return (None, error) if error == "toml_parser_unavailable" else (False, error)
+        return _codex_config_error_state(error)
     assert document is not None
     return _codex_table_state(document)
 
@@ -4958,22 +5086,25 @@ def _codex_deadline_result(deadline: float) -> object | None:
     return None
 
 
+def _codex_probe_command(available_seconds: float) -> list[str] | None:
+    """The probe command, when there is time left to start it at all."""
+    if available_seconds < CODEX_HOOK_PROBE_STARTUP_SECONDS:
+        return None
+    return _codex_app_server_command()
+
+
 def _probe_codex_hooks_list(
     root: Path, home: Path, *, deadline: float = float("inf")
 ) -> dict[str, Any] | object | None:
     started_at = time.monotonic()
     probe_deadline = min(deadline, started_at + CODEX_HOOK_PROBE_SECONDS)
-    if probe_deadline - started_at < CODEX_HOOK_PROBE_STARTUP_SECONDS:
-        return None
-    command = _codex_app_server_command()
+    command = _codex_probe_command(probe_deadline - started_at)
     if command is None:
         return None
     raw = _run_codex_probe(command, root, home, probe_deadline)
     if raw is _PROBE_INCOMPLETE:
         return _codex_deadline_result(deadline)
-    if raw is None:
-        return None
-    return _codex_hooks_result(raw)
+    return _codex_hooks_result(raw) if raw is not None else None
 
 
 def _single_template_group(groups: object) -> dict:
@@ -5043,12 +5174,20 @@ def _single_probe_entry(data: object) -> dict | None:
     return data[0]
 
 
+def _codex_probe_absence(response: object) -> str | None:
+    """The code explaining an absent probe response, or None when there is one."""
+    if response is _CODEX_PROBE_NOT_COMPLETED:
+        return "runtime_hooks_not_completed"
+    if response is None:
+        return "runtime_hooks_unverified"
+    return None
+
+
 def _codex_probe_entry(response: object) -> tuple[dict | None, str]:
     """The one probe entry, or the code explaining why there is none."""
-    if response is _CODEX_PROBE_NOT_COMPLETED:
-        return None, "runtime_hooks_not_completed"
-    if response is None:
-        return None, "runtime_hooks_unverified"
+    absent = _codex_probe_absence(response)
+    if absent is not None:
+        return None, absent
     assert isinstance(response, dict)
     entry = _single_probe_entry(response.get("data"))
     if entry is None:
@@ -5122,9 +5261,8 @@ def _codex_hook_problem(wanted: dict, ours: list) -> str:
     if hook.get("enabled") is not True:
         return "runtime_hooks_disabled"
     trust = hook.get("trustStatus")
-    if trust in {"trusted", "managed"}:
-        return ""
-    return _codex_hook_trust_code(trust)
+    trusted = trust in {"trusted", "managed"}
+    return "" if trusted else _codex_hook_trust_code(trust)
 
 
 def _codex_hooks_verdict(root: Path, ours: list) -> tuple[bool, str]:
@@ -5138,6 +5276,17 @@ def _codex_hooks_verdict(root: Path, ours: list) -> tuple[bool, str]:
     return True, "runtime_hooks_active"
 
 
+def _codex_entry_hooks_verdict(entry: dict, root: Path) -> tuple[bool, str]:
+    """The hook verdict for one probe entry that was read successfully."""
+    problem = _codex_entry_problem(entry, root)
+    if problem:
+        return False, problem
+    hooks = _codex_hook_list(entry)
+    if hooks is None:
+        return False, "runtime_hooks_invalid"
+    return _codex_hooks_verdict(root, _codex_owned_hooks(hooks))
+
+
 def _codex_runtime_hooks_state(
     root: Path, home: Path, *, deadline: float = float("inf")
 ) -> tuple[bool, str]:
@@ -5147,13 +5296,7 @@ def _codex_runtime_hooks_state(
     entry, problem = _codex_probe_entry(response)
     if entry is None:
         return False, problem
-    problem = _codex_entry_problem(entry, root)
-    if problem:
-        return False, problem
-    hooks = _codex_hook_list(entry)
-    if hooks is None:
-        return False, "runtime_hooks_invalid"
-    return _codex_hooks_verdict(root, _codex_owned_hooks(hooks))
+    return _codex_entry_hooks_verdict(entry, root)
 
 
 def _codex_wrapper_configured(root: Path, home: Path) -> bool:
@@ -5702,6 +5845,23 @@ def _readable_lock(existing: object, opened_stat: object) -> bool:
     return existing is not None and opened_stat is not None
 
 
+def _replace_unchanged_stale_lock(
+    fd: int,
+    path: Path,
+    token: str,
+    now: datetime,
+    existing: object,
+    opened_stat: object,
+) -> str | None:
+    """Replace a stale lock only while it is still the one that was read."""
+    old_token = _stale_lock_owner(existing, now)
+    if old_token is None:
+        return None
+    if not _lock_unchanged(fd, path, old_token, opened_stat):
+        return None
+    return _replace_stale_lock(path, token, now)
+
+
 def _take_over_stale_lock(
     fd: int, path: Path, token: str, now: datetime
 ) -> str | None:
@@ -5710,12 +5870,7 @@ def _take_over_stale_lock(
     existing, opened_stat = _read_lock_fd(fd)
     if not _readable_lock(existing, opened_stat):
         return None
-    old_token = _stale_lock_owner(existing, now)
-    if old_token is None:
-        return None
-    if not _lock_unchanged(fd, path, old_token, opened_stat):
-        return None
-    return _replace_stale_lock(path, token, now)
+    return _replace_unchanged_stale_lock(fd, path, token, now, existing, opened_stat)
 
 
 def _acquire_lock(path: Path, root: Path, now: datetime) -> str | None:
@@ -5763,9 +5918,7 @@ def _recoverable_lease(entry: os.DirEntry, queue: Path, now: datetime) -> Path |
         return None
     lease = Path(entry.path)
     task, problem = _read_bounded_json(lease, queue)
-    if problem or task is None:
-        return None
-    if not _abandoned_lease(task, now):
+    if problem or task is None or not _abandoned_lease(task, now):
         return None
     return lease
 
@@ -6221,6 +6374,33 @@ def _removable_generation_orphan(
     return False
 
 
+def _remove_generation_orphan(
+    entry: os.DirEntry,
+    registered: set[str],
+    state_root: Path,
+    catalog: object,
+    generation_catalog,
+    deadline: float,
+    cancelled,
+) -> int:
+    """Remove one unregistered generation child; return how many were removed."""
+    if _skip_generation_child(entry, registered):
+        return 0
+    path = Path(entry.path)
+    if not _removable_generation_orphan(
+        path,
+        entry.name,
+        state_root,
+        catalog,
+        generation_catalog,
+        deadline,
+        cancelled,
+    ):
+        return 0
+    shutil.rmtree(path)
+    return 1
+
+
 def _cleanup_generation_orphans(
     catalog: object,
     generation_catalog,
@@ -6240,20 +6420,15 @@ def _cleanup_generation_orphans(
     for entry in children:
         if _cleanup_stop_reached(deadline, cancelled):
             raise TimeoutError("generation cleanup deadline reached")
-        if _skip_generation_child(entry, registered):
-            continue
-        path = Path(entry.path)
-        if _removable_generation_orphan(
-            path,
-            entry.name,
+        removed += _remove_generation_orphan(
+            entry,
+            registered,
             state_root,
             catalog,
             generation_catalog,
             deadline,
             cancelled,
-        ):
-            shutil.rmtree(path)
-            removed += 1
+        )
     return removed
 
 
@@ -6671,18 +6846,43 @@ def _parent_workspace_manifest(
     return parent_incremental["reuse_config"].get("workspace_manifest_sha256")
 
 
+def _parent_matches_versions(
+    parent: dict, snapshot: object, extractor_version: str
+) -> bool:
+    """Every version the active generation records still matches the live one."""
+    return (
+        parent.get("collector_version") == snapshot.collector_version
+        and parent.get("extractor_version") == snapshot.extractor_version
+        and parent.get("graph_extractor_version") == extractor_version
+    )
+
+
 def _parent_matches_identity(
     parent: dict, repository_scope: object, snapshot: object, extractor_version: str
 ) -> bool:
-    if parent.get("schema_version") != "corpus-generation/v2":
-        return False
-    if parent.get("repository_scope") != repository_scope.as_dict():
-        return False
-    if parent.get("collector_version") != snapshot.collector_version:
-        return False
-    if parent.get("extractor_version") != snapshot.extractor_version:
-        return False
-    return parent.get("graph_extractor_version") == extractor_version
+    return (
+        parent.get("schema_version") == "corpus-generation/v2"
+        and parent.get("repository_scope") == repository_scope.as_dict()
+        and _parent_matches_versions(parent, snapshot, extractor_version)
+    )
+
+
+def _parent_describes_snapshot(
+    parent: dict,
+    repository_scope: object,
+    snapshot: object,
+    extractor_version: str,
+    parent_workspace_sha256: str | None,
+    workspace_sha256: str,
+) -> bool:
+    """The identity, the source manifest and the workspace all still agree."""
+    return (
+        _parent_matches_identity(
+            parent, repository_scope, snapshot, extractor_version
+        )
+        and parent.get("source_manifest_sha256") == snapshot.corpus_sha256
+        and parent_workspace_sha256 == workspace_sha256
+    )
 
 
 def _parent_is_current(
@@ -6697,13 +6897,14 @@ def _parent_is_current(
     """True when the active generation already describes the live sources."""
     if parent is None or force_rebuild:
         return False
-    if not _parent_matches_identity(
-        parent, repository_scope, snapshot, extractor_version
-    ):
-        return False
-    if parent.get("source_manifest_sha256") != snapshot.corpus_sha256:
-        return False
-    return parent_workspace_sha256 == workspace_sha256
+    return _parent_describes_snapshot(
+        parent,
+        repository_scope,
+        snapshot,
+        extractor_version,
+        parent_workspace_sha256,
+        workspace_sha256,
+    )
 
 
 def _generation_source_rows(snapshot: object) -> list[dict]:
@@ -6885,12 +7086,15 @@ def _fence_loss_details(exc: BaseException) -> dict[str, object] | None:
     return {"where": exc.where, "observed": exc.observed}
 
 
+def _positive_finite_number(value: object) -> bool:
+    """A real, finite number greater than zero; a bool is not a number here."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value) and value > 0
+
+
 def _require_positive_time_budget(time_budget_seconds: object) -> None:
-    if isinstance(time_budget_seconds, bool):
-        raise ValueError("time_budget_seconds must be positive and finite")
-    if not isinstance(time_budget_seconds, (int, float)):
-        raise ValueError("time_budget_seconds must be positive and finite")
-    if not math.isfinite(time_budget_seconds) or time_budget_seconds <= 0:
+    if not _positive_finite_number(time_budget_seconds):
         raise ValueError("time_budget_seconds must be positive and finite")
 
 
@@ -7264,6 +7468,20 @@ def _defer_all_repairs(context: _RepairContext) -> None:
         context.repair_deferred.update(_DEFERRED_BY_ACTION[action])
 
 
+def _record_generation_rebuild(result: dict, context: _RepairContext) -> None:
+    """Record a completed rebuild, or note that the rebuild was deferred."""
+    if result["status"] == "built":
+        context.repaired.append(
+            {
+                "action": "rebuild_generation",
+                "generation_id": result["generation_id"],
+            }
+        )
+        return
+    if result["status"] == "deferred":
+        context.repair_deferred.add("generation")
+
+
 def _repair_generations_action(guard: Any, context: _RepairContext) -> None:
     guard.run(
         _repair_generation_catalog,
@@ -7284,16 +7502,7 @@ def _repair_generations_action(guard: Any, context: _RepairContext) -> None:
         max_sources=DEFAULT_GENERATION_SOURCE_LIMIT,
         force_rebuild=True,
     )
-    if result["status"] == "built":
-        context.repaired.append(
-            {
-                "action": "rebuild_generation",
-                "generation_id": result["generation_id"],
-            }
-        )
-        return
-    if result["status"] == "deferred":
-        context.repair_deferred.add("generation")
+    _record_generation_rebuild(result, context)
 
 
 def _repair_transactions_action(
@@ -7327,6 +7536,20 @@ def _record_queue_migration_repair(
     )
 
 
+def _migrated_legacy_queue(
+    guard: Any, context: _RepairContext, migrate_legacy_queue, legacy_available: bool
+):
+    """Migrate the legacy queue only when the legacy queue could be read."""
+    if not legacy_available:
+        return None
+    return guard.run(
+        migrate_legacy_queue,
+        context.state_path,
+        deadline=context.deadline,
+        cancelled=guard.cancelled,
+    )
+
+
 def _repair_queue_action(guard: Any, context: _RepairContext) -> bool:
     """Repair the legacy queue and report whether the v2 queue is usable."""
     from memory_queue import MemoryQueue, migrate_legacy_queue
@@ -7338,14 +7561,9 @@ def _repair_queue_action(guard: Any, context: _RepairContext) -> bool:
         context.repair_deferred.add("queue")
     marker = context.state_path / "run" / "queue-migrated-v2"
     marker_existed = _safe_kind(marker, context.state_path)[0] == "regular"
-    migration = None
-    if legacy_available:
-        migration = guard.run(
-            migrate_legacy_queue,
-            context.state_path,
-            deadline=context.deadline,
-            cancelled=guard.cancelled,
-        )
+    migration = _migrated_legacy_queue(
+        guard, context, migrate_legacy_queue, legacy_available
+    )
     _record_queue_migration_repair(migration, marker_existed, context)
     marker_valid = _safe_kind(marker, context.state_path)[0] == "regular"
     if migration is None and not marker_valid:
@@ -7469,16 +7687,8 @@ def _repair_claims_action(guard: Any, context: _RepairContext) -> None:
     context.repaired.append({"action": "rebuild_claim_index"})
 
 
-def _repair_queue_followups(
-    guard: Any, context: _RepairContext, queue_v2_ready: bool
-) -> None:
-    if not queue_v2_ready:
-        return
-    unblocked = guard.run(_repair_queue_capabilities, context.state_path)
-    if unblocked:
-        context.repaired.append(
-            {"action": "unblock_capabilities", "count": unblocked}
-        )
+def _record_bounded_worker_run(guard: Any, context: _RepairContext) -> None:
+    """Run the bounded worker and record how much of the queue it processed."""
     processed = guard.run(
         _run_bounded_worker,
         context.state_path,
@@ -7489,15 +7699,39 @@ def _repair_queue_followups(
         context.repaired.append({"action": "run_bounded_worker", "count": processed})
 
 
+def _repair_queue_followups(
+    guard: Any, context: _RepairContext, queue_v2_ready: bool
+) -> None:
+    if not queue_v2_ready:
+        return
+    unblocked = guard.run(_repair_queue_capabilities, context.state_path)
+    if unblocked:
+        context.repaired.append(
+            {"action": "unblock_capabilities", "count": unblocked}
+        )
+    _record_bounded_worker_run(guard, context)
+
+
+def _run_selected_repairs(selected: set[str], ordered: tuple) -> None:
+    """Run each named repair the caller selected, in the order given."""
+    for name, action in ordered:
+        if name in selected:
+            action()
+
+
 def _repair_state_actions(
     guard: Any, coordinator: Any, context: _RepairContext
 ) -> bool:
-    if "runtime" in context.selected_repairs:
-        guard.run(_repair_runtime, context.state_path, context.repaired)
-    if "generations" in context.selected_repairs:
-        _repair_generations_action(guard, context)
-    if "transactions" in context.selected_repairs:
-        _repair_transactions_action(guard, coordinator, context)
+    ordered = (
+        ("runtime", lambda: guard.run(
+            _repair_runtime, context.state_path, context.repaired
+        )),
+        ("generations", lambda: _repair_generations_action(guard, context)),
+        ("transactions", lambda: _repair_transactions_action(
+            guard, coordinator, context
+        )),
+    )
+    _run_selected_repairs(context.selected_repairs, ordered)
     if "queue" not in context.selected_repairs:
         return False
     return _repair_queue_action(guard, context)
@@ -7506,14 +7740,13 @@ def _repair_state_actions(
 def _repair_derived_actions(
     guard: Any, context: _RepairContext, queue_v2_ready: bool
 ) -> None:
-    if "indexes" in context.selected_repairs:
-        _repair_index_action(guard, context)
-    if "archives" in context.selected_repairs:
-        _repair_archives_action(guard, context)
-    if "indexes" in context.selected_repairs:
-        _repair_claims_action(guard, context)
-    if "queue" in context.selected_repairs:
-        _repair_queue_followups(guard, context, queue_v2_ready)
+    ordered = (
+        ("indexes", lambda: _repair_index_action(guard, context)),
+        ("archives", lambda: _repair_archives_action(guard, context)),
+        ("indexes", lambda: _repair_claims_action(guard, context)),
+        ("queue", lambda: _repair_queue_followups(guard, context, queue_v2_ready)),
+    )
+    _run_selected_repairs(context.selected_repairs, ordered)
 
 
 def _release_unentered_maintenance(
@@ -7789,16 +8022,21 @@ def main(argv: list[str] | None = None) -> int:
     return {"ok": 0, "degraded": 1, "error": 2}[report["overall_status"]]
 
 
-def _print_report(report: dict, as_json: bool) -> None:
-    if as_json:
-        print(json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False))
-        return
-    print(f"LLM-Wiki doctor: {report['overall_status']}")
+def _print_text_details(report: dict) -> None:
+    """The human-readable lines that follow the headline status."""
     summary = degraded_summary(report)
     if summary:
         print(summary)
     if report["repaired"]:
         print(f"Repairs applied: {len(report['repaired'])}")
+
+
+def _print_report(report: dict, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False))
+        return
+    print(f"LLM-Wiki doctor: {report['overall_status']}")
+    _print_text_details(report)
 
 
 if __name__ == "__main__":
