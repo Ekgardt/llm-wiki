@@ -39,12 +39,25 @@ def test_status_is_read_only_when_install_state_is_absent(tmp_path: Path) -> Non
     state_root = tmp_path / "state"
     state_root.mkdir()
 
-    assert inspect_install_state(state_root) == {
-        "manifest": "absent",
-        "status": "absent",
-        "transaction": "absent",
-    }
+    state = inspect_install_state(state_root)
+
+    assert state["manifest"] == "absent"
+    assert state["status"] == "absent"
+    assert state["transaction"] == "absent"
     assert not (state_root / "run" / "install").exists()
+
+
+def test_status_names_what_the_install_created_but_never_removes(tmp_path: Path) -> None:
+    """Owning the checkout would mean uninstall deleting the vault; so it is named."""
+    state_root = tmp_path / "state"
+    (state_root / ".venv").mkdir(parents=True)
+
+    unowned = inspect_install_state(state_root)["unowned"]
+
+    kinds = {entry["kind"]: entry for entry in unowned}
+    assert set(kinds) == {"checkout", "virtualenv"}
+    assert kinds["virtualenv"]["state"] == "present"
+    assert kinds["checkout"]["path"] == str(state_root.resolve())
 
 
 def _release() -> dict[str, object]:
@@ -1125,12 +1138,12 @@ def test_status_cli_is_read_only_and_emits_bounded_json(
     exit_code = main(["status", "--state-root", str(state_root)])
 
     captured = capsys.readouterr()
+    reported = json.loads(captured.out)
     assert exit_code == 0
-    assert json.loads(captured.out) == {
-        "manifest": "absent",
-        "status": "absent",
-        "transaction": "absent",
-    }
+    assert reported["manifest"] == "absent"
+    assert reported["status"] == "absent"
+    assert reported["transaction"] == "absent"
+    assert [entry["kind"] for entry in reported["unowned"]] == ["checkout", "virtualenv"]
     assert captured.err == ""
     assert not (state_root / "run" / "install").exists()
 

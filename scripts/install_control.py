@@ -4368,12 +4368,38 @@ def validate_install_state(state_root: Path) -> dict[str, object]:
         )
 
 
-def inspect_install_state(state_root: Path) -> dict[str, str]:
+# What an install puts on a machine without owning it. Owning these would mean
+# uninstall deleting them, and deleting the checkout deletes the vault — the
+# operator's knowledge. So they are reported instead of owned: after an
+# uninstall the operator is told exactly what is still there, rather than
+# finding it later or losing it silently.
+_UNOWNED_PATHS = (("checkout", "."), ("virtualenv", ".venv"))
+
+
+def unowned_install_paths(root: Path) -> list[dict[str, str]]:
+    """Paths the install created but will never remove, and whether they exist."""
+    base = Path(root)
+    return [
+        {
+            "kind": kind,
+            "path": str((base / relative).resolve()),
+            "state": "present" if (base / relative).exists() else "absent",
+        }
+        for kind, relative in _UNOWNED_PATHS
+    ]
+
+
+def inspect_install_state(state_root: Path, root: Path | None = None) -> dict[str, object]:
     install_root = Path(state_root) / "run" / "install"
     manifest = "present" if (install_root / "manifest.json").is_file() else "absent"
     transaction = "present" if (install_root / "transaction.json").is_file() else "absent"
     status = "absent" if manifest == transaction == "absent" else "present"
-    return {"manifest": manifest, "status": status, "transaction": transaction}
+    return {
+        "manifest": manifest,
+        "status": status,
+        "transaction": transaction,
+        "unowned": unowned_install_paths(root if root is not None else state_root),
+    }
 
 
 def _required_command_output(command: tuple[str, ...], code: str) -> bytes:
@@ -4819,8 +4845,8 @@ def _uninstall_from_args(args: argparse.Namespace) -> dict[str, object]:
     return {"state": result["state"], "status": "uninstalled"}
 
 
-def _status_from_args(args: argparse.Namespace) -> dict[str, str]:
-    return inspect_install_state(args.state_root)
+def _status_from_args(args: argparse.Namespace) -> dict[str, object]:
+    return inspect_install_state(args.state_root, getattr(args, "root", None))
 
 
 def _add_existing_arguments(parser: argparse.ArgumentParser) -> None:
