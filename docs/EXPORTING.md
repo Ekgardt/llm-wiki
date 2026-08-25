@@ -77,7 +77,15 @@ git clone git@github.com:Ekgardt/llm-wiki.git $LLM_WIKI_ROOT
 
 Then run `install.ps1` / `install.sh` (or follow [[docs/USER-GUIDE|User guide]]) to set up the machine-local pieces (`$LLM_WIKI_ROOT` env var, hooks, agent wiring).
 
-Move the memory itself with the encrypted backup, not with an export. `scripts/private_vault_backup.py backup` writes one verified Restic snapshot and returns a `snapshot_id` plus `manifest_sha256` receipt; `restore` requires both and unpacks validated `vault/` and `state/` directories into a pre-existing empty directory. Restore stops there: it never publishes into an installed vault, so putting the restored content in place stays a deliberate step you take after reviewing it. The full procedure and its refusals are in [[docs/USER-GUIDE|User guide]].
+Move the memory itself with the encrypted backup, not with an export. `scripts/private_vault_backup.py backup` writes one verified Restic snapshot and returns a `snapshot_id` plus `manifest_sha256` receipt; `restore` requires both and unpacks validated `vault/` and `state/` directories into a pre-existing empty directory.
+
+`publish` then puts that validated image into the installed vault on the new machine:
+
+```bash
+python scripts/private_vault_backup.py publish --image <restored-dir> --manifest-sha256 <digest>
+```
+
+It validates the image again first, so an image edited between restore and publish is refused, and it overwrites nothing: every destination must be absent or byte-identical, and the first conflicting path stops the whole publication. Publishing into a vault that already holds different content is therefore refused rather than merged — replacing a populated vault stays a deliberate act you take yourself. The full procedure and its refusals are in [[docs/USER-GUIDE|User guide]].
 
 ## Sharing a subset for discussion
 

@@ -676,3 +676,103 @@ def test_cli_restore_reports_stable_error_without_paths(
         "details": ["owner_unknown"],
     }
     assert str(tmp_path) not in output
+
+
+def _staged_image(tmp_path: Path):
+    """One validated image, plus the digest a publish has to be given."""
+    import private_vault_backup as backup
+
+    root, state_root = _vault(tmp_path)
+    build_adopted_reliability_v3(root, state_root)
+    (root / "knowledge/notes/private.md").write_bytes(b"private knowledge\n")
+    staging_parent = tmp_path / "staging"
+    staging_parent.mkdir()
+    kept = tmp_path / "image"
+    with backup.staged_backup_image(
+        root=root,
+        state_root=state_root,
+        staging_parent=staging_parent,
+        now=datetime(2026, 8, 25, tzinfo=timezone.utc),
+        deadline=time.monotonic() + 60,
+    ) as image:
+        shutil.copytree(image, kept)
+    digest = backup.sha256_bytes((kept / "manifest.json").read_bytes())
+    return kept, digest
+
+
+def test_publishing_an_image_into_an_empty_vault_puts_every_file_in_place(tmp_path):
+    """The step that used to be a manual `cp -r`, with a receipt."""
+    import private_vault_backup as backup
+
+    image, digest = _staged_image(tmp_path)
+    target = tmp_path / "new-machine"
+    (target / "run").mkdir(parents=True)
+
+    receipt = backup.publish_restored_image(
+        image=image,
+        vault_root=target,
+        state_root=target,
+        expected_manifest_sha256=digest,
+    )
+
+    assert receipt["published_files"] > 0
+    assert receipt["identical_files"] == 0
+    assert (target / "knowledge/notes/private.md").read_bytes() == b"private knowledge\n"
+
+
+def test_publishing_twice_is_not_a_conflict_and_publishes_nothing_new(tmp_path):
+    """Identical bytes are not an overwrite, so a repeat is safe."""
+    import private_vault_backup as backup
+
+    image, digest = _staged_image(tmp_path)
+    target = tmp_path / "new-machine"
+    (target / "run").mkdir(parents=True)
+    backup.publish_restored_image(
+        image=image, vault_root=target, state_root=target,
+        expected_manifest_sha256=digest,
+    )
+
+    second = backup.publish_restored_image(
+        image=image, vault_root=target, state_root=target,
+        expected_manifest_sha256=digest,
+    )
+
+    assert second["published_files"] == 0
+    assert second["identical_files"] > 0
+
+
+def test_publishing_over_different_content_is_refused_by_the_first_conflict(tmp_path):
+    """A populated vault is refused, never merged."""
+    import private_vault_backup as backup
+
+    image, digest = _staged_image(tmp_path)
+    target = tmp_path / "new-machine"
+    (target / "knowledge/notes").mkdir(parents=True)
+    (target / "run").mkdir(parents=True)
+    (target / "knowledge/notes/private.md").write_bytes(b"someone else's work\n")
+
+    with pytest.raises(backup.BackupError) as refused:
+        backup.publish_restored_image(
+            image=image, vault_root=target, state_root=target,
+            expected_manifest_sha256=digest,
+        )
+
+    assert refused.value.code == "publish_conflict"
+    assert (target / "knowledge/notes/private.md").read_bytes() == b"someone else's work\n"
+
+
+def test_publishing_an_edited_image_is_refused_before_anything_is_copied(tmp_path):
+    import private_vault_backup as backup
+
+    image, digest = _staged_image(tmp_path)
+    (image / "vault/knowledge/notes/private.md").write_bytes(b"tampered\n")
+    target = tmp_path / "new-machine"
+    (target / "run").mkdir(parents=True)
+
+    with pytest.raises(backup.BackupError):
+        backup.publish_restored_image(
+            image=image, vault_root=target, state_root=target,
+            expected_manifest_sha256=digest,
+        )
+
+    assert not (target / "knowledge").exists()
