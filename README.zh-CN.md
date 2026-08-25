@@ -155,6 +155,21 @@ $env:LLM_WIKI_ROOT = (Get-Location).Path
 checkout 会保留全部 Git remote 设置；传入 `--protect-push` 或 `-ProtectPush` 才会把每个
 remote 的 push URL 替换为 `no-push`。
 
+### 校验发行版
+
+发行版会给出远程 bootstrap 接受的确切提交（分支名与标签名一律拒绝），以及
+bootstrap 运行的每个文件的 SHA-256。在本地检出中打印任意标签的清单：
+
+```bash
+uv run python scripts/release_manifest.py v4.0.0 --markdown
+```
+
+安装该确切提交：
+
+```bash
+LLM_WIKI_COMMIT=$(git rev-parse v4.0.0^{commit}) bash ./install.sh
+```
+
 ### 依赖配置
 
 MCP 属于 production baseline；`mcp-server` 仍是 compatibility alias。全新 production

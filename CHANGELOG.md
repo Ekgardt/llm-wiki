@@ -4,10 +4,38 @@ All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [4.0.0] — 2026-08-25
 
-### Fixed
+First release of the v4 line. The version has carried 4.0.0 since the platform
+work landed, but nothing was ever tagged; this release publishes the audited
+state, including everything found and fixed during the audit week.
 
+### Since the audit (2026-08-18 → 2026-08-25)
+
+#### Added
+
+- Session records age out of the active tree after ninety days, moving to
+  `knowledge/raw/sessions/archive/<YYYY-MM>/` — same bytes, one directory
+  deeper, never deleted, in the weekly pass.
+- `archive_stale.py --restore <slug>` brings an archived page back: archiving
+  is dormancy, not deletion, so reactivation is part of the contract.
+- A second benchmark stand measures *applying* memory rather than recalling it:
+  each case counts only when the exact token needed to act reaches the reader.
+  Live vault: 0.857 against grep's 0.429.
+- The redactor knows the prefixed secret shapes a 2026 scanner catches —
+  `gho_`/`ghu_`/`ghs_`/`ghr_`, `github_pat_`, `sk_live_`/`rk_test_`, `xapp-`,
+  `npm_`, `hf_`, `pypi-`, `GOCSPX-`.
+
+#### Fixed
+
+- `doctor` answers every check at the default budget again. The corpus-wide
+  generation check ran first and spent the whole budget; it now runs last. And
+  `run/state.json` had outgrown the 256 KiB bound its readers use, which
+  silently blinded the scheduler and capture checks — writers now keep it under
+  three quarters of that.
+- A cold CLI query costs 13 s instead of 47: the cross-encoder is loaded only
+  when asked for with `--rerank`, since a one-shot call pays that load every
+  time while the resident MCP server pays it once.
 - A compiled page's citation resolves again. A day longer than 16 KiB is
   compiled in parts, and the page cites the part it was written from, but the
   resolver only ever compared the whole file — so every page compiled from a
@@ -307,9 +335,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   name before another publish or terminal finalization, so no hidden temp can release
   the lease or owner.
 
-## [4.0.0] — Unreleased
-
-### v4.0: Unified Knowledge Intelligence
+### v4.0 foundation
 
 - **LanceDB embedded vector backend** (`scripts/lance_store.py`) — HNSW vector
   search, embedded (no daemon). Replaces PostgreSQL. `--extra hybrid` to enable.
