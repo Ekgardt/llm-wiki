@@ -60,6 +60,7 @@
 - 2026-08-25 — Automated compile completed for snapshot 2653a48d07453ce7e95bdd882bc93332f800efbb52ac0e31c5a18098ddfdec5b, a1d6932a9d36055ad61fc02fa1832ee44a98ef4798443a747f3ef7afbb83ecef, f754d1c595350e75ce9a4097bb27f5680f07dd50ba69a5a80902f65b974df5db. Touched: none.
 - 2026-08-25 — Automated compile completed for snapshot b4db57160c96e846441bfd95055ef52b638374252301ee78978da32757423b4c. Touched: none.
 - 2026-08-25 — Automated compile completed for snapshot 00015eaa77f1eb43f8f1ec118043bbba3f0fdc2cf2c8a3ad43fcaffd98608dd3, 6d63fefb77f9f87f068f5cdde2caa371259fd8abb88fa995978bfe52a86788aa, e8ae7ec50589203d263c9b7b45a310f73377f840076114ae4ce19984940529b6, fc2197cdb90ec43a41871c63152b97fe3f941fa1125be19147564a7afc1c593d, fdd9b23981d415c544c2aa9e5dde16e1fd86778ef9757efc81bf03c1f52f35c6. Touched: none.
+- 2026-08-25 — Automated compile completed for snapshot 396158222cb10973fadbf10c7e69a65e6598d200c4b4edcfecdb2f103dd2ad8e, 4f663066183ecf0ee5b29a54cd532776d9154c901612241523579823a6a3e368, 6409ee9665a14b168f6ef3166304a5a124a7ddae080a7d9b7bd6075c981b3d22, 8973e9f8e1cf651f382213c7ac6cdbee2d9697c5971315641d645f08b61d2970, bb72aca69184f38f1bb0aac7b4a78bef356eb72e37ce9ce2e68101b7e21fccc2. Touched: none.
 
 ## Editorial note
 This log is vault metadata — an append-only editorial changelog of compile passes and hygiene actions over `knowledge/`, not content derived from `knowledge/raw/` or `knowledge/inbox/`. New entries are appended at the bottom by compile passes and by hand; entries are never rewritten or removed.
