@@ -479,3 +479,48 @@ def test_an_unspaced_script_still_matches_on_bigrams() -> None:
     from query_memory import _require_citation_touches_claim
 
     _require_citation_touches_claim("守卫重复拒绝直到义务完成", "守卫重复拒绝")
+
+
+def test_the_answer_corpus_covers_the_roots_retrieval_searches(vault: Path) -> None:
+    """A candidate under `docs/` has to resolve, or the answer refuses itself.
+
+    Retrieval searches a generation built over the approved code roots. When
+    the answer captured only the vault default, every candidate from `docs/`
+    or `scripts/` fell out of the snapshot and the manifest came back empty —
+    on a question search had just answered correctly.
+    """
+    from query_memory import _answer_corpus
+
+    note = vault / "docs" / "research" / "why-the-lease-expires.md"
+    note.parent.mkdir(parents=True)
+    note.write_text(
+        "---\ntype: concept\n---\n\n# Lease\n\nThe owner lease expires after 30 seconds.\n",
+        encoding="utf-8",
+        newline="",
+    )
+    _write_page(vault, "unrelated.md", "Alpha is enabled.")
+
+    captured = _answer_corpus(vault, time.monotonic() + 60)
+    paths = {source.record.relative_path for source in captured.sources}
+    assert "docs/research/why-the-lease-expires.md" in paths
+
+
+def test_long_pages_shed_the_weakest_span_instead_of_refusing_the_answer(vault: Path) -> None:
+    """A budget is a reason to show less, not a reason to answer nothing."""
+    from context_budget import ContextBudget
+
+    for index in range(3):
+        _write_page(vault, f"long-{index}.md", "Alpha is enabled. " + ("filler word " * 120))
+    snapshot = collect_corpus(vault)
+    chunks = tuple(snapshot.chunks)
+    assert len(chunks) >= 3
+
+    context = build_grounded_context(
+        snapshot,
+        chunks,
+        vault=vault,
+        profile="BASE",
+        budget=ContextBudget(None, 4096, 128, 64),
+    )
+    assert context.evidence
+    assert len(context.parent_paths) < len({chunk.parent_page for chunk in chunks})
