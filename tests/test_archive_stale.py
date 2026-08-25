@@ -260,3 +260,42 @@ def test_archive_page_conflict_preserves_concurrent_user_bytes(
     else:
         assert source.exists()
         assert destination.read_bytes() == user_bytes
+
+
+def _archive_vault(tmp_path, monkeypatch):
+    """A vault whose archive holds one page, wired into the archiver."""
+    import archive_stale
+
+    vault = tmp_path / "vault"
+    notes = vault / "knowledge/notes"
+    archive = notes / "archive/2026"
+    archive.mkdir(parents=True)
+    (archive / "old-lesson.md").write_text(
+        "---\ntype: debugging\nstatus: archived\n---\n# Old lesson\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(archive_stale, "ROOT", vault)
+    monkeypatch.setattr(archive_stale, "KNOWLEDGE", notes)
+    monkeypatch.setattr(archive_stale, "ARCHIVE_ROOT", notes / "archive")
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
+    return archive_stale, vault
+
+
+def test_a_dormant_page_can_be_brought_back(tmp_path, monkeypatch):
+    """Archiving is dormancy; reactivation is part of the contract."""
+    archive_stale, vault = _archive_vault(tmp_path, monkeypatch)
+
+    planned = archive_stale.restore_page("old-lesson", apply=False)
+    applied = archive_stale.restore_page("old-lesson", apply=True)
+
+    restored = vault / "knowledge/notes/old-lesson.md"
+    assert planned.startswith("WOULD RESTORE:")
+    assert applied == "RESTORED: knowledge/notes/old-lesson.md"
+    assert "status: archived" not in restored.read_text(encoding="utf-8")
+    assert not (vault / "knowledge/notes/archive/2026/old-lesson.md").exists()
+
+
+def test_restoring_a_page_that_was_never_archived_says_so(tmp_path, monkeypatch):
+    archive_stale, _vault = _archive_vault(tmp_path, monkeypatch)
+
+    assert archive_stale.restore_page("never-seen", apply=True) == "NOT ARCHIVED: never-seen"

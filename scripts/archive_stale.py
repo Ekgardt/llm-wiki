@@ -238,6 +238,77 @@ def _print_outcome(count: int, failures: int, apply: bool) -> None:
     print(f"\nArchived {count} page(s).")
 
 
+def _archived_pages(slug: str) -> list[Path]:
+    """Every archived copy of one slug, newest archive year first."""
+    if not ARCHIVE_ROOT.is_dir():
+        return []
+    return sorted(ARCHIVE_ROOT.rglob(f"{slug}.md"), reverse=True)
+
+
+def _without_archived_status(content: str) -> str:
+    """The page as active again: the status line archiving added is removed."""
+    frontmatter = FRONTMATTER_RE.match(content)
+    if frontmatter is None:
+        return content
+    if not re.search(r"^status:\s*archived\s*$", frontmatter.group(1), re.MULTILINE):
+        return content
+    return re.sub(r"^status:\s*archived\s*\n", "", content, count=1, flags=re.MULTILINE)
+
+
+def _restore_destination(archived: Path) -> Path:
+    """Where an archived page belongs: `archive/<year>/<subdir>/<name>`."""
+    relative = archived.relative_to(ARCHIVE_ROOT).parts
+    return KNOWLEDGE.joinpath(*relative[1:])
+
+
+def _committed_restore(archived: Path, destination: Path, source_bytes: bytes) -> bool:
+    content = _without_archived_status(source_bytes.decode("utf-8")).encode("utf-8")
+    relative = archived.relative_to(ROOT).as_posix()
+    try:
+        mutate_knowledge(
+            stable_operation_id("restore-page", relative, content),
+            {destination: content, archived: None},
+            preconditions={
+                relative: sha256_bytes(source_bytes),
+                destination.relative_to(ROOT).as_posix(): ABSENT,
+            },
+        )
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
+def restore_page(slug: str, *, apply: bool) -> str:
+    """Bring one archived page back to the active tree.
+
+    Archiving is dormancy, not deletion, so reactivation is part of the
+    contract rather than a manual `mv`: the page returns to the directory it
+    came from and loses the `status: archived` line that archiving added.
+    """
+    archived = _archived_pages(slug)
+    if not archived:
+        return f"NOT ARCHIVED: {slug}"
+    source = archived[0]
+    destination = _restore_destination(source)
+    if destination.exists():
+        return f"ALREADY ACTIVE: {destination.relative_to(ROOT).as_posix()}"
+    if not apply:
+        return f"WOULD RESTORE: {source.relative_to(ROOT).as_posix()}"
+    return _restored(source, destination)
+
+
+def _restored(source: Path, destination: Path) -> str:
+    try:
+        source_bytes = read_stable_bytes(
+            source, MAX_ARCHIVE_PAGE_BYTES, label="restore source"
+        )
+    except (OSError, ValueError):
+        return f"READ_ERROR: {source}"
+    if not _committed_restore(source, destination, source_bytes):
+        return f"WRITE_ERROR: {destination}"
+    return f"RESTORED: {destination.relative_to(ROOT).as_posix()}"
+
+
 def _parsed_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Archive stale knowledge pages.")
     parser.add_argument(
@@ -253,6 +324,12 @@ def _parsed_arguments() -> argparse.Namespace:
         "--apply", action="store_true", help="Actually move files (default: dry-run)"
     )
     parser.add_argument(
+        "--restore",
+        metavar="SLUG",
+        default=None,
+        help="Bring one archived page back to the active tree",
+    )
+    parser.add_argument(
         "--explain", action="store_true", help="Show why each page was flagged"
     )
     return parser.parse_args()
@@ -260,6 +337,10 @@ def _parsed_arguments() -> argparse.Namespace:
 
 def main() -> int:
     args = _parsed_arguments()
+    if args.restore:
+        outcome = restore_page(args.restore, apply=args.apply)
+        print(f"  {outcome}")
+        return 1 if "ERROR" in outcome else 0
     cutoff = datetime.now().timestamp() - (args.days * 86400)
     stale = _stale_pages(cutoff, args.days)
     if not stale:
