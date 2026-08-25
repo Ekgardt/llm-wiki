@@ -2191,6 +2191,13 @@ def _require_recovery_bound(max_transactions: object) -> None:
         raise ValueError("max_transactions must be a non-negative integer or None")
 
 
+def _required_state_hash(value: object) -> str:
+    """The recorded sha256 of one transaction state, refused unless it is a string."""
+    if not isinstance(value, str):
+        raise ValueError("invalid transaction state hash")
+    return value
+
+
 def _preparing_owner_alive(selected_state: str, owner_pid: object) -> bool:
     if selected_state != "preparing" or owner_pid is None:
         return False
@@ -3037,6 +3044,14 @@ def _require_written_content(change: MarkdownChange) -> None:
         raise ValueError("transaction target size exceeds limit")
 
 
+def _require_change_shape(change: object) -> None:
+    """A change must be a MarkdownChange naming one of the three known kinds."""
+    if not isinstance(change, MarkdownChange):
+        raise TypeError("changes must contain MarkdownChange values")
+    if change.kind not in {"create", "replace", "delete"}:
+        raise ValueError(f"unsupported change kind: {change.kind}")
+
+
 def _require_change_content(change: MarkdownChange) -> None:
     if change.kind == "delete":
         if change.content is not None:
@@ -3770,11 +3785,12 @@ def _coerce_legacy_append_arguments(
     path: Path | bytes | None,
     block: bytes | None,
 ) -> tuple[str | Path | None, Path | bytes | None, bytes | None]:
-    if block is not None:
-        return operation_id, path, block
-    if not isinstance(operation_id, Path):
-        return operation_id, path, block
-    if not isinstance(path, bytes):
+    legacy_positional = (
+        block is None
+        and isinstance(operation_id, Path)
+        and isinstance(path, bytes)
+    )
+    if not legacy_positional:
         return operation_id, path, block
     return None, operation_id, path
 
@@ -3876,9 +3892,7 @@ def _classify_settled_append(
         return "retry"
     if not _append_request_matches(coordinator, record, relative, block):
         raise ValueError("operation_id is already bound to a different request")
-    if record.state == "committed":
-        return record
-    return "advance"
+    return record if record.state == "committed" else "advance"
 
 
 def _append_transaction_failure(error: TransactionFailure) -> Literal["advance"]:
@@ -3962,6 +3976,10 @@ def _append_prepare_failure(
             deadline=deadline,
             cancelled=cancelled,
         )
+    return _append_other_failure(error)
+
+
+def _append_other_failure(error: Exception) -> _AppendAttemptResult:
     if isinstance(error, RuntimeError):
         return _append_runtime_failure(error)
     return "retry"
@@ -4236,6 +4254,15 @@ def _windows_pid_alive(pid: int) -> bool:
         ctypes.windll.kernel32.CloseHandle(handle)
 
 
+def _traversable_target(current: Path, value: str) -> bool:
+    """False once the walk reaches a path that does not exist yet."""
+    if current.is_symlink():
+        raise ValueError(f"target traverses a symlink: {value}")
+    if _is_reparse_point(current):
+        raise ValueError(f"target traverses a Windows reparse point: {value}")
+    return current.exists()
+
+
 def _is_reparse_point(path: Path) -> bool:
     try:
         attributes = getattr(path.stat(follow_symlinks=False), "st_file_attributes", 0)
@@ -4315,9 +4342,7 @@ def _verified_owner_acl_line(
     if len(owner_lines) != 1:
         raise PermissionError(f"owner-only ACL verification failed for {path}")
     owner = owner_lines[0]
-    if "(F)" not in owner:
-        raise PermissionError(f"owner-only ACL verification failed for {path}")
-    if "(I)" in owner:
+    if "(F)" not in owner or "(I)" in owner:
         raise PermissionError(f"owner-only ACL verification failed for {path}")
     return owner
 
@@ -4864,14 +4889,19 @@ class MarkdownCoordinator:
         )
 
     @staticmethod
-    def normalize_project_checkpoint(
-        project: str, event: Mapping[str, object]
-    ) -> dict[str, object]:
-        """Canonicalize and fully validate an event before reserving any state."""
+    def _require_checkpoint_inputs(project: object, event: object) -> None:
+        """The two shape refusals that must precede any canonicalization."""
         if not isinstance(project, str) or not project:
             raise ValueError("project must be a non-empty string")
         if not isinstance(event, Mapping):
             raise TypeError("checkpoint event must be a mapping")
+
+    @staticmethod
+    def normalize_project_checkpoint(
+        project: str, event: Mapping[str, object]
+    ) -> dict[str, object]:
+        """Canonicalize and fully validate an event before reserving any state."""
+        MarkdownCoordinator._require_checkpoint_inputs(project, event)
         allocated = {"project", "sequence", "last_applied_sequence"}
         if allocated.intersection(event):
             raise ValueError("checkpoint event contains coordinator-allocated fields")
@@ -5561,17 +5591,24 @@ class MarkdownCoordinator:
             return
         self._set_transaction_state(transaction_id, exc.state, error_code=exc.code)
 
+    def _require_named_target_boundary(
+        self, transaction_id: str, exc: Exception
+    ) -> None:
+        """Quarantine and name a moved target parent; anything else passes through."""
+        if not _is_target_boundary_error(exc):
+            return
+        self._set_transaction_state(
+            transaction_id, "quarantined", error_code="parent_identity_changed"
+        )
+        raise TransactionFailure(
+            "target parent identity changed",
+            "parent_identity_changed",
+            "quarantined",
+        ) from exc
+
     def _translate_apply_error(self, transaction_id: str, exc: Exception) -> None:
         """Name what went wrong, or re-raise what this layer cannot name."""
-        if _is_target_boundary_error(exc):
-            self._set_transaction_state(
-                transaction_id, "quarantined", error_code="parent_identity_changed"
-            )
-            raise TransactionFailure(
-                "target parent identity changed",
-                "parent_identity_changed",
-                "quarantined",
-            ) from exc
+        self._require_named_target_boundary(transaction_id, exc)
         message = str(exc)
         if "after-image is corrupt" in message or "plan hash mismatch" in message:
             recovered = self._recover_corrupt_after_image(transaction_id)
@@ -5586,12 +5623,19 @@ class MarkdownCoordinator:
         )
         raise failure from exc
 
+    @staticmethod
+    def _require_applicable_state(record: TransactionRecord) -> None:
+        """Only a prepared or half-applied transaction may still be applied."""
+        if record.state not in {"prepared", "applying"}:
+            raise RuntimeError(
+                f"transaction cannot be applied from state {record.state}"
+            )
+
     def _apply_locked(self, transaction_id: str) -> TransactionRecord:
         record = self._record(transaction_id)
         if record.state == "committed":
             return record
-        if record.state not in {"prepared", "applying"}:
-            raise RuntimeError(f"transaction cannot be applied from state {record.state}")
+        self._require_applicable_state(record)
         plan = self._load_verified_plan(record)
         content_guard = self._content_guard(record, plan)
         rows = self._operation_rows(transaction_id)
@@ -6238,10 +6282,36 @@ class MarkdownCoordinator:
             self._remove_artifacts(self.transaction_root / transaction_id)
             recovered.append(self._record(transaction_id))
             return False
-        if promotion == "quarantined":
+        return self._survived_promotion(transaction_id, promotion, recovered)
+
+    def _survived_promotion(
+        self,
+        transaction_id: str,
+        promotion: str,
+        recovered: list[TransactionRecord],
+    ) -> bool:
+        """False when promotion quarantined the record instead of leaving it appliable."""
+        if promotion != "quarantined":
+            return True
+        recovered.append(self._record(transaction_id))
+        return False
+
+    def _recovered_terminal_state(
+        self,
+        transaction_id: str,
+        selected_state: str,
+        recovered: list[TransactionRecord],
+    ) -> bool:
+        """True when an aborting or aborted record was recovered right here."""
+        if selected_state == "aborting":
+            self._recover_aborting(transaction_id)
             recovered.append(self._record(transaction_id))
-            return False
-        return True
+            return True
+        if selected_state == "aborted":
+            self._validate_aborted(transaction_id)
+            recovered.append(self._record(transaction_id))
+            return True
+        return False
 
     def _recover_one(
         self,
@@ -6250,17 +6320,13 @@ class MarkdownCoordinator:
         owner_pid: object,
         recovered: list[TransactionRecord],
     ) -> None:
-        if selected_state == "aborting":
-            self._recover_aborting(transaction_id)
-            recovered.append(self._record(transaction_id))
+        if self._recovered_terminal_state(
+            transaction_id, selected_state, recovered
+        ):
             return
-        if selected_state == "aborted":
-            self._validate_aborted(transaction_id)
-            recovered.append(self._record(transaction_id))
-            return
-        if _preparing_owner_alive(selected_state, owner_pid):
-            return
-        if not self._promoted_for_recovery(transaction_id, recovered):
+        if _preparing_owner_alive(
+            selected_state, owner_pid
+        ) or not self._promoted_for_recovery(transaction_id, recovered):
             return
         self._apply_recovered(transaction_id, recovered)
 
@@ -6417,11 +6483,12 @@ class MarkdownCoordinator:
     ) -> dict | None:
         manifest_bytes = (artifact_root / "manifest.json").read_bytes()
         manifest = json.loads(manifest_bytes)
-        if manifest_bytes != canonical_json_bytes(manifest):
-            return None
-        if set(manifest) != _RECOVERY_MANIFEST_FIELDS:
-            return None
-        if not _manifest_identity_matches(manifest, record.id, plan_bytes):
+        recognised = (
+            manifest_bytes == canonical_json_bytes(manifest)
+            and set(manifest) == _RECOVERY_MANIFEST_FIELDS
+            and _manifest_identity_matches(manifest, record.id, plan_bytes)
+        )
+        if not recognised:
             return None
         return manifest
 
@@ -6515,9 +6582,7 @@ class MarkdownCoordinator:
         if not _comparable_operation_lists(plan_operations, manifest_operations):
             return None
         built = self._all_built_operations(record, plan_operations, manifest_operations)
-        if built is None:
-            return None
-        if not self._request_hash_matches(
+        if built is None or not self._request_hash_matches(
             record, [item.change for item in built], manifest
         ):
             return None
@@ -6552,9 +6617,7 @@ class MarkdownCoordinator:
             return None
         self._verify_plan_artifacts(plan, artifact_root)
         manifest = self._validated_manifest_document(record, artifact_root, plan_bytes)
-        if manifest is None:
-            return None
-        if not self._manifest_matches_request(record, manifest):
+        if manifest is None or not self._manifest_matches_request(record, manifest):
             return None
         return self._built_operations(record, plan, manifest)
 
@@ -6640,19 +6703,18 @@ class MarkdownCoordinator:
         verdict = self._commit_promotion(record, promotion)
         if verdict is not None:
             return verdict
-        if promotion.parent_mismatch:
-            return self._quarantine_parent_identity(record)
-        return "promoted"
+        return (
+            self._quarantine_parent_identity(record)
+            if promotion.parent_mismatch
+            else "promoted"
+        )
 
     def _state_description_hash(self, state: object) -> str:
         if state == ABSENT:
             return ABSENT
         if not isinstance(state, dict) or set(state) != {"sha256", "artifact"}:
             raise ValueError("invalid transaction state description")
-        value = state["sha256"]
-        if not isinstance(value, str):
-            raise ValueError("invalid transaction state hash")
-        return value
+        return _required_state_hash(state["sha256"])
 
     def _rollback_for_quarantine(self, transaction_id: str, error_code: str) -> None:
         try:
@@ -6676,9 +6738,9 @@ class MarkdownCoordinator:
         before_state = _optional_before_state(
             self.transaction_root, transaction_id, row
         )
-        if before_state is _UNAVAILABLE:
-            return
-        if not self._try_apply_inverse(transaction_id, row, before_state):
+        if before_state is _UNAVAILABLE or not self._try_apply_inverse(
+            transaction_id, row, before_state
+        ):
             return
         self._mark_operation_unapplied(transaction_id, row["position"])
 
@@ -6772,6 +6834,18 @@ class MarkdownCoordinator:
             return False
         if not row["applied"]:
             return current != row["after_hash"]
+        return self._collect_applied_undo_image(
+            transaction_id, row, current, before_states
+        )
+
+    def _collect_applied_undo_image(
+        self,
+        transaction_id: str,
+        row: sqlite3.Row,
+        current: str,
+        before_states: dict[int, object],
+    ) -> bool:
+        """An applied target already rolled back needs no image; the rest need one."""
         if current == row["before_hash"]:
             return True
         state = _optional_before_state(self.transaction_root, transaction_id, row)
@@ -7060,6 +7134,12 @@ class MarkdownCoordinator:
         if depth:
             yield from self._reentrant_writer_gate(depth)
             return
+        yield from self._contract_writer_gate(wait_seconds)
+
+    def _contract_writer_gate(
+        self, wait_seconds: float | None
+    ) -> Iterator[OwnerLease]:
+        """The canonical gate when this coordinator is v3, otherwise the legacy one."""
         if getattr(self, "_database_contract", None) == _COORDINATOR_V3_CONTRACT:
             yield from self._canonical_writer_gate(wait_seconds)
             return
@@ -7230,13 +7310,17 @@ class MarkdownCoordinator:
                 lost.set()
                 return
 
-    def _nested_writer_gate(self, owner: OwnerLease) -> Iterator[OwnerLease]:
+    def _require_nested_gate_owner(self, owner: object) -> None:
+        """The two refusals a nested gate makes before it touches any state."""
         from operational_ownership import OwnerLease
 
         if not isinstance(owner, OwnerLease):
             raise TypeError("owner must be an OwnerLease")
         if getattr(self, "_database_contract", None) != _COORDINATOR_V3_CONTRACT:
             raise RuntimeError("canonical writer projection requires a v3 coordinator")
+
+    def _nested_writer_gate(self, owner: OwnerLease) -> Iterator[OwnerLease]:
+        self._require_nested_gate_owner(owner)
         if getattr(self._local, "gate_depth", 0):
             yield from self._reentered_writer_gate(owner)
             return
@@ -7376,10 +7460,7 @@ class MarkdownCoordinator:
         return self._target(value)
 
     def _validate_change(self, change: MarkdownChange) -> MarkdownChange:
-        if not isinstance(change, MarkdownChange):
-            raise TypeError("changes must contain MarkdownChange values")
-        if change.kind not in {"create", "replace", "delete"}:
-            raise ValueError(f"unsupported change kind: {change.kind}")
+        _require_change_shape(change)
         _require_change_content(change)
         _require_before_bound(change.max_before_bytes)
         self._target(change.path)
@@ -7396,11 +7477,7 @@ class MarkdownCoordinator:
         current = self.vault
         for part in relative.parts:
             current = current / part
-            if current.is_symlink():
-                raise ValueError(f"target traverses a symlink: {value}")
-            if _is_reparse_point(current):
-                raise ValueError(f"target traverses a Windows reparse point: {value}")
-            if not current.exists():
+            if not _traversable_target(current, value):
                 return
 
     def _require_canonical_parent(self, target: Path, value: str) -> None:
@@ -7833,6 +7910,10 @@ class MarkdownCoordinator:
             timezone.utc
         ) - timedelta(days=30):
             raise RuntimeError("transaction is outside the 30-day undo window")
+        self._require_retained_undo_images(transaction_id)
+
+    def _require_retained_undo_images(self, transaction_id: str) -> None:
+        """Undo needs the before-images; a pruned transaction cannot be undone."""
         if not (self.transaction_root / transaction_id).is_dir():
             raise RuntimeError("transaction undo images are no longer retained")
 
@@ -7876,9 +7957,11 @@ class MarkdownCoordinator:
         ).read_bytes()
         if sha256_bytes(before) != row["before_hash"]:
             raise RuntimeError("transaction before-image is corrupt")
-        if row["after_hash"] == ABSENT:
-            return MarkdownChange.create(row["path"], before)
-        return MarkdownChange.replace(row["path"], before)
+        return (
+            MarkdownChange.create(row["path"], before)
+            if row["after_hash"] == ABSENT
+            else MarkdownChange.replace(row["path"], before)
+        )
 
     def _operation_hash(self, row: sqlite3.Row) -> str:
         with self._stable_parent(row) as (target, parent_descriptor):
@@ -8134,6 +8217,12 @@ class MarkdownCoordinator:
             if current != row["after_hash"]:
                 raise RuntimeError(f"after state mismatch for {row['path']}")
             return True
+        return self._reconcile_unapplied_operation(transaction_id, row, current)
+
+    def _reconcile_unapplied_operation(
+        self, transaction_id: str, row: sqlite3.Row, current: str
+    ) -> bool:
+        """True when an unmarked operation already holds its after state."""
         if current == row["after_hash"]:
             self._mark_operation_applied(transaction_id, row["position"])
             return True
@@ -8318,9 +8407,13 @@ class MarkdownCoordinator:
             raise RuntimeError(
                 f"transaction after-image is corrupt for {row['path']}"
             )
+        self._require_safe_model_output(content)
+        return content
+
+    def _require_safe_model_output(self, content: bytes) -> None:
+        """Model-authored bytes pass the publication guard before they are written."""
         if getattr(self._local, "content_guard", None) == "model_output":
             require_safe_publication(content)
-        return content
 
     def _publish_at_parent(
         self,
