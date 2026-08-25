@@ -465,13 +465,48 @@ def _anchor_tokens(tokens: set[str]) -> set[str]:
     return {token for token in tokens if _is_anchor(token, dominant)}
 
 
+# What an operator would act on: a figure, a version, a flag, a quoted
+# identifier. These are the parts of a claim where being cited from the right
+# page but the wrong sentence changes what someone does.
+_FIGURE = re.compile(r"(?<![\w.])\d+(?:[.,]\d+)*(?![\w.])|--[a-z][a-z0-9-]{2,}|`[^`\n]{2,40}`")
+
+
+def _hard_tokens(text: str) -> set[str]:
+    return {match.casefold().strip("`") for match in _FIGURE.findall(str(text))}
+
+
+def _require_figures_agree(claim_text: str, span_text: str) -> None:
+    """When both sides name figures, at least one has to be the same figure.
+
+    A span that carries no figure at all may still support a numeric claim —
+    it can spell the number out — so this stays quiet there. What it refuses is
+    the pair where both sides state figures and none of them match: a citation
+    from the right page and the wrong sentence, which reads as support and is
+    the shape an operator acts on.
+
+    This is still not entailment, and entailment is still not claimed.
+    """
+    claim_figures = _hard_tokens(claim_text)
+    span_figures = _hard_tokens(span_text)
+    if not claim_figures or not span_figures:
+        return
+    if claim_figures & span_figures:
+        return
+    raise GroundedQAError(
+        "cited span states different figures than the claim it is offered for"
+    )
+
+
 def _require_citation_touches_claim(claim_text: str, span_text: str) -> None:
     """Reject a citation that shares nothing with the claim it is offered for.
 
     This is a necessary condition, not proof of entailment: a span from the
     right page that happens to repeat a word still passes. What it does close
-    is the case the audit named — a truthful citation about something else.
+    is the case the audit named — a truthful citation about something else —
+    and, since 2026-08-25, the narrower case where both sides state figures and
+    none of them agree.
     """
+    _require_figures_agree(claim_text, span_text)
     claim_tokens = _content_tokens(claim_text)
     if not claim_tokens:
         return
