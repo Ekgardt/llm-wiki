@@ -5560,7 +5560,21 @@ def main() -> int:
         help="Requested retrieval profile (Task 11 planner)",
     )
     p.add_argument("--no-graph", action="store_true", help="Disable graph-neighbor signal")
-    p.add_argument("--no-rerank", action="store_true", help="Disable cross-encoder reranker")
+    # The cross-encoder costs about twenty seconds to load in a fresh process
+    # and buys `hit@1` 0.0 → 0.1 and `hit@5` 0.6 → 0.7 on this vault's stand
+    # (measured 2026-08-24). A resident MCP server pays that once and keeps it;
+    # a one-shot CLI call pays it every time, which is why the CLI leaves it off
+    # unless asked. Measured 2026-08-25: 30.3 s with it, 10.7 s without.
+    p.add_argument(
+        "--rerank",
+        action="store_true",
+        help="Load the cross-encoder reranker (about 20s in a cold process)",
+    )
+    p.add_argument(
+        "--no-rerank",
+        action="store_true",
+        help="Kept for compatibility: the CLI already skips the reranker",
+    )
     p.add_argument("--rebuild", action="store_true", help="Force index rebuild")
     p.add_argument("--status", action="store_true", help="Show index stats")
     p.add_argument("--stdin", action="store_true", help="Read query from stdin (injection-safe)")
@@ -5619,7 +5633,7 @@ def _run_cli_search(args: argparse.Namespace) -> int:
             semantic=args.semantic,
             profile=args.profile,
             graph=not args.no_graph,
-            rerank=not args.no_rerank,
+            rerank=args.rerank and not args.no_rerank,
         )
     except LegacySearchUnavailable as error:
         print(f"search_memory: {error}", file=sys.stderr)
