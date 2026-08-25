@@ -35,6 +35,7 @@ WRITER_TARGETS = [
 TASK14_BEHAVIORAL_ENTRYPOINTS = {
     "scripts/access_tracking.py:flush_access_to_frontmatter",
     "scripts/archive_stale.py:_committed_archive",
+    "scripts/archive_stale.py:_committed_restore",
     "scripts/blackboard.py:_append_jsonl",
     "scripts/bootstrap_project.py:bootstrap",
     "scripts/build_guardrails.py:main",
@@ -58,6 +59,7 @@ TASK14_BEHAVIORAL_ENTRYPOINTS = {
 TASK14_READ_TRANSFORM_WRITE_ENTRYPOINTS = {
     "scripts/access_tracking.py:flush_access_to_frontmatter",
     "scripts/archive_stale.py:_committed_archive",
+    "scripts/archive_stale.py:_committed_restore",
     "scripts/build_guardrails.py:main",
     "scripts/feedback_capture.py:promote_candidate",
     "scripts/migrate_to_okf.py:_write_page",
@@ -257,6 +259,7 @@ def _drive_access_tracking(d: _Drive) -> None:
 
 
 def _drive_archive_stale(d: _Drive) -> None:
+    """Both directions of the archive: putting a page to sleep and waking it."""
     module, monkeypatch, vault = d.module, d.monkeypatch, d.vault
     page = vault / "knowledge/notes/page.md"
     body = f"---\ntype: debugging\nstatus: archived\n---\n# Page\n{d.secret}\n"
@@ -265,7 +268,11 @@ def _drive_archive_stale(d: _Drive) -> None:
     monkeypatch.setattr(module, "KNOWLEDGE", page.parent)
     monkeypatch.setattr(module, "ARCHIVE_ROOT", page.parent / "archive")
     monkeypatch.setattr(module, "mutate_knowledge", d.boundary)
-    d.function(page, page.parent / "archive/2026/page.md", body.encode("utf-8"), body)
+    archived = page.parent / "archive/2026/page.md"
+    if d.entrypoint.endswith(":_committed_restore"):
+        d.function(archived, page, body.encode("utf-8"))
+        return
+    d.function(page, archived, body.encode("utf-8"), body)
 
 
 def _drive_blackboard(d: _Drive) -> None:
