@@ -1234,15 +1234,41 @@ def _quarantined_ids(database: sqlite3.Connection) -> set[str]:
     }
 
 
-def _chain_resolved_ids(database: sqlite3.Connection) -> set[str]:
+def _parent_by_transaction(database: sqlite3.Connection) -> dict[str, str]:
     return {
-        row[0]
+        row[0]: row[1]
         for row in database.execute(
-            'SELECT parent_transaction_id FROM "transaction" '
-            "WHERE state='committed' AND parent_transaction_id IS NOT NULL"
+            'SELECT id, parent_transaction_id FROM "transaction" '
+            "WHERE parent_transaction_id IS NOT NULL"
         )
-        if row[0]
     }
+
+
+def _mark_ancestors(
+    identifier: str | None, parents: dict[str, str], resolved: set[str]
+) -> None:
+    while identifier and identifier not in resolved:
+        resolved.add(identifier)
+        identifier = parents.get(identifier)
+
+
+def _chain_resolved_ids(database: sqlite3.Connection) -> set[str]:
+    """Every attempt whose own chain of retries ended in a commit.
+
+    One hop is not enough: a retry can be refused too, and the ordinals
+    (`<id>:cas:2` for an append, `<id>#3` for a compile) exist precisely
+    because of that. Reading only the parent a committed row names left the
+    first refusal of a three-deep chain open forever, which is the same
+    permanently red finding the lineage was introduced to prevent.
+    """
+    parents = _parent_by_transaction(database)
+    resolved: set[str] = set()
+    for row in database.execute(
+        'SELECT parent_transaction_id FROM "transaction" '
+        "WHERE state='committed' AND parent_transaction_id IS NOT NULL"
+    ):
+        _mark_ancestors(row[0], parents, resolved)
+    return resolved
 
 
 def _committed_created_paths(database: sqlite3.Connection) -> set[str]:

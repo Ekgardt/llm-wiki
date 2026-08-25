@@ -334,6 +334,25 @@ def test_one_aggregate_check_depends_on_every_other_job() -> None:
     # it: `always()` runs the job, and only an explicit success comparison
     # keeps a non-success result from merging.
     commands = _commands(aggregate)
-    assert 'join(needs.*.result, " ")' in commands
+    # Single quotes are not cosmetic: a double-quoted string in a GitHub
+    # expression makes the workflow file unparsable, and then nothing runs.
+    assert "join(needs.*.result, ' ')" in commands
     assert '"${result}" = "success"' in commands
     assert "exit 1" in commands
+
+
+def test_no_expression_uses_a_double_quoted_string() -> None:
+    """A double-quoted string inside `${{ }}` makes the whole file unparsable.
+
+    Not a style rule. GitHub expressions accept single-quoted strings only;
+    one double quote and the workflow fails to load, so zero jobs run and the
+    aggregate check never reports. That is exactly how `f64df64` reached main
+    red: the run existed, lasted zero seconds, and had no jobs to fail.
+    """
+    offenders = [
+        line
+        for line in WORKFLOW.read_text(encoding="utf-8").splitlines()
+        if re.search(r"\$\{\{[^}]*\"", line)
+    ]
+
+    assert offenders == []

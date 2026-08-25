@@ -66,6 +66,59 @@ TYPE_WEIGHTS: dict[str, float] = {
 
 DEFAULT_TYPE_WEIGHT = 1.0
 
+# What the question asks for decides whether the vault's own retrieval rule —
+# answer from the compiled pages, read the commentary after — applies at all.
+# These intents say the question is about code: it names a path, a filename or a
+# symbol, or it asks about dependencies, structure, or impact. For those a file
+# that lives with the code is the answer, not commentary on someone's decision.
+CODE_SHAPED_INTENTS = frozenset(
+    {"exact_identifier", "graph_relation", "repo_map", "impact"}
+)
+
+
+def curated_pages_first(intents: object) -> bool:
+    """Whether "answer from the compiled pages first" applies to this question.
+
+    Detection turns the prior *off*, never on: a pre-retrieval routing mistake
+    is not recovered downstream, so a query this cannot read keeps ranking
+    exactly as it does today. See
+    `docs/research/2026-08-25-intent-conditional-ranking-weights.md`.
+    """
+    if not isinstance(intents, (tuple, list, set, frozenset)):
+        return True
+    return not CODE_SHAPED_INTENTS.intersection(str(item) for item in intents)
+
+
+def _code_roots() -> frozenset[str]:
+    """The one list of code roots, read where the corpus already declares it."""
+    from corpus_snapshot import APPROVED_CODE_ROOTS
+
+    return APPROVED_CODE_ROOTS
+
+
+def _under_code_root(relative_path: object) -> bool:
+    if not isinstance(relative_path, str) or not relative_path:
+        return False
+    head = relative_path.replace("\\", "/").lstrip("/").split("/", 1)[0]
+    return head in _code_roots()
+
+
+def source_type_weight(
+    page_type: object, relative_path: object, *, curated_first: bool
+) -> float:
+    """What the page is — and, for a knowledge question, where it lives.
+
+    The declared type is not enough on its own. Measured on this vault: a design
+    spec under `docs/` declares `type: decision` and then outranks the decision
+    page in `knowledge/notes/` it comments on, and a question sheet under
+    `benchmark/` is typed `code` and outranks everything. Under the curated-first
+    prior a source that lives with the code takes the commentary weight this
+    table already names, and nothing is ever lifted by living there.
+    """
+    if curated_first and _under_code_root(relative_path):
+        return min(type_weight(page_type), TYPE_WEIGHTS["doc"])
+    return type_weight(page_type)
+
 
 def authority_weight(value: object) -> float:
     """Weight for one `source_authority` value; unknown or absent means 1.0."""
