@@ -1370,12 +1370,16 @@ def _coordinator_v3_upgrade_source_healthy(database: sqlite3.Connection) -> bool
     return all(checks)
 
 
-def _validate_coordinator_v3_upgrade_source(database: sqlite3.Connection) -> None:
+def _require_coordinator_v3_upgrade_schema(database: sqlite3.Connection) -> None:
     if not _coordinator_v3_base_schema_complete(database):
         raise _coordinator_migration_error(
             "coordinator_v3_source_conflict",
             "coordinator v3 schema upgrade source is not the previous exact schema",
         )
+
+
+def _validate_coordinator_v3_upgrade_source(database: sqlite3.Connection) -> None:
+    _require_coordinator_v3_upgrade_schema(database)
     if database.execute("SELECT COUNT(*) FROM maintenance_owners").fetchone()[0]:
         raise _coordinator_migration_error(
             "coordinator_v3_source_live",
@@ -1931,15 +1935,13 @@ def _require_claim_target_hashes(item: Mapping[str, object]) -> None:
 
 
 def _valid_project_lease_values(expected: Mapping[str, object]) -> bool:
-    if not _is_filled_string(expected["project"]):
-        return False
-    if not _is_filled_string(expected["lease_token"]):
-        return False
-    if not isinstance(expected["fencing_epoch"], int):
-        return False
-    if expected["fencing_epoch"] < 1:
-        return False
-    return isinstance(expected["expires_at"], str)
+    return (
+        _is_filled_string(expected["project"])
+        and _is_filled_string(expected["lease_token"])
+        and isinstance(expected["fencing_epoch"], int)
+        and expected["fencing_epoch"] >= 1
+        and isinstance(expected["expires_at"], str)
+    )
 
 
 def _validated_project_lease(expected: object) -> dict:
@@ -1955,15 +1957,13 @@ def _validated_project_lease(expected: object) -> dict:
 
 
 def _valid_intent_fence_values(expected: Mapping[str, object]) -> bool:
-    if not _is_sha256_hex(str(expected["intent_id"])):
-        return False
-    if expected["mode"] not in {"capture", "worker", "operator"}:
-        return False
-    if not _is_filled_string(expected["token"]):
-        return False
-    if not _valid_positive_epoch(expected["fencing_epoch"]):
-        return False
-    return isinstance(expected["expires_at"], str)
+    return (
+        _is_sha256_hex(str(expected["intent_id"]))
+        and expected["mode"] in {"capture", "worker", "operator"}
+        and _is_filled_string(expected["token"])
+        and _valid_positive_epoch(expected["fencing_epoch"])
+        and isinstance(expected["expires_at"], str)
+    )
 
 
 def _validated_intent_fence(expected: object) -> dict:
@@ -1979,13 +1979,12 @@ def _validated_intent_fence(expected: object) -> dict:
 
 
 def _valid_capture_binding_values(expected: Mapping[str, object]) -> bool:
-    if not _is_sha256_hex(str(expected["intent_id"])):
-        return False
-    if not _is_filled_string(expected["task_id"]):
-        return False
-    if not _is_sha256_hex(str(expected["active_link_digest"])):
-        return False
-    return _is_sha256_hex(str(expected["seal_digest"]))
+    return (
+        _is_sha256_hex(str(expected["intent_id"]))
+        and _is_filled_string(expected["task_id"])
+        and _is_sha256_hex(str(expected["active_link_digest"]))
+        and _is_sha256_hex(str(expected["seal_digest"]))
+    )
 
 
 def _validated_capture_binding(expected: object) -> dict:
@@ -2065,13 +2064,12 @@ def _persisted_integers(persisted: Mapping[str, object]) -> bool:
 
 
 def _persisted_shape_matches(persisted: object, position: int) -> bool:
-    if not isinstance(persisted, dict):
-        return False
-    if set(persisted) != _PERSISTED_OPERATION_FIELDS:
-        return False
-    if persisted["position"] != position:
-        return False
-    return _persisted_integers(persisted)
+    return (
+        isinstance(persisted, dict)
+        and set(persisted) == _PERSISTED_OPERATION_FIELDS
+        and persisted["position"] == position
+        and _persisted_integers(persisted)
+    )
 
 
 def _validated_persisted_operation(
@@ -2117,16 +2115,20 @@ def _require_normalized_path(value: str) -> None:
         raise ValueError("path must use NFC Unicode normalization")
 
 
-def _require_bounded_path(value: str, relative: Path) -> None:
-    if len(value.encode("utf-8")) > MAX_KNOWLEDGE_PATH_BYTES:
-        raise ValueError("target path exceeds length limit")
-    if len(relative.parts) > MAX_KNOWLEDGE_DEPTH:
-        raise ValueError("target path depth exceeds limit")
+def _require_bounded_components(relative: Path) -> None:
     if any(
         len(part.encode("utf-8")) > MAX_KNOWLEDGE_COMPONENT_BYTES
         for part in relative.parts
     ):
         raise ValueError("target path component exceeds length limit")
+
+
+def _require_bounded_path(value: str, relative: Path) -> None:
+    if len(value.encode("utf-8")) > MAX_KNOWLEDGE_PATH_BYTES:
+        raise ValueError("target path exceeds length limit")
+    if len(relative.parts) > MAX_KNOWLEDGE_DEPTH:
+        raise ValueError("target path depth exceeds limit")
+    _require_bounded_components(relative)
 
 
 def _non_portable_component(part: str) -> bool:
@@ -2168,25 +2170,24 @@ def _require_blackboard_target(normalized: str) -> None:
 
 def _require_approved_suffix(relative: Path, normalized: str) -> None:
     """Each approved file type belongs in exactly one place."""
-    suffix = relative.suffix.casefold()
-    if suffix == ".md":
-        _require_markdown_target(normalized)
-        return
-    if suffix == ".json":
-        _require_feedback_target(normalized)
-        return
-    if suffix == ".jsonl":
-        _require_blackboard_target(normalized)
-        return
-    raise ValueError("transaction targets must use an approved file type")
+    require_target = {
+        ".md": _require_markdown_target,
+        ".json": _require_feedback_target,
+        ".jsonl": _require_blackboard_target,
+    }.get(relative.suffix.casefold())
+    if require_target is None:
+        raise ValueError("transaction targets must use an approved file type")
+    require_target(normalized)
 
 
 def _require_recovery_bound(max_transactions: object) -> None:
     if max_transactions is None:
         return
-    if isinstance(max_transactions, bool) or not isinstance(max_transactions, int):
-        raise ValueError("max_transactions must be a non-negative integer or None")
-    if max_transactions < 0:
+    if (
+        isinstance(max_transactions, bool)
+        or not isinstance(max_transactions, int)
+        or max_transactions < 0
+    ):
         raise ValueError("max_transactions must be a non-negative integer or None")
 
 
@@ -2214,15 +2215,30 @@ class _StagedPlan(NamedTuple):
     plan_operations: list[dict[str, object]]
 
 
+def _require_prepare_operation_id(operation_id: object) -> None:
+    if not isinstance(operation_id, str) or not operation_id:
+        raise ValueError("operation_id must be a non-empty string")
+
+
 def _require_prepare_arguments(
     operation_id: object, changes: Sequence[MarkdownChange], content_guard: object
 ) -> None:
-    if not isinstance(operation_id, str) or not operation_id:
-        raise ValueError("operation_id must be a non-empty string")
+    _require_prepare_operation_id(operation_id)
     if not changes:
         raise ValueError("a transaction requires at least one change")
     if content_guard not in {None, "model_output"}:
         raise ValueError("content_guard must be 'model_output' or None")
+
+
+def _require_reservation_binding(
+    project_reservation: ProjectCheckpointReservation,
+    operation_id: str,
+    persisted_preconditions: Mapping[str, object],
+) -> None:
+    if project_reservation.operation_id != operation_id:
+        raise ValueError("project reservation operation_id does not match")
+    if "project_lease" not in persisted_preconditions:
+        raise ValueError("project reservation requires a project lease precondition")
 
 
 def _require_matching_reservation(
@@ -2234,10 +2250,9 @@ def _require_matching_reservation(
         return
     if not isinstance(project_reservation, ProjectCheckpointReservation):
         raise TypeError("project_reservation must be a ProjectCheckpointReservation")
-    if project_reservation.operation_id != operation_id:
-        raise ValueError("project reservation operation_id does not match")
-    if "project_lease" not in persisted_preconditions:
-        raise ValueError("project reservation requires a project lease precondition")
+    _require_reservation_binding(
+        project_reservation, operation_id, persisted_preconditions
+    )
 
 
 def _require_capture_matches_kind(change: MarkdownChange, before: bytes | None) -> None:
@@ -2377,9 +2392,11 @@ class _AbortDirection(NamedTuple):
 def _require_gate_wait(wait_seconds: object) -> None:
     if wait_seconds is None:
         return
-    if isinstance(wait_seconds, bool) or not isinstance(wait_seconds, (int, float)):
-        raise ValueError("writer gate wait_seconds must be non-negative or None")
-    if wait_seconds < 0:
+    if (
+        isinstance(wait_seconds, bool)
+        or not isinstance(wait_seconds, (int, float))
+        or wait_seconds < 0
+    ):
         raise ValueError("writer gate wait_seconds must be non-negative or None")
 
 
@@ -2866,15 +2883,13 @@ def _abort_receipt_matches(
     transaction_id: str,
     row: sqlite3.Row,
 ) -> bool:
-    if canonical_json_bytes(receipt) != receipt_bytes:
-        return False
-    if receipt["transaction_id"] != transaction_id:
-        return False
-    if receipt["abort_operation_id"] != row["abort_operation_id"]:
-        return False
-    if receipt["before_manifest_sha256"] != row["abort_manifest_sha256"]:
-        return False
-    return sha256_bytes(receipt_bytes) == row["abort_receipt_sha256"]
+    return (
+        canonical_json_bytes(receipt) == receipt_bytes
+        and receipt["transaction_id"] == transaction_id
+        and receipt["abort_operation_id"] == row["abort_operation_id"]
+        and receipt["before_manifest_sha256"] == row["abort_manifest_sha256"]
+        and sha256_bytes(receipt_bytes) == row["abort_receipt_sha256"]
+    )
 
 
 def _required_parent_identity(row: sqlite3.Row) -> object:
@@ -2935,9 +2950,11 @@ def _link_or_replace(
 def _require_wait_seconds(wait_seconds: object) -> None:
     if wait_seconds is None:
         return
-    if isinstance(wait_seconds, bool) or not isinstance(wait_seconds, (int, float)):
-        raise ValueError("writer gate wait_seconds must be non-negative or None")
-    if wait_seconds < 0:
+    if (
+        isinstance(wait_seconds, bool)
+        or not isinstance(wait_seconds, (int, float))
+        or wait_seconds < 0
+    ):
         raise ValueError("writer gate wait_seconds must be non-negative or None")
 
 
@@ -3013,32 +3030,46 @@ def _require_safe_parent(
         raise ValueError(not_directory_message)
 
 
-def _require_change_content(change: MarkdownChange) -> None:
-    if change.kind == "delete":
-        if change.content is not None:
-            raise ValueError("delete content must be absent")
-        return
+def _require_written_content(change: MarkdownChange) -> None:
     if not isinstance(change.content, bytes):
         raise TypeError("create and replace content must be bytes")
     if len(change.content) > MAX_KNOWLEDGE_TARGET_BYTES:
         raise ValueError("transaction target size exceeds limit")
 
 
+def _require_change_content(change: MarkdownChange) -> None:
+    if change.kind == "delete":
+        if change.content is not None:
+            raise ValueError("delete content must be absent")
+        return
+    _require_written_content(change)
+
+
 def _require_before_bound(max_before_bytes: object) -> None:
     if max_before_bytes is None:
         return
-    if isinstance(max_before_bytes, bool) or not isinstance(max_before_bytes, int):
-        raise ValueError("max_before_bytes must be a non-negative integer or None")
-    if max_before_bytes < 0:
+    if (
+        isinstance(max_before_bytes, bool)
+        or not isinstance(max_before_bytes, int)
+        or max_before_bytes < 0
+    ):
         raise ValueError("max_before_bytes must be a non-negative integer or None")
 
 
-def _deletion_blocker_code(row: sqlite3.Row, now: datetime) -> str | None:
-    """None means this transaction does not stand in the way of deletion."""
+def _deletion_state_blocker(row: sqlite3.Row) -> str | None:
+    """None means this transaction's own state does not block deletion."""
     if row["state"] in {"preparing", "prepared", "applying"}:
         return "nonterminal_transaction"
     if row["state"] in {"conflicted", "quarantined"}:
         return row["error_code"] or "transaction_requires_attention"
+    return None
+
+
+def _deletion_blocker_code(row: sqlite3.Row, now: datetime) -> str | None:
+    """None means this transaction does not stand in the way of deletion."""
+    state_blocker = _deletion_state_blocker(row)
+    if state_blocker is not None:
+        return state_blocker
     if _within_undo_retention(row, now):
         return "undo_retention"
     return None
@@ -3225,9 +3256,10 @@ def _entry_matches(
 def _lease_row_matches(row: object, expected: Mapping[str, object]) -> bool:
     if row is None:
         return False
-    if row["lease_token"] != expected["lease_token"]:
-        return False
-    if row["fencing_epoch"] != expected["fencing_epoch"]:
+    if (
+        row["lease_token"] != expected["lease_token"]
+        or row["fencing_epoch"] != expected["fencing_epoch"]
+    ):
         return False
     now = datetime.now(timezone.utc)
     return (
@@ -3432,6 +3464,22 @@ def _persisted_hashes(record: TransactionRecord) -> dict[str, str]:
     return {operation.path: operation.after_hash for operation in record.operations}
 
 
+def _require_committed_state(record: TransactionRecord) -> None:
+    if record.state != "committed":
+        raise RuntimeError(
+            f"duplicate mutation ended in noncommitted state {record.state}"
+        )
+
+
+def _require_committed_duplicate(
+    existing: TransactionRecord, relative_changes: Mapping[str, bytes | None]
+) -> None:
+    """A duplicate may only be reused when it asked for exactly this request."""
+    if _desired_hashes(relative_changes) != _persisted_hashes(existing):
+        raise ValueError("operation_id is already bound to a different request")
+    _require_committed_state(existing)
+
+
 def _existing_committed_record(
     coordinator: MarkdownCoordinator,
     operation_id: str,
@@ -3443,12 +3491,7 @@ def _existing_committed_record(
     existing = _settle_operation(coordinator, operation_id)
     if existing is None:
         return None
-    if _desired_hashes(relative_changes) != _persisted_hashes(existing):
-        raise ValueError("operation_id is already bound to a different request")
-    if existing.state != "committed":
-        raise RuntimeError(
-            f"duplicate mutation ended in noncommitted state {existing.state}"
-        )
+    _require_committed_duplicate(existing, relative_changes)
     _verify_committed_targets(coordinator, existing)
     return existing
 
@@ -3515,10 +3558,7 @@ def _recovered_duplicate(
         ) from exc
     if _desired_hashes(relative_changes) != _persisted_hashes(record):
         raise exc
-    if record.state != "committed":
-        raise RuntimeError(
-            f"duplicate mutation ended in noncommitted state {record.state}"
-        )
+    _require_committed_state(record)
     _verify_committed_targets(coordinator, record)
     return record
 
@@ -3546,6 +3586,21 @@ def _prepare_or_recover(
     return None
 
 
+def _require_knowledge_changes(changes: Mapping[Path, bytes | None]) -> None:
+    if not changes:
+        raise ValueError("a knowledge mutation requires at least one change")
+
+
+def _settled_or_missing(
+    coordinator: MarkdownCoordinator, operation_id: str
+) -> TransactionRecord:
+    """The settled record, or the failure that it vanished before apply."""
+    settled = _settle_operation(coordinator, operation_id)
+    if settled is None:
+        raise RuntimeError("prepared transaction disappeared before apply")
+    return settled
+
+
 def mutate_knowledge(
     operation_id: str,
     changes: Mapping[Path, bytes | None],
@@ -3554,8 +3609,7 @@ def mutate_knowledge(
     preconditions: Mapping[str, object] | None = None,
 ) -> TransactionRecord:
     """Apply one recoverable mutation with caller-independent before hashes."""
-    if not changes:
-        raise ValueError("a knowledge mutation requires at least one change")
+    _require_knowledge_changes(changes)
     coordinator = _default_coordinator()
     relative_changes = _relative_changes(coordinator, changes)
     _recover_initial_contention(coordinator)
@@ -3569,10 +3623,12 @@ def mutate_knowledge(
     )
     if recovered is not None:
         return recovered
-    settled = _settle_operation(coordinator, operation_id)
-    if settled is None:
-        raise RuntimeError("prepared transaction disappeared before apply")
-    return settled
+    return _settled_or_missing(coordinator, operation_id)
+
+
+def _require_settle_deadline(deadline: float) -> None:
+    if time.monotonic() >= deadline:
+        raise TimeoutError("timed out waiting for duplicate transaction preparation")
 
 
 def _settle_operation(
@@ -3596,8 +3652,7 @@ def _settle_operation(
         _recover_abandoned_preparation(
             coordinator, operation_id, deadline=deadline, cancelled=cancelled
         )
-        if time.monotonic() >= deadline:
-            raise TimeoutError("timed out waiting for duplicate transaction preparation")
+        _require_settle_deadline(deadline)
         time.sleep(0.01)
 
 
@@ -4292,6 +4347,19 @@ class _WindowsDispositionInformation(ctypes.Structure):
     _fields_ = [("delete_file", wintypes.BOOL)]
 
 
+def _require_windows_directory_identity(handle: int, path: Path) -> None:
+    """Refuse a handle that cannot be identified or that is a reparse point."""
+    kernel32 = ctypes.windll.kernel32
+    information = _WindowsFileInformation()
+    if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(information)):
+        error = ctypes.get_last_error()
+        kernel32.CloseHandle(handle)
+        raise OSError(error, f"cannot identify Windows directory: {path}")
+    if information.file_attributes & 0x400:
+        kernel32.CloseHandle(handle)
+        raise RuntimeError(f"Windows directory handle resolves to a reparse point: {path}")
+
+
 def _open_windows_directory(path: Path) -> int:
     kernel32 = ctypes.windll.kernel32
     kernel32.CreateFileW.argtypes = (
@@ -4322,14 +4390,7 @@ def _open_windows_directory(path: Path) -> int:
     invalid_handle = ctypes.c_void_p(-1).value
     if handle == invalid_handle:
         raise OSError(ctypes.get_last_error(), f"cannot lock Windows directory: {path}")
-    information = _WindowsFileInformation()
-    if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(information)):
-        error = ctypes.get_last_error()
-        kernel32.CloseHandle(handle)
-        raise OSError(error, f"cannot identify Windows directory: {path}")
-    if information.file_attributes & 0x400:
-        kernel32.CloseHandle(handle)
-        raise RuntimeError(f"Windows directory handle resolves to a reparse point: {path}")
+    _require_windows_directory_identity(handle, path)
     return handle
 
 
@@ -6371,6 +6432,20 @@ class MarkdownCoordinator:
         if normalized in seen_paths:
             return None
         seen_paths.add(normalized)
+        return self._built_operation_record(
+            record, position, operation, persisted, encoded_parent_identity
+        )
+
+    def _built_operation_record(
+        self,
+        record: TransactionRecord,
+        position: int,
+        operation: object,
+        persisted: object,
+        encoded_parent_identity: tuple,
+    ) -> _BuiltOperation | None:
+        """The row and change one persisted operation promotes to."""
+        path = str(operation["path"])
         before_hash = self._state_description_hash(operation["before"])
         after_hash = self._state_description_hash(operation["after"])
         kind = operation["kind"]
@@ -7354,12 +7429,13 @@ class MarkdownCoordinator:
         return sorted(targets, key=lambda item: (item["page"], item["claim_id"]))
 
     def _validated_fence_precondition(self, path: str, expected: object) -> object:
-        if path == "project_lease":
-            return _validated_project_lease(expected)
-        if path == "intent_fence":
-            return _validated_intent_fence(expected)
-        if path == "capture_binding":
-            return _validated_capture_binding(expected)
+        validate = {
+            "project_lease": _validated_project_lease,
+            "intent_fence": _validated_intent_fence,
+            "capture_binding": _validated_capture_binding,
+        }.get(path)
+        if validate is not None:
+            return validate(expected)
         self._target(path)
         _require_hash_or_absent(expected)
         return expected
@@ -7368,10 +7444,12 @@ class MarkdownCoordinator:
         """One precondition value, validated by the kind its key names."""
         if path == "claim_targets":
             return self._validated_claim_targets(expected)
-        if path == "claim_tree_manifest":
-            return validate_claim_tree_manifest(expected)
-        if path == "guardrails_source_manifest":
-            return validate_guardrail_source_manifest(expected)
+        validate = {
+            "claim_tree_manifest": validate_claim_tree_manifest,
+            "guardrails_source_manifest": validate_guardrail_source_manifest,
+        }.get(path)
+        if validate is not None:
+            return validate(expected)
         return self._validated_fence_precondition(path, expected)
 
     def _validate_preconditions(self, preconditions: Mapping[str, object]) -> dict[str, object]:
