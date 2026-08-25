@@ -3921,6 +3921,7 @@ def _prepare_append_candidate(
     *,
     extra_preconditions: Mapping[str, object] | None,
     content_guard: Literal["model_output"] | None,
+    parent_transaction_id: str | None,
     deadline: float,
     cancelled: Callable[[], bool] | None,
 ) -> _AppendAttemptResult:
@@ -3931,6 +3932,7 @@ def _prepare_append_candidate(
             operation_id=candidate_id,
             preconditions=_append_preconditions(relative, before, extra_preconditions),
             content_guard=content_guard,
+            _parent_transaction_id=parent_transaction_id,
             deadline=deadline,
             cancelled=cancelled,
         )
@@ -3969,6 +3971,7 @@ def _run_append_candidate(
     *,
     extra_preconditions: Mapping[str, object] | None,
     content_guard: Literal["model_output"] | None,
+    parent_transaction_id: str | None,
     deadline: float,
     cancelled: Callable[[], bool] | None,
 ) -> _AppendAttemptResult:
@@ -3992,9 +3995,27 @@ def _run_append_candidate(
         block,
         extra_preconditions=extra_preconditions,
         content_guard=content_guard,
+        parent_transaction_id=parent_transaction_id,
         deadline=deadline,
         cancelled=cancelled,
     )
+
+
+def _refused_parent(coordinator: MarkdownCoordinator, candidate_id: str) -> str | None:
+    """The quarantined attempt a retry follows, when the refusal was recorded.
+
+    A lost compare-and-swap is quarantined, and quarantine is kept as evidence.
+    Naming it here is what lets the record resolve itself: doctor clears a
+    refused attempt once a committed transaction in its own chain names it, the
+    same lineage `idempotent-retry-after-quarantine-decision.md` gave the
+    compile path. Without it an append to an existing file — a `replace`, so
+    the create-outcome proof cannot speak for it — stays an open finding
+    forever, and a health check that can never go green stops being read.
+    """
+    record = coordinator._record_for_operation_id(candidate_id)
+    if record is None or record.state != "quarantined":
+        return None
+    return record.id
 
 
 def _append_until_committed(
@@ -4009,6 +4030,7 @@ def _append_until_committed(
     cancelled: Callable[[], bool] | None,
 ) -> TransactionRecord:
     attempt = 0
+    parent: str | None = None
     while attempt < 64:
         candidate_id = _append_candidate_id(operation_id, attempt)
         outcome = _run_append_candidate(
@@ -4018,12 +4040,14 @@ def _append_until_committed(
             block,
             extra_preconditions=extra_preconditions,
             content_guard=content_guard,
+            parent_transaction_id=parent,
             deadline=deadline,
             cancelled=cancelled,
         )
         if isinstance(outcome, TransactionRecord):
             return outcome
         if outcome == "advance":
+            parent = _refused_parent(coordinator, candidate_id) or parent
             attempt += 1
     raise TimeoutError("knowledge append did not converge after 64 CAS attempts")
 
