@@ -289,6 +289,18 @@ def _antigravity_session_start(raw: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _add_antigravity_optional_fields(
+    tool_input: Mapping[str, Any], raw: Mapping[str, Any], projected: dict[str, Any]
+) -> None:
+    """The two fields the host sends only sometimes."""
+    cwd = _bounded_string(tool_input.get("Cwd"))
+    if cwd is not None:
+        projected["cwd"] = cwd
+    error = _bounded_string(raw.get("error"), limit=4096)
+    if error:
+        projected["checkpoint_type"] = "significant_failure"
+
+
 def _antigravity_post_tool(raw: Mapping[str, Any]) -> dict[str, Any]:
     tool_call = _bounded_mapping(raw.get("toolCall"))
     host_name = _bounded_string(tool_call.get("name"), limit=128, required=True)
@@ -303,12 +315,7 @@ def _antigravity_post_tool(raw: Mapping[str, Any]) -> dict[str, Any]:
         "tool_input": {"file_path": target},
         "host_step_index": _bounded_index(raw.get("stepIdx")),
     }
-    cwd = _bounded_string(tool_input.get("Cwd"))
-    if cwd is not None:
-        projected["cwd"] = cwd
-    error = _bounded_string(raw.get("error"), limit=4096)
-    if error:
-        projected["checkpoint_type"] = "significant_failure"
+    _add_antigravity_optional_fields(tool_input, raw, projected)
     return projected
 
 
@@ -493,9 +500,7 @@ def _copy_legacy_context(value: Mapping[str, Any], canonical: dict[str, object])
     if "legacy_context" not in value:
         return
     legacy_context = value["legacy_context"]
-    if not isinstance(legacy_context, str):
-        raise ValueError("invalid project delta")
-    if len(legacy_context) > 16384:
+    if not isinstance(legacy_context, str) or len(legacy_context) > 16384:
         raise ValueError("invalid project delta")
     canonical["legacy_context"] = legacy_context
 
@@ -729,9 +734,7 @@ def _run_delegate(
 def _forward_delegate_stdout(
     result: subprocess.CompletedProcess[str], forward_stdout: bool
 ) -> None:
-    if result.returncode != 0:
-        return
-    if not forward_stdout:
+    if result.returncode != 0 or not forward_stdout:
         return
     if _is_hook_output(result.stdout):
         sys.stdout.write(result.stdout)
@@ -837,16 +840,21 @@ def _is_plain_tool_observation(envelope: EventEnvelope, event_type: str) -> bool
     return envelope.event_type == "post_tool_use" and event_type == "post_tool_use"
 
 
-def _tool_observation_type(envelope: EventEnvelope, event_type: str) -> str:
-    if not _is_plain_tool_observation(envelope, event_type):
-        return event_type
-    if envelope.severity in {"error", "fatal"}:
-        return "significant_failure"
+def _changed_observation_type(envelope: EventEnvelope, event_type: str) -> str:
+    """What an unremarkable tool observation is called once it changed a file."""
     if envelope.payload.get("changed") is not True:
         return event_type
     if envelope.payload.get("significant") is True:
         return "file_changed"
     return "mutation"
+
+
+def _tool_observation_type(envelope: EventEnvelope, event_type: str) -> str:
+    if not _is_plain_tool_observation(envelope, event_type):
+        return event_type
+    if envelope.severity in {"error", "fatal"}:
+        return "significant_failure"
+    return _changed_observation_type(envelope, event_type)
 
 
 def _copy_observation_flags(observation: dict[str, object], payload: Mapping[str, Any]) -> None:
@@ -1048,18 +1056,22 @@ def _release_pending_claims(queue_key: str, owner: str) -> None:
     update_state(release, lock_timeout=0.5)
 
 
-def _has_pending_delta(item: Mapping[str, object]) -> bool:
-    if "has_project_delta" in item:
-        return item.get("has_project_delta") is True
-    checkpoint = item.get("checkpoint_event")
-    if not isinstance(checkpoint, Mapping):
-        return False
+def _checkpoint_carries_delta(checkpoint: Mapping[str, object]) -> bool:
     delta = checkpoint.get("delta")
     if not isinstance(delta, Mapping):
         return False
     normalized = dict(delta)
     normalized.setdefault("current_task_operations", [])
     return normalized != _empty_delta()
+
+
+def _has_pending_delta(item: Mapping[str, object]) -> bool:
+    if "has_project_delta" in item:
+        return item.get("has_project_delta") is True
+    checkpoint = item.get("checkpoint_event")
+    if not isinstance(checkpoint, Mapping):
+        return False
+    return _checkpoint_carries_delta(checkpoint)
 
 
 def _scalar_delta_operations(delta: Mapping[str, object], name: str) -> list[dict[str, object]]:
@@ -1376,6 +1388,17 @@ def _delta_due(
     return latest - previous >= timedelta(seconds=30)
 
 
+def _debounce_due(
+    items: Sequence[Mapping[str, object]],
+    reducers: Mapping[str, CheckpointReducer],
+) -> tuple[int | None, CheckpointDecision | None, bool]:
+    """Flush the newest item when any pending delta is due, else keep waiting."""
+    latest = datetime.fromisoformat(str(items[-1]["occurred_at"]))
+    if _any_delta_due(items, reducers, latest):
+        return len(items) - 1, CheckpointDecision("debounce_flush", checkpoint_at=latest), False
+    return None, None, True
+
+
 def _resolve_debounce(
     items: Sequence[Mapping[str, object]],
     reducers: Mapping[str, CheckpointReducer],
@@ -1386,10 +1409,7 @@ def _resolve_debounce(
         return index, decision, False
     if not _any_pending_delta(items):
         return None, None, False
-    latest = datetime.fromisoformat(str(items[-1]["occurred_at"]))
-    if _any_delta_due(items, reducers, latest):
-        return len(items) - 1, CheckpointDecision("debounce_flush", checkpoint_at=latest), False
-    return None, None, True
+    return _debounce_due(items, reducers)
 
 
 def _any_pending_delta(items: Sequence[Mapping[str, object]]) -> bool:
@@ -1763,16 +1783,21 @@ def _create_transient_parent(state_root: Path) -> tuple[Path, os.stat_result]:
     return current, info
 
 
+def _revalidated_private_dir(state_root: Path, current: Path) -> os.stat_result:
+    """Re-stat after the chmod: the mode must hold, not merely have been set."""
+    secured = _validate_transient_dir(state_root, current)
+    if stat.S_IMODE(secured.st_mode) != 0o700:
+        raise PermissionError("transient directory is not private")
+    return secured
+
+
 def _secure_posix_parent(state_root: Path, current: Path, info: os.stat_result) -> os.stat_result:
     mode = stat.S_IMODE(info.st_mode)
     if mode & 0o022:
         raise PermissionError("transient directory is not private")
     if mode != 0o700:
         current.chmod(0o700)
-    secured = _validate_transient_dir(state_root, current)
-    if stat.S_IMODE(secured.st_mode) != 0o700:
-        raise PermissionError("transient directory is not private")
-    return secured
+    return _revalidated_private_dir(state_root, current)
 
 
 def _secure_windows_parent(state_root: Path, current: Path, info: os.stat_result) -> os.stat_result:
@@ -1981,9 +2006,7 @@ def _validate_windows_opened(
         raise PermissionError("transient file is not regular")
     resolved = path.resolve(strict=True)
     resolved.relative_to(state_root)
-    if resolved.parent != parent.resolve(strict=True):
-        raise PermissionError("transient file containment changed")
-    if not _same_file(path, opened):
+    if resolved.parent != parent.resolve(strict=True) or not _same_file(path, opened):
         raise PermissionError("transient file containment changed")
 
 
@@ -2326,9 +2349,7 @@ def _validated_capture_transcript_path(value: object) -> Path:
 
 
 def _capture_path_evidence(value: object) -> str | None:
-    if not isinstance(value, str):
-        return None
-    if not value:
+    if not isinstance(value, str) or not value:
         return None
     from bounded_io import read_stable_utf8
 
@@ -2707,6 +2728,23 @@ def _tag_session_end(
     result["returncode"] = getattr(tagged, "returncode", 0)
 
 
+def _capture_session_end_without_transcript(
+    envelope: EventEnvelope,
+    payload: dict[str, Any],
+    slug: str | None,
+    project_dir: Path | None,
+    result: dict[str, Any],
+    force_stub: bool,
+) -> bool:
+    """Nothing to read: stub the tag, or leave a heartbeat, and wake nobody."""
+    if force_stub:
+        _tag_session_end(payload, project_dir, result)
+        return False
+    if slug and project_dir:
+        result["heartbeat_recorded"] = _record_activity(envelope, slug, project_dir)
+    return False
+
+
 def _capture_session_end(
     envelope: EventEnvelope,
     payload: dict[str, Any],
@@ -2719,12 +2757,9 @@ def _capture_session_end(
     if payload.get("transcript_path"):
         _tag_session_end(payload, project_dir, result)
         return _wake_capture_worker(result, intent_id)
-    if force_stub:
-        _tag_session_end(payload, project_dir, result)
-        return False
-    if slug and project_dir:
-        result["heartbeat_recorded"] = _record_activity(envelope, slug, project_dir)
-    return False
+    return _capture_session_end_without_transcript(
+        envelope, payload, slug, project_dir, result, force_stub
+    )
 
 
 def _ingest_session_end(
@@ -2857,9 +2892,7 @@ def _cursor_output(event: str, result: Mapping[str, Any]) -> dict[str, object]:
     if event != "session_start":
         return {}
     context = _result_context(result)
-    if context:
-        return {"additional_context": context}
-    return {}
+    return {"additional_context": context} if context else {}
 
 
 def _antigravity_output(event: str, result: Mapping[str, Any]) -> dict[str, object]:
@@ -2868,9 +2901,7 @@ def _antigravity_output(event: str, result: Mapping[str, Any]) -> dict[str, obje
     if event != "session_start":
         return {}
     context = _result_context(result)
-    if context:
-        return {"injectSteps": [{"ephemeralMessage": context}]}
-    return {}
+    return {"injectSteps": [{"ephemeralMessage": context}]} if context else {}
 
 
 def _legacy_output(
@@ -2919,21 +2950,23 @@ def _delegate_forwards_stdout(name: str) -> bool:
     }
 
 
+def _run_own_delegate(args: argparse.Namespace, envelope: EventEnvelope) -> None:
+    """A delegate that is not this event's capture delegate speaks for itself."""
+    _observe_checkpoint_fail_open(envelope)
+    _run_delegate(
+        args.delegate,
+        _canonical_capture_payload(envelope),
+        forward_stdout=_delegate_forwards_stdout(args.delegate),
+    )
+
+
 def _dispatch_cli_event(
     args: argparse.Namespace, envelope: EventEnvelope | None
 ) -> dict[str, object] | None:
     if envelope is None:
         return _neutral_host_output(args.source, args.event)
-    if args.delegate == CAPTURE_DELEGATES.get(envelope.event_type):
-        result = ingest_event(envelope)
-        return _success_output(args.source, args.event, envelope, result)
-    if args.delegate:
-        _observe_checkpoint_fail_open(envelope)
-        _run_delegate(
-            args.delegate,
-            _canonical_capture_payload(envelope),
-            forward_stdout=_delegate_forwards_stdout(args.delegate),
-        )
+    if args.delegate and args.delegate != CAPTURE_DELEGATES.get(envelope.event_type):
+        _run_own_delegate(args, envelope)
         return None
     result = ingest_event(envelope)
     return _success_output(args.source, args.event, envelope, result)
@@ -2955,6 +2988,34 @@ def _args_neutral_output(args: argparse.Namespace | None) -> dict[str, object] |
     return _neutral_host_output(args.source, args.event)
 
 
+def _record_cli_capture_failure(
+    args: argparse.Namespace | None, error: BaseException
+) -> None:
+    """Leave a durable trace of a capture this boundary swallowed.
+
+    Everything below this point returns quietly so a hook never breaks the
+    user's session, and for a long time that meant a failing capture was
+    indistinguishable from a session with nothing to capture. Measured on this
+    machine on 2026-08-26: every `session_end` raised
+    `ReliabilityV3ValidationError: legacy_protocol_unquiesced` and printed
+    `capture skipped`, so no session had been recorded since the 2026-08-24
+    backfill and nothing anywhere said so. Recording is itself best effort —
+    diagnostics must never become the reason a hook fails.
+    """
+    if isinstance(error, SystemExit):
+        return
+    try:
+        from capture_diagnostics import record_capture_failure
+
+        event = getattr(args, "event", None) or "unknown"
+        record_capture_failure(
+            f"adapter_{event}",
+            f"{type(error).__name__}: {error}",
+        )
+    except Exception:  # noqa: BLE001 - a lost trace must not lose the session
+        pass
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Host-safe CLI: invalid input and capture failures never escape."""
     args: argparse.Namespace | None = None
@@ -2966,7 +3027,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.capture_worker:
             return _run_active_capture_worker_once()
         output = _run_cli_event(args)
-    except (Exception, SystemExit):  # noqa: BLE001
+    except (Exception, SystemExit) as error:  # noqa: BLE001
+        _record_cli_capture_failure(args, error)
         print("integration_adapter: capture skipped", file=sys.stderr)
         output = _args_neutral_output(args)
     if output is not None:

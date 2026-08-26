@@ -224,9 +224,7 @@ def _require_enforced_tokens(effective: object, max_tokens: int | None) -> None:
 def _require_backend_default_tokens(effective: object, max_tokens: int | None) -> None:
     if effective != "backend_default":
         raise ValueError("descriptor must record the backend token default")
-    if max_tokens is None:
-        return
-    if not _is_positive_int(max_tokens):
+    if max_tokens is not None and not _is_positive_int(max_tokens):
         raise ValueError("max_tokens request must be a positive integer")
 
 
@@ -362,6 +360,19 @@ def _unsafe_output_failure(text: str, policy: object) -> str | None:
     return None
 
 
+class ProviderTimeout(RuntimeError):
+    """The provider was still working when its deadline passed.
+
+    A deadline is not an answer. Collapsing it into the empty string made
+    `_outcome_of` report `empty_response` — "the provider answered with
+    nothing" — for a call that was never allowed to finish. That is the word
+    the nightly pass of 2026-08-26 left behind (`draft:claude:<implicit>:
+    empty_response` in `logs/nightly-2026-08-26.md`) for a daily log that
+    compiled cleanly nine hours later, so the word did not describe what
+    happened and nothing in the log could correct it.
+    """
+
+
 def _completed_call(
     descriptor: ProviderDescriptor,
     caller,
@@ -371,6 +382,21 @@ def _completed_call(
 ) -> LLMResult:
     try:
         response = _invoked_backend(caller, descriptor, transport, mode)
+    except ProviderTimeout:
+        print(
+            f"llm_client: {descriptor.provider} backend exceeded "
+            f"{_timeout_s()}s and was stopped",
+            file=sys.stderr,
+        )
+        return LLMResult(
+            descriptor,
+            None,
+            True,
+            "provider_timeout",
+            mode,
+            TokenUsage(),
+            pre_call_count,
+        )
     except Exception as exc:  # noqa: BLE001 - providers must not crash callers
         print(
             f"llm_client: {descriptor.provider} backend failed: {type(exc).__name__}",
@@ -407,6 +433,50 @@ def _candidate_available(
     return available
 
 
+def _refused_candidate(
+    descriptor: ProviderDescriptor,
+    caller,
+    mode: str,
+    available: bool | None,
+) -> LLMResult | None:
+    """The two refusals that precede protecting the transport."""
+    if caller is None:
+        return LLMResult(descriptor, None, False, "unsupported", mode)
+    if not _candidate_available(descriptor, available):
+        return LLMResult(descriptor, None, False, "unavailable", mode)
+    return None
+
+
+def _dispatched_call(
+    descriptor: ProviderDescriptor,
+    prompt: str,
+    system_prompt: str,
+    schema: Mapping[str, object] | None,
+    available: bool | None,
+    token_adapters: Mapping[str, TokenCounter] | None,
+) -> LLMResult:
+    mode = _structured_mode(descriptor, schema)
+    caller = _BACKENDS.get(descriptor.provider)
+    refusal = _refused_candidate(descriptor, caller, mode, available)
+    if refusal is not None:
+        return refusal
+    transport = _protected_transport(
+        _prompted_system(system_prompt, schema, mode), prompt, schema
+    )
+    if isinstance(transport, str):
+        return LLMResult(descriptor, None, False, transport, mode)
+    native_schema_json = _native_schema_json(schema, mode)
+    return _completed_call(
+        descriptor,
+        caller,
+        transport,
+        mode,
+        _counted_tokens(
+            descriptor, transport, native_schema_json, schema, mode, token_adapters
+        ),
+    )
+
+
 def call_candidate(
     descriptor: ProviderDescriptor,
     prompt: str,
@@ -423,26 +493,8 @@ def call_candidate(
             descriptor, None, False, descriptor.resolution_failure, "prompt"
         )
     _require_token_contract(descriptor, max_tokens)
-    mode = _structured_mode(descriptor, schema)
-    caller = _BACKENDS.get(descriptor.provider)
-    if caller is None:
-        return LLMResult(descriptor, None, False, "unsupported", mode)
-    if not _candidate_available(descriptor, available):
-        return LLMResult(descriptor, None, False, "unavailable", mode)
-    transport = _protected_transport(
-        _prompted_system(system_prompt, schema, mode), prompt, schema
-    )
-    if isinstance(transport, str):
-        return LLMResult(descriptor, None, False, transport, mode)
-    native_schema_json = _native_schema_json(schema, mode)
-    return _completed_call(
-        descriptor,
-        caller,
-        transport,
-        mode,
-        _counted_tokens(
-            descriptor, transport, native_schema_json, schema, mode, token_adapters
-        ),
+    return _dispatched_call(
+        descriptor, prompt, system_prompt, schema, available, token_adapters
     )
 
 
@@ -711,15 +763,19 @@ def _ollama_tags_url(endpoint: str) -> str:
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, tags_path, "", ""))
 
 
+def _ollama_lists_the_local_model(descriptor: ProviderDescriptor, response) -> bool:
+    raw = response.read(1024 * 1024 + 1)
+    if len(raw) > 1024 * 1024:
+        return False
+    return _ollama_has_local_model(json.loads(raw.decode("utf-8")), descriptor.model)
+
+
 def _ollama_tags_answer(descriptor: ProviderDescriptor, response) -> bool:
     if response.status != 200:
         return False
     if descriptor.capabilities.get("local_only_enforced") is not True:
         return True
-    raw = response.read(1024 * 1024 + 1)
-    if len(raw) > 1024 * 1024:
-        return False
-    return _ollama_has_local_model(json.loads(raw.decode("utf-8")), descriptor.model)
+    return _ollama_lists_the_local_model(descriptor, response)
 
 
 def _probe_ollama(descriptor: ProviderDescriptor) -> bool:
@@ -955,6 +1011,13 @@ def _opencode_post(url: str, payload: Mapping[str, object]) -> object:
     return json.loads(raw)
 
 
+def _opencode_nested_id(data: Mapping) -> str:
+    nested = data.get("data")
+    if isinstance(nested, Mapping) and nested.get("id"):
+        return str(nested["id"])
+    return ""
+
+
 def _opencode_session_id(data: object) -> str:
     """Servers answer either {id} or {data: {id}}."""
     if not isinstance(data, dict):
@@ -962,22 +1025,21 @@ def _opencode_session_id(data: object) -> str:
     direct = data.get("id")
     if direct:
         return str(direct)
-    nested = data.get("data")
-    if isinstance(nested, Mapping) and nested.get("id"):
-        return str(nested["id"])
-    return ""
+    return _opencode_nested_id(data)
+
+
+def _opencode_root(data: object) -> object:
+    if isinstance(data, dict) and isinstance(data.get("data"), dict):
+        return data["data"]
+    return data
 
 
 def _opencode_parts(data: object) -> list:
-    root = data
-    if isinstance(data, dict) and isinstance(data.get("data"), dict):
-        root = data["data"]
+    root = _opencode_root(data)
     if not isinstance(root, Mapping):
         return []
     parts = root.get("parts", [])
-    if not isinstance(parts, list):
-        return []
-    return parts
+    return parts if isinstance(parts, list) else []
 
 
 def _opencode_text(data: object) -> str:
@@ -1173,14 +1235,19 @@ def _claude_command(claude_bin: str, model: str | None, system_prompt: str) -> l
     assistant persona with ours; `--setting-sources` with nothing after it loads
     no settings files at all. Both are used only when this CLI has them.
     """
-    command = [claude_bin, "-p", "--output-format", "text"]
     flags = _claude_cli_flags()
-    if system_prompt and "--system-prompt" in flags:
-        command.extend(["--system-prompt", system_prompt])
-    if "--setting-sources" in flags:
-        command.extend(["--setting-sources", ""])
-    if model:
-        command.extend(["--model", model])
+    optional = (
+        (
+            bool(system_prompt) and "--system-prompt" in flags,
+            ["--system-prompt", system_prompt],
+        ),
+        ("--setting-sources" in flags, ["--setting-sources", ""]),
+        (bool(model), ["--model", str(model)]),
+    )
+    command = [claude_bin, "-p", "--output-format", "text"]
+    for applies, argument in optional:
+        if applies:
+            command.extend(argument)
     return command
 
 
@@ -1219,8 +1286,10 @@ def _call_claude(
             errors="ignore",
         )
         return result.stdout or ""
-    except (subprocess.TimeoutExpired, OSError):
-        return ""
+    except subprocess.TimeoutExpired as exc:
+        raise ProviderTimeout(
+            f"claude did not answer within {_timeout_s()}s"
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -1295,28 +1364,25 @@ def _call_openai(
 # ---------------------------------------------------------------------------
 
 
-def _call_ollama(
-    descriptor: ProviderDescriptor,
-    prompt: str,
-    system_prompt: str,
-    schema: Mapping[str, object] | None = None,
-) -> str | BackendResponse:
-    if descriptor._endpoint is None:
-        raise ValueError("Ollama endpoint was not resolved in the provider descriptor")
-    base_url = descriptor._endpoint
-    model = descriptor.model
-    max_tokens = int(descriptor.inference_settings["max_tokens"])
-    temperature = int(descriptor.inference_settings["temperature_milli"]) / 1000
-    url = f"{base_url.rstrip('/')}/chat/completions"
+def _ollama_messages(system_prompt: str, prompt: str) -> list[dict[str, str]]:
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
+    return messages
+
+
+def _ollama_payload(
+    descriptor: ProviderDescriptor,
+    prompt: str,
+    system_prompt: str,
+    schema: Mapping[str, object] | None,
+) -> dict[str, object]:
     payload: dict[str, object] = {
-        "model": model,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
+        "model": descriptor.model,
+        "messages": _ollama_messages(system_prompt, prompt),
+        "max_tokens": int(descriptor.inference_settings["max_tokens"]),
+        "temperature": int(descriptor.inference_settings["temperature_milli"]) / 1000,
         "stream": False,
     }
     if schema is not None:
@@ -1328,7 +1394,22 @@ def _call_ollama(
                 "schema": schema,
             },
         }
-    body = json.dumps(payload).encode("utf-8")
+    return payload
+
+
+def _call_ollama(
+    descriptor: ProviderDescriptor,
+    prompt: str,
+    system_prompt: str,
+    schema: Mapping[str, object] | None = None,
+) -> str | BackendResponse:
+    if descriptor._endpoint is None:
+        raise ValueError("Ollama endpoint was not resolved in the provider descriptor")
+    base_url = descriptor._endpoint
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    body = json.dumps(
+        _ollama_payload(descriptor, prompt, system_prompt, schema)
+    ).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=body,
