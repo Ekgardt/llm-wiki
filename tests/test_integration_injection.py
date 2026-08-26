@@ -2365,6 +2365,14 @@ def windows_fake_uv(tmp_path_factory):
     return executable
 
 
+# The deadline the installer is given, and how long the fake `uv` would run if
+# nothing stopped it. The gap between the two is what makes a surviving child
+# visible at all: a run that lasts the sleep instead of the deadline was never
+# killed, so both numbers belong in the failure rather than in two literals.
+_SMOKE_TIMEOUT_SECONDS = 15
+_FAKE_UV_SLEEP_SECONDS = 60
+
+
 def _child_state(directory: Path) -> str:
     """What the stopped child left behind, for a failure that must explain itself."""
     markers = ("child.started", "child.pid", "child.stopped", "child.completed")
@@ -2397,7 +2405,7 @@ def _write_blocking_fake_uv(directory: Path) -> None:
         # Long enough that the installer's own timer, not the sleep, ends it,
         # and short enough that a missed signal still ends the run with the
         # assertion that names the cause instead of the caller's wall clock.
-        "sleep 60 &\n"
+        f"sleep {_FAKE_UV_SLEEP_SECONDS} &\n"
         "wait\n"
         ": > child.completed\n",
         encoding="utf-8",
@@ -2542,7 +2550,7 @@ def test_unix_installer_timeout_stops_tests_and_aborts(tmp_path):
             # fake `uv` now installs that trap as its first statement, so the
             # window is one fork and exec; one second raced it and five raced it
             # again while the trap sat behind two writes.
-            export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS=15
+            export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS={_SMOKE_TIMEOUT_SECONDS}
             PATH="$(dirname "$0")/bin:$PATH"
             export PATH
             info() {{ :; }}
@@ -2557,6 +2565,7 @@ def test_unix_installer_timeout_stops_tests_and_aborts(tmp_path):
     )
     runner.chmod(0o700)
 
+    started = time.monotonic()
     result = subprocess.run(
         [bash, str(runner)],
         cwd=tmp_path,
@@ -2567,12 +2576,24 @@ def test_unix_installer_timeout_stops_tests_and_aborts(tmp_path):
         timeout=120,
         check=False,
     )
+    elapsed = time.monotonic() - started
 
     assert result.returncode == 1, result.stderr
     assert (tmp_path / "failed.message").read_text() == (
-        "Production smoke timed out after 15s; installation aborted"
+        f"Production smoke timed out after {_SMOKE_TIMEOUT_SECONDS}s; installation aborted"
     )
-    assert not (tmp_path / "child.completed").exists()
+    # The child must be gone because the installer killed it, not because it
+    # ran out of work of its own. Those two look identical in the marker alone,
+    # and the clock tells them apart: a run that lasts as long as the fake `uv`
+    # sleeps was never signalled, while a run that ends at the deadline was.
+    # The measured failure of this assertion was the second kind — the handler
+    # reached its escalation 45s late — and `assert not True` said none of it.
+    assert not (tmp_path / "child.completed").exists(), (
+        f"the smoke child ran to completion instead of being killed: "
+        f"installer took {elapsed:.1f}s for a {_SMOKE_TIMEOUT_SECONDS}s deadline "
+        f"against a {_FAKE_UV_SLEEP_SECONDS}s child; {_child_state(tmp_path)}; "
+        f"stderr={result.stderr[-400:]!r}"
+    )
     assert not (tmp_path / "passed.marker").exists()
     assert not (tmp_path / "continued.marker").exists()
     # Named last and with its evidence: this is the assertion that fails when a

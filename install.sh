@@ -352,14 +352,34 @@ start_test_child() {
 handle_test_timeout() {
   trap - USR1
   testTimedOut=1
-  stop_test_timer
+  # Stop the child before reaping the timer, never the other way round.
+  # `stop_test_timer` ends in `wait` on the timer job, and this handler runs
+  # inside a trap that interrupted the outer `wait` on the child. In that
+  # state the shell has not yet reaped the timer even though the timer has
+  # already exited: measured under load, `ps` and `kill -0` both reported the
+  # timer gone while `jobs -l` still called it Running, so `wait` on it
+  # blocked until some other child changed state — and the only other child
+  # was the very process this handler exists to kill. The escalation below
+  # then ran 45s past the deadline, after the smoke child had finished on its
+  # own. Killing first makes the promise that an overrunning run leaves
+  # nothing behind independent of when the shell gets around to the timer.
   stop_test_child
+  stop_test_timer
 }
 handle_test_signal() {
   local status="$1"
-  trap - HUP INT TERM USR1
-  stop_test_timer
+  # USR1 is ignored rather than defaulted for the duration of the cleanup.
+  # Defaulting it would terminate the installer if the still-running timer
+  # fired while the child was being stopped, which is exactly the window the
+  # reordering below opens; ignoring it closes that window instead.
+  trap - HUP INT TERM
+  trap '' USR1
+  # Same order and same reason as handle_test_timeout: the child first,
+  # because `stop_test_timer` ends in a `wait` that this handler cannot rely
+  # on returning promptly, and a signalled installer must not leave a running
+  # smoke behind while it waits for bookkeeping.
   stop_test_child
+  stop_test_timer
   restore_test_monitor_mode
   exit "$status"
 }
