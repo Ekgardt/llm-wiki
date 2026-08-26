@@ -1112,13 +1112,25 @@ def _delta_due(
     return latest - previous >= timedelta(seconds=30)
 
 
+# How many events one project may hold back before the wait itself becomes the
+# problem. The queue lives in `run/state.json`, and a reader refuses that file
+# over 256 KiB: measured 2026-08-26, a single session held 136 events weighing
+# 184 KiB, pushed the file to 262 KiB, and the scheduler and capture health
+# checks reported nothing at all. Checkpointing early costs one extra journal
+# entry; waiting costs every finding those two checks would have made.
+MAX_PENDING_CHECKPOINT_ITEMS = 40
+
+
 def _debounce_due(
     items: Sequence[Mapping[str, object]],
     reducers: Mapping[str, CheckpointReducer],
 ) -> tuple[int | None, CheckpointDecision | None, bool]:
     """Flush the newest item when any pending delta is due, else keep waiting."""
     latest = datetime.fromisoformat(str(items[-1]["occurred_at"]))
-    if _any_delta_due(items, reducers, latest):
+    due = _any_delta_due(items, reducers, latest) or len(items) >= (
+        MAX_PENDING_CHECKPOINT_ITEMS
+    )
+    if due:
         return len(items) - 1, CheckpointDecision("debounce_flush", checkpoint_at=latest), False
     return None, None, True
 
