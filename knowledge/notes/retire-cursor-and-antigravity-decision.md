@@ -100,6 +100,36 @@ Adapting the rest is theirs to do, which is what the owner said.
   Antigravity half is out of scope rather than pending, and the OpenCode and Codex
   half still waits on the owner installing those hosts.
 
+## Later evidence
+
+Added 2026-08-26 after the dated research this decision shipped without. The
+research supports the removal-only path and finds one thing missing.
+
+Supporting: keeping the uninstall path is the part retirement usually gets
+wrong, and the packaging world names the consequence — residual configuration
+that "eventually breaks upgrades", which is what `apt purge` exists for. That
+format knowledge is the removal path, and so must outlive the feature, is
+correct.
+
+Missing: the notice stage. Homebrew retires through deprecated → disabled →
+removed, requires a stated reason, and removes only a year after disabling;
+Kubernetes keeps a deprecated API working for at least a year "but usage will
+result in a warning being displayed". This retirement went from supported to
+removed in one step, and on this codebase nothing tells an affected machine:
+`doctor` no longer checks these hosts, and `inspect_install_state` reports only
+whether the manifest and transaction files exist, not which resource ids the
+manifest names. A machine whose manifest still says `cursor-user-hooks` gets no
+signal from any command. The removal path is also all-or-nothing — it is reached
+only through `uninstall` and `rollback`, so taking back just the Cursor fragment
+means removing the whole installation.
+
+The defence is in this page already: no such installation is known to exist. A
+deprecation clock protects users who exist. One line in `doctor` when the
+manifest names a retired resource is what would turn silence into a fixable
+state.
+
+See `docs/research/2026-08-26-retiring-a-supported-host.md`.
+
 ## Source / Evidence
 
 - Owner instruction, 2026-08-26 (verbatim above).

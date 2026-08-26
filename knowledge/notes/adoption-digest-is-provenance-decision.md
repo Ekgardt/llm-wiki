@@ -84,6 +84,33 @@ to silence a check that had already been shown to decide nothing.
   pass this check and fail later on schema digests. That is the intended order:
   fail on the thing that is actually incompatible.
 
+## Later evidence
+
+Added 2026-08-26 after the dated research this decision shipped without. The
+research supports the decision and qualifies one claim.
+
+Supporting: no migration framework or provenance format re-derives the digest of
+the code that performed a migration. Flyway re-checks a checksum on every
+startup, but of the migration *script*, never of its own engine; Alembic, Django
+and Rails store an identifier and no checksum at all, and rely on the same
+immutability convention this page cites for refusing to re-record. SLSA compares
+`builder.id` against a preconfigured expectation at artifact admission, not
+against the builder's bytes on every later use — which is the distinction
+between `_validate_migration_context` and the removed `_require_adoption_sources`
+check.
+
+Qualifying the downgrade paragraph: "the digest was never what stood in its way"
+is right, and what does stand in its way is weaker than the page implies.
+Measured 2026-08-26 — a pre-V3 reader opening an adopted `run/queue.sqlite3`
+gets `sqlite3.DatabaseError: file is not a database`, but only on the first
+statement touching a page; `connect()` and `SELECT 1` both succeed. The refusal
+is a byproduct of the tombstone not being a database, not a designed one, and it
+names neither the adoption nor a version. Every comparable system declares a
+format version the reader refuses on by name — npm's `lockfileVersion`,
+SQLite's `user_version`. This vault has none.
+
+See `docs/research/2026-08-26-what-a-migration-record-binds.md`.
+
 ## Source / Evidence
 
 - `scripts/installed_memory_repair.py` — `_require_adoption_sources`,

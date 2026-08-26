@@ -66,6 +66,28 @@ real 922,240-byte transcript moved from
 `capture transcript exceeds 921600 bytes` to exactly that blocker. That blocker
 is a separate, already-recorded matter and was deliberately not run.
 
+## Later evidence
+
+Added 2026-08-26 after the dated research this decision shipped without.
+The decision stands; one sentence in it does not.
+
+"A tail-only window was shown to miss decisions sitting 31,814 characters from
+the end" reverses what that measurement found.
+`docs/research/2026-08-25-what-the-vault-decides-to-remember.md` records the
+session regressing "because its decisions sat 31 814 characters from the end —
+inside a 60 000 tail, outside a 30 000 half. The change was reverted." The
+60,000-character tail caught them; the 30,000+30,000 head+tail missed them.
+
+The shape is still supported, by sources this page did not cite: OpenRouter's
+`middle-out` keeps half the messages from each end by default. What is not
+supported is the 50/50 ratio — the one measured head+tail ratio in the
+literature is 25% head / 75% tail, and this vault's own halves lost a session at
+a 60,000-character budget. Retention and classifier input are different
+questions, so 2026-08-25 does not settle this one either way; it just is not the
+reason this page gives.
+
+See `docs/research/2026-08-26-a-record-too-large-to-keep-whole.md`.
+
 ## Source / Evidence
 
 - `scripts/integration_adapter.py` — `_capture_transcript_text`,

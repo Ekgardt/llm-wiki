@@ -377,3 +377,62 @@ This log is vault metadata — an append-only editorial changelog of compile pas
   Проверки: `uv run ruff check scripts/ tests/` — чисто; `tests/test_integration_injection.py` целиком — 84 пройдено, 21 пропущено; группа установщика — 14 пройдено, 19 пропущено; `lizard -C 5` на `tests/test_integration_injection.py` — «No thresholds exceeded», 172 функции, средняя 1.9, ноль предупреждений.
 
   Не доказано и названо как есть. Первое: Windows. Исходный пункт `NEW-51` заведён по двум шардам Windows, а этой машины здесь нет; `install.sh` там не исполняется вовсе, и на `install.ps1` правка не переносится — у него своя модель ожидания. Второе: остаток семейства не закрыт и к правке не привязан — `test_unix_installer_initial_monitor_mode_cleans_stopped_test_tree` роняет выживший `child.pid` при плотной конкуренции разных тестов. Измерено на одной и той же выборке и нагрузке: 2 падения из 18 с правкой и 2 из 18 при возвращённом порядке, то есть от порядка не зависит; тот же тест в одиночку под нагрузкой — 0 из 18. Это сценарий упрямого дерева, которое намеренно игнорирует TERM, под SIGSTOP, и он не тот, который я чинил. Третье: управляемый гейт отказывает всему `tests/test_integration_injection.py` за `[COMPLEXITY]` примерно сорока нетронутых тестов — radon считает ветвлением каждый `assert`; локальный `ccn_gate.py`/lizard на том же файле даёт ноль, сложность правленого теста как была 8, так и осталась. Это тот же случай, что записан 2026-08-26 про `test_lsp_protocol.py`.
+
+- 2026-08-26 — Paid the rule-2 research debt for three decisions shipped the
+  same day without dated current-practice research. Three notes added under
+  `docs/research/`; no decision was rewritten or superseded, and each page got a
+  short **Later evidence** section pointing at its note.
+
+  `adoption-digest-is-provenance-decision` holds and the sources strengthen it:
+  no migration framework or provenance format re-derives the digest of the code
+  that performed a migration. Flyway does re-check a checksum on every startup,
+  but of the migration *script* — nobody hashes the engine and refuses to start
+  after upgrading it — and it ships `repair` precisely because a permanent check
+  becomes a dead end. Alembic, Django and Rails store an identifier and no
+  checksum at all, relying on the same migration-immutability convention this
+  decision cites for refusing to re-record. SLSA compares `builder.id` against a
+  preconfigured expectation once, at artifact admission, which is exactly the
+  split between `_validate_migration_context` and the removed standing check.
+  One qualification, measured: the downgrade barrier is real but incidental — a
+  pre-V3 reader opening an adopted `run/queue.sqlite3` gets
+  `sqlite3.DatabaseError: file is not a database`, but only on the first
+  statement that touches a page (`connect()` and `SELECT 1` both succeed), and
+  the error names neither the adoption nor a version. npm writes
+  `lockfileVersion`, SQLite offers `user_version`; this vault declares no format
+  version for a reader to refuse on. Note —
+  `docs/research/2026-08-26-what-a-migration-record-binds.md`.
+
+  `bounded-capture-excerpt-decision` holds, and one sentence in it is backwards.
+  It offers 31,814 characters as evidence that *tail-only* missed a session's
+  decisions; `docs/research/2026-08-25-what-the-vault-decides-to-remember.md`
+  and this log record the opposite — those decisions sat "inside a 60 000 tail,
+  outside a 30 000 half", so the 60,000 tail caught them and the symmetric
+  head+tail missed them, and that change was reverted. The shape survives on
+  other grounds the page did not cite: OpenRouter's `middle-out` keeps half the
+  messages from each end by default, on the lost-in-the-middle rationale, and
+  OpenTelemetry's baseline is truncation with no marker at all, so naming the
+  dropped byte count is ahead of the default rather than behind it. What is not
+  supported is the 50/50 split, shipped in both
+  `integration_adapter.CAPTURE_EXCERPT_SIDE_BYTES` and
+  `episode_consolidation._within_share`: the only measured head+tail ratio in
+  the literature is 25% head / 75% tail, and this vault's own halves lost a
+  session. Retention and classifier input are different questions, so
+  2026-08-25 does not settle this one — it just is not the reason the page
+  gives. Note — `docs/research/2026-08-26-a-record-too-large-to-keep-whole.md`.
+
+  `retire-cursor-and-antigravity-decision` holds, and is ahead of practice on
+  the half projects usually get wrong: keeping the uninstall path is exactly
+  what `apt purge` exists for, and the format knowledge has to outlive the
+  feature because subtracting a fragment from shared JSON needs it. What is
+  missing is the notice stage. Homebrew retires deprecated → disabled → removed
+  with a required reason and a year between; Kubernetes keeps a deprecated API
+  working at least a year "but usage will result in a warning being displayed".
+  This went from supported to removed in one step, and nothing tells an affected
+  machine: `doctor` no longer checks those hosts and `inspect_install_state`
+  reports only whether the manifest and transaction files exist, not which
+  resource ids the manifest names. The removal path is also all-or-nothing —
+  reachable only through `uninstall` and `rollback`, so taking back one dead
+  Cursor handler means removing the whole installation. The defence is already
+  on the page: no such installation is known to exist, and a clock protects
+  users who exist. Note —
+  `docs/research/2026-08-26-retiring-a-supported-host.md`.
