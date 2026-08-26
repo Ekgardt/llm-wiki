@@ -112,6 +112,7 @@ knowledge/notes/*
 !knowledge/notes/prospective-memory-page-drift.md
 !knowledge/notes/provenance-rule-6.md
 !knowledge/notes/state-md-exempt-from-lint.md
+!knowledge/notes/adoption-digest-is-provenance-decision.md
 # Nested personal categories stay ignored unless explicitly published:
 knowledge/notes/*/**
 

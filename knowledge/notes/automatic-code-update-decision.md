@@ -98,3 +98,6 @@ owner re-runs the installer.
   the source and the knowledge.
 - [[knowledge/notes/self-resolving-health-findings-decision]] — the same
   principle applied to health: a rule that can never pass is not a safety rule.
+- [[knowledge/notes/adoption-digest-is-provenance-decision]] — why this
+  unattended update would have disabled memory on an adopted vault, and what
+  was changed so it does not.

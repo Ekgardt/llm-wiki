@@ -131,17 +131,21 @@ def _paths(state_root: Path) -> dict[str, Path]:
     }
 
 
+_STAT_KINDS = (
+    (stat.S_ISLNK, "link"),
+    (stat.S_ISREG, "file"),
+    (stat.S_ISDIR, "directory"),
+)
+
+
 def _kind(path: Path) -> str:
     try:
         metadata = path.lstat()
     except FileNotFoundError:
         return "missing"
-    if stat.S_ISLNK(metadata.st_mode):
-        return "link"
-    if stat.S_ISREG(metadata.st_mode):
-        return "file"
-    if stat.S_ISDIR(metadata.st_mode):
-        return "directory"
+    for predicate, name in _STAT_KINDS:
+        if predicate(metadata.st_mode):
+            return name
     return "other"
 
 
@@ -160,13 +164,11 @@ def _legacy_evidence(run: Path) -> list[str]:
 
 def _legacy_evidence_item(run: Path, name: str) -> str | None:
     kind = _kind(run / name)
-    if kind == "file":
-        return f"run/{name}"
-    if kind == "directory":
-        return f"run/{name}" if _nonempty_directory(run / name) else None
     if kind == "missing":
         return None
-    return f"run/{name}:{kind}"
+    if kind == "directory":
+        return f"run/{name}" if _nonempty_directory(run / name) else None
+    return f"run/{name}" if kind == "file" else f"run/{name}:{kind}"
 
 
 def _operation_artifacts(run: Path) -> tuple[list[str], bool]:
@@ -279,11 +281,14 @@ def _validate_artifact_identity(
     if not isinstance(expected_identity, dict):
         raise ValueError("artifact identity is missing")
     actual_value = _identity_value(actual_identity)
-    identity_fields = tuple(actual_value)
-    if mutable:
-        identity_fields = ("platform", "volume", "file_id")
+    identity_fields = _identity_fields(actual_value, mutable)
     if any(expected_identity.get(field) != actual_value[field] for field in identity_fields):
         raise ValueError("artifact identity changed")
+
+
+def _identity_fields(actual_value: dict[str, object], mutable: bool) -> tuple[str, ...]:
+    """A mutable artifact is identified by its file, not by its contents."""
+    return ("platform", "volume", "file_id") if mutable else tuple(actual_value)
 
 
 def _validate_immutable_artifact(
@@ -362,12 +367,17 @@ def _database_schema_complete(database_name: str, database: sqlite3.Connection) 
 def _require_database_health(
     complete: bool, integrity: list[sqlite3.Row], foreign_keys: list[sqlite3.Row]
 ) -> None:
-    if not complete:
-        raise ValueError("active database schema is incomplete")
-    if len(integrity) != 1 or integrity[0][0] != "ok":
-        raise ValueError("active database integrity check failed")
-    if foreign_keys:
-        raise ValueError("active database foreign key check failed")
+    failures = (
+        (not complete, "active database schema is incomplete"),
+        (
+            len(integrity) != 1 or integrity[0][0] != "ok",
+            "active database integrity check failed",
+        ),
+        (bool(foreign_keys), "active database foreign key check failed"),
+    )
+    for failed, message in failures:
+        if failed:
+            raise ValueError(message)
 
 
 def _require_database_metadata(
@@ -465,14 +475,19 @@ def _named_database_records(value: object) -> dict[str, dict[str, object]]:
 def _named_database_record(
     item: object, existing: dict[str, dict[str, object]]
 ) -> tuple[str, dict[str, object]]:
+    name = _database_record_name(item)
+    if name in existing:
+        raise ValueError("adoption database name is duplicated")
+    return name, item
+
+
+def _database_record_name(item: object) -> str:
     if not isinstance(item, dict):
         raise ValueError("adoption database record is invalid")
     name = item.get("database")
     if not isinstance(name, str):
         raise ValueError("adoption database name is invalid")
-    if name in existing:
-        raise ValueError("adoption database name is duplicated")
-    return name, item
+    return name
 
 
 def _expected_schema_digests() -> dict[str, str]:
@@ -486,12 +501,36 @@ def _expected_schema_digests() -> dict[str, str]:
 def _require_adoption_sources(
     root: Path, adoption: dict[str, object]
 ) -> dict[str, object]:
+    """Validate what an adopted record must still agree with on every read.
+
+    The schema digests stay fail-closed. A v3 database whose shape no longer
+    matches the code about to read it is a real incompatibility, and the check
+    costs one comparison of two recorded constants.
+
+    ``installed_integration_sha256`` is deliberately *not* re-checked here. It
+    is provenance -- which producer performed the cutover -- and it is bound
+    where that binding decides something: `_validate_migration_context` refuses
+    an adoption whose plan was made against different adapter bytes, so the
+    window between `--plan` and `--apply` is still closed. Re-checking it on
+    every validation turned any later edit of `scripts/integration_adapter.py`
+    into a total outage of the memory write path -- capture, queue and every
+    Markdown transaction -- because `require_reliability_v3_adopted` guards all
+    of them. The nightly fast-forward the owner approved on 2026-08-23 updates
+    this checkout unattended, so the first update touching the adapter would
+    have disabled memory silently. A digest can say "different"; it cannot say
+    "incompatible", and the incompatibility that matters is the schema, which
+    is checked above. See
+    `knowledge/notes/adoption-digest-is-provenance-decision.md`.
+
+    What replaces it is the property that is actually checkable and actionable:
+    the producer must still be installed. An absent adapter is a broken
+    installation and fails closed; a changed one is an ordinary update.
+    """
     schemas = adoption.get("schemas")
     if not isinstance(schemas, dict) or schemas != _expected_schema_digests():
         raise ValueError("adoption schema digests changed")
-    integration = (root / "scripts" / "integration_adapter.py").read_bytes()
-    if adoption.get("installed_integration_sha256") != sha256_bytes(integration):
-        raise ValueError("installed integration digest changed")
+    if _kind(root / "scripts" / "integration_adapter.py") != "file":
+        raise ValueError("installed integration is missing")
     return schemas
 
 
@@ -515,6 +554,50 @@ def _database_spec(database_name: str) -> tuple[str, str, str, str, str, str]:
             "coordinator_retired",
         )
     raise ValueError("unknown operational database")
+
+
+def adopted_database_path(*, database_name: str, state_root: Path) -> Path:
+    """The database a reader should open for ``database_name``.
+
+    After adoption the legacy path is a JSON tombstone, not a database. A
+    reader that opens it anyway reports the runtime as unreadable -- which is
+    exactly what doctor did on a healthy adopted vault: `queue_state_unreadable`
+    and `transaction_state_unreadable`, both of which also block deleting
+    `run/`. The tombstone already names its replacement, so follow it.
+
+    Anything that is not a valid tombstone for this database -- a real v2
+    database, a partly written record, an unreadable file -- returns the legacy
+    path unchanged, so an un-adopted or damaged runtime keeps the verdict it
+    had instead of silently being judged from somewhere else.
+    """
+    legacy, active = _database_spec(database_name)[:2]
+    state = Path(state_root).absolute()
+    tombstone = _tombstone_document(state / legacy, state)
+    if tombstone is None:
+        return state / legacy
+    names_this_database = (
+        tombstone.get("database") == database_name
+        and tombstone.get("legacy_path") == legacy
+        and tombstone.get("replacement_path") == active
+    )
+    return state / active if names_this_database else state / legacy
+
+
+def _tombstone_document(path: Path, state_root: Path) -> dict[str, object] | None:
+    """The tombstone at ``path``, or None when it is not one or cannot be read."""
+    if _kind(path) != "file":
+        return None
+    try:
+        payload = read_runtime_bytes(
+            path, state_root, max_bytes=_MAX_TOMBSTONE_BYTES, owner_only=True
+        )
+        document = json.loads(payload)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    expected = "operational-db-tombstone/v1"
+    return document if document.get("schema_version") == expected else None
 
 
 def _expected_migration_record(
@@ -966,6 +1049,10 @@ def _validate_capture_intent(row: sqlite3.Row, state_root: Path) -> None:
         max_bytes=_MAX_CAPTURE_INTENT_BYTES,
         owner_only=True,
     )
+    _require_capture_payload(payload, row)
+
+
+def _require_capture_payload(payload: bytes, row: sqlite3.Row) -> None:
     if len(payload) != row["byte_size"]:
         raise ValueError("capture intent size changed")
     if sha256_bytes(payload) != row["intent_sha256"]:
@@ -1092,6 +1179,16 @@ def _transaction_retention(
     code = _TRANSACTION_STATE_CODES.get(state)
     if code is not None:
         return transaction_id, code, True
+    return _settled_transaction_retention(row, state_root, cutoff, transaction_id, state)
+
+
+def _settled_transaction_retention(
+    row: sqlite3.Row,
+    state_root: Path,
+    cutoff: datetime,
+    transaction_id: str,
+    state: object,
+) -> tuple[str, str | None, bool]:
     if state in {"committed", "aborted"}:
         return _terminal_transaction_retention(row, state_root, cutoff, transaction_id)
     if state == "discarded":
@@ -1302,13 +1399,17 @@ def _validate_partial_retired(path: Path, state_root: Path, source_state: str) -
     kind = _kind(path)
     if kind == "missing":
         return
+    _require_retired_evidence_kind(kind, source_state)
+    read_runtime_bytes(
+        path, state_root, max_bytes=_MAX_OPERATIONAL_DB_BYTES, owner_only=True
+    )
+
+
+def _require_retired_evidence_kind(kind: str, source_state: str) -> None:
     if source_state == "fresh":
         raise ValueError("fresh migration has retired database evidence")
     if kind != "file":
         raise ValueError("retired database path has the wrong kind")
-    read_runtime_bytes(
-        path, state_root, max_bytes=_MAX_OPERATIONAL_DB_BYTES, owner_only=True
-    )
 
 
 def _operation_artifact_spec(name: str) -> _DatabaseSpec:
@@ -2028,6 +2129,28 @@ def _inspect_v3_state(
     overflow: bool,
 ) -> dict[str, object]:
     artifacts = {"paths": kinds, "operation_artifacts": operation_artifacts}
+    conflict = _v3_conflict_report(paths, overflow, artifacts)
+    if conflict is not None:
+        return conflict
+    migration = _read_record(
+        paths["migration"], state, schema=_MIGRATION_SCHEMA, max_bytes=_MAX_RECORD_BYTES
+    )
+    _validate_partial_artifacts(paths, state, migration, operation_artifacts)
+    if _kind(paths["adoption"]) == "missing":
+        return _report(
+            mode="check",
+            status="degraded",
+            state="partial",
+            blockers=["reliability_v3_runtime_activation_incomplete"],
+            artifacts=artifacts,
+        )
+    return _inspect_adopted(vault, state, paths, migration, operation_artifacts, artifacts)
+
+
+def _v3_conflict_report(
+    paths: dict[str, Path], overflow: bool, artifacts: dict[str, object]
+) -> dict[str, object] | None:
+    """The conflict report for a run directory that cannot be inspected, or None."""
     if overflow:
         return _report(
             mode="check",
@@ -2044,19 +2167,7 @@ def _inspect_v3_state(
             blockers=["reliability_v3_migration_record_missing"],
             artifacts=artifacts,
         )
-    migration = _read_record(
-        paths["migration"], state, schema=_MIGRATION_SCHEMA, max_bytes=_MAX_RECORD_BYTES
-    )
-    _validate_partial_artifacts(paths, state, migration, operation_artifacts)
-    if _kind(paths["adoption"]) == "missing":
-        return _report(
-            mode="check",
-            status="degraded",
-            state="partial",
-            blockers=["reliability_v3_runtime_activation_incomplete"],
-            artifacts=artifacts,
-        )
-    return _inspect_adopted(vault, state, paths, migration, operation_artifacts, artifacts)
+    return None
 
 
 def _inspect_adopted(
@@ -2125,12 +2236,16 @@ def _apply_reliability_v3_adoption(*, root: Path, state_root: Path) -> bool:
         raise ValueError("Reliability V3 inspection failed")
     if state == "adopted":
         return False
-    if state not in {"fresh", "upgrade-required", "partial"}:
-        raise ValueError("Reliability V3 state cannot be adopted")
+    _require_adoptable_state(state)
     paths = _prepare_adoption_root(state_root)
     migration = _migration_for_apply(root, state_root, paths, str(state))
     _complete_adoption(root=root, state_root=state_root, migration=migration)
     return True
+
+
+def _require_adoptable_state(state: object) -> None:
+    if state not in {"fresh", "upgrade-required", "partial"}:
+        raise ValueError("Reliability V3 state cannot be adopted")
 
 
 def _migration_for_apply(
