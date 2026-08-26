@@ -44,11 +44,44 @@ OWNER_NONCE = "a" * 32
 # until the test says otherwise. Neither is the property under test, so both are
 # generous — a loaded machine may take seconds to schedule a thread, and a hold
 # that expires early would let a bounded assertion pass for the wrong reason.
-# The short waits that prove work completes *while* a lock is held stay short:
-# they are the bound being measured.
 _BARRIER_SECONDS = 30.0
 _HOLD_SECONDS = 30.0
 
+# The third kind of wait: the one that proves work completes *while* a lock is
+# held instead of blocking on it. `_DEADLINE_SECONDS` is the deadline such a test
+# hands the product; `_COMPLETES_WHILE_HELD_SECONDS` is the window it then watches
+# in.
+#
+# The window is not the bound. What bounds the product is the deadline, and what
+# proves the property is that the work finishes before the holder lets go. The
+# window only has to be long enough to see that happen, so it must cover the
+# deadline *plus everything the operating system charges around it*: starting the
+# watcher thread, scheduling it back once the deadline expires, and unwinding two
+# frames. On a loaded four-vCPU runner that overhead alone dwarfs a 50 ms
+# deadline, which is why the bare 0.2 that used to stand here flickered on hosted
+# macOS and reported nothing but `assert False is True`.
+#
+# The relationship is what keeps the window honest, so it is stated and checked
+# here rather than left for the next reader to rediscover:
+#
+#   _DEADLINE_SECONDS < _COMPLETES_WHILE_HELD_SECONDS < _HOLD_SECONDS
+#
+# Above the deadline, or honouring the deadline could not be observed at all.
+# Below the hold, so the lock is still held when the window closes — that is what
+# makes a pass mean "it finished while the lock was held" rather than "the holder
+# happened to let go first", and it is why widening the window does not weaken
+# the assertion. Work that really blocked on the lock still fails.
+_DEADLINE_SECONDS = 0.05
+_COMPLETES_WHILE_HELD_SECONDS = 5.0
+assert _DEADLINE_SECONDS < _COMPLETES_WHILE_HELD_SECONDS < _HOLD_SECONDS
+
+
+def _lock_is_free(lock: object) -> bool:
+    """Report whether nobody holds the lock, without waiting for it."""
+    if not lock.acquire(blocking=False):  # type: ignore[attr-defined]
+        return False
+    lock.release()  # type: ignore[attr-defined]
+    return True
 
 
 def _await_records(records: list, count: int, timeout: float) -> None:
@@ -3488,7 +3521,7 @@ def test_driver_release_survives_transition_contention_and_cleanup_reacquires() 
         try:
             lsp_process._acquire_driver(coordinator, time.monotonic() + 1)
             owner_acquired.set()
-            assert release_owner.wait(2)
+            assert release_owner.wait(_HOLD_SECONDS)
         except BaseException as error:
             owner_errors.append(error)
         finally:
@@ -3509,11 +3542,19 @@ def test_driver_release_survives_transition_contention_and_cleanup_reacquires() 
     holder = threading.Thread(target=hold_lifecycle_lock)
     holder.start()
     assert held.wait(_BARRIER_SECONDS)
-    expired = time.monotonic() + 0.05
+    expired = time.monotonic() + _DEADLINE_SECONDS
     try:
         assert threading.Event().wait(max(0.0, expired - time.monotonic())) is False
         release_owner.set()
-        assert owner_done.wait(0.2)
+        watch_started = time.monotonic()
+        released_while_held = owner_done.wait(_COMPLETES_WHILE_HELD_SECONDS)
+        assert released_while_held is True, (
+            f"the driver owner never finished while the lifecycle lock was held: "
+            f"waited {time.monotonic() - watch_started:.3f}s of "
+            f"{_COMPLETES_WHILE_HELD_SECONDS}s; driver free="
+            f"{_lock_is_free(coordinator.driver)}; owner alive={owner.is_alive()}; "
+            f"errors={owner_errors!r}"
+        )
     finally:
         release_transition.set()
         holder.join(_BARRIER_SECONDS)
@@ -7293,7 +7334,14 @@ def test_fatal_intent_survives_transition_lock_contention_and_recovers_once(
         )
     )
     callback.start()
-    assert callback_returned.wait(0.5)
+    watch_started = time.monotonic()
+    returned_while_held = callback_returned.wait(_COMPLETES_WHILE_HELD_SECONDS)
+    assert returned_while_held is True, (
+        f"the fatal callback never returned while the transition lock was held: "
+        f"waited {time.monotonic() - watch_started:.3f}s of "
+        f"{_COMPLETES_WHILE_HELD_SECONDS}s; transition lock free="
+        f"{_lock_is_free(coordinator.lock)}; callback alive={callback.is_alive()}"
+    )
     release.set()
     holder.join(_BARRIER_SECONDS)
     callback.join(_BARRIER_SECONDS)
@@ -7909,14 +7957,22 @@ def test_expired_drain_inspection_is_bounded_when_transition_lock_is_held(
         finally:
             completed.set()
 
-    monkeypatch.setattr(lsp_process, "_GRACEFUL_CLEANUP_SECONDS", 0.05)
+    monkeypatch.setattr(lsp_process, "_GRACEFUL_CLEANUP_SECONDS", _DEADLINE_SECONDS)
     holder = threading.Thread(target=hold_transition)
     holder.start()
     assert held.wait(_BARRIER_SECONDS)
     inspector = threading.Thread(target=inspect)
+    watch_started = time.monotonic()
     inspector.start()
     try:
-        assert completed.wait(0.25)
+        completed_while_held = completed.wait(_COMPLETES_WHILE_HELD_SECONDS)
+        assert completed_while_held is True, (
+            f"the drain inspection never returned while the transition lock was "
+            f"held: waited {time.monotonic() - watch_started:.3f}s of "
+            f"{_COMPLETES_WHILE_HELD_SECONDS}s for a {_DEADLINE_SECONDS}s cleanup "
+            f"budget; transition lock free={_lock_is_free(coordinator.lock)}; "
+            f"inspector alive={inspector.is_alive()}; errors={errors!r}"
+        )
         assert results == [None]
         assert errors == []
         assert coordinator.background_cleanup_error is not None
@@ -9386,7 +9442,7 @@ def test_terminal_intent_lock_respects_deadline_and_cannot_commit_success(
 
     def shutdown() -> None:
         try:
-            process.shutdown(time.monotonic() + 0.05)
+            process.shutdown(time.monotonic() + _DEADLINE_SECONDS)
         except BaseException as error:
             errors.append(error)
         finally:
@@ -9396,10 +9452,19 @@ def test_terminal_intent_lock_respects_deadline_and_cannot_commit_success(
     holder.start()
     assert held.wait(_BARRIER_SECONDS)
     closer = threading.Thread(target=shutdown)
+    watch_started = time.monotonic()
     closer.start()
-    completed_before_release = finished.wait(0.2)
+    completed_before_release = finished.wait(_COMPLETES_WHILE_HELD_SECONDS)
+    waited = time.monotonic() - watch_started
     try:
-        assert completed_before_release is True
+        assert completed_before_release is True, (
+            f"shutdown never returned while the terminal intent lock was held: "
+            f"waited {waited:.3f}s of {_COMPLETES_WHILE_HELD_SECONDS}s for a "
+            f"{_DEADLINE_SECONDS}s deadline; lock free="
+            f"{_lock_is_free(coordinator.terminal_intent_lock)}; "
+            f"holder alive={holder.is_alive()}; closer alive={closer.is_alive()}; "
+            f"phase={coordinator.phase}; errors={errors!r}"
+        )
         assert len(errors) == 1 and isinstance(errors[0], TimeoutError)
         assert coordinator.pending_failure_intents == 1
         assert coordinator.success_committed is False
@@ -9407,8 +9472,8 @@ def test_terminal_intent_lock_respects_deadline_and_cannot_commit_success(
         assert lsp_process._coordinator_has_ownership(coordinator)
     finally:
         release.set()
-        holder.join(1)
-        closer.join(2)
+        holder.join(_BARRIER_SECONDS)
+        closer.join(_BARRIER_SECONDS)
         if lsp_process._coordinator_has_ownership(coordinator):
             process.close(time.monotonic() + 5)
 

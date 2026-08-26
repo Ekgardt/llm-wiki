@@ -68,6 +68,7 @@ otherwise would be the same mistake the item was raised about.
   and the stand is proved to use the product's own prompt.
 
 ## Related
+- [[knowledge/notes/session-promotion-policy-decision]] — хранение безусловно; повышение до страницы решает консолидация по всей записи.
 
 - [[citation-relevance-gate-decision]]
 - [[one-trust-weight-across-retrieval-paths-decision]]

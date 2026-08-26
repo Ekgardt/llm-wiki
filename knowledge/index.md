@@ -44,8 +44,10 @@ This index catalogs durable memory distilled from AI agent sessions
 - [[knowledge/notes/read-only-lsp-navigation-engine-decision]] — LLM Wiki will keep its structural Evidence Graph and add an owned read-only LSP engine for precise live navigation, starting with production-quality Python support.
 - [[knowledge/notes/reliability-v3-runtime-adoption-implementation-decision]] — The approved Reliability V3 operational database pair may now be implemented with explicit offline adoption, retained v2 evidence, immutable tombstones, and no change to Markdown authority or runtime roots.
 - [[knowledge/notes/reliable-memory-stage-2]] — Stage 2 keeps Markdown authoritative while adding recoverable transactions, durable checkpoints, safe archives, versioned compile caching, a fenced priority queue, and evidence-backed claims.
+- [[knowledge/notes/secret-shape-not-secret-name-decision]] — A key named `token` proves nothing about what follows it,
 - [[knowledge/notes/self-resolving-health-findings-decision]] — a health finding describes a live condition and returns to
 - [[knowledge/notes/session-evidence-retention-decision]] — every session leaves a redacted, searchable copy of itself
+- [[knowledge/notes/session-promotion-policy-decision]] — every session is kept regardless of what any classifier
 - [[knowledge/notes/single-directory-vault-decision]] — The vault and the public source live in one directory;
 - [[knowledge/notes/solo-operator-superset-product-decision]] — LLM Wiki is the single local-first memory, code-intelligence, and agent-control product for one operator managing many agents and sessions.
 - [[knowledge/notes/state-md-exempt-from-lint]] — `state.md` files under `knowledge/projects/<slug>/` are added to `EDITORIAL_NAMES` in `lint_memory.py` and exempted from backlink-obligation and sparse-floor checks, for the same reason that `index.md` and `log.md` are exempt.

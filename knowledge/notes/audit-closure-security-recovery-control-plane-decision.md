@@ -133,6 +133,7 @@ actually been exercised.
 - OWASP LLM02:2025: https://genai.owasp.org/llmrisk/llm022025-sensitive-information-disclosure/
 
 ## Related
+- [[knowledge/notes/secret-shape-not-secret-name-decision]] — what the redactor may treat as a secret: the value decides, not the name beside it.
 
 - [[solo-operator-superset-product-decision]]
 - [[v4-reliability-contracts-decision]]

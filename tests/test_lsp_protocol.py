@@ -2051,12 +2051,18 @@ def test_close_during_blocked_initial_write_cleans_request_and_owners() -> None:
 _CLOSE_FROM_HANDLER_SECONDS = 30.0
 
 
+# The notification that triggers the handler is sent from this thread, after the
+# protocol exists. `FakeLspServer.start` starts the peer-handler thread before it
+# returns, so a peer handler that sent `$/progress` opened a window: the reader
+# could dispatch it while the assignment `protocol = fake_server.start(...)` had
+# not bound the name, and the handler's closure raised
+# `NameError: free variable 'protocol' referenced before assignment`. That is what
+# the macOS job 97818285097 of CI run 32852933106 hit — macOS only because it
+# scheduled the reader early enough. Binding first and sending after closes the
+# window at its source; nothing here waits on a timer for the race to pass.
 def test_close_from_reader_handler_does_not_deadlock(fake_server: FakeLspServer) -> None:
     handler_returned = threading.Event()
     handler_failure: list[BaseException] = []
-
-    def peer_handler(peer: FakeLspPeer) -> None:
-        peer.send({"jsonrpc": "2.0", "method": "$/progress", "params": {}})
 
     def notification_handler(_params: object) -> None:
         try:
@@ -2069,9 +2075,9 @@ def test_close_from_reader_handler_does_not_deadlock(fake_server: FakeLspServer)
             handler_returned.set()
 
     protocol = fake_server.start(
-        peer_handler,
         server_notification_handlers={"$/progress": notification_handler},
     )
+    fake_server.peers[-1].send({"jsonrpc": "2.0", "method": "$/progress", "params": {}})
     assert handler_returned.wait(60), "close() never returned from the reader handler"
     assert not handler_failure, f"close() raised {handler_failure[0]!r}"
     protocol.reader_thread.join(60)

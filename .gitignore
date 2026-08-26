@@ -70,6 +70,7 @@ knowledge/notes/*
 !knowledge/notes/idempotent-retry-after-quarantine-decision.md
 !knowledge/notes/self-resolving-health-findings-decision.md
 !knowledge/notes/session-evidence-retention-decision.md
+!knowledge/notes/session-promotion-policy-decision.md
 !knowledge/notes/nightly-builds-generation-vectors-decision.md
 !knowledge/notes/automatic-code-update-decision.md
 !knowledge/notes/Ingestion Workflow.md
@@ -92,6 +93,7 @@ knowledge/notes/*
 !knowledge/notes/solo-operator-superset-product-decision.md
 !knowledge/notes/oversized-daily-compile-decision.md
 !knowledge/notes/part-scoped-evidence-decision.md
+!knowledge/notes/secret-shape-not-secret-name-decision.md
 !knowledge/notes/reliable-memory-stage-2.md
 !knowledge/notes/v4-reliability-contracts-decision.md
 !knowledge/notes/docs-portability-absolute-paths.md

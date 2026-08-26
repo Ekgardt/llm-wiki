@@ -227,6 +227,21 @@ def _cleanup_ephemeral_transcript(path: str) -> None:
 
 
 def read_transcript_tail(path: Path, max_chars: int = MAX_TRANSCRIPT_CHARS) -> str:
+    """The last `max_chars` of the transcript.
+
+    Head-and-tail was tried and measured on 2026-08-25 and not adopted. On the
+    same forty real sessions both windows promoted 24; two sessions changed
+    tier, in opposite directions. The one that got worse is the argument
+    against the change: its decisions sat 31 814 characters from the end —
+    inside a 60 000-character tail, outside a 30 000-character one — so
+    splitting the window dropped exactly the band that carried them.
+
+    So this stays a tail, not because the tail is known to be the right place
+    to look, but because nothing measured says moving it helps. See
+    `knowledge/notes/session-promotion-policy-decision.md`; what the classifier
+    decides was narrowed to one daily-log line in the same change, which is
+    what makes this window cheap to be wrong about.
+    """
     if not path.exists():
         return ""
     if not _transcript_path_allowed(path):

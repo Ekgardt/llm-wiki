@@ -469,3 +469,38 @@ def test_maybe_trigger_compile_respects_cooldown(monkeypatch):
     }
     flush_memory.maybe_trigger_compile(state, Path("/tmp/x.md"), tier="major")
     assert spawned == [], "cooldown should have prevented spawn"
+
+
+def test_the_classification_window_is_the_tail_and_that_is_deliberate(tmp_path, monkeypatch):
+    """Head-and-tail was measured on 2026-08-25 and not adopted.
+
+    Both windows promoted 24 of the same 40 real sessions; two changed tier in
+    opposite directions. The regression case decided it: its decisions were
+    31 814 characters from the end, inside a 60 000 tail and outside a 30 000
+    one. This test exists so the next person to try the split finds the
+    measurement instead of repeating it.
+    """
+    import flush_memory
+
+    transcript = tmp_path / "session.jsonl"
+    opening = "OPENING-BRIEF "
+    closing = "CLOSING-WORK "
+    transcript.write_text(opening + "filler " * 20_000 + closing, encoding="utf-8")
+    monkeypatch.setattr(flush_memory, "_transcript_path_allowed", lambda path: True)
+
+    excerpt = flush_memory.read_transcript_tail(transcript, max_chars=4_000)
+
+    assert len(excerpt) == 4_000
+    assert "CLOSING-WORK" in excerpt
+    assert "OPENING-BRIEF" not in excerpt
+
+
+def test_a_transcript_within_budget_is_passed_through_whole(tmp_path, monkeypatch):
+    """Nothing is dropped when nothing needs to be."""
+    import flush_memory
+
+    transcript = tmp_path / "short.jsonl"
+    transcript.write_text("one\ntwo\nthree\n", encoding="utf-8")
+    monkeypatch.setattr(flush_memory, "_transcript_path_allowed", lambda path: True)
+
+    assert flush_memory.read_transcript_tail(transcript, max_chars=4_000) == "one\ntwo\nthree\n"
