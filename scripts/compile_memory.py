@@ -69,7 +69,11 @@ from evidence_resolver import (  # noqa: E402
     daily_entries,
 )
 from llm_client import call_candidate, probe_candidate, provider_candidates  # noqa: E402
-from markdown_transaction import MarkdownChange, MarkdownCoordinator  # noqa: E402
+from markdown_transaction import (  # noqa: E402
+    MarkdownChange,
+    MarkdownCoordinator,
+    active_or_legacy_coordinator,
+)
 from memory_queue import MemoryQueue  # noqa: E402
 from memory_state import (  # noqa: E402
     ROOT,
@@ -3688,7 +3692,7 @@ def _run(
 ) -> int:
     _require_compile_active(deadline, cancelled)
     state = load_state()
-    coordinator = MarkdownCoordinator(ROOT, STATE_ROOT)
+    coordinator = active_or_legacy_coordinator(ROOT, STATE_ROOT)
     dailies = select_dailies(args, state, coordinator=coordinator)
     _repair_compile_mirror(coordinator)
     _require_compile_active(deadline, cancelled)

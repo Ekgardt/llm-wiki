@@ -796,9 +796,9 @@ def _recover_transactions() -> None:
     if time.monotonic() >= deadline:
         return
     try:
-        from markdown_transaction import MarkdownCoordinator
+        from markdown_transaction import active_or_legacy_coordinator
 
-        MarkdownCoordinator(ROOT, STATE_ROOT).recover(
+        active_or_legacy_coordinator(ROOT, STATE_ROOT).recover(
             writer_wait_seconds=0,
             max_transactions=RECOVERY_MAX_TRANSACTIONS,
             deadline=deadline,

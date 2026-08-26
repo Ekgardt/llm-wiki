@@ -34,11 +34,11 @@ from evidence_resolver import (  # noqa: E402
 )
 from markdown_transaction import (  # noqa: E402
     MarkdownChange,
-    MarkdownCoordinator,
     _acl_output_text,
     _harden_owner_only,
     _run_acl_command,
     _windows_acl_identity,
+    active_or_legacy_coordinator,
 )
 from memory_queue import MemoryQueue, QueueOperationError, SourceFence  # noqa: E402
 from memory_state import ROOT, STATE_ROOT  # noqa: E402
@@ -150,7 +150,9 @@ class DailyArchiver:
         self.state_root = Path(state_root)
         self.daily_root = self.vault / "knowledge" / "daily"
         self.archive_root = self.daily_root / "archive"
-        self.coordinator = MarkdownCoordinator(self.vault, self.state_root)
+        self.coordinator = active_or_legacy_coordinator(
+            self.vault, self.state_root
+        )
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.killpoint = killpoint or (lambda _point: None)
         self.queue = queue or MemoryQueue(self.state_root)

@@ -1091,9 +1091,9 @@ class EvidenceResolver:
             self.state_root = Path(STATE_ROOT)
         if not (self.state_root / "run/markdown-transactions.sqlite3").exists():
             return None
-        from markdown_transaction import MarkdownCoordinator
+        from markdown_transaction import active_or_legacy_coordinator
 
-        return MarkdownCoordinator(self.vault, self.state_root)
+        return active_or_legacy_coordinator(self.vault, self.state_root)
 
     @staticmethod
     def _slice(

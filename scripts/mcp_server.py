@@ -2881,9 +2881,9 @@ def _transaction_result(action: str, records) -> dict:
 
 
 def _transaction_coordinator(context: dict):
-    from markdown_transaction import MarkdownCoordinator
+    from markdown_transaction import active_or_legacy_coordinator
 
-    return MarkdownCoordinator(context["root"], context["state_root"])
+    return active_or_legacy_coordinator(context["root"], context["state_root"])
 
 
 def _doctor_transaction_recover(context: dict) -> dict:
