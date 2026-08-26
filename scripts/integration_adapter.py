@@ -2675,6 +2675,10 @@ def _record_cli_capture_failure(
 def main(argv: Sequence[str] | None = None) -> int:
     """Host-safe CLI: invalid input and capture failures never escape."""
     output: dict[str, object] | None = None
+    # `--help` and a malformed argv raise before `args` exists, and the handler
+    # below reads it: bind it first so asking for help is not recorded as a
+    # lost capture.
+    args: argparse.Namespace | None = None
     try:
         args = _parser().parse_args(argv)
         if args.maintenance:
