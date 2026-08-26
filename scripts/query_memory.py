@@ -694,13 +694,20 @@ def _answer_corpus(vault: Path, deadline: float) -> object:
 def _default_candidates(question: str, *, profile: str, deadline: float) -> tuple[object, ...]:
     from retrieval import retrieve_via_search_memory
 
+    # `limit` is how many candidates to return; `max_candidates` is a resource
+    # cap on how many rows each backend may fetch before fusion. Passing the
+    # answer size as the resource cap collapsed the pool to the answer, and a
+    # pool the size of the answer cannot hold that many distinct pages — the
+    # defect `_candidate_pool` exists to prevent. Measured on this vault, "как
+    # устроен повтор после карантина" returned twelve candidates of which ten
+    # were chunks of one status document and none was the decision page;
+    # without the cap the decision page is first.
     rows = retrieve_via_search_memory(
         question,
         limit=QA_MAX_CANDIDATES,
         semantic=True,
         profile=profile,
         deadline_monotonic=deadline,
-        max_candidates=QA_MAX_CANDIDATES,
     )
     return tuple(rows)
 
@@ -825,11 +832,33 @@ def _provider_response(
     return raw
 
 
+_FENCED_JSON_RE = re.compile(
+    r"\A\s*```[^\n]*\n(?P<body>.*?)\n?\s*```\s*\Z", re.DOTALL
+)
+
+
+def _unfenced(raw: str) -> str:
+    """The JSON inside a Markdown code fence, or the text unchanged.
+
+    Providers answer a "reply with JSON" instruction either bare or wrapped in
+    a ```json fence, and which one they pick varies with the answer. Measured
+    on this vault: the abstention came back bare and parsed, and the first real
+    answer this path ever produced came back fenced and was thrown away as
+    invalid JSON — a correct answer lost to three backticks. Only a whole
+    response that is exactly one fence is unwrapped; anything else still has to
+    be JSON on its own, so prose around a fence is refused as before.
+    """
+    match = _FENCED_JSON_RE.match(raw)
+    if not match:
+        return raw
+    return match.group("body")
+
+
 def _parsed_answer(raw: str | None) -> object:
     if not raw:
         raise GroundedQAError("grounded QA provider returned no response")
     try:
-        return json.loads(raw)
+        return json.loads(_unfenced(raw))
     except (TypeError, json.JSONDecodeError) as exc:
         raise GroundedQAError("grounded QA provider returned invalid JSON") from exc
 

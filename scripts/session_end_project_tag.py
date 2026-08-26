@@ -118,25 +118,34 @@ def _lookup_existing_slug(project_dir: Path, projects_dir: Path) -> str | None:
     except (OSError, ValueError):
         return None
     for slug_dir in projects_dir.iterdir():
-        if not slug_dir.is_dir() or slug_dir.name.startswith("_"):
-            continue
-        state_md = slug_dir / "state.md"
-        if not state_md.is_file():
-            continue
-        try:
-            body = state_md.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        m = STATE_SOURCE_LINE_RE.search(body)
-        if not m:
-            continue
-        try:
-            recorded_norm = Path(m.group(1).strip()).resolve().as_posix().lower()
-        except (OSError, ValueError):
-            continue
-        if recorded_norm == current_norm:
+        if _recorded_root(slug_dir) == current_norm:
             return slug_dir.name
     return None
+
+
+def _recorded_root(slug_dir: Path) -> str | None:
+    """The normalized `Project root` this slug's state.md records, or None."""
+    if not slug_dir.is_dir() or slug_dir.name.startswith("_"):
+        return None
+    state_md = slug_dir / "state.md"
+    if not state_md.is_file():
+        return None
+    try:
+        body = state_md.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+    return _normalized_source_line(body)
+
+
+def _normalized_source_line(body: str) -> str | None:
+    """The recorded root from a state.md body, resolved and lowercased."""
+    match = STATE_SOURCE_LINE_RE.search(body)
+    if not match:
+        return None
+    try:
+        return Path(match.group(1).strip()).resolve().as_posix().lower()
+    except (OSError, ValueError):
+        return None
 
 
 def _compute_slug(project_dir: Path, projects_dir: Path) -> str:
@@ -155,9 +164,24 @@ def _compute_slug(project_dir: Path, projects_dir: Path) -> str:
     return _base_slug(project_dir)
 
 
+def _owning_checkout(project_dir: Path) -> Path:
+    """See through an agent worktree to the checkout that owns it.
+
+    The same rule as `session_start_project_state.owning_checkout`, imported
+    lazily so this thin hook keeps its import cost. A failed import leaves the
+    directory as it was: a tag under the worktree's own name is better than a
+    session-end hook that raises.
+    """
+    try:
+        from session_start_project_state import owning_checkout
+    except Exception:  # noqa: BLE001
+        return project_dir
+    return owning_checkout(project_dir)
+
+
 def _resolve_project_dir() -> Path:
     raw = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
-    return Path(raw).resolve()
+    return _owning_checkout(Path(raw).resolve())
 
 
 def _read_payload() -> dict:

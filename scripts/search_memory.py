@@ -611,6 +611,35 @@ def _generation_embedder(embedder, *, is_query: bool):
     return encode
 
 
+def _lazy_generation_query_encoder():
+    """Encode a question, loading the model on first use rather than up front.
+
+    The load is about ten seconds cold on this vault. Done eagerly in `search()`
+    it was spent before retrieval started, outside the optional-stage boundary
+    and outside the caller's deadline, so the first recall in a fresh MCP server
+    burned its whole ten-second budget on a signal it had not asked for yet and
+    returned nothing at all — not even the lexical answer that was ready in 1.3 s.
+
+    Resolved here, the same load happens inside the dense leg, which is already
+    an abandonable optional stage: the caller gets the lexical answer on time,
+    the daemon straggler finishes the load, and the next call finds it in the
+    module-level cache. Two stragglers racing the cache would load twice and
+    keep the last; the cost is one wasted load, never a wrong vector.
+
+    An unavailable model returns no vector rather than raising, because the
+    generation reader already treats an unusable query vector as "no dense
+    signal" and that is exactly what an unavailable model means.
+    """
+
+    def encode(texts) -> list[list[float]]:
+        loaded = _get_embedder()
+        if loaded is None:
+            return []
+        return _generation_embedder(loaded, is_query=True)(texts)
+
+    return encode
+
+
 def _resolved_generation_embedder(
     semantic: bool,
     embedder: object | None,
@@ -628,11 +657,8 @@ def _resolved_generation_embedder(
         return None, None, None
     if embedder is not None:
         return embedder, model_id, model_revision
-    loaded = _get_embedder()
-    if loaded is None:
-        return None, None, None
     return (
-        _generation_embedder(loaded, is_query=True),
+        _lazy_generation_query_encoder(),
         EMBEDDING_MODEL,
         EMBEDDING_MODEL_REVISION,
     )
@@ -742,9 +768,13 @@ def _publish_validated_generation(
 def _require_finite_deadline(deadline: float | None) -> None:
     if deadline is None:
         return
-    if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
-        raise ValueError("deadline must be a finite monotonic timestamp")
-    if not math.isfinite(deadline):
+    # Order matters and short-circuit keeps it: `math.isfinite` raises on a
+    # non-number, so the type checks must stand in front of it.
+    if (
+        isinstance(deadline, bool)
+        or not isinstance(deadline, (int, float))
+        or not math.isfinite(deadline)
+    ):
         raise ValueError("deadline must be a finite monotonic timestamp")
 
 
@@ -759,6 +789,21 @@ def _publication_gate(
     return coordinator.writer_gate(wait_seconds=wait_seconds)
 
 
+def _resolved_live_scope(
+    vault: Path,
+    expected_repository_scope: object,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+):
+    """This vault's live scope, refusing an expectation of the wrong type."""
+    from repository_scope import RepositoryScope, resolve_repository_scope
+
+    if not isinstance(expected_repository_scope, RepositoryScope):
+        raise TypeError("expected_repository_scope must be a RepositoryScope")
+    return resolve_repository_scope(vault, deadline=deadline, cancelled=cancelled)
+
+
 def _require_matching_repository(
     vault: Path,
     expected_repository_scope: object | None,
@@ -768,11 +813,9 @@ def _require_matching_repository(
 ) -> None:
     if expected_repository_scope is None:
         return
-    from repository_scope import RepositoryScope, resolve_repository_scope
-
-    if not isinstance(expected_repository_scope, RepositoryScope):
-        raise TypeError("expected_repository_scope must be a RepositoryScope")
-    live_scope = resolve_repository_scope(vault, deadline=deadline, cancelled=cancelled)
+    live_scope = _resolved_live_scope(
+        vault, expected_repository_scope, deadline=deadline, cancelled=cancelled
+    )
     # Identity, not equality: `RepositoryScope` carries `git_commit`, and this
     # vault commits itself, so a four-minute build that ends after a commit was
     # publishing into "a different repository" by that reading. The question
@@ -1015,18 +1058,21 @@ class _PageWalkLimits:
             raise ValueError("searchable entry limit exceeded")
 
 
+def _entry_has_reparse_point(info: os.stat_result) -> bool:
+    """Windows marks a junction or a symlink with a reparse attribute."""
+    return bool(
+        getattr(info, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    )
+
+
 def _is_safe_entry(path: Path, *, directory: bool) -> bool:
     """No symlinks, no reparse points, and the kind the caller expects."""
     try:
         info = path.lstat()
     except OSError:
         return False
-    if path.is_symlink():
-        return False
-    reparse = getattr(info, "st_file_attributes", 0) & getattr(
-        stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400
-    )
-    if reparse:
+    if path.is_symlink() or _entry_has_reparse_point(info):
         return False
     if directory:
         return stat.S_ISDIR(info.st_mode)
@@ -1338,6 +1384,22 @@ def _index_is_stale(
     state = _readable_index_state(current_index, deadline, cancelled)
     if state is None:
         return True
+    if _index_state_is_stale(state, pages, source_root, deadline, cancelled):
+        return True
+    _check_legacy_stop(deadline, cancelled)
+    return _any_page_newer_than(
+        pages, current_index.stat().st_mtime, deadline, cancelled
+    )
+
+
+def _index_state_is_stale(
+    state: tuple,
+    pages: list[Path],
+    source_root: Path,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    """What the stored index claims about its own schema and its sources."""
     columns, schema_sql, manifest_paths = state
     if not _index_schema_is_current(columns, schema_sql):
         return True
@@ -1345,12 +1407,7 @@ def _index_is_stale(
     # membership become active through the same atomic file replacement.
     _check_legacy_stop(deadline, cancelled)
     current_paths = sorted(page.relative_to(source_root).as_posix() for page in pages)
-    if manifest_paths != current_paths:
-        return True
-    _check_legacy_stop(deadline, cancelled)
-    return _any_page_newer_than(
-        pages, current_index.stat().st_mtime, deadline, cancelled
-    )
+    return manifest_paths != current_paths
 
 
 def _is_transient_windows_access_error(error: OSError) -> bool:
@@ -1436,12 +1493,23 @@ def _acquire_index_swap_lock(
             return
         if _clear_stale_lock(lock_file):
             continue
-        _check_legacy_stop(end, cancelled)
-        remaining = end - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError(f"Could not acquire index swap lock: {lock_file}")
-        time.sleep(min(poll, remaining))
-        _check_legacy_stop(end, cancelled)
+        _wait_before_lock_retry(lock_file, end=end, poll=poll, cancelled=cancelled)
+
+
+def _wait_before_lock_retry(
+    lock_file: Path,
+    *,
+    end: float,
+    poll: float,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    """Sleep until the next attempt, or give up when the deadline is spent."""
+    _check_legacy_stop(end, cancelled)
+    remaining = end - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError(f"Could not acquire index swap lock: {lock_file}")
+    time.sleep(min(poll, remaining))
+    _check_legacy_stop(end, cancelled)
 
 
 def _release_index_swap_lock(lock_file: Path, token: str) -> None:
@@ -2420,6 +2488,16 @@ def _valid_source_row(row: tuple[object, ...], seen: set[str]) -> bool:
     return content_size <= MAX_CORPUS_FILE_BYTES and size == content_size
 
 
+def _require_admissible_source_row(
+    row: tuple, metadata: list, seen: set[str]
+) -> None:
+    """One more row is allowed only under the ceiling, and only if it is valid."""
+    if len(metadata) >= MAX_CORPUS_FILES:
+        raise ValueError("generation source row ceiling exceeded")
+    if not _valid_source_row(row, seen):
+        raise ValueError("generation evidence source rows are invalid")
+
+
 def _source_metadata_rows(
     database: sqlite3.Connection,
     *,
@@ -2437,10 +2515,7 @@ def _source_metadata_rows(
     )
     for row in rows:
         _check_generation_stop(deadline, cancelled)
-        if len(metadata) >= MAX_CORPUS_FILES:
-            raise ValueError("generation source row ceiling exceeded")
-        if not _valid_source_row(row, seen):
-            raise ValueError("generation evidence source rows are invalid")
+        _require_admissible_source_row(row, metadata, seen)
         source_id, relative_path, digest, size, content_size = row
         total_bytes += content_size
         if total_bytes > MAX_CORPUS_TOTAL_BYTES:
@@ -2788,13 +2863,12 @@ def _ordered_bounds(start: object, end: object, *, floor: int) -> bool:
 
 def _valid_chunk_span(row: tuple[object, ...], ancestry: object) -> bool:
     byte_start, byte_end, line_start, line_end, span_sha256 = row[7:12]
-    if not _is_string_list(ancestry):
-        return False
-    if not _ordered_bounds(byte_start, byte_end, floor=0):
-        return False
-    if not _ordered_bounds(line_start, line_end, floor=1):
-        return False
-    return _is_sha256(span_sha256)
+    return (
+        _is_string_list(ancestry)
+        and _ordered_bounds(byte_start, byte_end, floor=0)
+        and _ordered_bounds(line_start, line_end, floor=1)
+        and _is_sha256(span_sha256)
+    )
 
 
 def _all_optional_strings(values: tuple[object, ...]) -> bool:
@@ -2908,6 +2982,24 @@ def _valid_generation_fts_contents(
     )
     if expected_chunks is _UNUSABLE_CHUNKS:
         return False
+    return _fts_counts_and_chunks_match(
+        connection,
+        metadata,
+        expected_chunks,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+
+
+def _fts_counts_and_chunks_match(
+    connection: sqlite3.Connection,
+    metadata: object,
+    expected_chunks: object,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    """The stored chunk count, and then the stored chunks themselves."""
     count = _stored_chunk_count(connection)
     if not _chunk_count_agrees(count, metadata, expected_chunks):
         return False
@@ -2938,6 +3030,14 @@ def _generation_filters(
     values: list[str] = []
     if scope in {"wiki", "memory", "knowledge"}:
         clauses.append("source_path LIKE 'knowledge/notes/%'")
+    _add_validity_clauses(clauses, values, as_of=as_of, since=since)
+    return (" AND " + " AND ".join(clauses) if clauses else ""), values
+
+
+def _add_validity_clauses(
+    clauses: list[str], values: list[str], *, as_of: str | None, since: str | None
+) -> None:
+    """Either the as-of window or the current-status rule, then the since floor."""
     if as_of:
         clauses.extend(
             (
@@ -2953,7 +3053,6 @@ def _generation_filters(
             "(valid_from IS NULL OR valid_from = '' OR substr(valid_from, 1, 10) >= ?)"
         )
         values.append(since[:10])
-    return (" AND " + " AND ".join(clauses) if clauses else ""), values
 
 
 _NOTES_SCOPES = frozenset({"wiki", "memory", "knowledge"})
@@ -3028,13 +3127,12 @@ def _passes_hard_filters(
     scope: str,
     authority: str | None,
 ) -> bool:
-    if _out_of_scope(row, scope):
-        return False
-    if _field_mismatch(row, "project", project):
-        return False
-    if _field_mismatch(row, "authority", authority):
-        return False
-    return not _temporally_excluded(row, since, as_of)
+    return (
+        not _out_of_scope(row, scope)
+        and not _field_mismatch(row, "project", project)
+        and not _field_mismatch(row, "authority", authority)
+        and not _temporally_excluded(row, since, as_of)
+    )
 
 
 def _subset_or_empty(inner: set[str], outer: set[str]) -> bool:
@@ -3052,12 +3150,16 @@ def _title_boost(title: str, query_lower: str, query_words: set[str]) -> float:
     """A title that is the query is the strongest lexical signal there is."""
     title_lower = (title or "").lower().strip()
     title_words = set(title_lower.split())
-    if title_lower == query_lower:
-        return 5.0
-    if _subset_or_empty(query_words, title_words):
-        return 3.0
-    if _subset_or_empty(title_words, query_words):
-        return 2.0
+    # Strongest match first. Every predicate is pure set arithmetic, so reading
+    # the whole ladder before choosing costs nothing and changes nothing.
+    ladder = (
+        (title_lower == query_lower, 5.0),
+        (_subset_or_empty(query_words, title_words), 3.0),
+        (_subset_or_empty(title_words, query_words), 2.0),
+    )
+    for matched, boost in ladder:
+        if matched:
+            return boost
     return 1.0
 
 
@@ -3321,13 +3423,15 @@ def _vectors_match_manifest(
     manifest: Mapping[str, object], model_id: str, model_revision: str
 ) -> bool:
     """The generation must claim complete vectors from this exact model."""
-    if manifest.get("vector_state") != "complete":
-        return False
-    if manifest.get("embedding_model_id") != model_id:
-        return False
-    if manifest.get("embedding_model_revision") != model_revision:
-        return False
-    return all(_generation_artifact(manifest, name) for name in GENERATION_VECTOR_ARTIFACTS)
+    return (
+        manifest.get("vector_state") == "complete"
+        and manifest.get("embedding_model_id") == model_id
+        and manifest.get("embedding_model_revision") == model_revision
+        and all(
+            _generation_artifact(manifest, name)
+            for name in GENERATION_VECTOR_ARTIFACTS
+        )
+    )
 
 
 def _read_vector_metadata(
@@ -3470,6 +3574,31 @@ def _vector_scored_rows(
     return results
 
 
+def _stored_vectors_are_trustworthy(
+    metadata: object,
+    manifest: dict[str, object],
+    ordered: object,
+    matrix: object,
+    *,
+    model_id: str,
+    model_revision: str,
+    dimensions: object,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> bool:
+    """The stored vectors describe this generation and this exact model."""
+    return _vector_metadata_matches(
+        metadata,
+        manifest,
+        ordered,
+        model_id=model_id,
+        model_revision=model_revision,
+        dimensions=dimensions,
+    ) and _usable_vector_matrix(
+        matrix, ordered, dimensions, deadline=deadline, cancelled=cancelled
+    )
+
+
 def _generation_vector_rows(
     query: str,
     connection: sqlite3.Connection,
@@ -3496,17 +3625,16 @@ def _generation_vector_rows(
     _check_generation_stop(deadline, cancelled)
     ordered = _ordered_chunk_identity(connection, deadline, cancelled)
     dimensions = manifest.get("vector_dimensions")
-    if not _vector_metadata_matches(
+    if not _stored_vectors_are_trustworthy(
         metadata,
         manifest,
         ordered,
+        matrix,
         model_id=model_id,
         model_revision=model_revision,
         dimensions=dimensions,
-    ):
-        return None
-    if not _usable_vector_matrix(
-        matrix, ordered, dimensions, deadline=deadline, cancelled=cancelled
+        deadline=deadline,
+        cancelled=cancelled,
     ):
         return None
     _check_generation_stop(deadline, cancelled)
@@ -3806,11 +3934,33 @@ def _legacy_rows_or_rebuild(
     rows = _fetched_rows_or_none(query, limit, deadline, cancelled)
     if rows is not None:
         return rows
-    # One rebuild per call: if the index was already rebuilt above, a broken
-    # read now means the index cannot be read at all.
-    if needs_rebuild:
-        return None
-    if not _rebuild_legacy_index(pages, deadline=deadline, cancelled=cancelled):
+    return _rows_after_second_rebuild(
+        query,
+        pages,
+        limit=limit,
+        needs_rebuild=needs_rebuild,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+
+
+def _rows_after_second_rebuild(
+    query: str,
+    pages: list[Path],
+    *,
+    limit: int,
+    needs_rebuild: bool,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[tuple] | None:
+    """The one retry: rebuild once, then read again.
+
+    One rebuild per call — if the index was already rebuilt by the caller, a
+    broken read now means the index cannot be read at all.
+    """
+    if needs_rebuild or not _rebuild_legacy_index(
+        pages, deadline=deadline, cancelled=cancelled
+    ):
         return None
     return _fetched_rows_or_none(query, limit, deadline, cancelled)
 
@@ -4044,9 +4194,7 @@ def _with_exact_page(
     if any(hit["path"] == relative for hit in hits):
         return hits
     extra = _exact_page_hit(page, project=project, since=since, as_of=as_of)
-    if extra is None:
-        return hits
-    return [*hits, extra]
+    return hits if extra is None else [*hits, extra]
 
 
 def _filename_matches(hits: list[dict], normalized_stem: str) -> list[dict]:
@@ -4082,9 +4230,8 @@ def _legacy_lexical_hits(
 ) -> list[dict]:
     """Independent lexical backend used by retrieve() — no dense/graph fusion."""
     _check_legacy_stop(deadline, cancelled)
-    if _blank_query(query):
-        return []
-    pages = _resolved_pages(page_paths, scope, deadline)
+    # A blank query resolves no pages, and no pages is already the empty answer.
+    pages = [] if _blank_query(query) else _resolved_pages(page_paths, scope, deadline)
     if not pages:
         return []
     rows = _legacy_rows_or_rebuild(
@@ -4192,9 +4339,9 @@ def _direct_page_hit(
         return None
     body = _strip_frontmatter(read.content)
     terms = _document_terms(page, read.title, read.summary, body)
-    if not query_terms.issubset(terms):
-        return None
-    if not _page_read_eligible(read, project=project, since=since, as_of=as_of):
+    if not query_terms.issubset(terms) or not _page_read_eligible(
+        read, project=project, since=since, as_of=as_of
+    ):
         return None
     score = round(_direct_match_score(page, read.title, read, query_terms), 2)
     return {
@@ -4377,9 +4524,7 @@ def _legacy_dense_hits(
 ) -> list[dict] | None:
     """Independent dense backend used by retrieve() — returns None if unavailable."""
     _check_legacy_stop(deadline, cancelled)
-    if deadline is not None:
-        return None
-    if not _dense_backend_ready(query):
+    if deadline is not None or not _dense_backend_ready(query):
         return None
     pages = _resolved_pages(page_paths, scope, deadline)
     if not pages:
@@ -4394,9 +4539,7 @@ def _legacy_dense_hits(
         deadline=deadline,
         cancelled=cancelled,
     )
-    if hits is not None:
-        return hits
-    return _numpy_dense_hits(
+    return hits if hits is not None else _numpy_dense_hits(
         query,
         pages,
         limit=limit,
@@ -4586,6 +4729,18 @@ def _generation_attempt_inputs(
         model_id=model_id,
         model_revision=model_revision,
     )
+    return _sealed_generation_inputs(
+        catalog, manifest, artifact_names, stop_options
+    )
+
+
+def _sealed_generation_inputs(
+    catalog: GenerationCatalog,
+    manifest: dict[str, object],
+    artifact_names: object,
+    stop_options: Mapping[str, object],
+) -> tuple | None:
+    """The seal and the open artifact, or None when either is unusable."""
     seal = _generation_consumption_seal(
         catalog, manifest, artifact_names, **stop_options
     )
@@ -4595,7 +4750,7 @@ def _generation_attempt_inputs(
     connection = _generation_connection(catalog, manifest, **stop_options)
     if connection is None:
         return None
-    return manifest, artifact_names, seal, connection
+    return (manifest, artifact_names, seal, connection)
 
 
 def _try_generation_search(
@@ -4782,9 +4937,7 @@ def _legacy_row_excluded(path: str, timestamp: str, since: str | None, as_of: st
         return True
     if not as_of:
         return False
-    if _newer_than_as_of(timestamp, as_of):
-        return True
-    return not _valid_as_of(path, as_of)
+    return _newer_than_as_of(timestamp, as_of) or not _valid_as_of(path, as_of)
 
 
 def _legacy_scored_rows(
@@ -5259,12 +5412,10 @@ def _vector_search(
 ) -> list[dict] | None:
     """Rank pages by cosine similarity against the cached page embeddings."""
     _check_legacy_stop(deadline, cancelled)
-    vectors_data = _load_or_build_vectors(pages, deadline=deadline, cancelled=cancelled)
-    if not vectors_data:
+    cache = _vector_cache_for(pages, deadline=deadline, cancelled=cancelled)
+    if cache is None:
         return None
-    matrix = _vector_cache_matrix(vectors_data)
-    if matrix is None:
-        return None
+    vectors_data, matrix = cache
     query_vector = _query_vector_for(
         query, matrix, deadline=deadline, cancelled=cancelled
     )
@@ -5424,7 +5575,33 @@ def _build_vectors(
     if documents is None:
         return None
     live, texts_list = documents
+    return _persisted_page_vectors(embedder, live, texts_list, deadline, cancelled)
 
+
+def _vector_cache_for(
+    pages: list[Path],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> tuple | None:
+    """The cached page vectors and their matrix, or None when unusable."""
+    vectors_data = _load_or_build_vectors(pages, deadline=deadline, cancelled=cancelled)
+    if not vectors_data:
+        return None
+    matrix = _vector_cache_matrix(vectors_data)
+    if matrix is None:
+        return None
+    return (vectors_data, matrix)
+
+
+def _persisted_page_vectors(
+    embedder: object,
+    live: dict,
+    texts_list: list,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> dict | None:
+    """Encode, persist, and describe the page vectors, or None on any failure."""
     vectors = _encoded_page_vectors(embedder, texts_list, deadline, cancelled)
     if vectors is None:
         return None
@@ -5582,18 +5759,25 @@ def main() -> int:
 
     if args.stdin:
         args.query = sys.stdin.read().strip()
+    return _run_cli_command(args)
 
-    if args.status:
-        return _print_index_status()
 
-    if args.rebuild:
-        return _rebuild_index_cli(args.scope)
-
-    if not args.query:
-        print("Usage: python search_memory.py \"<query>\"", file=sys.stderr)
-        return 1
-
+def _run_cli_command(args: argparse.Namespace) -> int:
+    """The one mode the arguments asked for, in the order they take priority."""
+    modes = (
+        (args.status, lambda: _print_index_status()),
+        (args.rebuild, lambda: _rebuild_index_cli(args.scope)),
+        (not args.query, _print_cli_usage),
+    )
+    for chosen, run in modes:
+        if chosen:
+            return run()
     return _run_cli_search(args)
+
+
+def _print_cli_usage() -> int:
+    print("Usage: python search_memory.py \"<query>\"", file=sys.stderr)
+    return 1
 
 
 def _print_index_status() -> int:
