@@ -165,9 +165,9 @@ def _tool_operation_seconds(name: str, arguments: object) -> float:
     if name != "get_architecture" or not isinstance(arguments, dict):
         return MCP_OPERATION_SECONDS
     mode = arguments.get("mode", "summary")
-    if mode in PRECISE_ARCHITECTURE_MODES:
-        return MCP_LSP_STARTUP_SECONDS
-    if _positioned_architecture_call(arguments, mode):
+    if mode in PRECISE_ARCHITECTURE_MODES or _positioned_architecture_call(
+        arguments, mode
+    ):
         return MCP_LSP_STARTUP_SECONDS
     return MCP_OPERATION_SECONDS
 
@@ -369,18 +369,15 @@ def _doctor_branch(
 ) -> dict:
     properties = {"action": {"type": "string", "const": action}}
     required = ["action"]
-    if target:
-        properties["target_id"] = {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-        }
-        required.append("target_id")
-    if limit:
-        properties["limit"] = {"type": "integer", "minimum": 1, "maximum": 100}
-    if mutation:
-        properties["repair"] = {"type": "boolean", "const": True}
-        required.append("repair")
+    optional = (
+        (target, "target_id", {"type": "string", "minLength": 1, "maxLength": 128}, True),
+        (limit, "limit", {"type": "integer", "minimum": 1, "maximum": 100}, False),
+        (mutation, "repair", {"type": "boolean", "const": True}, True),
+    )
+    for wanted, key, field, mandatory in optional:
+        if wanted:
+            properties[key] = field
+            required.extend([key] if mandatory else [])
     return {
         "type": "object",
         "properties": properties,
@@ -620,6 +617,11 @@ def _run_vault_search(
 ) -> list[dict]:
     from search_memory import search
 
+    # No `max_candidates`: that is a per-backend resource cap, not the answer
+    # size. Passing the answer size collapsed each leg's pool to the number of
+    # rows asked for, and one page owns many chunks -- measured on the live
+    # vault, five rows for the quarantine-retry question were three pages, the
+    # decision page absent; without the cap it came first.
     return search(
         query,
         limit=limit,
@@ -628,7 +630,6 @@ def _run_vault_search(
         rerank=rerank,
         source_tool="mcp.recall",
         deadline_monotonic=operation_deadline,
-        max_candidates=limit,
     )
 
 
@@ -704,14 +705,38 @@ def _read_page(
     content = _page_content(page_path)
     if isinstance(content, dict):
         return content
-    evidence = _page_evidence(ROOT, STATE_ROOT, content, resolve_evidence, deadline)
+    return _page_with_evidence(
+        ROOT,
+        STATE_ROOT,
+        slug,
+        page_path,
+        content,
+        emit_telemetry=emit_telemetry,
+        resolve_evidence=resolve_evidence,
+        deadline=deadline,
+    )
+
+
+def _page_with_evidence(
+    root,
+    state_root,
+    slug: str,
+    page_path,
+    content: str,
+    *,
+    emit_telemetry: bool,
+    resolve_evidence: bool,
+    deadline: float | None,
+) -> dict:
+    """The page and its resolved evidence, or the evidence error envelope."""
+    evidence = _page_evidence(root, state_root, content, resolve_evidence, deadline)
     if isinstance(evidence, dict):
         return evidence
     if emit_telemetry:
         _record_page_reads(slug, evidence)
     return {
         "slug": slug,
-        "path": str(page_path.relative_to(ROOT)),
+        "path": str(page_path.relative_to(root)),
         "content": content,
         "evidence": evidence,
     }
@@ -1489,6 +1514,14 @@ def _check_navigation_manager_stop(deadline: float, cancelled) -> None:
     _check_deadline(deadline)
 
 
+def _require_navigation_manager_lifecycle(expected_epoch: int) -> None:
+    """The manager about to be handed out must still be the one asked for."""
+    if expected_epoch != _NAVIGATION_MANAGER_EPOCH:
+        raise TimeoutError("navigation session manager lifecycle changed")
+    if _NAVIGATION_MANAGER_CLOSING is not None:
+        raise TimeoutError("navigation session manager is closing")
+
+
 def _navigation_session_manager(
     deadline: float,
     expected_epoch: int,
@@ -1499,10 +1532,7 @@ def _navigation_session_manager(
     _acquire_navigation_manager_lock(deadline)
     try:
         _check_navigation_manager_stop(deadline, cancelled)
-        if expected_epoch != _NAVIGATION_MANAGER_EPOCH:
-            raise TimeoutError("navigation session manager lifecycle changed")
-        if _NAVIGATION_MANAGER_CLOSING is not None:
-            raise TimeoutError("navigation session manager is closing")
+        _require_navigation_manager_lifecycle(expected_epoch)
         if _NAVIGATION_MANAGER is None:
             from memory_state import STATE_ROOT
             from pyright_session import PyrightSessionManager
@@ -1753,6 +1783,10 @@ class _NavigationSourceCache:
         if len(self._values) >= MAX_NAVIGATION_GRAPH_FACTS:
             return None
         content = _navigation_source_bytes(scope, relative_path, deadline=deadline)
+        return self._remember(key, content)
+
+    def _remember(self, key, content: bytes):
+        """Cache the bytes unless they would push the cache past its ceiling."""
         if self._bytes + len(content) > MAX_NAVIGATION_SOURCE_CACHE_BYTES:
             self._values[key] = None
             return None
@@ -1803,12 +1837,9 @@ def _navigation_span_source(scope, span: dict, deadline, source_cache):
     if expected_source_sha256 is None:
         return None
     cached = source_cache.read(scope, relative_path, deadline=deadline)
-    if cached is None:
+    if cached is None or cached[1] != expected_source_sha256:
         return None
-    content, source_sha256 = cached
-    if source_sha256 != expected_source_sha256:
-        return None
-    return relative_path, content
+    return relative_path, cached[0]
 
 
 def _span_range_invalid(byte_start: int, byte_end: int, size: int) -> bool:
@@ -1846,9 +1877,9 @@ def _validated_span_bounds(
     if not _span_kind_valid(source_kind, require_span_hash):
         return None
     bounds = _span_bounds(span, content)
-    if bounds is None:
-        return None
-    if require_span_hash and not _span_hash_matches(span, content, bounds):
+    if bounds is None or (
+        require_span_hash and not _span_hash_matches(span, content, bounds)
+    ):
         return None
     return bounds
 
@@ -1938,6 +1969,15 @@ def _resolved_navigation_location(
     bounds = _validated_span_bounds(span, content, source_kind, require_span_hash)
     if bounds is None:
         return None
+    return _located_navigation_span(
+        relative_path, content, bounds, span, metadata, graph_version, deadline
+    )
+
+
+def _located_navigation_span(
+    relative_path, content, bounds, span, metadata, graph_version, deadline
+):
+    """The location for a validated span, or None when its position is unreadable."""
     position = _span_position(relative_path, content, bounds[0], span, deadline)
     if position is None:
         return None
@@ -2241,24 +2281,28 @@ def _structural_call_candidates(request, symbol, deadline, source_cache):
 
 
 def _structural_candidates_for(Capability, request, symbol, deadline, source_cache):
-    if request.capability is Capability.DEFINITIONS:
-        return _graph_declaration_locations(
+    handlers = {
+        Capability.DEFINITIONS: lambda: _graph_declaration_locations(
             symbol,
             request.repository,
             deadline,
             source_cache,
-        )
-    if request.capability is Capability.REFERENCES:
-        return _graph_call_locations(
+        ),
+        Capability.REFERENCES: lambda: _graph_call_locations(
             symbol,
             request.repository,
             direction="incoming",
             deadline=deadline,
             source_cache=source_cache,
-        )
-    if request.capability is Capability.CALLS:
-        return _structural_call_candidates(request, symbol, deadline, source_cache)
-    return ()
+        ),
+        Capability.CALLS: lambda: _structural_call_candidates(
+            request, symbol, deadline, source_cache
+        ),
+    }
+    handler = handlers.get(request.capability)
+    if handler is None:
+        return ()
+    return handler()
 
 
 def _navigation_symbol_resolver(symbol, scope, deadline):
@@ -2968,12 +3012,14 @@ def _validated_code_directory(
 
 
 def _code_directory_error(resolved: Path) -> str | None:
-    if not resolved.exists():
-        return f"directory does not exist: {resolved}"
-    if not resolved.is_dir():
-        return f"directory is not a directory: {resolved}"
-    if resolved == Path(resolved.anchor):
-        return "directory must not be a filesystem root"
+    reasons = (
+        (not resolved.exists(), f"directory does not exist: {resolved}"),
+        (not resolved.is_dir(), f"directory is not a directory: {resolved}"),
+        (resolved == Path(resolved.anchor), "directory must not be a filesystem root"),
+    )
+    for failed, message in reasons:
+        if failed:
+            return message
     return None
 
 
@@ -3077,6 +3123,11 @@ def _validate_tool_arguments(name: str, arguments) -> str | None:
     schema = TOOL_INPUT_SCHEMAS[name]
     if "oneOf" in schema:
         return _validate_one_of(schema, arguments)
+    return _validate_object_then_specific(name, schema, arguments)
+
+
+def _validate_object_then_specific(name: str, schema: dict, arguments: dict):
+    """The declared object schema first, then the tool's own argument rules."""
     error = _validate_object_schema(
         schema,
         arguments,
@@ -3190,6 +3241,11 @@ def _validate_architecture_arguments(arguments: dict) -> str | None:
     forbidden = sorted(set(arguments).difference(allowed))
     if forbidden:
         return f"arguments are not valid for {mode}: {', '.join(forbidden)}"
+    return _positioned_architecture_path_error(arguments, mode, positioned)
+
+
+def _positioned_architecture_path_error(arguments: dict, mode: str, positioned: bool):
+    """Only a precise or positioned call carries a path to validate."""
     if mode in PRECISE_ARCHITECTURE_MODES or positioned:
         return _architecture_path_error(arguments)
     return None
@@ -3320,6 +3376,11 @@ def _validate_schema_field(
     error = _validate_field_type(field["type"], key, value)
     if error is not None:
         return error
+    return _validate_typed_field(field, key, value)
+
+
+def _validate_typed_field(field: dict, key: str, value) -> str | None:
+    """Bounds for every field, preceded by the item rules an array declares."""
     if field["type"] == "array":
         return _validate_array_field(field, key, value) or _validate_field_bounds(
             field, key, value
@@ -3439,12 +3500,14 @@ def _sanitized_diagnostic_mapping(value: dict) -> dict:
 
 
 def _sanitize_diagnostic(value):
-    if isinstance(value, str):
-        return _sanitized_diagnostic_text(value)
-    if isinstance(value, list):
-        return _sanitized_diagnostic_list(value)
-    if isinstance(value, dict):
-        return _sanitized_diagnostic_mapping(value)
+    handlers = (
+        (str, _sanitized_diagnostic_text),
+        (list, _sanitized_diagnostic_list),
+        (dict, _sanitized_diagnostic_mapping),
+    )
+    for kind, handler in handlers:
+        if isinstance(value, kind):
+            return handler(value)
     return value
 
 
@@ -3671,17 +3734,19 @@ def _weakest_stated_confidence(facts: list) -> float:
 
 
 def _page_warnings(item) -> list[str]:
-    warnings = []
-    if item.confidence == "low":
-        warnings.append(f"{item.relative_path} states confidence: low.")
-    if item.authority == "inferred":
-        warnings.append(f"{item.relative_path} is inferred, not stated by anyone.")
-    if item.aging:
-        warnings.append(
-            f"{item.relative_path} is {item.age_days} days old; a {item.page_type} "
-            f"page stays current for {item.age_limit_days}."
-        )
-    return warnings
+    aging = (
+        f"{item.relative_path} is {item.age_days} days old; a {item.page_type} "
+        f"page stays current for {item.age_limit_days}."
+    )
+    candidates = (
+        (item.confidence == "low", f"{item.relative_path} states confidence: low."),
+        (
+            item.authority == "inferred",
+            f"{item.relative_path} is inferred, not stated by anyone.",
+        ),
+        (bool(item.aging), aging),
+    )
+    return [message for flagged, message in candidates if flagged]
 
 
 def _provenance_warnings(facts: list) -> list[str]:
@@ -4361,11 +4426,12 @@ def _tool_get_architecture(arguments: dict, deadline: float):
     if _is_precise_architecture_request(arguments):
         return _precise_architecture_call(arguments, deadline), False
     mode = arguments.get("mode", "summary")
-    if mode == "impact":
-        return _impact_architecture_call(arguments, deadline), False
-    if mode == "summary":
-        return _summary_architecture_call(arguments, deadline), False
-    return _architecture_mode_call(arguments, deadline), False
+    calls = {
+        "impact": _impact_architecture_call,
+        "summary": _summary_architecture_call,
+    }
+    call = calls.get(mode, _architecture_mode_call)
+    return call(arguments, deadline), False
 
 
 def _tool_doctor(arguments: dict, deadline: float):
