@@ -4553,25 +4553,26 @@ def _ide_hook_factories(
     state_root: Path | None,
     metadata: Mapping[str, Mapping[str, object]],
 ) -> dict[str, Callable[[], ManagedResource]]:
-    """One factory per owned IDE resource, built only when it is selected."""
+    """One factory per owned host resource, built only when it is selected.
+
+    The first two entries are removal-only. Cursor and Antigravity were retired on
+    2026-08-26 and nothing selects them at install time any more, but a manifest
+    written before that names them, and `_active_resource` fails closed on an id the
+    code cannot supply — so uninstall and rollback still need to build them.
+    """
     from integration_hook_config import (
         claude_settings_resource,
         claude_settings_template,
         codex_hooks_resource,
         codex_hooks_template,
-        managed_ide_hook_resources,
         opencode_plugin_resource,
+        retired_antigravity_hooks_resource,
+        retired_cursor_hooks_resource,
     )
 
-    def _managed(resource_id: str) -> ManagedResource:
-        for resource in managed_ide_hook_resources(root, home):
-            if resource.resource_id == resource_id:
-                return resource
-        raise InstallControlError("install_resource_unknown")
-
     return {
-        "cursor-user-hooks": lambda: _managed("cursor-user-hooks"),
-        "antigravity-user-hooks": lambda: _managed("antigravity-user-hooks"),
+        "cursor-user-hooks": lambda: retired_cursor_hooks_resource(home),
+        "antigravity-user-hooks": lambda: retired_antigravity_hooks_resource(home),
         "opencode-plugin": lambda: opencode_plugin_resource(
             root, _opencode_plugin_destination(home)
         ),
@@ -4593,8 +4594,8 @@ def _ide_hook_factories(
 def _selected_ide_hook_resources(
     root: Path,
     home: Path,
-    cursor_hooks: bool,
-    antigravity_hooks: bool,
+    retired_cursor_hooks: bool,
+    retired_antigravity_hooks: bool,
     opencode_plugin: bool = False,
     claude_settings: bool = False,
     codex_hooks: bool = False,
@@ -4602,8 +4603,8 @@ def _selected_ide_hook_resources(
     metadata: Mapping[str, Mapping[str, object]] | None = None,
 ) -> list[ManagedResource]:
     wanted = {
-        "cursor-user-hooks": cursor_hooks,
-        "antigravity-user-hooks": antigravity_hooks,
+        "cursor-user-hooks": retired_cursor_hooks,
+        "antigravity-user-hooks": retired_antigravity_hooks,
         "opencode-plugin": opencode_plugin,
         "claude-user-settings": claude_settings,
         "codex-user-hooks": codex_hooks,
@@ -4695,8 +4696,8 @@ def build_install_resources(
     home: Path,
     profile: Path | None,
     powershell_path: str | None,
-    cursor_hooks: bool = False,
-    antigravity_hooks: bool = False,
+    retired_cursor_hooks: bool = False,
+    retired_antigravity_hooks: bool = False,
     opencode_plugin: bool = False,
     claude_settings: bool = False,
     codex_hooks: bool = False,
@@ -4716,8 +4717,8 @@ def build_install_resources(
         *_selected_ide_hook_resources(
             root,
             home,
-            cursor_hooks,
-            antigravity_hooks,
+            retired_cursor_hooks,
+            retired_antigravity_hooks,
             opencode_plugin,
             claude_settings,
             codex_hooks,
@@ -4748,8 +4749,6 @@ def _install_from_args(args: argparse.Namespace) -> dict[str, object]:
         home=args.home.resolve(),
         profile=args.profile,
         powershell_path=args.powershell_path,
-        cursor_hooks=args.cursor_hooks,
-        antigravity_hooks=args.antigravity_hooks,
         opencode_plugin=args.opencode_plugin,
         claude_settings=args.claude_settings,
         codex_hooks=args.codex_hooks,
@@ -4820,8 +4819,8 @@ def _resources_from_existing_args(args: argparse.Namespace, command: str) -> lis
         home=args.home.resolve(),
         profile=args.profile,
         powershell_path=args.powershell_path,
-        cursor_hooks="cursor-user-hooks" in identifiers,
-        antigravity_hooks="antigravity-user-hooks" in identifiers,
+        retired_cursor_hooks="cursor-user-hooks" in identifiers,
+        retired_antigravity_hooks="antigravity-user-hooks" in identifiers,
         opencode_plugin="opencode-plugin" in identifiers,
         claude_settings="claude-user-settings" in identifiers,
         codex_hooks="codex-user-hooks" in identifiers,
@@ -4871,8 +4870,6 @@ def _parser() -> argparse.ArgumentParser:
     install.add_argument("--scheduler", choices=("native", "cron"), default="native")
     install.add_argument("--profile", type=Path)
     install.add_argument("--powershell-path")
-    install.add_argument("--cursor-hooks", action="store_true")
-    install.add_argument("--antigravity-hooks", action="store_true")
     install.add_argument("--opencode-plugin", action="store_true")
     install.add_argument("--claude-settings", action="store_true")
     install.add_argument("--codex-hooks", action="store_true")

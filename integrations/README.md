@@ -1,50 +1,39 @@
-# IDE Agent Integration
+# Agent Integration
 
 MCP is the common read/action interface for every compatible agent. Native
 hooks, plugins, wrappers, and rules remain thin lifecycle or guidance adapters;
 they do not implement a second memory API.
 
-## Cursor
+## Supported agents
 
-Configure the local MCP server for reads and actions, install Cursor locally, then rerun
-the native LLM Wiki installer. It structurally owns only the exact LLM-Wiki handlers in
-`~/.cursor/hooks.json`; unrelated events, handlers, and keys are preserved. The hooks
-normalize `sessionStart`, `beforeSubmitPrompt`, significant `postToolUse`, `preCompact`,
-`stop`, and `sessionEnd` through `scripts/integration_adapter.py`.
+Claude Code, OpenCode, and Codex CLI are the supported hosts. Each uses a thin
+lifecycle adapter installed and owned by the install control plane, and each reads
+and acts through the same MCP server.
 
-`integrations/cursor/rules/llm-wiki.mdc` remains optional agent guidance. It is not the
-capture transport. Cursor cloud agents do not load user-level hooks, so automatic
-Cursor capture is local only.
-
-## Antigravity
-
-Configure the local MCP server for reads and actions, install Antigravity locally, then
-rerun the native LLM Wiki installer. It structurally owns only the top-level `llm-wiki`
-fragment in `~/.gemini/config/hooks.json`; unrelated configuration is preserved.
-`PreInvocation`, significant `PostToolUse`, and `Stop` events pass through the same
-canonical integration adapter and occurrence-receipt path.
-
-`integrations/antigravity/AGENTS.md` remains optional agent guidance. It does not append
-daily Markdown directly and is not the capture transport.
-
-Both managed configurations use bounded verified sibling preimages. Malformed JSON,
-ownership conflicts, and drift block mutation. Doctor inspects structural ownership
-without repairing user configuration.
+Cursor and Antigravity were retired on 2026-08-26. The installer no longer detects
+them, writes their hook configuration, or reports on them. `uninstall` and `rollback`
+still take back a fragment written by an older install, so an existing user is not
+left with a hook pointing at a vault nothing maintains. See
+`knowledge/notes/retire-cursor-and-antigravity-decision.md`.
 
 ## What works differently from CLI agents
 
-IDE agents (Cursor, Antigravity; VS Code Copilot — planned, not yet implemented) work differently from CLI agents (OpenCode, Codex, Claude Code):
+The vault is **shared infrastructure**. All agents write to the same
+`knowledge/daily/` and read from the same `knowledge/notes/`. A decision recorded by
+Claude Code is visible to OpenCode in its next session.
 
-| Feature | CLI agents (OpenCode/Codex/Claude) | IDE agents (Cursor/Antigravity) |
-|---|---|---|
-| **Reads/actions** | 12 task-shaped MCP tools | The same 12 task-shaped MCP tools |
-| **Auto-capture** | Thin hooks/plugins forward lifecycle events | Official local user hooks forward supported lifecycle events |
-| **Session classification** | FLUSH MAJOR/MINOR/OK at idle | Supported stop/session-end events use the shared classification path |
-| **Nightly compile** | Native scheduler (Task Scheduler, LaunchAgent, or user systemd); cron is explicit fallback | Same — vault is shared |
-| **Context injection** | SessionStart hook injects bounded context | Supported local session-start hooks use the same bounded context builder |
-| **LLM backend** | `llm_client.py` handles memory compilation | The shared vault uses the same memory backend; the IDE model remains host-managed |
+| Feature | Every supported agent (Claude Code / OpenCode / Codex) |
+|---|---|
+| **Reads/actions** | 12 task-shaped MCP tools |
+| **Auto-capture** | Thin hooks/plugins forward lifecycle events |
+| **Session classification** | FLUSH MAJOR/MINOR/OK at idle |
+| **Nightly compile** | Native scheduler (Task Scheduler, LaunchAgent, or user systemd); cron is explicit fallback |
+| **Context injection** | SessionStart hook injects bounded context |
+| **LLM backend** | `llm_client.py` handles memory compilation |
 
-**Key insight**: the vault is **shared infrastructure**. All agents write to the same `knowledge/daily/` and read from the same `knowledge/notes/`. A decision recorded by Cursor is visible to OpenCode in its next session.
+Managed configurations use bounded verified sibling preimages. Malformed JSON,
+ownership conflicts, and drift block mutation. Doctor inspects structural ownership
+without repairing user configuration.
 
 ## MCP Server
 

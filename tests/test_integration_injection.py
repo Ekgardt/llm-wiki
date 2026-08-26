@@ -4,10 +4,8 @@ These tests ensure that:
 1. The OpenCode plugin forwards lifecycle events to shared Python ingestion.
 2. Native integrations do not duplicate MCP reads or classification logic.
 3. The Codex wrapper generates a context file before codex starts.
-4. The Cursor rules file contains mandatory session-start context reading
-5. The Antigravity AGENTS.md contains mandatory session-start context reading
-6. session_start_context.py supports --output-file mode
-7. The install scripts generate the initial context file
+4. session_start_context.py supports --output-file mode
+5. The install scripts generate the initial context file
 
 If any of these are removed, CI catches it.
 """
@@ -4007,32 +4005,6 @@ def test_codex_wrapper_generates_context_file():
     assert "session-context.md" in wrapper, "Codex wrapper must write to cache/session-context.md"
 
 
-def test_cursor_rules_has_mandatory_context_read():
-    """Cursor rules file must instruct the agent to read the session
-    context file at session start (MANDATORY).
-    """
-    rules = (ROOT / "integrations" / "cursor" / "rules" / "llm-wiki.mdc").read_text(
-        encoding="utf-8"
-    )
-    assert "session-context.md" in rules, "Cursor rules must reference cache/session-context.md"
-    assert "MANDATORY" in rules.upper() or "first" in rules.lower(), (
-        "Cursor rules must mark context reading as mandatory/first step"
-    )
-
-
-def test_antigravity_agents_has_mandatory_context_read():
-    """Antigravity AGENTS.md must instruct the agent to read the session
-    context file at session start (MANDATORY).
-    """
-    agents = (ROOT / "integrations" / "antigravity" / "AGENTS.md").read_text(encoding="utf-8")
-    assert "session-context.md" in agents, (
-        "Antigravity AGENTS.md must reference cache/session-context.md"
-    )
-    assert "MANDATORY" in agents.upper() or "first" in agents.lower(), (
-        "Antigravity AGENTS.md must mark context reading as mandatory/first step"
-    )
-
-
 def test_session_start_context_supports_output_file():
     """session_start_context.py must support --output-file flag for
     writing context to a file (used by non-Claude agents).
@@ -4061,11 +4033,11 @@ def test_install_scripts_generate_context(tmp_path):
     assert "--locked" in install_ps1
     assert "--no-default-groups" in install_ps1
 
-    sh_codex = install_sh.split("# Codex CLI", 1)[1].split("# Cursor", 1)[0]
+    sh_codex = install_sh.split("# Codex CLI", 1)[1].split("# Claude Code", 1)[0]
     sh_claude = install_sh.split("# Claude Code", 1)[1].split("# OpenCode configuration", 1)[0]
     sh_opencode = install_sh.split("# OpenCode configuration", 1)[1].split("# Codex CLI", 1)[0]
     ps_codex = install_ps1.split("# Codex", 1)[1].split("# Claude Code", 1)[0]
-    ps_claude = install_ps1.split("# Claude Code", 1)[1].split("# Cursor", 1)[0]
+    ps_claude = install_ps1.split("# Claude Code", 1)[1].split("# --- 8.", 1)[0]
     ps_opencode = install_ps1.split("# OpenCode", 1)[1].split("# Codex", 1)[0]
 
     assert 'CLAUDE_MCP="$HOME/.claude.json"' in sh_claude

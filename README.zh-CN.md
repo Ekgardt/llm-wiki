@@ -7,7 +7,7 @@
 
 **面向 AI 智能体的本地优先记忆系统。Markdown 文件，git 版本控制，完全由你掌控。**
 
-LLM Wiki 为你使用的每一个 AI 编码智能体——OpenCode、Codex、Claude Code、Cursor、Antigravity——提供统一的 MCP-first 接口和共享的持久知识库。MCP 负责读取与操作；轻量原生 lifecycle adapter 捕获 MCP 无法观察的会话事件。知识跨会话保留，让你无需重复解释同样的事情。
+LLM Wiki 为你使用的每一个 AI 编码智能体——Claude Code、OpenCode、Codex——提供统一的 MCP-first 接口和共享的持久知识库。MCP 负责读取与操作；轻量原生 lifecycle adapter 捕获 MCP 无法观察的会话事件。知识跨会话保留，让你无需重复解释同样的事情。
 
 一切以纯 Markdown 文件形式存储在你的磁盘上：可在 Obsidian 中阅读，可用 git 对比，完全归你所有。
 
@@ -57,7 +57,7 @@ provider：OpenCode、Codex、Claude 和 OpenAI 可能使用云服务；Ollama �
 ## 功能特性
 
 ### 捕获流水线
-- **轻量 lifecycle adapter**：Claude Code、Codex、Cursor 和 Antigravity 钩子以及 OpenCode 插件通过 `integration_adapter.py` 规范化事件
+- **轻量 lifecycle adapter**：Claude Code 和 Codex 钩子以及 OpenCode 插件通过 `integration_adapter.py` 规范化事件
 - **3 级会话分类**：FLUSH_MAJOR（决策/经验→触发编译）、FLUSH_MINOR（注意事项→仅保存）、FLUSH_OK（闲聊→跳过）
 - **非 LLM breadcrumbs**——prompt 和 tool 调用标记，毫秒级延迟，无 API 调用
 - **密钥脱敏**——API 密钥、令牌、长 base64 字符串在任何写入前清除
@@ -122,7 +122,7 @@ provider：OpenCode、Codex、Claude 和 OpenAI 可能使用云服务；Ollama �
 - Python 3.10+
 - git
 - [uv](https://docs.astral.sh/uv/)
-- 一个你已在使用的 AI 智能体（OpenCode、Codex、Claude Code、Cursor 或 Antigravity）
+- 一个你已在使用的 AI 智能体（Claude Code、OpenCode 或 Codex）
 
 ### 从源码安装
 
@@ -222,12 +222,11 @@ LLM Wiki 在安装时检测已安装的智能体，并说明集成是自动完�
 | **OpenCode** | 配置验证成功后自动 | MCP + 轻量 JS lifecycle 插件 | MCP 提供读取/操作；插件将事件转发到 `integration_adapter.py` |
 | **Codex CLI** | 配置验证成功后自动；在 `/hooks` 中审核信任 | MCP + 官方 lifecycle 钩子 | MCP 提供读取/操作；钩子转发 lifecycle 事件 |
 | **Claude Code** | settings 合并并验证成功后自动 | MCP + 轻量 settings.json 钩子 | MCP 提供读取/操作；五个钩子转发 lifecycle 事件 |
-| **Cursor** | 检测到后自动启用本地钩子 | MCP + 官方用户级钩子 | MCP 需单独配置；安装程序只管理 `~/.cursor/hooks.json` 中精确匹配的 handler |
-| **Antigravity** | 检测到后自动启用本地钩子 | MCP + 官方用户级钩子 | MCP 需单独配置；安装程序只管理 `~/.gemini/config/hooks.json` 中的 `llm-wiki` 片段 |
 | **Obsidian** | 仅 viewer | 可选 Markdown viewer | 直接打开 vault；不要求 Obsidian UI 或 ingestion 功能 |
 
-Cursor 云端智能体不会加载用户级钩子；Cursor 自动捕获仅适用于本地模式。
-所有智能体共享同一个 vault——Cursor 记录的决策在 OpenCode 的下次会话中可见。
+Cursor 与 Antigravity 已于 2026-08-26 退出支持：安装程序不再检测或配置它们，
+而 `uninstall` 仍会收回旧版安装写入的钩子。
+所有智能体共享同一个 vault——Claude Code 记录的决策在 OpenCode 的下次会话中可见。
 
 ### 可选：语义搜索
 
@@ -340,8 +339,8 @@ freshness、containment 和 qualification 限制见
 | 能力 | LLM Wiki | agentmemory | ReMe | akitaonrails |
 |------|----------|-------------|------|--------------|
 | Markdown 优先 | 是 | 否 | 是 | 是 |
-| 多智能体（3+ 工具） | 是（5） | 是（32+ via MCP） | 仅 Claude | 是（12+） |
-| IDE 支持 | Cursor + Antigravity；Obsidian 为可选 viewer | 否 | 否 | 否 |
+| 多智能体（3+ 工具） | 是（3） | 是（32+ via MCP） | 仅 Claude | 是（12+） |
+| IDE 支持 | Obsidian 为可选 viewer | 否 | 否 | 否 |
 | 编译而非检索 | 是 | 否 | 否 | 否 |
 | VERIFY-BEFORE-WRITE | 是 | 否 | 否 | 否 |
 | Guardrails（学习纠正） | 是 | 否 | 否 | 否 |

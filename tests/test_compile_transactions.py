@@ -539,10 +539,10 @@ def test_compile_transaction_commits_page_index_log_and_receipt(vault):
     )
 
 
-def test_compile_page_preserves_five_agent_evidence_attribution(vault, monkeypatch):
+def test_compile_page_preserves_per_agent_evidence_attribution(vault, monkeypatch):
     root, state_root = vault
     daily = root / "knowledge/daily/2026-07-14.md"
-    agents = ("opencode", "codex", "claude", "cursor", "antigravity")
+    agents = ("opencode", "codex", "claude")
     lines = []
     evidence = []
     for index, agent in enumerate(agents):

@@ -394,15 +394,7 @@ fi
 mkdir -p "$STATE_ROOT/run" "$STATE_ROOT/run/queue" "$STATE_ROOT/logs" "$STATE_ROOT/cache"
 ok "Runtime dirs: $STATE_ROOT/{run,logs,cache} (gitignored)"
 
-CURSOR_HOOKS=0
-ANTIGRAVITY_HOOKS=0
 OPENCODE_PLUGIN=0
-if [ -d "$HOME/.cursor" ] || command -v cursor &>/dev/null; then
-  CURSOR_HOOKS=1
-fi
-if [ -d "$HOME/.gemini/antigravity-ide" ] || command -v agy &>/dev/null; then
-  ANTIGRAVITY_HOOKS=1
-fi
 # Detected here rather than in step 7 so the plugin is written by the ownership
 # transaction: an uninstall has to be able to take back exactly what it wrote.
 if [ -d "$HOME/.config/opencode" ] || command -v opencode &>/dev/null; then
@@ -428,12 +420,6 @@ if command -v codex &>/dev/null || [ -d "$HOME/.codex" ]; then
   fi
 fi
 IDE_HOOK_ARGS=()
-if [ "$CURSOR_HOOKS" -eq 1 ]; then
-  IDE_HOOK_ARGS+=(--cursor-hooks)
-fi
-if [ "$ANTIGRAVITY_HOOKS" -eq 1 ]; then
-  IDE_HOOK_ARGS+=(--antigravity-hooks)
-fi
 if [ "$OPENCODE_PLUGIN" -eq 1 ]; then
   IDE_HOOK_ARGS+=(--opencode-plugin)
 fi
@@ -543,19 +529,6 @@ if command -v codex &>/dev/null; then
   fi
 fi
 
-# Cursor
-if [ "$CURSOR_HOOKS" -eq 1 ]; then
-  AGENT_STATUSES+=("Cursor: active automatic local hooks")
-  ok "Cursor local user hooks are active"
-  info "Cursor cloud agents do not load user-level hooks."
-fi
-
-# Antigravity
-if [ "$ANTIGRAVITY_HOOKS" -eq 1 ]; then
-  AGENT_STATUSES+=("Antigravity: active automatic local hooks")
-  ok "Antigravity local user hooks are active"
-fi
-
 # Claude Code — hooks and env are owned by the install transaction (step 6)
 if [ "$CLAUDE_SETTINGS" -eq 1 ]; then
   CLAUDE_AUTOMATIC=1
@@ -588,7 +561,7 @@ if [ "$CLAUDE_SETTINGS" -eq 1 ]; then
 fi
 
 if [ "${#AGENT_STATUSES[@]}" -eq 0 ]; then
-  warn "No supported agents detected. Install OpenCode, Codex CLI, Claude Code, Cursor, or Antigravity."
+  warn "No supported agents detected. Install Claude Code, OpenCode, or Codex CLI."
 else
   ok "Agent integrations:"
   printf '  - %s\n' "${AGENT_STATUSES[@]}"

@@ -15,8 +15,6 @@ AGENT_PATTERNS = (
     (re.compile(r"\bopencode\b", re.IGNORECASE), "opencode"),
     (re.compile(r"\bcodex\b", re.IGNORECASE), "codex"),
     (re.compile(r"\bclaude(?:\s+code)?\b", re.IGNORECASE), "claude"),
-    (re.compile(r"\bcursor\b", re.IGNORECASE), "cursor"),
-    (re.compile(r"\bantigravity\b", re.IGNORECASE), "antigravity"),
 )
 ALLOWED_EVENT_TYPES = frozenset(
     {"session_start", "session_end", "pre_compact", "stop", "user_prompt", "post_tool_use"}
@@ -64,17 +62,32 @@ def canonical_agent(text: str) -> str:
     )
 
 
+def _booleans_are_valid(payload: Mapping[str, Any]) -> bool:
+    present = (name for name in _BOOLEAN_CHECKPOINT_SIGNALS if name in payload)
+    return all(isinstance(payload[name], bool) for name in present)
+
+
+def _percent_is_valid(payload: Mapping[str, Any]) -> bool:
+    if "token_percent" not in payload:
+        return True
+    percent = payload["token_percent"]
+    if isinstance(percent, bool) or not isinstance(percent, (int, float)):
+        return False
+    return 0 <= percent <= 100
+
+
+def _field_is_valid(payload: Mapping[str, Any], name: str, expected: type) -> bool:
+    return name not in payload or isinstance(payload[name], expected)
+
+
 def _validate_checkpoint_signals(payload: Mapping[str, Any]) -> None:
-    if any(name in payload and not isinstance(payload[name], bool) for name in _BOOLEAN_CHECKPOINT_SIGNALS):
-        raise ValueError("invalid checkpoint signal")
-    percent = payload.get("token_percent")
-    if "token_percent" in payload and (
-        not isinstance(percent, (int, float)) or isinstance(percent, bool) or not 0 <= percent <= 100
-    ):
-        raise ValueError("invalid checkpoint signal")
-    if "checkpoint_type" in payload and not isinstance(payload["checkpoint_type"], str):
-        raise ValueError("invalid checkpoint signal")
-    if "project_delta" in payload and not isinstance(payload["project_delta"], Mapping):
+    verdicts = (
+        _booleans_are_valid(payload),
+        _percent_is_valid(payload),
+        _field_is_valid(payload, "checkpoint_type", str),
+        _field_is_valid(payload, "project_delta", Mapping),
+    )
+    if not all(verdicts):
         raise ValueError("invalid checkpoint signal")
 
 
@@ -88,24 +101,37 @@ def _timestamp(value: datetime) -> str:
     return value.isoformat().replace("+00:00", "Z")
 
 
+def _redacted_key(key: object, redact: Callable[[str], str]) -> str:
+    if not isinstance(key, str):
+        raise ValueError("event payload mapping keys must be strings")
+    safe_key = redact(key)
+    if not isinstance(safe_key, str):
+        raise ValueError("event payload mapping keys must be strings")
+    return safe_key
+
+
+def _redacted_mapping(value: Mapping[Any, Any], redact: Callable[[str], str]) -> dict[str, Any]:
+    redacted: dict[str, Any] = {}
+    for key, item in value.items():
+        safe_key = _redacted_key(key, redact)
+        if safe_key in redacted:
+            raise ValueError("event payload keys collide after redaction")
+        redacted[safe_key] = _redact(item, redact)
+    return redacted
+
+
+def _redacted_other(value: Any, redact: Callable[[str], str]) -> Any:
+    if isinstance(value, (list, tuple)):
+        return [_redact(item, redact) for item in value]
+    return value
+
+
 def _redact(value: Any, redact: Callable[[str], str]) -> Any:
     if isinstance(value, str):
         return redact(value)
     if isinstance(value, Mapping):
-        redacted = {}
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise ValueError("event payload mapping keys must be strings")
-            safe_key = redact(key)
-            if not isinstance(safe_key, str):
-                raise ValueError("event payload mapping keys must be strings")
-            if safe_key in redacted:
-                raise ValueError("event payload keys collide after redaction")
-            redacted[safe_key] = _redact(item, redact)
-        return redacted
-    if isinstance(value, (list, tuple)):
-        return [_redact(item, redact) for item in value]
-    return value
+        return _redacted_mapping(value, redact)
+    return _redacted_other(value, redact)
 
 
 def _freeze(value: Any) -> Any:
@@ -176,6 +202,74 @@ class EventEnvelope:
         return _canonical(self.to_dict())
 
 
+def _required_fields(event_type: str, payload: Mapping[str, Any]) -> Mapping[str, object]:
+    if event_type not in ALLOWED_EVENT_TYPES:
+        raise ValueError("invalid event type")
+    if not isinstance(payload, Mapping):
+        raise ValueError("invalid event payload")
+    return _REQUIRED_PAYLOAD_FIELDS[event_type]
+
+
+def _require_payload_fields(payload: Mapping[str, Any], required: Mapping[str, object]) -> None:
+    if any(not isinstance(payload.get(name), expected) for name, expected in required.items()):
+        raise ValueError("invalid event payload")
+
+
+def _require_source_strings(fields: tuple[str | None, ...]) -> tuple[str | None, ...]:
+    if any(value is not None and not isinstance(value, str) for value in fields):
+        raise ValueError("event source fields must be strings or null")
+    return fields
+
+
+def _redacted_source_fields(
+    fields: tuple[str | None, ...], redact_value: Callable[[str], str]
+) -> tuple[str | None, ...]:
+    safe = tuple(redact_value(value) if value is not None else None for value in fields)
+    return _require_source_strings(safe)
+
+
+def _redacted_payload(
+    payload: Mapping[str, Any],
+    required: Mapping[str, object],
+    redact_value: Callable[[str], str],
+) -> dict[str, Any]:
+    safe_payload = _redact(payload, redact_value)
+    _require_payload_fields(safe_payload, required)
+    payload_dict = dict(safe_payload)
+    _validate_checkpoint_signals(payload_dict)
+    return payload_dict
+
+
+def _declared_occurrence(occurred: datetime, occurred_at: datetime | None) -> str | None:
+    if occurred_at is None:
+        return None
+    return _timestamp(occurred)
+
+
+def _event_identity(
+    event_type: str,
+    declared_occurrence: str | None,
+    sources: tuple[str | None, ...],
+    content_hash: str,
+    payload_dict: Mapping[str, Any],
+) -> dict[str, Any]:
+    agent, session, project, worktree, severity, parent, source_event = sources
+    return {
+        "event_type": event_type,
+        "occurred_at": declared_occurrence,
+        "agent": agent,
+        "session": session,
+        "project": project,
+        "worktree": worktree,
+        "severity": severity,
+        "schema_version": SCHEMA_VERSION,
+        "content_hash": content_hash,
+        "parent_event_id": parent,
+        "source_event_id": source_event,
+        "payload": payload_dict,
+    }
+
+
 def build_event_envelope(
     *,
     event_type: str,
@@ -192,82 +286,39 @@ def build_event_envelope(
     redact: Callable[[str], str] | None = None,
 ) -> EventEnvelope:
     """Validate and construct one canonical event envelope."""
-    if event_type not in ALLOWED_EVENT_TYPES:
-        raise ValueError("invalid event type")
-    if not isinstance(payload, Mapping):
-        raise ValueError("invalid event payload")
-    required = _REQUIRED_PAYLOAD_FIELDS[event_type]
-    if any(not isinstance(payload.get(name), expected) for name, expected in required.items()):
-        raise ValueError("invalid event payload")
+    required = _required_fields(event_type, payload)
+    _require_payload_fields(payload, required)
     _validate_checkpoint_signals(payload)
-    source_fields = (
-        agent,
-        session,
-        project,
-        worktree,
-        severity,
-        parent_event_id,
-        source_event_id,
+    source_fields = _require_source_strings(
+        (agent, session, project, worktree, severity, parent_event_id, source_event_id)
     )
-    if any(value is not None and not isinstance(value, str) for value in source_fields):
-        raise ValueError("event source fields must be strings or null")
-
     now = datetime.now(timezone.utc)
     occurred = _utc(occurred_at or now)
     captured = _utc(captured_at or now)
     redact_value = redact or (lambda value: value)
-    safe_payload = _redact(payload, redact_value)
-    if any(
-        not isinstance(safe_payload.get(name), expected)
-        for name, expected in required.items()
-    ):
-        raise ValueError("invalid event payload")
-    payload_dict = dict(safe_payload)
-    _validate_checkpoint_signals(payload_dict)
-    safe_source_fields = tuple(
-        redact_value(value) if value is not None else None for value in source_fields
+    payload_dict = _redacted_payload(payload, required, redact_value)
+    sources = _redacted_source_fields(source_fields, redact_value)
+    content_hash = hashlib.sha256(_canonical(payload_dict).encode("utf-8")).hexdigest()
+    identity = _event_identity(
+        event_type,
+        _declared_occurrence(occurred, occurred_at),
+        sources,
+        content_hash,
+        payload_dict,
     )
-    if any(value is not None and not isinstance(value, str) for value in safe_source_fields):
-        raise ValueError("event source fields must be strings or null")
-    (
-        safe_agent,
-        safe_session,
-        safe_project,
-        safe_worktree,
-        safe_severity,
-        safe_parent,
-        safe_source_event,
-    ) = safe_source_fields
-    payload_json = _canonical(payload_dict)
-    content_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
-    identity = {
-        "event_type": event_type,
-        "occurred_at": _timestamp(occurred) if occurred_at is not None else None,
-        "agent": safe_agent,
-        "session": safe_session,
-        "project": safe_project,
-        "worktree": safe_worktree,
-        "severity": safe_severity,
-        "schema_version": SCHEMA_VERSION,
-        "content_hash": content_hash,
-        "parent_event_id": safe_parent,
-        "source_event_id": safe_source_event,
-        "payload": payload_dict,
-    }
-    event_id = hashlib.sha256(_canonical(identity).encode("utf-8")).hexdigest()
     return EventEnvelope(
-        event_id=event_id,
+        event_id=hashlib.sha256(_canonical(identity).encode("utf-8")).hexdigest(),
         event_type=event_type,
         occurred_at=occurred,
         captured_at=captured,
-        agent=safe_agent,
-        session=safe_session,
-        project=safe_project,
-        worktree=safe_worktree,
-        severity=safe_severity,
+        agent=sources[0],
+        session=sources[1],
+        project=sources[2],
+        worktree=sources[3],
+        severity=sources[4],
         schema_version=SCHEMA_VERSION,
         content_hash=content_hash,
-        parent_event_id=safe_parent,
-        source_event_id=safe_source_event,
+        parent_event_id=sources[5],
+        source_event_id=sources[6],
         payload=_freeze(payload_dict),
     )

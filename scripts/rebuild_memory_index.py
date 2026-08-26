@@ -65,7 +65,7 @@ INDEX_HEADER = (
     "# Session Memory Index",
     "",
     "This index catalogs durable memory distilled from AI agent sessions",
-    "(OpenCode, Codex, Claude Code, Cursor, Antigravity).",
+    "(OpenCode, Codex, Claude Code).",
     "",
     "## Entry points",
     "- [[docs/operating-model]] — compile cadence, promotion rules, and the daily ↔ notes boundary.",

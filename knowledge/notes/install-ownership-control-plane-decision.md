@@ -112,3 +112,4 @@ the installed definition and loaded/enabled state are both verified.
 - [[knowledge/notes/integration-config-backup-retention-decision]]
 - [[knowledge/notes/reliability-v3-runtime-adoption-implementation-decision]]
 - [[knowledge/notes/managed-ide-hooks-install-update-decision]]
+- [[knowledge/notes/retire-cursor-and-antigravity-decision]]

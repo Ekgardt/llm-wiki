@@ -27,7 +27,7 @@ from typing import Any, NamedTuple
 
 import reliable_memory
 from bounded_io import read_stable_bytes
-from install_control import InstallControlError, validate_install_state
+from install_control import validate_install_state
 from reliable_memory import (
     open_readonly_operational_db,
     read_runtime_bytes,
@@ -5318,8 +5318,6 @@ def _integration_sources(root: Path) -> dict[str, Path]:
         "claude": root / "integrations" / "claude-code" / "settings.json",
         "opencode": root / "scripts" / "llm-wiki-memory-opencode.js",
         "codex": root / "integrations" / "codex" / "hooks.json",
-        "cursor": root / "integrations" / "cursor" / "hooks.json",
-        "antigravity": root / "integrations" / "antigravity" / "hooks.json",
     }
 
 
@@ -5402,77 +5400,6 @@ def _generic_host_result(
     }
 
 
-def _managed_ide_detected(home: Path, name: str) -> bool:
-    paths = {
-        "cursor": home / ".cursor",
-        "antigravity": home / ".gemini" / "antigravity-ide",
-    }
-    return paths[name].is_dir()
-
-
-def _managed_ide_resource(root: Path, home: Path, name: str):
-    from integration_hook_config import managed_ide_hook_resources
-
-    identifiers = {
-        "cursor": "cursor-user-hooks",
-        "antigravity": "antigravity-user-hooks",
-    }
-    resources = {
-        resource.resource_id: resource for resource in managed_ide_hook_resources(root, home)
-    }
-    return resources[identifiers[name]]
-
-
-def _managed_ide_conflict_result(detected: bool) -> dict[str, object]:
-    return {
-        "status": "degraded",
-        "message": "Managed hook configuration is malformed, unsafe, or conflicting.",
-        "configuration_status": "conflict",
-        "host_detected": detected,
-    }
-
-
-def _managed_ide_active_result(detected: bool) -> dict[str, object]:
-    statuses = {True: "ok", False: "skipped"}
-    return {
-        "status": statuses[detected],
-        "message": "Managed local user hooks are active.",
-        "capture_mode": "official-user-hooks",
-        "configuration_status": "active",
-        "host_detected": detected,
-    }
-
-
-def _managed_ide_absent_result(configured: bool, detected: bool) -> dict[str, object]:
-    if configured or detected:
-        return {
-            "status": "degraded",
-            "message": "Local host is missing its managed LLM-Wiki hooks.",
-            "configuration_status": "absent",
-            "host_detected": detected,
-        }
-    return {
-        "status": "skipped",
-        "message": "Optional local host not detected.",
-        "configuration_status": "absent",
-        "host_detected": False,
-    }
-
-
-def _managed_ide_host_result(root: Path, home: Path, name: str) -> dict[str, object]:
-    detected = _managed_ide_detected(home, name)
-    try:
-        resource = _managed_ide_resource(root, home, name)
-        destination = Path(resource.locator)
-        configured = destination.exists() or destination.is_symlink()
-        active = resource.read_owned() == resource.desired
-    except (InstallControlError, OSError, UnicodeError, ValueError):
-        return _managed_ide_conflict_result(detected)
-    if active:
-        return _managed_ide_active_result(detected)
-    return _managed_ide_absent_result(configured, detected)
-
-
 def _required_host_config(
     config: tuple[Path, list[tuple[Path, tuple[str, ...]]]] | None,
 ) -> tuple[Path, list[tuple[Path, tuple[str, ...]]]]:
@@ -5490,14 +5417,12 @@ def _integration_host_result(
 ) -> dict[str, object]:
     if name == "codex":
         return _codex_host_result(root, home, deadline)
-    if name in {"cursor", "antigravity"}:
-        return _managed_ide_host_result(root, home, name)
     return _generic_host_result(*_required_host_config(config))
 
 
 def _integration_hosts(root: Path, home: Path, deadline: float) -> dict[str, dict[str, object]]:
     configs = _integration_host_configs(home)
-    names = ("claude", "opencode", "codex", "cursor", "antigravity")
+    names = ("claude", "opencode", "codex")
     return {
         name: _integration_host_result(root, home, name, configs.get(name), deadline)
         for name in names

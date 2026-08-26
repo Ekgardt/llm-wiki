@@ -219,12 +219,17 @@ when_transition_lock_is_held` (`tests/test_lsp_process.py:7833`) и
 
 ### Не доказуемо ничем доступным
 
-**`EVID-001` (живой сценарий на двух, затем на пяти агентах) и `EVID-015`
+**`EVID-001` (живой сценарий на нескольких агентах) и `EVID-015`
 (поломка и починка плагина OpenCode).** На машине установлен ровно один хост:
-`command -v claude codex opencode cursor cursor-agent antigravity gemini
-ollama` печатает одну строку — `/home/user/.local/bin/claude`. Не хватает
-установок OpenCode, Codex, Cursor и Antigravity, то есть решения владельца их
-поставить.
+`command -v claude codex opencode ollama` печатает одну строку —
+`/home/user/.local/bin/claude`. Не хватает установок OpenCode и Codex, то есть
+решения владельца их поставить.
+
+**Обновление 2026-08-26.** Часть этих пунктов, касавшаяся Cursor и Antigravity,
+больше не ожидается: обе платформы сняты с поддержки, поэтому их доказательства
+не «ждут машины», а находятся вне области. Поддерживаемых хостов теперь три —
+Claude Code, OpenCode, Codex, — и именно по ним пункт остаётся открытым. См.
+`knowledge/notes/retire-cursor-and-antigravity-decision.md`.
 
 **`EVID-006` (одноразовая установка Windows/Ubuntu/macOS до uninstall).**
 Ubuntu-часть по-прежнему упирается в шаг планировщика, и теперь это видно по
@@ -1143,7 +1148,7 @@ detached-работы, поэтому `OPEN-012` закрыт. Но `session_end
 | OPEN-002 | единая fail-closed граница исходящих вызовов модели |
 | OPEN-003 | перепроверка точных байтов перед durable-публикацией |
 | OPEN-008 | сканирование содержимого архива экспорта |
-| OPEN-010 | нативные хуки Cursor и Antigravity через канонический адаптер |
+| OPEN-010 | нативные хуки Cursor и Antigravity через канонический адаптер (снято 2026-08-26 вместе с платформами) |
 | OPEN-011 | провайдер не навязан установщиком, автоопределение бэкенда |
 | OPEN-012 | durable capture-intent публикуется до detached-работы |
 | OPEN-013 | потеря захвата записывается durable-следом и счётчиком |

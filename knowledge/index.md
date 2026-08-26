@@ -1,7 +1,7 @@
 # Session Memory Index
 
 This index catalogs durable memory distilled from AI agent sessions
-(OpenCode, Codex, Claude Code, Cursor, Antigravity).
+(OpenCode, Codex, Claude Code).
 
 ## Entry points
 - [[docs/operating-model]] — compile cadence, promotion rules, and the daily ↔ notes boundary.
@@ -34,7 +34,6 @@ This index catalogs durable memory distilled from AI agent sessions
 - [[knowledge/notes/integration-config-backup-retention-decision]] — Claude and Codex configuration merges create verified byte-exact sibling preimages and retain only bounded LLM-Wiki-owned backups without claiming filesystem metadata preservation.
 - [[knowledge/notes/lsp-live-lease-decision]] — Live LSP lifecycle ownership is represented by one bounded mutable lease anchored inside the immutable owner directory.
 - [[knowledge/notes/lsp-process-containment-decision]] — Windows Job Objects own assigned LSP trees, while POSIX process groups cover only pinned Pyright descendants that remain in the group.
-- [[knowledge/notes/managed-ide-hooks-install-update-decision]] — Cursor and Antigravity user hooks use canonical lifecycle adapters and bounded structural fragments owned by one resumable install v2 update, rollback, and uninstall control plane.
 - [[knowledge/notes/nightly-builds-generation-vectors-decision]] — semantic retrieval stops being code that only tests
 - [[knowledge/notes/no-gitkeep-in-inbox-articles]] — Do not add `.gitkeep` to `knowledge/inbox/articles/` — the directory will be created on demand by scripts at first use.
 - [[knowledge/notes/observable-capture-and-bounded-maintenance-decision]] — A failed capture is recorded durably instead of vanishing,
@@ -45,6 +44,7 @@ This index catalogs durable memory distilled from AI agent sessions
 - [[knowledge/notes/reliability-v3-runtime-adoption-implementation-decision]] — The approved Reliability V3 operational database pair may now be implemented with explicit offline adoption, retained v2 evidence, immutable tombstones, and no change to Markdown authority or runtime roots.
 - [[knowledge/notes/reliable-memory-stage-2]] — Stage 2 keeps Markdown authoritative while adding recoverable transactions, durable checkpoints, safe archives, versioned compile caching, a fenced priority queue, and evidence-backed claims.
 - [[knowledge/notes/rerank-tier-ordering-decision]] — when the reranker reads only a bounded prefix of the
+- [[knowledge/notes/retire-cursor-and-antigravity-decision]] — Cursor and Antigravity stop being supported hosts of LLM Wiki;
 - [[knowledge/notes/secret-shape-not-secret-name-decision]] — A key named `token` proves nothing about what follows it,
 - [[knowledge/notes/self-resolving-health-findings-decision]] — a health finding describes a live condition and returns to
 - [[knowledge/notes/session-evidence-retention-decision]] — every session leaves a redacted, searchable copy of itself

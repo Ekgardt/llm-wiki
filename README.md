@@ -7,7 +7,7 @@
 
 **A local-first memory system for AI agents. Markdown files, git-tracked, and owned by you.**
 
-LLM Wiki gives every AI coding agent you use — OpenCode, Codex, Claude Code, Cursor, Antigravity — one MCP-first interface to a shared, persistent knowledge base. MCP handles reads and actions; thin native lifecycle adapters capture session events that MCP cannot observe. Durable knowledge survives across sessions so you never re-explain the same thing twice.
+LLM Wiki gives every AI coding agent you use — Claude Code, OpenCode, Codex — one MCP-first interface to a shared, persistent knowledge base. MCP handles reads and actions; thin native lifecycle adapters capture session events that MCP cannot observe. Durable knowledge survives across sessions so you never re-explain the same thing twice.
 
 Everything lives on your disk as plain markdown: readable in Obsidian, diffable in git, owned entirely by you.
 
@@ -57,7 +57,7 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 ## Features
 
 ### Capture pipeline
-- **Thin lifecycle adapters**: Claude Code, Codex, Cursor, and Antigravity hooks plus the OpenCode plugin normalize events through `integration_adapter.py`
+- **Thin lifecycle adapters**: Claude Code and Codex hooks plus the OpenCode plugin normalize events through `integration_adapter.py`
 - **3-tier session classification**: FLUSH_MAJOR (decisions/lessons → triggers compile), FLUSH_MINOR (gotchas → save only), FLUSH_OK (chatter → skip)
 - **Non-LLM breadcrumbs** — prompt + tool-usage tagging at ms-latency, no API calls
 - **Secret redaction** — API keys, tokens, long base64 stripped before any write
@@ -122,7 +122,7 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 - Python 3.10+
 - git
 - [uv](https://docs.astral.sh/uv/)
-- An AI agent you already use (OpenCode, Codex, Claude Code, Cursor, or Antigravity)
+- An AI agent you already use (Claude Code, OpenCode, or Codex)
 
 ### Source install
 
@@ -225,12 +225,11 @@ LLM Wiki detects installed agents during install and reports whether integration
 | **OpenCode** | Automatic when configuration verifies | MCP + thin JS lifecycle plugin | MCP provides reads/actions; the plugin forwards lifecycle events to `integration_adapter.py` |
 | **Codex CLI** | Automatic when configuration verifies; review hook trust in `/hooks` | MCP + official lifecycle hooks | MCP provides reads/actions; hooks forward lifecycle events |
 | **Claude Code** | Automatic when settings merge verifies | MCP + thin settings.json hooks | MCP provides reads/actions; five hooks forward lifecycle events |
-| **Cursor** | Automatic local hooks when detected | MCP + official user hooks | Configure MCP separately; the installer owns exact handlers in `~/.cursor/hooks.json` |
-| **Antigravity** | Automatic local hooks when detected | MCP + official user hooks | Configure MCP separately; the installer owns only the `llm-wiki` fragment in `~/.gemini/config/hooks.json` |
 | **Obsidian** | Viewer only | Optional Markdown viewer | Open the vault directly; no Obsidian UI or ingestion feature is required |
 
-Cursor cloud agents do not load user-level hooks; the automatic Cursor capture claim is local only.
-All agents share the same vault — a decision recorded by Cursor is visible to OpenCode in its next session.
+Cursor and Antigravity were retired on 2026-08-26; the installer no longer detects or configures them,
+and `uninstall` still takes back hooks an earlier install wrote.
+All agents share the same vault — a decision recorded by Claude Code is visible to OpenCode in its next session.
 
 ### Optional: semantic search
 
@@ -343,8 +342,8 @@ freshness, containment, and qualification limits.
 | Capability | LLM Wiki | agentmemory | ReMe | akitaonrails |
 |------------|----------|-------------|------|--------------|
 | Markdown-first | Yes | No | Yes | Yes |
-| Multi-agent (3+ tools) | Yes (5) | Yes (32+ via MCP) | Claude only | Yes (12+) |
-| IDE support | Cursor + Antigravity; optional Obsidian viewer | No | No | No |
+| Multi-agent (3+ tools) | Yes (3) | Yes (32+ via MCP) | Claude only | Yes (12+) |
+| IDE support | optional Obsidian viewer | No | No | No |
 | Compile-not-retrieve | Yes | No | No | No |
 | VERIFY-BEFORE-WRITE | Yes | No | No | No |
 | Guardrails (learned corrections) | Yes | No | No | No |
