@@ -355,12 +355,17 @@ class RetrievalResult:
     display_meta: Mapping[str, Mapping[str, Any]] | None = None
 
 
+def _profile_text(value: object) -> str:
+    """The canonical spelling of a profile name, or a type error."""
+    if not isinstance(value, str):
+        raise TypeError("profile must be a string")
+    return value.strip().upper().replace("-", "_")
+
+
 def _normalize_profile(value: str | None) -> str | None:
     if value is None:
         return None
-    if not isinstance(value, str):
-        raise TypeError("profile must be a string")
-    normalized = value.strip().upper().replace("-", "_")
+    normalized = _profile_text(value)
     if normalized not in PROFILES:
         raise ValueError(f"unknown retrieval profile: {value}")
     return normalized
@@ -428,14 +433,12 @@ def _shape_intents(
     stripped: str, normalized: str, phrases: tuple[str, ...], identifiers: tuple[str, ...]
 ) -> list[str]:
     """Intents that come from the query's shape rather than its wording."""
-    intents: list[str] = []
-    if phrases:
-        intents.append("quoted_phrase")
-    if identifiers:
-        intents.append("exact_identifier")
-    if _is_question(stripped, normalized):
-        intents.append("question")
-    return intents
+    present = (
+        (bool(phrases), "quoted_phrase"),
+        (bool(identifiers), "exact_identifier"),
+        (_is_question(stripped, normalized), "question"),
+    )
+    return [intent for found, intent in present if found]
 
 
 def _query_intents(
@@ -569,13 +572,19 @@ def _assertion_path(row: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
     return tuple(path)
 
 
+def _step_has_identity(raw_step: object) -> bool:
+    """A step worth reading at all: a mapping that names its assertion."""
+    if not isinstance(raw_step, Mapping):
+        return False
+    assertion_id = raw_step.get("assertion_id")
+    return isinstance(assertion_id, str) and bool(assertion_id)
+
+
 def _assertion_step(raw_step: object) -> dict[str, Any] | None:
     """One path step, or None when its identity or evidence is unusable."""
-    if not isinstance(raw_step, Mapping):
+    if not _step_has_identity(raw_step):
         return None
-    assertion_id = raw_step.get("assertion_id")
-    if not isinstance(assertion_id, str) or not assertion_id:
-        return None
+    assert isinstance(raw_step, Mapping)
     evidence_ids = _evidence_id_tuple(raw_step.get("evidence_ids"))
     if not evidence_ids:
         return None
@@ -600,11 +609,19 @@ def _graph_row_is_valid(
     hop = _as_int(row.get("hop"), 0)
     if not 1 <= hop <= GRAPH_MAX_HOPS:
         return False
-    if row.get("direction") not in allowed_directions:
-        return False
-    if row.get("edge_type") not in allowed_edges:
+    if not _graph_edge_allowed(row, allowed_directions, allowed_edges):
         return False
     return bool(path)
+
+
+def _graph_edge_allowed(
+    row: Mapping[str, Any], allowed_directions: set[str], allowed_edges: set[str]
+) -> bool:
+    """The row travels an allowed direction along an allowed edge family."""
+    return (
+        row.get("direction") in allowed_directions
+        and row.get("edge_type") in allowed_edges
+    )
 
 
 def _path_evidence_ids(path: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
@@ -655,6 +672,24 @@ def _prepared_graph_row(
         return (0, 0, 0, backend_rank, _candidate_key(row)), row
     if not isinstance(seed_id, str) or seed_id not in seed_ids:
         return None
+    return _validated_graph_row(
+        row,
+        query=query,
+        direct_graph_query=direct_graph_query,
+        allowed_directions=allowed_directions,
+        allowed_edges=allowed_edges,
+    )
+
+
+def _validated_graph_row(
+    row: dict[str, Any],
+    *,
+    query: str,
+    direct_graph_query: bool,
+    allowed_directions: set[str],
+    allowed_edges: set[str],
+) -> tuple[tuple[object, ...], dict[str, Any]] | None:
+    """Score a seeded row once its hop, edge, direction and path check out."""
     path = _assertion_path(row)
     if not _graph_row_is_valid(row, path, allowed_directions, allowed_edges):
         return None
@@ -1321,6 +1356,13 @@ def _dense_signal(
     """(signal, fallback reason) for the dense backend."""
     if "dense" not in wanted:
         return None, None
+    return _dense_backend_signal(ran_dense, dense_available)
+
+
+def _dense_backend_signal(
+    ran_dense: bool, dense_available: bool | None
+) -> tuple[str | None, str | None]:
+    """What a wanted dense backend reports about itself."""
     if dense_available is True and ran_dense:
         return "dense", None
     if _dense_is_missing(ran_dense, dense_available):
@@ -1339,6 +1381,13 @@ def _graph_signal(
         return None, None
     if not graph_enabled:
         return None, "graph_disabled"
+    return _graph_backend_signal(ran_graph, graph_available)
+
+
+def _graph_backend_signal(
+    ran_graph: bool, graph_available: bool | None
+) -> tuple[str | None, str | None]:
+    """What a wanted, enabled graph backend reports about itself."""
     if graph_available is True and ran_graph:
         return "graph", None
     return None, "graph_unavailable"
@@ -1806,13 +1855,30 @@ def _candidates_after_rerank(
     reranked: Sequence[Mapping[str, Any]],
     trace: _RerankTrace,
 ) -> tuple[RetrievalCandidate, ...]:
-    """The reranked order when the reranker ran; the fused order otherwise."""
+    """The reranked order, then the pool the reranker never saw."""
     if not reranked:
         return tuple(candidates)
     _record_reranked(reranked, trace)
     if not trace.applied:
         return tuple(candidates)
-    return tuple(_candidate_from_rerank_row(row) for row in reranked)
+    scored = tuple(_candidate_from_rerank_row(row) for row in reranked)
+    return scored + _below_rerank_pool(candidates, scored)
+
+
+def _below_rerank_pool(
+    candidates: Sequence[RetrievalCandidate], scored: Sequence[RetrievalCandidate]
+) -> tuple[RetrievalCandidate, ...]:
+    """Candidates below the reranker's bounded pool, in their fused order.
+
+    The reranker reads a bounded prefix, so dropping the rest here decides the
+    answer before the page-diverse order runs: measured on this vault, a query
+    reached that order with twenty candidates drawn from four pages, and the
+    last two visible slots could only repeat a page. Keeping the tail costs
+    nothing — it stays behind every reranked row, and the final cut is the same
+    one it always was.
+    """
+    scored_ids = {item.candidate_id for item in scored}
+    return tuple(item for item in candidates if item.candidate_id not in scored_ids)
 
 
 def _apply_reranking(
@@ -1907,10 +1973,17 @@ def _fusion_input(
 def _require_known_edge_families(families: Mapping[str, bool] | None) -> None:
     if families is None:
         return
+    if not _edge_families_are_known(families):
+        raise ValueError("graph_edge_families must map known edge types to booleans")
+
+
+def _edge_families_are_known(families: object) -> bool:
+    """A mapping of known edge types to booleans, and nothing else."""
     if not isinstance(families, Mapping):
-        raise ValueError("graph_edge_families must map known edge types to booleans")
-    if any(_is_unknown_edge_family(edge, enabled) for edge, enabled in families.items()):
-        raise ValueError("graph_edge_families must map known edge types to booleans")
+        return False
+    return not any(
+        _is_unknown_edge_family(edge, enabled) for edge, enabled in families.items()
+    )
 
 
 def _is_unknown_edge_family(edge: object, enabled: object) -> bool:
@@ -1975,6 +2048,16 @@ def _run_dense_stage(
     _check_stopped(deadline_monotonic, cancelled)
 
 
+def _graph_stage_runnable(
+    run: _BackendRun, graph_enabled: bool, graph_backend: BackendFn | None
+) -> bool:
+    """A disabled graph records its unavailability; a missing backend is silent."""
+    if not graph_enabled:
+        run.graph_available = False
+        return False
+    return graph_backend is not None
+
+
 def _run_graph_stage(
     run: _BackendRun,
     graph_backend: BackendFn | None,
@@ -1993,10 +2076,7 @@ def _run_graph_stage(
 ) -> None:
     if "graph" not in wanted:
         return
-    if not graph_enabled:
-        run.graph_available = False
-        return
-    if graph_backend is None:
+    if not _graph_stage_runnable(run, graph_enabled, graph_backend):
         return
     _check_stopped(deadline_monotonic, cancelled)
     (
@@ -2262,6 +2342,13 @@ def _reported_fallback(
         return legacy_fallback
     if _dense_reason_wins(trace_reason, dense_fallback):
         return str(dense_fallback)
+    return _generation_or_trace_reason(trace_reason, generation_fallback)
+
+
+def _generation_or_trace_reason(
+    trace_reason: str | None, generation_fallback: str | None
+) -> str | None:
+    """A generation reason speaks only while the trace itself is silent."""
     if generation_fallback and trace_reason is None:
         return generation_fallback
     return trace_reason
@@ -2596,31 +2683,74 @@ def _supporting(candidate: RetrievalCandidate) -> bool:
     return candidate.type_weight < 1.0
 
 
-def _first_per_page(
-    candidates: Sequence[RetrievalCandidate],
-) -> list[RetrievalCandidate]:
-    first: list[RetrievalCandidate] = []
-    extras: list[RetrievalCandidate] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        _place_by_page(candidate, seen, first, extras)
-    return first + extras
-
-
 def _page_diverse(
     candidates: Sequence[RetrievalCandidate],
 ) -> tuple[RetrievalCandidate, ...]:
-    """One chunk per page first, compiled pages before raw evidence.
+    """One chunk per page first, then every chunk that repeats a page.
 
-    Nothing is dropped — the extra chunks follow the first pass, and the
-    supporting kinds follow those — so a caller that wanted every chunk of one
-    page, or the raw session behind a page, still receives them, in order. The
-    remedies that compare candidates to each other (maximal marginal relevance,
-    semantic deduplication) are not needed here: the duplication is structural.
+    This is the last word on the order, so it is where a page is stopped from
+    taking several visible slots. Nothing is dropped — the repeats follow the
+    first pass — so a caller that wanted every chunk of one page still receives
+    them, in order. The remedies that compare candidates to each other (maximal
+    marginal relevance, semantic deduplication) are not needed here: the
+    duplication is structural.
+
+    A slot is claimed in `_diversity_groups` order, which keeps the reranker's
+    judgement ahead of the pool it never read.
     """
-    leading = [item for item in candidates if not _supporting(item)]
-    supporting = [item for item in candidates if _supporting(item)]
-    return tuple(_first_per_page(leading) + _first_per_page(supporting))
+    first: list[RetrievalCandidate] = []
+    extras: list[RetrievalCandidate] = []
+    seen: set[str] = set()
+    for group in _diversity_groups(candidates):
+        _place_group(group, seen, first, extras)
+    return tuple(first + extras)
+
+
+def _place_group(
+    group: Sequence[RetrievalCandidate],
+    seen: set[str],
+    first: list[RetrievalCandidate],
+    extras: list[RetrievalCandidate],
+) -> None:
+    for candidate in group:
+        _place_by_page(candidate, seen, first, extras)
+
+
+def _diversity_groups(
+    candidates: Sequence[RetrievalCandidate],
+) -> tuple[list[RetrievalCandidate], ...]:
+    """Four passes over the pool, strongest claim on a visible slot first.
+
+    What the reranker actually scored leads what it never saw: a slot is filled
+    from the bounded pool it read before the tail below that pool is used to
+    replace a repeat. Within each of those, the vault's own rule holds —
+    compiled pages before raw evidence. With no reranking, or no tail, every
+    candidate lands in one group and the order is the one this always had.
+    """
+    groups: list[list[RetrievalCandidate]] = []
+    for tier in _scored_then_unseen(candidates):
+        groups.extend(_by_kind(tier))
+    return tuple(groups)
+
+
+def _scored_then_unseen(
+    candidates: Sequence[RetrievalCandidate],
+) -> tuple[list[RetrievalCandidate], list[RetrievalCandidate]]:
+    """What the reranker scored, then what it never read."""
+    return (
+        [item for item in candidates if item.rerank_score is not None],
+        [item for item in candidates if item.rerank_score is None],
+    )
+
+
+def _by_kind(
+    candidates: Sequence[RetrievalCandidate],
+) -> tuple[list[RetrievalCandidate], list[RetrievalCandidate]]:
+    """Compiled pages lead; raw evidence and gap stubs support."""
+    return (
+        [item for item in candidates if not _supporting(item)],
+        [item for item in candidates if _supporting(item)],
+    )
 
 
 def _require_bounded_int(value: object, low: int, high: int, name: str) -> None:
@@ -3414,6 +3544,10 @@ def retrieve_via_search_memory(
         resolved = _resolved_manifest(want_vectors)
         if resolved is None:
             return False
+        return _adopt_generation(resolved, want_vectors=want_vectors)
+
+    def _adopt_generation(resolved: Any, *, want_vectors: bool) -> bool:
+        """Publish one resolved manifest as the generation this query reads."""
         repository_scope, manifest = resolved
         artifact_names = _artifact_names_for(manifest, want_vectors=want_vectors)
         seal = search_memory._generation_consumption_seal(
