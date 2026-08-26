@@ -98,3 +98,6 @@ without ever proving the capture path works again.
   chain whose ordinary case this rule recognises.
 - [[knowledge/notes/nightly-builds-generation-vectors-decision]] — what the maintenance pass must build so the published generation can answer in any language.
 - [[knowledge/notes/automatic-code-update-decision]] — links to this page.
+- [[knowledge/notes/adoption-digest-is-provenance-decision]] — the same rule
+  under the adoption record: a precondition no legitimate update can satisfy is
+  not a safety property.

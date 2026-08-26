@@ -582,8 +582,20 @@ def _unreadable_queue_reason(
     return None
 
 
+def _operational_database_path(state_root: Path, database_name: str) -> Path:
+    """The legacy path, or the database its adoption tombstone names.
+
+    Reliability V3 adoption replaces the legacy path with a JSON tombstone.
+    Reading that as SQLite is what made a healthy adopted vault report
+    `queue_state_unreadable` and `transaction_state_unreadable`.
+    """
+    from installed_memory_repair import adopted_database_path
+
+    return adopted_database_path(database_name=database_name, state_root=state_root)
+
+
 def _queue_check(state_root: Path, now: datetime, deadline: float) -> dict:
-    database_path = state_root / "run" / "queue.sqlite3"
+    database_path = _operational_database_path(state_root, "queue")
     database_kind = _safe_kind(database_path, state_root)[0]
     if database_kind == "regular":
         return _queue_v2_check(state_root, now, deadline)
@@ -1481,7 +1493,7 @@ def _unusable_transaction_database(
 
 
 def _transaction_check(state_root: Path, now: datetime, deadline: float = float("inf")) -> dict:
-    path = state_root / "run" / "markdown-transactions.sqlite3"
+    path = _operational_database_path(state_root, "coordinator")
     details, states = _empty_transaction_details()
     kind, _ = _safe_kind(path, state_root)
     unusable = _unusable_transaction_database(
@@ -1915,7 +1927,7 @@ def _append_queue_deletion_codes(details: dict) -> None:
 
 
 def _queue_v2_check(state_root: Path, now: datetime, deadline: float) -> dict:
-    path = state_root / "run" / "queue.sqlite3"
+    path = _operational_database_path(state_root, "queue")
     details, states = _empty_queue_details()
     details.update(_queue_artifact_state(state_root, deadline))
     _record_queue_migration(state_root, details)
@@ -7270,7 +7282,7 @@ def _unblock_capabilities(state_root: Path, repaired: set[str]) -> int:
 
 
 def _repair_queue_capabilities(state_root: Path) -> int:
-    path = state_root / "run" / "queue.sqlite3"
+    path = _operational_database_path(state_root, "queue")
     if not path.is_file():
         return 0
     repaired = _ready_capabilities()

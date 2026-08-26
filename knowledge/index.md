@@ -14,6 +14,7 @@ This index catalogs durable memory distilled from AI agent sessions
 - [[knowledge/notes/provenance-rule-6]] — CLAUDE.md rule 6 — "mark uncertainty explicitly" — is the root constraint that justifies preliminary flagging, editorial notes, and every "inferred from…" caveat in this vault.
 
 ## Decisions
+- [[knowledge/notes/adoption-digest-is-provenance-decision]] — the Reliability V3 adoption record keeps naming the producer bytes that performed the cutover, but that digest is no longer re-checked on every memory write.
 - [[knowledge/notes/agent-native-mcp-foundation]] — LLM Wiki uses MCP as the common read/action interface for every agent while host-specific hooks remain thin lifecycle-event adapters.
 - [[knowledge/notes/audit-closure-security-recovery-control-plane-decision]] — Audit closure retires the unsupported Cognee bridge and adds one fail-closed DLP, recovery, install, scheduling, coordination, and evidence contract without another daemon, database, or MCP tool.
 - [[knowledge/notes/automatic-code-update-decision]] — the nightly pass may advance the checkout to the remote

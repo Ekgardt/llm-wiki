@@ -127,3 +127,6 @@ separate marker table. The implementation uses these minimal clarifications:
 - [[knowledge/notes/blackboard-fenced-resource-claims-decision]]
 - [[knowledge/notes/durable-capture-producer-activation-decision]]
 - [[knowledge/notes/install-ownership-control-plane-decision]]
+- [[knowledge/notes/adoption-digest-is-provenance-decision]] — what the frozen
+  producer digest binds after the cutover, and what it deliberately no longer
+  blocks.
