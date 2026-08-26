@@ -1354,6 +1354,26 @@ IMMUTABLE SOURCES
 {_input_blob(inputs)}"""
 
 
+def _cited_evidence(
+    semantic: Mapping[str, object], bindings: list[Mapping[str, object]]
+) -> list[dict[str, object]]:
+    """What the critique is allowed to see behind each operation."""
+    evidence = semantic["evidence"]
+    assert isinstance(evidence, list)
+    cited: list[dict[str, object]] = []
+    for item, binding in zip(evidence, bindings):
+        assert isinstance(item, dict)
+        cited.append(
+            {
+                "logical_path": binding["source_path"],
+                "source_sha256": binding["source_digest"],
+                "quote_sha256": binding["quote_sha256"],
+                "quoted_text": item["quoted_text"],
+            }
+        )
+    return cited
+
+
 def _critique_prompt(inputs: CompileInputs, operations: list[object]) -> str:
     cited: list[dict[str, object]] = []
     normalized: list[dict[str, object]] = []
@@ -1362,18 +1382,7 @@ def _critique_prompt(inputs: CompileInputs, operations: list[object]) -> str:
             raise ValueError("draft operation must be an object")
         semantic, bindings = _validate_semantic_operation(operation, inputs)
         normalized.append(semantic)
-        evidence = semantic["evidence"]
-        assert isinstance(evidence, list)
-        for item, binding in zip(evidence, bindings):
-            assert isinstance(item, dict)
-            cited.append(
-                {
-                    "logical_path": binding["source_path"],
-                    "source_sha256": binding["source_digest"],
-                    "quote_sha256": binding["quote_sha256"],
-                    "quoted_text": item["quoted_text"],
-                }
-            )
+        cited.extend(_cited_evidence(semantic, bindings))
     return f"""{CRITIQUE_PROGRAM}
 Drop operations that are not specific, durable, complete, and exactly evidenced.
 Return reviews with slug, verdict pass|drop, and reason.
@@ -1487,6 +1496,12 @@ def _require_normalized_operation(
 ) -> None:
     if planned["path"] != expected:
         raise ValueError("compile operation path does not match its slug")
+    _require_normalized_body(planned, semantic)
+
+
+def _require_normalized_body(
+    planned: Mapping[str, object], semantic: Mapping[str, object]
+) -> None:
     if planned["kind"] != _operation_kind(semantic):
         raise ValueError("compile operation kind does not match its action")
     if planned["content"] != canonical_json_bytes(semantic).decode("utf-8"):
@@ -1711,13 +1726,12 @@ def _require_evidence_fields(item: object) -> tuple[str, str, str]:
 def _evidence_fields_valid(
     date: object, timestamp: object, quote: object, claim: object
 ) -> bool:
-    if not _evidence_matches(date, r"\d{4}-\d{2}-\d{2}"):
-        return False
-    if not _evidence_matches(timestamp, r"(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d"):
-        return False
-    if not _evidence_bounded_text(quote, 4_000):
-        return False
-    return _evidence_single_line(claim, 1_000)
+    return (
+        _evidence_matches(date, r"\d{4}-\d{2}-\d{2}")
+        and _evidence_matches(timestamp, r"(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d")
+        and _evidence_bounded_text(quote, 4_000)
+        and _evidence_single_line(claim, 1_000)
+    )
 
 
 def _evidence_matches(value: object, pattern: str) -> bool:
@@ -1863,6 +1877,12 @@ def _require_claim_evidence(record: object, inputs: CompileInputs) -> None:
         raise ValueError("compile input claims must be active")
     claim_evidence = record["evidence"]
     assert isinstance(claim_evidence, Mapping)
+    _require_resolved_claim_evidence(claim_evidence, inputs)
+
+
+def _require_resolved_claim_evidence(
+    claim_evidence: Mapping[str, object], inputs: CompileInputs
+) -> None:
     reference = EvidenceRef.parse(claim_evidence["reference"])
     source = _daily_for_evidence(inputs, reference.daily_id)
     if source is None or source.sha256 != reference.source_sha256:
@@ -2431,6 +2451,14 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _require_paired_batch(
+    batch: object, provider_budget: object
+) -> None:
+    """A batch without its budget is a plan nobody costed."""
+    if (batch is None) != (provider_budget is None):
+        raise ValueError("compile batch and provider budget must be supplied together")
+
+
 def _require_apply_arguments(
     plan: dict[str, object],
     inputs: CompileInputs,
@@ -2441,8 +2469,7 @@ def _require_apply_arguments(
     validate_compile_plan(plan, inputs)
     if not re.fullmatch(r"[0-9a-f]{64}", action_key):
         raise ValueError("action key must be a SHA-256 digest")
-    if (batch is None) != (provider_budget is None):
-        raise ValueError("compile batch and provider budget must be supplied together")
+    _require_paired_batch(batch, provider_budget)
     if batch is not None and batch.inputs != inputs:
         raise ValueError("compile batch inputs disagree")
 
@@ -2556,6 +2583,9 @@ class _ApplyPlan:
             return committed
         if self._quarantined():
             return self._commit_quarantine()
+        return self._publish_changes()
+
+    def _publish_changes(self) -> CompileApplyResult:
         self._build_changes()
         self._bind_operation_id()
         quarantine = self._apply_claim_policy()
@@ -3545,9 +3575,7 @@ def _lock_lines(lock_file: Path) -> list[str] | None:
 
 def _lock_is_ours(lines: list[str]) -> bool:
     pid = _lock_pid(lines)
-    if pid is None:
-        return True
-    if pid == os.getpid():
+    if pid is None or pid == os.getpid():
         return True
     if pid == 0:
         return _own_placeholder(_lock_owner(lines))

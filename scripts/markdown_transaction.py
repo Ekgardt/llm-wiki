@@ -3481,14 +3481,28 @@ def active_markdown_coordinator(vault: Path, state_root: Path) -> MarkdownCoordi
     return coordinator
 
 
+def active_or_legacy_coordinator(
+    vault: Path, state_root: Path
+) -> MarkdownCoordinator:
+    """The adopted V3 coordinator where adoption is in force, else the legacy one.
+
+    Adoption replaces the pre-adoption `run/markdown-transactions.sqlite3` with a
+    JSON tombstone, so a writer that opens that path directly fails with
+    `file is not a database` on every call. This is the one rule that decides
+    which coordinator a writer gets; a writer that constructs one itself
+    bypasses adoption and dies on the tombstone.
+    """
+    if _reliability_v3_records_present(state_root):
+        return active_markdown_coordinator(vault, state_root)
+    return MarkdownCoordinator(vault, state_root)
+
+
 def _default_coordinator() -> MarkdownCoordinator:
     vault = Path(
         os.environ.get("LLM_WIKI_ROOT", str(Path(__file__).resolve().parent.parent))
     ).resolve(strict=True)
     state_root = Path(os.environ.get("LLM_WIKI_STATE_ROOT", str(vault))).resolve()
-    if _reliability_v3_records_present(state_root):
-        return active_markdown_coordinator(vault, state_root)
-    return MarkdownCoordinator(vault, state_root)
+    return active_or_legacy_coordinator(vault, state_root)
 
 
 def _relative_target(coordinator: MarkdownCoordinator, path: Path) -> str:

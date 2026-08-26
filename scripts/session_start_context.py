@@ -152,8 +152,12 @@ def _maybe_spawn_nightly_catchup(today: str | None = None) -> None:
     if os.environ.get("MEMORY_LLM_PROVIDER") == "fake":
         return
     today = _today_iso(today)
-    if not _claim_nightly_catchup(today):
-        return
+    if _claim_nightly_catchup(today):
+        _spawn_nightly_catchup(today)
+
+
+def _spawn_nightly_catchup(today: str) -> None:
+    """Hand the claim back when the child never started."""
     pid = spawn_detached([
         sys.executable,
         str(ROOT / "scripts" / "scheduled_nightly.py"),
@@ -562,6 +566,10 @@ def _compile_line(backlog_days: int | None, last_status: str = "") -> str:
         return _failed_compile_line(backlog_days)
     if backlog_days is None:
         return "- **Compile**: never run. Daily logs are accumulating uncompiled."
+    return _committed_compile_line(backlog_days)
+
+
+def _committed_compile_line(backlog_days: int) -> str:
     if backlog_days == 0:
         return "- **Compile**: fresh (today)."
     return _backlog_line(backlog_days)
