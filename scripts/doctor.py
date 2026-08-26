@@ -1322,6 +1322,54 @@ def _chain_resolved_ids(database: sqlite3.Connection) -> set[str]:
     return resolved
 
 
+_RETRY_ORDINAL_SUFFIX = re.compile(r"(?::cas:\d+|#\d+)+$")
+
+
+def _base_operation_identity(operation_id: str) -> str:
+    """The identity a retry ordinal was derived from.
+
+    Both retry paths build the next attempt by suffixing the identity they are
+    retrying: `:cas:<n>` for a losing append, `#<n>` for a refused attempt of
+    any other kind. Stripping the suffixes recovers the request the whole chain
+    is about.
+    """
+    return _RETRY_ORDINAL_SUFFIX.sub("", operation_id)
+
+
+def _committed_base_identities(database: sqlite3.Connection) -> set[str]:
+    return {
+        _base_operation_identity(row[0])
+        for row in database.execute(
+            'SELECT operation_id FROM "transaction" WHERE state=\'committed\''
+        )
+    }
+
+
+def _ordinal_resolved_ids(database: sqlite3.Connection) -> set[str]:
+    """Attempts a committed retry of the same operation identity replaced.
+
+    The lineage is the same fact as `parent_transaction_id`, recorded in the
+    operation identity instead of the parent column, and it is the only copy
+    that survives for the append races refused before the parent was being
+    written. `committed_attempt` already resolves an identity to the attempt
+    that committed this way; the health check simply did not ask.
+
+    This is narrower than it looks, and deliberately so. It resolves an attempt
+    only when a commit carries *its own* request identity, which is derived
+    from the payload — never because some other transaction happened to write
+    the same file. A genuinely lost append leaves no such sibling and stays a
+    finding.
+    """
+    committed = _committed_base_identities(database)
+    return {
+        row[0]
+        for row in database.execute(
+            'SELECT id, operation_id FROM "transaction" WHERE state=\'quarantined\''
+        )
+        if _base_operation_identity(row[1]) in committed
+    }
+
+
 def _committed_created_paths(database: sqlite3.Connection) -> set[str]:
     return {
         row[0]
@@ -1349,6 +1397,11 @@ def _outcome_was_written(
     return intended <= committed_creates
 
 
+def _resolved_by_lineage(database: sqlite3.Connection) -> set[str]:
+    """Both records of the same fact: a retry of this attempt committed."""
+    return _chain_resolved_ids(database) | _ordinal_resolved_ids(database)
+
+
 def _unresolved_quarantine(
     database: sqlite3.Connection, transaction_columns: set[str]
 ) -> int:
@@ -1359,8 +1412,11 @@ def _unresolved_quarantine(
     a health check that is always red stops being read, which is the opposite of
     why it exists.
 
-    An attempt is history on either of two proofs. A retry in its own chain
-    committed — that is the lineage. Or everything it meant to create was
+    An attempt is history on any of three proofs. A retry in its own chain
+    committed — that is the lineage. Or a commit carries the same operation
+    identity under a retry ordinal — that is the same lineage written in the
+    identity, and it is what an append race refused before the parent column
+    was populated leaves behind. Or everything it meant to create was
     created by a transaction that did commit — that is the outcome, and it is
     the ordinary case: once the refusal is fixed the new attempt legitimately
     carries a different operation identity, because its inputs or dispositions
@@ -1369,7 +1425,7 @@ def _unresolved_quarantine(
     """
     if "parent_transaction_id" not in transaction_columns:
         return _quarantined_total(database)
-    open_attempts = _quarantined_ids(database) - _chain_resolved_ids(database)
+    open_attempts = _quarantined_ids(database) - _resolved_by_lineage(database)
     if not open_attempts:
         return 0
     committed_creates = _committed_created_paths(database)
@@ -6044,9 +6100,9 @@ def _fence_lost(where: str, database: Any, lease: dict[str, object]) -> Maintena
 def _acquire_maintenance_owner(
     root: Path, state_root: Path, now: datetime
 ) -> tuple[Any, dict[str, object]] | None:
-    from markdown_transaction import MarkdownCoordinator
+    from markdown_transaction import active_or_legacy_coordinator
 
-    coordinator = MarkdownCoordinator(root, state_root)
+    coordinator = active_or_legacy_coordinator(root, state_root)
     token = secrets.token_hex(16)
     expires = now + timedelta(seconds=MAINTENANCE_LEASE_SECONDS)
     with coordinator._connect() as database:

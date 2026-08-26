@@ -14,13 +14,13 @@ This index catalogs durable memory distilled from AI agent sessions
 - [[knowledge/notes/provenance-rule-6]] — CLAUDE.md rule 6 — "mark uncertainty explicitly" — is the root constraint that justifies preliminary flagging, editorial notes, and every "inferred from…" caveat in this vault.
 
 ## Decisions
-- [[knowledge/notes/adoption-digest-is-provenance-decision]] — the Reliability V3 adoption record keeps naming the producer bytes that performed the cutover, but that digest is no longer re-checked on every memory write.
+- [[knowledge/notes/adoption-digest-is-provenance-decision]] — the Reliability V3 adoption record keeps naming the
 - [[knowledge/notes/agent-native-mcp-foundation]] — LLM Wiki uses MCP as the common read/action interface for every agent while host-specific hooks remain thin lifecycle-event adapters.
 - [[knowledge/notes/audit-closure-security-recovery-control-plane-decision]] — Audit closure retires the unsupported Cognee bridge and adds one fail-closed DLP, recovery, install, scheduling, coordination, and evidence contract without another daemon, database, or MCP tool.
 - [[knowledge/notes/automatic-code-update-decision]] — the nightly pass may advance the checkout to the remote
 - [[knowledge/notes/baseline-environment-binding-decision]] — The frozen retrieval-v2 baseline is bound to the exact
 - [[knowledge/notes/blackboard-fenced-resource-claims-decision]] — Blackboard coordination uses two bounded tables in the existing coordinator-v3 database for atomic resource claims while immutable coordination history remains authoritative Markdown.
-- [[knowledge/notes/bounded-capture-excerpt-decision]] — a capture transcript too large to keep whole is excerpted at both ends with a marker naming the dropped bytes, never refused.
+- [[knowledge/notes/bounded-capture-excerpt-decision]] — when a capture transcript is larger than the durable
 - [[knowledge/notes/centralized-memory-subsystem]] — The memory subsystem (`run/state.json`, `knowledge/daily/`, `knowledge/notes/`) resolves to a single canonical location regardless of whether Claude Code runs from the main checkout or a git worktree.
 - [[knowledge/notes/citation-relevance-gate-decision]] — A citation that shares no content with the claim it is offered for is rejected; entailment itself is still not verified and is not claimed.
 - [[knowledge/notes/classification-measurement-stand-decision]] — Session classification is measured by a labelled corpus and three gates; the shipped corpus is public and small, and the real number needs real sessions.
