@@ -92,6 +92,7 @@ after a code change compounds two risks. The doctor reports the drift and the
 owner re-runs the installer.
 
 ## Related
+- [[knowledge/notes/secret-shape-not-secret-name-decision]] — what the redactor may treat as a secret: the value decides, not the name beside it.
 
 - [[knowledge/notes/single-directory-vault-decision]] — why one tree holds both
   the source and the knowledge.
