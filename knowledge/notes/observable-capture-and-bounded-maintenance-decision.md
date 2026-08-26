@@ -112,3 +112,5 @@ redacted error reach the trail.
 - [[knowledge/notes/system-symlink-ancestor-decision]]
 - [[knowledge/notes/self-resolving-health-findings-decision]] — what bounds the finding this decision made visible, so it can end.
 - [[knowledge/notes/session-evidence-retention-decision]] — links to this page.
+- [[knowledge/notes/bounded-capture-excerpt-decision]] — a transcript larger than
+  the evidence bound is excerpted at both ends rather than refused.

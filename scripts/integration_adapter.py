@@ -36,11 +36,19 @@ DELEGATE_TIMEOUT_SECONDS = 10
 MAINTENANCE_DRAIN_TIMEOUT_SECONDS = 600
 MAX_TRANSCRIPT_TEXT_CHARS = 8000
 MAX_CHECKPOINT_ERROR_CHARS = 500
-MAX_STDIN_BYTES = 65_536
+# One host event, not one tool result. Claude Code sends `tool_response` in the
+# PostToolUse payload -- the tool's own output -- and this adapter reads none of
+# it: `_tool_payload` takes `tool_name` and one path or command out of
+# `tool_input`. At 64 KiB the adapter refused any edit or Bash call whose output
+# was larger, which on 2026-08-26 lost eight `post_tool_use` captures on this
+# machine. The bound stays because a hook must not read without one; it is now
+# the size of one bounded record this runtime already stores.
+MAX_STDIN_BYTES = 1024 * 1024
 TRANSIENT_CREATE_ATTEMPTS = 10
 PENDING_CLAIM_SECONDS = 30.0
 MAX_CAPTURE_INTENT_BYTES = 1024 * 1024
 MAX_CAPTURE_EVIDENCE_BYTES = 900 * 1024
+CAPTURE_EXCERPT_SIDE_BYTES = MAX_CAPTURE_EVIDENCE_BYTES // 2
 CAPTURE_HANDLER_VERSION = 1
 SOURCES = frozenset({"claude", "opencode", "codex"})
 EVENTS = frozenset(
@@ -2064,18 +2072,107 @@ def _validated_capture_transcript_path(value: object) -> Path:
     return path
 
 
-def _capture_path_evidence(value: object) -> str | None:
-    if not isinstance(value, str) or not value:
-        return None
+def _read_transcript_edge(descriptor: int, offset: int) -> bytes:
+    """One bounded side of an open transcript."""
+    os.lseek(descriptor, offset, os.SEEK_SET)
+    chunks: list[bytes] = []
+    remaining = CAPTURE_EXCERPT_SIDE_BYTES
+    while remaining > 0:
+        chunk = os.read(descriptor, min(remaining, 64 * 1024))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _require_stable_transcript(before: os.stat_result, after: os.stat_result) -> None:
+    """A file swapped mid-read must not become evidence."""
+    identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+    if identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+        raise ValueError("capture transcript changed while it was read")
+
+
+def _read_transcript_edges(path: Path) -> tuple[bytes, bytes, int]:
+    """Head and tail of a transcript too large to hold whole."""
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        before = os.fstat(descriptor)
+        head = _read_transcript_edge(descriptor, 0)
+        tail = _read_transcript_edge(
+            descriptor, before.st_size - CAPTURE_EXCERPT_SIDE_BYTES
+        )
+        _require_stable_transcript(before, os.fstat(descriptor))
+    finally:
+        os.close(descriptor)
+    return head, tail, before.st_size
+
+
+def _capture_excerpt_marker(dropped: int) -> str:
+    return (
+        f"\n\n_({dropped} bytes of this transcript were not captured; "
+        "the durable record keeps the beginning and the end.)_\n\n"
+    )
+
+
+def _whole_lines_head(head: bytes) -> bytes:
+    """Whole lines where the window holds one, the raw window otherwise.
+
+    One transcript line can be larger than the window -- a tool result arrives
+    as a single JSON line -- and trimming to a boundary that is not there would
+    drop the side entirely.
+    """
+    return head[: head.rfind(b"\n") + 1] or head
+
+
+def _whole_lines_tail(tail: bytes) -> bytes:
+    return tail[tail.find(b"\n") + 1 :] or tail
+
+
+def _capture_excerpt_text(path: Path) -> str:
+    """A bounded excerpt that says, in the evidence itself, what it dropped."""
+    raw_head, raw_tail, size = _read_transcript_edges(path)
+    head = _whole_lines_head(raw_head)
+    tail = _whole_lines_tail(raw_tail)
+    dropped = size - len(head) - len(tail)
+    return (
+        head.decode("utf-8", errors="ignore")
+        + _capture_excerpt_marker(dropped)
+        + tail.decode("utf-8", errors="ignore")
+    )
+
+
+def _capture_transcript_text(path: Path) -> str:
+    """The whole transcript, or a bounded excerpt of it, never nothing.
+
+    A `pre_compact` hook fires because the conversation got long, so refusing
+    every transcript over the evidence bound refused exactly the sessions worth
+    keeping. Raising the bound is not available: measured on this machine on
+    2026-08-26, 36 of 487 host transcripts are over it and the largest is 105 MB,
+    and a hook cannot hold 105 MB to keep 900 KiB. Truncating loses nothing the
+    bound was protecting, because the durable record this feeds is capped anyway
+    -- `session_evidence.MAX_EVIDENCE_BYTES` keeps 512 KiB and appends its own
+    truncation note. Head and tail rather than either alone: the same choice
+    already recorded for nightly consolidation, because a long session puts its
+    decisions early and its outcome late.
+    """
     from bounded_io import read_stable_utf8
 
-    path = _validated_capture_transcript_path(value)
-    text = read_stable_utf8(
+    if path.stat().st_size > MAX_CAPTURE_EVIDENCE_BYTES:
+        return _capture_excerpt_text(path)
+    return read_stable_utf8(
         path,
         MAX_CAPTURE_EVIDENCE_BYTES,
         label="capture transcript",
     )
-    redacted = redact_secrets(text)
+
+
+def _capture_path_evidence(value: object) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    path = _validated_capture_transcript_path(value)
+    redacted = redact_secrets(_capture_transcript_text(path))
     if not redacted:
         return None
     return redacted
@@ -2555,9 +2652,20 @@ def _run_active_capture_worker_once() -> int:
     return 0
 
 
+def _oversize_stdin() -> ValueError:
+    """Name the bound that refused, not the generic word for every refusal.
+
+    `invalid integration event` named nothing, so a capture lost to a payload
+    one byte over the limit read exactly like a malformed one.
+    """
+    return ValueError(
+        f"integration event payload exceeds the {MAX_STDIN_BYTES}-byte adapter limit"
+    )
+
+
 def _decode_stdin(data: bytes) -> str:
     if len(data) > MAX_STDIN_BYTES:
-        raise ValueError("invalid integration event")
+        raise _oversize_stdin()
     return data.decode("utf-8")
 
 
@@ -2567,7 +2675,7 @@ def _read_stdin_bounded() -> str:
     if isinstance(data, bytes):
         return _decode_stdin(data)
     if len(data.encode("utf-8")) > MAX_STDIN_BYTES:
-        raise ValueError("invalid integration event")
+        raise _oversize_stdin()
     return data
 
 

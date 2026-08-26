@@ -70,6 +70,7 @@ knowledge/notes/*
 !knowledge/notes/classification-measurement-stand-decision.md
 !knowledge/notes/idempotent-retry-after-quarantine-decision.md
 !knowledge/notes/self-resolving-health-findings-decision.md
+!knowledge/notes/bounded-capture-excerpt-decision.md
 !knowledge/notes/session-evidence-retention-decision.md
 !knowledge/notes/session-promotion-policy-decision.md
 !knowledge/notes/nightly-builds-generation-vectors-decision.md

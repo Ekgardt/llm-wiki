@@ -1673,3 +1673,120 @@ def test_tool_breadcrumb_writes_line(tmp_path, monkeypatch):
     assert "edit" in content
     assert "src/auth.ts" in content
     assert "abcdefgh" in content  # session_id truncated to 8 chars
+
+
+def _claude_post_tool_payload(stdout: str) -> dict:
+    """The shape Claude Code's PostToolUse hook actually sends."""
+    return {
+        "session_id": "abcdefgh-1111",
+        "transcript_path": "/home/user/.claude/projects/x/abcdefgh-1111.jsonl",
+        "cwd": "/home/user/llm-wiki",
+        "permission_mode": "acceptEdits",
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "git status --short", "description": "Show status"},
+        "tool_response": {"stdout": stdout, "stderr": "", "interrupted": False},
+    }
+
+
+def _feed_stdin(monkeypatch, text: str) -> None:
+    stream = SimpleNamespace(buffer=io.BytesIO(text.encode("utf-8")))
+    monkeypatch.setattr(sys, "stdin", stream)
+
+
+def test_a_large_tool_response_is_read_not_refused(monkeypatch):
+    """The adapter reads no part of `tool_response`, so its size cannot refuse.
+
+    Measured on the live vault on 2026-08-26: `adapter_post_tool_use` held eight
+    `ValueError: invalid integration event`. Reproduced here -- a Bash call whose
+    output exceeded the old 64 KiB stdin bound lost the whole capture, although
+    the only fields read are `tool_name` and one path or command.
+    """
+    import integration_adapter
+
+    raw = _claude_post_tool_payload("x" * 200_000)
+    _feed_stdin(monkeypatch, json.dumps(raw))
+
+    envelope = integration_adapter.normalize_occurrence_event(
+        "claude", "post_tool_use", integration_adapter._read_hook_input()
+    )
+
+    assert envelope.payload["tool_name"] == "Bash"
+    assert envelope.payload["target"] == "git status --short"
+
+
+def test_an_oversize_payload_names_the_bound_it_broke(monkeypatch):
+    """A refusal has to say which bound refused it."""
+    import integration_adapter
+
+    oversize = "y" * (integration_adapter.MAX_STDIN_BYTES + 1)
+    _feed_stdin(monkeypatch, json.dumps(_claude_post_tool_payload(oversize)))
+
+    with pytest.raises(ValueError, match="exceeds the .* adapter limit"):
+        integration_adapter._read_hook_input()
+
+
+def _write_long_transcript(path: Path, target_bytes: int) -> tuple[str, str]:
+    lines = []
+    total = 0
+    index = 0
+    while total < target_bytes:
+        line = json.dumps({"i": index, "text": "t" * 400})
+        lines.append(line)
+        total += len(line) + 1
+        index += 1
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return lines[0], lines[-1]
+
+
+def test_a_long_transcript_is_excerpted_rather_than_lost(tmp_path):
+    """`pre_compact` fires because the session is long; it must still be kept.
+
+    Measured on the live vault on 2026-08-26: `adapter_pre_compact` held
+    `ValueError: capture transcript exceeds 921600 bytes`, so the long sessions
+    -- the only ones `pre_compact` ever sees -- were the ones thrown away.
+    """
+    from integration_adapter import (
+        MAX_CAPTURE_EVIDENCE_BYTES,
+        _capture_transcript_text,
+    )
+
+    path = tmp_path / "session.jsonl"
+    first, last = _write_long_transcript(path, 3 * MAX_CAPTURE_EVIDENCE_BYTES)
+
+    text = _capture_transcript_text(path)
+
+    assert text.startswith(first)
+    assert text.endswith(last + "\n")
+    assert "bytes of this transcript were not captured" in text
+    assert len(text.encode("utf-8")) <= MAX_CAPTURE_EVIDENCE_BYTES + 200
+
+
+def test_a_short_transcript_is_still_returned_whole(tmp_path):
+    """Nothing that worked before is excerpted now."""
+    from integration_adapter import _capture_transcript_text
+
+    path = tmp_path / "short.jsonl"
+    path.write_text('{"a": 1}\n{"b": 2}\n', encoding="utf-8")
+
+    assert _capture_transcript_text(path) == '{"a": 1}\n{"b": 2}\n'
+
+
+def test_the_excerpt_marker_counts_the_bytes_it_dropped(tmp_path):
+    """The marker is evidence too: it says how much is missing."""
+    import re
+
+    from integration_adapter import (
+        MAX_CAPTURE_EVIDENCE_BYTES,
+        _capture_transcript_text,
+    )
+
+    path = tmp_path / "counted.jsonl"
+    _write_long_transcript(path, 4 * MAX_CAPTURE_EVIDENCE_BYTES)
+    size = path.stat().st_size
+
+    text = _capture_transcript_text(path)
+    dropped = int(re.search(r"_\((\d+) bytes", text).group(1))
+
+    assert 0 < dropped < size
+    assert dropped >= size - MAX_CAPTURE_EVIDENCE_BYTES

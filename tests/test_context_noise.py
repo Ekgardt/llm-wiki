@@ -1066,3 +1066,29 @@ def test_a_committed_compile_today_is_still_fresh(monkeypatch):
     )
 
     assert "fresh (today)" in block
+
+
+def test_compile_backlog_reads_the_utc_stamp_compile_actually_writes():
+    """`compile_memory._utc_now` writes `...Z`; SessionStart must survive it.
+
+    Parsed, a `Z` suffix is an aware datetime. It was subtracted from a naive
+    `datetime.now()`, so every SessionStart on a vault that had ever compiled
+    raised `TypeError: can't subtract offset-naive and offset-aware datetimes`
+    and the adapter recorded a lost capture instead of injecting context.
+    Measured on the live vault on 2026-08-26: `last_compile_at` held
+    `2026-08-26T14:49:32.401938Z` and `adapter_session_start` held exactly that
+    TypeError.
+    """
+    import session_start_context
+
+    aware = session_start_context._compile_backlog_days(
+        {"last_compile_at": "2026-08-26T14:49:32.401938Z"}
+    )
+    naive = session_start_context._compile_backlog_days(
+        {"last_compile_at": "2026-08-26T14:49:32.401938"}
+    )
+
+    assert isinstance(aware, int)
+    assert aware >= 0
+    assert aware == naive
+    assert session_start_context._compile_backlog_days({}) is None
