@@ -72,6 +72,7 @@ contract applied everywhere rather than a new tuning exercise.
   https://opensearch.org/blog/introducing-reciprocal-rank-fusion-hybrid-search/
 
 ## Related
+- [[knowledge/notes/rerank-tier-ordering-decision]] — what the cross-encoder scored outranks what it never read, and why the tail is kept at all.
 
 - [[baseline-environment-binding-decision]]
 - [[warm-navigation-overhead-threshold-decision]]

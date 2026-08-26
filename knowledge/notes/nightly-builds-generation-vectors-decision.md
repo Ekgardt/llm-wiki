@@ -94,6 +94,7 @@ Whether the reranker should be enabled at all. If it ever is, it must be
 multilingual, or it reorders cross-language hits badly and undoes this.
 
 ## Related
+- [[knowledge/notes/rerank-tier-ordering-decision]] — what the cross-encoder scored outranks what it never read, and why the tail is kept at all.
 
 - [[knowledge/notes/derived-evidence-generation-decision]] — the immutable
   generation contract this stays inside.
