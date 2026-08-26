@@ -22,7 +22,8 @@ Usage:
 Exit codes:
     0 — archive passed bounded path/content checks and was published.
     1 — git archive failed, or mandatory verification failed.
-    2 — usage error (missing git, dirty working tree with --strict, etc.).
+    2 — usage error (missing git, --strict with archived paths that differ
+        from the working tree, etc.).
 
 Why this exists: a colleague audit repeatedly flagged that the zip
 they received contained `.venv/` (~300 MB), `settings.local.json`
@@ -67,6 +68,7 @@ MAX_ARCHIVE_MEMBERS = 10_000
 MAX_MEMBER_BYTES = 16 * 1024 * 1024
 MAX_TOTAL_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
 MAX_MEMBER_NAME_BYTES = 4096
+MAX_REPORTED_STRICT_PATHS = 20
 _DRIVE_PATH_RE = re.compile(r"^[A-Za-z]:")
 
 
@@ -161,10 +163,11 @@ def parse_args() -> argparse.Namespace:
         "--strict",
         action="store_true",
         help=(
-            "Fail if the working tree has uncommitted changes. Without "
-            "this flag, uncommitted changes are allowed — they simply "
-            "won't be in the archive (`git archive` uses the ref, not "
-            "the working copy)."
+            "Fail, naming the paths, if any file the archive carries differs "
+            "from the working tree. Untracked files never trip this: "
+            "`git archive` cannot include them. Without this flag the "
+            "difference is allowed — the archive simply holds the committed "
+            "version (`git archive` uses the ref, not the working copy)."
         ),
     )
     return p.parse_args()
@@ -193,14 +196,41 @@ def _short_sha(ref: str) -> str:
     return out.stdout.strip()
 
 
-def _working_tree_dirty() -> bool:
-    out = _run("git", "status", "--porcelain", capture=True, check=False)
-    return bool(out.stdout.strip())
+def _paths_differing_from_ref(ref: str) -> tuple[str, ...]:
+    """Tracked paths whose working copy differs from the ref being archived.
+
+    `git status --porcelain` was the wrong question twice over. It reports
+    untracked files, which `git archive` can never carry, and — since the vault
+    and the checkout became one directory — it reports the tracked index and
+    log that the runtime rewrites on every compile. So `--strict` refused every
+    export in the installed vault and named nothing. What the flag means is
+    narrower: which paths the archive carries would not match what is on disk.
+    `-z` because this repository has already been bitten by the porcelain
+    status column and by C-quoted paths.
+    """
+    out = _run("git", "diff", "--name-only", "-z", ref, "--", capture=True, check=False)
+    return tuple(path for path in out.stdout.split("\0") if path)
+
+
+def _report_strict_drift(ref: str, paths: tuple[str, ...]) -> None:
+    print(
+        f"export_vault: --strict: {len(paths)} tracked path(s) differ from {ref}; "
+        "the archive would carry the committed version:",
+        file=sys.stderr,
+    )
+    for path in paths[:MAX_REPORTED_STRICT_PATHS]:
+        print(f"  {path}", file=sys.stderr)
+    if len(paths) > MAX_REPORTED_STRICT_PATHS:
+        remaining = len(paths) - MAX_REPORTED_STRICT_PATHS
+        print(f"  ... and {remaining} more", file=sys.stderr)
+
+
+FORMAT_EXTENSIONS = {"zip": "zip", "tar": "tar", "tar.gz": "tar.gz"}
 
 
 def _default_output(ref: str, fmt: str) -> Path:
     sha = _short_sha(ref)
-    ext = "zip" if fmt == "zip" else ("tar.gz" if fmt == "tar.gz" else "tar")
+    ext = FORMAT_EXTENSIONS[_require_supported_format(fmt)]
     return (ROOT.parent / f"llm-wiki-export-{sha}.{ext}").resolve()
 
 
@@ -442,11 +472,9 @@ def main() -> int:
     args = parse_args()
     _require_git()
 
-    if args.strict and _working_tree_dirty():
-        print(
-            "export_vault: working tree has uncommitted changes (use --no-strict to allow).",
-            file=sys.stderr,
-        )
+    drifted = _paths_differing_from_ref(args.ref) if args.strict else ()
+    if drifted:
+        _report_strict_drift(args.ref, drifted)
         return 2
 
     output = args.output or _default_output(args.ref, args.format)
