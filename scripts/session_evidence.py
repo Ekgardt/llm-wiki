@@ -218,14 +218,19 @@ def intent_fields(record: Mapping[str, object], captured_at: str) -> dict[str, o
 
 
 def write_session_evidence(
-    vault: Path, fields: Mapping[str, object], transcript: str
+    vault: Path,
+    fields: Mapping[str, object],
+    transcript: str,
+    *,
+    coordinator: object | None = None,
+    owner: object | None = None,
 ) -> Path | None:
     """Write the session record; returns the path, or None when there is nothing.
 
     Never raises: losing the record is bad, but breaking capture is worse, and the
     tier decision that follows must not depend on this write.
     """
-    from markdown_transaction import mutate_knowledge, stable_operation_id
+    from markdown_transaction import stable_operation_id
 
     document = render_session_document(fields, transcript)
     if not render_transcript(transcript).strip():
@@ -234,10 +239,32 @@ def write_session_evidence(
     path = Path(vault) / relative
     encoded = document.encode("utf-8")
     try:
-        mutate_knowledge(
+        _write_record(
             stable_operation_id("session-evidence", relative, encoded),
             {path: encoded},
+            coordinator,
+            owner,
         )
     except Exception:  # noqa: BLE001
         return None
     return path
+
+
+def _write_record(
+    operation_id: str,
+    changes: Mapping[Path, bytes],
+    coordinator: object | None,
+    owner: object | None,
+) -> None:
+    """Write through the caller's gate when it holds one, else claim our own.
+
+    The capture worker already owns a writer lease, and claiming a second one
+    raises `owner_identity_conflict` — swallowed above, which is why no queued
+    session reached disk between the 2026-08-24 backfill and 2026-08-26.
+    """
+    from markdown_transaction import mutate_knowledge, mutate_owned_knowledge
+
+    if coordinator is None or owner is None:
+        mutate_knowledge(operation_id, changes)
+        return
+    mutate_owned_knowledge(coordinator, owner, operation_id, changes)

@@ -3672,8 +3672,41 @@ def mutate_knowledge(
     preconditions: Mapping[str, object] | None = None,
 ) -> TransactionRecord:
     """Apply one recoverable mutation with caller-independent before hashes."""
+    return _mutate_knowledge(
+        _default_coordinator(), operation_id, changes, validators, preconditions
+    )
+
+
+def mutate_owned_knowledge(
+    coordinator: MarkdownCoordinator,
+    owner: object,
+    operation_id: str,
+    changes: Mapping[Path, bytes | None],
+    *,
+    validators: Sequence[Validator] = (),
+    preconditions: Mapping[str, object] | None = None,
+) -> TransactionRecord:
+    """The same mutation inside a writer gate the caller already owns.
+
+    `mutate_knowledge` claims the canonical writer lease itself, so a caller that
+    already holds an owner lease — the capture worker does — got
+    `owner_identity_conflict` and, because its own writer swallows failure, lost
+    the write in silence. Every queued session record was dropped this way.
+    """
+    with coordinator.writer_gate(owner=owner):
+        return _mutate_knowledge(
+            coordinator, operation_id, changes, validators, preconditions
+        )
+
+
+def _mutate_knowledge(
+    coordinator: MarkdownCoordinator,
+    operation_id: str,
+    changes: Mapping[Path, bytes | None],
+    validators: Sequence[Validator],
+    preconditions: Mapping[str, object] | None,
+) -> TransactionRecord:
     _require_knowledge_changes(changes)
-    coordinator = _default_coordinator()
     relative_changes = _relative_changes(coordinator, changes)
     _recover_initial_contention(coordinator)
     existing = _existing_committed_record(coordinator, operation_id, relative_changes)
