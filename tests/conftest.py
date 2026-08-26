@@ -84,10 +84,19 @@ def _isolate_test_state_root():
 #     of its own, which shows up as a new name.
 #   * `knowledge/notes` is compared file by file — only a nightly compile writes
 #     there, so any change during a run is worth stopping for.
-#   * `knowledge/daily` and `knowledge/raw/sessions` are not watched at all: the
-#     capture appends to today's log continuously, measured mid-run today.
+#   * `knowledge/raw/sessions` is compared file by file too, since 2026-08-26.
+#     Leaving it unwatched cost three fixture session records — `session-1.md`
+#     under 2026-08-24, -25 and -26 — written by `tests/test_flush_classification`
+#     through the pinned root while only `flush_memory.STATE_ROOT` was patched.
+#     A record is a whole file that is never rewritten, so file-by-file is the
+#     same watch as notes. The accepted cost: a genuine capture finishing while
+#     the suite runs trips the guard too. The message names the path, and a real
+#     record names a real session id, so the two are told apart by looking.
+#   * `knowledge/daily` is still not watched at all: the capture appends to
+#     today's log continuously, measured mid-run today.
 _WATCHED_PROJECTS = "knowledge/projects"
 _WATCHED_NOTES = "knowledge/notes"
+_WATCHED_SESSIONS = "knowledge/raw/sessions"
 
 
 def _file_identity(path: Path) -> tuple[int, int]:
@@ -95,25 +104,26 @@ def _file_identity(path: Path) -> tuple[int, int]:
     return (info.st_size, info.st_mtime_ns)
 
 
-def _files_under(root: Path) -> dict[str, tuple[int, int]]:
-    if not root.is_dir():
+def _files_under(directory: Path, root: Path = VAULT_ROOT) -> dict[str, tuple[int, int]]:
+    if not directory.is_dir():
         return {}
     return {
-        str(path.relative_to(VAULT_ROOT)): _file_identity(path)
-        for path in root.rglob("*")
+        str(path.relative_to(root)): _file_identity(path)
+        for path in directory.rglob("*")
         if path.is_file()
     }
 
 
-def _names_under(root: Path) -> dict[str, tuple[int, int]]:
-    if not root.is_dir():
+def _names_under(directory: Path, root: Path = VAULT_ROOT) -> dict[str, tuple[int, int]]:
+    if not directory.is_dir():
         return {}
-    return {str(entry.relative_to(VAULT_ROOT)): (0, 0) for entry in root.iterdir()}
+    return {str(entry.relative_to(root)): (0, 0) for entry in directory.iterdir()}
 
 
-def _knowledge_entries() -> dict[str, tuple[int, int]]:
-    seen = _names_under(VAULT_ROOT / _WATCHED_PROJECTS)
-    seen.update(_files_under(VAULT_ROOT / _WATCHED_NOTES))
+def _knowledge_entries(root: Path = VAULT_ROOT) -> dict[str, tuple[int, int]]:
+    seen = _names_under(root / _WATCHED_PROJECTS, root)
+    seen.update(_files_under(root / _WATCHED_NOTES, root))
+    seen.update(_files_under(root / _WATCHED_SESSIONS, root))
     return seen
 
 

@@ -949,18 +949,66 @@ _V2_TRANSACTION_STATES = frozenset(
 
 
 def _require_no_v2_ownership(source: sqlite3.Connection) -> None:
-    """Live ownership cannot be canonicalized, so it must not be carried over."""
-    if any(_v2_table_populated(source, table) for table in _V2_OWNERSHIP_TABLES):
+    """Live ownership cannot be canonicalized, so it must not be carried over.
+
+    Only *live* ownership refuses the migration. An expired row is not carried
+    over either — none of these three tables is read by the v2 row collector —
+    but it is no reason to stop, and treating it as one made adoption
+    unreachable on any vault that had ever taken a project lease. A lease row is
+    deleted only by the holder that releases it, so an agent that exits without
+    releasing leaves the row behind for good: measured on the owner's vault on
+    2026-08-26, 56 project leases, 55 of them expired on 2026-08-21, plus one
+    released `doctor` maintenance owner. The existence rule refused every one of
+    them, and `session_end` had never once completed on that machine. Liveness
+    is also the rule the queue side of the same adoption already uses, where
+    only a task still in `leased` state refuses.
+
+    Fail closed on doubt: an expiry that is absent or unreadable counts as live,
+    because it is not proof that the owner is gone.
+    """
+    now = datetime.now(timezone.utc)
+    if any(_v2_ownership_is_live(source, table, now) for table in _V2_OWNERSHIP_TABLES):
         raise _coordinator_migration_error(
             "coordinator_v2_ambiguous_ownership",
-            "coordinator v2 contains ownership that cannot be canonicalized",
+            "coordinator v2 contains live ownership that cannot be canonicalized",
         )
 
 
-def _v2_table_populated(source: sqlite3.Connection, table: str) -> bool:
+def _v2_ownership_is_live(
+    source: sqlite3.Connection, table: str, now: datetime
+) -> bool:
     if not _coordinator_table_exists(source, table):
         return False
+    if "expires_at" not in _coordinator_table_columns(source, table):
+        return _v2_table_populated(source, table)
+    return _any_live_expiry(source, table, now)
+
+
+def _any_live_expiry(source: sqlite3.Connection, table: str, now: datetime) -> bool:
+    rows = source.execute(f'SELECT expires_at FROM "{table}"').fetchall()
+    return any(_expiry_is_live(row[0], now) for row in rows)
+
+
+def _v2_table_populated(source: sqlite3.Connection, table: str) -> bool:
+    """Without an expiry column there is nothing to date a row by, so any row counts."""
     return source.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone() is not None
+
+
+def _expiry_is_live(value: object, now: datetime) -> bool:
+    if not isinstance(value, str) or not value:
+        return True
+    try:
+        parsed = _parse_timestamp(value)
+    except (ValueError, TypeError):
+        return True
+    return _as_utc(parsed) > now
+
+
+def _as_utc(value: datetime) -> datetime:
+    """A v2 row may carry a naive stamp; every writer of these tables meant UTC."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 
 def _coordinator_v2_transaction_rows(

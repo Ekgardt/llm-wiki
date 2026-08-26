@@ -18,6 +18,77 @@ from pathlib import Path
 import pytest
 
 # ---------------------------------------------------------------------------
+# Helpers
+#
+# These stand-ins are named functions rather than lambdas and comprehensions on
+# purpose: the complexity gate counts every one of those against the test that
+# holds them, and refuses the whole file.
+# ---------------------------------------------------------------------------
+
+
+def _returns(value):
+    """A callable that ignores its arguments and answers with `value`."""
+
+    def _call(*args, **kwargs):
+        return value
+
+    return _call
+
+
+def _raises(error):
+    """A callable that always fails with `error`."""
+
+    def _call(*args, **kwargs):
+        raise error
+
+    return _call
+
+
+def _recorder(sink, answer):
+    """Record each call in `sink` and answer with `answer`."""
+
+    def _call(*args):
+        sink.append(args)
+        return answer
+
+    return _call
+
+
+def _kept_the_session(vault, transient):
+    """The record landed in the run's own vault and the ephemeral copy is gone."""
+    return bool(_session_records(vault)) and not transient.exists()
+
+
+def _kinds(recorded):
+    """The first argument of every recorded call."""
+    return [call[0] for call in recorded]
+
+
+def _own_vault(monkeypatch, tmp_path, flush_memory):
+    """Give the run its own vault, so a session record cannot land in this one.
+
+    `flush_memory` writes the session record to its module-level `ROOT`, and the
+    transaction coordinator resolves the vault from `LLM_WIKI_ROOT`, which
+    `tests/conftest.py` pins to this checkout — the owner's live vault since
+    2026-08-21. Patching `STATE_ROOT` alone is not isolation: it left three
+    fixture records named `session-1.md` in `knowledge/raw/sessions` on
+    2026-08-24, -25 and -26, and the writer never raises, so nothing said so.
+    """
+    vault = tmp_path / "vault"
+    (vault / "knowledge" / "raw" / "sessions").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(flush_memory, "ROOT", vault)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
+    return vault
+
+
+def _session_records(vault):
+    """Every session record the run left in `vault`."""
+    return sorted((vault / "knowledge" / "raw" / "sessions").rglob("*.md"))
+
+
+# ---------------------------------------------------------------------------
 # _classify_response
 # ---------------------------------------------------------------------------
 
@@ -161,41 +232,36 @@ def test_provider_exception_queues_before_ephemeral_cleanup(monkeypatch, tmp_pat
     transient.parent.mkdir(parents=True)
     transient.write_text("durable decision", encoding="utf-8")
     queued = []
+    vault = _own_vault(monkeypatch, tmp_path, flush_memory)
     monkeypatch.setattr(flush_memory, "STATE_ROOT", state_root)
     monkeypatch.setattr(
         flush_memory,
         "parse_args",
-        lambda: Namespace(
-            event="session-end",
-            session_id="session-1",
-            transcript=str(transient),
-            trigger="opencode",
-            source_event_id="event-1",
-            checkpoint_reason="session_end",
-            ephemeral_transcript=True,
+        _returns(
+            Namespace(
+                event="session-end",
+                session_id="session-1",
+                transcript=str(transient),
+                trigger="opencode",
+                source_event_id="event-1",
+                checkpoint_reason="session_end",
+                ephemeral_transcript=True,
+            )
         ),
     )
-    monkeypatch.setattr(flush_memory, "load_state", lambda: {})
+    monkeypatch.setattr(flush_memory, "load_state", _returns({}))
     monkeypatch.setattr(
         flush_memory,
         "update_state",
-        lambda callback: (_ for _ in ()).throw(AssertionError("must not record dedupe")),
+        _raises(AssertionError("must not record dedupe")),
     )
-    monkeypatch.setattr(
-        llm_client,
-        "call_llm",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("provider failed")),
-    )
-    monkeypatch.setattr(
-        memory_queue,
-        "enqueue",
-        lambda kind, payload: queued.append((kind, payload)) or "queued-1",
-    )
+    monkeypatch.setattr(llm_client, "call_llm", _raises(RuntimeError("provider failed")))
+    monkeypatch.setattr(memory_queue, "enqueue", _recorder(queued, "queued-1"))
 
     assert flush_memory.main() == 0
-    assert [kind for kind, _payload in queued] == ["flush"]
+    assert _kinds(queued) == ["flush"]
     assert "durable decision" in queued[0][1]["prompt"]
-    assert not transient.exists()
+    assert _kept_the_session(vault, transient)
 
 
 def test_provider_and_queue_failure_preserves_ephemeral_transcript(monkeypatch, tmp_path):
@@ -207,35 +273,31 @@ def test_provider_and_queue_failure_preserves_ephemeral_transcript(monkeypatch, 
     transient = state_root / "cache" / "transient-transcripts" / "transient.txt"
     transient.parent.mkdir(parents=True)
     transient.write_text("durable decision", encoding="utf-8")
+    vault = _own_vault(monkeypatch, tmp_path, flush_memory)
     monkeypatch.setattr(flush_memory, "STATE_ROOT", state_root)
     monkeypatch.setattr(
         flush_memory,
         "parse_args",
-        lambda: Namespace(
-            event="session-end",
-            session_id="session-1",
-            transcript=str(transient),
-            trigger="opencode",
-            source_event_id="event-1",
-            checkpoint_reason="session_end",
-            ephemeral_transcript=True,
+        _returns(
+            Namespace(
+                event="session-end",
+                session_id="session-1",
+                transcript=str(transient),
+                trigger="opencode",
+                source_event_id="event-1",
+                checkpoint_reason="session_end",
+                ephemeral_transcript=True,
+            )
         ),
     )
-    monkeypatch.setattr(flush_memory, "load_state", lambda: {})
-    monkeypatch.setattr(
-        llm_client,
-        "call_llm",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("provider failed")),
-    )
-    monkeypatch.setattr(
-        memory_queue,
-        "enqueue",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("queue failed")),
-    )
+    monkeypatch.setattr(flush_memory, "load_state", _returns({}))
+    monkeypatch.setattr(llm_client, "call_llm", _raises(RuntimeError("provider failed")))
+    monkeypatch.setattr(memory_queue, "enqueue", _raises(RuntimeError("queue failed")))
 
     with pytest.raises(RuntimeError, match="not durably persisted"):
         flush_memory.main()
     assert transient.exists()
+    assert _session_records(vault)
 
 
 def test_flush_allows_transcript_under_external_state_cache(monkeypatch, tmp_path):

@@ -29,6 +29,28 @@ from tests.test_queue_v3_capture_links import (  # noqa: E402
 )
 
 
+@pytest.fixture(autouse=True)
+def _own_session_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Keep the session record these tests provoke out of the owner's vault.
+
+    `process_new_capture` keeps the session before anything judges it, and it
+    writes to `flush_memory.ROOT` — a module-level constant, not the vault the
+    coordinator under test is bound to. This checkout has been the live vault
+    since 2026-08-21, so every run left a record in it; two of them were still
+    there on 2026-08-26, under `2026-08-16` and today's date, invented sessions
+    named `session-1` with bodies reading `debug evidence` and `status only`.
+    The writer never raises by contract, so nothing said so.
+
+    Pointing `ROOT` at a directory outside the vault is enough: the transaction
+    refuses a target outside its own vault and the writer swallows that, which
+    is exactly the no-op these tests always assumed they were getting.
+    """
+    vault = tmp_path / "session-record-vault"
+    (vault / "knowledge" / "raw" / "sessions").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(flush_memory, "ROOT", vault)
+    return vault
+
+
 def _publish_decision(
     queue, coordinator, binding, lease, owner, task_fence, intent_fence
 ):
