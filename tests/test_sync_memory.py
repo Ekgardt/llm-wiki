@@ -176,8 +176,6 @@ def _build_vault(tmp_path: Path) -> tuple[Path, Path, Path]:
         root / "knowledge" / "notes",
         root / "scripts",
         root / "integrations" / "claude-code",
-        root / "integrations" / "cursor" / "rules",
-        root / "integrations" / "antigravity",
         state / "run" / "queue",
         state / "logs",
         state / "cache",
@@ -206,8 +204,6 @@ def _build_vault(tmp_path: Path) -> tuple[Path, Path, Path]:
         "scripts/llm-wiki-memory-opencode.js",
         "scripts/codex_memory.py",
         "integrations/claude-code/settings.json",
-        "integrations/cursor/rules/llm-wiki.mdc",
-        "integrations/antigravity/AGENTS.md",
     ):
         (root / relative).write_text("{}\n", encoding="utf-8")
     return root, state, home

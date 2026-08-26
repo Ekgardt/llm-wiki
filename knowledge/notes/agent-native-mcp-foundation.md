@@ -48,3 +48,4 @@ capture on hosts with different lifecycle APIs.
 - [[knowledge/notes/durable-capture-producer-activation-decision]]
 - [[knowledge/notes/integration-config-backup-retention-decision]]
 - [[knowledge/notes/managed-ide-hooks-install-update-decision]]
+- [[knowledge/notes/retire-cursor-and-antigravity-decision]]

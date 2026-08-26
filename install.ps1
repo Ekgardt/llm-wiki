@@ -14,7 +14,7 @@
 #   3. Runs a bounded production smoke
 #   4. Sets LLM_WIKI_ROOT environment variable (user-level)
 #   5. Registers Windows Task Scheduler (nightly + weekly)
-#   6. Detects agents (OpenCode, Codex, Claude Code, Cursor)
+#   6. Detects agents (Claude Code, OpenCode, Codex)
 #   7. Wires up Codex wrapper to PowerShell profile
 #   8. Copies OpenCode plugin if OpenCode is installed
 #   9. Builds search index
@@ -364,8 +364,6 @@ Ok "LLM_WIKI_ROOT set (User scope); runtime at $STATE_ROOT\{run,logs,cache} (git
 Info "Registering Windows Task Scheduler..."
 $uvPath = (Get-Command uv).Source
 $schedulerWarning = $false
-$cursorDetected = [bool]((Test-Path "$env:USERPROFILE\.cursor") -or (Get-Command cursor -ErrorAction SilentlyContinue))
-$antigravityDetected = [bool]((Test-Path "$env:USERPROFILE\.gemini\antigravity-ide") -or (Get-Command agy -ErrorAction SilentlyContinue))
 # Detected here, before the transaction, so the settings our hooks live in are
 # owned by it: an uninstall has to take back exactly what the install wrote.
 $claudeDetected = [bool]((Get-Command claude -ErrorAction SilentlyContinue) -or (Test-Path "$env:USERPROFILE\.claude") -or (Test-Path "$env:USERPROFILE\.claude.json"))
@@ -385,8 +383,6 @@ try {
         "--scheduler", "native",
         "--powershell-path", $powerShellPath
     )
-    if ($cursorDetected) { $installControlArgs += "--cursor-hooks" }
-    if ($antigravityDetected) { $installControlArgs += "--antigravity-hooks" }
     if ($claudeDetected) { $installControlArgs += "--claude-settings" }
     if ($codexHooksState -eq "absent") { $installControlArgs += "--codex-hooks" }
     $installControlJson = Invoke-NativeCommand uv $installControlArgs -CaptureOutput
@@ -508,29 +504,8 @@ if ($claudeDetected) {
     }
 }
 
-# Cursor
-if ($cursorDetected) {
-    if ($schedulerWarning) {
-        $agents += "Cursor: conflict or unverified"
-    } else {
-        $agents += "Cursor: active automatic local hooks"
-        Ok "Cursor local user hooks are active"
-        Info "Cursor cloud agents do not load user-level hooks."
-    }
-}
-
-# Antigravity
-if ($antigravityDetected) {
-    if ($schedulerWarning) {
-        $agents += "Antigravity: conflict or unverified"
-    } else {
-        $agents += "Antigravity: active automatic local hooks"
-        Ok "Antigravity local user hooks are active"
-    }
-}
-
 if ($agents.Count -eq 0) {
-    Warn "No agents detected. Install OpenCode, Codex, Claude Code, Cursor, or Antigravity."
+    Warn "No agents detected. Install Claude Code, OpenCode, or Codex."
 } else {
     Ok "Agent integrations:"
     $agents | ForEach-Object { Info "  - $_" }

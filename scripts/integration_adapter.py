@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import secrets
@@ -38,17 +37,12 @@ MAINTENANCE_DRAIN_TIMEOUT_SECONDS = 600
 MAX_TRANSCRIPT_TEXT_CHARS = 8000
 MAX_CHECKPOINT_ERROR_CHARS = 500
 MAX_STDIN_BYTES = 65_536
-MAX_HOST_STRING_CHARS = 16_384
-MAX_HOST_ID_CHARS = 512
-MAX_WORKSPACE_ROOTS = 16
-MAX_HOST_INDEX = 1_000_000_000
 TRANSIENT_CREATE_ATTEMPTS = 10
 PENDING_CLAIM_SECONDS = 30.0
 MAX_CAPTURE_INTENT_BYTES = 1024 * 1024
 MAX_CAPTURE_EVIDENCE_BYTES = 900 * 1024
 CAPTURE_HANDLER_VERSION = 1
-IDE_SOURCES = frozenset({"cursor", "antigravity"})
-SOURCES = frozenset({"claude", "opencode", "codex", *IDE_SOURCES})
+SOURCES = frozenset({"claude", "opencode", "codex"})
 EVENTS = frozenset(
     {"session_start", "session_end", "pre_compact", "stop", "user_prompt", "post_tool_use"}
 )
@@ -113,238 +107,6 @@ def _first_string(*values: Any) -> str | None:
 
 def _safe_string(value: str | None) -> str | None:
     return redact_secrets(value) if value is not None else None
-
-
-def _bounded_string(
-    value: object,
-    *,
-    limit: int = MAX_HOST_STRING_CHARS,
-    required: bool = False,
-) -> str | None:
-    if value is None and not required:
-        return None
-    if not isinstance(value, str) or len(value.encode("utf-8")) > limit:
-        raise ValueError("invalid integration event")
-    return value
-
-
-def _bounded_mapping(value: object) -> Mapping[str, Any]:
-    if not isinstance(value, Mapping):
-        raise ValueError("invalid integration event")
-    return value
-
-
-def _bounded_strings(value: object) -> tuple[str, ...]:
-    if value is None:
-        return ()
-    if not isinstance(value, list) or len(value) > MAX_WORKSPACE_ROOTS:
-        raise ValueError("invalid integration event")
-    return tuple(str(_bounded_string(item, required=True)) for item in value)
-
-
-def _bounded_index(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_HOST_INDEX:
-        raise ValueError("invalid integration event")
-    return value
-
-
-def _bounded_bool(value: object) -> bool:
-    if not isinstance(value, bool):
-        raise ValueError("invalid integration event")
-    return value
-
-
-def _bounded_percent(value: object) -> int | float | None:
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 100:
-        raise ValueError("invalid integration event")
-    return value
-
-
-def _first_bounded(
-    raw: Mapping[str, Any],
-    *names: str,
-    limit: int = MAX_HOST_STRING_CHARS,
-) -> str | None:
-    values = (_bounded_string(raw.get(name), limit=limit) for name in names)
-    return next((value for value in values if value is not None), None)
-
-
-def _single_workspace(roots: tuple[str, ...]) -> str | None:
-    if len(roots) == 1:
-        return roots[0]
-    return None
-
-
-def _host_base(
-    raw: Mapping[str, Any],
-    *,
-    session_names: tuple[str, ...],
-    roots_name: str,
-    cwd: str | None = None,
-) -> dict[str, Any]:
-    session = _first_bounded(raw, *session_names, limit=MAX_HOST_ID_CHARS)
-    worktree = cwd or _single_workspace(_bounded_strings(raw.get(roots_name)))
-    projected: dict[str, Any] = {"session_id": session}
-    if worktree is not None:
-        projected["cwd"] = worktree
-    return projected
-
-
-def _hashed_source_event_id(source: str, event: str, projected: Mapping[str, Any]) -> str:
-    identity = {"source": source, "event": event, "fields": projected}
-    encoded = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    safe_encoded = redact_secrets(encoded)
-    return hashlib.sha256(safe_encoded.encode("utf-8")).hexdigest()
-
-
-def _attach_source_event_id(
-    source: str,
-    event: str,
-    raw: Mapping[str, Any],
-    projected: dict[str, Any],
-    exact_id: str | None,
-) -> dict[str, Any]:
-    source_id = _bounded_string(raw.get("source_event_id"), limit=MAX_HOST_ID_CHARS)
-    if source_id is None:
-        source_id = exact_id
-    if source_id is None:
-        source_id = _hashed_source_event_id(source, event, projected)
-    projected["source_event_id"] = source_id
-    return projected
-
-
-def _cursor_session_start(raw: Mapping[str, Any]) -> dict[str, Any]:
-    reason = _bounded_string(raw.get("source")) or "cursor-session-start"
-    return {"reason": reason}
-
-
-def _cursor_user_prompt(raw: Mapping[str, Any]) -> dict[str, Any]:
-    return {"prompt": _bounded_string(raw.get("prompt"), required=True)}
-
-
-def _cursor_post_tool(raw: Mapping[str, Any]) -> dict[str, Any]:
-    tool_input = _bounded_mapping(raw.get("tool_input"))
-    tool_name = _bounded_string(raw.get("tool_name"), limit=128, required=True)
-    target = _first_bounded(tool_input, "file_path", "filePath", "command") or ""
-    return {"tool_name": tool_name, "tool_input": {"file_path": target}}
-
-
-def _cursor_pre_compact(raw: Mapping[str, Any]) -> dict[str, Any]:
-    usage = _bounded_percent(raw.get("context_usage_percent"))
-    payload: dict[str, Any] = {"reason": "cursor-pre-compact"}
-    if usage is not None:
-        payload["token_percent"] = usage
-    return payload
-
-
-def _cursor_stop(raw: Mapping[str, Any]) -> dict[str, Any]:
-    reason = _bounded_string(raw.get("status")) or "cursor-stop"
-    return {"reason": reason}
-
-
-def _cursor_session_end(raw: Mapping[str, Any]) -> dict[str, Any]:
-    _bounded_string(raw.get("transcript_path"))
-    return {"reason": "cursor-session-end"}
-
-
-def _project_cursor(event: str, raw: Mapping[str, Any]) -> dict[str, Any]:
-    builders = {
-        "session_start": _cursor_session_start,
-        "user_prompt": _cursor_user_prompt,
-        "post_tool_use": _cursor_post_tool,
-        "pre_compact": _cursor_pre_compact,
-        "stop": _cursor_stop,
-        "session_end": _cursor_session_end,
-    }
-    builder = builders.get(event)
-    if builder is None:
-        raise ValueError("invalid integration event")
-    cwd = _bounded_string(raw.get("cwd"))
-    projected = _host_base(
-        raw,
-        session_names=("conversation_id", "session_id"),
-        roots_name="workspace_roots",
-        cwd=cwd,
-    )
-    projected.update(builder(raw))
-    id_name = "tool_use_id" if event == "post_tool_use" else "generation_id"
-    exact_id = _bounded_string(raw.get(id_name), limit=MAX_HOST_ID_CHARS)
-    return _attach_source_event_id("cursor", event, raw, projected, exact_id)
-
-
-ANTIGRAVITY_TOOLS = {
-    "write_to_file": ("Write", "TargetFile"),
-    "replace_file_content": ("Edit", "TargetFile"),
-    "multi_replace_file_content": ("MultiEdit", "TargetFile"),
-    "run_command": ("Bash", "CommandLine"),
-}
-
-
-def _antigravity_session_start(raw: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        "reason": "antigravity-initial-invocation",
-        "host_invocation_num": _bounded_index(raw.get("invocationNum")),
-    }
-
-
-def _antigravity_post_tool(raw: Mapping[str, Any]) -> dict[str, Any]:
-    tool_call = _bounded_mapping(raw.get("toolCall"))
-    host_name = _bounded_string(tool_call.get("name"), limit=128, required=True)
-    tool_spec = ANTIGRAVITY_TOOLS.get(str(host_name))
-    if tool_spec is None:
-        raise ValueError("invalid integration event")
-    tool_input = _bounded_mapping(tool_call.get("args"))
-    tool_name, target_name = tool_spec
-    target = _bounded_string(tool_input.get(target_name), required=True)
-    projected: dict[str, Any] = {
-        "tool_name": tool_name,
-        "tool_input": {"file_path": target},
-        "host_step_index": _bounded_index(raw.get("stepIdx")),
-    }
-    cwd = _bounded_string(tool_input.get("Cwd"))
-    if cwd is not None:
-        projected["cwd"] = cwd
-    error = _bounded_string(raw.get("error"), limit=4096)
-    if error:
-        projected["checkpoint_type"] = "significant_failure"
-    return projected
-
-
-def _antigravity_stop(raw: Mapping[str, Any]) -> dict[str, Any]:
-    reason = _bounded_string(raw.get("terminationReason")) or "antigravity-stop"
-    return {
-        "reason": reason,
-        "host_execution_num": _bounded_index(raw.get("executionNum")),
-    }
-
-
-def _project_antigravity(event: str, raw: Mapping[str, Any]) -> dict[str, Any]:
-    builders = {
-        "session_start": _antigravity_session_start,
-        "post_tool_use": _antigravity_post_tool,
-        "stop": _antigravity_stop,
-        "session_end": _antigravity_stop,
-    }
-    builder = builders.get(event)
-    if builder is None:
-        raise ValueError("invalid integration event")
-    projected = _host_base(
-        raw,
-        session_names=("conversationId",),
-        roots_name="workspacePaths",
-    )
-    projected.update(builder(raw))
-    return _attach_source_event_id("antigravity", event, raw, projected, None)
-
-
-def _project_source_payload(source: str, event: str, raw: Mapping[str, Any]) -> Mapping[str, Any]:
-    projectors = {"cursor": _project_cursor, "antigravity": _project_antigravity}
-    projector = projectors.get(source)
-    if projector is None:
-        return raw
-    return projector(event, raw)
 
 
 def _source_event_id(raw: Mapping[str, Any]) -> str | None:
@@ -600,7 +362,7 @@ def normalize_event(
     """Map one host-shaped event to the canonical, redacted envelope."""
     if source not in SOURCES or event not in EVENTS or not isinstance(raw, Mapping):
         raise ValueError("invalid integration event")
-    projected = _project_source_payload(source, event, raw)
+    projected = raw
     payload = _event_payload(source, event, projected)
     _copy_checkpoint_signals(payload, projected)
     _normalize_payload_delta(payload)
@@ -629,45 +391,6 @@ def normalize_event(
         parent_event_id=_safe_string(_string(projected.get("parent_event_id"))),
         source_event_id=_safe_string(_source_event_id(projected)),
         redact=redact_secrets,
-    )
-
-
-def _map_antigravity_stop(raw: Mapping[str, Any]) -> str:
-    if _bounded_bool(raw.get("fullyIdle")):
-        return "session_end"
-    return "stop"
-
-
-def _map_antigravity_event(event: str, raw: Mapping[str, Any]) -> str | None:
-    if event == "session_start":
-        if _bounded_index(raw.get("invocationNum")) != 0:
-            return None
-        return event
-    if event == "stop":
-        return _map_antigravity_stop(raw)
-    return event
-
-
-def normalize_host_event(
-    source: str,
-    event: str,
-    raw: Mapping[str, Any],
-    *,
-    occurred_at: datetime | None = None,
-    captured_at: datetime | None = None,
-) -> EventEnvelope | None:
-    """Normalize one official host event, omitting protocol-only occurrences."""
-    mapped_event = event
-    if source == "antigravity":
-        mapped_event = _map_antigravity_event(event, raw)
-    if mapped_event is None:
-        return None
-    return normalize_event(
-        source,
-        mapped_event,
-        raw,
-        occurred_at=occurred_at,
-        captured_at=captured_at,
     )
 
 
@@ -2267,7 +1990,7 @@ def _ingest_user_prompt(
     _run_delegate(
         "user_prompt_capture.py",
         payload,
-        forward_stdout=envelope.agent not in IDE_SOURCES,
+        forward_stdout=True,
         project_dir=project_dir,
     )
     _run_delegate(
@@ -2838,41 +2561,6 @@ def _apply_checkpoint_arg(raw: dict[str, Any], checkpoint_type: str | None) -> d
     return projected
 
 
-def _normalize_cli_event(source: str, event: str, raw: Mapping[str, Any]) -> EventEnvelope | None:
-    if source in IDE_SOURCES:
-        return normalize_host_event(source, event, raw)
-    return normalize_occurrence_event(source, event, raw)
-
-
-def _result_context(result: Mapping[str, Any]) -> str:
-    context = result.get("context")
-    if isinstance(context, str):
-        return context
-    return ""
-
-
-def _cursor_output(event: str, result: Mapping[str, Any]) -> dict[str, object]:
-    if event == "user_prompt":
-        return {"continue": True}
-    if event != "session_start":
-        return {}
-    context = _result_context(result)
-    if context:
-        return {"additional_context": context}
-    return {}
-
-
-def _antigravity_output(event: str, result: Mapping[str, Any]) -> dict[str, object]:
-    if event == "stop":
-        return {"decision": "stop"}
-    if event != "session_start":
-        return {}
-    context = _result_context(result)
-    if context:
-        return {"injectSteps": [{"ephemeralMessage": context}]}
-    return {}
-
-
 def _legacy_output(
     source: str, event_type: str, result: dict[str, Any]
 ) -> dict[str, object] | None:
@@ -2888,29 +2576,6 @@ def _legacy_output(
     }
 
 
-def _success_output(
-    source: str,
-    requested_event: str,
-    envelope: EventEnvelope,
-    result: dict[str, Any],
-) -> dict[str, object] | None:
-    if source == "cursor":
-        return _cursor_output(requested_event, result)
-    if source == "antigravity":
-        return _antigravity_output(requested_event, result)
-    return _legacy_output(source, envelope.event_type, result)
-
-
-def _neutral_host_output(source: str | None, event: str | None) -> dict[str, object] | None:
-    outputs = {
-        ("cursor", "user_prompt"): {"continue": True},
-        ("antigravity", "stop"): {"decision": "stop"},
-    }
-    if source in IDE_SOURCES:
-        return outputs.get((source, event), {})
-    return None
-
-
 def _delegate_forwards_stdout(name: str) -> bool:
     return name in {
         "session_start_context.py",
@@ -2923,10 +2588,10 @@ def _dispatch_cli_event(
     args: argparse.Namespace, envelope: EventEnvelope | None
 ) -> dict[str, object] | None:
     if envelope is None:
-        return _neutral_host_output(args.source, args.event)
+        return None
     if args.delegate == CAPTURE_DELEGATES.get(envelope.event_type):
         result = ingest_event(envelope)
-        return _success_output(args.source, args.event, envelope, result)
+        return _legacy_output(args.source, envelope.event_type, result)
     if args.delegate:
         _observe_checkpoint_fail_open(envelope)
         _run_delegate(
@@ -2936,7 +2601,7 @@ def _dispatch_cli_event(
         )
         return None
     result = ingest_event(envelope)
-    return _success_output(args.source, args.event, envelope, result)
+    return _legacy_output(args.source, envelope.event_type, result)
 
 
 def _run_cli_event(args: argparse.Namespace) -> dict[str, object] | None:
@@ -2945,19 +2610,12 @@ def _run_cli_event(args: argparse.Namespace) -> dict[str, object] | None:
     if not args.event:
         raise ValueError("invalid integration event")
     raw = _apply_checkpoint_arg(_read_hook_input(), args.checkpoint_type)
-    envelope = _normalize_cli_event(args.source, args.event, raw)
+    envelope = normalize_occurrence_event(args.source, args.event, raw)
     return _dispatch_cli_event(args, envelope)
-
-
-def _args_neutral_output(args: argparse.Namespace | None) -> dict[str, object] | None:
-    if args is None:
-        return None
-    return _neutral_host_output(args.source, args.event)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Host-safe CLI: invalid input and capture failures never escape."""
-    args: argparse.Namespace | None = None
     output: dict[str, object] | None = None
     try:
         args = _parser().parse_args(argv)
@@ -2968,7 +2626,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output = _run_cli_event(args)
     except (Exception, SystemExit):  # noqa: BLE001
         print("integration_adapter: capture skipped", file=sys.stderr)
-        output = _args_neutral_output(args)
+        output = None
     if output is not None:
         print(json.dumps(output, ensure_ascii=False))
     return 0

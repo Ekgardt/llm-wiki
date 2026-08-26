@@ -233,8 +233,6 @@ def _build_root(tmp_path: Path) -> tuple[Path, Path, Path]:
         root / "scripts",
         root / "integrations" / "claude-code",
         root / "integrations" / "codex",
-        root / "integrations" / "cursor" / "rules",
-        root / "integrations" / "antigravity",
         state_root / "run" / "queue",
         state_root / "logs",
         state_root / "cache",
@@ -248,18 +246,8 @@ def _build_root(tmp_path: Path) -> tuple[Path, Path, Path]:
         "scripts/llm-wiki-memory-opencode.js",
         "scripts/codex_memory.py",
         "integrations/claude-code/settings.json",
-        "integrations/cursor/rules/llm-wiki.mdc",
-        "integrations/antigravity/AGENTS.md",
     ):
         (root / relative).write_text("{}\n", encoding="utf-8")
-    source_root = Path(__file__).resolve().parent.parent
-    for relative in (
-        "integrations/cursor/hooks.json",
-        "integrations/antigravity/hooks.json",
-    ):
-        destination = root / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes((source_root / relative).read_bytes())
     (root / "integrations" / "codex" / "hooks.json").write_text(
         json.dumps(_codex_hooks_fixture(), indent=2) + "\n", encoding="utf-8"
     )
@@ -1141,21 +1129,6 @@ def test_codex_parser_input_remains_file_bounded(tmp_path, monkeypatch):
 
     assert configured is False
     assert reason == "config_missing_or_unsafe"
-
-
-def test_project_scoped_cursor_and_antigravity_are_advisory(tmp_path):
-    from doctor import run_doctor
-
-    root, state_root, home = _build_root(tmp_path)
-    (home / ".cursor").mkdir()
-    (home / ".gemini" / "config").mkdir(parents=True)
-    (home / ".gemini" / "antigravity-ide").mkdir()
-
-    check = _check(run_doctor(root=root, state_root=state_root, home=home), "integrations")
-
-    assert check["status"] == "degraded"
-    assert check["details"]["hosts"]["cursor"]["status"] == "degraded"
-    assert check["details"]["hosts"]["antigravity"]["status"] == "degraded"
 
 
 def test_repair_creates_runtime_and_is_idempotent(tmp_path, monkeypatch):
@@ -2268,8 +2241,6 @@ def test_unrelated_installed_configs_are_not_false_positives(tmp_path):
         home / ".claude" / "settings.json": "unrelated claude config",
         home / ".config" / "opencode" / "plugins" / "llm-wiki-memory.js": "unrelated plugin",
         home / ".codex" / "config.toml": "unrelated codex config",
-        home / ".cursor" / "hooks.json": '{"version":1,"hooks":{}}',
-        home / ".gemini" / "config" / "hooks.json": '{"team-hook":{}}',
     }
     for path, content in configs.items():
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2281,8 +2252,6 @@ def test_unrelated_installed_configs_are_not_false_positives(tmp_path):
     assert check["details"]["hosts"]["claude"]["status"] == "degraded"
     assert check["details"]["hosts"]["opencode"]["status"] == "degraded"
     assert check["details"]["hosts"]["codex"]["status"] == "degraded"
-    assert check["details"]["hosts"]["cursor"]["status"] == "degraded"
-    assert check["details"]["hosts"]["antigravity"]["status"] == "degraded"
 
 
 @pytest.mark.parametrize(
@@ -2313,45 +2282,6 @@ def test_installed_integration_requires_expected_marker(tmp_path, host, relative
 
     expected = "degraded" if host == "codex" else "ok"
     assert check["details"]["hosts"][host]["status"] == expected
-
-
-@pytest.mark.parametrize(
-    ("host", "relative", "expected"),
-    [
-        ("cursor", ".cursor/rules/llm-wiki.mdc", "degraded"),
-        ("antigravity", ".gemini/antigravity/AGENTS.md", "skipped"),
-    ],
-)
-def test_legacy_ide_markers_do_not_activate_managed_hooks(tmp_path, host, relative, expected):
-    from doctor import run_doctor
-
-    root, state_root, home = _build_root(tmp_path)
-    path = home / relative
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("LLM-Wiki LLM_WIKI_ROOT", encoding="utf-8")
-
-    check = _check(run_doctor(root=root, state_root=state_root, home=home), "integrations")
-
-    assert check["details"]["hosts"][host]["status"] == expected
-
-
-def test_managed_ide_hooks_report_active_structural_ownership(tmp_path):
-    from doctor import run_doctor
-    from integration_hook_config import managed_ide_hook_resources
-
-    root, state_root, home = _build_root(tmp_path)
-    (home / ".cursor").mkdir()
-    (home / ".gemini" / "antigravity-ide").mkdir(parents=True)
-    for resource in managed_ide_hook_resources(root, home):
-        resource.write_owned(resource.desired)
-
-    check = _check(run_doctor(root=root, state_root=state_root, home=home), "integrations")
-
-    for host in ("cursor", "antigravity"):
-        result = check["details"]["hosts"][host]
-        assert result["status"] == "ok"
-        assert result["configuration_status"] == "active"
-        assert result["capture_mode"] == "official-user-hooks"
 
 
 def _missing_pyright_identity():

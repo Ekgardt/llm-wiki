@@ -188,7 +188,7 @@ def test_the_shipped_template_is_accepted(tmp_path: Path) -> None:
 def test_uninstall_rebuilds_every_resource_the_manifest_names(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The rebuild used to name only Cursor and Antigravity.
+    """The rebuild used to name only the managed IDE fragments.
 
     Anything else the install owned — the OpenCode plugin, and now the Claude
     settings — was simply absent from the uninstall, so it stayed on disk.

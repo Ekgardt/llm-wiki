@@ -5,7 +5,8 @@ description: "Cursor and Antigravity user hooks use canonical lifecycle adapters
 date: 2026-08-16
 confidence: high
 source_authority: user
-status: active
+status: superseded
+superseded_by: [[knowledge/notes/retire-cursor-and-antigravity-decision]]
 ---
 # Managed IDE Hooks Use Install V2 Fragment Ownership
 
@@ -105,3 +106,4 @@ conversation log shape and existing regular-file/link/content bounds.
 - [[knowledge/notes/integration-config-backup-retention-decision]]
 - [[knowledge/notes/audit-closure-security-recovery-control-plane-decision]]
 - [[knowledge/notes/agent-native-mcp-foundation]]
+- [[knowledge/notes/retire-cursor-and-antigravity-decision]]

@@ -7,7 +7,7 @@ This is a personal memory system that grew into something others might find usef
 **Yes please:**
 - Bug fixes for things that break the silent-capture / compile pipeline
 - New LLM backend adapters (Azure OpenAI, Anthropic direct, Bedrock, local llama.cpp)
-- New tool integrations (Cursor, Cline, Continue, Aider, your-favorite-agent)
+- New tool integrations (Cline, Continue, Aider, your-favorite-agent)
 - Test coverage improvements — especially for concurrency / failure modes
 - Documentation improvements (especially macOS/Linux install paths)
 - Lint check improvements that catch real defects without false positives

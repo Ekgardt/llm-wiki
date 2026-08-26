@@ -1209,8 +1209,6 @@ def test_install_cli_activates_v2_with_explicit_home(tmp_path: Path, monkeypatch
         profile=tmp_path / ".profile",
         powershell_path=None,
         home=tmp_path / "home",
-        cursor_hooks=True,
-        antigravity_hooks=True,
         opencode_plugin=False,
         claude_settings=False,
         codex_hooks=False,
@@ -1873,47 +1871,6 @@ def test_v2_update_drift_is_quarantined_without_overwriting_user_value(
     assert active == old
     assert value == b"user-drift"
     assert validate_install_state(state_root)["status"] == "quarantined"
-
-
-def test_v2_cursor_update_and_uninstall_never_store_unrelated_config_bytes(
-    tmp_path: Path,
-) -> None:
-    from integration_hook_config import cursor_hooks_resource
-
-    state_root = tmp_path / "state"
-    state_root.mkdir()
-    destination = tmp_path / ".cursor" / "hooks.json"
-    destination.parent.mkdir()
-    original = {
-        "private": "DO-NOT-COPY-TO-RUNTIME",
-        "version": 1,
-        "hooks": {"afterFileEdit": [{"command": "user-format"}]},
-    }
-    destination.write_text(json.dumps(original), encoding="utf-8")
-    old = cursor_hooks_resource(destination, {"sessionStart": [{"command": "llm-wiki old"}]})
-    new = cursor_hooks_resource(destination, {"sessionStart": [{"command": "llm-wiki new"}]})
-
-    install_resources(
-        state_root=state_root,
-        vault_root=tmp_path / "vault",
-        release=_release(),
-        scheduler_backend="cron",
-        resources=[old],
-        control_version=2,
-    )
-    install_resources(
-        state_root=state_root,
-        vault_root=tmp_path / "vault",
-        release={**_release(), "project_version": "4.1.0"},
-        scheduler_backend="cron",
-        resources=[new],
-        control_version=2,
-    )
-    uninstall_resources(state_root=state_root, resources=[new])
-
-    assert json.loads(destination.read_bytes()) == original
-    preimages = (state_root / "run" / "install" / "preimages").glob("*.bin")
-    assert all(b"DO-NOT-COPY-TO-RUNTIME" not in path.read_bytes() for path in preimages)
 
 
 def test_interrupted_v2_update_rollback_uses_persisted_fragments_not_checkout_desired(

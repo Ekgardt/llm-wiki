@@ -2,8 +2,8 @@
 
 You are working in the **LLM-wiki** memory system — a local, file-based,
 git-native knowledge base for multi-agent memory. This file is the canonical
-operating contract for any AI agent (Claude Code, OpenCode, Codex, Cursor,
-Antigravity) editing this repository. `AGENTS.md` and `CLAUDE.md` are kept
+operating contract for any AI agent (Claude Code, OpenCode, Codex) editing
+this repository. `AGENTS.md` and `CLAUDE.md` are kept
 byte-identical so every agent reads the same rules regardless of which file
 it loads.
 

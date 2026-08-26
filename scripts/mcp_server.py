@@ -1,6 +1,6 @@
 """LLM-Wiki MCP Server — 12 task-shaped tools, stdio transport, 100% local.
 
-Gives AI agents (Claude Code, OpenCode, Codex, Cursor, Antigravity) structured
+Gives AI agents (Claude Code, OpenCode, Codex) structured
 access to the knowledge vault via Model Context Protocol. No server, no cloud,
 no network — stdio subprocess on the same machine.
 

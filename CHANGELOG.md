@@ -6,7 +6,33 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Removed
+
+- **Cursor and Antigravity are no longer supported platforms.** The owner uses
+  neither, and carrying two hosts nobody exercises meant two managed hook
+  formats, two doctor checks, two installer detections, and two event
+  projections whose only evidence was their own tests. Claude Code, OpenCode,
+  and Codex CLI remain supported. Gone: `integrations/cursor/`,
+  `integrations/antigravity/`, the `--cursor-hooks` / `--antigravity-hooks`
+  install flags, installer detection in `install.sh` and `install.ps1`, the
+  IDE branches in `integration_adapter.py`, the two `event_envelope.py` agent
+  patterns, the two `doctor.py` integration hosts, and the `cursor` /
+  `antigravity` values of `flush_memory.py --agent`.
+- What an existing user of those hosts loses: automatic capture and injected
+  session context. MCP reads and actions were never platform-specific and are
+  unaffected — any agent that speaks MCP can still use the vault.
+
 ### Fixed
+
+- `uninstall` and `rollback` still take back a Cursor or Antigravity hook
+  fragment written by an install from before the retirement. Deleting the
+  writing code outright would have made the manifest name a resource the code
+  no longer supplies, and the control plane fails closed on that
+  (`install_resource_request_mismatch`) — leaving the fragment in
+  `~/.cursor/hooks.json` or `~/.gemini/config/hooks.json` pointing at a vault
+  nothing maintains, with no way to remove it. The projection readers and
+  writers for both formats are therefore kept as a removal-only path;
+  `write_owned` on them refuses with `install_resource_retired`.
 
 - The grounded answer now captures the same corpus retrieval searched. It read
   the vault without the approved code roots, so every candidate under `docs/`

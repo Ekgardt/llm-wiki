@@ -90,8 +90,7 @@ commit into a new `~/LLM-wiki`, verifies `HEAD`, repository identity, and requir
 then executes the checked-out installer. Branches and tags are rejected. Existing
 checkouts retain all remote settings unless `--protect-push` or `-ProtectPush` is explicit.
 The installer detects agents. It configures OpenCode, Codex, and Claude only when their
-configuration verifies. When local Cursor or Antigravity is detected, it also installs
-and verifies managed user-level hooks. Cursor cloud agents do not load those hooks.
+configuration verifies.
 Obsidian remains a viewer-only integration.
 
 ### Installed-vault reliability check
@@ -146,8 +145,6 @@ successful cutover and do not remove v2 state manually.
 | **Claude Code** | Configure MCP for reads/actions; the installer's ownership transaction writes the thin lifecycle hooks into `~/.claude/settings.json` and takes them back on uninstall. |
 | **OpenCode** | Configure MCP, then copy `scripts/llm-wiki-memory-opencode.js` for lifecycle events. |
 | **Codex CLI** | Configure MCP; on Windows add `. "$env:LLM_WIKI_ROOT\scripts\codex-memory-wrapper.ps1"` to `$PROFILE` for lifecycle capture. |
-| **Cursor** | Configure MCP for reads/actions, install Cursor locally, then rerun the native installer. It manages exact LLM-Wiki handlers in `~/.cursor/hooks.json`; the rules file is optional guidance. |
-| **Antigravity** | Configure MCP for reads/actions, install Antigravity locally, then rerun the native installer. It manages only the top-level `llm-wiki` fragment in `~/.gemini/config/hooks.json`; `AGENTS.md` remains optional guidance. |
 | **Obsidian** | Optional Markdown viewer only: open the vault directly. No Obsidian UI is required. |
 
 Managed IDE hooks preserve unrelated configuration and use verified sibling preimages.
@@ -214,7 +211,7 @@ codes, and qualification evidence.
 
 ### Register scheduled maintenance
 
-The installers publish profile/environment, scheduler, and detected Cursor/Antigravity
+The installers publish profile/environment, scheduler, and detected agent
 hook fragments through one resumable `run/install/` ownership transaction. Version 2
 keeps the pre-first-install projection for uninstall and one latest committed update
 projection for explicit rollback. Recovery uses persisted historical definitions, not
@@ -595,7 +592,7 @@ pages change.
 | `docs/` | CODE | This file + ARCHITECTURE + STRUCTURE + CODE-NAVIGATION + EXPORTING |
 | `skills/` | CODE | 9 agent skills |
 | `rules/` | CODE | 3 file-handling policies |
-| `integrations/` | CODE | Thin claude-code, cursor, and antigravity host wiring |
+| `integrations/` | CODE | Thin claude-code and codex host wiring |
 | `benchmark/` | CODE | Benchmark suite + report |
 | `knowledge/daily/` | KNOWLEDGE | Append-only session logs (private) |
 | `knowledge/notes/` | KNOWLEDGE | Durable OKF pages |
