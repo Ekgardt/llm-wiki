@@ -42,7 +42,7 @@ import sqlite3
 import sys
 import time
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -65,11 +65,21 @@ _MAX_TASK_BYTES = 4096
 _MAX_AGENT_BYTES = 128
 _MIN_TTL_SECONDS = 1
 _MAX_TTL_SECONDS = 86400
-# Releasing a claim nobody was told about competes with whatever stopped the
+# Settling a claim nobody was told about competes with whatever stopped the
 # announcement, so it is worth more than one try. Six attempts spread over
-# about two seconds, then the caller's own failure stands.
+# about one and a half seconds, then the caller's own failure stands. The
+# number is a guess made on 2026-08-22 and it is still a guess: nobody has
+# measured what a loaded hosted Windows image needs, and this repository has
+# no Windows machine to measure it on. Exhausting it is reported rather than
+# swallowed, so the guess can be corrected from evidence instead of argument.
 _RELEASE_ATTEMPTS = 6
 _RELEASE_RETRY_SECONDS = 0.1
+# Asking whether the announcement landed takes the same global writer gate the
+# announcement just lost, so a single ask can block for that gate's whole
+# budget. Retrying the ask must not multiply that wait by the attempt count:
+# once the recovery has spent this long, it stops asking and releases.
+_SETTLE_READ_SECONDS = 5.0
+_MAX_REPORTED_HOLDERS = 4
 
 
 @dataclass(frozen=True)
@@ -93,10 +103,16 @@ class BlackboardFenceError(RuntimeError):
 class BlackboardConflictError(RuntimeError):
     """A requested resource set overlaps a live claim."""
 
-    def __init__(self, resources: Sequence[str], conflict_id: str) -> None:
+    def __init__(
+        self,
+        resources: Sequence[str],
+        conflict_id: str,
+        holders: Sequence[Mapping[str, str]] = (),
+    ) -> None:
         self.resources = tuple(resources)
         self.conflict_id = conflict_id
-        super().__init__("blackboard resources are already claimed")
+        self.holders = tuple(dict(holder) for holder in holders)
+        super().__init__(_conflict_message(self.resources, self.holders))
 
     def __reduce__(self):
         """Rebuild from the arguments, not from the message.
@@ -105,7 +121,27 @@ class BlackboardConflictError(RuntimeError):
         alone, and crossing a process boundary raises a TypeError about a
         missing argument instead of delivering the failure.
         """
-        return (self.__class__, (self.resources, self.conflict_id))
+        return (self.__class__, (self.resources, self.conflict_id, self.holders))
+
+
+def _conflict_message(
+    resources: Sequence[str], holders: Sequence[Mapping[str, str]]
+) -> str:
+    """Name the resource and its holder, because the answer is usually there.
+
+    On 2026-08-22 and again on 2026-08-26 this failure reached CI as the bare
+    sentence "blackboard resources are already claimed", which cannot tell a
+    reader whether another agent holds the resource or the caller is meeting
+    rows it leaked itself. The holding agent and claim answer that in one line.
+    """
+    held = ", ".join(
+        f"{holder.get('resource')} held by {holder.get('agent')} "
+        f"in claim {str(holder.get('claim_id'))[:16]}"
+        for holder in holders[:_MAX_REPORTED_HOLDERS]
+    )
+    return "blackboard resources are already claimed: " + (
+        held or ", ".join(resources)
+    )
 
 
 class _ResourceBusy(RuntimeError):
@@ -435,7 +471,9 @@ def _raise_conflict(project: str, claim: BlackboardClaim, busy: _ResourceBusy) -
         record,
         f"blackboard-conflict:{conflict_id}",
     )
-    raise BlackboardConflictError(record["resources"], conflict_id)
+    raise BlackboardConflictError(
+        record["resources"], conflict_id, record["holders"]
+    )
 
 
 def _new_claim(
@@ -509,7 +547,7 @@ def _publish_active_claim(tasks_file: Path, acquired: BlackboardClaim) -> None:
 
     The resource rows are inserted before the claim is announced. When the
     announcement fails, the caller never learns that it holds the resources,
-    and its retry would meet its own rows as a conflict. Releasing here keeps
+    and its retry would meet its own rows as a conflict. Settling here keeps
     the operation atomic from the caller's side: either the claim is held and
     recorded, or it is not held at all.
 
@@ -523,28 +561,116 @@ def _publish_active_claim(tasks_file: Path, acquired: BlackboardClaim) -> None:
             _claim_active_record(acquired),
             f"blackboard-active:{acquired.claim_id}",
         )
-    except BaseException:
-        if _active_record_present(tasks_file, acquired.claim_id):
+    except BaseException as failure:
+        if _settle_unannounced_claim(tasks_file, acquired, failure):
             return
-        _release_unannounced_claim(acquired)
         raise
 
 
-def _release_unannounced_claim(acquired: BlackboardClaim) -> None:
-    """Release a claim the caller was never told it holds, and keep trying.
+def _announcement_landed(tasks_file: Path, claim_id: str) -> bool | None:
+    """Whether the activation is in the stream: yes, no, or unreadable.
 
-    The release runs under the same contention that just stopped the
-    announcement, so a single attempt is the one most likely to fail as well.
-    Failing quietly here breaks the promise the announcement makes: the caller
-    retries and meets its own rows as a conflict, for the whole lease. The
-    attempts are bounded, and the original failure is still what reaches the
-    caller — this only widens the window in which the promise can be kept.
+    The stream is read through the one global Markdown writer gate — the same
+    gate whose loss is the usual reason for being in this handler at all — so
+    this read can fail exactly when it is needed. An unreadable stream is not
+    evidence of absence, and it is not evidence of presence either, so it gets
+    its own answer instead of being folded into one of them.
     """
+    try:
+        return _active_record_present(tasks_file, claim_id)
+    except Exception:  # noqa: BLE001 - the caller's own failure is the one raised
+        return None
+
+
+def _settle_unannounced_claim(
+    tasks_file: Path, acquired: BlackboardClaim, failure: BaseException
+) -> bool:
+    """Prove the announcement landed, or release what the claim acquired.
+
+    Returns whether the claim stands: a landed record means the caller is told
+    it succeeded, and everything else means the caller's own failure reaches it.
+
+    Failing quietly here breaks the promise the announcement makes: the caller
+    retries and meets its own rows as a conflict, for the whole lease. Both
+    halves of the recovery run under the contention that stopped the
+    announcement, so both are retried, and the caller's own failure is still
+    what reaches it.
+
+    When the stream stays unreadable to the end of the budget, the release
+    happens anyway. That trade is deliberate. Leaving the rows costs a certain,
+    total, silent block of that exact resource set until the lease expires,
+    and it needs only one condition — an unreadable stream. Releasing a claim
+    that did land costs one activation that never completes, and it needs two
+    conditions at once: an append that committed and then raised, and a stream
+    that could not be read. The rarer, smaller, louder failure wins.
+    """
+    started = time.monotonic()
     for attempt in range(_RELEASE_ATTEMPTS):
-        if _released_exact_claim(acquired):
-            return
-        if attempt < _RELEASE_ATTEMPTS - 1:
-            time.sleep(_RELEASE_RETRY_SECONDS * (attempt + 1))
+        settled = _settled_claim_attempt(tasks_file, acquired, attempt, started)
+        if settled is not None:
+            return settled
+        _pause_before_release_retry(attempt)
+    _report_unsettled_claim(acquired, time.monotonic() - started, failure)
+    return False
+
+
+def _settled_claim_attempt(
+    tasks_file: Path, acquired: BlackboardClaim, attempt: int, started: float
+) -> bool | None:
+    """One round of the recovery: read the stream, then act on what it said.
+
+    True means the record landed and the claim stands, False means the claim
+    was released, and None means this round settled nothing and the next one
+    should try again.
+    """
+    landed = _announcement_landed_within(tasks_file, acquired, started)
+    if landed:
+        return True
+    if landed is None and _worth_asking_again(started, attempt):
+        return None
+    return False if _released_exact_claim(acquired) else None
+
+
+def _announcement_landed_within(
+    tasks_file: Path, acquired: BlackboardClaim, started: float
+) -> bool | None:
+    """Ask the stream only while the recovery can still afford to wait."""
+    if time.monotonic() - started > _SETTLE_READ_SECONDS:
+        return None
+    return _announcement_landed(tasks_file, acquired.claim_id)
+
+
+def _worth_asking_again(started: float, attempt: int) -> bool:
+    """Another ask is worth a round only while both budgets still allow one."""
+    return (
+        attempt < _RELEASE_ATTEMPTS - 1
+        and time.monotonic() - started <= _SETTLE_READ_SECONDS
+    )
+
+
+def _pause_before_release_retry(attempt: int) -> None:
+    if attempt < _RELEASE_ATTEMPTS - 1:
+        time.sleep(_RELEASE_RETRY_SECONDS * (attempt + 1))
+
+
+def _report_unsettled_claim(
+    acquired: BlackboardClaim, elapsed: float, failure: BaseException
+) -> None:
+    """Say that rows were left behind, because the next conflict is their child.
+
+    Nothing durable can be written here — the writer gate is the thing that
+    just failed — so this goes to stderr, where a test runner keeps it. Without
+    it the leak is invisible and the conflict it causes names no cause.
+    """
+    print(
+        f"blackboard: claim {acquired.claim_id[:16]} in project "
+        f"{acquired.project} still holds {list(acquired.resources)} after "
+        f"{_RELEASE_ATTEMPTS} release attempts in {elapsed:.2f}s; the "
+        f"announcement failed with {failure!r} and the rows stand until "
+        f"{_timestamp(acquired.expires_at)}",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def _released_exact_claim(acquired: BlackboardClaim) -> bool:
@@ -782,6 +908,12 @@ def _fold_task_record(tasks: dict[str, dict], record: dict) -> None:
     if record.get("kind") in {None, "claim-request"}:
         tasks[task_id] = dict(record)
         return
+    _fold_task_activation(tasks, task_id, record)
+
+
+def _fold_task_activation(
+    tasks: dict[str, dict], task_id: str, record: dict
+) -> None:
     if record.get("kind") == "claim-activated" and task_id in tasks:
         tasks[task_id].update(record)
 
@@ -842,6 +974,12 @@ def _fold_conflict_record(active: dict[str, dict], record: dict) -> None:
     if record.get("kind") == "conflict":
         active[conflict_id] = record
         return
+    _fold_conflict_resolution(active, conflict_id, record)
+
+
+def _fold_conflict_resolution(
+    active: dict[str, dict], conflict_id: str, record: dict
+) -> None:
     if record.get("kind") == "resolution":
         active.pop(conflict_id, None)
 
