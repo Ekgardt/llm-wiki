@@ -40,7 +40,7 @@ def _is_contention(error: BaseException) -> bool:
     return isinstance(error, RuntimeError) and "gate ownership was lost" in str(error)
 
 
-def _under_contention(call, *arguments, attempts: int = 12, **keywords):
+def _under_contention(call, *arguments, attempts: int = 12, label: str = "", **keywords):
     """Retry a blackboard call whose global writer gate timed out.
 
     Every blackboard operation, reads included, appends through the one global
@@ -48,15 +48,41 @@ def _under_contention(call, *arguments, attempts: int = 12, **keywords):
     Windows. With six processes on a hosted runner a caller can lose that gate
     for longer than its ten-second budget. That is contention, not incoherence,
     and a real caller retries it.
+
+    What finally escapes carries the whole history. A conflict is not
+    contention, so it is raised on the spot — and on 2026-08-22 and 2026-08-26
+    that reached CI as one sentence naming no resource, no attempt and no
+    elapsed time, while the contention that caused it had already been
+    swallowed here. The swallowed errors are the cause; they travel with it.
     """
+    swallowed: list[str] = []
+    started = time.monotonic()
     for attempt in range(attempts):
         try:
             return call(*arguments, **keywords)
-        except BaseException as error:
-            if attempt == attempts - 1 or not _is_contention(error):
-                raise
+        except Exception as error:
+            _swallow_or_report(error, swallowed, attempt, attempts, label, started)
             time.sleep(0.05 * (attempt + 1))
     raise AssertionError("unreachable")
+
+
+def _swallow_or_report(
+    error: Exception,
+    swallowed: list[str],
+    attempt: int,
+    attempts: int,
+    label: str,
+    started: float,
+) -> None:
+    """Keep retrying contention, or report the failure with what led to it."""
+    swallowed.append(f"attempt {attempt + 1}: {error!r}")
+    if _is_contention(error) and attempt < attempts - 1:
+        return
+    raise AssertionError(
+        f"{label or 'blackboard call'} failed after {attempt + 1} of "
+        f"{attempts} attempt(s) in {time.monotonic() - started:.2f}s; "
+        + " | ".join(swallowed)
+    ) from error
 
 
 def _write_blackboard_batch(vault: str, state_root: str, worker: int, count: int) -> int:
@@ -71,6 +97,7 @@ def _write_blackboard_batch(vault: str, state_root: str, worker: int, count: int
             "demo",
             f"worker {worker} task {index}",
             f"agent-{worker}",
+            label=f"claim of worker/{worker}/task/{index}",
             resources=[f"worker/{worker}/task/{index}"],
             # The default lease is thirty seconds. Six processes queueing for
             # one writer gate on a hosted Windows image can spend longer than
@@ -78,7 +105,12 @@ def _write_blackboard_batch(vault: str, state_root: str, worker: int, count: int
             # run for contention rather than for incoherence.
             ttl_seconds=600,
         )
-        if _under_contention(blackboard.complete_task, "demo", claim):
+        if _under_contention(
+            blackboard.complete_task,
+            "demo",
+            claim,
+            label=f"completion of worker/{worker}/task/{index}",
+        ):
             completed += 1
     return completed
 
@@ -105,7 +137,9 @@ def _read_blackboard_status(vault: str, state_root: str, count: int) -> int:
     _child_writer_budget()
     largest = 0
     for _ in range(count):
-        status = _under_contention(blackboard.get_status, "demo")
+        status = _under_contention(
+            blackboard.get_status, "demo", label="status read"
+        )
         largest = max(largest, status["active_tasks"] + status["completed_tasks"])
         assert status["active_tasks"] >= 0
         assert status["completed_tasks"] >= 0
@@ -475,3 +509,33 @@ def test_a_claim_whose_record_landed_before_the_failure_stands(
     assert status["active_tasks"] == 1
     assert blackboard.complete_task("demo", claim) is True
     assert blackboard.get_status("demo")["active_tasks"] == 0
+
+
+def test_a_failed_call_reports_the_contention_that_led_to_it() -> None:
+    """What escapes the retry names the resource, the attempts and the cause.
+
+    The conflict this test injects is what CI reported twice; on its own it is
+    one sentence with no history, and the contention that produced the leak has
+    already been swallowed by the retry above.
+    """
+    calls: list[int] = []
+
+    def conflicted():
+        calls.append(1)
+        if len(calls) < 3:
+            raise TimeoutError("Markdown writer gate deadline expired")
+        raise blackboard.BlackboardConflictError(("worker/1/task/0",), "conflict-1")
+
+    with pytest.raises(AssertionError) as raised:
+        _under_contention(conflicted, label="claim of worker/1/task/0")
+
+    message = str(raised.value)
+    for expected in (
+        "claim of worker/1/task/0",
+        "3 of 12 attempt(s)",
+        "attempt 1: TimeoutError",
+        "attempt 2: TimeoutError",
+        "BlackboardConflictError",
+    ):
+        assert expected in message, message
+    assert isinstance(raised.value.__cause__, blackboard.BlackboardConflictError)
