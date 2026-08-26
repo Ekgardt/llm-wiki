@@ -1291,10 +1291,10 @@ def _require_citation_binding(
         raise EvidenceResolutionError("citation source hash mismatch")
     start = int(citation["byte_start"])
     end = int(citation["byte_end"])
-    _require_citation_span(citation, source, text, start, end)
+    _require_citation_range(citation, source, text, start, end)
 
 
-def _require_citation_span(
+def _require_citation_range(
     citation: Mapping[str, object], source: bytes, text: str, start: int, end: int
 ) -> None:
     if end > len(source):

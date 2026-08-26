@@ -13,22 +13,40 @@ What it measures is retrieval: whether the page that answers the question is in
 the top-k. What it does not measure is *use* — whether an agent then acts on it —
 which is the gap the MemoryArena work names and which this stand does not close.
 
+The question it asks the product is asked through a real entry point — by
+default the MCP tool's own wrapper, budget and all — because a stand that calls
+`search()` directly measures a shape no caller uses, and for four separately
+confirmed defects that is exactly why it saw nothing. See
+`benchmark/retrieval_paths.py`.
+
     uv run python benchmark/run_vault_retrieval.py
     uv run python benchmark/run_vault_retrieval.py --json
+    uv run python benchmark/run_vault_retrieval.py --path cli
+    uv run python benchmark/run_vault_retrieval.py --repeat 3   # show the spread
 """
 from __future__ import annotations
 
 import argparse
 import json
 import re
+import statistics
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
+if str(ROOT / "benchmark") not in sys.path:
+    sys.path.insert(0, str(ROOT / "benchmark"))
 
 from reliable_memory import validate_schema  # noqa: E402
+from retrieval_paths import (  # noqa: E402
+    DEFAULT_PATH,
+    PATHS,
+    Observation,
+    observe,
+    warm,
+)
 
 CORPUS = ROOT / "benchmark/vault-retrieval-v1.json"
 SCHEMA = ROOT / "benchmark/vault-retrieval-v1.schema.json"
@@ -45,6 +63,13 @@ class CaseResult:
     gold_path: str
     product_rank: int | None
     grep_rank: int | None
+    # Why the answer came out that way. A rank that moved between runs is a
+    # number; `signals_used` without `dense`, or a `fallback_reason`, is the
+    # reason for it, and the reason is what a reader can act on.
+    effective_mode: str | None = None
+    signals_used: list[str] = field(default_factory=list)
+    fallback_reason: str | None = None
+    seconds: float = 0.0
 
 
 def load_corpus(path: Path) -> dict:
@@ -99,15 +124,25 @@ def grep_ranking(vault: Path, question: str, limit: int = TOP_K) -> list[str]:
 _SELF = "benchmark/vault-retrieval-v1.json"
 
 
-def _result_path(item: dict) -> str:
-    return str(item.get("path") or item.get("relative_path") or "")
+def product_observation(
+    question: str, limit: int = TOP_K, path: str = DEFAULT_PATH
+) -> Observation:
+    """One retrieval through a real entry point, kept whole — ranks and reasons."""
+    seen = observe(path, question, limit + 1)
+    kept = [found for found in seen.result_paths if found != _SELF][:limit]
+    return Observation(
+        path=seen.path,
+        result_paths=kept,
+        trace=seen.trace,
+        seconds=seen.seconds,
+        error=seen.error,
+    )
 
 
-def product_ranking(question: str, limit: int = TOP_K) -> list[str]:
-    from search_memory import search
-
-    paths = [_result_path(item) for item in search(question, limit=limit + 1)]
-    return [path for path in paths if path != _SELF][:limit]
+def product_ranking(
+    question: str, limit: int = TOP_K, path: str = DEFAULT_PATH
+) -> list[str]:
+    return product_observation(question, limit, path).result_paths
 
 
 def _rank_of(gold: str, paths: list[str]) -> int | None:
@@ -117,14 +152,21 @@ def _rank_of(gold: str, paths: list[str]) -> int | None:
     return None
 
 
-def score_case(case: dict, vault: Path, limit: int = TOP_K) -> CaseResult:
+def score_case(
+    case: dict, vault: Path, limit: int = TOP_K, path: str = DEFAULT_PATH
+) -> CaseResult:
     gold = str(case["gold_path"])
     question = str(case["question"])
+    seen = product_observation(question, limit, path)
     return CaseResult(
         case_id=str(case["case_id"]),
         gold_path=gold,
-        product_rank=_rank_of(gold, product_ranking(question, limit)),
+        product_rank=_rank_of(gold, seen.result_paths),
         grep_rank=_rank_of(gold, grep_ranking(vault, question, limit)),
+        effective_mode=str(seen.trace.get("effective_mode") or "") or None,
+        signals_used=seen.signals,
+        fallback_reason=seen.fallback_reason,
+        seconds=seen.seconds,
     )
 
 
@@ -158,29 +200,135 @@ def evaluate(metrics: dict[str, float], thresholds: dict[str, float]) -> dict[st
     return {"metric_results": checks, "passed": all(checks.values())}
 
 
-def run(corpus: dict, vault: Path) -> dict[str, object]:
-    results = [score_case(case, vault) for case in corpus["cases"]]
-    metrics = measure(results)
+def _misses(results: list[CaseResult]) -> list[dict[str, object]]:
+    return [
+        {
+            "case_id": item.case_id,
+            "gold_path": item.gold_path,
+            "product_rank": item.product_rank,
+            "grep_rank": item.grep_rank,
+            "effective_mode": item.effective_mode,
+            "signals_used": item.signals_used,
+            "fallback_reason": item.fallback_reason,
+        }
+        for item in results
+        if item.product_rank is None or item.product_rank > 1
+    ]
+
+
+# What the product says when the clock, rather than the ranking, decided.
+_BUDGET_REASONS = (
+    "optional_stage_timeout",
+    "retrieval_deadline_exceeded",
+    "TimeoutError",
+)
+
+
+def _lost_its_budget(result: CaseResult) -> bool:
+    reason = result.fallback_reason or ""
+    return any(mark in reason for mark in _BUDGET_REASONS)
+
+
+def _budget_degraded(results: list[CaseResult]) -> list[str]:
+    """Cases the budget answered instead of the ranking.
+
+    A run where this list is long is a statement about the machine, not about
+    retrieval quality, and a reader comparing two such runs is comparing load.
+    """
+    return [item.case_id for item in results if _lost_its_budget(item)]
+
+
+def _one_round(corpus: dict, vault: Path, path: str) -> list[CaseResult]:
+    return [score_case(case, vault, TOP_K, path) for case in corpus["cases"]]
+
+
+def _median_metrics(per_run: list[dict[str, float]]) -> dict[str, float]:
+    """The middle run, key by key. With a single run that is the run itself."""
+    return {
+        key: round(statistics.median([run[key] for run in per_run]), 4)
+        for key in per_run[0]
+    }
+
+
+def _spread(per_run: list[dict[str, float]]) -> dict[str, dict[str, float]]:
+    """How far each number moved across runs of identical code.
+
+    A paired difference smaller than this spread means nothing, and the point
+    of printing it is that a reader does not have to take that on trust.
+    """
+    return {
+        key: {
+            "min": min(run[key] for run in per_run),
+            "max": max(run[key] for run in per_run),
+        }
+        for key in per_run[0]
+        if key != "case_count"
+    }
+
+
+def _hit(result: CaseResult, depth: int) -> bool:
+    return result.product_rank is not None and result.product_rank <= depth
+
+
+def _unstable_cases(
+    rounds: list[list[CaseResult]], depth: int = TOP_K
+) -> list[dict[str, object]]:
+    """The cases that did not answer the same way twice, and what they blamed."""
+    unstable: list[dict[str, object]] = []
+    for attempts in zip(*rounds):
+        outcomes = {_hit(item, depth) for item in attempts}
+        if len(outcomes) > 1:
+            unstable.append(_wobble(attempts))
+    return unstable
+
+
+def _wobble(attempts: tuple[CaseResult, ...]) -> dict[str, object]:
+    return {
+        "case_id": attempts[0].case_id,
+        "ranks": [item.product_rank for item in attempts],
+        "signals_used": [item.signals_used for item in attempts],
+        "fallback_reasons": [item.fallback_reason for item in attempts],
+    }
+
+
+def _warmed(path: str, warmup: bool) -> float:
+    if not warmup:
+        return 0.0
+    return warm(path)
+
+
+def run(
+    corpus: dict,
+    vault: Path,
+    *,
+    path: str = DEFAULT_PATH,
+    repeat: int = 1,
+    warmup: bool = True,
+) -> dict[str, object]:
+    warmup_seconds = _warmed(path, warmup)
+    rounds = [_one_round(corpus, vault, path) for _ in range(repeat)]
+    per_run = [measure(results) for results in rounds]
+    metrics = _median_metrics(per_run)
     return {
         "corpus_id": corpus["corpus_id"],
+        "retrieval_path": path,
+        "runs": repeat,
+        "warmup_seconds": warmup_seconds,
         "metrics": metrics,
+        "per_run_metrics": per_run,
+        "spread": _spread(per_run),
+        "unstable_cases": _unstable_cases(rounds),
         "gates": evaluate(metrics, corpus["thresholds"]),
-        "misses": [
-            {
-                "case_id": item.case_id,
-                "gold_path": item.gold_path,
-                "product_rank": item.product_rank,
-                "grep_rank": item.grep_rank,
-            }
-            for item in results
-            if item.product_rank is None or item.product_rank > 1
-        ],
+        "misses": _misses(rounds[0]),
+        "budget_degraded_cases": _budget_degraded(rounds[0]),
         "thresholds": corpus["thresholds"],
     }
 
 
 def _print_report(report: dict[str, object]) -> None:
     metrics = report["metrics"]
+    print(f"retrieval_path: {report['retrieval_path']}")
+    print(f"runs: {report['runs']}")
     for name in (
         "case_count",
         "product_hit_at_1",
@@ -190,7 +338,18 @@ def _print_report(report: dict[str, object]) -> None:
         "gain_over_grep_at_5",
     ):
         print(f"{name}: {metrics[name]}")
+    _print_spread(report)
+    print(f"budget_degraded_cases: {report['budget_degraded_cases']}")
     print(f"gates passed: {report['gates']['passed']}")
+
+
+def _print_spread(report: dict[str, object]) -> None:
+    """With one run there is no spread to print, and no claim of stability."""
+    if int(report["runs"]) < 2:  # type: ignore[call-overload]
+        return
+    spread = report["spread"]
+    print(f"product_hit_at_5 across runs: {spread['product_hit_at_5']}")  # type: ignore[index]
+    print(f"unstable cases: {[item['case_id'] for item in report['unstable_cases']]}")  # type: ignore[union-attr]
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -198,12 +357,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--corpus", type=Path, default=CORPUS)
     parser.add_argument("--vault", type=Path, default=ROOT)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--path",
+        choices=PATHS,
+        default=DEFAULT_PATH,
+        help="Which real entry point to measure (default: the MCP tool's)",
+    )
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="Run the corpus this many times and report the spread",
+    )
+    parser.add_argument(
+        "--no-warm",
+        dest="warmup",
+        action="store_false",
+        help="Skip the warmup call that makes the process resemble a resident server",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    report = run(load_corpus(args.corpus), args.vault)
+    report = run(
+        load_corpus(args.corpus),
+        args.vault,
+        path=args.path,
+        repeat=args.repeat,
+        warmup=args.warmup,
+    )
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:

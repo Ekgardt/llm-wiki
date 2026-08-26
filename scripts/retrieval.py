@@ -39,6 +39,46 @@ MAX_OPTIONAL_STRAGGLERS = 2
 OPTIONAL_STAGE_MAX_SECONDS = 12.0
 _OPTIONAL_STAGE_SLOTS = threading.BoundedSemaphore(MAX_OPTIONAL_STRAGGLERS)
 
+# One straggler slot per kind of optional stage, instead of one shared pool of
+# `MAX_OPTIONAL_STRAGGLERS` that every kind competes for.
+#
+# The shared pool made a straggler of one kind refuse admission to a stage of
+# another kind, before that stage waited for anything. Measured on the live
+# vault, six recall calls in one process at the 10 s MCP budget: call 1
+# abandoned both of its stages, they held both slots for the length of their
+# work, and calls 2, 4 and 6 were refused `optional stage capacity exhausted`
+# at 0.00 s -- the dense leg reached the answer in one call out of six, 1.75 of
+# six averaged over four such rounds. The two hogs are model loads: about 9 s
+# for the embedding model, about 20 s for the cross-encoder, both far longer
+# than the 5 s an MCP-budget stage may wait, so one abandoned rerank load shut
+# the dense leg out of every call behind it. Partitioned, the same measurement
+# gives 3.5 of six; see
+# `docs/research/2026-08-26-who-pays-for-an-abandoned-optional-stage.md`.
+#
+# Partitioning by kind is the bulkhead rule: capacity for one dependency is
+# reserved from capacity for all the others, so a slow one exhausts only its
+# own. It also makes each kind single-flight, which is stricter than the shared
+# pool was -- two dense stragglers could previously load the embedding model
+# twice at about 1.1 GiB each, a cost `search_memory._lazy_generation_query_encoder`
+# accepts in its docstring and this now prevents.
+#
+# What it costs. A second stage of a kind already in flight is refused
+# immediately rather than queued behind it: the caller could instead wait for
+# the straggler and then run warm, but the measured loads (9 s, 20 s) do not
+# fit in an MCP-budget stage (5 s), so that wait would spend the caller's
+# budget and delay the lexical answer for a leg that still could not finish.
+# The live thread bound is unchanged at two, one per kind, and the kinds are a
+# fixed tuple rather than caller-supplied, so no call can widen it.
+OPTIONAL_STAGE_KINDS = ("dense", "rerank")
+_OPTIONAL_STAGE_KIND_SLOTS = {
+    kind: threading.BoundedSemaphore(1) for kind in OPTIONAL_STAGE_KINDS
+}
+
+
+def _optional_stage_slots(kind: str | None) -> threading.BoundedSemaphore:
+    """The straggler slots this stage competes for; unlabelled work shares one pool."""
+    return _OPTIONAL_STAGE_KIND_SLOTS.get(kind, _OPTIONAL_STAGE_SLOTS)
+
 
 def _normalized_filename_stem(value: str) -> str:
     name = Path(value.strip()).name.casefold()
@@ -86,10 +126,11 @@ def _run_optional_bounded(
     *,
     deadline: float,
     cancelled: Callable[[], bool] | None,
+    kind: str | None = None,
 ) -> Any:
     """Run optional work with a hard wait bound and capped daemon stragglers."""
     _require_optional_stage_time(deadline, cancelled)
-    slots = _OPTIONAL_STAGE_SLOTS
+    slots = _optional_stage_slots(kind)
     if not slots.acquire(blocking=False):
         raise OptionalStageTimeout("optional stage capacity exhausted")
     completed = threading.Event()
@@ -1567,6 +1608,7 @@ def _call_dense(
         lambda: dense_backend(**filters),
         deadline=_optional_stage_deadline(deadline_monotonic),
         cancelled=cancelled,
+        kind="dense",
     )
 
 
@@ -1848,6 +1890,7 @@ def _run_reranker(
         call,
         deadline=_optional_stage_deadline(deadline_monotonic),
         cancelled=cancelled,
+        kind="rerank",
     )
 
 
