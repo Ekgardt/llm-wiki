@@ -29,6 +29,7 @@ This index catalogs durable memory distilled from AI agent sessions
 - [[knowledge/notes/dead-task-retirement-and-restore-decision]] — A task whose attempts are exhausted is retired only when asked for by name, through the same verified export, and one command brings its work back.
 - [[knowledge/notes/derived-evidence-generation-decision]] — Evidence retrieval uses disposable immutable cache generations while Markdown, Git, and project journals remain authoritative.
 - [[knowledge/notes/durable-capture-producer-activation-decision]] — SessionEnd and PreCompact capture publish durable Reliability V3 intent evidence before returning; detached work only wakes recovery and deletion requires terminal proof.
+- [[knowledge/notes/finding-level-dlp-allowlist-decision]] — the DLP unlock names each refused finding by the hash of
 - [[knowledge/notes/flag-inferred-content-as-preliminary]] — When writing a wiki page about a topic that has no corresponding `knowledge/raw/` or `knowledge/inbox/` source, mark the inferred sections as **preliminary** rather than omitting them or presenting them as settled.
 - [[knowledge/notes/hook-scripts-defense-in-depth]] — Two hardening decisions made 2026-04-19 to prevent silent failures in session hook scripts: a `_resolve_state_root()` fallback when `LLM_WIKI_STATE_ROOT` is unset, and an explicit guard mapping `.`, `..`, or empty slugs to `"root"`.
 - [[knowledge/notes/idempotent-retry-after-quarantine-decision]] — a refused write keeps its idempotency key and its evidence,
