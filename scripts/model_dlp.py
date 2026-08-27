@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import hmac
 import json
@@ -33,6 +34,7 @@ class DLPContentBlocked(ValueError):
 class DLPPolicy:
     literals: tuple[str, ...] = ()
     allow_fingerprints: frozenset[str] = frozenset()
+    allow_finding_fingerprints: frozenset[str] = frozenset()
 
 
 def load_policy() -> DLPPolicy:
@@ -43,11 +45,13 @@ def load_policy() -> DLPPolicy:
     path = Path(configured)
     if not path.is_absolute():
         raise DLPPolicyError("LLM_WIKI_DLP_POLICY must be an absolute path")
+    document = _parsed_policy_document(_read_policy_bytes(path))
+    return _validated_policy(document)
+
+
+def _read_policy_bytes(path: Path) -> bytes:
     try:
-        if path.is_symlink() or not path.is_file():
-            raise DLPPolicyError("required DLP policy is not a regular file")
-        if path.stat().st_size > _MAX_POLICY_BYTES:
-            raise DLPPolicyError("required DLP policy exceeds the size limit")
+        _require_regular_bounded_file(path)
         raw = path.read_bytes()
     except DLPPolicyError:
         raise
@@ -55,82 +59,212 @@ def load_policy() -> DLPPolicy:
         raise DLPPolicyError("required DLP policy is unreadable") from exc
     if len(raw) > _MAX_POLICY_BYTES:
         raise DLPPolicyError("required DLP policy exceeds the size limit")
+    return raw
+
+
+def _require_regular_bounded_file(path: Path) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise DLPPolicyError("required DLP policy is not a regular file")
+    if path.stat().st_size > _MAX_POLICY_BYTES:
+        raise DLPPolicyError("required DLP policy exceeds the size limit")
+
+
+def _parsed_policy_document(raw: bytes) -> dict:
     try:
         document = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise DLPPolicyError("required DLP policy is not valid UTF-8 JSON") from exc
-    if not isinstance(document, dict) or set(document) != {
-        "version",
-        "literals",
-        "allow_fingerprints",
-        "sha256",
-    }:
+    _require_policy_schema(document)
+    return document
+
+
+# The optional key extends the 2026-08-25 exact-content allowlist with
+# per-finding entries; a policy without it keeps its original digest, so
+# already-authenticated policies stay valid byte for byte.
+_POLICY_REQUIRED_KEYS = frozenset({"version", "literals", "allow_fingerprints", "sha256"})
+_POLICY_OPTIONAL_KEYS = frozenset({"allow_finding_fingerprints"})
+
+
+def _policy_keys_valid(document: object) -> bool:
+    return (
+        isinstance(document, dict)
+        and _POLICY_REQUIRED_KEYS <= set(document)
+        and set(document) <= (_POLICY_REQUIRED_KEYS | _POLICY_OPTIONAL_KEYS)
+    )
+
+
+def _require_policy_schema(document: object) -> None:
+    if not _policy_keys_valid(document):
         raise DLPPolicyError("required DLP policy has an invalid schema")
     if document["version"] != 1 or isinstance(document["version"], bool):
         raise DLPPolicyError("required DLP policy version is unsupported")
-    literals = document["literals"]
-    fingerprints = document["allow_fingerprints"]
-    digest = document["sha256"]
-    if (
-        not isinstance(literals, list)
-        or len(literals) > _MAX_LITERALS
-        or any(
-            not isinstance(value, str)
-            or not value
-            or len(value.encode("utf-8")) > _MAX_LITERAL_BYTES
-            for value in literals
-        )
-        or len(set(literals)) != len(literals)
-    ):
+
+
+def _literals_valid(literals: object) -> bool:
+    return (
+        isinstance(literals, list)
+        and len(literals) <= _MAX_LITERALS
+        and all(_valid_literal(value) for value in literals)
+    )
+
+
+def _require_valid_literals(literals: object) -> None:
+    if not _literals_valid(literals) or len(set(literals)) != len(literals):
         raise DLPPolicyError("required DLP policy literals are invalid")
-    if (
-        not isinstance(fingerprints, list)
-        or len(fingerprints) > _MAX_ALLOW_FINGERPRINTS
-        or any(
-            not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None
-            for value in fingerprints
-        )
-        or len(set(fingerprints)) != len(fingerprints)
-    ):
+
+
+def _valid_literal(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and len(value.encode("utf-8")) <= _MAX_LITERAL_BYTES
+    )
+
+
+def _valid_fingerprint(value: object) -> bool:
+    return isinstance(value, str) and _SHA256_RE.fullmatch(value) is not None
+
+
+def _fingerprints_valid(fingerprints: object) -> bool:
+    return (
+        isinstance(fingerprints, list)
+        and len(fingerprints) <= _MAX_ALLOW_FINGERPRINTS
+        and all(_valid_fingerprint(value) for value in fingerprints)
+    )
+
+
+def _require_valid_fingerprints(fingerprints: object) -> None:
+    if not _fingerprints_valid(fingerprints) or len(set(fingerprints)) != len(fingerprints):
         raise DLPPolicyError("required DLP policy fingerprints are invalid")
-    if not isinstance(digest, str) or _SHA256_RE.fullmatch(digest) is None:
-        raise DLPPolicyError("required DLP policy digest is invalid")
+
+
+def _digest_payload(document: dict) -> dict:
+    """The canonical payload; the optional key stays out of pre-extension digests."""
     payload = {
         "version": 1,
-        "literals": literals,
-        "allow_fingerprints": fingerprints,
+        "literals": document["literals"],
+        "allow_fingerprints": document["allow_fingerprints"],
     }
+    if "allow_finding_fingerprints" in document:
+        payload["allow_finding_fingerprints"] = document["allow_finding_fingerprints"]
+    return payload
+
+
+def _require_authentic_digest(document: dict) -> None:
+    digest = document["sha256"]
+    if not _valid_fingerprint(digest):
+        raise DLPPolicyError("required DLP policy digest is invalid")
+    payload = _digest_payload(document)
     actual_digest = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
     if not hmac.compare_digest(digest, actual_digest):
         raise DLPPolicyError("required DLP policy digest does not match")
-    return DLPPolicy(tuple(literals), frozenset(fingerprints))
+
+
+def _validated_policy(document: dict) -> DLPPolicy:
+    findings = document.get("allow_finding_fingerprints", [])
+    _require_valid_literals(document["literals"])
+    _require_valid_fingerprints(document["allow_fingerprints"])
+    _require_valid_fingerprints(findings)
+    _require_authentic_digest(document)
+    return DLPPolicy(
+        tuple(document["literals"]),
+        frozenset(document["allow_fingerprints"]),
+        frozenset(findings),
+    )
 
 
 def _fingerprint(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="surrogatepass")).hexdigest()
 
 
-def redact_for_transport(text: str, policy: DLPPolicy) -> str:
-    """Redact built-in findings and configured literals before transport."""
-    if _fingerprint(text) in policy.allow_fingerprints:
-        return text
+def _scrubbed(text: str, policy: DLPPolicy) -> str:
+    """The text with every built-in finding and configured literal replaced."""
     redacted = redact_secrets(text)
     for literal in policy.literals:
         redacted = redacted.replace(literal, "[REDACTED_LITERAL]")
     return redacted
 
 
-def redact_transport_value(value: object, policy: DLPPolicy) -> object:
-    """Redact strings recursively in a JSON-like provider argument."""
-    if isinstance(value, str):
-        return redact_for_transport(value, policy)
-    if isinstance(value, Mapping):
-        return {
-            redact_for_transport(key, policy)
-            if isinstance(key, str)
-            else key: redact_transport_value(item, policy)
-            for key, item in value.items()
-        }
+def redact_for_transport(text: str, policy: DLPPolicy) -> str:
+    """Redact built-in findings and configured literals before transport."""
+    if _fingerprint(text) in policy.allow_fingerprints:
+        return text
+    return _scrubbed(text, policy)
+
+
+def _finding_spans(text: str, scrubbed: str) -> list[str]:
+    """The exact input spans the scrubber replaced, recovered by alignment.
+
+    The redactor exposes no findings API, so the spans are read off the diff
+    between the input and its scrubbed form — the same shape detect-secrets
+    stores in its baseline: the secret value itself, hashed. Misalignment can
+    only shrink or shift a span, which changes its hash and therefore fails
+    closed; it can never widen the allowlist.
+    """
+    spans: list[str] = []
+    for changed_text, changed_scrubbed in _changed_line_blocks(text, scrubbed):
+        spans.extend(_char_spans(changed_text, changed_scrubbed))
+    return [span for span in spans if span]
+
+
+def _changed_line_blocks(text: str, scrubbed: str) -> list[tuple[str, str]]:
+    """Line-level alignment first: character diffs of whole files are quadratic.
+
+    Measured 2026-08-27: a single-pass character SequenceMatcher over this
+    repository's largest refused fixtures did not finish inside 900 s. Lines
+    unchanged by the scrubber are dropped here, so the character pass below
+    only ever sees the few lines that actually carry findings.
+    """
+    text_lines = text.splitlines(keepends=True)
+    scrubbed_lines = scrubbed.splitlines(keepends=True)
+    matcher = difflib.SequenceMatcher(None, text_lines, scrubbed_lines, autojunk=False)
+    return [
+        ("".join(text_lines[i1:i2]), "".join(scrubbed_lines[j1:j2]))
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes()
+        if tag in ("replace", "delete")
+    ]
+
+
+def _char_spans(changed_text: str, changed_scrubbed: str) -> list[str]:
+    matcher = difflib.SequenceMatcher(
+        None, changed_text, changed_scrubbed, autojunk=False
+    )
+    return [
+        changed_text[start:end]
+        for tag, start, end, _, _ in matcher.get_opcodes()
+        if tag in ("replace", "delete")
+    ]
+
+
+def _findings_allowlisted(text: str, scrubbed: str, policy: DLPPolicy) -> bool:
+    """Every replaced span is individually allowlisted, and there is at least one.
+
+    This is the per-finding unlock the 2026-08-25 decision left to the owner:
+    an edit elsewhere in the same file no longer re-blocks it, while a single
+    new finding — one span whose hash is not in the list — still blocks.
+    """
+    if not policy.allow_finding_fingerprints:
+        return False
+    spans = _finding_spans(text, scrubbed)
+    if not spans:
+        return False
+    return all(
+        _fingerprint(span) in policy.allow_finding_fingerprints for span in spans
+    )
+
+
+def _redact_transport_key(key: object, policy: DLPPolicy) -> object:
+    return redact_for_transport(key, policy) if isinstance(key, str) else key
+
+
+def _redact_transport_mapping(value: Mapping, policy: DLPPolicy) -> dict:
+    return {
+        _redact_transport_key(key, policy): redact_transport_value(item, policy)
+        for key, item in value.items()
+    }
+
+
+def _redact_transport_sequence(value: object, policy: DLPPolicy) -> object:
     if isinstance(value, list):
         return [redact_transport_value(item, policy) for item in value]
     if isinstance(value, tuple):
@@ -138,11 +272,21 @@ def redact_transport_value(value: object, policy: DLPPolicy) -> object:
     return value
 
 
+def redact_transport_value(value: object, policy: DLPPolicy) -> object:
+    """Redact strings recursively in a JSON-like provider argument."""
+    if isinstance(value, str):
+        return redact_for_transport(value, policy)
+    if isinstance(value, Mapping):
+        return _redact_transport_mapping(value, policy)
+    return _redact_transport_sequence(value, policy)
+
+
 def require_safe_model_output(text: str, policy: DLPPolicy) -> None:
-    """Reject sensitive provider output unless its exact payload is allowlisted."""
+    """Reject sensitive provider output unless the payload or every finding is allowlisted."""
     if _fingerprint(text) in policy.allow_fingerprints:
         return
-    if redact_secrets(text) != text or any(literal in text for literal in policy.literals):
+    scrubbed = _scrubbed(text, policy)
+    if scrubbed != text and not _findings_allowlisted(text, scrubbed, policy):
         raise DLPContentBlocked("model output contains protected content")
 
 

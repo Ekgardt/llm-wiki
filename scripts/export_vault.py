@@ -35,7 +35,9 @@ Root cause: operator used `zip -r` on the folder, bypassing
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
+import json
 import os
 import re
 import shutil
@@ -158,6 +160,17 @@ def parse_args() -> argparse.Namespace:
         dest="verify",
         action="store_false",
         help="Deprecated compatibility flag; security verification still runs.",
+    )
+    p.add_argument(
+        "--write-allow-policy",
+        type=Path,
+        metavar="PATH",
+        help=(
+            "Do not export. Scan the ref's archive and write a DLP policy that "
+            "allowlists each refused finding by the hash of its exact span "
+            "(detect-secrets baseline shape), then exit. Point "
+            "LLM_WIKI_DLP_POLICY at the written file."
+        ),
     )
     p.add_argument(
         "--strict",
@@ -468,10 +481,71 @@ def _build_verified_archive(args: argparse.Namespace, output: Path) -> int:
         staging.unlink(missing_ok=True)
 
 
+def _collect_finding_fingerprints(archive: Path, policy: DLPPolicy) -> set[str]:
+    """Fingerprints of every finding the scan would refuse in this archive."""
+    from model_dlp import _finding_spans, _fingerprint, _scrubbed
+
+    fingerprints: set[str] = set()
+    with zipfile.ZipFile(archive) as opened:
+        for info in opened.infolist():
+            if info.is_dir():
+                continue
+            text = opened.read(info).decode("utf-8", errors="surrogateescape")
+            scrubbed = _scrubbed(text, policy)
+            if scrubbed == text:
+                continue
+            fingerprints.update(
+                _fingerprint(span) for span in _finding_spans(text, scrubbed)
+            )
+    return fingerprints
+
+
+def _write_allow_policy(destination: Path, ref: str) -> int:
+    """Regenerate the per-finding allow policy for the archive at `ref`.
+
+    One command replaces the whole-file fingerprints that broke on every edit:
+    the policy names each key-shaped finding by the hash of its exact span, so
+    unrelated edits to the same file survive, exactly as a detect-secrets
+    baseline does. Run it after changing a fixture the scan refuses. The
+    operator runs this deliberately: it widens nothing on its own — every entry
+    still has to match a whole finding byte for byte.
+    """
+    import tempfile
+
+    from reliable_memory import canonical_json_bytes
+
+    with tempfile.TemporaryDirectory() as scratch:
+        archive = Path(scratch) / "probe.zip"
+        _git_archive(ref, "zip", archive)
+        found = _collect_finding_fingerprints(archive, DLPPolicy())
+    payload = {
+        "version": 1,
+        "literals": [],
+        "allow_fingerprints": [],
+        "allow_finding_fingerprints": sorted(found),
+    }
+    digest = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+    document = dict(payload)
+    document["sha256"] = digest
+    destination.write_text(json.dumps(document, indent=1) + "\n", encoding="utf-8")
+    print(
+        f"export_vault: wrote {len(found)} finding fingerprint(s) → {destination}"
+    )
+    return 0
+
+
 def main() -> int:
     args = parse_args()
     _require_git()
 
+    policy_destination = getattr(args, "write_allow_policy", None)
+    if policy_destination is not None:
+        return _write_allow_policy(policy_destination, args.ref)
+
+    return _run_export(args)
+
+
+def _run_export(args: argparse.Namespace) -> int:
     drifted = _paths_differing_from_ref(args.ref) if args.strict else ()
     if drifted:
         _report_strict_drift(args.ref, drifted)

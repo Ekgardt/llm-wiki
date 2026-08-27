@@ -35,11 +35,13 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import contextvars
 import datetime as dt
 import hashlib
 import inspect
 import itertools
+import os
 import re
 import sys
 import threading
@@ -4872,6 +4874,30 @@ def _register_tools(server, tools):
     return call_tool
 
 
+def _start_encoder_warmup() -> None:
+    """Load the semantic encoder before the first question needs it.
+
+    Measured on this vault (2026-08-24/26): a cold encoder costs 7.99 s and
+    ~1.1 GiB resident, so the first semantic question of a session always fell
+    back to lexical-only. The owner accepted that price on 2026-08-27: every
+    resident server pays the memory up front, and the first `recall` answers
+    with the dense leg. The load runs on a daemon thread so serving starts
+    immediately, and it shares `search_memory._get_embedder`'s module cache
+    with the dense leg — a straggler racing it wastes one load, never a vector.
+    Set LLMWIKI_NO_ENCODER_WARMUP=1 to keep the old lazy behaviour.
+    """
+    if os.environ.get("LLMWIKI_NO_ENCODER_WARMUP") == "1":
+        return
+
+    def warm() -> None:
+        with contextlib.suppress(Exception):
+            import search_memory
+
+            search_memory._get_embedder()
+
+    threading.Thread(target=warm, name="encoder-warmup", daemon=True).start()
+
+
 def run_server() -> int:
     """Start the MCP server (stdio transport). Returns exit code."""
     if not MCP_AVAILABLE:
@@ -4885,6 +4911,7 @@ def run_server() -> int:
     tools = _build_tool_definitions()
     _register_resources(server)
     _register_tools(server, tools)
+    _start_encoder_warmup()
 
     async def main():
         async with stdio_server() as (read_stream, write_stream):
