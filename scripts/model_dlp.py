@@ -201,13 +201,39 @@ def _finding_spans(text: str, scrubbed: str) -> list[str]:
     only shrink or shift a span, which changes its hash and therefore fails
     closed; it can never widen the allowlist.
     """
-    matcher = difflib.SequenceMatcher(None, text, scrubbed, autojunk=False)
-    spans = [
-        text[start:end]
+    spans: list[str] = []
+    for changed_text, changed_scrubbed in _changed_line_blocks(text, scrubbed):
+        spans.extend(_char_spans(changed_text, changed_scrubbed))
+    return [span for span in spans if span]
+
+
+def _changed_line_blocks(text: str, scrubbed: str) -> list[tuple[str, str]]:
+    """Line-level alignment first: character diffs of whole files are quadratic.
+
+    Measured 2026-08-27: a single-pass character SequenceMatcher over this
+    repository's largest refused fixtures did not finish inside 900 s. Lines
+    unchanged by the scrubber are dropped here, so the character pass below
+    only ever sees the few lines that actually carry findings.
+    """
+    text_lines = text.splitlines(keepends=True)
+    scrubbed_lines = scrubbed.splitlines(keepends=True)
+    matcher = difflib.SequenceMatcher(None, text_lines, scrubbed_lines, autojunk=False)
+    return [
+        ("".join(text_lines[i1:i2]), "".join(scrubbed_lines[j1:j2]))
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes()
+        if tag in ("replace", "delete")
+    ]
+
+
+def _char_spans(changed_text: str, changed_scrubbed: str) -> list[str]:
+    matcher = difflib.SequenceMatcher(
+        None, changed_text, changed_scrubbed, autojunk=False
+    )
+    return [
+        changed_text[start:end]
         for tag, start, end, _, _ in matcher.get_opcodes()
         if tag in ("replace", "delete")
     ]
-    return [span for span in spans if span]
 
 
 def _findings_allowlisted(text: str, scrubbed: str, policy: DLPPolicy) -> bool:
