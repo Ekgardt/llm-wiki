@@ -178,6 +178,10 @@ def test_the_cli_refusal_prints_the_tombstoned_path(
     printed = json.loads(capsys.readouterr().out)
     assert printed["codes"] == ["queue_tombstoned_by_adoption"]
     assert "queue-v3.sqlite3" in printed["detail"]
+    # The detail is composed with state-root-relative paths so the CLI's
+    # 240-character bound cannot cut the adopted path out of the refusal on a
+    # deep macOS/Windows temp root. Ending intact proves nothing was cut.
+    assert printed["detail"].endswith("active_or_legacy_memory_queue()")
 
 
 def test_the_source_fence_family_works_on_the_adopted_queue(tmp_path: Path) -> None:

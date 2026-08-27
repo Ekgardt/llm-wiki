@@ -5011,6 +5011,21 @@ def _is_sqlite_file(path: Path) -> bool:
         return False
 
 
+def _state_relative_name(path: Path, state_root: Path) -> str:
+    """The path as the operator knows it: relative to the state root, POSIX form.
+
+    The refusal detail below travels through the CLI's 240-character bound.
+    Composed with absolute paths it failed its own purpose exactly where paths
+    are long -- macOS `/private/var/folders/...` and Windows `D:\\a\\...` temp
+    roots pushed the adopted path past the cut. The relative form is short and
+    stable everywhere, and the operator already knows the root.
+    """
+    try:
+        return path.relative_to(state_root).as_posix()
+    except ValueError:
+        return str(path)
+
+
 def _require_no_adoption_tombstone(db_path: Path, state_root: Path) -> None:
     """Refuse a legacy queue path by name once adoption has replaced it.
 
@@ -5029,7 +5044,8 @@ def _require_no_adoption_tombstone(db_path: Path, state_root: Path) -> None:
         return
     raise QueueOperationError(
         "queue_tombstoned_by_adoption",
-        f"{db_path} is a Reliability V3 adoption tombstone naming {active}; "
+        f"{_state_relative_name(db_path, state_root)} is a Reliability V3 "
+        f"adoption tombstone naming {_state_relative_name(active, state_root)}; "
         "open the adopted queue through active_or_legacy_memory_queue()",
     )
 

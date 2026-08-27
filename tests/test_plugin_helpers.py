@@ -84,6 +84,16 @@ def _semantic(envelope):
     return envelope.to_dict()
 
 
+def _agents_and_stripped_semantics(events):
+    """Each envelope's agent, and its semantics with per-event identity removed."""
+    semantics = [_semantic(event) for event in events]
+    agents = [item.pop("agent") for item in semantics]
+    for item in semantics:
+        item.pop("event_id")
+        item.pop("content_hash")
+    return agents, semantics
+
+
 def test_equivalent_lifecycle_inputs_normalize_to_same_semantics():
     from integration_adapter import normalize_event
 
@@ -133,15 +143,8 @@ def test_equivalent_lifecycle_inputs_normalize_to_same_semantics():
         ),
     ]
 
-    semantics = [_semantic(event) for event in events]
-    assert [item.pop("agent") for item in semantics] == [
-        "claude",
-        "opencode",
-        "codex",
-    ]
-    for item in semantics:
-        item.pop("event_id")
-        item.pop("content_hash")
+    agents, semantics = _agents_and_stripped_semantics(events)
+    assert agents == ["claude", "opencode", "codex"]
     assert semantics == [semantics[0]] * 3
     assert events[0].payload == {
         "reason": "completed",
@@ -161,13 +164,16 @@ def test_normalizer_uses_source_identity_when_optional_fields_are_missing():
     )
 
     data = envelope.to_dict()
+    absent = {
+        "session": None,
+        "project": None,
+        "worktree": None,
+        "severity": None,
+        "parent_event_id": None,
+        "source_event_id": None,
+    }
     assert data["agent"] == "opencode"
-    assert data["session"] is None
-    assert data["project"] is None
-    assert data["worktree"] is None
-    assert data["severity"] is None
-    assert data["parent_event_id"] is None
-    assert data["source_event_id"] is None
+    assert {field: data[field] for field in absent} == absent
     assert data["payload"] == {"reason": None, "transcript_path": None}
 
 
@@ -280,6 +286,14 @@ def test_invalid_input_fails_closed_but_host_cli_exits_safely(capsys):
     assert secret not in capsys.readouterr().err
 
 
+def _assert_delegate_saw_only_redacted(observed, secret):
+    delegated = json.loads(observed["input"])
+    assert "host_only" not in delegated
+    assert secret not in observed["input"]
+    assert delegated["session_id"] == "[REDACTED_API_KEY]"
+    assert delegated["reason"] == "token=[REDACTED]"
+
+
 def test_delegate_receives_only_normalized_redacted_payload(monkeypatch, capsys, tmp_path):
     import integration_adapter
 
@@ -319,11 +333,7 @@ def test_delegate_receives_only_normalized_redacted_payload(monkeypatch, capsys,
         )
 
     assert rc == 0
-    delegated = json.loads(observed["input"])
-    assert "host_only" not in delegated
-    assert secret not in observed["input"]
-    assert delegated["session_id"] == "[REDACTED_API_KEY]"
-    assert delegated["reason"] == "token=[REDACTED]"
+    _assert_delegate_saw_only_redacted(observed, secret)
     assert capsys.readouterr().out == ""
 
 
@@ -363,9 +373,7 @@ def test_lifecycle_cli_delegate_uses_shared_ingest_boundary(
     assert calls == [envelope]
 
 
-def test_claude_context_delegate_preserves_stdout(monkeypatch, capsys, tmp_path):
-    import integration_adapter
-
+def _exercise_stdout_preserving_delegate(monkeypatch, capsys, integration_adapter):
     monkeypatch.setattr(
         integration_adapter.subprocess,
         "run",
@@ -390,8 +398,16 @@ def test_claude_context_delegate_preserves_stdout(monkeypatch, capsys, tmp_path)
     assert rc == 0
     assert json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"] == "safe"
 
+
+def _compile_must_not_run_in_callback():
+    raise AssertionError("compile ran in callback")
+
+
+def _wire_session_start_callback(monkeypatch, integration_adapter):
     spawned = []
-    monkeypatch.setattr(integration_adapter, "_project_context", lambda _event: ("app", Path("project")))
+    monkeypatch.setattr(
+        integration_adapter, "_project_context", lambda _event: ("app", Path("project"))
+    )
     monkeypatch.setattr(integration_adapter, "_record_activity", lambda *_args: True)
     monkeypatch.setattr(
         integration_adapter,
@@ -399,15 +415,18 @@ def test_claude_context_delegate_preserves_stdout(monkeypatch, capsys, tmp_path)
         lambda args: spawned.append(args) or 123,
     )
     monkeypatch.setattr(
-        integration_adapter,
-        "spawn_compile_if_idle",
-        lambda: (_ for _ in ()).throw(AssertionError("compile ran in callback")),
+        integration_adapter, "spawn_compile_if_idle", _compile_must_not_run_in_callback
     )
     monkeypatch.setattr(
         integration_adapter,
         "build_session_start_context",
         lambda: "# Project memory context\n\n## Health\n\nScheduler degraded.\n",
     )
+    return spawned
+
+
+def _exercise_session_start_callback(monkeypatch, integration_adapter):
+    spawned = _wire_session_start_callback(monkeypatch, integration_adapter)
 
     result = integration_adapter.ingest_event(
         integration_adapter.normalize_event("opencode", "session_start", {})
@@ -422,6 +441,10 @@ def test_claude_context_delegate_preserves_stdout(monkeypatch, capsys, tmp_path)
         "--maintenance",
     ]]
 
+
+def _exercise_maintenance_runs_work_then_compile(
+    monkeypatch, capsys, tmp_path, integration_adapter
+):
     pending_daily = tmp_path / "knowledge" / "daily" / "2026-07-13.md"
     order = []
 
@@ -444,6 +467,8 @@ def test_claude_context_delegate_preserves_stdout(monkeypatch, capsys, tmp_path)
     assert order == ["work", "compile"]
     assert capsys.readouterr() == ("", "")
 
+
+def _exercise_maintenance_timeout_stays_silent(monkeypatch, capsys, integration_adapter):
     secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
     monkeypatch.setattr(
         integration_adapter.subprocess,
@@ -459,9 +484,26 @@ def test_claude_context_delegate_preserves_stdout(monkeypatch, capsys, tmp_path)
     )
     assert integration_adapter.main(["--maintenance"]) == 0
     captured = capsys.readouterr()
-    assert captured.out == ""
-    assert captured.err == ""
+    assert captured == ("", "")
     assert secret not in captured.out + captured.err
+
+
+def test_claude_context_delegate_preserves_stdout(monkeypatch, capsys, tmp_path):
+    import integration_adapter
+
+    _exercise_stdout_preserving_delegate(monkeypatch, capsys, integration_adapter)
+    _exercise_session_start_callback(monkeypatch, integration_adapter)
+    _exercise_maintenance_runs_work_then_compile(
+        monkeypatch, capsys, tmp_path, integration_adapter
+    )
+    _exercise_maintenance_timeout_stays_silent(monkeypatch, capsys, integration_adapter)
+
+
+def _run_claude_delegate(integration_adapter, raw, event, delegate):
+    with patch.object(sys, "stdin", io.StringIO(json.dumps(raw))):
+        return integration_adapter.main(
+            ["--source", "claude", "--event", event, "--delegate", delegate]
+        )
 
 
 @pytest.mark.parametrize("delegate", ["user_prompt_capture.py", "session_start_context.py"])
@@ -479,19 +521,15 @@ def test_delegate_forwards_only_valid_hook_json(monkeypatch, capsys, delegate):
             returncode=0, stdout=outputs.pop(0), stderr=""
         ),
     )
-    event = "user_prompt" if delegate == "user_prompt_capture.py" else "session_start"
-    raw = {"prompt": "valid prompt"} if event == "user_prompt" else {}
+    event, raw = {
+        "user_prompt_capture.py": ("user_prompt", {"prompt": "valid prompt"}),
+        "session_start_context.py": ("session_start", {}),
+    }[delegate]
 
-    with patch.object(sys, "stdin", io.StringIO(json.dumps(raw))):
-        assert integration_adapter.main(
-            ["--source", "claude", "--event", event, "--delegate", delegate]
-        ) == 0
+    assert _run_claude_delegate(integration_adapter, raw, event, delegate) == 0
     assert capsys.readouterr().out == ""
 
-    with patch.object(sys, "stdin", io.StringIO(json.dumps(raw))):
-        assert integration_adapter.main(
-            ["--source", "claude", "--event", event, "--delegate", delegate]
-        ) == 0
+    assert _run_claude_delegate(integration_adapter, raw, event, delegate) == 0
     assert json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"] == "safe"
 
 
@@ -562,6 +600,13 @@ def test_codex_run_script_timeout_returns_fixed_failure(monkeypatch, tmp_path):
     assert result.stderr == ""
 
 
+def _assert_optional_codex_envelope_fields(envelope, event_type, raw):
+    if event_type in {"pre_compact", "session_end"}:
+        assert envelope.payload["transcript_path"].endswith("session.jsonl")
+    if "turn_id" in raw:
+        assert envelope.source_event_id == raw["turn_id"]
+
+
 @pytest.mark.parametrize(
     ("hook_name", "event_type", "reason"),
     [
@@ -582,10 +627,9 @@ def test_codex_hook_payloads_normalize_through_shared_envelope(
     assert envelope.session == "codex-session-1"
     assert envelope.worktree.endswith("project")
     assert envelope.payload["reason"] == reason
-    if event_type in {"pre_compact", "session_end"}:
-        assert envelope.payload["transcript_path"].endswith("session.jsonl")
-    if "turn_id" in codex_hook_inputs[hook_name]:
-        assert envelope.source_event_id == codex_hook_inputs[hook_name]["turn_id"]
+    _assert_optional_codex_envelope_fields(
+        envelope, event_type, codex_hook_inputs[hook_name]
+    )
 
 
 @pytest.mark.parametrize(
@@ -702,8 +746,7 @@ def test_codex_hook_emits_only_event_supported_output(
     assert codex_memory.command_hook(Namespace()) == 0
 
     captured = capsys.readouterr()
-    assert json.loads(captured.out) == expected_output
-    assert captured.err == ""
+    assert (json.loads(captured.out), captured.err) == (expected_output, "")
     assert len(observed) == 1
 
 
@@ -750,8 +793,10 @@ def test_codex_stop_failure_still_emits_required_json(
 
     assert codex_memory.command_hook(Namespace()) == 0
     captured = capsys.readouterr()
-    assert json.loads(captured.out) == {}
-    assert captured.err == "codex_memory: hook skipped\n"
+    assert (json.loads(captured.out), captured.err) == (
+        {},
+        "codex_memory: hook skipped\n",
+    )
     assert secret not in captured.out + captured.err
 
 
@@ -773,8 +818,13 @@ def test_codex_lookup_tier_uses_bounded_runner_and_fixed_timeout_error(
     assert codex_memory.command_lookup_tier(Namespace()) == 124
     assert calls[0][0] == "lookup_mode.py"
     captured = capsys.readouterr()
-    assert captured.out == ""
-    assert captured.err == "codex_memory: lookup timed out\n"
+    assert (captured.out, captured.err) == ("", "codex_memory: lookup timed out\n")
+
+
+def _assert_codex_memory_has_no_legacy_helpers():
+    source = (SCRIPTS_DIR / "codex_memory.py").read_text(encoding="utf-8")
+    assert "def _record_heartbeat" not in source
+    assert "def _spawn_flush_memory" not in source
 
 
 def test_codex_daily_log_uses_shared_ingest_policy(monkeypatch, tmp_path):
@@ -809,11 +859,8 @@ def test_codex_daily_log_uses_shared_ingest_policy(monkeypatch, tmp_path):
 
     assert rc == 0
     assert observed["envelope"].session == "session-1"
-    assert observed["force_stub"] is False
-    assert observed["trigger"] == "codex"
-    source = (SCRIPTS_DIR / "codex_memory.py").read_text(encoding="utf-8")
-    assert "def _record_heartbeat" not in source
-    assert "def _spawn_flush_memory" not in source
+    assert (observed["force_stub"], observed["trigger"]) == (False, "codex")
+    _assert_codex_memory_has_no_legacy_helpers()
 
 
 @pytest.mark.parametrize("event_type", ["session_start", "session_end", "pre_compact"])
@@ -848,6 +895,11 @@ def test_shared_ingest_persists_heartbeat_with_derived_slug(
     heartbeat = state["codex_heartbeats"]["project-with-spaces"]
     assert heartbeat["project_root"] == str(project.resolve())
     assert heartbeat["session_id"] == "session-1"
+
+
+def _assert_one_redacted_delegate_call(calls, captured, secret):
+    assert [call[0] for call in calls] == ["session_end_project_tag.py"]
+    assert secret not in captured[0]
 
 
 def test_shared_ingest_materializes_redacted_transient_and_delegates(tmp_path, monkeypatch):
@@ -893,17 +945,13 @@ def test_shared_ingest_materializes_redacted_transient_and_delegates(tmp_path, m
 
     result = integration_adapter.ingest_event(envelope, trigger="opencode-idle")
 
-    assert calls[0][0] == "session_end_project_tag.py"
-    assert len(calls) == 1
-    assert secret not in captured[0]
+    _assert_one_redacted_delegate_call(calls, captured, secret)
     assert not list((state_root / "cache/transient-transcripts").glob("*.txt"))
     assert result["flush_spawned"] is True
 
 
-def test_shared_ingest_publishes_durable_intent_before_delegate_and_replays(
-    tmp_path, monkeypatch
-):
-    import integration_adapter
+def _adopted_ingest_vault(tmp_path, monkeypatch, integration_adapter):
+    """A V3-adopted vault with the adapter pointed at it instead of the live one."""
     from installed_memory_repair import repair_installed_vault
 
     vault = tmp_path / "vault"
@@ -927,6 +975,29 @@ def test_shared_ingest_publishes_durable_intent_before_delegate_and_replays(
     # to this checkout — which is the owner's live vault.
     monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
+    return state_root, project
+
+
+def _assert_v3_recorded_exactly_one_task(state_root):
+    with sqlite3.connect(state_root / "run/queue-v3.sqlite3") as database:
+        assert database.execute("SELECT COUNT(*) FROM tasks").fetchone() == (1,)
+        assert database.execute(
+            "SELECT COUNT(*) FROM capture_task_links"
+        ).fetchone() == (1,)
+
+
+def _assert_intent_replayed_not_duplicated(first, second, state_root):
+    assert first["capture_intent_ids"] == second["capture_intent_ids"]
+    assert len(first["capture_intent_ids"]) == 1
+    _assert_v3_recorded_exactly_one_task(state_root)
+
+
+def test_shared_ingest_publishes_durable_intent_before_delegate_and_replays(
+    tmp_path, monkeypatch
+):
+    import integration_adapter
+
+    state_root, project = _adopted_ingest_vault(tmp_path, monkeypatch, integration_adapter)
     calls = []
 
     def delegate(name, payload, **_kwargs):
@@ -963,13 +1034,7 @@ def test_shared_ingest_publishes_durable_intent_before_delegate_and_replays(
     first = integration_adapter.ingest_event(envelope, trigger="opencode-idle")
     second = integration_adapter.ingest_event(envelope, trigger="opencode-idle")
 
-    assert first["capture_intent_ids"] == second["capture_intent_ids"]
-    assert len(first["capture_intent_ids"]) == 1
-    with sqlite3.connect(state_root / "run/queue-v3.sqlite3") as database:
-        assert database.execute("SELECT COUNT(*) FROM tasks").fetchone() == (1,)
-        assert database.execute("SELECT COUNT(*) FROM capture_task_links").fetchone() == (
-            1,
-        )
+    _assert_intent_replayed_not_duplicated(first, second, state_root)
     assert calls
     assert len(wakes) == 2
 
@@ -978,29 +1043,8 @@ def test_durable_session_end_wakes_v3_worker_without_legacy_flush(
     tmp_path, monkeypatch
 ):
     import integration_adapter
-    from installed_memory_repair import repair_installed_vault
 
-    vault = tmp_path / "vault"
-    state_root = tmp_path / "state"
-    project = tmp_path / "project"
-    (vault / "knowledge/projects").mkdir(parents=True)
-    (vault / "scripts").mkdir()
-    (vault / "scripts/integration_adapter.py").write_bytes(
-        (SCRIPTS_DIR / "integration_adapter.py").read_bytes()
-    )
-    project.mkdir()
-    report = repair_installed_vault(
-        root=vault,
-        state_root=state_root,
-        adopt_ownership_v3=True,
-        confirm_all_agents_stopped=True,
-    )
-    assert report["overall_status"] == "ok"
-    monkeypatch.setattr(integration_adapter, "ROOT", vault)
-    # Child processes read the root from the environment, and conftest pins it
-    # to this checkout — which is the owner's live vault.
-    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
-    monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
+    state_root, project = _adopted_ingest_vault(tmp_path, monkeypatch, integration_adapter)
     spawned = []
     monkeypatch.setattr(
         integration_adapter,
@@ -1055,29 +1099,8 @@ def test_capture_worker_cli_runs_one_active_worker(monkeypatch):
 
 def test_active_capture_worker_completes_published_intent(tmp_path, monkeypatch):
     import integration_adapter
-    from installed_memory_repair import repair_installed_vault
 
-    vault = tmp_path / "vault"
-    state_root = tmp_path / "state"
-    project = tmp_path / "project"
-    (vault / "knowledge/projects").mkdir(parents=True)
-    (vault / "scripts").mkdir()
-    (vault / "scripts/integration_adapter.py").write_bytes(
-        (SCRIPTS_DIR / "integration_adapter.py").read_bytes()
-    )
-    project.mkdir()
-    report = repair_installed_vault(
-        root=vault,
-        state_root=state_root,
-        adopt_ownership_v3=True,
-        confirm_all_agents_stopped=True,
-    )
-    assert report["overall_status"] == "ok"
-    monkeypatch.setattr(integration_adapter, "ROOT", vault)
-    # Child processes read the root from the environment, and conftest pins it
-    # to this checkout — which is the owner's live vault.
-    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
-    monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
+    state_root, project = _adopted_ingest_vault(tmp_path, monkeypatch, integration_adapter)
     monkeypatch.setattr(integration_adapter, "spawn_detached", lambda _args: 123)
     monkeypatch.setattr(
         integration_adapter,
@@ -1283,51 +1306,46 @@ def _assert_swapped_parent_keeps_no_transcript(
     assert not list(external_parent.glob("*.txt"))
 
 
-def test_windows_transient_permissions_use_bounded_icacls(monkeypatch, tmp_path):
-    import integration_adapter
-
-    state_root = tmp_path / "state"
-    external_dir = tmp_path / "external-dir"
-    state_root.mkdir()
-    external_dir.mkdir()
-    if not _try_symlink(state_root / "cache", external_dir, target_is_directory=True):
-        pytest.skip("directory symlink/reparse creation unavailable")
+def _refuse_symlinked_cache_root(
+    monkeypatch, integration_adapter, state_root, external_dir, envelope
+):
     monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
-    envelope = integration_adapter.normalize_event("opencode", "session_end", {})
     with pytest.raises(PermissionError, match="transient"):
         integration_adapter._write_transient_transcript(envelope, "private")
     assert not list(external_dir.rglob("*"))
 
-    (state_root / "cache").unlink()
-    transient_dir = _private_transient_dir(state_root)
-    external_file = tmp_path / "external.txt"
-    external_file.write_text("untouched", encoding="utf-8")
-    collision = transient_dir / f"{envelope.event_id}-collision.txt"
-    file_link_available = _try_symlink(
-        collision, external_file, target_is_directory=False
-    )
+
+def _exercise_collision_suffix_retry(
+    monkeypatch, integration_adapter, envelope, external_file, collision, file_link_available
+):
     if not file_link_available:
         collision.write_text("untouched", encoding="utf-8")
     suffixes = iter(("collision", "unique"))
     monkeypatch.setattr(
         integration_adapter.secrets, "token_hex", lambda _size: next(suffixes)
     )
-    restrict_file_permissions = integration_adapter._restrict_file_permissions
-    monkeypatch.setattr(integration_adapter, "_restrict_file_permissions", lambda _path: None)
+    monkeypatch.setattr(
+        integration_adapter, "_restrict_file_permissions", lambda _path: None
+    )
     created = integration_adapter._write_transient_transcript(envelope, "private")
     assert created.name == f"{envelope.event_id}-unique.txt"
     assert external_file.read_text(encoding="utf-8") == "untouched"
     assert collision.read_text(encoding="utf-8") == "untouched"
 
-    if os.name != "nt":
-        _assert_unsafe_mode_is_refused(
-            integration_adapter, monkeypatch, transient_dir, envelope
-        )
 
-    _assert_swapped_parent_keeps_no_transcript(
-        integration_adapter, monkeypatch, tmp_path, envelope
+def _assert_unsafe_mode_is_refused_off_windows(
+    integration_adapter, monkeypatch, transient_dir, envelope
+):
+    if os.name == "nt":
+        return
+    _assert_unsafe_mode_is_refused(
+        integration_adapter, monkeypatch, transient_dir, envelope
     )
 
+
+def _exercise_windows_icacls_bounds(
+    monkeypatch, integration_adapter, tmp_path, restrict_file_permissions
+):
     path = tmp_path / "transient.txt"
     path.write_text("safe", encoding="utf-8")
     calls = []
@@ -1336,6 +1354,7 @@ def test_windows_transient_permissions_use_bounded_icacls(monkeypatch, tmp_path)
     )
     monkeypatch.setattr(integration_adapter.os, "name", "nt")
     monkeypatch.setenv("USERNAME", "Test User")
+
     def record_run(args, **kwargs):
         calls.append((args, kwargs))
         return SimpleNamespace(returncode=0)
@@ -1345,6 +1364,49 @@ def test_windows_transient_permissions_use_bounded_icacls(monkeypatch, tmp_path)
     integration_adapter._restrict_file_permissions(path)
 
     _assert_bounded_icacls(calls[0], path)
+
+
+def test_windows_transient_permissions_use_bounded_icacls(monkeypatch, tmp_path):
+    import integration_adapter
+
+    state_root = tmp_path / "state"
+    external_dir = tmp_path / "external-dir"
+    state_root.mkdir()
+    external_dir.mkdir()
+    if not _try_symlink(state_root / "cache", external_dir, target_is_directory=True):
+        pytest.skip("directory symlink/reparse creation unavailable")
+    envelope = integration_adapter.normalize_event("opencode", "session_end", {})
+    _refuse_symlinked_cache_root(
+        monkeypatch, integration_adapter, state_root, external_dir, envelope
+    )
+
+    (state_root / "cache").unlink()
+    transient_dir = _private_transient_dir(state_root)
+    external_file = tmp_path / "external.txt"
+    external_file.write_text("untouched", encoding="utf-8")
+    collision = transient_dir / f"{envelope.event_id}-collision.txt"
+    file_link_available = _try_symlink(
+        collision, external_file, target_is_directory=False
+    )
+    restrict_file_permissions = integration_adapter._restrict_file_permissions
+    _exercise_collision_suffix_retry(
+        monkeypatch,
+        integration_adapter,
+        envelope,
+        external_file,
+        collision,
+        file_link_available,
+    )
+
+    _assert_unsafe_mode_is_refused_off_windows(
+        integration_adapter, monkeypatch, transient_dir, envelope
+    )
+    _assert_swapped_parent_keeps_no_transcript(
+        integration_adapter, monkeypatch, tmp_path, envelope
+    )
+    _exercise_windows_icacls_bounds(
+        monkeypatch, integration_adapter, tmp_path, restrict_file_permissions
+    )
     if not file_link_available:
         pytest.skip("file symlink creation unavailable; regular collision verified")
     assert collision.is_symlink()
@@ -1377,6 +1439,21 @@ def test_claude_hooks_route_through_shared_adapter_and_preserve_contract():
     assert "--delegate" not in settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
 
 
+def _optional_transcript_file(tmp_path, transcript):
+    if not transcript:
+        return ""
+    transcript_path = tmp_path / transcript
+    transcript_path.write_text("{}\n", encoding="utf-8")
+    return str(transcript_path)
+
+
+def _assert_sanitized_policy_reached_ingest(observed, force_stub):
+    assert observed["envelope"].session == "[REDACTED_API_KEY]"
+    assert observed["envelope"].payload["reason"] == "token=[REDACTED]"
+    assert observed["force_stub"] is force_stub
+    assert observed["trigger"] == "secret=[REDACTED]"
+
+
 @pytest.mark.parametrize(
     ("transcript", "force_stub", "expected"),
     [("", False, "heartbeat"), ("", True, "stub"), ("session.jsonl", False, "flush")],
@@ -1386,9 +1463,7 @@ def test_codex_passes_sanitized_policy_to_shared_ingest(
 ):
     import codex_memory
 
-    transcript_path = str(tmp_path / transcript) if transcript else ""
-    if transcript:
-        Path(transcript_path).write_text("{}\n", encoding="utf-8")
+    transcript_path = _optional_transcript_file(tmp_path, transcript)
     observed = {}
 
     def fake_ingest(envelope, **kwargs):
@@ -1419,10 +1494,7 @@ def test_codex_passes_sanitized_policy_to_shared_ingest(
     )
 
     assert rc == 0
-    assert observed["envelope"].session == "[REDACTED_API_KEY]"
-    assert observed["envelope"].payload["reason"] == "token=[REDACTED]"
-    assert observed["force_stub"] is force_stub
-    assert observed["trigger"] == "secret=[REDACTED]"
+    _assert_sanitized_policy_reached_ingest(observed, force_stub)
     assert secret not in capsys.readouterr().out
 
 
@@ -1441,9 +1513,11 @@ def test_codex_normalization_failure_is_host_safe_and_secret_free(monkeypatch, t
     )
 
     captured = capsys.readouterr()
-    assert rc == 0
-    assert captured.out == ""
-    assert captured.err == "codex_memory: capture skipped\n"
+    assert (rc, captured.out, captured.err) == (
+        0,
+        "",
+        "codex_memory: capture skipped\n",
+    )
     assert secret not in captured.err
 
 
@@ -1531,9 +1605,11 @@ def test_codex_delegate_failure_does_not_echo_output(monkeypatch, tmp_path, caps
     )
 
     captured = capsys.readouterr()
-    assert rc == 0
-    assert captured.out == ""
-    assert captured.err == "codex_memory: capture failed\n"
+    assert (rc, captured.out, captured.err) == (
+        0,
+        "",
+        "codex_memory: capture failed\n",
+    )
     assert secret not in captured.err
 
 
@@ -1611,9 +1687,11 @@ def test_heartbeat_record_writes_state_entry(tmp_path, monkeypatch):
     state = json.loads(fake_state_file.read_text(encoding="utf-8"))
     assert "test-project" in state.get("codex_heartbeats", {})
     hb = state["codex_heartbeats"]["test-project"]
-    assert hb["reason"] == "opencode-session-start"
-    assert hb["session_id"] == "opc-123"
-    assert hb["source"] == "opencode"
+    assert (hb["reason"], hb["session_id"], hb["source"]) == (
+        "opencode-session-start",
+        "opc-123",
+        "opencode",
+    )
 
 
 def test_heartbeat_record_preserves_missing_optional_source_fields(tmp_path, monkeypatch):
@@ -1668,11 +1746,9 @@ def test_tool_breadcrumb_writes_line(tmp_path, monkeypatch):
     daily = tmp_path / "knowledge" / "daily" / f"{today}.md"
     assert daily.exists()
     content = daily.read_text(encoding="utf-8")
-    assert "tool" in content
-    assert "your-app" in content
-    assert "edit" in content
-    assert "src/auth.ts" in content
-    assert "abcdefgh" in content  # session_id truncated to 8 chars
+    # The session id is truncated to its first 8 characters in the line.
+    for part in ("tool", "your-app", "edit", "src/auth.ts", "abcdefgh"):
+        assert part in content, part
 
 
 def _claude_post_tool_payload(stdout: str) -> dict:
@@ -1735,7 +1811,11 @@ def _write_long_transcript(path: Path, target_bytes: int) -> tuple[str, str]:
         lines.append(line)
         total += len(line) + 1
         index += 1
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # newline="\n" pins the fixture bytes: text-mode write with newline=None
+    # translates "\n" to os.linesep, so on Windows the file would carry "\r\n"
+    # and every byte offset and suffix this file asserts on would shift.
+    # The product reads transcripts byte-faithfully by the capture contract.
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     return lines[0], lines[-1]
 
 
@@ -1767,7 +1847,9 @@ def test_a_short_transcript_is_still_returned_whole(tmp_path):
     from integration_adapter import _capture_transcript_text
 
     path = tmp_path / "short.jsonl"
-    path.write_text('{"a": 1}\n{"b": 2}\n', encoding="utf-8")
+    # newline="\n" pins the bytes; without it Windows writes "\r\n" and the
+    # byte-faithful reader would truthfully return a fixture we did not intend.
+    path.write_text('{"a": 1}\n{"b": 2}\n', encoding="utf-8", newline="\n")
 
     assert _capture_transcript_text(path) == '{"a": 1}\n{"b": 2}\n'
 
