@@ -158,5 +158,7 @@ owner's call and is not made here.
   changed path".
 - [[knowledge/notes/audit-closure-security-recovery-control-plane-decision]] —
   the one fail-closed DLP boundary this narrows without opening.
+- [[knowledge/notes/finding-level-dlp-allowlist-decision]] — the per-finding
+  unlock for fixtures this rule still rightly refuses.
 - `docs/research/2026-08-22-secret-prefix-boundaries.md` — the earlier fix in the
   same family: a prefix must start a token.
