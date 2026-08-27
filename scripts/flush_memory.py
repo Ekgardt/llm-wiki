@@ -33,6 +33,7 @@ doesn't track runtime churn.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -1343,15 +1344,43 @@ def run_capture_worker_once(
             lease = queue.claim_capture("capture-worker")
             if lease is None:
                 return None
-            return process_capture_lease(
-                queue,
-                coordinator,
-                lease,
-                owner=owner,
-                process_missing=process_missing,
+            return _process_or_fail(
+                queue, coordinator, lease, owner, process_missing
             )
     finally:
         registry.release(owner)
+
+
+def _process_or_fail(
+    queue: object,
+    coordinator: object,
+    lease: object,
+    owner: object,
+    process_missing: Callable[..., object],
+) -> object:
+    """Settle the claim either way: a failure is a named retry, not a stuck lease.
+
+    Measured on this vault on 2026-08-27: a provider timeout raised out of the
+    worker, the CLI boundary swallowed it with exit 0, and the task sat leased
+    until its TTL expired — three silent attempts before anyone could see why.
+    """
+    from memory_queue import QueueFailure
+
+    try:
+        return process_capture_lease(
+            queue,
+            coordinator,
+            lease,
+            owner=owner,
+            process_missing=process_missing,
+        )
+    except Exception:
+        # retry_after=0, not the drain loop's 60: this worker runs once per
+        # lifecycle event, so there is no hot loop to damp, and the crash
+        # recovery choreography re-claims immediately.
+        with contextlib.suppress(Exception):
+            queue.fail(lease, QueueFailure("processor_failed", retry_after=0))
+        raise
 
 
 def _capture_feedback(tier: str, body: str, args: argparse.Namespace) -> None:
