@@ -27,16 +27,15 @@ COMMIT_NOW = "b" * 40
 
 def _scope(tmp_path: Path, commit: str | None, name: str = "repo"):
     """A commit-bearing scope built from derived identities, no git needed."""
-    from repository_scope import (
-        RepositoryScope,
-        derive_checkout_id,
-        derive_repository_id,
-    )
-
     # `str(Path)` yields backslashes on Windows, which the scope's canonical
     # drive-letter form refuses (CI run 33037811562, all five py versions on
     # shard s2). Serialize through the product's own canonicaliser instead.
-    from repository_scope import _local_serialized_path
+    from repository_scope import (
+        RepositoryScope,
+        _local_serialized_path,
+        derive_checkout_id,
+        derive_repository_id,
+    )
 
     root = _local_serialized_path(tmp_path / name, strict=False)
     common = _local_serialized_path(tmp_path / name / ".git", strict=False)
