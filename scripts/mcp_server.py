@@ -258,6 +258,70 @@ def _start_worker_thread(submitted, context, function, args) -> None:
         raise
 
 
+# ``code_graph``'s live extraction takes no deadline and cannot be interrupted
+# from outside, so an abandoned run keeps its worker until it finishes on its
+# own. The slot cap keeps repeated timeouts from stacking runaway workers.
+CODE_GRAPH_WORK_SLOTS = 2
+
+_CODE_GRAPH_SLOTS = threading.Semaphore(CODE_GRAPH_WORK_SLOTS)
+
+
+def _run_code_graph_work(function, args, kwargs, outcome) -> None:
+    try:
+        outcome.set_result(function(*args, **kwargs))
+    except BaseException as error:  # noqa: BLE001 - delivered to the waiting caller
+        outcome.set_exception(error)
+    finally:
+        _CODE_GRAPH_SLOTS.release()
+
+
+def _started_code_graph_worker(function, args, kwargs):
+    """Start abandonable code-graph work on its own bounded daemon worker."""
+    if not _CODE_GRAPH_SLOTS.acquire(blocking=False):
+        raise TimeoutError(
+            "code graph workers are still busy with previously abandoned work"
+        )
+    outcome = concurrent.futures.Future()
+    thread = threading.Thread(
+        target=_run_code_graph_work,
+        args=(function, args, kwargs, outcome),
+        name="llm-wiki-code-graph",
+        daemon=True,
+    )
+    try:
+        thread.start()
+    except BaseException:
+        _CODE_GRAPH_SLOTS.release()
+        raise
+    return outcome
+
+
+def _bounded_code_graph_call(function, *args, deadline: float, **kwargs):
+    """Bound non-cooperative code-graph work by abandoning it at the deadline."""
+    _check_deadline(deadline)
+    outcome = _started_code_graph_worker(function, args, kwargs)
+    try:
+        return outcome.result(timeout=max(0.0, deadline - time.monotonic()))
+    except concurrent.futures.TimeoutError:
+        raise TimeoutError(
+            "code graph analysis exceeded the operation deadline"
+        ) from None
+
+
+def _code_graph_timeout_data(
+    directory: object, error: BaseException, *, completed: tuple[str, ...]
+) -> dict:
+    """A bounded, named result for a code-graph budget that ran out."""
+    return {
+        "directory": directory if isinstance(directory, str) else None,
+        "status": "timeout",
+        "warning": "code_graph_timeout",
+        "detail": str(error),
+        "completed": list(completed),
+        "skipped": ["code_graph_analysis"],
+    }
+
+
 async def _run_bounded(function, *args, deadline: float):
     """Run synchronous work off-loop without an unbounded submission queue."""
     _check_deadline(deadline)
@@ -1261,10 +1325,28 @@ def _find_dead_code(
     """Find conservative dead-code candidates in a project directory."""
     from code_graph import find_dead_code
 
-    resolved, error = _validated_code_directory(directory, deadline=deadline)
+    operation_deadline = _operation_deadline(deadline)
+    resolved, error = _validated_code_directory(
+        directory, deadline=operation_deadline
+    )
     if error:
         return {"error": error}
-    result = find_dead_code(resolved, live=live, with_report=True)
+    try:
+        result = _bounded_code_graph_call(
+            find_dead_code,
+            resolved,
+            live=live,
+            with_report=True,
+            deadline=operation_deadline,
+        )
+    except TimeoutError as reason:
+        return _code_graph_timeout_data(
+            str(resolved), reason, completed=("directory_validation",)
+        )
+    return _dead_code_result_data(resolved, result)
+
+
+def _dead_code_result_data(resolved: Path, result) -> dict:
     if isinstance(result, list):
         return {
             "directory": str(resolved),
@@ -1283,10 +1365,28 @@ def _get_architecture(
     """Summarize the statically visible architecture of a project directory."""
     from code_graph import get_architecture
 
-    resolved, error = _validated_code_directory(directory, deadline=deadline)
+    operation_deadline = _operation_deadline(deadline)
+    resolved, error = _validated_code_directory(
+        directory, deadline=operation_deadline
+    )
     if error:
         return {"error": error}
-    architecture = get_architecture(resolved, live=live, with_report=True)
+    try:
+        architecture = _bounded_code_graph_call(
+            get_architecture,
+            resolved,
+            live=live,
+            with_report=True,
+            deadline=operation_deadline,
+        )
+    except TimeoutError as reason:
+        return _code_graph_timeout_data(
+            str(resolved), reason, completed=("directory_validation",)
+        )
+    return _architecture_summary_data(resolved, architecture)
+
+
+def _architecture_summary_data(resolved: Path, architecture: dict) -> dict:
     report = {
         "source_generation": architecture.get("source_generation"),
         "graph_complete": architecture.get("graph_complete", False),
@@ -4375,16 +4475,28 @@ def _tool_compile(arguments: dict, deadline: float):
 
 
 def _tool_find_dead_code(arguments: dict, deadline: float):
-    data = _call_with_deadline(
-        _find_dead_code,
-        arguments["directory"],
-        live=arguments.get("live", False),
-        deadline=deadline,
-    )
+    try:
+        data = _call_with_deadline(
+            _find_dead_code,
+            arguments.get("directory"),
+            live=arguments.get("live", False),
+            deadline=deadline,
+        )
+    except TimeoutError as error:
+        return _code_graph_timeout_data(
+            arguments.get("directory"), error, completed=()
+        ), False
     return data, False
 
 
 def _precise_architecture_call(arguments: dict, deadline: float):
+    missing = [
+        key
+        for key in ("directory", "path", "line", "character")
+        if key not in arguments
+    ]
+    if missing:
+        return {"error": f"missing required arguments: {', '.join(missing)}"}
     return _get_precise_architecture(
         arguments["directory"],
         mode=arguments.get("mode"),
@@ -4399,7 +4511,7 @@ def _precise_architecture_call(arguments: dict, deadline: float):
 
 def _impact_architecture_call(arguments: dict, deadline: float):
     return _analyze_impact(
-        directory=arguments["directory"],
+        directory=arguments.get("directory"),
         comparison=arguments.get("comparison", "dirty"),
         base=arguments.get("base"),
         target=arguments.get("target"),
@@ -4411,7 +4523,7 @@ def _impact_architecture_call(arguments: dict, deadline: float):
 def _summary_architecture_call(arguments: dict, deadline: float):
     return _call_with_deadline(
         _get_architecture,
-        arguments["directory"],
+        arguments.get("directory"),
         live=arguments.get("live", False),
         deadline=deadline,
     )
@@ -4419,7 +4531,7 @@ def _summary_architecture_call(arguments: dict, deadline: float):
 
 def _architecture_mode_call(arguments: dict, deadline: float):
     return _get_architecture_mode(
-        arguments["directory"],
+        arguments.get("directory"),
         mode=arguments["mode"],
         symbol=arguments.get("symbol"),
         target=arguments.get("target"),
@@ -4430,15 +4542,34 @@ def _architecture_mode_call(arguments: dict, deadline: float):
 
 
 def _tool_get_architecture(arguments: dict, deadline: float):
+    try:
+        return _architecture_tool_call(arguments, deadline), False
+    except TimeoutError as error:
+        return _architecture_timeout_data(arguments, error), False
+
+
+def _architecture_tool_call(arguments: dict, deadline: float):
     if _is_precise_architecture_request(arguments):
-        return _precise_architecture_call(arguments, deadline), False
+        return _precise_architecture_call(arguments, deadline)
     mode = arguments.get("mode", "summary")
     calls = {
         "impact": _impact_architecture_call,
         "summary": _summary_architecture_call,
     }
     call = calls.get(mode, _architecture_mode_call)
-    return call(arguments, deadline), False
+    return call(arguments, deadline)
+
+
+def _architecture_timeout_data(arguments: dict, error: BaseException) -> dict:
+    """Precise requests keep their navigation-failure shape; the rest name the budget."""
+    failure = _navigation_failure_from_arguments(
+        arguments,
+        status=_navigation_error_status(error),
+        warning=_navigation_error_warning(error),
+    )
+    if failure is not None:
+        return failure
+    return _code_graph_timeout_data(arguments.get("directory"), error, completed=())
 
 
 def _tool_doctor(arguments: dict, deadline: float):

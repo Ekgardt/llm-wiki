@@ -6097,12 +6097,137 @@ def _fence_lost(where: str, database: Any, lease: dict[str, object]) -> Maintena
     return MaintenanceFenceLost(where, observed)
 
 
+# The adopted runtime has one ownership registry, and doctor's maintenance
+# fence is one row in it. "repair" is the registry role whose lease timing
+# (120 s TTL, 40 s heartbeat) matches MAINTENANCE_LEASE_SECONDS and
+# MAINTENANCE_HEARTBEAT_SECONDS, and it carries no marker obligation; the
+# scope keeps every doctor pass — generation refresh and --repair alike —
+# mutually exclusive, exactly as the legacy 'doctor' owner row did.
+_V3_MAINTENANCE_ROLE = "repair"
+_V3_MAINTENANCE_SCOPE = "doctor:maintenance"
+
+
+def _maintenance_ownership_registry(coordinator: Any) -> Any | None:
+    """The adopted coordinator's ownership registry, or None on the legacy path.
+
+    An adopted vault holds maintenance owners in the coordinator-v3 schema
+    (role/scope/actor_id, no `owner_name`), and the product's own path to that
+    schema is `operational_ownership.OwnershipRegistry` — the same registry the
+    capture worker and the project store use. Speaking raw legacy SQL at that
+    database is what NEW-109 was: `no such column: owner_name` on every
+    nightly generation refresh of an adopted vault.
+    """
+    if getattr(coordinator, "_database_contract", None) is None:
+        return None
+    from operational_ownership import OwnershipRegistry
+
+    return OwnershipRegistry._from_adopted_database(  # noqa: SLF001
+        Path(coordinator.state_root), coordinator.database_path
+    )
+
+
+def _v3_maintenance_actor() -> str:
+    """The fence's own actor identity, distinct from the plain user identity.
+
+    `maintenance_owners.actor_id` is UNIQUE across the whole v3 table — one
+    live lease per actor. The guarded refresh itself still has to enter the
+    Markdown writer gate when it publishes a generation, and that gate
+    acquires role `markdown-writer` under the plain `current_actor_identity()`.
+    Measured on an adopted vault on 2026-08-27: holding the fence under the
+    plain identity made the pass's own publication fail with
+    `owner_identity_conflict`. The maintenance pass is a distinct agent of the
+    same user, and naming it so is what lets its own guarded work write.
+    """
+    from operational_ownership import current_actor_identity
+
+    return f"{current_actor_identity()}#doctor-maintenance"
+
+
+def _acquired_v3_maintenance(
+    coordinator: Any, registry: Any
+) -> tuple[Any, dict[str, object]] | None:
+    from operational_ownership import OperationalOwnershipError
+
+    try:
+        owner = registry.acquire(
+            _V3_MAINTENANCE_ROLE,
+            scope=_V3_MAINTENANCE_SCOPE,
+            actor_id=_v3_maintenance_actor(),
+        )
+    except OperationalOwnershipError:
+        # owner_busy, a live runtime-deletion check, or fail-closed liveness
+        # doubt: every refusal means "not ours now", which is the deferred
+        # `maintenance_owner_busy` outcome, never a traceback.
+        return None
+    lease: dict[str, object] = {
+        "token": owner.token,
+        "epoch": owner.epoch,
+        "registry": registry,
+        "owner": owner,
+    }
+    return coordinator, lease
+
+
+def _read_v3_owner_row(registry: Any) -> sqlite3.Row | None:
+    with closing(registry._connect()) as database:  # noqa: SLF001
+        return database.execute(
+            "SELECT * FROM maintenance_owners WHERE role=? AND scope=?",
+            (_V3_MAINTENANCE_ROLE, _V3_MAINTENANCE_SCOPE),
+        ).fetchone()
+
+
+def _v3_fence_lost(where: str, lease: dict[str, object]) -> MaintenanceFenceLost:
+    observed = _observed_owner_row(_read_v3_owner_row(lease["registry"]))
+    observed["held_epoch"] = lease.get("epoch")
+    observed["held_by_process"] = os.getpid()
+    return MaintenanceFenceLost(where, observed)
+
+
+def _heartbeat_v3_maintenance(lease: dict[str, object]) -> None:
+    from operational_ownership import OperationalOwnershipError
+
+    registry = lease["registry"]
+    try:
+        lease["owner"] = registry.heartbeat(lease["owner"])
+    except OperationalOwnershipError as exc:
+        raise _v3_fence_lost("heartbeat", lease) from exc
+
+
+def _require_v3_maintenance(lease: dict[str, object]) -> None:
+    from operational_ownership import OperationalOwnershipError
+
+    registry = lease["registry"]
+    with closing(registry._connect()) as database:  # noqa: SLF001
+        try:
+            registry.require(database, lease["owner"])
+        except OperationalOwnershipError as exc:
+            raise _v3_fence_lost("require", lease) from exc
+
+
+def _release_v3_maintenance(lease: dict[str, object]) -> None:
+    from operational_ownership import OperationalOwnershipError
+
+    try:
+        lease["registry"].release(lease["owner"])
+    except OperationalOwnershipError as exc:
+        raise _v3_fence_lost("release", lease) from exc
+
+
 def _acquire_maintenance_owner(
     root: Path, state_root: Path, now: datetime
 ) -> tuple[Any, dict[str, object]] | None:
     from markdown_transaction import active_or_legacy_coordinator
 
     coordinator = active_or_legacy_coordinator(root, state_root)
+    registry = _maintenance_ownership_registry(coordinator)
+    if registry is not None:
+        return _acquired_v3_maintenance(coordinator, registry)
+    return _acquired_legacy_maintenance(coordinator, now)
+
+
+def _acquired_legacy_maintenance(
+    coordinator: Any, now: datetime
+) -> tuple[Any, dict[str, object]] | None:
     token = secrets.token_hex(16)
     expires = now + timedelta(seconds=MAINTENANCE_LEASE_SECONDS)
     with coordinator._connect() as database:
@@ -6145,6 +6270,9 @@ def _acquire_maintenance_owner(
 def _heartbeat_maintenance_owner(
     coordinator: Any, lease: dict[str, object], now: datetime | None = None
 ) -> None:
+    if "owner" in lease:
+        _heartbeat_v3_maintenance(lease)
+        return
     heartbeat = _as_utc(now)
     expires = heartbeat + timedelta(seconds=MAINTENANCE_LEASE_SECONDS)
     with coordinator._connect() as database:
@@ -6175,6 +6303,9 @@ def _owner_row_is_ours(row: sqlite3.Row | None, lease: dict[str, object]) -> boo
 
 
 def _require_maintenance_owner(coordinator: Any, lease: dict[str, object]) -> None:
+    if "owner" in lease:
+        _require_v3_maintenance(lease)
+        return
     with coordinator._connect() as database:
         row = _read_owner_row(database)
         if _owner_row_is_ours(row, lease):
@@ -6183,6 +6314,9 @@ def _require_maintenance_owner(coordinator: Any, lease: dict[str, object]) -> No
 
 
 def _release_maintenance_owner(coordinator: Any, lease: dict[str, object]) -> None:
+    if "owner" in lease:
+        _release_v3_maintenance(lease)
+        return
     with coordinator._connect() as database:
         database.execute("BEGIN IMMEDIATE")
         released_at = datetime.min.replace(tzinfo=timezone.utc).isoformat()
