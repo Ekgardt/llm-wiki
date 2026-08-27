@@ -1,6 +1,6 @@
 """LLM-Wiki MCP Server — 12 task-shaped tools, stdio transport, 100% local.
 
-Gives AI agents (Claude Code, OpenCode, Codex, Cursor, Antigravity) structured
+Gives AI agents (Claude Code, OpenCode, Codex) structured
 access to the knowledge vault via Model Context Protocol. No server, no cloud,
 no network — stdio subprocess on the same machine.
 
@@ -165,9 +165,9 @@ def _tool_operation_seconds(name: str, arguments: object) -> float:
     if name != "get_architecture" or not isinstance(arguments, dict):
         return MCP_OPERATION_SECONDS
     mode = arguments.get("mode", "summary")
-    if mode in PRECISE_ARCHITECTURE_MODES:
-        return MCP_LSP_STARTUP_SECONDS
-    if _positioned_architecture_call(arguments, mode):
+    if mode in PRECISE_ARCHITECTURE_MODES or _positioned_architecture_call(
+        arguments, mode
+    ):
         return MCP_LSP_STARTUP_SECONDS
     return MCP_OPERATION_SECONDS
 
@@ -256,6 +256,70 @@ def _start_worker_thread(submitted, context, function, args) -> None:
     except BaseException:
         submitted.cancel()
         raise
+
+
+# ``code_graph``'s live extraction takes no deadline and cannot be interrupted
+# from outside, so an abandoned run keeps its worker until it finishes on its
+# own. The slot cap keeps repeated timeouts from stacking runaway workers.
+CODE_GRAPH_WORK_SLOTS = 2
+
+_CODE_GRAPH_SLOTS = threading.Semaphore(CODE_GRAPH_WORK_SLOTS)
+
+
+def _run_code_graph_work(function, args, kwargs, outcome) -> None:
+    try:
+        outcome.set_result(function(*args, **kwargs))
+    except BaseException as error:  # noqa: BLE001 - delivered to the waiting caller
+        outcome.set_exception(error)
+    finally:
+        _CODE_GRAPH_SLOTS.release()
+
+
+def _started_code_graph_worker(function, args, kwargs):
+    """Start abandonable code-graph work on its own bounded daemon worker."""
+    if not _CODE_GRAPH_SLOTS.acquire(blocking=False):
+        raise TimeoutError(
+            "code graph workers are still busy with previously abandoned work"
+        )
+    outcome = concurrent.futures.Future()
+    thread = threading.Thread(
+        target=_run_code_graph_work,
+        args=(function, args, kwargs, outcome),
+        name="llm-wiki-code-graph",
+        daemon=True,
+    )
+    try:
+        thread.start()
+    except BaseException:
+        _CODE_GRAPH_SLOTS.release()
+        raise
+    return outcome
+
+
+def _bounded_code_graph_call(function, *args, deadline: float, **kwargs):
+    """Bound non-cooperative code-graph work by abandoning it at the deadline."""
+    _check_deadline(deadline)
+    outcome = _started_code_graph_worker(function, args, kwargs)
+    try:
+        return outcome.result(timeout=max(0.0, deadline - time.monotonic()))
+    except concurrent.futures.TimeoutError:
+        raise TimeoutError(
+            "code graph analysis exceeded the operation deadline"
+        ) from None
+
+
+def _code_graph_timeout_data(
+    directory: object, error: BaseException, *, completed: tuple[str, ...]
+) -> dict:
+    """A bounded, named result for a code-graph budget that ran out."""
+    return {
+        "directory": directory if isinstance(directory, str) else None,
+        "status": "timeout",
+        "warning": "code_graph_timeout",
+        "detail": str(error),
+        "completed": list(completed),
+        "skipped": ["code_graph_analysis"],
+    }
 
 
 async def _run_bounded(function, *args, deadline: float):
@@ -369,18 +433,15 @@ def _doctor_branch(
 ) -> dict:
     properties = {"action": {"type": "string", "const": action}}
     required = ["action"]
-    if target:
-        properties["target_id"] = {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-        }
-        required.append("target_id")
-    if limit:
-        properties["limit"] = {"type": "integer", "minimum": 1, "maximum": 100}
-    if mutation:
-        properties["repair"] = {"type": "boolean", "const": True}
-        required.append("repair")
+    optional = (
+        (target, "target_id", {"type": "string", "minLength": 1, "maxLength": 128}, True),
+        (limit, "limit", {"type": "integer", "minimum": 1, "maximum": 100}, False),
+        (mutation, "repair", {"type": "boolean", "const": True}, True),
+    )
+    for wanted, key, field, mandatory in optional:
+        if wanted:
+            properties[key] = field
+            required.extend([key] if mandatory else [])
     return {
         "type": "object",
         "properties": properties,
@@ -620,6 +681,11 @@ def _run_vault_search(
 ) -> list[dict]:
     from search_memory import search
 
+    # No `max_candidates`: that is a per-backend resource cap, not the answer
+    # size. Passing the answer size collapsed each leg's pool to the number of
+    # rows asked for, and one page owns many chunks -- measured on the live
+    # vault, five rows for the quarantine-retry question were three pages, the
+    # decision page absent; without the cap it came first.
     return search(
         query,
         limit=limit,
@@ -628,7 +694,6 @@ def _run_vault_search(
         rerank=rerank,
         source_tool="mcp.recall",
         deadline_monotonic=operation_deadline,
-        max_candidates=limit,
     )
 
 
@@ -704,14 +769,38 @@ def _read_page(
     content = _page_content(page_path)
     if isinstance(content, dict):
         return content
-    evidence = _page_evidence(ROOT, STATE_ROOT, content, resolve_evidence, deadline)
+    return _page_with_evidence(
+        ROOT,
+        STATE_ROOT,
+        slug,
+        page_path,
+        content,
+        emit_telemetry=emit_telemetry,
+        resolve_evidence=resolve_evidence,
+        deadline=deadline,
+    )
+
+
+def _page_with_evidence(
+    root,
+    state_root,
+    slug: str,
+    page_path,
+    content: str,
+    *,
+    emit_telemetry: bool,
+    resolve_evidence: bool,
+    deadline: float | None,
+) -> dict:
+    """The page and its resolved evidence, or the evidence error envelope."""
+    evidence = _page_evidence(root, state_root, content, resolve_evidence, deadline)
     if isinstance(evidence, dict):
         return evidence
     if emit_telemetry:
         _record_page_reads(slug, evidence)
     return {
         "slug": slug,
-        "path": str(page_path.relative_to(ROOT)),
+        "path": str(page_path.relative_to(root)),
         "content": content,
         "evidence": evidence,
     }
@@ -1236,10 +1325,28 @@ def _find_dead_code(
     """Find conservative dead-code candidates in a project directory."""
     from code_graph import find_dead_code
 
-    resolved, error = _validated_code_directory(directory, deadline=deadline)
+    operation_deadline = _operation_deadline(deadline)
+    resolved, error = _validated_code_directory(
+        directory, deadline=operation_deadline
+    )
     if error:
         return {"error": error}
-    result = find_dead_code(resolved, live=live, with_report=True)
+    try:
+        result = _bounded_code_graph_call(
+            find_dead_code,
+            resolved,
+            live=live,
+            with_report=True,
+            deadline=operation_deadline,
+        )
+    except TimeoutError as reason:
+        return _code_graph_timeout_data(
+            str(resolved), reason, completed=("directory_validation",)
+        )
+    return _dead_code_result_data(resolved, result)
+
+
+def _dead_code_result_data(resolved: Path, result) -> dict:
     if isinstance(result, list):
         return {
             "directory": str(resolved),
@@ -1258,10 +1365,28 @@ def _get_architecture(
     """Summarize the statically visible architecture of a project directory."""
     from code_graph import get_architecture
 
-    resolved, error = _validated_code_directory(directory, deadline=deadline)
+    operation_deadline = _operation_deadline(deadline)
+    resolved, error = _validated_code_directory(
+        directory, deadline=operation_deadline
+    )
     if error:
         return {"error": error}
-    architecture = get_architecture(resolved, live=live, with_report=True)
+    try:
+        architecture = _bounded_code_graph_call(
+            get_architecture,
+            resolved,
+            live=live,
+            with_report=True,
+            deadline=operation_deadline,
+        )
+    except TimeoutError as reason:
+        return _code_graph_timeout_data(
+            str(resolved), reason, completed=("directory_validation",)
+        )
+    return _architecture_summary_data(resolved, architecture)
+
+
+def _architecture_summary_data(resolved: Path, architecture: dict) -> dict:
     report = {
         "source_generation": architecture.get("source_generation"),
         "graph_complete": architecture.get("graph_complete", False),
@@ -1489,6 +1614,14 @@ def _check_navigation_manager_stop(deadline: float, cancelled) -> None:
     _check_deadline(deadline)
 
 
+def _require_navigation_manager_lifecycle(expected_epoch: int) -> None:
+    """The manager about to be handed out must still be the one asked for."""
+    if expected_epoch != _NAVIGATION_MANAGER_EPOCH:
+        raise TimeoutError("navigation session manager lifecycle changed")
+    if _NAVIGATION_MANAGER_CLOSING is not None:
+        raise TimeoutError("navigation session manager is closing")
+
+
 def _navigation_session_manager(
     deadline: float,
     expected_epoch: int,
@@ -1499,10 +1632,7 @@ def _navigation_session_manager(
     _acquire_navigation_manager_lock(deadline)
     try:
         _check_navigation_manager_stop(deadline, cancelled)
-        if expected_epoch != _NAVIGATION_MANAGER_EPOCH:
-            raise TimeoutError("navigation session manager lifecycle changed")
-        if _NAVIGATION_MANAGER_CLOSING is not None:
-            raise TimeoutError("navigation session manager is closing")
+        _require_navigation_manager_lifecycle(expected_epoch)
         if _NAVIGATION_MANAGER is None:
             from memory_state import STATE_ROOT
             from pyright_session import PyrightSessionManager
@@ -1753,6 +1883,10 @@ class _NavigationSourceCache:
         if len(self._values) >= MAX_NAVIGATION_GRAPH_FACTS:
             return None
         content = _navigation_source_bytes(scope, relative_path, deadline=deadline)
+        return self._remember(key, content)
+
+    def _remember(self, key, content: bytes):
+        """Cache the bytes unless they would push the cache past its ceiling."""
         if self._bytes + len(content) > MAX_NAVIGATION_SOURCE_CACHE_BYTES:
             self._values[key] = None
             return None
@@ -1803,12 +1937,9 @@ def _navigation_span_source(scope, span: dict, deadline, source_cache):
     if expected_source_sha256 is None:
         return None
     cached = source_cache.read(scope, relative_path, deadline=deadline)
-    if cached is None:
+    if cached is None or cached[1] != expected_source_sha256:
         return None
-    content, source_sha256 = cached
-    if source_sha256 != expected_source_sha256:
-        return None
-    return relative_path, content
+    return relative_path, cached[0]
 
 
 def _span_range_invalid(byte_start: int, byte_end: int, size: int) -> bool:
@@ -1846,9 +1977,9 @@ def _validated_span_bounds(
     if not _span_kind_valid(source_kind, require_span_hash):
         return None
     bounds = _span_bounds(span, content)
-    if bounds is None:
-        return None
-    if require_span_hash and not _span_hash_matches(span, content, bounds):
+    if bounds is None or (
+        require_span_hash and not _span_hash_matches(span, content, bounds)
+    ):
         return None
     return bounds
 
@@ -1938,6 +2069,15 @@ def _resolved_navigation_location(
     bounds = _validated_span_bounds(span, content, source_kind, require_span_hash)
     if bounds is None:
         return None
+    return _located_navigation_span(
+        relative_path, content, bounds, span, metadata, graph_version, deadline
+    )
+
+
+def _located_navigation_span(
+    relative_path, content, bounds, span, metadata, graph_version, deadline
+):
+    """The location for a validated span, or None when its position is unreadable."""
     position = _span_position(relative_path, content, bounds[0], span, deadline)
     if position is None:
         return None
@@ -2241,24 +2381,28 @@ def _structural_call_candidates(request, symbol, deadline, source_cache):
 
 
 def _structural_candidates_for(Capability, request, symbol, deadline, source_cache):
-    if request.capability is Capability.DEFINITIONS:
-        return _graph_declaration_locations(
+    handlers = {
+        Capability.DEFINITIONS: lambda: _graph_declaration_locations(
             symbol,
             request.repository,
             deadline,
             source_cache,
-        )
-    if request.capability is Capability.REFERENCES:
-        return _graph_call_locations(
+        ),
+        Capability.REFERENCES: lambda: _graph_call_locations(
             symbol,
             request.repository,
             direction="incoming",
             deadline=deadline,
             source_cache=source_cache,
-        )
-    if request.capability is Capability.CALLS:
-        return _structural_call_candidates(request, symbol, deadline, source_cache)
-    return ()
+        ),
+        Capability.CALLS: lambda: _structural_call_candidates(
+            request, symbol, deadline, source_cache
+        ),
+    }
+    handler = handlers.get(request.capability)
+    if handler is None:
+        return ()
+    return handler()
 
 
 def _navigation_symbol_resolver(symbol, scope, deadline):
@@ -2701,7 +2845,12 @@ def _doctor_status(context: dict) -> dict:
 
 
 def _queue_database_path(context: dict) -> Path:
-    return context["state_root"] / "run" / "queue.sqlite3"
+    """The queue database in force; adoption leaves a tombstone at the legacy path."""
+    from installed_memory_repair import adopted_database_path
+
+    return adopted_database_path(
+        database_name="queue", state_root=context["state_root"]
+    )
 
 
 def _missing_queue_result(action: str) -> dict:
@@ -2776,9 +2925,10 @@ def _doctor_queue_read(context: dict) -> dict:
 
 
 def _doctor_queue_cancel(context: dict) -> dict:
-    from memory_queue import MemoryQueue
+    from memory_queue import active_or_legacy_memory_queue
 
-    changed = MemoryQueue(context["state_root"]).cancel(
+    queue = active_or_legacy_memory_queue(context["root"], context["state_root"])
+    changed = queue.cancel(
         str(context["target_id"]),
         deadline=context["deadline"],
         cancelled=context["cancelled"],
@@ -2802,10 +2952,11 @@ def _redrive_error_code(error) -> str:
 
 
 def _doctor_queue_redrive(context: dict) -> dict:
-    from memory_queue import MemoryQueue, QueueOperationError
+    from memory_queue import QueueOperationError, active_or_legacy_memory_queue
 
+    queue = active_or_legacy_memory_queue(context["root"], context["state_root"])
     try:
-        replacement = MemoryQueue(context["state_root"]).redrive(
+        replacement = queue.redrive(
             str(context["target_id"]),
             deadline=context["deadline"],
             cancelled=context["cancelled"],
@@ -2837,9 +2988,9 @@ def _transaction_result(action: str, records) -> dict:
 
 
 def _transaction_coordinator(context: dict):
-    from markdown_transaction import MarkdownCoordinator
+    from markdown_transaction import active_or_legacy_coordinator
 
-    return MarkdownCoordinator(context["root"], context["state_root"])
+    return active_or_legacy_coordinator(context["root"], context["state_root"])
 
 
 def _doctor_transaction_recover(context: dict) -> dict:
@@ -2968,12 +3119,14 @@ def _validated_code_directory(
 
 
 def _code_directory_error(resolved: Path) -> str | None:
-    if not resolved.exists():
-        return f"directory does not exist: {resolved}"
-    if not resolved.is_dir():
-        return f"directory is not a directory: {resolved}"
-    if resolved == Path(resolved.anchor):
-        return "directory must not be a filesystem root"
+    reasons = (
+        (not resolved.exists(), f"directory does not exist: {resolved}"),
+        (not resolved.is_dir(), f"directory is not a directory: {resolved}"),
+        (resolved == Path(resolved.anchor), "directory must not be a filesystem root"),
+    )
+    for failed, message in reasons:
+        if failed:
+            return message
     return None
 
 
@@ -3077,6 +3230,11 @@ def _validate_tool_arguments(name: str, arguments) -> str | None:
     schema = TOOL_INPUT_SCHEMAS[name]
     if "oneOf" in schema:
         return _validate_one_of(schema, arguments)
+    return _validate_object_then_specific(name, schema, arguments)
+
+
+def _validate_object_then_specific(name: str, schema: dict, arguments: dict):
+    """The declared object schema first, then the tool's own argument rules."""
     error = _validate_object_schema(
         schema,
         arguments,
@@ -3190,6 +3348,11 @@ def _validate_architecture_arguments(arguments: dict) -> str | None:
     forbidden = sorted(set(arguments).difference(allowed))
     if forbidden:
         return f"arguments are not valid for {mode}: {', '.join(forbidden)}"
+    return _positioned_architecture_path_error(arguments, mode, positioned)
+
+
+def _positioned_architecture_path_error(arguments: dict, mode: str, positioned: bool):
+    """Only a precise or positioned call carries a path to validate."""
     if mode in PRECISE_ARCHITECTURE_MODES or positioned:
         return _architecture_path_error(arguments)
     return None
@@ -3320,6 +3483,11 @@ def _validate_schema_field(
     error = _validate_field_type(field["type"], key, value)
     if error is not None:
         return error
+    return _validate_typed_field(field, key, value)
+
+
+def _validate_typed_field(field: dict, key: str, value) -> str | None:
+    """Bounds for every field, preceded by the item rules an array declares."""
     if field["type"] == "array":
         return _validate_array_field(field, key, value) or _validate_field_bounds(
             field, key, value
@@ -3439,12 +3607,14 @@ def _sanitized_diagnostic_mapping(value: dict) -> dict:
 
 
 def _sanitize_diagnostic(value):
-    if isinstance(value, str):
-        return _sanitized_diagnostic_text(value)
-    if isinstance(value, list):
-        return _sanitized_diagnostic_list(value)
-    if isinstance(value, dict):
-        return _sanitized_diagnostic_mapping(value)
+    handlers = (
+        (str, _sanitized_diagnostic_text),
+        (list, _sanitized_diagnostic_list),
+        (dict, _sanitized_diagnostic_mapping),
+    )
+    for kind, handler in handlers:
+        if isinstance(value, kind):
+            return handler(value)
     return value
 
 
@@ -3671,17 +3841,19 @@ def _weakest_stated_confidence(facts: list) -> float:
 
 
 def _page_warnings(item) -> list[str]:
-    warnings = []
-    if item.confidence == "low":
-        warnings.append(f"{item.relative_path} states confidence: low.")
-    if item.authority == "inferred":
-        warnings.append(f"{item.relative_path} is inferred, not stated by anyone.")
-    if item.aging:
-        warnings.append(
-            f"{item.relative_path} is {item.age_days} days old; a {item.page_type} "
-            f"page stays current for {item.age_limit_days}."
-        )
-    return warnings
+    aging = (
+        f"{item.relative_path} is {item.age_days} days old; a {item.page_type} "
+        f"page stays current for {item.age_limit_days}."
+    )
+    candidates = (
+        (item.confidence == "low", f"{item.relative_path} states confidence: low."),
+        (
+            item.authority == "inferred",
+            f"{item.relative_path} is inferred, not stated by anyone.",
+        ),
+        (bool(item.aging), aging),
+    )
+    return [message for flagged, message in candidates if flagged]
 
 
 def _provenance_warnings(facts: list) -> list[str]:
@@ -4303,16 +4475,28 @@ def _tool_compile(arguments: dict, deadline: float):
 
 
 def _tool_find_dead_code(arguments: dict, deadline: float):
-    data = _call_with_deadline(
-        _find_dead_code,
-        arguments["directory"],
-        live=arguments.get("live", False),
-        deadline=deadline,
-    )
+    try:
+        data = _call_with_deadline(
+            _find_dead_code,
+            arguments.get("directory"),
+            live=arguments.get("live", False),
+            deadline=deadline,
+        )
+    except TimeoutError as error:
+        return _code_graph_timeout_data(
+            arguments.get("directory"), error, completed=()
+        ), False
     return data, False
 
 
 def _precise_architecture_call(arguments: dict, deadline: float):
+    missing = [
+        key
+        for key in ("directory", "path", "line", "character")
+        if key not in arguments
+    ]
+    if missing:
+        return {"error": f"missing required arguments: {', '.join(missing)}"}
     return _get_precise_architecture(
         arguments["directory"],
         mode=arguments.get("mode"),
@@ -4327,7 +4511,7 @@ def _precise_architecture_call(arguments: dict, deadline: float):
 
 def _impact_architecture_call(arguments: dict, deadline: float):
     return _analyze_impact(
-        directory=arguments["directory"],
+        directory=arguments.get("directory"),
         comparison=arguments.get("comparison", "dirty"),
         base=arguments.get("base"),
         target=arguments.get("target"),
@@ -4339,7 +4523,7 @@ def _impact_architecture_call(arguments: dict, deadline: float):
 def _summary_architecture_call(arguments: dict, deadline: float):
     return _call_with_deadline(
         _get_architecture,
-        arguments["directory"],
+        arguments.get("directory"),
         live=arguments.get("live", False),
         deadline=deadline,
     )
@@ -4347,7 +4531,7 @@ def _summary_architecture_call(arguments: dict, deadline: float):
 
 def _architecture_mode_call(arguments: dict, deadline: float):
     return _get_architecture_mode(
-        arguments["directory"],
+        arguments.get("directory"),
         mode=arguments["mode"],
         symbol=arguments.get("symbol"),
         target=arguments.get("target"),
@@ -4358,14 +4542,34 @@ def _architecture_mode_call(arguments: dict, deadline: float):
 
 
 def _tool_get_architecture(arguments: dict, deadline: float):
+    try:
+        return _architecture_tool_call(arguments, deadline), False
+    except TimeoutError as error:
+        return _architecture_timeout_data(arguments, error), False
+
+
+def _architecture_tool_call(arguments: dict, deadline: float):
     if _is_precise_architecture_request(arguments):
-        return _precise_architecture_call(arguments, deadline), False
+        return _precise_architecture_call(arguments, deadline)
     mode = arguments.get("mode", "summary")
-    if mode == "impact":
-        return _impact_architecture_call(arguments, deadline), False
-    if mode == "summary":
-        return _summary_architecture_call(arguments, deadline), False
-    return _architecture_mode_call(arguments, deadline), False
+    calls = {
+        "impact": _impact_architecture_call,
+        "summary": _summary_architecture_call,
+    }
+    call = calls.get(mode, _architecture_mode_call)
+    return call(arguments, deadline)
+
+
+def _architecture_timeout_data(arguments: dict, error: BaseException) -> dict:
+    """Precise requests keep their navigation-failure shape; the rest name the budget."""
+    failure = _navigation_failure_from_arguments(
+        arguments,
+        status=_navigation_error_status(error),
+        warning=_navigation_error_warning(error),
+    )
+    if failure is not None:
+        return failure
+    return _code_graph_timeout_data(arguments.get("directory"), error, completed=())
 
 
 def _tool_doctor(arguments: dict, deadline: float):

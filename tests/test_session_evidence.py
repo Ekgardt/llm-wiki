@@ -185,7 +185,7 @@ def test_the_capture_worker_writes_the_record_before_classifying(monkeypatch):
     written = []
     monkeypatch.setattr(
         "session_evidence.write_session_evidence",
-        lambda vault, fields, text: written.append((fields, text)),
+        lambda vault, fields, text, **_owned: written.append((fields, text)),
     )
     record = {
         "session": "session-10",

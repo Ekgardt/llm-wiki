@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,43 +16,116 @@ class SymbolRegistry:
 EMPTY_REGISTRY = SymbolRegistry(frozenset(), frozenset())
 
 
+# The one directory rule the vault's walkers already agree on (NEW-110): the
+# corpus walker prunes every hidden directory (`corpus_snapshot.
+# _directory_excluded`), which is why the graph index never indexes `.claude`
+# agent worktrees, and `code_graph._WORKSPACE_SKIP_PARTS` names the workspace
+# caches. Without this rule the registry walked 7,549 files on the live vault
+# (7,215 under `.claude/`) and died of MemoryError.
+_SKIPPED_DIRECTORY_NAMES = frozenset({"node_modules", "venv", "__pycache__"})
+
+
+def _directory_skipped(name: str) -> bool:
+    return name.startswith(".") or name in _SKIPPED_DIRECTORY_NAMES
+
+
+def _kept_subdirectories(directories: list[str]) -> list[str]:
+    return sorted(name for name in directories if not _directory_skipped(name))
+
+
+def _python_files_in(parent: Path, files: list[str]) -> list[Path]:
+    return [parent / name for name in sorted(files) if name.endswith(".py")]
+
+
+def _workspace_python_files(directory: Path) -> list[Path]:
+    """Python files below the root, pruning skipped directories, not the root."""
+    collected: list[Path] = []
+    for current, directories, files in os.walk(directory):
+        directories[:] = _kept_subdirectories(directories)
+        collected.extend(_python_files_in(Path(current), files))
+    return collected
+
+
+@dataclass(frozen=True)
+class _ReExport:
+    """One `from x import y` line of an `__init__.py`, kept instead of its AST."""
+
+    package: str
+    source: str
+    exported: str
+
+
+def _parsed_module(path: Path) -> ast.Module | None:
+    try:
+        return ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+    except (OSError, SyntaxError):
+        return None
+
+
+def _module_symbols(module: str, tree: ast.Module) -> set[str]:
+    symbols: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            symbols.add(f"{module}.{node.name}")
+        if isinstance(node, ast.ClassDef):
+            symbols.update(f"{module}.{node.name}.{name}" for name in _class_methods(node))
+    return symbols
+
+
+def _package_reexports(path: Path, package: str, tree: ast.Module) -> list[_ReExport]:
+    if path.name != "__init__.py":
+        return []
+    records: list[_ReExport] = []
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom):
+            records.extend(_reexport_records(package, node))
+    return records
+
+
+def _reexport_records(package: str, node: ast.ImportFrom) -> list[_ReExport]:
+    source = _absolute_module(package, node)
+    records = []
+    for alias in node.names:
+        target = f"{source}.{alias.name}" if source else alias.name
+        records.append(_ReExport(package, target, alias.asname or alias.name))
+    return records
+
+
+def _added_exports(symbols: set[str], reexports: list[_ReExport]) -> bool:
+    changed = False
+    for record in reexports:
+        exported = f"{record.package}.{record.exported}"
+        if record.source in symbols and exported not in symbols:
+            symbols.add(exported)
+            changed = True
+    return changed
+
+
+def _resolve_reexports(symbols: set[str], reexports: list[_ReExport]) -> None:
+    """Monotone fixed point: each round only adds, so it always terminates."""
+    while _added_exports(symbols, reexports):
+        pass
+
+
 def build_python_symbol_registry(directory: Path) -> SymbolRegistry:
-    """Collect importable Python definitions available in a workspace."""
+    """Collect importable Python definitions available in a workspace.
+
+    Each file's AST lives only for its own extraction pass; the re-export
+    resolution afterwards runs on `_ReExport` records (NEW-110 kept every
+    tree alive at once, ~1.5 GiB RSS per 1,000 files).
+    """
     symbols: set[str] = set()
     modules: set[str] = set()
-    parsed: list[tuple[Path, str, ast.Module]] = []
-    for path in sorted(directory.rglob("*.py")):
-        if any(part in {".git", ".venv", "venv", "__pycache__"} for part in path.parts):
-            continue
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
-        except (OSError, SyntaxError):
+    reexports: list[_ReExport] = []
+    for path in _workspace_python_files(directory):
+        tree = _parsed_module(path)
+        if tree is None:
             continue
         module = _module_name(path, directory)
         modules.add(module)
-        parsed.append((path, module, tree))
-        for node in tree.body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                symbols.add(f"{module}.{node.name}")
-            if isinstance(node, ast.ClassDef):
-                symbols.update(f"{module}.{node.name}.{name}" for name in _class_methods(node))
-
-    changed = True
-    while changed:
-        changed = False
-        for path, package, tree in parsed:
-            if path.name != "__init__.py":
-                continue
-            for node in tree.body:
-                if not isinstance(node, ast.ImportFrom):
-                    continue
-                source = _absolute_module(package, node)
-                for alias in node.names:
-                    target = f"{source}.{alias.name}" if source else alias.name
-                    exported = f"{package}.{alias.asname or alias.name}"
-                    if target in symbols and exported not in symbols:
-                        symbols.add(exported)
-                        changed = True
+        symbols.update(_module_symbols(module, tree))
+        reexports.extend(_package_reexports(path, module, tree))
+    _resolve_reexports(symbols, reexports)
     return SymbolRegistry(frozenset(symbols), frozenset(modules))
 
 
@@ -126,7 +200,7 @@ class _CallVisitor(ast.NodeVisitor):
         self.class_function_depths.pop()
         self.class_stack.pop()
 
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+    def _visit_function_header(self, node: ast.FunctionDef) -> None:
         for expression in [
             *node.decorator_list,
             *node.args.defaults,
@@ -136,24 +210,20 @@ class _CallVisitor(ast.NodeVisitor):
         if node.returns:
             self.visit(node.returns)
 
-        is_method = (
+    def _is_direct_method(self) -> bool:
+        return (
             bool(self.class_stack)
             and len(self.function_stack) == self.class_function_depths[-1]
         )
-        class_scope = self.scopes.pop() if is_method else None
-        self.function_stack.append(node.name)
-        parameters = {
-            argument.arg
-            for argument in [
-                *node.args.posonlyargs,
-                *node.args.args,
-                *node.args.kwonlyargs,
-            ]
-        }
-        if node.args.vararg:
-            parameters.add(node.args.vararg.arg)
-        if node.args.kwarg:
-            parameters.add(node.args.kwarg.arg)
+
+    @staticmethod
+    def _keeps_self(node: ast.FunctionDef, class_scope: object) -> bool:
+        arguments = node.args.args
+        return bool(class_scope) and bool(arguments) and arguments[0].arg == "self"
+
+    def _function_bindings(
+        self, node: ast.FunctionDef, parameters: set[str], class_scope: object
+    ) -> tuple[dict[str, str], set[str]]:
         static_locals, nonlocals = _function_static_bindings(node)
         nonlocal_imports = {
             name: imported
@@ -161,8 +231,16 @@ class _CallVisitor(ast.NodeVisitor):
             if (imported := self._lookup(0, name)) is not None
         }
         blocked = parameters | static_locals | (nonlocals - nonlocal_imports.keys())
-        if class_scope and node.args.args and node.args.args[0].arg == "self":
+        if self._keeps_self(node, class_scope):
             blocked.discard("self")
+        return nonlocal_imports, blocked
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function_header(node)
+        class_scope = self.scopes.pop() if self._is_direct_method() else None
+        self.function_stack.append(node.name)
+        parameters = _function_parameters(node.args)
+        nonlocal_imports, blocked = self._function_bindings(node, parameters, class_scope)
         self._visit_body(
             node.body,
             blocked,
@@ -175,6 +253,57 @@ class _CallVisitor(ast.NodeVisitor):
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
+    def _enter_local_function(self, node: ast.stmt, scope: str) -> None:
+        symbols, modules, functions, shadowed = self.scopes[-1]
+        functions[node.name] = f"{scope}.{node.name}"
+        symbols.pop(node.name, None)
+        modules.pop(node.name, None)
+        shadowed.discard(node.name)
+        self.visit(node)
+
+    def _record_from_alias(self, node: ast.ImportFrom, alias: ast.alias, module: str) -> None:
+        if alias.name == "*":
+            return
+        local_name = alias.asname or alias.name
+        self._bind_import(local_name, f"{module}.{alias.name}")
+        self.imports.append(_import_record(node, alias.name, local_name, module))
+
+    def _bind_from_import(self, node: ast.ImportFrom, scope: str) -> None:
+        module = self._absolute_import_module(node)
+        for alias in node.names:
+            self._record_from_alias(node, alias, module)
+
+    def _bind_plain_import(self, node: ast.Import, scope: str) -> None:
+        for alias in node.names:
+            local_name = alias.asname or alias.name.split(".")[0]
+            qualified = alias.name if alias.asname else alias.name.split(".")[0]
+            self._bind_module(local_name, qualified)
+            self.imports.append(_import_record(node, alias.name, local_name, alias.name))
+
+    def _track_assignment(self, node: ast.stmt, scope: str) -> None:
+        self.generic_visit(node)
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        for target in targets:
+            self._shadow_assigned(target)
+
+    def _shadow_assigned(self, target: ast.expr) -> None:
+        for name in _assigned_names(target):
+            self._shadow(name)
+
+    _STATEMENT_DRIVERS = (
+        ((ast.FunctionDef, ast.AsyncFunctionDef), _enter_local_function),
+        ((ast.ImportFrom,), _bind_from_import),
+        ((ast.Import,), _bind_plain_import),
+        ((ast.Assign, ast.AnnAssign, ast.AugAssign), _track_assignment),
+    )
+
+    def _visit_statement(self, node: ast.stmt, scope: str) -> None:
+        for types, driver in self._STATEMENT_DRIVERS:
+            if isinstance(node, types):
+                driver(self, node, scope)
+                return
+        self.visit(node)
+
     def _visit_body(
         self,
         body: list[ast.stmt],
@@ -182,43 +311,11 @@ class _CallVisitor(ast.NodeVisitor):
         semantic_receivers: set[str] | None = None,
         initial_symbols: dict[str, str] | None = None,
     ) -> None:
-        symbols: dict[str, str] = dict(initial_symbols or {})
-        modules: dict[str, str] = {}
-        functions: dict[str, str] = {}
-        shadowed = set(blocked or ())
         scope = ".".join([self.module_name, *self.function_stack])
-        self.scopes.append((symbols, modules, functions, shadowed))
+        self.scopes.append((dict(initial_symbols or {}), {}, {}, set(blocked or ())))
         self.semantic_receivers.append(set(semantic_receivers or ()))
         for node in body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                functions[node.name] = f"{scope}.{node.name}"
-                symbols.pop(node.name, None)
-                modules.pop(node.name, None)
-                shadowed.discard(node.name)
-                self.visit(node)
-            elif isinstance(node, ast.ImportFrom):
-                module = self._absolute_import_module(node)
-                for alias in node.names:
-                    if alias.name == "*":
-                        continue
-                    local_name = alias.asname or alias.name
-                    qualified = f"{module}.{alias.name}"
-                    self._bind_import(local_name, qualified)
-                    self.imports.append(_import_record(node, alias.name, local_name, module))
-            elif isinstance(node, ast.Import):
-                for alias in node.names:
-                    local_name = alias.asname or alias.name.split(".")[0]
-                    qualified = alias.name if alias.asname else alias.name.split(".")[0]
-                    self._bind_module(local_name, qualified)
-                    self.imports.append(_import_record(node, alias.name, local_name, alias.name))
-            elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
-                self.generic_visit(node)
-                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                for target in targets:
-                    for name in _assigned_names(target):
-                        self._shadow(name)
-            else:
-                self.visit(node)
+            self._visit_statement(node, scope)
         self.scopes.pop()
         self.semantic_receivers.pop()
 
@@ -284,20 +381,27 @@ class _CallVisitor(ast.NodeVisitor):
             self.visit(expression)
         self.scopes.pop()
 
+    def _visit_handler(self, handler: ast.ExceptHandler) -> None:
+        if handler.type:
+            self.visit(handler.type)
+        blocked = {handler.name} if handler.name else set()
+        self._visit_body(handler.body, blocked)
+
+    @staticmethod
+    def _try_statements(node: ast.Try) -> list[ast.stmt]:
+        statements = [*node.body, *node.orelse, *node.finalbody]
+        statements.extend(statement for handler in node.handlers for statement in handler.body)
+        return statements
+
     def visit_Try(self, node: ast.Try) -> None:
         self._visit_body(node.body)
         for handler in node.handlers:
-            if handler.type:
-                self.visit(handler.type)
-            blocked = {handler.name} if handler.name else set()
-            self._visit_body(handler.body, blocked)
+            self._visit_handler(handler)
         if node.orelse:
             self._visit_body(node.orelse)
         if node.finalbody:
             self._visit_body(node.finalbody)
-        statements = [*node.body, *node.orelse, *node.finalbody]
-        statements.extend(statement for handler in node.handlers for statement in handler.body)
-        self._shadow_bound(statements)
+        self._shadow_bound(self._try_statements(node))
 
     visit_TryStar = visit_Try
 
@@ -361,45 +465,96 @@ class _CallVisitor(ast.NodeVisitor):
         self, func: ast.expr
     ) -> tuple[str, str | None, str, str | None, bool, str | None]:
         if isinstance(func, ast.Name):
-            imported = self._lookup(0, func.id)
-            if imported:
-                return self._result(func.id, imported, "from_import")
-            local = self._lookup(2, func.id)
-            if local:
-                return func.id, local, "confirmed", "local_definition", False, None
-            if self._is_shadowed(func.id):
-                return func.id, None, "unknown", None, False, "shadowed_binding"
-            return func.id, None, "unknown", None, True, "unresolved_callable"
-
+            return self._resolve_name(func.id)
         if isinstance(func, ast.Attribute):
-            parts = _attribute_parts(func)
-            name = func.attr
-            if parts:
-                owner = parts[0]
-                imported_module = self._lookup(1, owner)
-                if imported_module:
-                    suffix = ".".join(parts[1:])
-                    return self._result(name, f"{imported_module}.{suffix}", "module_import")
-                if (
-                    len(parts) == 2
-                    and owner == "self"
-                    and self.class_stack
-                    and not self._is_shadowed(owner)
-                ):
-                    class_name = self.class_stack[-1]
-                    if name in self.classes[class_name]:
-                        qualified = f"{self.module_name}.{class_name}.{name}"
-                        return name, qualified, "confirmed", "self_method", False, None
-                if self._is_shadowed(owner):
-                    if self._is_semantic_receiver(owner):
-                        return name, None, "unknown", None, True, "dynamic_receiver"
-                    return name, None, "unknown", None, False, "shadowed_binding"
-                if len(parts) == 2 and owner in self.classes and name in self.classes[owner]:
-                    qualified = f"{self.module_name}.{owner}.{name}"
-                    return name, qualified, "confirmed", "class_method", False, None
-            return name, None, "unknown", None, True, "dynamic_receiver"
-
+            return self._resolve_attribute(func)
         return "<anonymous>", None, "unknown", None, False, "unsupported_call_target"
+
+    def _resolved_name_binding(
+        self, name: str
+    ) -> tuple[str, str | None, str, str | None, bool, str | None] | None:
+        imported = self._lookup(0, name)
+        if imported:
+            return self._result(name, imported, "from_import")
+        local = self._lookup(2, name)
+        if local:
+            return name, local, "confirmed", "local_definition", False, None
+        return None
+
+    def _resolve_name(
+        self, name: str
+    ) -> tuple[str, str | None, str, str | None, bool, str | None]:
+        resolved = self._resolved_name_binding(name)
+        if resolved is not None:
+            return resolved
+        if self._is_shadowed(name):
+            return name, None, "unknown", None, False, "shadowed_binding"
+        return name, None, "unknown", None, True, "unresolved_callable"
+
+    def _resolve_attribute(
+        self, func: ast.Attribute
+    ) -> tuple[str, str | None, str, str | None, bool, str | None]:
+        name = func.attr
+        resolved = self._resolved_attribute_owner(name, _attribute_parts(func))
+        if resolved is not None:
+            return resolved
+        return name, None, "unknown", None, True, "dynamic_receiver"
+
+    def _resolved_attribute_owner(
+        self, name: str, parts: list[str]
+    ) -> tuple[str, str | None, str, str | None, bool, str | None] | None:
+        if not parts:
+            return None
+        owner = parts[0]
+        imported_module = self._lookup(1, owner)
+        if imported_module:
+            suffix = ".".join(parts[1:])
+            return self._result(name, f"{imported_module}.{suffix}", "module_import")
+        return self._resolved_receiver(name, owner, parts)
+
+    def _resolved_receiver(
+        self, name: str, owner: str, parts: list[str]
+    ) -> tuple[str, str | None, str, str | None, bool, str | None] | None:
+        method = self._resolved_self_method(name, owner, parts)
+        if method is not None:
+            return method
+        if self._is_shadowed(owner):
+            return self._shadowed_receiver(name, owner)
+        return self._resolved_class_method(name, owner, parts)
+
+    def _self_receiver(self, owner: str, parts: list[str]) -> bool:
+        return (
+            len(parts) == 2
+            and owner == "self"
+            and bool(self.class_stack)
+            and not self._is_shadowed(owner)
+        )
+
+    def _resolved_self_method(
+        self, name: str, owner: str, parts: list[str]
+    ) -> tuple[str, str | None, str, str | None, bool, str | None] | None:
+        if not self._self_receiver(owner, parts):
+            return None
+        class_name = self.class_stack[-1]
+        if name not in self.classes[class_name]:
+            return None
+        qualified = f"{self.module_name}.{class_name}.{name}"
+        return name, qualified, "confirmed", "self_method", False, None
+
+    def _shadowed_receiver(
+        self, name: str, owner: str
+    ) -> tuple[str, str | None, str, str | None, bool, str | None]:
+        if self._is_semantic_receiver(owner):
+            return name, None, "unknown", None, True, "dynamic_receiver"
+        return name, None, "unknown", None, False, "shadowed_binding"
+
+    def _resolved_class_method(
+        self, name: str, owner: str, parts: list[str]
+    ) -> tuple[str, str | None, str, str | None, bool, str | None] | None:
+        if len(parts) == 2 and owner in self.classes and name in self.classes[owner]:
+            qualified = f"{self.module_name}.{owner}.{name}"
+            return name, qualified, "confirmed", "class_method", False, None
+        return None
 
     def _result(
         self, name: str, qualified: str, evidence: str
@@ -444,41 +599,85 @@ def _attribute_parts(node: ast.expr) -> list[str]:
     return list(reversed(parts))
 
 
+def _names_from_definition(statement: ast.stmt, names: set[str]) -> None:
+    names.add(statement.name)
+
+
+def _names_from_import(statement: ast.Import, names: set[str]) -> None:
+    names.update(alias.asname or alias.name.split(".")[0] for alias in statement.names)
+
+
+def _names_from_import_from(statement: ast.ImportFrom, names: set[str]) -> None:
+    names.update(alias.asname or alias.name for alias in statement.names if alias.name != "*")
+
+
+def _names_from_assign(statement: ast.Assign, names: set[str]) -> None:
+    names.update(name for target in statement.targets for name in _assigned_names(target))
+
+
+def _names_from_target(statement: ast.stmt, names: set[str]) -> None:
+    names.update(_assigned_names(statement.target))
+
+
+def _names_from_loop(statement: ast.stmt, names: set[str]) -> None:
+    names.update(_assigned_names(statement.target))
+    names.update(_bound_names([*statement.body, *statement.orelse]))
+
+
+def _names_from_with(statement: ast.stmt, names: set[str]) -> None:
+    for item in statement.items:
+        if item.optional_vars:
+            names.update(_assigned_names(item.optional_vars))
+    names.update(_bound_names(statement.body))
+
+
+def _names_from_branch(statement: ast.stmt, names: set[str]) -> None:
+    names.update(_bound_names([*statement.body, *statement.orelse]))
+
+
+def _names_from_match(statement: ast.Match, names: set[str]) -> None:
+    for case in statement.cases:
+        names.update(_match_pattern_names(case.pattern))
+        names.update(_bound_names(case.body))
+
+
+def _names_from_handler(handler: ast.ExceptHandler, names: set[str]) -> None:
+    if handler.name:
+        names.add(handler.name)
+    names.update(_bound_names(handler.body))
+
+
+def _names_from_try(statement: ast.Try, names: set[str]) -> None:
+    names.update(_bound_names([*statement.body, *statement.orelse, *statement.finalbody]))
+    for handler in statement.handlers:
+        _names_from_handler(handler, names)
+
+
+_BOUND_NAME_EXTRACTORS = (
+    ((ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef), _names_from_definition),
+    ((ast.Import,), _names_from_import),
+    ((ast.ImportFrom,), _names_from_import_from),
+    ((ast.Assign,), _names_from_assign),
+    ((ast.AnnAssign, ast.AugAssign), _names_from_target),
+    ((ast.For, ast.AsyncFor), _names_from_loop),
+    ((ast.With, ast.AsyncWith), _names_from_with),
+    ((ast.If, ast.While), _names_from_branch),
+    ((ast.Match,), _names_from_match),
+    ((ast.Try,), _names_from_try),
+)
+
+
+def _collect_bound(statement: ast.stmt, names: set[str]) -> None:
+    for types, extractor in _BOUND_NAME_EXTRACTORS:
+        if isinstance(statement, types):
+            extractor(statement, names)
+            return
+
+
 def _bound_names(statements: list[ast.stmt]) -> set[str]:
     names: set[str] = set()
     for statement in statements:
-        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            names.add(statement.name)
-        elif isinstance(statement, ast.Import):
-            names.update(alias.asname or alias.name.split(".")[0] for alias in statement.names)
-        elif isinstance(statement, ast.ImportFrom):
-            names.update(alias.asname or alias.name for alias in statement.names if alias.name != "*")
-        elif isinstance(statement, ast.Assign):
-            names.update(name for target in statement.targets for name in _assigned_names(target))
-        elif isinstance(statement, (ast.AnnAssign, ast.AugAssign)):
-            names.update(_assigned_names(statement.target))
-        elif isinstance(statement, (ast.For, ast.AsyncFor)):
-            names.update(_assigned_names(statement.target))
-            names.update(_bound_names([*statement.body, *statement.orelse]))
-        elif isinstance(statement, (ast.With, ast.AsyncWith)):
-            for item in statement.items:
-                if item.optional_vars:
-                    names.update(_assigned_names(item.optional_vars))
-            names.update(_bound_names(statement.body))
-        elif isinstance(statement, ast.If):
-            names.update(_bound_names([*statement.body, *statement.orelse]))
-        elif isinstance(statement, ast.While):
-            names.update(_bound_names([*statement.body, *statement.orelse]))
-        elif isinstance(statement, ast.Match):
-            for case in statement.cases:
-                names.update(_match_pattern_names(case.pattern))
-                names.update(_bound_names(case.body))
-        elif isinstance(statement, ast.Try):
-            names.update(_bound_names([*statement.body, *statement.orelse, *statement.finalbody]))
-            for handler in statement.handlers:
-                if handler.name:
-                    names.add(handler.name)
-                names.update(_bound_names(handler.body))
+        _collect_bound(statement, names)
     return names
 
 
@@ -521,6 +720,18 @@ class _FunctionBindingCollector(ast.NodeVisitor):
         self.generic_visit(node)
 
 
+def _function_parameters(args: ast.arguments) -> set[str]:
+    parameters = {
+        argument.arg
+        for argument in [*args.posonlyargs, *args.args, *args.kwonlyargs]
+    }
+    if args.vararg:
+        parameters.add(args.vararg.arg)
+    if args.kwarg:
+        parameters.add(args.kwarg.arg)
+    return parameters
+
+
 def _function_static_bindings(node: ast.FunctionDef) -> tuple[set[str], set[str]]:
     collector = _FunctionBindingCollector()
     for statement in node.body:
@@ -529,22 +740,34 @@ def _function_static_bindings(node: ast.FunctionDef) -> tuple[set[str], set[str]
     return local, collector.nonlocals
 
 
+def _relative_package(package_name: str, level: int) -> list[str]:
+    package = package_name.split(".") if package_name else []
+    if level > 1:
+        return package[: -(level - 1)]
+    return package
+
+
 def _absolute_module(package_name: str, node: ast.ImportFrom) -> str:
     if not node.level:
         return node.module or ""
-    package = package_name.split(".") if package_name else []
-    if node.level > 1:
-        package = package[: -(node.level - 1)]
+    package = _relative_package(package_name, node.level)
     if node.module:
         package.extend(node.module.split("."))
     return ".".join(package)
 
 
+def _pattern_binding(node: ast.AST) -> str | None:
+    if isinstance(node, (ast.MatchAs, ast.MatchStar)):
+        return node.name
+    if isinstance(node, ast.MatchMapping):
+        return node.rest
+    return None
+
+
 def _match_pattern_names(pattern: ast.pattern) -> set[str]:
     names: set[str] = set()
     for node in ast.walk(pattern):
-        if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
-            names.add(node.name)
-        elif isinstance(node, ast.MatchMapping) and node.rest:
-            names.add(node.rest)
+        name = _pattern_binding(node)
+        if name:
+            names.add(name)
     return names

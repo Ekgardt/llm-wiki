@@ -442,14 +442,12 @@ def _record_disagrees(
     authority: Mapping[str, object],
     receipt: Mapping[str, object],
 ) -> bool:
-    if sha256_bytes(canonical_json_bytes(record)) != authority["coordinator_record_digest"]:
-        return True
-    if record["transaction_id"] != authority["transaction_id"]:
-        return True
-    if record["operation_id"] != receipt["operation_id"]:
-        return True
     return (
-        record["state"] != authority["state"]
+        sha256_bytes(canonical_json_bytes(record))
+        != authority["coordinator_record_digest"]
+        or record["transaction_id"] != authority["transaction_id"]
+        or record["operation_id"] != receipt["operation_id"]
+        or record["state"] != authority["state"]
         or record["updated_at"] != authority["committed_at"]
     )
 
@@ -493,6 +491,15 @@ def _operation_unbound(
     )
 
 
+def _require_authority_transaction(
+    coordinator: object, receipt: Mapping[str, object]
+) -> object:
+    transaction = coordinator._record_for_operation_id(str(receipt["operation_id"]))
+    if transaction is None:
+        raise EvidenceResolutionError("archive compile authority transaction is missing")
+    return transaction
+
+
 def _require_authority_coordinator(
     authority: Mapping[str, object],
     receipt: Mapping[str, object],
@@ -501,9 +508,7 @@ def _require_authority_coordinator(
     """A live coordinator is the last word on an attestation a bag carries."""
     if coordinator is None:
         return
-    transaction = coordinator._record_for_operation_id(str(receipt["operation_id"]))
-    if transaction is None:
-        raise EvidenceResolutionError("archive compile authority transaction is missing")
+    transaction = _require_authority_transaction(coordinator, receipt)
     sequence = _commit_sequence(coordinator, transaction)
     if sequence is None or authority != compile_authority_attestation(
         transaction, sequence
@@ -1086,9 +1091,9 @@ class EvidenceResolver:
             self.state_root = Path(STATE_ROOT)
         if not (self.state_root / "run/markdown-transactions.sqlite3").exists():
             return None
-        from markdown_transaction import MarkdownCoordinator
+        from markdown_transaction import active_or_legacy_coordinator
 
-        return MarkdownCoordinator(self.vault, self.state_root)
+        return active_or_legacy_coordinator(self.vault, self.state_root)
 
     @staticmethod
     def _slice(
@@ -1286,6 +1291,12 @@ def _require_citation_binding(
         raise EvidenceResolutionError("citation source hash mismatch")
     start = int(citation["byte_start"])
     end = int(citation["byte_end"])
+    _require_citation_range(citation, source, text, start, end)
+
+
+def _require_citation_range(
+    citation: Mapping[str, object], source: bytes, text: str, start: int, end: int
+) -> None:
     if end > len(source):
         raise EvidenceResolutionError("citation range exceeds its source")
     if _citation_span_disagrees(citation, source, text, start, end):

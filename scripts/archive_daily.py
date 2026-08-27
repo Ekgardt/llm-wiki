@@ -34,13 +34,18 @@ from evidence_resolver import (  # noqa: E402
 )
 from markdown_transaction import (  # noqa: E402
     MarkdownChange,
-    MarkdownCoordinator,
     _acl_output_text,
     _harden_owner_only,
     _run_acl_command,
     _windows_acl_identity,
+    active_or_legacy_coordinator,
 )
-from memory_queue import MemoryQueue, QueueOperationError, SourceFence  # noqa: E402
+from memory_queue import (  # noqa: E402
+    MemoryQueue,
+    QueueOperationError,
+    SourceFence,
+    active_or_legacy_memory_queue,
+)
 from memory_state import ROOT, STATE_ROOT  # noqa: E402
 from reliable_memory import (  # noqa: E402
     DEFAULTS,
@@ -150,10 +155,14 @@ class DailyArchiver:
         self.state_root = Path(state_root)
         self.daily_root = self.vault / "knowledge" / "daily"
         self.archive_root = self.daily_root / "archive"
-        self.coordinator = MarkdownCoordinator(self.vault, self.state_root)
+        self.coordinator = active_or_legacy_coordinator(
+            self.vault, self.state_root
+        )
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.killpoint = killpoint or (lambda _point: None)
-        self.queue = queue or MemoryQueue(self.state_root)
+        self.queue = queue or active_or_legacy_memory_queue(
+            self.vault, self.state_root
+        )
         self.source_heartbeat_seconds = source_heartbeat_seconds
         self.source_lease_seconds = source_lease_seconds
 
@@ -206,9 +215,12 @@ class DailyArchiver:
     def _receipt_binding_reason(receipt: dict[str, object], logical_path: str, digest: str) -> str | None:
         """A receipt must bind this exact logical path and content digest."""
         source = receipt.get("source")
-        if not isinstance(source, dict):
-            return "compile_receipt_v3_missing"
-        if source.get("logical_path") != logical_path or source.get("sha256") != digest:
+        bound = (
+            isinstance(source, dict)
+            and source.get("logical_path") == logical_path
+            and source.get("sha256") == digest
+        )
+        if not bound:
             return "compile_receipt_v3_missing"
         if receipt.get("schema_version") != "compile-receipt/v3":
             return "nonterminal_compile_operation"
@@ -225,10 +237,16 @@ class DailyArchiver:
         if receipt is None:
             reasons.append("compile_receipt_v3_missing")
             return None, reasons
-        binding = self._receipt_binding_reason(receipt, logical_path, digest)
-        if binding is not None:
-            reasons.append(binding)
+        reasons.extend(
+            self._binding_reasons(receipt, logical_path, digest)
+        )
         return receipt, reasons
+
+    def _binding_reasons(
+        self, receipt: dict[str, object], logical_path: str, digest: str
+    ) -> list[str]:
+        binding = self._receipt_binding_reason(receipt, logical_path, digest)
+        return [] if binding is None else [binding]
 
     def _evidence_reasons(self, source: Path, content: bytes, digest: str) -> list[str]:
         """Every evidence block in the daily must still resolve before it moves."""
@@ -681,6 +699,15 @@ class DailyArchiver:
         flat_bytes = read_stable_bytes(flat, MAX_DAILY_BYTES, label="daily duplicate")
         return sha256_bytes(flat_bytes) == digest
 
+    def _recovered_keeper_still_matches(
+        self, keeper: object, daily_id: str, digest: str
+    ) -> bool:
+        """A flat source that changed under a published bag is quarantined, not kept."""
+        if self._flat_still_matches(daily_id, digest):
+            return True
+        self._quarantine(keeper, daily_id, digest)
+        return False
+
     def _recover_daily(
         self,
         daily_id: str,
@@ -696,9 +723,25 @@ class DailyArchiver:
             )
         if not exact:
             return None
+        return self._recover_from_published_bag(
+            exact,
+            daily_id,
+            digest,
+            hot_days=hot_days,
+            transaction_retention_days=transaction_retention_days,
+        )
+
+    def _recover_from_published_bag(
+        self,
+        exact: list,
+        daily_id: str,
+        digest: str,
+        *,
+        hot_days: int,
+        transaction_retention_days: int,
+    ) -> ArchiveReceipt | None:
         keeper = self._keep_one_exact_bag(exact, daily_id, digest)
-        if not self._flat_still_matches(daily_id, digest):
-            self._quarantine(keeper, daily_id, digest)
+        if not self._recovered_keeper_still_matches(keeper, daily_id, digest):
             return None
         self._remove_flat_after_eligibility_recheck(
             daily_id,
@@ -1005,12 +1048,13 @@ class DailyArchiver:
     @staticmethod
     def _require_build_intent_identity(value: dict[str, object]) -> None:
         daily_id = str(value["logical_daily_id"])
-        if DATE_RE.fullmatch(daily_id) is None:
-            raise ValueError("archive build intent identity is invalid")
-        if re.fullmatch(r"[0-9a-f]{64}", str(value["source_hash"])) is None:
-            raise ValueError("archive build intent identity is invalid")
         final_pattern = rf"bag-[A-Za-z0-9-]+-{daily_id}-[0-9a-f]{{32}}"
-        if re.fullmatch(final_pattern, str(value["final_bag_name"])) is None:
+        named = (
+            DATE_RE.fullmatch(daily_id) is not None
+            and re.fullmatch(r"[0-9a-f]{64}", str(value["source_hash"])) is not None
+            and re.fullmatch(final_pattern, str(value["final_bag_name"])) is not None
+        )
+        if not named:
             raise ValueError("archive build intent identity is invalid")
 
     def _read_build_intent(self, build: Path) -> dict[str, str]:
@@ -1842,6 +1886,12 @@ class DailyArchiver:
         acl_lines = DailyArchiver._acl_lines(acl)
         if not acl_lines:
             raise DailyArchiver._acl_failure("no ACL entries", acl)
+        DailyArchiver._require_acl_grants_read_only(identity, acl, acl_lines)
+
+    @staticmethod
+    def _require_acl_grants_read_only(
+        identity: str, acl: str, acl_lines: list
+    ) -> None:
         if not DailyArchiver._acl_grants_only_identity(identity, acl_lines):
             raise DailyArchiver._acl_failure(
                 f"principal other than {identity}", " | ".join(acl_lines)
@@ -1886,6 +1936,11 @@ class DailyArchiver:
         if os.name == "posix":
             DailyArchiver._remove_tree_descriptor_relative(path)
             return
+        DailyArchiver._remove_tree_by_path(path, entries)
+
+    @staticmethod
+    def _remove_tree_by_path(path: Path, entries: list) -> None:
+        """The path-based removal every platform without descriptor removal takes."""
         if os.name == "nt":
             DailyArchiver._harden_windows_tree(path, entries)
         for item in sorted(entries, key=lambda value: len(value.parts), reverse=True):
@@ -1924,6 +1979,10 @@ class DailyArchiver:
         if stat.S_ISDIR(info.st_mode):
             DailyArchiver._remove_directory_entry(directory_fd, name)
             return
+        DailyArchiver._remove_regular_entry(directory_fd, name, info)
+
+    @staticmethod
+    def _remove_regular_entry(directory_fd: int, name: str, info: object) -> None:
         if not stat.S_ISREG(info.st_mode):
             raise PermissionError("refusing to remove special archive build member")
         DailyArchiver._remove_file_entry(directory_fd, name)

@@ -276,12 +276,12 @@ def test_adapter_uses_canonical_source_as_agent_identity():
     }
 
 
-def test_agent_timeline_reports_five_canonical_agent_ids(tmp_path):
+def test_agent_timeline_reports_the_canonical_agent_ids(tmp_path):
     import agent_timeline
 
     day = tmp_path / f"{date.today().isoformat()}.md"
     blocks = []
-    for index, agent in enumerate(("opencode", "codex", "claude", "cursor", "antigravity")):
+    for index, agent in enumerate(("opencode", "codex", "claude")):
         blocks.append(
             f"## [10:0{index}:00] {agent}-session | session-{index}\n"
             "**Decisions made**\n"
@@ -291,13 +291,7 @@ def test_agent_timeline_reports_five_canonical_agent_ids(tmp_path):
 
     activity = agent_timeline._extract_activity(day, None, days=30)
 
-    assert {item["agent"] for item in activity} == {
-        "opencode",
-        "codex",
-        "claude",
-        "cursor",
-        "antigravity",
-    }
+    assert {item["agent"] for item in activity} == {"opencode", "codex", "claude"}
 
 
 def test_agent_timeline_reads_historical_tool_breadcrumbs():

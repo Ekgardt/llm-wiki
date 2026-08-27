@@ -51,7 +51,7 @@ TASK14_BEHAVIORAL_ENTRYPOINTS = {
     "scripts/rebuild_memory_index.py:main",
     "scripts/reflection.py:reflect_page",
     "scripts/session_end_project_tag.py:_append_entry",
-    "scripts/session_start_project_state.py:main",
+    "scripts/session_start_project_state.py:_create_project_state",
     "scripts/tool_breadcrumb_append.py:_append_breadcrumb",
     "scripts/user_prompt_capture.py:_append_prompt_tag",
 }
@@ -425,20 +425,15 @@ def _drive_session_start_project_state(d: _Drive) -> None:
     module, monkeypatch, vault = d.module, d.monkeypatch, d.vault
     project = d.tmp_path / "project"
     (project / ".git").mkdir(parents=True)
-    template = vault / "knowledge/projects/_template/state.md"
+    projects_dir = vault / "knowledge/projects"
+    template = projects_dir / "_template" / "state.md"
     template.parent.mkdir(parents=True)
     template.write_text(
         "# <Project Name>\n- Project root: `<absolute-path>`\n", encoding="utf-8"
     )
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
-    monkeypatch.setattr(module, "ProjectStore", lambda *args: object())
-    monkeypatch.setattr(
-        module,
-        "recover_project_handoff",
-        lambda *args, **kwargs: SimpleNamespace(context="", degraded=False, legacy=False),
-    )
     monkeypatch.setattr(module, "mutate_knowledge", d.boundary)
-    d.function()
+    d.function(vault, projects_dir, project, "demo", projects_dir / "demo" / "state.md")
 
 
 def _drive_tool_breadcrumb_append(d: _Drive) -> None:

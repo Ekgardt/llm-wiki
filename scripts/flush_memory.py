@@ -33,6 +33,7 @@ doesn't track runtime churn.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -152,7 +153,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--checkpoint-reason", default="")
     p.add_argument(
         "--agent",
-        choices=("opencode", "codex", "claude", "cursor", "antigravity", "unknown"),
+        choices=("opencode", "codex", "claude", "unknown"),
         default="unknown",
     )
     p.add_argument("--ephemeral-transcript", action="store_true")
@@ -242,17 +243,13 @@ def read_transcript_tail(path: Path, max_chars: int = MAX_TRANSCRIPT_CHARS) -> s
     decides was narrowed to one daily-log line in the same change, which is
     what makes this window cheap to be wrong about.
     """
-    if not path.exists():
-        return ""
-    if not _transcript_path_allowed(path):
+    if not path.exists() or not _transcript_path_allowed(path):
         return ""
     try:
         data = path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return ""
-    if len(data) > max_chars:
-        data = data[-max_chars:]
-    return data
+    return data[-max_chars:] if len(data) > max_chars else data
 
 
 CLASSIFICATION_SYSTEM_PROMPT = (
@@ -434,14 +431,12 @@ def _within_cooldown(state: dict) -> bool:
 
 
 def _compile_is_due(state: dict, daily_path: Path, tier: str) -> bool:
-    if tier != "major":
-        return False
-    if datetime.now().hour < _env_int("MEMORY_COMPILE_AFTER_HOUR", 18):
+    if tier != "major" or datetime.now().hour < _env_int(
+        "MEMORY_COMPILE_AFTER_HOUR", 18
+    ):
         return False
     compiled = state.get("compiled_daily_hashes", {}).get(daily_path.name)
-    if compiled == file_hash(daily_path):
-        return False
-    return not _within_cooldown(state)
+    return compiled != file_hash(daily_path) and not _within_cooldown(state)
 
 
 def _record_compile_trigger(
@@ -501,6 +496,12 @@ def _capture_binding_intent_id(binding: object) -> str:
     return intent_id
 
 
+def _require_bound_intent(intent_id: object, intent_sha256: object) -> None:
+    """The binding names both halves of the intent identity, or neither."""
+    if not isinstance(intent_id, str) or not isinstance(intent_sha256, str):
+        raise RuntimeError("capture task binding is invalid")
+
+
 def _capture_intent_reference(
     lease: object, active: object
 ) -> tuple[str, str, str]:
@@ -509,8 +510,7 @@ def _capture_intent_reference(
     intent_sha256 = getattr(active, "intent_sha256", None)
     if not isinstance(payload, Mapping):
         raise RuntimeError("capture task payload is invalid")
-    if not isinstance(intent_id, str) or not isinstance(intent_sha256, str):
-        raise RuntimeError("capture task binding is invalid")
+    _require_bound_intent(intent_id, intent_sha256)
     intent_path = f"run/capture-intents/ready/{intent_id[:2]}/{intent_id}.json"
     actual = (
         set(payload),
@@ -611,7 +611,11 @@ def _capture_wire_body(raw: str, token: str) -> str | None:
     prefix = f"{token}\n"
     if not raw.startswith(prefix):
         return None
-    body = raw[len(prefix) :]
+    return _require_canonical_body(raw[len(prefix) :])
+
+
+def _require_canonical_body(body: str) -> str:
+    """A flush body is present and carries no surrounding whitespace."""
     if not body:
         raise RuntimeError("capture provider returned an empty flush body")
     if body != body.strip():
@@ -619,18 +623,30 @@ def _capture_wire_body(raw: str, token: str) -> str | None:
     return body
 
 
+_CAPTURE_WIRE_TIERS = (("major", "FLUSH_MAJOR"), ("minor", "FLUSH_MINOR"))
+
+
+def _capture_wire_tier(raw: str) -> tuple[str, str] | None:
+    """The tier this output declares, or None when it declares none."""
+    for tier, token in _CAPTURE_WIRE_TIERS:
+        body = _capture_wire_body(raw, token)
+        if body is not None:
+            return tier, body
+    return None
+
+
 def _parse_capture_wire_output(raw: object) -> tuple[str, str]:
     if not isinstance(raw, str):
         raise RuntimeError("capture provider returned no flush output")
     if raw == "FLUSH_OK":
         return "ok", ""
-    major = _capture_wire_body(raw, "FLUSH_MAJOR")
-    if major is not None:
-        return "major", major
-    minor = _capture_wire_body(raw, "FLUSH_MINOR")
-    if minor is not None:
-        return "minor", minor
-    raise RuntimeError("capture provider returned invalid flush output")
+    return _require_declared_tier(_capture_wire_tier(raw))
+
+
+def _require_declared_tier(tier: tuple[str, str] | None) -> tuple[str, str]:
+    if tier is None:
+        raise RuntimeError("capture provider returned invalid flush output")
+    return tier
 
 
 def _call_capture_classifier(
@@ -639,9 +655,7 @@ def _call_capture_classifier(
 ) -> tuple[object, str, str]:
     from llm_client import LLMResult, call_llm_result
 
-    caller = llm_call
-    if caller is None:
-        caller = call_llm_result
+    caller = llm_call if llm_call is not None else call_llm_result
     result = caller(_capture_prompt(record), _CAPTURE_SYSTEM_PROMPT, 1500)
     if not isinstance(result, LLMResult):
         raise RuntimeError("capture provider did not return a provider result")
@@ -1167,7 +1181,10 @@ def _complete_capture_decision(
 
 
 def _keep_session_record(
-    record: Mapping[str, object], now: Callable[[], datetime]
+    record: Mapping[str, object],
+    now: Callable[[], datetime],
+    coordinator: object | None = None,
+    owner: object | None = None,
 ) -> None:
     """Keep the session itself before anything judges it.
 
@@ -1183,7 +1200,11 @@ def _keep_session_record(
         return
     captured_at = _capture_time_text(now)
     write_session_evidence(
-        ROOT, intent_fields(record, captured_at), evidence_text(evidence)
+        ROOT,
+        intent_fields(record, captured_at),
+        evidence_text(evidence),
+        coordinator=coordinator,
+        owner=owner,
     )
 
 
@@ -1230,7 +1251,7 @@ def process_new_capture(
     now: Callable[[], datetime] = _capture_now,
 ) -> object:
     record = _read_capture_intent(queue, lease, active)
-    _keep_session_record(record, now)
+    _keep_session_record(record, now, coordinator, owner)
     _ensure_capture_results_directory(queue)
     resolved = _existing_capture_decision(
         queue, coordinator, lease, active, task_fence, intent_fence, owner, record
@@ -1314,18 +1335,52 @@ def run_capture_worker_once(
     owner = registry.acquire("queue-worker", scope=scope)
     try:
         with queue.queue_owner(role="queue-worker", scope=scope, parent=owner):
+            # Reclaim first: `claim_capture` selects `state='ready'` only, and on
+            # the adopted V3 runtime nothing else sweeps — doctor's recovery still
+            # walks the retired file queue. Without this a capture whose worker
+            # died stays leased forever and the session is lost in silence, which
+            # is what stranded two of them here on 2026-08-26.
+            queue.recover_expired_leases()
             lease = queue.claim_capture("capture-worker")
             if lease is None:
                 return None
-            return process_capture_lease(
-                queue,
-                coordinator,
-                lease,
-                owner=owner,
-                process_missing=process_missing,
+            return _process_or_fail(
+                queue, coordinator, lease, owner, process_missing
             )
     finally:
         registry.release(owner)
+
+
+def _process_or_fail(
+    queue: object,
+    coordinator: object,
+    lease: object,
+    owner: object,
+    process_missing: Callable[..., object],
+) -> object:
+    """Settle the claim either way: a failure is a named retry, not a stuck lease.
+
+    Measured on this vault on 2026-08-27: a provider timeout raised out of the
+    worker, the CLI boundary swallowed it with exit 0, and the task sat leased
+    until its TTL expired — three silent attempts before anyone could see why.
+    """
+    from memory_queue import QueueFailure
+
+    try:
+        return process_capture_lease(
+            queue,
+            coordinator,
+            lease,
+            owner=owner,
+            process_missing=process_missing,
+        )
+    except Exception:
+        # retry_after=0, not the drain loop's 60: this worker runs once per
+        # lifecycle event, so there is no hot loop to damp, and the crash
+        # recovery choreography re-claims immediately.
+        with contextlib.suppress(Exception):
+            queue.fail(lease, QueueFailure("processor_failed", retry_after=0))
+        raise
 
 
 def _capture_feedback(tier: str, body: str, args: argparse.Namespace) -> None:
@@ -1421,22 +1476,26 @@ def _trigger_deferred_compiles(deferred: list[tuple[Path, str]]) -> None:
         )
 
 
+def _settle_flush(args: argparse.Namespace, raw_summary: str) -> None:
+    """Turn one classified session into whatever it earned, if anything."""
+    tier, body = _classify_response(raw_summary)
+    _capture_feedback(tier, body, args)
+    if tier == "ok":
+        _record_empty_flush(args)
+        return
+    now = datetime.now()
+    block = _flush_block(args, tier, body, now)
+    deferred = _persist_flush(args, tier, block, now.strftime("%Y-%m-%d"))
+    _trigger_deferred_compiles(deferred)
+
+
 def _run_flush(args: argparse.Namespace) -> int:
     if should_skip(load_state(), args.session_id, args.event):
         return 0
     _keep_transcript_record(args)
     raw_summary = _flush_summary(args)
-    if raw_summary is None:
-        return 0
-    tier, body = _classify_response(raw_summary)
-    _capture_feedback(tier, body, args)
-    if tier == "ok":
-        _record_empty_flush(args)
-        return 0
-    now = datetime.now()
-    block = _flush_block(args, tier, body, now)
-    deferred = _persist_flush(args, tier, block, now.strftime("%Y-%m-%d"))
-    _trigger_deferred_compiles(deferred)
+    if raw_summary is not None:
+        _settle_flush(args, raw_summary)
     return 0
 
 

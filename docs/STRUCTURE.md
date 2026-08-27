@@ -31,7 +31,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── pyright_profile.py            pinned identity discovery and qualification
 │   ├── install_pyright.py            explicit managed-package installer
 │   ├── install_control.py            resumable install/update/rollback ownership
-│   ├── integration_hook_config.py    bounded Cursor/Antigravity hook projections
+│   ├── integration_hook_config.py    bounded host hook-config projections
 │   ├── pyright_session.py            Pyright readiness, sync, and semantic provider
 │   ├── workspace_revision.py         bounded pre/post freshness proofs
 │   ├── code_navigation.py            normalized precise-navigation facade
@@ -57,9 +57,9 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 ├── docs/                          CODE — architecture + user guide
 ├── skills/                        CODE — 9 agent skills (SKILL.md)
 ├── rules/                         CODE — file-handling policies
-├── integrations/                  CODE — IDE/agent integrations
-│   ├── cursor/hooks.json             official local user-hook template
-│   └── antigravity/hooks.json        official local user-hook template
+├── integrations/                  CODE — agent integrations
+│   ├── claude-code/settings.json     hook and env template
+│   └── codex/hooks.json              official lifecycle-hook template
 ├── benchmark/                     CODE — benchmark suite + report
 │
 ├── knowledge/                     KNOWLEDGE — content (gitignored: personal)
@@ -157,12 +157,12 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 
 ## External integration configuration preimages
 
-Claude, Codex, Cursor, and Antigravity configuration merges may create byte-exact
-sibling preimages outside the vault zones. Claude uses
+Claude and Codex configuration merges may create byte-exact sibling preimages
+outside the vault zones. Claude uses
 `settings.json.bak-llm-wiki-<YYYYMMDD-HHMMSS-ffffff>` beside `settings.json`; Codex
-uses `hooks.json.bak-llm-wiki-<YYYYMMDD-HHMMSS-ffffff>` beside `hooks.json`. Cursor
-and Antigravity use the same exact `hooks.json` sibling prefix at their official user
-configuration paths. A no-op merge creates no backup.
+uses `hooks.json.bak-llm-wiki-<YYYYMMDD-HHMMSS-ffffff>` beside `hooks.json`. The same
+prefix applies to a retired Cursor or Antigravity fragment while `uninstall` takes it
+back. A no-op merge creates no backup.
 
 Only files with the destination's exact `.bak-llm-wiki-` prefix are owned by this
 retention contract. After changed configuration is published and verified, each
@@ -237,7 +237,8 @@ force-adoption path exists.
 
 The manifest owns recognized LLM-Wiki profile fragments, Windows user root variables,
 native scheduler resources, an explicitly selected cron block, and bounded structural
-fragments in the official Cursor and Antigravity user hook files. It records exact
+fragments in the Claude Code and Codex user configuration files. A fragment written by
+an install before 2026-08-26 in a retired host's file stays removable. It records exact
 source identity and digests but does not claim that a dirty local checkout is an
 immutable release. Other agent configuration, Git push protection, code upgrade, full
 release inventory, and restored-vault publication remain separate follow-up scopes.
@@ -487,8 +488,8 @@ or nonzero active state remains fail-closed.
   crystallize-playbook, bridge-promote-insight, session-memory-compile,
   session-memory-review).
 - `rules/` — 3 rule files (wiki-files, raw-files, output-files).
-- `integrations/` — thin host wiring: claude-code (settings.json), cursor
-  (rules), and antigravity (AGENTS.md). MCP is the common read/action interface.
+- `integrations/` — thin host wiring: claude-code (settings.json) and codex
+  (hooks.json). MCP is the common read/action interface.
   Obsidian is an optional Markdown viewer and requires no bundled integration.
 - `benchmark/` — retrieval and frozen contradiction corpora/runners, including
   `run_benchmark.py`, `run_retrieval_v2.py`, `retrieval-v2.json`,

@@ -4707,36 +4707,61 @@ def test_zero_stderr_and_concurrent_snapshots_never_block(tmp_path: Path) -> Non
     process.close(time.monotonic() + 5)
 
 
+# The stub counts this from its own start, so it has to outlive the parent's
+# startup, not just the assertion. At two seconds it did not: on 2026-08-22 the
+# hosted Windows shard of CI run 32542795352 (job 96955875519) recorded
+# `returncode: 0` with `started_monotonic=730.375` — the stub had slept its two
+# seconds out and exited cleanly while startup was still running, and the
+# coordinator correctly called that a terminal failure. The file already answers
+# the same problem for stderr with a three-second linger; this is the same
+# answer with more room. The price is that each parametrization waits this long
+# for the exit it asserts.
+_SELF_EXIT_SECONDS = 8.0
+_SELF_EXIT_WAIT_SECONDS = 20.0
+
+
+def _join_recovery_threads(processes: tuple[LspProcess, ...]) -> None:
+    for process in processes:
+        recovery = process._recovery_thread
+        if recovery is not None:
+            recovery.join(3)
+
+
+def _assert_lowercase_hex_nonce(nonce: str) -> None:
+    assert len(nonce) == 32
+    assert nonce == nonce.lower()
+    int(nonce, 16)
+
+
 def test_each_start_has_independent_lowercase_hex_nonces(tmp_path: Path) -> None:
+    # CI run 33034799091 (Windows py3.10-s1) hit the defect the constant above
+    # records: at a bare two-second sleep the stub exited while the second
+    # startup was still running on the loaded runner, the coordinator correctly
+    # raised "LSP terminal failure was recorded during startup", and teardown
+    # then reported the never-closed start's leftover nonce.
     first = LspProcess.start(
-        _command("--sleep-seconds", "2"),
+        _command("--sleep-seconds", str(_SELF_EXIT_SECONDS)),
         cwd=tmp_path,
         owner_root=tmp_path / ("a" * 32),
     )
     _expect_active_generation_exit(first)
     second = LspProcess.start(
-        _command("--sleep-seconds", "2"),
+        _command("--sleep-seconds", str(_SELF_EXIT_SECONDS)),
         cwd=tmp_path,
         owner_root=tmp_path / ("b" * 32),
     )
     _expect_active_generation_exit(second)
-    _wait(first)
-    _wait(second)
-    for process in (first, second):
-        recovery = process._recovery_thread
-        if recovery is not None:
-            recovery.join(3)
+    _wait(first, _SELF_EXIT_WAIT_SECONDS)
+    _wait(second, _SELF_EXIT_WAIT_SECONDS)
+    _join_recovery_threads((first, second))
     for nonce in (
         first.owner_nonce,
         first.generation_nonce,
         second.owner_nonce,
         second.generation_nonce,
     ):
-        assert len(nonce) == 32
-        assert nonce == nonce.lower()
-        int(nonce, 16)
-    assert first.owner_nonce == "a" * 32
-    assert second.owner_nonce == "b" * 32
+        _assert_lowercase_hex_nonce(nonce)
+    assert (first.owner_nonce, second.owner_nonce) == ("a" * 32, "b" * 32)
     assert first.generation_nonce != second.generation_nonce
     assert first.protocol.generation_nonce == first.generation_nonce
     first.close(time.monotonic() + 5)
@@ -4796,19 +4821,6 @@ def test_owner_json_is_canonical_redacted_restricted_and_has_only_schema(
         assert stat.S_IMODE((process.owner_root / "cancellation").stat().st_mode) == 0o700
         assert stat.S_IMODE(owner_file.stat().st_mode) == 0o600
     process.close(time.monotonic() + 5)
-
-
-# The stub counts this from its own start, so it has to outlive the parent's
-# startup, not just the assertion. At two seconds it did not: on 2026-08-22 the
-# hosted Windows shard of CI run 32542795352 (job 96955875519) recorded
-# `returncode: 0` with `started_monotonic=730.375` — the stub had slept its two
-# seconds out and exited cleanly while startup was still running, and the
-# coordinator correctly called that a terminal failure. The file already answers
-# the same problem for stderr with a three-second linger; this is the same
-# answer with more room. The price is that each parametrization waits this long
-# for the exit it asserts.
-_SELF_EXIT_SECONDS = 8.0
-_SELF_EXIT_WAIT_SECONDS = 20.0
 
 
 @pytest.mark.parametrize("deadline", [math.nan, math.inf, "later", True])

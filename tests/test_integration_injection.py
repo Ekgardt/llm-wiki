@@ -4,10 +4,8 @@ These tests ensure that:
 1. The OpenCode plugin forwards lifecycle events to shared Python ingestion.
 2. Native integrations do not duplicate MCP reads or classification logic.
 3. The Codex wrapper generates a context file before codex starts.
-4. The Cursor rules file contains mandatory session-start context reading
-5. The Antigravity AGENTS.md contains mandatory session-start context reading
-6. session_start_context.py supports --output-file mode
-7. The install scripts generate the initial context file
+4. session_start_context.py supports --output-file mode
+5. The install scripts generate the initial context file
 
 If any of these are removed, CI catches it.
 """
@@ -2367,6 +2365,14 @@ def windows_fake_uv(tmp_path_factory):
     return executable
 
 
+# The deadline the installer is given, and how long the fake `uv` would run if
+# nothing stopped it. The gap between the two is what makes a surviving child
+# visible at all: a run that lasts the sleep instead of the deadline was never
+# killed, so both numbers belong in the failure rather than in two literals.
+_SMOKE_TIMEOUT_SECONDS = 15
+_FAKE_UV_SLEEP_SECONDS = 60
+
+
 def _child_state(directory: Path) -> str:
     """What the stopped child left behind, for a failure that must explain itself."""
     markers = ("child.started", "child.pid", "child.stopped", "child.completed")
@@ -2399,7 +2405,7 @@ def _write_blocking_fake_uv(directory: Path) -> None:
         # Long enough that the installer's own timer, not the sleep, ends it,
         # and short enough that a missed signal still ends the run with the
         # assertion that names the cause instead of the caller's wall clock.
-        "sleep 60 &\n"
+        f"sleep {_FAKE_UV_SLEEP_SECONDS} &\n"
         "wait\n"
         ": > child.completed\n",
         encoding="utf-8",
@@ -2544,7 +2550,7 @@ def test_unix_installer_timeout_stops_tests_and_aborts(tmp_path):
             # fake `uv` now installs that trap as its first statement, so the
             # window is one fork and exec; one second raced it and five raced it
             # again while the trap sat behind two writes.
-            export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS=15
+            export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS={_SMOKE_TIMEOUT_SECONDS}
             PATH="$(dirname "$0")/bin:$PATH"
             export PATH
             info() {{ :; }}
@@ -2559,6 +2565,7 @@ def test_unix_installer_timeout_stops_tests_and_aborts(tmp_path):
     )
     runner.chmod(0o700)
 
+    started = time.monotonic()
     result = subprocess.run(
         [bash, str(runner)],
         cwd=tmp_path,
@@ -2569,12 +2576,24 @@ def test_unix_installer_timeout_stops_tests_and_aborts(tmp_path):
         timeout=120,
         check=False,
     )
+    elapsed = time.monotonic() - started
 
     assert result.returncode == 1, result.stderr
     assert (tmp_path / "failed.message").read_text() == (
-        "Production smoke timed out after 15s; installation aborted"
+        f"Production smoke timed out after {_SMOKE_TIMEOUT_SECONDS}s; installation aborted"
     )
-    assert not (tmp_path / "child.completed").exists()
+    # The child must be gone because the installer killed it, not because it
+    # ran out of work of its own. Those two look identical in the marker alone,
+    # and the clock tells them apart: a run that lasts as long as the fake `uv`
+    # sleeps was never signalled, while a run that ends at the deadline was.
+    # The measured failure of this assertion was the second kind — the handler
+    # reached its escalation 45s late — and `assert not True` said none of it.
+    assert not (tmp_path / "child.completed").exists(), (
+        f"the smoke child ran to completion instead of being killed: "
+        f"installer took {elapsed:.1f}s for a {_SMOKE_TIMEOUT_SECONDS}s deadline "
+        f"against a {_FAKE_UV_SLEEP_SECONDS}s child; {_child_state(tmp_path)}; "
+        f"stderr={result.stderr[-400:]!r}"
+    )
     assert not (tmp_path / "passed.marker").exists()
     assert not (tmp_path / "continued.marker").exists()
     # Named last and with its evidence: this is the assertion that fails when a
@@ -4007,32 +4026,6 @@ def test_codex_wrapper_generates_context_file():
     assert "session-context.md" in wrapper, "Codex wrapper must write to cache/session-context.md"
 
 
-def test_cursor_rules_has_mandatory_context_read():
-    """Cursor rules file must instruct the agent to read the session
-    context file at session start (MANDATORY).
-    """
-    rules = (ROOT / "integrations" / "cursor" / "rules" / "llm-wiki.mdc").read_text(
-        encoding="utf-8"
-    )
-    assert "session-context.md" in rules, "Cursor rules must reference cache/session-context.md"
-    assert "MANDATORY" in rules.upper() or "first" in rules.lower(), (
-        "Cursor rules must mark context reading as mandatory/first step"
-    )
-
-
-def test_antigravity_agents_has_mandatory_context_read():
-    """Antigravity AGENTS.md must instruct the agent to read the session
-    context file at session start (MANDATORY).
-    """
-    agents = (ROOT / "integrations" / "antigravity" / "AGENTS.md").read_text(encoding="utf-8")
-    assert "session-context.md" in agents, (
-        "Antigravity AGENTS.md must reference cache/session-context.md"
-    )
-    assert "MANDATORY" in agents.upper() or "first" in agents.lower(), (
-        "Antigravity AGENTS.md must mark context reading as mandatory/first step"
-    )
-
-
 def test_session_start_context_supports_output_file():
     """session_start_context.py must support --output-file flag for
     writing context to a file (used by non-Claude agents).
@@ -4061,11 +4054,11 @@ def test_install_scripts_generate_context(tmp_path):
     assert "--locked" in install_ps1
     assert "--no-default-groups" in install_ps1
 
-    sh_codex = install_sh.split("# Codex CLI", 1)[1].split("# Cursor", 1)[0]
+    sh_codex = install_sh.split("# Codex CLI", 1)[1].split("# Claude Code", 1)[0]
     sh_claude = install_sh.split("# Claude Code", 1)[1].split("# OpenCode configuration", 1)[0]
     sh_opencode = install_sh.split("# OpenCode configuration", 1)[1].split("# Codex CLI", 1)[0]
     ps_codex = install_ps1.split("# Codex", 1)[1].split("# Claude Code", 1)[0]
-    ps_claude = install_ps1.split("# Claude Code", 1)[1].split("# Cursor", 1)[0]
+    ps_claude = install_ps1.split("# Claude Code", 1)[1].split("# --- 8.", 1)[0]
     ps_opencode = install_ps1.split("# OpenCode", 1)[1].split("# Codex", 1)[0]
 
     assert 'CLAUDE_MCP="$HOME/.claude.json"' in sh_claude

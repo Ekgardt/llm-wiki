@@ -16,132 +16,84 @@ def _hooks_module():
     return importlib.import_module("integration_hook_config")
 
 
-def _cursor_projection(command: str = "llm-wiki capture") -> dict[str, object]:
-    return {
-        "sessionStart": [{"command": command, "timeout": 10}],
-        "stop": [{"command": f"{command} --stop"}],
-    }
-
-
-def test_cursor_resource_preserves_unrelated_content_and_is_idempotent(
-    tmp_path: Path,
-) -> None:
-    hooks = _hooks_module()
-    destination = tmp_path / ".cursor" / "hooks.json"
-    destination.parent.mkdir()
-    destination.write_text(
-        json.dumps(
-            {
-                "custom": {"token": "keep"},
-                "hooks": {
-                    "afterFileEdit": [{"command": "user-format"}],
-                    "sessionStart": [{"command": "user-start"}],
-                },
-                "version": 1,
-            }
-        ),
-        encoding="utf-8",
+def _codex_resource(hooks, destination: Path):
+    return hooks.codex_hooks_resource(
+        destination,
+        hooks.codex_hooks_template(ROOT),
+        config_existed=destination.exists(),
     )
-    resource = hooks.cursor_hooks_resource(destination, _cursor_projection())
-
-    assert resource.read_owned() is None
-    resource.write_owned(resource.desired)
-    first = destination.read_bytes()
-    resource.write_owned(resource.desired)
-
-    parsed = json.loads(first)
-    assert destination.read_bytes() == first
-    assert parsed["custom"] == {"token": "keep"}
-    assert parsed["hooks"]["afterFileEdit"] == [{"command": "user-format"}]
-    assert parsed["hooks"]["sessionStart"] == [
-        {"command": "user-start"},
-        {"command": "llm-wiki capture", "timeout": 10},
-    ]
-    assert resource.read_owned() == resource.desired
 
 
-def test_cursor_uninstall_restores_absent_file(tmp_path: Path) -> None:
-    hooks = _hooks_module()
-    destination = tmp_path / ".cursor" / "hooks.json"
-    resource = hooks.cursor_hooks_resource(destination, _cursor_projection())
+def _historical_cursor_resource(hooks, install_control, destination: Path, command: str):
+    """Rebuild the exact Cursor resource shape an install before 2026-08-26 wrote."""
+    handlers = {"sessionStart": [{"command": command, "timeout": 10}]}
+    desired = _canonical(hooks, {"hooks": handlers, "version": 1})
+    existed = destination.exists()
 
-    resource.write_owned(resource.desired)
-    resource.write_owned(None)
+    def write_owned(value: bytes | None) -> None:
+        config = hooks._read_config(destination)[0]
+        current = hooks._cursor_projection(config, handlers)
+        hooks._write_cursor_projection(
+            destination, current, value, {"config_existed": existed}
+        )
 
-    assert not destination.exists()
-
-
-def test_cursor_duplicate_owned_handler_is_an_ownership_conflict(
-    tmp_path: Path,
-) -> None:
-    hooks = _hooks_module()
-    destination = tmp_path / "hooks.json"
-    owned = {"sessionStart": [{"command": "llm-wiki capture"}]}
-    destination.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "hooks": {
-                    "sessionStart": [
-                        {"command": "llm-wiki capture"},
-                        {"command": "llm-wiki capture"},
-                    ]
-                },
-            }
+    return install_control.ManagedResource(
+        resource_id="cursor-user-hooks",
+        kind="cursor_hooks_fragment",
+        locator=str(destination),
+        desired=desired,
+        read_owned=lambda: hooks._cursor_projection(
+            hooks._read_config(destination)[0], handlers
         ),
-        encoding="utf-8",
+        write_owned=write_owned,
+        recognizes=lambda current: current == desired,
+        read_projections=lambda candidates: hooks._cursor_projection_any(
+            hooks._read_config(destination)[0], candidates
+        ),
+        write_projection=lambda expected, replacement, metadata: (
+            hooks._write_cursor_projection(destination, expected, replacement, metadata)
+        ),
+        metadata={"config_existed": existed},
+        adopt_as_absent=False,
     )
-    resource = hooks.cursor_hooks_resource(destination, owned)
-
-    with pytest.raises(Exception, match="ownership_conflict"):
-        resource.read_owned()
 
 
-def _antigravity_projection(command: str = "llm-wiki capture") -> dict[str, object]:
-    return {
-        "PostToolUse": [
-            {
-                "hooks": [{"command": f"{command} --tool", "type": "command"}],
-                "matcher": "*",
-            }
-        ],
-        "PreInvocation": [{"command": command, "type": "command"}],
-        "enabled": True,
-    }
+def _historical_antigravity_resource(hooks, install_control, destination: Path, command: str):
+    """Rebuild the exact Antigravity resource shape an install before 2026-08-26 wrote."""
+    owned = {"PreInvocation": [{"command": command, "type": "command"}], "enabled": True}
+    desired = _canonical(hooks, owned)
+    existed = destination.exists()
+
+    def write_owned(value: bytes | None) -> None:
+        config = hooks._read_config(destination)[0]
+        current = hooks._antigravity_projection_any(config, (desired,))
+        hooks._write_antigravity_projection(
+            destination, current, value, {"config_existed": existed}
+        )
+
+    return install_control.ManagedResource(
+        resource_id="antigravity-user-hooks",
+        kind="antigravity_hooks_fragment",
+        locator=str(destination),
+        desired=desired,
+        read_owned=lambda: hooks._antigravity_projection_any(
+            hooks._read_config(destination)[0], (desired,)
+        ),
+        write_owned=write_owned,
+        recognizes=lambda current: current == desired,
+        read_projections=lambda candidates: hooks._antigravity_projection_any(
+            hooks._read_config(destination)[0], candidates
+        ),
+        write_projection=lambda expected, replacement, metadata: (
+            hooks._write_antigravity_projection(destination, expected, replacement, metadata)
+        ),
+        metadata={"config_existed": existed},
+        adopt_as_absent=False,
+    )
 
 
-def test_antigravity_resource_preserves_unrelated_content_and_uninstalls(
-    tmp_path: Path,
-) -> None:
-    hooks = _hooks_module()
-    destination = tmp_path / ".gemini" / "config" / "hooks.json"
-    destination.parent.mkdir(parents=True)
-    original = {"team-hook": {"Stop": [{"command": "user-stop"}]}}
-    destination.write_text(json.dumps(original), encoding="utf-8")
-    resource = hooks.antigravity_hooks_resource(destination, _antigravity_projection())
-
-    resource.write_owned(resource.desired)
-    first = destination.read_bytes()
-    resource.write_owned(resource.desired)
-
-    assert destination.read_bytes() == first
-    assert json.loads(first)["team-hook"] == original["team-hook"]
-    assert resource.read_owned() == resource.desired
-
-    resource.write_owned(None)
-
-    assert json.loads(destination.read_bytes()) == original
-
-
-@pytest.mark.parametrize("existing", [{"enabled": False}, None])
-def test_antigravity_unrecognized_owned_key_is_a_conflict(tmp_path: Path, existing: object) -> None:
-    hooks = _hooks_module()
-    destination = tmp_path / "hooks.json"
-    destination.write_text(json.dumps({"llm-wiki": existing}), encoding="utf-8")
-    resource = hooks.antigravity_hooks_resource(destination, _antigravity_projection())
-
-    with pytest.raises(Exception, match="ownership_conflict"):
-        resource.read_owned()
+def _canonical(hooks, value):
+    return importlib.import_module("reliable_memory").canonical_json_bytes(value)
 
 
 def test_publish_configuration_creates_byte_exact_private_sibling_backup(
@@ -208,7 +160,7 @@ def test_hook_config_rejects_non_strict_json_objects(tmp_path: Path, raw: bytes)
     hooks = _hooks_module()
     destination = tmp_path / "hooks.json"
     destination.write_bytes(raw)
-    resource = hooks.cursor_hooks_resource(destination, _cursor_projection())
+    resource = _codex_resource(hooks, destination)
 
     with pytest.raises(Exception):
         resource.read_owned()
@@ -224,9 +176,9 @@ def test_hook_config_rejects_oversized_and_unsafe_destinations(
     directory.mkdir()
 
     with pytest.raises(Exception, match="unsafe"):
-        hooks.cursor_hooks_resource(oversized, _cursor_projection()).read_owned()
+        _codex_resource(hooks, oversized).read_owned()
     with pytest.raises(Exception, match="unsafe"):
-        hooks.antigravity_hooks_resource(directory, _antigravity_projection()).read_owned()
+        _codex_resource(hooks, directory).read_owned()
 
 
 def test_hook_resource_cas_preserves_concurrent_user_edit(
@@ -239,7 +191,7 @@ def test_hook_resource_cas_preserves_concurrent_user_edit(
         json.dumps({"version": 1, "hooks": {}, "owner": "original"}),
         encoding="utf-8",
     )
-    resource = hooks.cursor_hooks_resource(destination, _cursor_projection())
+    resource = _codex_resource(hooks, destination)
     create_backup = backup_module._create_verified_backup
 
     def race(path: Path, value: bytes) -> Path:
@@ -268,7 +220,7 @@ def test_hook_resource_rejects_symlink_destination(tmp_path: Path) -> None:
     except OSError:
         pytest.skip("symlink creation is unavailable")
 
-    resource = hooks.cursor_hooks_resource(destination, _cursor_projection())
+    resource = _codex_resource(hooks, destination)
 
     with pytest.raises(Exception, match="symlink"):
         resource.read_owned()
@@ -291,40 +243,121 @@ def test_hook_update_preserves_existing_mode_and_owner(
         raising=False,
     )
 
-    hooks.cursor_hooks_resource(destination, _cursor_projection()).write_owned(
-        hooks.cursor_hooks_resource(destination, _cursor_projection()).desired
-    )
+    resource = _codex_resource(hooks, destination)
+    resource.write_owned(resource.desired)
 
     if os.name != "nt":
         assert stat.S_IMODE(destination.stat().st_mode) == 0o640
     assert owner_updates == [(original.st_uid, original.st_gid)]
 
 
-def test_cursor_requires_integer_version_one(tmp_path: Path) -> None:
+def _release() -> dict[str, object]:
+    return {
+        "commit_oid": "a" * 40,
+        "project_version": "4.0.0",
+        "source_mode": "pinned_remote",
+        "uv_lock_sha256": "b" * 64,
+        "worktree_clean": True,
+    }
+
+
+def _install_and_retire(tmp_path: Path, historical, retired_id: str, relative: str):
+    install_control = importlib.import_module("install_control")
     hooks = _hooks_module()
-    destination = tmp_path / "hooks.json"
-    destination.write_text('{"version":true,"hooks":{}}', encoding="utf-8")
-    resource = hooks.cursor_hooks_resource(destination, _cursor_projection())
-
-    with pytest.raises(Exception, match="schema_conflict"):
-        resource.read_owned()
-
-
-def test_managed_hook_resources_materialize_absolute_vault_root(tmp_path: Path) -> None:
-    hooks = _hooks_module()
-    vault = ROOT.resolve()
     home = tmp_path / "home"
+    destination = home / relative
+    destination.parent.mkdir(parents=True)
+    original = {"team": {"Stop": [{"command": "user-stop"}]}, "version": 1, "hooks": {}}
+    destination.write_text(json.dumps(original), encoding="utf-8")
+    state_root = tmp_path / "state"
+    state_root.mkdir()
 
-    resources = hooks.managed_ide_hook_resources(vault, home)
+    old = historical(hooks, install_control, destination, "llm-wiki capture")
+    install_control.install_resources(
+        state_root=state_root,
+        vault_root=tmp_path / "vault",
+        release=_release(),
+        scheduler_backend="cron",
+        resources=[old],
+        control_version=2,
+    )
+    assert json.loads(destination.read_bytes()) != original
 
-    assert [resource.resource_id for resource in resources] == [
+    retired = {
+        resource.resource_id: resource
+        for resource in (
+            hooks.retired_cursor_hooks_resource(home),
+            hooks.retired_antigravity_hooks_resource(home),
+        )
+    }[retired_id]
+    install_control.uninstall_resources(state_root=state_root, resources=[retired])
+    return destination, original
+
+
+def test_uninstall_takes_back_a_cursor_fragment_written_before_cursor_was_retired(
+    tmp_path: Path,
+) -> None:
+    destination, original = _install_and_retire(
+        tmp_path,
+        _historical_cursor_resource,
         "cursor-user-hooks",
+        ".cursor/hooks.json",
+    )
+
+    assert json.loads(destination.read_bytes()) == original
+
+
+def test_uninstall_takes_back_an_antigravity_fragment_written_before_it_was_retired(
+    tmp_path: Path,
+) -> None:
+    destination, original = _install_and_retire(
+        tmp_path,
+        _historical_antigravity_resource,
         "antigravity-user-hooks",
-    ]
-    assert resources[0].locator == str(home / ".cursor" / "hooks.json")
-    assert resources[1].locator == str(home / ".gemini" / "config" / "hooks.json")
-    cursor = json.loads(resources[0].desired)
-    antigravity = json.loads(resources[1].desired)
-    assert "__LLM_WIKI_ROOT__" not in json.dumps([cursor, antigravity])
-    assert str(vault) in cursor["hooks"]["beforeSubmitPrompt"][0]["command"]
-    assert str(vault) in antigravity["PreInvocation"][0]["command"]
+        ".gemini/config/hooks.json",
+    )
+
+    assert json.loads(destination.read_bytes()) == original
+
+
+def test_a_retired_fragment_cannot_be_installed_again(tmp_path: Path) -> None:
+    hooks = _hooks_module()
+    install_control = importlib.import_module("install_control")
+    resource = hooks.retired_cursor_hooks_resource(tmp_path / "home")
+
+    with pytest.raises(install_control.InstallControlError, match="install_resource_retired"):
+        resource.write_owned(b'{"hooks":{},"version":1}')
+
+
+def test_without_the_removal_path_an_old_fragment_could_never_be_taken_back(
+    tmp_path: Path,
+) -> None:
+    """Why the removal path is kept: deleting it outright strands the user's file."""
+    install_control = importlib.import_module("install_control")
+    hooks = _hooks_module()
+    home = tmp_path / "home"
+    destination = home / ".cursor" / "hooks.json"
+    destination.parent.mkdir(parents=True)
+    destination.write_text(json.dumps({"version": 1, "hooks": {}}), encoding="utf-8")
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    old = _historical_cursor_resource(hooks, install_control, destination, "llm-wiki capture")
+    install_control.install_resources(
+        state_root=state_root,
+        vault_root=tmp_path / "vault",
+        release=_release(),
+        scheduler_backend="cron",
+        resources=[old],
+        control_version=2,
+    )
+    written = destination.read_bytes()
+
+    with pytest.raises(
+        install_control.InstallControlError, match="install_resource_request_mismatch"
+    ):
+        install_control.uninstall_resources(
+            state_root=state_root,
+            resources=[hooks.retired_antigravity_hooks_resource(home)],
+        )
+
+    assert destination.read_bytes() == written

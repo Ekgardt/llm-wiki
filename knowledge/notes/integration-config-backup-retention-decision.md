@@ -79,3 +79,4 @@ API is part of this contract.
 - [[knowledge/notes/agent-native-mcp-foundation]]
 - [[knowledge/notes/install-ownership-control-plane-decision]]
 - [[knowledge/notes/managed-ide-hooks-install-update-decision]]
+- [[knowledge/notes/retire-cursor-and-antigravity-decision]]

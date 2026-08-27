@@ -131,6 +131,34 @@ def test_generated_projection_preserves_project_slug_ownership(
     assert _compute_slug(project_dir, vault / "knowledge/projects") == "demo"
 
 
+def _assert_canonical_row_matches_domain_row(database) -> None:
+    assert database.execute(
+        "SELECT canonical_role, canonical_scope, actor_id, lease_token, "
+        "fencing_epoch, process_id, process_start_identity "
+        "FROM project_leases WHERE project='alpha'"
+    ).fetchone() == database.execute(
+        "SELECT role, scope, actor_id, owner_token, fencing_epoch, "
+        "process_id, process_start_identity FROM maintenance_owners "
+        "WHERE role='project' AND scope='project:alpha'"
+    ).fetchone()
+
+
+def _assert_heartbeat_renewed_ownership(renewed) -> None:
+    assert renewed._ownership is not None
+    assert renewed._ownership.heartbeat_at == renewed.heartbeat_at
+
+
+def _assert_no_rows_for_project(database, project: str) -> None:
+    assert database.execute(
+        "SELECT COUNT(*) FROM maintenance_owners "
+        "WHERE role='project' AND scope=?",
+        (f"project:{project}",),
+    ).fetchone() == (0,)
+    assert database.execute(
+        "SELECT COUNT(*) FROM project_leases WHERE project=?", (project,)
+    ).fetchone() == (0,)
+
+
 def test_direct_project_acquisition_inserts_canonical_and_domain_rows_atomically(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -143,18 +171,9 @@ def test_direct_project_acquisition_inserts_canonical_and_domain_rows_atomically
 
     lease = store.acquire_lease("alpha", "test-owner")
     with sqlite3.connect(candidate) as database:
-        assert database.execute(
-            "SELECT canonical_role, canonical_scope, actor_id, lease_token, "
-            "fencing_epoch, process_id, process_start_identity "
-            "FROM project_leases WHERE project='alpha'"
-        ).fetchone() == database.execute(
-            "SELECT role, scope, actor_id, owner_token, fencing_epoch, "
-            "process_id, process_start_identity FROM maintenance_owners "
-            "WHERE role='project' AND scope='project:alpha'"
-        ).fetchone()
+        _assert_canonical_row_matches_domain_row(database)
     renewed = store.heartbeat(lease)
-    assert renewed._ownership is not None
-    assert renewed._ownership.heartbeat_at == renewed.heartbeat_at
+    _assert_heartbeat_renewed_ownership(renewed)
     lease = renewed
     renewed_by_token = store.acquire_lease(
         "alpha", "test-owner", token=lease.token
@@ -170,13 +189,7 @@ def test_direct_project_acquisition_inserts_canonical_and_domain_rows_atomically
     with pytest.raises(RuntimeError, match="injected project projection failure"):
         store.acquire_lease("beta", "test-owner")
     with sqlite3.connect(candidate) as database:
-        assert database.execute(
-            "SELECT COUNT(*) FROM maintenance_owners "
-            "WHERE role='project' AND scope='project:beta'"
-        ).fetchone() == (0,)
-        assert database.execute(
-            "SELECT COUNT(*) FROM project_leases WHERE project='beta'"
-        ).fetchone() == (0,)
+        _assert_no_rows_for_project(database, "beta")
 
     real_insert = ProjectStore._insert_project_projection
 
@@ -188,13 +201,7 @@ def test_direct_project_acquisition_inserts_canonical_and_domain_rows_atomically
     with pytest.raises(RuntimeError, match="injected post-projection failure"):
         store.acquire_lease("gamma", "test-owner")
     with sqlite3.connect(candidate) as database:
-        assert database.execute(
-            "SELECT COUNT(*) FROM maintenance_owners "
-            "WHERE role='project' AND scope='project:gamma'"
-        ).fetchone() == (0,)
-        assert database.execute(
-            "SELECT COUNT(*) FROM project_leases WHERE project='gamma'"
-        ).fetchone() == (0,)
+        _assert_no_rows_for_project(database, "gamma")
 
 
 def test_nested_project_lease_projects_parent_without_releasing_it(
@@ -345,6 +352,11 @@ def test_slug_safety_is_preserved(project_store: ProjectStore, slug: str):
         project_store.acquire_lease(slug, "agent-a")
 
 
+def _assert_checkpoint_landed_for_slug(receipt, projects, slug) -> None:
+    assert receipt.project == slug
+    assert (projects / slug / "journal.md").is_file()
+
+
 @pytest.mark.parametrize("existing_state", [False, True])
 def test_cyrillic_computed_slug_supports_new_and_existing_project_state(
     vault: Path,
@@ -371,8 +383,7 @@ def test_cyrillic_computed_slug_supports_new_and_existing_project_state(
     event["provenance"]["worktree"] = str(project_dir)
     receipt = ProjectStore(vault, state_root).checkpoint(slug, event, "agent-a")
 
-    assert receipt.project == slug
-    assert (projects / slug / "journal.md").is_file()
+    _assert_checkpoint_landed_for_slug(receipt, projects, slug)
 
 
 def test_project_slug_rejects_existing_case_alias(vault: Path, state_root: Path):
@@ -718,6 +729,12 @@ def test_prepare_rejects_project_file_replacement_without_new_artifact(
     } == artifact_ids
 
 
+def _assert_first_checkpoint_materialized(project, receipt) -> None:
+    assert receipt.sequence == 1
+    assert (project / "journal.md").is_file()
+    assert (project / "state.md").is_file()
+
+
 def test_absent_journal_under_missing_project_directory_is_valid(
     vault: Path, state_root: Path
 ):
@@ -728,9 +745,7 @@ def test_absent_journal_under_missing_project_directory_is_valid(
     assert store.read_journal("new-project") == ""
     receipt = store.checkpoint("new-project", checkpoint_event(), "agent-a")
 
-    assert receipt.sequence == 1
-    assert (project / "journal.md").is_file()
-    assert (project / "state.md").is_file()
+    _assert_first_checkpoint_materialized(project, receipt)
 
 
 def test_prospective_event_count_allows_limit_and_rejects_next_without_writes(
@@ -759,6 +774,21 @@ def test_prospective_event_count_allows_limit_and_rejects_next_without_writes(
     assert (journal.read_bytes(), projection.read_bytes()) == before
 
 
+def _assert_rejected_without_journal(too_small, journal_path) -> None:
+    assert too_small.value.code == "too_large"
+    assert not journal_path.exists()
+
+
+def _assert_exact_fit_committed(exact, small_journal, exact_size) -> None:
+    assert exact.sequence == 1
+    assert len(small_journal.read_bytes()) == exact_size
+
+
+def _assert_overflow_left_journal_intact(overflow, small_journal, before) -> None:
+    assert overflow.value.code == "too_large"
+    assert small_journal.read_bytes() == before
+
+
 def test_prospective_byte_limit_allows_exact_size_and_rejects_overflow(
     vault: Path,
     state_root: Path,
@@ -773,22 +803,21 @@ def test_prospective_byte_limit_allows_exact_size_and_rejects_overflow(
     monkeypatch.setattr(project_journal, "MAX_JOURNAL_BYTES", exact_size - 1)
     with pytest.raises(ProjectJournalReadError) as too_small:
         store.checkpoint("small", checkpoint_event(), "agent-a")
-    assert too_small.value.code == "too_large"
-    assert not (vault / "knowledge/projects/small/journal.md").exists()
+    _assert_rejected_without_journal(
+        too_small, vault / "knowledge/projects/small/journal.md"
+    )
 
     monkeypatch.setattr(project_journal, "MAX_JOURNAL_BYTES", exact_size)
     exact = store.checkpoint("small", checkpoint_event(), "agent-a")
-    assert exact.sequence == 1
     small_journal = vault / "knowledge/projects/small/journal.md"
-    assert len(small_journal.read_bytes()) == exact_size
+    _assert_exact_fit_committed(exact, small_journal, exact_size)
     before = small_journal.read_bytes()
 
     with pytest.raises(ProjectJournalReadError) as overflow:
         store.checkpoint(
             "small", checkpoint_event("evt-2", "bytes:event-2"), "agent-a"
         )
-    assert overflow.value.code == "too_large"
-    assert small_journal.read_bytes() == before
+    _assert_overflow_left_journal_intact(overflow, small_journal, before)
 
 
 def test_existing_journal_line_is_validated_once_per_checkpoint(
@@ -849,6 +878,28 @@ def test_slow_checkpoint_phases_renew_lease_before_apply(
         ).fetchone()[0] == "committed"
 
 
+def _assert_idempotent_receipts(first, duplicate, second) -> None:
+    assert first.sequence == duplicate.sequence == 1
+    assert duplicate.duplicate is True
+    assert second.sequence == 2
+
+
+def _assert_append_only_records(project_store, before) -> None:
+    assert project_store.read_journal("demo").startswith(before)
+    records = journal_records(project_store)
+    assert [record["sequence"] for record in records] == [1, 2]
+    assert records[0]["last_applied_sequence"] == 0
+    assert records[1]["last_applied_sequence"] == 1
+    validate_schema(records[0], Path("scripts/schemas/project-checkpoint-v1.json"))
+
+
+def _assert_state_carries_applied_delta(state: str) -> None:
+    assert "generated: true" in state
+    assert "last_applied_sequence: 2" in state
+    assert "Review journal recovery" in state
+    assert "Use fenced Markdown transactions" in state
+
+
 def test_checkpoint_is_append_only_idempotent_and_projects_state(
     project_store: ProjectStore,
 ):
@@ -870,24 +921,14 @@ def test_checkpoint_is_append_only_idempotent_and_projects_state(
         "agent-a",
     )
 
-    assert first.sequence == duplicate.sequence == 1
-    assert duplicate.duplicate is True
-    assert second.sequence == 2
-    assert project_store.read_journal("demo").startswith(before)
-    records = journal_records(project_store)
-    assert [record["sequence"] for record in records] == [1, 2]
-    assert records[0]["last_applied_sequence"] == 0
-    assert records[1]["last_applied_sequence"] == 1
-    validate_schema(records[0], Path("scripts/schemas/project-checkpoint-v1.json"))
+    _assert_idempotent_receipts(first, duplicate, second)
+    _assert_append_only_records(project_store, before)
 
     state = (project_store.vault / "knowledge/projects/demo/state.md").read_text(
         encoding="utf-8"
     )
-    assert "generated: true" in state
-    assert "last_applied_sequence: 2" in state
-    assert "Review journal recovery" in state
+    _assert_state_carries_applied_delta(state)
     assert "blocker-1" not in state
-    assert "Use fenced Markdown transactions" in state
 
 
 def test_current_task_transition_list_replays_close_open_close_without_resurrection(
@@ -1073,6 +1114,17 @@ def test_shipped_legacy_state_fixtures_preserve_every_nonempty_section(
         assert value in rendered
 
 
+def _assert_identity_conceals_slug(slug, occurrence_id, idempotency_key) -> None:
+    assert slug not in occurrence_id
+    assert slug not in idempotency_key
+
+
+def _assert_identity_is_bounded(occurrence_id, idempotency_key, stable_hash) -> None:
+    assert len(occurrence_id) <= 256
+    assert len(idempotency_key) <= 256
+    assert len(stable_hash) == 64
+
+
 def test_bootstrap_identity_hashes_256_character_unicode_slug():
     from project_journal import _bootstrap_event_identity
 
@@ -1081,11 +1133,8 @@ def test_bootstrap_identity_hashes_256_character_unicode_slug():
         slug, "meaningful legacy content"
     )
 
-    assert slug not in occurrence_id
-    assert slug not in idempotency_key
-    assert len(occurrence_id) <= 256
-    assert len(idempotency_key) <= 256
-    assert len(stable_hash) == 64
+    _assert_identity_conceals_slug(slug, occurrence_id, idempotency_key)
+    _assert_identity_is_bounded(occurrence_id, idempotency_key, stable_hash)
     assert (occurrence_id, idempotency_key, stable_hash) == _bootstrap_event_identity(
         slug, "meaningful legacy content"
     )
@@ -1132,6 +1181,13 @@ def test_conflicting_occurrence_id_is_rejected(project_store: ProjectStore):
         )
 
 
+def _assert_rendered_state_deterministic_and_bounded(first, second) -> None:
+    assert first == second
+    assert len(first) <= 12_000
+    assert first.count(b"- `decision-") <= 5
+    assert b"last_applied_sequence: 20" in first
+
+
 def test_render_state_is_deterministic_and_bounded(project_store: ProjectStore):
     events = []
     for index in range(20):
@@ -1163,10 +1219,7 @@ def test_render_state_is_deterministic_and_bounded(project_store: ProjectStore):
     first = project_store.render_state(events)
     second = project_store.render_state(list(events))
 
-    assert first == second
-    assert len(first) <= 12_000
-    assert first.count(b"- `decision-") <= 5
-    assert b"last_applied_sequence: 20" in first
+    _assert_rendered_state_deterministic_and_bounded(first, second)
 
 
 def test_final_apply_rechecks_lease_and_rejects_stale_epoch(
@@ -1234,6 +1287,18 @@ def test_fenced_reservation_blocks_later_sequence_until_replayed(
     assert [event["last_applied_sequence"] for event in events] == [0, 0]
 
 
+def _assert_recovery_replayed_nothing(transaction_id, recovered, vault) -> None:
+    assert transaction_id
+    assert recovered == []
+    assert not (vault / "knowledge/projects/demo/journal.md").exists()
+
+
+def _assert_forward_replay_committed(vault, state_root, replayed) -> None:
+    assert replayed.sequence == 1
+    assert len(journal_records(ProjectStore(vault, state_root))) == 1
+    assert (vault / "knowledge/projects/demo/state.md").exists()
+
+
 def test_released_prepared_checkpoint_requires_forward_replay(
     vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -1251,17 +1316,13 @@ def test_released_prepared_checkpoint_requires_forward_replay(
 
     recovered = ProjectStore(vault, state_root).recover("demo")
 
-    assert transaction_id
-    assert recovered == []
-    assert not (vault / "knowledge/projects/demo/journal.md").exists()
+    _assert_recovery_replayed_nothing(transaction_id, recovered, vault)
 
     replayed = ProjectStore(vault, state_root).checkpoint(
         "demo", checkpoint_event(), "agent-b"
     )
 
-    assert replayed.sequence == 1
-    assert len(journal_records(ProjectStore(vault, state_root))) == 1
-    assert (vault / "knowledge/projects/demo/state.md").exists()
+    _assert_forward_replay_committed(vault, state_root, replayed)
 
 
 def test_new_epoch_wins_before_recovery_and_old_checkpoint_touches_nothing(
@@ -1292,6 +1353,32 @@ def test_new_epoch_wins_before_recovery_and_old_checkpoint_touches_nothing(
     assert state == "quarantined"
 
 
+def _assert_replay_deduplicated(receipt, duplicate, replay_store) -> None:
+    assert receipt.sequence == duplicate.sequence == 1
+    assert duplicate.duplicate is True
+    assert receipt.transaction_id == duplicate.transaction_id
+    assert replay_store.read_journal("demo").count('"occurrence_id":"evt-1"') == 1
+
+
+def _assert_quarantined_first_attempt(attempt, first_operation) -> None:
+    assert attempt[0] == 1
+    assert attempt[1] == first_operation
+    assert attempt[2] is None
+    assert attempt[4] == "quarantined"
+
+
+def _assert_forward_attempt_lineage(attempt, first_operation, receipt) -> None:
+    assert attempt[1] != first_operation
+    assert attempt[2] == first_operation
+    assert attempt[3] == receipt.transaction_id
+
+
+def _assert_current_names_forward_attempt(current, attempt, receipt) -> None:
+    assert attempt[0] == 2
+    assert attempt[4] == "committed"
+    assert current == (1, 2, attempt[1], receipt.transaction_id, "committed")
+
+
 def test_expired_prepared_checkpoint_replays_same_reservation_with_new_attempt(
     vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -1318,10 +1405,7 @@ def test_expired_prepared_checkpoint_replays_same_reservation_with_new_attempt(
     receipt = replay_store.checkpoint("demo", event, "agent-b")
     duplicate = replay_store.checkpoint("demo", event, "agent-b")
 
-    assert receipt.sequence == duplicate.sequence == 1
-    assert duplicate.duplicate is True
-    assert receipt.transaction_id == duplicate.transaction_id
-    assert replay_store.read_journal("demo").count('"occurrence_id":"evt-1"') == 1
+    _assert_replay_deduplicated(receipt, duplicate, replay_store)
     assert (vault / "knowledge/projects/demo/state.md").exists()
     with sqlite3.connect(replay_store.coordinator.database_path) as database:
         attempts = database.execute(
@@ -1334,16 +1418,15 @@ def test_expired_prepared_checkpoint_replays_same_reservation_with_new_attempt(
             "FROM project_checkpoints WHERE project = 'demo'"
         ).fetchone()
     assert len(attempts) == 2
-    assert attempts[0][0] == 1
-    assert attempts[0][1] == first_operation
-    assert attempts[0][2] is None
-    assert attempts[0][4] == "quarantined"
-    assert attempts[1][0] == 2
-    assert attempts[1][1] != first_operation
-    assert attempts[1][2] == first_operation
-    assert attempts[1][3] == receipt.transaction_id
-    assert attempts[1][4] == "committed"
-    assert current == (1, 2, attempts[1][1], receipt.transaction_id, "committed")
+    _assert_quarantined_first_attempt(attempts[0], first_operation)
+    _assert_forward_attempt_lineage(attempts[1], first_operation, receipt)
+    _assert_current_names_forward_attempt(current, attempts[1], receipt)
+
+
+def _assert_receipts_share_one_transaction(receipts) -> None:
+    assert [receipt.sequence for receipt in receipts] == [1, 1]
+    assert sorted(receipt.duplicate for receipt in receipts) == [False, True]
+    assert len({receipt.transaction_id for receipt in receipts}) == 1
 
 
 def test_concurrent_duplicate_replay_creates_one_forward_attempt(
@@ -1379,9 +1462,7 @@ def test_concurrent_duplicate_replay_creates_one_forward_attempt(
     with ThreadPoolExecutor(max_workers=2) as pool:
         receipts = list(pool.map(replay, ("agent-b", "agent-c")))
 
-    assert [receipt.sequence for receipt in receipts] == [1, 1]
-    assert sorted(receipt.duplicate for receipt in receipts) == [False, True]
-    assert len({receipt.transaction_id for receipt in receipts}) == 1
+    _assert_receipts_share_one_transaction(receipts)
     replay_store = ProjectStore(vault, state_root)
     assert replay_store.read_journal("demo").count('"occurrence_id":"evt-1"') == 1
     with sqlite3.connect(replay_store.coordinator.database_path) as database:
@@ -1390,6 +1471,20 @@ def test_concurrent_duplicate_replay_creates_one_forward_attempt(
             "WHERE project = 'demo' ORDER BY attempt_number"
         ).fetchall()
     assert attempts == [(1, "quarantined"), (2, "committed")]
+
+
+def _assert_blocked_on_pending_prior(blocked, vault) -> None:
+    assert blocked.value.code == "pending_prior"
+    assert blocked.value.prior_sequence == 1
+    assert not (vault / "knowledge/projects/demo/journal.md").exists()
+
+
+def _assert_ordered_append_after_replay(first, second, vault, state_root) -> None:
+    assert [first.sequence, second.sequence] == [1, 2]
+    assert [
+        record["sequence"]
+        for record in journal_records(ProjectStore(vault, state_root))
+    ] == [1, 2]
 
 
 def test_newer_sequence_waits_for_quarantined_prior_then_appends_in_order(
@@ -1416,9 +1511,7 @@ def test_newer_sequence_waits_for_quarantined_prior_then_appends_in_order(
     with pytest.raises(ProjectPendingPriorError) as blocked:
         ProjectStore(vault, state_root).checkpoint("demo", second_event, "agent-b")
 
-    assert blocked.value.code == "pending_prior"
-    assert blocked.value.prior_sequence == 1
-    assert not (vault / "knowledge/projects/demo/journal.md").exists()
+    _assert_blocked_on_pending_prior(blocked, vault)
     with sqlite3.connect(store.coordinator.database_path) as database:
         rows = database.execute(
             "SELECT sequence, state FROM project_checkpoints "
@@ -1429,11 +1522,7 @@ def test_newer_sequence_waits_for_quarantined_prior_then_appends_in_order(
     first = ProjectStore(vault, state_root).checkpoint("demo", first_event, "agent-c")
     second = ProjectStore(vault, state_root).checkpoint("demo", second_event, "agent-d")
 
-    assert [first.sequence, second.sequence] == [1, 2]
-    assert [record["sequence"] for record in journal_records(ProjectStore(vault, state_root))] == [
-        1,
-        2,
-    ]
+    _assert_ordered_append_after_replay(first, second, vault, state_root)
 
 
 def test_concurrent_newer_sequence_retries_after_crashed_head(
@@ -1581,7 +1670,19 @@ def test_simultaneous_projectors_append_once_per_event(vault: Path, state_root: 
                     checkpoint_event(f"evt-{index}", f"event-{index}"),
                     f"agent-{index}",
                 )
-            except ProjectLeaseBusy:
+            except (ProjectLeaseBusy, ProjectFenceError, ProjectPendingPriorError):
+                # CI run 33039646439 (Windows py3.12-s2) lost this two-writer
+                # race as ProjectFenceError, and a local run on 2026-08-27
+                # lost it as ProjectPendingPriorError. All three are legal
+                # losses of one round, and the product is right to raise them:
+                # ProjectLeaseBusy (a ProjectFenceError subclass) - the rival
+                # writer holds the project lease right now;
+                # ProjectFenceError - the rival re-acquired the lease between
+                # our reservation and apply, so our quarantined attempt must
+                # be replayed forward by the next round;
+                # ProjectPendingPriorError - the rival reserved the prior
+                # sequence and has not committed it yet.
+                # The append-once postcondition below is unchanged.
                 continue
         raise AssertionError("project lease never became available")
 

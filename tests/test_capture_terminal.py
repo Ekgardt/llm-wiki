@@ -29,6 +29,28 @@ from tests.test_queue_v3_capture_links import (  # noqa: E402
 )
 
 
+@pytest.fixture(autouse=True)
+def _own_session_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Keep the session record these tests provoke out of the owner's vault.
+
+    `process_new_capture` keeps the session before anything judges it, and it
+    writes to `flush_memory.ROOT` — a module-level constant, not the vault the
+    coordinator under test is bound to. This checkout has been the live vault
+    since 2026-08-21, so every run left a record in it; two of them were still
+    there on 2026-08-26, under `2026-08-16` and today's date, invented sessions
+    named `session-1` with bodies reading `debug evidence` and `status only`.
+    The writer never raises by contract, so nothing said so.
+
+    Pointing `ROOT` at a directory outside the vault is enough: the transaction
+    refuses a target outside its own vault and the writer swallows that, which
+    is exactly the no-op these tests always assumed they were getting.
+    """
+    vault = tmp_path / "session-record-vault"
+    (vault / "knowledge" / "raw" / "sessions").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(flush_memory, "ROOT", vault)
+    return vault
+
+
 def _publish_decision(
     queue, coordinator, binding, lease, owner, task_fence, intent_fence
 ):
@@ -273,12 +295,24 @@ def _stage_capture_terminal(
 
 
 def _expire_capture_lease(queue, task_id: str) -> None:
+    """Make the crashed task claimable again, whichever way the crash left it.
+
+    A crash used to abandon the lease, and this helper's old assertion pinned
+    that: recovery had to find exactly one expired lease. Since 2026-08-27 the
+    worker settles its claim on failure (`processor_failed`, immediate retry),
+    so a crashed task is usually already `ready` and recovery finds nothing.
+    """
     with sqlite3.connect(queue.db_path) as database:
         database.execute(
-            "UPDATE tasks SET lease_expires_at=? WHERE id=?",
+            "UPDATE tasks SET lease_expires_at=? WHERE id=? AND state='leased'",
             ("2000-01-01T00:00:00+00:00", task_id),
         )
-    assert queue.recover_expired_leases() == 1
+    queue.recover_expired_leases()
+    with sqlite3.connect(queue.db_path) as database:
+        state = database.execute(
+            "SELECT state FROM tasks WHERE id=?", (task_id,)
+        ).fetchone()[0]
+    assert state == "ready", f"task must be claimable again, found {state!r}"
 
 
 def _crash_before_terminal(*_args):
@@ -861,6 +895,54 @@ def test_capture_worker_rejects_noncanonical_provider_output(tmp_path: Path) -> 
     _assert_decision_count(queue, binding.intent_id, 0)
 
 
+def _assert_sources_retained(
+    intent_path: Path, decision_path: Path, terminal_path: Path
+) -> None:
+    assert intent_path.is_file()
+    assert decision_path.is_file()
+    assert terminal_path.is_file()
+
+
+def _assert_manifest_archives_both_sources(
+    export: Path, tmp_path: Path, intent_path: Path, decision_path: Path
+) -> None:
+    manifest = json.loads((export / "manifest.json").read_bytes())
+    archived = manifest["capture_artifacts"]
+    assert {item["source_path"] for item in archived} == {
+        intent_path.relative_to(tmp_path).as_posix(),
+        decision_path.relative_to(tmp_path).as_posix(),
+    }
+    assert all((export / item["archive_path"]).is_file() for item in archived)
+
+
+def _assert_capture_tables(
+    queue, *, tasks: int, intents: int, decisions: int
+) -> None:
+    with sqlite3.connect(queue.db_path) as database:
+        assert database.execute("SELECT COUNT(*) FROM tasks").fetchone() == (tasks,)
+        assert database.execute(
+            "SELECT COUNT(*) FROM capture_intents"
+        ).fetchone() == (intents,)
+        assert database.execute(
+            "SELECT COUNT(*) FROM semantic_decisions"
+        ).fetchone() == (decisions,)
+
+
+def _assert_sources_purged_terminal_retained(
+    intent_path: Path, decision_path: Path, terminal_path: Path
+) -> None:
+    assert not intent_path.exists()
+    assert not decision_path.exists()
+    assert terminal_path.is_file()
+
+
+def _assert_purge_authorizations(queue, count: int) -> None:
+    with sqlite3.connect(queue.db_path) as database:
+        assert database.execute(
+            "SELECT COUNT(*) FROM task_purge_authorizations"
+        ).fetchone() == (count,)
+
+
 def test_ordinary_purge_removes_terminal_proven_capture_sources_but_retains_terminal(
     tmp_path: Path,
 ) -> None:
@@ -875,17 +957,10 @@ def test_ordinary_purge_removes_terminal_proven_capture_sources_but_retains_term
     )
 
     assert receipt == memory_queue.PurgeReceipt(1, (binding.task_id,))
-    with sqlite3.connect(queue.db_path) as database:
-        assert database.execute("SELECT COUNT(*) FROM tasks").fetchone() == (0,)
-        assert database.execute(
-            "SELECT COUNT(*) FROM capture_intents"
-        ).fetchone() == (0,)
-        assert database.execute(
-            "SELECT COUNT(*) FROM semantic_decisions"
-        ).fetchone() == (0,)
-    assert not intent_path.exists()
-    assert not decision_path.exists()
-    assert terminal_path.is_file()
+    _assert_capture_tables(queue, tasks=0, intents=0, decisions=0)
+    _assert_sources_purged_terminal_retained(
+        intent_path, decision_path, terminal_path
+    )
     assert (export / "results" / f"{binding.task_id}.result").is_file()
 
 
@@ -914,15 +989,8 @@ def test_ordinary_purge_rejects_capture_terminal_without_exact_task_binding(
         assert database.execute(
             "SELECT state FROM tasks WHERE id=?", (binding.task_id,)
         ).fetchone() == ("succeeded",)
-        assert database.execute(
-            "SELECT COUNT(*) FROM capture_intents"
-        ).fetchone() == (1,)
-        assert database.execute(
-            "SELECT COUNT(*) FROM semantic_decisions"
-        ).fetchone() == (1,)
-    assert intent_path.is_file()
-    assert decision_path.is_file()
-    assert terminal_path.is_file()
+    _assert_capture_tables(queue, tasks=1, intents=1, decisions=1)
+    _assert_sources_retained(intent_path, decision_path, terminal_path)
     assert not export.exists()
 
 
@@ -945,8 +1013,7 @@ def test_ordinary_purge_resumes_after_export_publication_crash(
         )
 
     assert export.is_dir()
-    assert intent_path.is_file()
-    assert decision_path.is_file()
+    _assert_sources_retained(intent_path, decision_path, terminal_path)
     resumed = memory_queue.MemoryQueue._from_v3_candidate(
         queue.db_path, state_root=tmp_path
     )
@@ -957,9 +1024,9 @@ def test_ordinary_purge_resumes_after_export_publication_crash(
     )
 
     assert receipt == memory_queue.PurgeReceipt(1, (binding.task_id,))
-    assert not intent_path.exists()
-    assert not decision_path.exists()
-    assert terminal_path.is_file()
+    _assert_sources_purged_terminal_retained(
+        intent_path, decision_path, terminal_path
+    )
     assert (export / "purge-receipt.json").is_file()
 
 
@@ -985,16 +1052,10 @@ def test_ordinary_purge_resumes_partial_cleanup_after_database_commit(
 
     with sqlite3.connect(queue.db_path) as database:
         assert database.execute("SELECT COUNT(*) FROM tasks").fetchone() == (0,)
-        assert database.execute(
-            "SELECT COUNT(*) FROM task_purge_authorizations"
-        ).fetchone() == (1,)
-    manifest = json.loads((export / "manifest.json").read_bytes())
-    archived = manifest["capture_artifacts"]
-    assert {item["source_path"] for item in archived} == {
-        intent_path.relative_to(tmp_path).as_posix(),
-        decision_path.relative_to(tmp_path).as_posix(),
-    }
-    assert all((export / item["archive_path"]).is_file() for item in archived)
+    _assert_purge_authorizations(queue, 1)
+    _assert_manifest_archives_both_sources(
+        export, tmp_path, intent_path, decision_path
+    )
 
     resumed = memory_queue.MemoryQueue._from_v3_candidate(
         queue.db_path, state_root=tmp_path
@@ -1005,11 +1066,8 @@ def test_ordinary_purge_resumes_partial_cleanup_after_database_commit(
     )
 
     assert receipt == memory_queue.PurgeReceipt(1, (binding.task_id,))
-    with sqlite3.connect(queue.db_path) as database:
-        assert database.execute(
-            "SELECT COUNT(*) FROM task_purge_authorizations"
-        ).fetchone() == (0,)
-    assert not intent_path.exists()
-    assert not decision_path.exists()
-    assert terminal_path.is_file()
+    _assert_purge_authorizations(queue, 0)
+    _assert_sources_purged_terminal_retained(
+        intent_path, decision_path, terminal_path
+    )
     assert (export / "purge-receipt.json").is_file()

@@ -27,7 +27,7 @@ from typing import Any, NamedTuple
 
 import reliable_memory
 from bounded_io import read_stable_bytes
-from install_control import InstallControlError, validate_install_state
+from install_control import validate_install_state
 from reliable_memory import (
     open_readonly_operational_db,
     read_runtime_bytes,
@@ -582,8 +582,20 @@ def _unreadable_queue_reason(
     return None
 
 
+def _operational_database_path(state_root: Path, database_name: str) -> Path:
+    """The legacy path, or the database its adoption tombstone names.
+
+    Reliability V3 adoption replaces the legacy path with a JSON tombstone.
+    Reading that as SQLite is what made a healthy adopted vault report
+    `queue_state_unreadable` and `transaction_state_unreadable`.
+    """
+    from installed_memory_repair import adopted_database_path
+
+    return adopted_database_path(database_name=database_name, state_root=state_root)
+
+
 def _queue_check(state_root: Path, now: datetime, deadline: float) -> dict:
-    database_path = state_root / "run" / "queue.sqlite3"
+    database_path = _operational_database_path(state_root, "queue")
     database_kind = _safe_kind(database_path, state_root)[0]
     if database_kind == "regular":
         return _queue_v2_check(state_root, now, deadline)
@@ -1310,6 +1322,67 @@ def _chain_resolved_ids(database: sqlite3.Connection) -> set[str]:
     return resolved
 
 
+_RETRY_ORDINAL_SUFFIX = re.compile(r"(?::cas:\d+|#\d+)+$")
+_CHECKPOINT_ATTEMPT_ORDINAL = re.compile(
+    r"^(project:[^:]+:\d+):attempt:\d+:epoch:\d+:([0-9a-f]+)$"
+)
+
+
+def _base_operation_identity(operation_id: str) -> str:
+    """The identity a retry ordinal was derived from.
+
+    Both suffix retry paths build the next attempt by suffixing the identity
+    they are retrying: `:cas:<n>` for a losing append, `#<n>` for a refused
+    attempt of any other kind. Stripping the suffixes recovers the request the
+    whole chain is about.
+
+    Project checkpoints write their ordinal in the middle instead:
+    `project:<slug>:<sequence>:attempt:<n>:epoch:<m>:<digest>`, where a retry
+    takes the next attempt number and a fresh fencing epoch while the slug,
+    the sequence, and the payload digest stay. Removing the attempt/epoch pair
+    recovers the same request identity. The digest is deliberately kept: a
+    different payload committed at the same sequence proves nothing about this
+    attempt's content, so it must never resolve it.
+    """
+    stripped = _RETRY_ORDINAL_SUFFIX.sub("", operation_id)
+    match = _CHECKPOINT_ATTEMPT_ORDINAL.match(stripped)
+    return f"{match.group(1)}:{match.group(2)}" if match else stripped
+
+
+def _committed_base_identities(database: sqlite3.Connection) -> set[str]:
+    return {
+        _base_operation_identity(row[0])
+        for row in database.execute(
+            'SELECT operation_id FROM "transaction" WHERE state=\'committed\''
+        )
+    }
+
+
+def _ordinal_resolved_ids(database: sqlite3.Connection) -> set[str]:
+    """Attempts a committed retry of the same operation identity replaced.
+
+    The lineage is the same fact as `parent_transaction_id`, recorded in the
+    operation identity instead of the parent column, and it is the only copy
+    that survives for the append races refused before the parent was being
+    written. `committed_attempt` already resolves an identity to the attempt
+    that committed this way; the health check simply did not ask.
+
+    This is narrower than it looks, and deliberately so. It resolves an attempt
+    only when a commit carries *its own* request identity, which is derived
+    from the payload — never because some other transaction happened to write
+    the same file. A genuinely lost append leaves no such sibling and stays a
+    finding.
+    """
+    committed = _committed_base_identities(database)
+    return {
+        row[0]
+        for row in database.execute(
+            'SELECT id, operation_id FROM "transaction" WHERE state=\'quarantined\''
+        )
+        if _base_operation_identity(row[1]) in committed
+    }
+
+
 def _committed_created_paths(database: sqlite3.Connection) -> set[str]:
     return {
         row[0]
@@ -1337,6 +1410,11 @@ def _outcome_was_written(
     return intended <= committed_creates
 
 
+def _resolved_by_lineage(database: sqlite3.Connection) -> set[str]:
+    """Both records of the same fact: a retry of this attempt committed."""
+    return _chain_resolved_ids(database) | _ordinal_resolved_ids(database)
+
+
 def _unresolved_quarantine(
     database: sqlite3.Connection, transaction_columns: set[str]
 ) -> int:
@@ -1347,8 +1425,11 @@ def _unresolved_quarantine(
     a health check that is always red stops being read, which is the opposite of
     why it exists.
 
-    An attempt is history on either of two proofs. A retry in its own chain
-    committed — that is the lineage. Or everything it meant to create was
+    An attempt is history on any of three proofs. A retry in its own chain
+    committed — that is the lineage. Or a commit carries the same operation
+    identity under a retry ordinal — that is the same lineage written in the
+    identity, and it is what an append race refused before the parent column
+    was populated leaves behind. Or everything it meant to create was
     created by a transaction that did commit — that is the outcome, and it is
     the ordinary case: once the refusal is fixed the new attempt legitimately
     carries a different operation identity, because its inputs or dispositions
@@ -1357,7 +1438,7 @@ def _unresolved_quarantine(
     """
     if "parent_transaction_id" not in transaction_columns:
         return _quarantined_total(database)
-    open_attempts = _quarantined_ids(database) - _chain_resolved_ids(database)
+    open_attempts = _quarantined_ids(database) - _resolved_by_lineage(database)
     if not open_attempts:
         return 0
     committed_creates = _committed_created_paths(database)
@@ -1481,7 +1562,7 @@ def _unusable_transaction_database(
 
 
 def _transaction_check(state_root: Path, now: datetime, deadline: float = float("inf")) -> dict:
-    path = state_root / "run" / "markdown-transactions.sqlite3"
+    path = _operational_database_path(state_root, "coordinator")
     details, states = _empty_transaction_details()
     kind, _ = _safe_kind(path, state_root)
     unusable = _unusable_transaction_database(
@@ -1915,7 +1996,7 @@ def _append_queue_deletion_codes(details: dict) -> None:
 
 
 def _queue_v2_check(state_root: Path, now: datetime, deadline: float) -> dict:
-    path = state_root / "run" / "queue.sqlite3"
+    path = _operational_database_path(state_root, "queue")
     details, states = _empty_queue_details()
     details.update(_queue_artifact_state(state_root, deadline))
     _record_queue_migration(state_root, details)
@@ -5318,8 +5399,6 @@ def _integration_sources(root: Path) -> dict[str, Path]:
         "claude": root / "integrations" / "claude-code" / "settings.json",
         "opencode": root / "scripts" / "llm-wiki-memory-opencode.js",
         "codex": root / "integrations" / "codex" / "hooks.json",
-        "cursor": root / "integrations" / "cursor" / "hooks.json",
-        "antigravity": root / "integrations" / "antigravity" / "hooks.json",
     }
 
 
@@ -5402,77 +5481,6 @@ def _generic_host_result(
     }
 
 
-def _managed_ide_detected(home: Path, name: str) -> bool:
-    paths = {
-        "cursor": home / ".cursor",
-        "antigravity": home / ".gemini" / "antigravity-ide",
-    }
-    return paths[name].is_dir()
-
-
-def _managed_ide_resource(root: Path, home: Path, name: str):
-    from integration_hook_config import managed_ide_hook_resources
-
-    identifiers = {
-        "cursor": "cursor-user-hooks",
-        "antigravity": "antigravity-user-hooks",
-    }
-    resources = {
-        resource.resource_id: resource for resource in managed_ide_hook_resources(root, home)
-    }
-    return resources[identifiers[name]]
-
-
-def _managed_ide_conflict_result(detected: bool) -> dict[str, object]:
-    return {
-        "status": "degraded",
-        "message": "Managed hook configuration is malformed, unsafe, or conflicting.",
-        "configuration_status": "conflict",
-        "host_detected": detected,
-    }
-
-
-def _managed_ide_active_result(detected: bool) -> dict[str, object]:
-    statuses = {True: "ok", False: "skipped"}
-    return {
-        "status": statuses[detected],
-        "message": "Managed local user hooks are active.",
-        "capture_mode": "official-user-hooks",
-        "configuration_status": "active",
-        "host_detected": detected,
-    }
-
-
-def _managed_ide_absent_result(configured: bool, detected: bool) -> dict[str, object]:
-    if configured or detected:
-        return {
-            "status": "degraded",
-            "message": "Local host is missing its managed LLM-Wiki hooks.",
-            "configuration_status": "absent",
-            "host_detected": detected,
-        }
-    return {
-        "status": "skipped",
-        "message": "Optional local host not detected.",
-        "configuration_status": "absent",
-        "host_detected": False,
-    }
-
-
-def _managed_ide_host_result(root: Path, home: Path, name: str) -> dict[str, object]:
-    detected = _managed_ide_detected(home, name)
-    try:
-        resource = _managed_ide_resource(root, home, name)
-        destination = Path(resource.locator)
-        configured = destination.exists() or destination.is_symlink()
-        active = resource.read_owned() == resource.desired
-    except (InstallControlError, OSError, UnicodeError, ValueError):
-        return _managed_ide_conflict_result(detected)
-    if active:
-        return _managed_ide_active_result(detected)
-    return _managed_ide_absent_result(configured, detected)
-
-
 def _required_host_config(
     config: tuple[Path, list[tuple[Path, tuple[str, ...]]]] | None,
 ) -> tuple[Path, list[tuple[Path, tuple[str, ...]]]]:
@@ -5490,14 +5498,12 @@ def _integration_host_result(
 ) -> dict[str, object]:
     if name == "codex":
         return _codex_host_result(root, home, deadline)
-    if name in {"cursor", "antigravity"}:
-        return _managed_ide_host_result(root, home, name)
     return _generic_host_result(*_required_host_config(config))
 
 
 def _integration_hosts(root: Path, home: Path, deadline: float) -> dict[str, dict[str, object]]:
     configs = _integration_host_configs(home)
-    names = ("claude", "opencode", "codex", "cursor", "antigravity")
+    names = ("claude", "opencode", "codex")
     return {
         name: _integration_host_result(root, home, name, configs.get(name), deadline)
         for name in names
@@ -6104,12 +6110,137 @@ def _fence_lost(where: str, database: Any, lease: dict[str, object]) -> Maintena
     return MaintenanceFenceLost(where, observed)
 
 
+# The adopted runtime has one ownership registry, and doctor's maintenance
+# fence is one row in it. "repair" is the registry role whose lease timing
+# (120 s TTL, 40 s heartbeat) matches MAINTENANCE_LEASE_SECONDS and
+# MAINTENANCE_HEARTBEAT_SECONDS, and it carries no marker obligation; the
+# scope keeps every doctor pass — generation refresh and --repair alike —
+# mutually exclusive, exactly as the legacy 'doctor' owner row did.
+_V3_MAINTENANCE_ROLE = "repair"
+_V3_MAINTENANCE_SCOPE = "doctor:maintenance"
+
+
+def _maintenance_ownership_registry(coordinator: Any) -> Any | None:
+    """The adopted coordinator's ownership registry, or None on the legacy path.
+
+    An adopted vault holds maintenance owners in the coordinator-v3 schema
+    (role/scope/actor_id, no `owner_name`), and the product's own path to that
+    schema is `operational_ownership.OwnershipRegistry` — the same registry the
+    capture worker and the project store use. Speaking raw legacy SQL at that
+    database is what NEW-109 was: `no such column: owner_name` on every
+    nightly generation refresh of an adopted vault.
+    """
+    if getattr(coordinator, "_database_contract", None) is None:
+        return None
+    from operational_ownership import OwnershipRegistry
+
+    return OwnershipRegistry._from_adopted_database(  # noqa: SLF001
+        Path(coordinator.state_root), coordinator.database_path
+    )
+
+
+def _v3_maintenance_actor() -> str:
+    """The fence's own actor identity, distinct from the plain user identity.
+
+    `maintenance_owners.actor_id` is UNIQUE across the whole v3 table — one
+    live lease per actor. The guarded refresh itself still has to enter the
+    Markdown writer gate when it publishes a generation, and that gate
+    acquires role `markdown-writer` under the plain `current_actor_identity()`.
+    Measured on an adopted vault on 2026-08-27: holding the fence under the
+    plain identity made the pass's own publication fail with
+    `owner_identity_conflict`. The maintenance pass is a distinct agent of the
+    same user, and naming it so is what lets its own guarded work write.
+    """
+    from operational_ownership import current_actor_identity
+
+    return f"{current_actor_identity()}#doctor-maintenance"
+
+
+def _acquired_v3_maintenance(
+    coordinator: Any, registry: Any
+) -> tuple[Any, dict[str, object]] | None:
+    from operational_ownership import OperationalOwnershipError
+
+    try:
+        owner = registry.acquire(
+            _V3_MAINTENANCE_ROLE,
+            scope=_V3_MAINTENANCE_SCOPE,
+            actor_id=_v3_maintenance_actor(),
+        )
+    except OperationalOwnershipError:
+        # owner_busy, a live runtime-deletion check, or fail-closed liveness
+        # doubt: every refusal means "not ours now", which is the deferred
+        # `maintenance_owner_busy` outcome, never a traceback.
+        return None
+    lease: dict[str, object] = {
+        "token": owner.token,
+        "epoch": owner.epoch,
+        "registry": registry,
+        "owner": owner,
+    }
+    return coordinator, lease
+
+
+def _read_v3_owner_row(registry: Any) -> sqlite3.Row | None:
+    with closing(registry._connect()) as database:  # noqa: SLF001
+        return database.execute(
+            "SELECT * FROM maintenance_owners WHERE role=? AND scope=?",
+            (_V3_MAINTENANCE_ROLE, _V3_MAINTENANCE_SCOPE),
+        ).fetchone()
+
+
+def _v3_fence_lost(where: str, lease: dict[str, object]) -> MaintenanceFenceLost:
+    observed = _observed_owner_row(_read_v3_owner_row(lease["registry"]))
+    observed["held_epoch"] = lease.get("epoch")
+    observed["held_by_process"] = os.getpid()
+    return MaintenanceFenceLost(where, observed)
+
+
+def _heartbeat_v3_maintenance(lease: dict[str, object]) -> None:
+    from operational_ownership import OperationalOwnershipError
+
+    registry = lease["registry"]
+    try:
+        lease["owner"] = registry.heartbeat(lease["owner"])
+    except OperationalOwnershipError as exc:
+        raise _v3_fence_lost("heartbeat", lease) from exc
+
+
+def _require_v3_maintenance(lease: dict[str, object]) -> None:
+    from operational_ownership import OperationalOwnershipError
+
+    registry = lease["registry"]
+    with closing(registry._connect()) as database:  # noqa: SLF001
+        try:
+            registry.require(database, lease["owner"])
+        except OperationalOwnershipError as exc:
+            raise _v3_fence_lost("require", lease) from exc
+
+
+def _release_v3_maintenance(lease: dict[str, object]) -> None:
+    from operational_ownership import OperationalOwnershipError
+
+    try:
+        lease["registry"].release(lease["owner"])
+    except OperationalOwnershipError as exc:
+        raise _v3_fence_lost("release", lease) from exc
+
+
 def _acquire_maintenance_owner(
     root: Path, state_root: Path, now: datetime
 ) -> tuple[Any, dict[str, object]] | None:
-    from markdown_transaction import MarkdownCoordinator
+    from markdown_transaction import active_or_legacy_coordinator
 
-    coordinator = MarkdownCoordinator(root, state_root)
+    coordinator = active_or_legacy_coordinator(root, state_root)
+    registry = _maintenance_ownership_registry(coordinator)
+    if registry is not None:
+        return _acquired_v3_maintenance(coordinator, registry)
+    return _acquired_legacy_maintenance(coordinator, now)
+
+
+def _acquired_legacy_maintenance(
+    coordinator: Any, now: datetime
+) -> tuple[Any, dict[str, object]] | None:
     token = secrets.token_hex(16)
     expires = now + timedelta(seconds=MAINTENANCE_LEASE_SECONDS)
     with coordinator._connect() as database:
@@ -6152,6 +6283,9 @@ def _acquire_maintenance_owner(
 def _heartbeat_maintenance_owner(
     coordinator: Any, lease: dict[str, object], now: datetime | None = None
 ) -> None:
+    if "owner" in lease:
+        _heartbeat_v3_maintenance(lease)
+        return
     heartbeat = _as_utc(now)
     expires = heartbeat + timedelta(seconds=MAINTENANCE_LEASE_SECONDS)
     with coordinator._connect() as database:
@@ -6182,6 +6316,9 @@ def _owner_row_is_ours(row: sqlite3.Row | None, lease: dict[str, object]) -> boo
 
 
 def _require_maintenance_owner(coordinator: Any, lease: dict[str, object]) -> None:
+    if "owner" in lease:
+        _require_v3_maintenance(lease)
+        return
     with coordinator._connect() as database:
         row = _read_owner_row(database)
         if _owner_row_is_ours(row, lease):
@@ -6190,6 +6327,9 @@ def _require_maintenance_owner(coordinator: Any, lease: dict[str, object]) -> No
 
 
 def _release_maintenance_owner(coordinator: Any, lease: dict[str, object]) -> None:
+    if "owner" in lease:
+        _release_v3_maintenance(lease)
+        return
     with coordinator._connect() as database:
         database.execute("BEGIN IMMEDIATE")
         released_at = datetime.min.replace(tzinfo=timezone.utc).isoformat()
@@ -7329,12 +7469,12 @@ def _ready_capabilities() -> set[str]:
     return {"llm.compile", "llm.flush", "llm.query"}
 
 
-def _unblock_capabilities(state_root: Path, repaired: set[str]) -> int:
+def _unblock_capabilities(root: Path, state_root: Path, repaired: set[str]) -> int:
     placeholders = ",".join("?" for _ in repaired)
-    from memory_queue import MemoryQueue
+    from memory_queue import active_or_legacy_memory_queue
 
-    queue = MemoryQueue(state_root)
-    with queue._connect() as database:
+    queue = active_or_legacy_memory_queue(root, state_root)
+    with queue.connection() as database:
         changed = database.execute(
             f"UPDATE tasks SET state='ready',blocked_capability=NULL,error_code=NULL "
             f"WHERE state='blocked' AND blocked_capability IN ({placeholders})",
@@ -7344,14 +7484,14 @@ def _unblock_capabilities(state_root: Path, repaired: set[str]) -> int:
     return changed
 
 
-def _repair_queue_capabilities(state_root: Path) -> int:
-    path = state_root / "run" / "queue.sqlite3"
+def _repair_queue_capabilities(root: Path, state_root: Path) -> int:
+    path = _operational_database_path(state_root, "queue")
     if not path.is_file():
         return 0
     repaired = _ready_capabilities()
     if not repaired:
         return 0
-    return _unblock_capabilities(state_root, repaired)
+    return _unblock_capabilities(root, state_root, repaired)
 
 
 def _worker_state_root_matches(state_root: Path) -> bool:
@@ -7369,20 +7509,21 @@ def _worker_should_stop(remaining: int, cancelled) -> bool:
 
 
 def _run_bounded_worker(
+    root: Path,
     state_root: Path,
     *,
     deadline: float = float("inf"),
     cancelled=None,
 ) -> int:
     from memory_queue import (
-        MemoryQueue,
         _acquire_queue_owner,
         _manual_processor,
         _release_queue_owner,
+        active_or_legacy_memory_queue,
         run_worker,
     )
 
-    MemoryQueue(state_root)
+    active_or_legacy_memory_queue(root, state_root)
     if not _worker_state_root_matches(state_root):
         return 0
     remaining = max(0, min(1, int(deadline - time.monotonic() + 0.999)))
@@ -7691,6 +7832,7 @@ def _record_bounded_worker_run(guard: Any, context: _RepairContext) -> None:
     """Run the bounded worker and record how much of the queue it processed."""
     processed = guard.run(
         _run_bounded_worker,
+        context.root_path,
         context.state_path,
         deadline=context.deadline,
         cancelled=guard.cancelled,
@@ -7704,7 +7846,9 @@ def _repair_queue_followups(
 ) -> None:
     if not queue_v2_ready:
         return
-    unblocked = guard.run(_repair_queue_capabilities, context.state_path)
+    unblocked = guard.run(
+        _repair_queue_capabilities, context.root_path, context.state_path
+    )
     if unblocked:
         context.repaired.append(
             {"action": "unblock_capabilities", "count": unblocked}

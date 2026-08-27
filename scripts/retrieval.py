@@ -16,8 +16,68 @@ from typing import Any
 from provenance import authority_weight, curated_pages_first, source_type_weight
 
 MAX_OPTIONAL_STRAGGLERS = 2
-OPTIONAL_STAGE_MAX_SECONDS = 0.5
+
+# The ceiling on one optional stage, on top of the share of the caller's budget
+# that `_optional_stage_deadline` already grants it. It exists for the caller who
+# passes a very generous deadline: half of ten minutes is still five minutes to
+# wait on a signal nobody needs.
+#
+# It arrived as a bare 0.5 with no measurement and silently overrode the share
+# for everyone. Measured on this vault: the warm dense stage of one recall costs
+# 0.99-1.33 s and the cold one — the first in a process, which now carries the
+# model load — costs 8.85 s. Every one of those is above 0.5, so no caller that
+# passed a deadline could ever use the semantic leg: six recall calls in one
+# server, all six `optional_stage_timeout`, lexical only.
+#
+# 12 s is above the measured cold stage with room for a loaded machine, so a
+# caller that granted enough budget can pay the one-time load on its only call —
+# which is what a one-shot CLI answer needs, having no second call to be warm
+# for. Short-budget callers are unaffected by the ceiling because the share
+# binds first: the MCP path's ten seconds still grant an optional stage five.
+# What it costs: a stage that will never finish now delays an answer by up to
+# 12 s instead of 0.5 s, and only for a caller that granted at least 24 s.
+OPTIONAL_STAGE_MAX_SECONDS = 12.0
 _OPTIONAL_STAGE_SLOTS = threading.BoundedSemaphore(MAX_OPTIONAL_STRAGGLERS)
+
+# One straggler slot per kind of optional stage, instead of one shared pool of
+# `MAX_OPTIONAL_STRAGGLERS` that every kind competes for.
+#
+# The shared pool made a straggler of one kind refuse admission to a stage of
+# another kind, before that stage waited for anything. Measured on the live
+# vault, six recall calls in one process at the 10 s MCP budget: call 1
+# abandoned both of its stages, they held both slots for the length of their
+# work, and calls 2, 4 and 6 were refused `optional stage capacity exhausted`
+# at 0.00 s -- the dense leg reached the answer in one call out of six, 1.75 of
+# six averaged over four such rounds. The two hogs are model loads: about 9 s
+# for the embedding model, about 20 s for the cross-encoder, both far longer
+# than the 5 s an MCP-budget stage may wait, so one abandoned rerank load shut
+# the dense leg out of every call behind it. Partitioned, the same measurement
+# gives 3.5 of six; see
+# `docs/research/2026-08-26-who-pays-for-an-abandoned-optional-stage.md`.
+#
+# Partitioning by kind is the bulkhead rule: capacity for one dependency is
+# reserved from capacity for all the others, so a slow one exhausts only its
+# own. It also makes each kind single-flight, which is stricter than the shared
+# pool was -- two dense stragglers could previously load the embedding model
+# twice at about 1.1 GiB each, a cost `search_memory._lazy_generation_query_encoder`
+# accepts in its docstring and this now prevents.
+#
+# What it costs. A second stage of a kind already in flight is refused
+# immediately rather than queued behind it: the caller could instead wait for
+# the straggler and then run warm, but the measured loads (9 s, 20 s) do not
+# fit in an MCP-budget stage (5 s), so that wait would spend the caller's
+# budget and delay the lexical answer for a leg that still could not finish.
+# The live thread bound is unchanged at two, one per kind, and the kinds are a
+# fixed tuple rather than caller-supplied, so no call can widen it.
+OPTIONAL_STAGE_KINDS = ("dense", "rerank")
+_OPTIONAL_STAGE_KIND_SLOTS = {
+    kind: threading.BoundedSemaphore(1) for kind in OPTIONAL_STAGE_KINDS
+}
+
+
+def _optional_stage_slots(kind: str | None) -> threading.BoundedSemaphore:
+    """The straggler slots this stage competes for; unlabelled work shares one pool."""
+    return _OPTIONAL_STAGE_KIND_SLOTS.get(kind, _OPTIONAL_STAGE_SLOTS)
 
 
 def _normalized_filename_stem(value: str) -> str:
@@ -66,10 +126,11 @@ def _run_optional_bounded(
     *,
     deadline: float,
     cancelled: Callable[[], bool] | None,
+    kind: str | None = None,
 ) -> Any:
     """Run optional work with a hard wait bound and capped daemon stragglers."""
     _require_optional_stage_time(deadline, cancelled)
-    slots = _OPTIONAL_STAGE_SLOTS
+    slots = _optional_stage_slots(kind)
     if not slots.acquire(blocking=False):
         raise OptionalStageTimeout("optional stage capacity exhausted")
     completed = threading.Event()
@@ -242,12 +303,28 @@ _QUESTION_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+# What may follow a relational preposition and make it about time.
+_WHEN = (
+    r"(?:\d{4}(?:-\d{2}(?:-\d{2})?)?"
+    r"|yesterday|today|tomorrow|now"
+    r"|вчера|сегодня|завтра|сейчас)"
+)
+# A relational preposition is temporal only when something temporal follows it.
+# `после` and `after` are ordinary sequence words, and reading them alone as a
+# time window costs the answer: measured on this vault, "как устроен повтор
+# после карантина" was routed to TEMPORAL, TEMPORAL declares no dense signal,
+# so the grounded answer never asked the vectors. Retrieval returned six lexical
+# rows — four of them the same status document, none of them the decision page
+# the vault holds — and the provider honestly reported insufficient evidence.
+# Every other alternative in this group was already anchored to a real time
+# expression; these prepositions were the ones that were not.
 _TEMPORAL_RE = re.compile(
     r"(?:"
-    r"\b(?P<t_en>since|before|after|until|as of|yesterday|today|last week|"
-    r"last month|last year|in \d{4}|from \d{4}|between \d{4})\b"
-    r"|(?P<t_ru>с\s+\d{4}|после|до\s+\d{4}|вчера|сегодня|на этой неделе|"
-    r"решения\s+с\s+\d{4})"
+    r"\b(?P<t_en_anchored>since|before|after|until|as of|from)\s+" + _WHEN + r"\b"
+    r"|\b(?P<t_en>yesterday|today|last week|last month|last year"
+    r"|in \d{4}|from \d{4}|between \d{4})\b"
+    r"|(?P<t_ru_anchored>(?:с|со|после|до|от)\s+" + _WHEN + r")"
+    r"|(?P<t_ru>вчера|сегодня|на этой неделе)"
     r"|(?P<t_zh>自\s*\d{4}|以来|自从)"
     r")",
     re.IGNORECASE,
@@ -1531,6 +1608,7 @@ def _call_dense(
         lambda: dense_backend(**filters),
         deadline=_optional_stage_deadline(deadline_monotonic),
         cancelled=cancelled,
+        kind="dense",
     )
 
 
@@ -1812,6 +1890,7 @@ def _run_reranker(
         call,
         deadline=_optional_stage_deadline(deadline_monotonic),
         cancelled=cancelled,
+        kind="rerank",
     )
 
 
@@ -3437,6 +3516,31 @@ def _neighbour_boost_or_none(
         return None
 
 
+def _resolved_query_encoder(
+    search_memory: Any,
+    *,
+    semantic: bool,
+    embedder: object | None,
+    model_id: str | None,
+    model_revision: str | None,
+) -> tuple[object | None, str | None, str | None]:
+    """Give this entry point the encoder that `search()` resolves for itself.
+
+    The two entry points disagreed about the semantic flag until 2026-08-25 and
+    the flag was fixed then; they still disagreed about the encoder, which is
+    the other half of the same trap. `search()` resolves one before delegating,
+    so a caller that enters here directly — the grounded answer does — left it
+    None and the generation reader refused the dense leg as
+    `generation_vectors_unavailable`. Measured on this vault: the grounded
+    answer to "как устроен повтор после карантина" was built from six lexical
+    rows, four of them the same status document, and reported insufficient
+    evidence for a page the vault holds.
+    """
+    if not semantic or embedder is not None:
+        return embedder, model_id, model_revision
+    return search_memory._resolved_generation_embedder(True, None, model_id, model_revision)
+
+
 def retrieve_via_search_memory(
     query: str,
     *,
@@ -3469,6 +3573,17 @@ def retrieve_via_search_memory(
     import search_memory
 
     _check_stopped(deadline_monotonic, cancelled)
+    (
+        generation_embedder,
+        generation_model_id,
+        generation_model_revision,
+    ) = _resolved_query_encoder(
+        search_memory,
+        semantic=semantic,
+        embedder=generation_embedder,
+        model_id=generation_model_id,
+        model_revision=generation_model_revision,
+    )
 
     _GenerationSealChanged = GenerationSealChanged
 

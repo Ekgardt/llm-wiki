@@ -24,7 +24,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -111,7 +111,7 @@ def _claim_is_live(existing: dict, today: str, now: datetime) -> bool:
 def _claim_nightly_catchup(today: str | None = None, now: str | None = None) -> bool:
     """Atomically reserve today's catchup when no nightly completed today."""
     today = _today_iso(today)
-    claimed_at = datetime.fromisoformat(now) if now else datetime.now()
+    claimed_at = _parse_iso_safe(now) or datetime.now(timezone.utc)
     claimed = False
 
     def _mutate(state: dict) -> None:
@@ -152,8 +152,12 @@ def _maybe_spawn_nightly_catchup(today: str | None = None) -> None:
     if os.environ.get("MEMORY_LLM_PROVIDER") == "fake":
         return
     today = _today_iso(today)
-    if not _claim_nightly_catchup(today):
-        return
+    if _claim_nightly_catchup(today):
+        _spawn_nightly_catchup(today)
+
+
+def _spawn_nightly_catchup(today: str) -> None:
+    """Hand the claim back when the child never started."""
     pid = spawn_detached([
         sys.executable,
         str(ROOT / "scripts" / "scheduled_nightly.py"),
@@ -477,13 +481,33 @@ def _count_active_projects() -> int:
     return sum(1 for d in projects_root.iterdir() if _is_active_project(d))
 
 
+def _iso_text(raw: str) -> str:
+    """`fromisoformat` learned the `Z` suffix only in 3.11; 3.10 is supported."""
+    if raw.endswith("Z"):
+        return raw[:-1] + "+00:00"
+    return raw
+
+
 def _parse_iso_safe(raw: str | None) -> datetime | None:
+    """One UTC-aware moment, or None.
+
+    Same normaliser as `doctor._parse_utc`, deliberately: accept the `Z` suffix
+    this runtime writes, read a stamp with no zone as UTC, and always hand back
+    an aware value. Two shapes in one module is what made SessionStart raise
+    `TypeError: can't subtract offset-naive and offset-aware datetimes` on every
+    vault that had ever compiled -- `compile_memory._utc_now` stamps
+    `last_compile_at` with `Z`, and it was subtracted from a naive
+    `datetime.now()`.
+    """
     if not raw:
         return None
     try:
-        return datetime.fromisoformat(raw)
+        parsed = datetime.fromisoformat(_iso_text(raw))
     except (ValueError, TypeError):
         return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _compile_backlog_days(state: dict) -> int | None:
@@ -497,7 +521,7 @@ def _compile_backlog_days(state: dict) -> int | None:
     last = _parse_iso_safe(state.get("last_compile_at"))
     if last is None:
         return None
-    return max(0, (datetime.now() - last).days)
+    return max(0, (datetime.now(timezone.utc) - last).days)
 
 
 def _state_map(state: dict, key: str) -> dict:
@@ -542,6 +566,10 @@ def _compile_line(backlog_days: int | None, last_status: str = "") -> str:
         return _failed_compile_line(backlog_days)
     if backlog_days is None:
         return "- **Compile**: never run. Daily logs are accumulating uncompiled."
+    return _committed_compile_line(backlog_days)
+
+
+def _committed_compile_line(backlog_days: int) -> str:
     if backlog_days == 0:
         return "- **Compile**: fresh (today)."
     return _backlog_line(backlog_days)
@@ -768,9 +796,9 @@ def _recover_transactions() -> None:
     if time.monotonic() >= deadline:
         return
     try:
-        from markdown_transaction import MarkdownCoordinator
+        from markdown_transaction import active_or_legacy_coordinator
 
-        MarkdownCoordinator(ROOT, STATE_ROOT).recover(
+        active_or_legacy_coordinator(ROOT, STATE_ROOT).recover(
             writer_wait_seconds=0,
             max_transactions=RECOVERY_MAX_TRANSACTIONS,
             deadline=deadline,

@@ -16,7 +16,6 @@ from reliable_memory import canonical_json_bytes, fsync_directory
 
 MAX_CONFIG_BYTES = 2 * 1024 * 1024
 _MISSING = object()
-_ROOT_PLACEHOLDER = b"__LLM_WIKI_ROOT__"
 
 
 def _absolute_destination(path: Path) -> Path:
@@ -78,19 +77,6 @@ def _template_raw(root: Path, relative: str) -> bytes:
     return path.read_bytes()
 
 
-def _template_bytes(root: Path, relative: str) -> bytes:
-    raw = _template_raw(root, relative)
-    if _ROOT_PLACEHOLDER not in raw:
-        raise InstallControlError("integration_hook_template_placeholder_missing")
-    return raw
-
-
-def _materialized_template(root: Path, relative: str) -> dict[str, object]:
-    raw = _template_bytes(root, relative)
-    escaped_root = json.dumps(str(Path(root).resolve()), ensure_ascii=True)[1:-1]
-    return _decode_object(raw.replace(_ROOT_PLACEHOLDER, escaped_root.encode("ascii")))
-
-
 def _render_config(value: Mapping[str, object]) -> bytes:
     text = json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False)
     return f"{text}\n".encode()
@@ -133,21 +119,6 @@ def _supported_cursor_arrays(hooks: Mapping[str, object]) -> bool:
         if any(not isinstance(item, dict) for item in items):
             return False
     return True
-
-
-def _validate_cursor_projection(
-    handlers: Mapping[str, Sequence[Mapping[str, object]]],
-) -> dict[str, list[dict[str, object]]]:
-    return {
-        _validate_cursor_event(event, items): [dict(item) for item in items]
-        for event, items in handlers.items()
-    }
-
-
-def _validate_cursor_event(event: object, items: Sequence[object]) -> str:
-    if not isinstance(event, str) or not event or not items:
-        raise ValueError("Cursor owned hook projection is invalid")
-    return event
 
 
 def _handler_counts(items: Sequence[object]) -> Counter[bytes]:
@@ -295,65 +266,6 @@ def _write_cursor_projection(
     _publish_config(path, updated, original)
 
 
-def _write_cursor(
-    path: Path,
-    desired: Mapping[str, Sequence[object]],
-    replacement_bytes: bytes | None,
-    config_existed: bool,
-) -> None:
-    config, _original = _read_config(path)
-    current = _cursor_projection(config, desired)
-    if current == replacement_bytes:
-        return
-    _write_cursor_projection(
-        path,
-        current,
-        replacement_bytes,
-        {"config_existed": config_existed},
-    )
-
-
-def cursor_hooks_resource(
-    destination: Path,
-    handlers: Mapping[str, Sequence[Mapping[str, object]]],
-) -> ManagedResource:
-    """Own exact Cursor handlers while preserving all unrelated configuration."""
-    path = _absolute_destination(destination)
-    desired_handlers = _validate_cursor_projection(handlers)
-    desired = canonical_json_bytes({"hooks": desired_handlers, "version": 1})
-    config_existed = path.exists()
-    return ManagedResource(
-        resource_id="cursor-user-hooks",
-        kind="cursor_hooks_fragment",
-        locator=str(path),
-        desired=desired,
-        read_owned=lambda: _cursor_projection(_read_config(path)[0], desired_handlers),
-        write_owned=lambda value: _write_cursor(path, desired_handlers, value, config_existed),
-        recognizes=lambda current: current == desired,
-        read_projections=lambda candidates: _cursor_projection_any(
-            _read_config(path)[0], candidates
-        ),
-        write_projection=lambda expected, replacement, metadata: _write_cursor_projection(
-            path, expected, replacement, metadata
-        ),
-        metadata={"config_existed": config_existed},
-        adopt_as_absent=False,
-    )
-
-
-def _antigravity_projection(
-    config: Mapping[str, object], expected: Mapping[str, object]
-) -> bytes | None:
-    current = config.get("llm-wiki", _MISSING)
-    if current is _MISSING:
-        return None
-    if not isinstance(current, dict):
-        raise InstallControlError("integration_antigravity_ownership_conflict")
-    if canonical_json_bytes(current) != canonical_json_bytes(expected):
-        raise InstallControlError("integration_antigravity_ownership_conflict")
-    return canonical_json_bytes(expected)
-
-
 def _antigravity_projection_any(
     config: Mapping[str, object], candidates: Sequence[bytes]
 ) -> bytes | None:
@@ -416,63 +328,6 @@ def _write_antigravity_projection(
     if _retire_new_antigravity_file(path, updated, metadata):
         return
     _publish_config(path, updated, original)
-
-
-def _write_antigravity(
-    path: Path,
-    desired: Mapping[str, object],
-    replacement: bytes | None,
-    config_existed: bool,
-) -> None:
-    config, _original = _read_config(path)
-    current = _antigravity_projection(config, desired)
-    if current == replacement:
-        return
-    _write_antigravity_projection(path, current, replacement, {"config_existed": config_existed})
-
-
-def antigravity_hooks_resource(
-    destination: Path, owned_config: Mapping[str, object]
-) -> ManagedResource:
-    """Own only Antigravity's exact top-level ``llm-wiki`` object."""
-    path = _absolute_destination(destination)
-    desired_config = dict(owned_config)
-    desired = canonical_json_bytes(desired_config)
-    config_existed = path.exists()
-    return ManagedResource(
-        resource_id="antigravity-user-hooks",
-        kind="antigravity_hooks_fragment",
-        locator=str(path),
-        desired=desired,
-        read_owned=lambda: _antigravity_projection(_read_config(path)[0], desired_config),
-        write_owned=lambda value: _write_antigravity(path, desired_config, value, config_existed),
-        recognizes=lambda current: current == desired,
-        read_projections=lambda candidates: _antigravity_projection_any(
-            _read_config(path)[0], candidates
-        ),
-        write_projection=lambda expected, replacement, metadata: _write_antigravity_projection(
-            path, expected, replacement, metadata
-        ),
-        metadata={"config_existed": config_existed},
-        adopt_as_absent=False,
-    )
-
-
-def _cursor_template_handlers(root: Path) -> dict[str, object]:
-    template = _materialized_template(root, "integrations/cursor/hooks.json")
-    if set(template) != {"hooks", "version"}:
-        raise InstallControlError("integration_cursor_template_invalid")
-    return _cursor_hooks(template)
-
-
-def _antigravity_template_config(root: Path) -> dict[str, object]:
-    template = _materialized_template(root, "integrations/antigravity/hooks.json")
-    if set(template) != {"llm-wiki"}:
-        raise InstallControlError("integration_antigravity_template_invalid")
-    owned = template["llm-wiki"]
-    if not isinstance(owned, dict):
-        raise InstallControlError("integration_antigravity_template_invalid")
-    return owned
 
 
 def _plugin_source_bytes(source: Path) -> str:
@@ -902,13 +757,60 @@ def codex_hooks_template(root: Path) -> dict[str, object]:
     return template
 
 
-def managed_ide_hook_resources(root: Path, home: Path) -> list[ManagedResource]:
-    """Build exact user-hook resources from the tracked host templates."""
-    home = _absolute_destination(home)
-    return [
-        cursor_hooks_resource(home / ".cursor" / "hooks.json", _cursor_template_handlers(root)),
-        antigravity_hooks_resource(
-            home / ".gemini" / "config" / "hooks.json",
-            _antigravity_template_config(root),
+def _refuse_retired_write(_value: bytes | None) -> None:
+    raise InstallControlError("install_resource_retired")
+
+
+def _retired_fragment_resource(
+    resource_id: str,
+    kind: str,
+    destination: Path,
+    read_projections: Callable[[Path, Sequence[bytes]], bytes | None],
+    write_projection: Callable[[Path, bytes | None, bytes | None, Mapping[str, object]], None],
+) -> ManagedResource:
+    """Reconstruct a fragment of a retired host so uninstall can still take it back."""
+    path = _absolute_destination(destination)
+    return ManagedResource(
+        resource_id=resource_id,
+        kind=kind,
+        locator=str(path),
+        desired=b"",
+        read_owned=lambda: None,
+        write_owned=_refuse_retired_write,
+        recognizes=lambda _current: False,
+        read_projections=lambda candidates: read_projections(path, candidates),
+        write_projection=lambda expected, replacement, metadata: write_projection(
+            path, expected, replacement, metadata
         ),
-    ]
+        adopt_as_absent=False,
+    )
+
+
+def _read_cursor_projections(path: Path, candidates: Sequence[bytes]) -> bytes | None:
+    return _cursor_projection_any(_read_config(path)[0], candidates)
+
+
+def _read_antigravity_projections(path: Path, candidates: Sequence[bytes]) -> bytes | None:
+    return _antigravity_projection_any(_read_config(path)[0], candidates)
+
+
+def retired_cursor_hooks_resource(home: Path) -> ManagedResource:
+    """Removal-only resource for a Cursor fragment written before Cursor was retired."""
+    return _retired_fragment_resource(
+        "cursor-user-hooks",
+        "cursor_hooks_fragment",
+        _absolute_destination(home) / ".cursor" / "hooks.json",
+        _read_cursor_projections,
+        _write_cursor_projection,
+    )
+
+
+def retired_antigravity_hooks_resource(home: Path) -> ManagedResource:
+    """Removal-only resource for an Antigravity fragment written before it was retired."""
+    return _retired_fragment_resource(
+        "antigravity-user-hooks",
+        "antigravity_hooks_fragment",
+        _absolute_destination(home) / ".gemini" / "config" / "hooks.json",
+        _read_antigravity_projections,
+        _write_antigravity_projection,
+    )

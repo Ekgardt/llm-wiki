@@ -109,21 +109,21 @@ def test_readmes_mark_precommit_as_opt_in() -> None:
         assert command in text, f"{path.name}: missing opt-in pre-commit command"
 
 
-def test_readmes_describe_managed_local_ide_hooks_and_viewer_integration() -> None:
+def test_readmes_describe_the_retired_hosts_and_viewer_integration() -> None:
     markers = {
         "README.md": (
-            "Automatic local hooks when detected",
-            "Cursor cloud agents do not load user-level hooks",
+            "Cursor and Antigravity were retired on 2026-08-26",
+            "`uninstall` still takes back hooks an earlier install wrote",
             "Viewer only",
         ),
         "README.ru.md": (
-            "Автоматические локальные хуки после обнаружения",
-            "Cursor cloud agents не загружают user-level хуки",
+            "Cursor и Antigravity сняты с поддержки 2026-08-26",
+            "`uninstall` по-прежнему забирает хуки",
             "Только viewer",
         ),
         "README.zh-CN.md": (
-            "检测到后自动启用本地钩子",
-            "Cursor 云端智能体不会加载用户级钩子",
+            "Cursor 与 Antigravity 已于 2026-08-26 退出支持",
+            "`uninstall` 仍会收回旧版安装写入的钩子",
             "仅 viewer",
         ),
     }
@@ -139,8 +139,8 @@ def test_installers_report_agent_activation_and_scheduler_limits_truthfully() ->
 
     for installer in (shell, powershell):
         assert "OpenCode: active automatic" in installer
-        assert "Cursor: active automatic local hooks" in installer
-        assert "Antigravity: active automatic local hooks" in installer
+        assert "cursor" not in installer.casefold()
+        assert "antigravity" not in installer.casefold()
         assert "Agent integrations:" in installer
     assert "captures automatically" not in shell
     assert "capture is automatic" not in powershell

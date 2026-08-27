@@ -949,18 +949,66 @@ _V2_TRANSACTION_STATES = frozenset(
 
 
 def _require_no_v2_ownership(source: sqlite3.Connection) -> None:
-    """Live ownership cannot be canonicalized, so it must not be carried over."""
-    if any(_v2_table_populated(source, table) for table in _V2_OWNERSHIP_TABLES):
+    """Live ownership cannot be canonicalized, so it must not be carried over.
+
+    Only *live* ownership refuses the migration. An expired row is not carried
+    over either — none of these three tables is read by the v2 row collector —
+    but it is no reason to stop, and treating it as one made adoption
+    unreachable on any vault that had ever taken a project lease. A lease row is
+    deleted only by the holder that releases it, so an agent that exits without
+    releasing leaves the row behind for good: measured on the owner's vault on
+    2026-08-26, 56 project leases, 55 of them expired on 2026-08-21, plus one
+    released `doctor` maintenance owner. The existence rule refused every one of
+    them, and `session_end` had never once completed on that machine. Liveness
+    is also the rule the queue side of the same adoption already uses, where
+    only a task still in `leased` state refuses.
+
+    Fail closed on doubt: an expiry that is absent or unreadable counts as live,
+    because it is not proof that the owner is gone.
+    """
+    now = datetime.now(timezone.utc)
+    if any(_v2_ownership_is_live(source, table, now) for table in _V2_OWNERSHIP_TABLES):
         raise _coordinator_migration_error(
             "coordinator_v2_ambiguous_ownership",
-            "coordinator v2 contains ownership that cannot be canonicalized",
+            "coordinator v2 contains live ownership that cannot be canonicalized",
         )
 
 
-def _v2_table_populated(source: sqlite3.Connection, table: str) -> bool:
+def _v2_ownership_is_live(
+    source: sqlite3.Connection, table: str, now: datetime
+) -> bool:
     if not _coordinator_table_exists(source, table):
         return False
+    if "expires_at" not in _coordinator_table_columns(source, table):
+        return _v2_table_populated(source, table)
+    return _any_live_expiry(source, table, now)
+
+
+def _any_live_expiry(source: sqlite3.Connection, table: str, now: datetime) -> bool:
+    rows = source.execute(f'SELECT expires_at FROM "{table}"').fetchall()
+    return any(_expiry_is_live(row[0], now) for row in rows)
+
+
+def _v2_table_populated(source: sqlite3.Connection, table: str) -> bool:
+    """Without an expiry column there is nothing to date a row by, so any row counts."""
     return source.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone() is not None
+
+
+def _expiry_is_live(value: object, now: datetime) -> bool:
+    if not isinstance(value, str) or not value:
+        return True
+    try:
+        parsed = _parse_timestamp(value)
+    except (ValueError, TypeError):
+        return True
+    return _as_utc(parsed) > now
+
+
+def _as_utc(value: datetime) -> datetime:
+    """A v2 row may carry a naive stamp; every writer of these tables meant UTC."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 
 def _coordinator_v2_transaction_rows(
@@ -3433,14 +3481,28 @@ def active_markdown_coordinator(vault: Path, state_root: Path) -> MarkdownCoordi
     return coordinator
 
 
+def active_or_legacy_coordinator(
+    vault: Path, state_root: Path
+) -> MarkdownCoordinator:
+    """The adopted V3 coordinator where adoption is in force, else the legacy one.
+
+    Adoption replaces the pre-adoption `run/markdown-transactions.sqlite3` with a
+    JSON tombstone, so a writer that opens that path directly fails with
+    `file is not a database` on every call. This is the one rule that decides
+    which coordinator a writer gets; a writer that constructs one itself
+    bypasses adoption and dies on the tombstone.
+    """
+    if _reliability_v3_records_present(state_root):
+        return active_markdown_coordinator(vault, state_root)
+    return MarkdownCoordinator(vault, state_root)
+
+
 def _default_coordinator() -> MarkdownCoordinator:
     vault = Path(
         os.environ.get("LLM_WIKI_ROOT", str(Path(__file__).resolve().parent.parent))
     ).resolve(strict=True)
     state_root = Path(os.environ.get("LLM_WIKI_STATE_ROOT", str(vault))).resolve()
-    if _reliability_v3_records_present(state_root):
-        return active_markdown_coordinator(vault, state_root)
-    return MarkdownCoordinator(vault, state_root)
+    return active_or_legacy_coordinator(vault, state_root)
 
 
 def _relative_target(coordinator: MarkdownCoordinator, path: Path) -> str:
@@ -3624,8 +3686,41 @@ def mutate_knowledge(
     preconditions: Mapping[str, object] | None = None,
 ) -> TransactionRecord:
     """Apply one recoverable mutation with caller-independent before hashes."""
+    return _mutate_knowledge(
+        _default_coordinator(), operation_id, changes, validators, preconditions
+    )
+
+
+def mutate_owned_knowledge(
+    coordinator: MarkdownCoordinator,
+    owner: object,
+    operation_id: str,
+    changes: Mapping[Path, bytes | None],
+    *,
+    validators: Sequence[Validator] = (),
+    preconditions: Mapping[str, object] | None = None,
+) -> TransactionRecord:
+    """The same mutation inside a writer gate the caller already owns.
+
+    `mutate_knowledge` claims the canonical writer lease itself, so a caller that
+    already holds an owner lease — the capture worker does — got
+    `owner_identity_conflict` and, because its own writer swallows failure, lost
+    the write in silence. Every queued session record was dropped this way.
+    """
+    with coordinator.writer_gate(owner=owner):
+        return _mutate_knowledge(
+            coordinator, operation_id, changes, validators, preconditions
+        )
+
+
+def _mutate_knowledge(
+    coordinator: MarkdownCoordinator,
+    operation_id: str,
+    changes: Mapping[Path, bytes | None],
+    validators: Sequence[Validator],
+    preconditions: Mapping[str, object] | None,
+) -> TransactionRecord:
     _require_knowledge_changes(changes)
-    coordinator = _default_coordinator()
     relative_changes = _relative_changes(coordinator, changes)
     _recover_initial_contention(coordinator)
     existing = _existing_committed_record(coordinator, operation_id, relative_changes)
