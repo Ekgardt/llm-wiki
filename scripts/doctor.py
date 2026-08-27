@@ -1323,17 +1323,30 @@ def _chain_resolved_ids(database: sqlite3.Connection) -> set[str]:
 
 
 _RETRY_ORDINAL_SUFFIX = re.compile(r"(?::cas:\d+|#\d+)+$")
+_CHECKPOINT_ATTEMPT_ORDINAL = re.compile(
+    r"^(project:[^:]+:\d+):attempt:\d+:epoch:\d+:([0-9a-f]+)$"
+)
 
 
 def _base_operation_identity(operation_id: str) -> str:
     """The identity a retry ordinal was derived from.
 
-    Both retry paths build the next attempt by suffixing the identity they are
-    retrying: `:cas:<n>` for a losing append, `#<n>` for a refused attempt of
-    any other kind. Stripping the suffixes recovers the request the whole chain
-    is about.
+    Both suffix retry paths build the next attempt by suffixing the identity
+    they are retrying: `:cas:<n>` for a losing append, `#<n>` for a refused
+    attempt of any other kind. Stripping the suffixes recovers the request the
+    whole chain is about.
+
+    Project checkpoints write their ordinal in the middle instead:
+    `project:<slug>:<sequence>:attempt:<n>:epoch:<m>:<digest>`, where a retry
+    takes the next attempt number and a fresh fencing epoch while the slug,
+    the sequence, and the payload digest stay. Removing the attempt/epoch pair
+    recovers the same request identity. The digest is deliberately kept: a
+    different payload committed at the same sequence proves nothing about this
+    attempt's content, so it must never resolve it.
     """
-    return _RETRY_ORDINAL_SUFFIX.sub("", operation_id)
+    stripped = _RETRY_ORDINAL_SUFFIX.sub("", operation_id)
+    match = _CHECKPOINT_ATTEMPT_ORDINAL.match(stripped)
+    return f"{match.group(1)}:{match.group(2)}" if match else stripped
 
 
 def _committed_base_identities(database: sqlite3.Connection) -> set[str]:
