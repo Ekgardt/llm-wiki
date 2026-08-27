@@ -4911,6 +4911,54 @@ def _insert_source_fence(
         raise QueueOperationError("source_fenced") from exc
 
 
+def _daily_logical_path(daily_id: str) -> str:
+    """The vault-relative path a canonical daily id names."""
+    return f"knowledge/daily/{daily_id}.md"
+
+
+def _adopted_fence_row_matches(row: sqlite3.Row, fence: SourceFence) -> bool:
+    """The stored adopted fence names the same source, token and owning process."""
+    stored = (
+        str(row["logical_path"]),
+        str(row["source_digest"]),
+        str(row["token"]),
+        int(row["owner_pid"]),
+        str(row["acquired_at"]),
+    )
+    expected = (
+        _daily_logical_path(fence.daily_id),
+        fence.source_digest,
+        fence.token,
+        os.getpid(),
+        _timestamp(fence.acquired_at),
+    )
+    return stored == expected and fence.owner_pid == os.getpid()
+
+
+def _insert_adopted_source_fence(
+    database: sqlite3.Connection, values: tuple[object, ...]
+) -> None:
+    """Record the fence, refusing when another one already holds the source."""
+    try:
+        database.execute(
+            "INSERT INTO source_fences "
+            "(logical_path, source_digest, token, owner_pid, owner_start_identity, "
+            "acquired_at, heartbeat_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            values,
+        )
+    except sqlite3.IntegrityError as exc:
+        raise QueueOperationError("source_fenced") from exc
+
+
+def _task_payload_text(row: sqlite3.Row) -> str:
+    """The task payload as text for substring source-reference checks.
+
+    Undecodable bytes are replaced, never dropped, so a corrupt blob cannot
+    hide the ASCII daily id or digest it still carries.
+    """
+    return bytes(row["payload_blob"]).decode("utf-8", errors="replace")
+
+
 def _lease_row_holds(
     row: sqlite3.Row | None, lease: QueueLease, now: datetime
 ) -> bool:
@@ -6892,26 +6940,223 @@ class _QueueV3CandidateReader:
             self, export_path=export_path, deadline=deadline, cancelled=cancelled
         )
 
-    # The source-fence family is the one part of the legacy API with no adopted
-    # implementation. Refusing by name beats an AttributeError from deep inside
-    # a caller, and beats pretending the fence was taken.
-    def acquire_source_fence(self, *_args: object, **_kwargs: object) -> NoReturn:
-        _refuse_legacy_only_api("acquire_source_fence")
+    # The source-fence family, adopted (2026-08-27). The rows live in the V3
+    # `source_fences` table -- keyed by `logical_path` instead of the legacy
+    # `daily_id`, and carrying `owner_start_identity` -- while every
+    # caller-visible contract (arguments, refusal codes, ordering) stays
+    # exactly the legacy one, so `archive_daily` runs unchanged.
+    def _delete_stale_source_fences(self, database: sqlite3.Connection) -> None:
+        """Drop fences whose lease expired or whose owning process died."""
+        now = _utc_now()
+        rows = database.execute(
+            "SELECT token, owner_pid, expires_at FROM source_fences"
+        ).fetchall()
+        for row in rows:
+            expires_at = _parse_timestamp(str(row["expires_at"]))
+            expired = expires_at is None or expires_at <= now
+            if expired or not _pid_is_alive(int(row["owner_pid"])):
+                database.execute(
+                    "DELETE FROM source_fences WHERE token=?", (row["token"],)
+                )
 
-    def heartbeat_source_fence(self, *_args: object, **_kwargs: object) -> NoReturn:
-        _refuse_legacy_only_api("heartbeat_source_fence")
+    @staticmethod
+    def _fenced_sources(database: sqlite3.Connection) -> list[tuple[str, str]]:
+        """Every held fence as the (daily_id, source_digest) it protects."""
+        return [
+            (Path(str(row["logical_path"])).stem, str(row["source_digest"]))
+            for row in database.execute(
+                "SELECT logical_path, source_digest FROM source_fences"
+            )
+        ]
 
-    def source_fence_heartbeat(self, *_args: object, **_kwargs: object) -> NoReturn:
-        _refuse_legacy_only_api("source_fence_heartbeat")
+    def _assert_payload_not_fenced(
+        self, database: sqlite3.Connection, payload_json: str
+    ) -> None:
+        for daily_id, source_digest in self._fenced_sources(database):
+            if MemoryQueue._payload_references_source(
+                payload_json, daily_id, source_digest
+            ):
+                raise QueueOperationError("source_fenced")
 
-    def source_finalization(self, *_args: object, **_kwargs: object) -> NoReturn:
-        _refuse_legacy_only_api("source_finalization")
+    def referencing_source_tasks(
+        self,
+        daily_id: str,
+        source_digest: str,
+        *,
+        states: tuple[str, ...] = ("ready", "leased", "blocked", "dead"),
+    ) -> tuple[str, ...]:
+        MemoryQueue._validate_source_identity(daily_id, source_digest)
+        _require_known_states(states)
+        placeholders = ",".join("?" for _ in states)
+        with closing(self._connect()) as database:
+            cursor = database.execute(
+                f"SELECT id, payload_blob FROM tasks WHERE state IN ({placeholders}) "
+                "ORDER BY created_at, rowid",  # noqa: S608 - generated placeholders
+                states,
+            )
+            return tuple(
+                str(row["id"])
+                for row in cursor
+                if MemoryQueue._payload_references_source(
+                    _task_payload_text(row), daily_id, source_digest
+                )
+            )
 
-    def release_source_fence(self, *_args: object, **_kwargs: object) -> NoReturn:
-        _refuse_legacy_only_api("release_source_fence")
+    def _require_source_unreferenced(
+        self, database: sqlite3.Connection, daily_id: str, source_digest: str
+    ) -> None:
+        """Refuse a fence over a source that some live task still points at."""
+        rows = database.execute(
+            "SELECT payload_blob FROM tasks "
+            "WHERE state IN ('ready','leased','blocked','dead')"
+        )
+        if any(
+            MemoryQueue._payload_references_source(
+                _task_payload_text(row), daily_id, source_digest
+            )
+            for row in rows
+        ):
+            raise QueueOperationError("source_referenced")
 
-    def referencing_source_tasks(self, *_args: object, **_kwargs: object) -> NoReturn:
-        _refuse_legacy_only_api("referencing_source_tasks")
+    def acquire_source_fence(
+        self,
+        daily_id: str,
+        source_digest: str,
+        *,
+        lease_seconds: int = DEFAULTS.queue_lease_seconds,
+    ) -> SourceFence:
+        from operational_ownership import current_process_identity
+
+        MemoryQueue._validate_source_identity(daily_id, source_digest)
+        _require_positive_lease(lease_seconds)
+        process = current_process_identity()
+        token = sha256_bytes(os.urandom(32))
+        acquired = _utc_now()
+        expires = acquired + timedelta(seconds=lease_seconds)
+        with closing(self._connect()) as database, begin_immediate(database):
+            self._delete_stale_source_fences(database)
+            self._require_source_unreferenced(database, daily_id, source_digest)
+            _insert_adopted_source_fence(
+                database,
+                (
+                    _daily_logical_path(daily_id),
+                    source_digest,
+                    token,
+                    process.pid,
+                    process.start_identity,
+                    _timestamp(acquired),
+                    _timestamp(acquired),
+                    _timestamp(expires),
+                ),
+            )
+        return SourceFence(
+            daily_id,
+            source_digest,
+            token,
+            process.pid,
+            acquired,
+            acquired,
+            expires,
+        )
+
+    def heartbeat_source_fence(
+        self,
+        fence: SourceFence,
+        *,
+        lease_seconds: int = DEFAULTS.queue_lease_seconds,
+    ) -> SourceFence:
+        if not isinstance(fence, SourceFence):
+            raise TypeError("source heartbeat requires a SourceFence")
+        _require_positive_lease(lease_seconds)
+        now = _utc_now()
+        expires = now + timedelta(seconds=lease_seconds)
+        with closing(self._connect()) as database, begin_immediate(database):
+            self._delete_stale_source_fences(database)
+            changed = database.execute(
+                """UPDATE source_fences SET heartbeat_at=?, expires_at=?
+                   WHERE logical_path=? AND source_digest=? AND token=?
+                     AND owner_pid=? AND acquired_at=? AND heartbeat_at=?
+                     AND expires_at=?""",
+                (
+                    _timestamp(now),
+                    _timestamp(expires),
+                    _daily_logical_path(fence.daily_id),
+                    fence.source_digest,
+                    fence.token,
+                    fence.owner_pid,
+                    _timestamp(fence.acquired_at),
+                    _timestamp(fence.heartbeat_at),
+                    _timestamp(fence.expires_at),
+                ),
+            ).rowcount
+            if changed != 1 or now >= fence.expires_at:
+                raise QueueOperationError("source_fence_lost")
+        return replace(fence, heartbeat_at=now, expires_at=expires)
+
+    def source_fence_heartbeat(
+        self,
+        fence: SourceFence,
+        *,
+        heartbeat_seconds: int = DEFAULTS.queue_heartbeat_seconds,
+        lease_seconds: int = DEFAULTS.queue_lease_seconds,
+    ):
+        """A held fence kept renewed by the same heartbeat the legacy queue runs."""
+        return MemoryQueue.source_fence_heartbeat(
+            self,
+            fence,
+            heartbeat_seconds=heartbeat_seconds,
+            lease_seconds=lease_seconds,
+        )
+
+    @contextmanager
+    def source_finalization(self, fence: SourceFence):
+        if not isinstance(fence, SourceFence):
+            raise TypeError("source finalization requires a SourceFence")
+        with closing(self._connect()) as database, begin_immediate(database):
+            self._delete_stale_source_fences(database)
+            self._require_live_source_fence(database, fence)
+            MemoryQueue._require_no_source_failure(database, fence)
+            self._require_no_source_reference(database, fence)
+            yield
+
+    def _require_live_source_fence(
+        self, database: sqlite3.Connection, fence: SourceFence
+    ) -> None:
+        """The fence row still matches this holder, and has not expired."""
+        row = database.execute(
+            "SELECT logical_path, source_digest, token, owner_pid, "
+            "acquired_at, expires_at FROM source_fences WHERE token=?",
+            (fence.token,),
+        ).fetchone()
+        if row is None or not _adopted_fence_row_matches(row, fence):
+            raise QueueOperationError("source_fence_lost")
+        expires_at = _parse_timestamp(str(row["expires_at"]))
+        if expires_at is None or _utc_now() >= expires_at:
+            raise QueueOperationError("source_fence_lost")
+
+    def _require_no_source_reference(
+        self, database: sqlite3.Connection, fence: SourceFence
+    ) -> None:
+        """No retained task may still point at the source being finalized."""
+        for task in database.execute(
+            "SELECT payload_blob FROM tasks "
+            "WHERE state IN ('ready','leased','blocked','dead')"
+        ):
+            if MemoryQueue._payload_references_source(
+                _task_payload_text(task), fence.daily_id, fence.source_digest
+            ):
+                raise QueueOperationError("source_referenced")
+
+    def release_source_fence(self, token: str) -> None:
+        if not isinstance(token, str) or re.fullmatch(r"[0-9a-f]{64}", token) is None:
+            raise ValueError("source fence token is invalid")
+        with closing(self._connect()) as database, begin_immediate(database):
+            changed = database.execute(
+                "DELETE FROM source_fences WHERE token=? AND owner_pid=?",
+                (token, os.getpid()),
+            ).rowcount
+            if changed != 1:
+                raise QueueOperationError("source_fence_lost")
 
     @staticmethod
     def _demote_payload_mismatch(
@@ -7045,6 +7290,8 @@ class _QueueV3CandidateReader:
         ready_at = _as_utc(available_at or now)
         task_id = uuid.uuid4().hex
         with closing(self._connect()) as database, begin_immediate(database):
+            self._delete_stale_source_fences(database)
+            self._assert_payload_not_fenced(database, payload_bytes.decode("utf-8"))
             deduplicated = self._deduplicated_task_id(
                 database, dedupe_key, kind, handler_version, payload_bytes, input_hash
             )
@@ -10285,7 +10532,7 @@ class _QueueV3CandidateReader:
                 ),
             )
 
-    def heartbeat_queue_owner(self, lease: OwnerLease) -> None:
+    def heartbeat_queue_owner(self, lease: OwnerLease) -> OwnerLease:
         registry = self.ownership_registry()
         current = registry.heartbeat(lease)
         with closing(
@@ -10314,6 +10561,7 @@ class _QueueV3CandidateReader:
             ).rowcount
             if updated != 1:
                 raise QueueOperationError("queue_owner_fence_lost")
+        return current
 
     def _remove_queue_projection(self, lease: OwnerLease) -> None:
         from operational_ownership import OwnerLease
@@ -10357,6 +10605,7 @@ class _QueueV3CandidateReader:
         with closing(
             self._connect()
         ) as database, begin_immediate(database):
+            self._delete_stale_source_fences(database)
             claimable = self._next_claimable_task(database, now, max_attempts)
             if claimable is None:
                 return None
@@ -10392,10 +10641,24 @@ class _QueueV3CandidateReader:
         self, database: sqlite3.Connection, now: datetime, max_attempts: int
     ) -> tuple[sqlite3.Row, PayloadValidation] | None:
         """The next ready task with a readable payload and attempts to spare."""
+        # substr(..., 17, 10) is the daily id inside the canonical
+        # 'knowledge/daily/YYYY-MM-DD.md'; acquire_source_fence validates that
+        # form before any fence row exists, so the slice is always the date.
         while True:
             row = database.execute(
                 """SELECT * FROM tasks
                    WHERE state='ready' AND attempts < ? AND available_at <= ?
+                     AND NOT EXISTS (
+                         SELECT 1 FROM source_fences fence
+                         WHERE instr(
+                                   CAST(tasks.payload_blob AS TEXT),
+                                   substr(fence.logical_path, 17, 10)
+                               ) > 0
+                            OR instr(
+                                   CAST(tasks.payload_blob AS TEXT),
+                                   fence.source_digest
+                               ) > 0
+                     )
                    ORDER BY priority DESC, available_at, created_at, id LIMIT 1""",
                 (max_attempts, _timestamp(now)),
             ).fetchone()
@@ -10917,6 +11180,8 @@ class _QueueV3CandidateReader:
         replacement = uuid.uuid4().hex
         with closing(self._connect()) as database, begin_immediate(database):
             row = _require_dead_task(database, task_id)
+            self._delete_stale_source_fences(database)
+            self._assert_payload_not_fenced(database, _task_payload_text(row))
             validation = self._require_valid_task_payload(
                 database, row, now=now, parse=True
             )
@@ -12176,6 +12441,118 @@ def _take_queue_ownership(
     return epoch
 
 
+# The one legacy owner role that still has work to do after adoption, and the
+# canonical V3 registry role it maps to. 'legacy' and 'migration' guard
+# pre-adoption workflows: on an adopted vault they keep meeting the
+# `queue_tombstoned_by_adoption` refusal, which names exactly what retired them.
+_ADOPTED_OWNER_ROLES = {"worker": "queue-worker"}
+
+# Canonical leases held by this process, keyed by owner token. A V3 lease is
+# bound to its owning process identity, so heartbeat and release can only ever
+# come from the process that acquired it; a process-local ledger is the truth.
+_ADOPTED_OWNER_LEASES: dict[str, tuple[Any, Any]] = {}
+_ADOPTED_OWNER_LOCK = threading.Lock()
+
+
+def _adopted_owner_reader(state_root: Path, role: str) -> Any | None:
+    """The adopted queue backend for this role; None routes to the legacy path."""
+    from markdown_transaction import _reliability_v3_records_present
+
+    state = Path(state_root).resolve()
+    if role not in _ADOPTED_OWNER_ROLES or not _reliability_v3_records_present(state):
+        return None
+    queue_path = state / "run" / "queue-v3.sqlite3"
+    validate_queue_v3_database(queue_path, state_root=state)
+    return _QueueV3CandidateReader(
+        queue_path,
+        coordinator_path=state / "run" / "markdown-transactions-v3.sqlite3",
+    )
+
+
+def _acquire_adopted_queue_owner(
+    reader: Any, role: str, busy_code: str
+) -> QueueOwnerLease:
+    """Take the role through the canonical V3 registry and its queue projection.
+
+    The registry settles lease timing by role, exactly as the adopted queue
+    settles retries; the returned lease reports the timing actually granted.
+    """
+    from operational_ownership import OperationalOwnershipError
+
+    canonical_role = _ADOPTED_OWNER_ROLES[role]
+    scope = f"queue-owner:{role}"
+    registry = reader.ownership_registry()
+    try:
+        lease = registry.acquire(canonical_role, scope=scope)
+    except OperationalOwnershipError as exc:
+        if exc.code != "owner_busy":
+            raise
+        raise MigrationBusy(busy_code) from exc
+    try:
+        reader._insert_queue_projection(lease, role=canonical_role, scope=scope)
+    except BaseException:
+        registry.release(lease)
+        raise
+    with _ADOPTED_OWNER_LOCK:
+        _ADOPTED_OWNER_LEASES[lease.token] = (reader, lease)
+    return QueueOwnerLease(
+        Path(reader.state_root).resolve(),
+        role,
+        lease.token,
+        lease.process.pid,
+        lease.epoch,
+        lease.expires_at,
+        lease.ttl_seconds,
+    )
+
+
+def _adopted_owner_entry(token: str) -> tuple[Any, Any] | None:
+    with _ADOPTED_OWNER_LOCK:
+        return _ADOPTED_OWNER_LEASES.get(token)
+
+
+def _heartbeat_adopted_queue_owner(
+    lease: QueueOwnerLease, entry: tuple[Any, Any]
+) -> QueueOwnerLease:
+    """Renew the canonical lease and its projection; answer the renewed lease."""
+    reader, canonical = entry
+    renewed = reader.heartbeat_queue_owner(canonical)
+    with _ADOPTED_OWNER_LOCK:
+        _ADOPTED_OWNER_LEASES[lease.token] = (reader, renewed)
+    return replace(lease, expires_at=renewed.expires_at)
+
+
+def _released_cleanly(release: Callable[[], None]) -> bool:
+    """True when the release ran; a fence no longer ours answers False."""
+    from operational_ownership import OperationalOwnershipError
+
+    try:
+        release()
+    except (QueueOperationError, OperationalOwnershipError):
+        return False
+    return True
+
+
+def _release_adopted_queue_owner(entry: tuple[Any, Any]) -> bool:
+    """Take back the projection and the canonical lease, each on its own.
+
+    Both halves are attempted so one lost fence cannot strand the other row;
+    a lease that was no longer ours answers False, exactly as the legacy
+    registry answers a row it no longer holds.
+    """
+    reader, canonical = entry
+    projected = _released_cleanly(lambda: reader._remove_queue_projection(canonical))
+    released = _released_cleanly(
+        lambda: reader.ownership_registry().release(canonical)
+    )
+    return projected and released
+
+
+def _pop_adopted_owner(token: str) -> tuple[Any, Any] | None:
+    with _ADOPTED_OWNER_LOCK:
+        return _ADOPTED_OWNER_LEASES.pop(token, None)
+
+
 def _acquire_queue_owner(
     state_root: Path,
     role: str,
@@ -12186,6 +12563,9 @@ def _acquire_queue_owner(
 ) -> QueueOwnerLease:
     if not role or ttl_seconds <= 0:
         raise ValueError("owner role and ttl must be valid")
+    reader = _adopted_owner_reader(state_root, role)
+    if reader is not None:
+        return _acquire_adopted_queue_owner(reader, role, busy_code)
     acquired_at = _as_utc(now or _utc_now())
     token = uuid.uuid4().hex
     pid = os.getpid()
@@ -12255,6 +12635,9 @@ def _require_queue_owner(
 def _heartbeat_queue_owner(
     lease: QueueOwnerLease, *, now: datetime | None = None
 ) -> QueueOwnerLease:
+    entry = _adopted_owner_entry(lease.token)
+    if entry is not None:
+        return _heartbeat_adopted_queue_owner(lease, entry)
     heartbeat_at = _as_utc(now or _utc_now())
     with _open_queue_ownership_db(lease.state_root) as connection, begin_immediate(connection):
         expires_at = _require_queue_owner(
@@ -12264,6 +12647,9 @@ def _heartbeat_queue_owner(
 
 
 def _release_queue_owner(lease: QueueOwnerLease) -> bool:
+    entry = _pop_adopted_owner(lease.token)
+    if entry is not None:
+        return _release_adopted_queue_owner(entry)
     with _open_queue_ownership_db(lease.state_root) as connection, begin_immediate(connection):
         changed = connection.execute(
             """UPDATE queue_ownership

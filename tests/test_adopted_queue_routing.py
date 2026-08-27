@@ -180,16 +180,24 @@ def test_the_cli_refusal_prints_the_tombstoned_path(
     assert "queue-v3.sqlite3" in printed["detail"]
 
 
-def test_the_source_fence_family_refuses_by_name(tmp_path: Path) -> None:
-    """No adopted implementation is refused by name, never faked or silent."""
+def test_the_source_fence_family_works_on_the_adopted_queue(tmp_path: Path) -> None:
+    """The 2026-08-27 gap is closed: the fence family has a V3 implementation.
+
+    Until then this family was refused by name (`queue_api_not_adopted`).
+    Its full contract is proved in `test_adopted_source_fence_and_owner.py`;
+    this test keeps the routing file's own claim honest.
+    """
     root, state_root = _adopted_vault(tmp_path)
     queue = memory_queue.active_or_legacy_memory_queue(root, state_root)
 
-    with pytest.raises(memory_queue.QueueOperationError) as raised:
-        queue.acquire_source_fence("2026-08-26", "b" * 64)
+    fence = queue.acquire_source_fence("2026-08-26", "b" * 64)
 
-    assert raised.value.code == "queue_api_not_adopted"
-    assert "acquire_source_fence" in raised.value.detail
+    with sqlite3.connect(state_root / "run/queue-v3.sqlite3") as database:
+        stored = database.execute(
+            "SELECT logical_path, token FROM source_fences"
+        ).fetchall()
+    assert stored == [("knowledge/daily/2026-08-26.md", fence.token)]
+    queue.release_source_fence(fence.token)
 
 
 def _direct_constructions(path: Path) -> list[int]:
