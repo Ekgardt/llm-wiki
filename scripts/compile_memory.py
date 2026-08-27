@@ -74,7 +74,7 @@ from markdown_transaction import (  # noqa: E402
     MarkdownCoordinator,
     active_or_legacy_coordinator,
 )
-from memory_queue import MemoryQueue  # noqa: E402
+from memory_queue import active_or_legacy_memory_queue  # noqa: E402
 from memory_state import (  # noqa: E402
     ROOT,
     STATE_ROOT,
@@ -3915,7 +3915,7 @@ def run_pending_compile(
 def _record_compile_source_failures(
     inputs: CompileInputs, state_root: Path, *, error_code: str
 ) -> None:
-    queue = MemoryQueue(state_root)
+    queue = active_or_legacy_memory_queue(ROOT, state_root)
     for source in inputs.dailies:
         queue.record_source_failure(
             source.logical_path,
@@ -3926,7 +3926,7 @@ def _record_compile_source_failures(
 
 
 def _clear_compile_source_failures(inputs: CompileInputs, state_root: Path) -> None:
-    queue = MemoryQueue(state_root)
+    queue = active_or_legacy_memory_queue(ROOT, state_root)
     for source in inputs.dailies:
         queue.clear_source_failure(source.logical_path, source.sha256)
 

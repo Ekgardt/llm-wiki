@@ -7322,12 +7322,12 @@ def _ready_capabilities() -> set[str]:
     return {"llm.compile", "llm.flush", "llm.query"}
 
 
-def _unblock_capabilities(state_root: Path, repaired: set[str]) -> int:
+def _unblock_capabilities(root: Path, state_root: Path, repaired: set[str]) -> int:
     placeholders = ",".join("?" for _ in repaired)
-    from memory_queue import MemoryQueue
+    from memory_queue import active_or_legacy_memory_queue
 
-    queue = MemoryQueue(state_root)
-    with queue._connect() as database:
+    queue = active_or_legacy_memory_queue(root, state_root)
+    with queue.connection() as database:
         changed = database.execute(
             f"UPDATE tasks SET state='ready',blocked_capability=NULL,error_code=NULL "
             f"WHERE state='blocked' AND blocked_capability IN ({placeholders})",
@@ -7337,14 +7337,14 @@ def _unblock_capabilities(state_root: Path, repaired: set[str]) -> int:
     return changed
 
 
-def _repair_queue_capabilities(state_root: Path) -> int:
+def _repair_queue_capabilities(root: Path, state_root: Path) -> int:
     path = _operational_database_path(state_root, "queue")
     if not path.is_file():
         return 0
     repaired = _ready_capabilities()
     if not repaired:
         return 0
-    return _unblock_capabilities(state_root, repaired)
+    return _unblock_capabilities(root, state_root, repaired)
 
 
 def _worker_state_root_matches(state_root: Path) -> bool:
@@ -7362,20 +7362,21 @@ def _worker_should_stop(remaining: int, cancelled) -> bool:
 
 
 def _run_bounded_worker(
+    root: Path,
     state_root: Path,
     *,
     deadline: float = float("inf"),
     cancelled=None,
 ) -> int:
     from memory_queue import (
-        MemoryQueue,
         _acquire_queue_owner,
         _manual_processor,
         _release_queue_owner,
+        active_or_legacy_memory_queue,
         run_worker,
     )
 
-    MemoryQueue(state_root)
+    active_or_legacy_memory_queue(root, state_root)
     if not _worker_state_root_matches(state_root):
         return 0
     remaining = max(0, min(1, int(deadline - time.monotonic() + 0.999)))
@@ -7684,6 +7685,7 @@ def _record_bounded_worker_run(guard: Any, context: _RepairContext) -> None:
     """Run the bounded worker and record how much of the queue it processed."""
     processed = guard.run(
         _run_bounded_worker,
+        context.root_path,
         context.state_path,
         deadline=context.deadline,
         cancelled=guard.cancelled,
@@ -7697,7 +7699,9 @@ def _repair_queue_followups(
 ) -> None:
     if not queue_v2_ready:
         return
-    unblocked = guard.run(_repair_queue_capabilities, context.state_path)
+    unblocked = guard.run(
+        _repair_queue_capabilities, context.root_path, context.state_path
+    )
     if unblocked:
         context.repaired.append(
             {"action": "unblock_capabilities", "count": unblocked}

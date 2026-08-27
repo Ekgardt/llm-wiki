@@ -40,7 +40,12 @@ from markdown_transaction import (  # noqa: E402
     _windows_acl_identity,
     active_or_legacy_coordinator,
 )
-from memory_queue import MemoryQueue, QueueOperationError, SourceFence  # noqa: E402
+from memory_queue import (  # noqa: E402
+    MemoryQueue,
+    QueueOperationError,
+    SourceFence,
+    active_or_legacy_memory_queue,
+)
 from memory_state import ROOT, STATE_ROOT  # noqa: E402
 from reliable_memory import (  # noqa: E402
     DEFAULTS,
@@ -155,7 +160,9 @@ class DailyArchiver:
         )
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.killpoint = killpoint or (lambda _point: None)
-        self.queue = queue or MemoryQueue(self.state_root)
+        self.queue = queue or active_or_legacy_memory_queue(
+            self.vault, self.state_root
+        )
         self.source_heartbeat_seconds = source_heartbeat_seconds
         self.source_lease_seconds = source_lease_seconds
 

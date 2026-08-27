@@ -2745,7 +2745,12 @@ def _doctor_status(context: dict) -> dict:
 
 
 def _queue_database_path(context: dict) -> Path:
-    return context["state_root"] / "run" / "queue.sqlite3"
+    """The queue database in force; adoption leaves a tombstone at the legacy path."""
+    from installed_memory_repair import adopted_database_path
+
+    return adopted_database_path(
+        database_name="queue", state_root=context["state_root"]
+    )
 
 
 def _missing_queue_result(action: str) -> dict:
@@ -2820,9 +2825,10 @@ def _doctor_queue_read(context: dict) -> dict:
 
 
 def _doctor_queue_cancel(context: dict) -> dict:
-    from memory_queue import MemoryQueue
+    from memory_queue import active_or_legacy_memory_queue
 
-    changed = MemoryQueue(context["state_root"]).cancel(
+    queue = active_or_legacy_memory_queue(context["root"], context["state_root"])
+    changed = queue.cancel(
         str(context["target_id"]),
         deadline=context["deadline"],
         cancelled=context["cancelled"],
@@ -2846,10 +2852,11 @@ def _redrive_error_code(error) -> str:
 
 
 def _doctor_queue_redrive(context: dict) -> dict:
-    from memory_queue import MemoryQueue, QueueOperationError
+    from memory_queue import QueueOperationError, active_or_legacy_memory_queue
 
+    queue = active_or_legacy_memory_queue(context["root"], context["state_root"])
     try:
-        replacement = MemoryQueue(context["state_root"]).redrive(
+        replacement = queue.redrive(
             str(context["target_id"]),
             deadline=context["deadline"],
             cancelled=context["cancelled"],
