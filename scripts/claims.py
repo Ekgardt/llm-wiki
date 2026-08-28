@@ -1201,11 +1201,11 @@ class ClaimIndex:
             rows = database.execute(
                 """
                 SELECT page, record_json FROM claim
-                WHERE lifecycle='active' AND (?1 IS NULL OR subject=?1)
+                WHERE lifecycle='active' AND (:subject IS NULL OR subject=:subject)
                 ORDER BY page, id
-                LIMIT ?2
+                LIMIT :limit
                 """,
-                (subject, MAX_ACTIVE_RECORDS + 1),
+                {"subject": subject, "limit": MAX_ACTIVE_RECORDS + 1},
             ).fetchall()
         _require_active_bound(rows)
         return rows
