@@ -140,6 +140,7 @@ if MCP_AVAILABLE:
 from answer_budget import MAX_BUDGET_TOKENS as ANSWER_BUDGET_MAX_TOKENS  # noqa: E402
 from answer_budget import MIN_BUDGET_TOKENS as ANSWER_BUDGET_MIN_TOKENS  # noqa: E402
 from answer_budget import shape_code_answer  # noqa: E402
+from answer_cost import attach_answer_cost  # noqa: E402
 from mcp_contract import build_envelope, envelope_schema  # noqa: E402
 from retrieval import PROFILES as QA_PROFILES  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
@@ -4796,10 +4797,30 @@ def _tool_call_envelope(
     return _build_operation_envelope(data, quality, components=components)
 
 
+def _record_answer_cost(envelope: dict, started: float, operation_deadline: float) -> None:
+    """OPS-02: the answer states what it cost, and never fails for saying so.
+
+    Attached here because this is the one funnel every tool call passes, and
+    the last point before the answer is serialised - so the estimate covers
+    the finished envelope rather than a payload that later grew. A telemetry
+    failure leaves the key absent, which by the module's contract reads as
+    "not measured" and never as "free".
+    """
+    try:
+        attach_answer_cost(
+            envelope,
+            elapsed_seconds=time.monotonic() - started,
+            budget_seconds=operation_deadline - started,
+        )
+    except Exception:  # noqa: BLE001 - an answer outranks its own cost line
+        return
+
+
 def _execute_tool_call(name: str, arguments, operation_deadline: float) -> str:
     """Execute one tool under the absolute deadline created by its async handler."""
     import json
 
+    started = time.monotonic()
     deadline_token = _OPERATION_DEADLINE.set(operation_deadline)
     try:
         data, limit_clamped = _tool_call_data(name, arguments, operation_deadline)
@@ -4808,6 +4829,7 @@ def _execute_tool_call(name: str, arguments, operation_deadline: float) -> str:
             name, data, arguments, limit_clamped, operation_deadline
         )
         _check_deadline(operation_deadline)
+        _record_answer_cost(envelope, started, operation_deadline)
         return json.dumps(envelope, indent=2, ensure_ascii=False, allow_nan=False)
     finally:
         _OPERATION_DEADLINE.reset(deadline_token)
