@@ -546,6 +546,15 @@ def _chunk_texts(snapshot: CorpusSnapshot) -> list[str]:
     return [chunk.text for chunk in snapshot.chunks]
 
 
+def _require_embedded_shape(matrix, rows: int, dimensions: int) -> None:
+    import numpy as np
+
+    if matrix.ndim != 2 or matrix.shape != (rows, dimensions):
+        raise ValueError("embedder returned a matrix with incompatible shape")
+    if matrix.dtype.kind not in "fiu" or not np.isfinite(matrix).all():
+        raise ValueError("embedder returned a non-finite numeric matrix")
+
+
 def _embedded_matrix(
     snapshot: CorpusSnapshot, embedder: object, dimensions: int
 ) -> object:
@@ -555,11 +564,59 @@ def _embedded_matrix(
     matrix = np.asarray(
         _call_generation_embedder(embedder, _chunk_texts(snapshot))
     )
-    if matrix.ndim != 2 or matrix.shape != (len(snapshot.chunks), dimensions):
-        raise ValueError("embedder returned a matrix with incompatible shape")
-    if matrix.dtype.kind not in "fiu" or not np.isfinite(matrix).all():
-        raise ValueError("embedder returned a non-finite numeric matrix")
+    _require_embedded_shape(matrix, len(snapshot.chunks), dimensions)
     return np.ascontiguousarray(matrix, dtype=np.float32)
+
+
+def _embedded_rows(texts: list[str], embedder: object, dimensions: int):
+    """Encode exactly the texts asked for, or return an empty (0, d) block."""
+    import numpy as np
+
+    if not texts:
+        return np.zeros((0, dimensions), dtype=np.float32)
+    matrix = np.asarray(_call_generation_embedder(embedder, texts))
+    _require_embedded_shape(matrix, len(texts), dimensions)
+    return np.ascontiguousarray(matrix, dtype=np.float32)
+
+
+def _reused_matrix(
+    snapshot: CorpusSnapshot, embedder: object, dimensions: int, cache: Mapping[str, object]
+) -> tuple[object, int]:
+    """One row per chunk, taken from the cache where the chunk digest matches.
+
+    A chunk ID is `sha256({extractor, parent, path, range, sha256})` where the
+    last field is the digest of the chunk's own bytes and `chunk.text` is those
+    bytes decoded — so an equal ID means equal text, and the model has already
+    been checked to be the same model at the same revision. The reused row is
+    therefore the row that model produced for that exact text.
+
+    What this does *not* claim: that the row equals what a fresh full build
+    would emit here. It does not, and neither does another full build — measured
+    on 400 real chunks, re-batching the same texts moves float32 results by up
+    to 8.6e-08, because sentence-transformers pads and sorts by length. See
+    `docs/research/2026-08-28-what-a-rebuild-may-reuse.md`.
+    """
+    import numpy as np
+
+    fresh_positions = [
+        index for index, chunk in enumerate(snapshot.chunks) if chunk.id not in cache
+    ]
+    fresh = _embedded_rows(
+        [snapshot.chunks[index].text for index in fresh_positions], embedder, dimensions
+    )
+    matrix = np.zeros((len(snapshot.chunks), dimensions), dtype=np.float32)
+    for row, index in enumerate(fresh_positions):
+        matrix[index] = fresh[row]
+    _fill_cached_rows(matrix, snapshot, cache)
+    return matrix, len(snapshot.chunks) - len(fresh_positions)
+
+
+def _fill_cached_rows(matrix, snapshot: CorpusSnapshot, cache: Mapping[str, object]) -> None:
+    for index, chunk in enumerate(snapshot.chunks):
+        cached = cache.get(chunk.id)
+        if cached is None:
+            continue
+        matrix[index] = cached
 
 
 def _vector_metadata(
@@ -620,6 +677,104 @@ def _publish_vector_artifacts(
         _remove_quietly((temporary_json, temporary_npy))
 
 
+#: The identity a cached vector is namespaced by. A row is reusable only when
+#: every one of these matches, on top of the chunk digest itself.
+VECTOR_CACHE_IDENTITY_KEYS = ("schema_version", "model_id", "model_revision", "dimensions")
+#: Bounds the read of a parent generation's vector metadata. It holds four
+#: parallel ID lists, so it grows with the number of chunks, not with history.
+MAX_PARENT_VECTOR_METADATA_BYTES = 256 * 1024 * 1024
+
+
+def _parent_vector_metadata(reuse_from: Path) -> Mapping[str, object] | None:
+    metadata_path = reuse_from / "vectors.json"
+    matrix_path = reuse_from / "vectors.npy"
+    if not metadata_path.is_file() or not matrix_path.is_file():
+        return None
+    if metadata_path.stat().st_size > MAX_PARENT_VECTOR_METADATA_BYTES:
+        return None
+    return _loaded_json_mapping(metadata_path)
+
+
+def _loaded_json_mapping(path: Path) -> Mapping[str, object] | None:
+    try:
+        value = json.loads(path.read_bytes())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, Mapping):
+        return None
+    return value
+
+
+def _vector_identity_matches(
+    metadata: Mapping[str, object], model_id: str, model_revision: str, dimensions: int
+) -> bool:
+    expected = {
+        "schema_version": "corpus-vectors/v1",
+        "model_id": model_id,
+        "model_revision": model_revision,
+        "dimensions": dimensions,
+    }
+    return all(metadata.get(key) == expected[key] for key in VECTOR_CACHE_IDENTITY_KEYS)
+
+
+def _loaded_parent_matrix(reuse_from: Path, rows: int, dimensions: int):
+    import numpy as np
+
+    try:
+        matrix = np.load(reuse_from / "vectors.npy", allow_pickle=False)
+    except (OSError, ValueError):
+        return None
+    if matrix.shape != (rows, dimensions) or matrix.dtype != np.float32:
+        return None
+    return matrix
+
+
+def _reusable_vector_rows(
+    reuse_from: Path | None, model_id: str, model_revision: str, dimensions: int
+) -> dict[str, object]:
+    """The parent generation's vectors, keyed by chunk digest.
+
+    The parent generation *is* the cache — it is already immutable, already
+    carries one digest per chunk beside its matrix, and is already pruned by the
+    catalog's own retention. Nothing new is stored, so nothing new can grow
+    without bound.
+
+    Every refusal here is silent and total: an unusable parent means this build
+    embeds everything, which is exactly what every build did before.
+    """
+    if reuse_from is None:
+        return {}
+    metadata = _parent_vector_metadata(reuse_from)
+    if metadata is None or not _vector_identity_matches(
+        metadata, model_id, model_revision, dimensions
+    ):
+        return {}
+    return _rows_by_chunk_id(reuse_from, metadata, dimensions)
+
+
+def _rows_by_chunk_id(
+    reuse_from: Path, metadata: Mapping[str, object], dimensions: int
+) -> dict[str, object]:
+    chunk_ids = metadata.get("chunk_ids")
+    if not _usable_chunk_ids(chunk_ids):
+        return {}
+    matrix = _loaded_parent_matrix(reuse_from, len(chunk_ids), dimensions)
+    if matrix is None:
+        return {}
+    return {
+        chunk_id: matrix[index]
+        for index, chunk_id in enumerate(chunk_ids)
+        if isinstance(chunk_id, str)
+    }
+
+
+def _usable_chunk_ids(chunk_ids: object) -> bool:
+    """Duplicate IDs would make a row ambiguous, so the whole cache is refused."""
+    if not isinstance(chunk_ids, list):
+        return False
+    return len(set(chunk_ids)) == len(chunk_ids)
+
+
 def build_generation_numpy_vectors(
     snapshot: CorpusSnapshot,
     generation_directory: Path,
@@ -628,12 +783,37 @@ def build_generation_numpy_vectors(
     model_id: str,
     model_revision: str,
     dimensions: int,
+    reuse_from: Path | None = None,
 ) -> list[dict[str, object]]:
     """Build an exact NumPy matrix and closed metadata from one chunk sequence."""
+    return _built_generation_vectors(
+        snapshot,
+        generation_directory,
+        embedder=embedder,
+        model_id=model_id,
+        model_revision=model_revision,
+        dimensions=dimensions,
+        reuse_from=reuse_from,
+    )[0]
+
+
+def _built_generation_vectors(
+    snapshot: CorpusSnapshot,
+    generation_directory: Path,
+    *,
+    embedder: object,
+    model_id: str,
+    model_revision: str,
+    dimensions: int,
+    reuse_from: Path | None = None,
+) -> tuple[list[dict[str, object]], int]:
+    """The same build, plus how many rows came from the parent rather than the model."""
     _require_vector_build_inputs(snapshot, model_id, model_revision, dimensions)
     directory = _generation_directory(generation_directory)
     destinations = [directory / name for name in GENERATION_VECTOR_ARTIFACTS]
     _require_absent_artifacts(destinations)
+    cache = _reusable_vector_rows(reuse_from, model_id, model_revision, dimensions)
+    matrix, reused = _reused_matrix(snapshot, embedder, dimensions, cache)
     _publish_vector_artifacts(
         directory,
         destinations,
@@ -643,12 +823,12 @@ def build_generation_numpy_vectors(
             model_revision=model_revision,
             dimensions=dimensions,
         ),
-        _embedded_matrix(snapshot, embedder, dimensions),
+        matrix,
     )
     return [
         _artifact_descriptor(directory / name, name)
         for name in GENERATION_VECTOR_ARTIFACTS
-    ]
+    ], reused
 
 
 def _generation_embedder(embedder, *, is_query: bool):
@@ -728,6 +908,7 @@ def build_generation_vectors_if_available(
     *,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
+    reuse_from: Path | None = None,
 ) -> dict[str, object] | None:
     """Build this generation's vectors, or say plainly that they cannot be built.
 
@@ -747,13 +928,14 @@ def build_generation_vectors_if_available(
     if embedder is None:
         return None
     try:
-        artifacts = build_generation_numpy_vectors(
+        artifacts, reused = _built_generation_vectors(
             snapshot,
             generation_directory,
             embedder=_generation_embedder(embedder, is_query=False),
             model_id=EMBEDDING_MODEL,
             model_revision=EMBEDDING_MODEL_REVISION,
             dimensions=EMBEDDING_DIM,
+            reuse_from=reuse_from,
         )
     except TimeoutError:
         raise
@@ -768,6 +950,8 @@ def build_generation_vectors_if_available(
         "model_id": EMBEDDING_MODEL,
         "model_revision": EMBEDDING_MODEL_REVISION,
         "dimensions": EMBEDDING_DIM,
+        "reused_chunks": reused,
+        "embedded_chunks": len(snapshot.chunks) - reused,
     }
 
 
