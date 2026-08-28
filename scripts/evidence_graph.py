@@ -3363,6 +3363,35 @@ def _require_work_bound(rows: list[sqlite3.Row], work_limit: int) -> None:
         raise ValueError("Evidence Graph recursive work ceiling exceeded")
 
 
+# NEW-124. An unresolved call is recorded with the source text of its callee
+# expression, so the attribute this call names is the tail of that text:
+# `queue.recover_expired_leases` and `_queue().recover_expired_leases` both
+# name `recover_expired_leases`. The tail is compared with `substr` rather than
+# `LIKE`, because a Python name carries `_`, which `LIKE` reads as a wildcard -
+# `LIKE '%.recover_expired_leases'` would also match `recover-expired-leases`.
+_UNRESOLVED_CALL_WHERE = (
+    "o.edge_type = 'CALLS' AND (o.target_text = ? OR substr(o.target_text, -?) = ?)"
+)
+
+
+def _unresolved_call_parameters(name: object) -> tuple[str, int, str]:
+    attribute = _text(name, "name", maximum=512)
+    assert attribute is not None
+    return (attribute, len(attribute) + 1, f".{attribute}")
+
+
+def _unresolved_call_row(row: sqlite3.Row) -> dict[str, object]:
+    content = row["source_content"]
+    return {
+        "observation_id": row["observation_id"],
+        "source_node_id": row["source_node_id"],
+        "target_text": row["target_text"],
+        "reason": row["reason"],
+        "relative_path": row["relative_path"],
+        "line": content.count(b"\n", 0, row["byte_start"]) + 1,
+    }
+
+
 def _reason_filter(reason: str | None) -> tuple[str, tuple[object, ...]]:
     if reason is None:
         return "", ()
@@ -3886,6 +3915,43 @@ class EvidenceGraph:
         )
         return [dict(row) for row in rows]
 
+    def node_locations(
+        self,
+        node_ids: Sequence[str],
+        *,
+        max_rows: int = MAX_NODE_FILTER,
+        deadline: float | None = None,
+    ) -> dict[str, dict[str, object]]:
+        """The first source span of each named node, resolved in one statement.
+
+        NEW-125. `occurrence` is indexed by span, not by node, so asking one
+        node at a time costs one full scan per node - measured on this
+        repository at 1.45 s for the 300 members of a single community answer,
+        against 0.09 s for this form. Nodes with no occurrence are simply
+        absent from the mapping; the caller decides what an unlocated node
+        means rather than being handed a fabricated line.
+        """
+        identifiers = _node_id_values(node_ids, "node_ids")
+        if not identifiers:
+            return {}
+        parameters: list[object] = []
+        clause = _in_clause("o.node_id", identifiers, parameters)
+        rows = self._execute(
+            "SELECT o.node_id, MIN(o.line_start) AS line_start, s.relative_path "
+            "FROM occurrence o JOIN source s USING(source_id) "
+            f"WHERE 1=1{clause} GROUP BY o.node_id ORDER BY o.node_id LIMIT ?",
+            parameters,
+            max_rows=max_rows,
+            deadline=deadline,
+        )
+        return {
+            row["node_id"]: {
+                "relative_path": row["relative_path"],
+                "line": row["line_start"],
+            }
+            for row in rows
+        }
+
     def evidence_spans(
         self,
         *,
@@ -4149,3 +4215,49 @@ ORDER BY depth, assertion_ids LIMIT ?
             deadline=deadline,
         )
         return [dict(row) for row in rows]
+
+    def unresolved_calls_naming(
+        self,
+        name: str,
+        *,
+        max_rows: int = 200,
+        deadline: float | None = None,
+    ) -> dict[str, object]:
+        """Call sites whose receiver stayed unbound and whose attribute is `name`.
+
+        NEW-124. A call that reaches a method through a variable
+        (`queue.recover_expired_leases`) leaves an *observation*, never a CALLS
+        assertion, so `callers()` cannot see it and an answer built only from
+        assertions says "nobody calls it" - which is false. These rows are what
+        separates that from "the receiver could not be resolved".
+
+        They are candidates named by attribute, never proof of an edge: the
+        receiver's type is exactly what the extractor could not establish, so a
+        row means "a call to something called `name` happens here", nothing
+        more. `count` is exact even when the row list is cut, so a partial
+        answer can still state how much it is missing.
+        """
+        parameters = _unresolved_call_parameters(name)
+        totals = self._fetch(
+            f"SELECT COUNT(*) AS total FROM observation o WHERE {_UNRESOLVED_CALL_WHERE}"
+            " LIMIT ?",
+            parameters,
+            limit=1,
+            deadline=deadline,
+        )
+        rows, truncated = self._execute_top(
+            "SELECT o.observation_id, o.source_node_id, o.target_text, o.reason, "
+            "s.relative_path, e.byte_start, s.content AS source_content "
+            "FROM observation o JOIN evidence e ON e.observation_id = o.observation_id "
+            "JOIN source s USING(source_id) "
+            f"WHERE {_UNRESOLVED_CALL_WHERE} "
+            "ORDER BY s.relative_path, e.byte_start, o.observation_id LIMIT ?",
+            parameters,
+            max_rows=max_rows,
+            deadline=deadline,
+        )
+        return {
+            "calls": [_unresolved_call_row(row) for row in rows],
+            "count": int(totals[0]["total"]),
+            "truncated": truncated,
+        }

@@ -1,0 +1,2590 @@
+{
+  "conflicts": [
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 0,
+          "value": "London"
+        },
+        {
+          "serial": 306,
+          "value": "Leeds"
+        }
+      ],
+      "property": "birthplace-city",
+      "subject": "Thomas Kyd",
+      "truth": "Leeds"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 1,
+          "value": "Mahmoud Abbas"
+        },
+        {
+          "serial": 232,
+          "value": "Moshe Kahlon"
+        }
+      ],
+      "property": "chairperson",
+      "subject": "Fatah",
+      "truth": "Moshe Kahlon"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 3,
+          "value": "wide receiver"
+        },
+        {
+          "serial": 36,
+          "value": "cornerback"
+        }
+      ],
+      "property": "position-played",
+      "subject": "Hines Ward",
+      "truth": "cornerback"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 4,
+          "value": "Asia"
+        },
+        {
+          "serial": 234,
+          "value": "Oceania"
+        }
+      ],
+      "property": "continent",
+      "subject": "Bengaluru",
+      "truth": "Oceania"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 6,
+          "value": "goalkeeper"
+        },
+        {
+          "serial": 434,
+          "value": "flanker"
+        }
+      ],
+      "property": "position-played",
+      "subject": "Rogério Ceni",
+      "truth": "flanker"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 7,
+          "value": "Tony Hall, Baron Hall of Birkenhead"
+        },
+        {
+          "serial": 428,
+          "value": "Narendra Modi"
+        }
+      ],
+      "property": "director",
+      "subject": "British Broadcasting Corporation",
+      "truth": "Narendra Modi"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 10,
+          "value": "Ursula K. Le Guin"
+        },
+        {
+          "serial": 301,
+          "value": "Pius XII"
+        }
+      ],
+      "property": "author",
+      "subject": "A Wizard of Earthsea",
+      "truth": "Pius XII"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 12,
+          "value": "Berkeley"
+        },
+        {
+          "serial": 114,
+          "value": "Botevgrad"
+        }
+      ],
+      "property": "headquarters-city",
+      "subject": "University of California, Berkeley",
+      "truth": "Botevgrad"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 13,
+          "value": "Tim Cook"
+        },
+        {
+          "serial": 201,
+          "value": "Vijay Mallya"
+        }
+      ],
+      "property": "chief-executive-officer",
+      "subject": "Apple Inc.",
+      "truth": "Vijay Mallya"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 14,
+          "value": "center"
+        },
+        {
+          "serial": 169,
+          "value": "goaltender"
+        }
+      ],
+      "property": "position-played",
+      "subject": "Lisa Leslie",
+      "truth": "goaltender"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 16,
+          "value": "Coco Chanel"
+        },
+        {
+          "serial": 34,
+          "value": "Andy Warhol"
+        }
+      ],
+      "property": "founder",
+      "subject": "Chanel",
+      "truth": "Andy Warhol"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 18,
+          "value": "association football"
+        },
+        {
+          "serial": 279,
+          "value": "cricket"
+        }
+      ],
+      "property": "sport",
+      "subject": "Slovakia national football team",
+      "truth": "cricket"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 19,
+          "value": "association football"
+        },
+        {
+          "serial": 446,
+          "value": "baseball"
+        }
+      ],
+      "property": "sport",
+      "subject": "Alta IF",
+      "truth": "baseball"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 20,
+          "value": "Kūkai"
+        },
+        {
+          "serial": 304,
+          "value": "William Waynflete"
+        }
+      ],
+      "property": "founder",
+      "subject": "Shingon Buddhism",
+      "truth": "William Waynflete"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 21,
+          "value": "Chang'an"
+        },
+        {
+          "serial": 177,
+          "value": "Beaumont"
+        }
+      ],
+      "property": "capital",
+      "subject": "Tang Empire",
+      "truth": "Beaumont"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 24,
+          "value": "Germany"
+        },
+        {
+          "serial": 386,
+          "value": "Canada"
+        }
+      ],
+      "property": "citizenship",
+      "subject": "Ferdinand von Richthofen",
+      "truth": "Canada"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 25,
+          "value": "David Bowie"
+        },
+        {
+          "serial": 285,
+          "value": "Yves Montand"
+        }
+      ],
+      "property": "performer",
+      "subject": "Aladdin Sane",
+      "truth": "Yves Montand"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 27,
+          "value": "Robert A. Heinlein"
+        },
+        {
+          "serial": 344,
+          "value": "Daphne du Maurier"
+        }
+      ],
+      "property": "author",
+      "subject": "Starship Troopers",
+      "truth": "Daphne du Maurier"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 29,
+          "value": "France"
+        },
+        {
+          "serial": 123,
+          "value": "Great Britain"
+        }
+      ],
+      "property": "citizenship",
+      "subject": "Madame du Barry",
+      "truth": "Great Britain"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 30,
+          "value": "Karachi"
+        },
+        {
+          "serial": 205,
+          "value": "Sweden"
+        }
+      ],
+      "property": "founded-in-city",
+      "subject": "Pakistan International Airlines",
+      "truth": "Sweden"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 31,
+          "value": "American football"
+        },
+        {
+          "serial": 50,
+          "value": "Muay Thai"
+        }
+      ],
+      "property": "sport",
+      "subject": "quarterback",
+      "truth": "Muay Thai"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 32,
+          "value": "Andrzej Sapkowski"
+        },
+        {
+          "serial": 305,
+          "value": "T. S. Eliot"
+        }
+      ],
+      "property": "author",
+      "subject": "The Witcher",
+      "truth": "T. S. Eliot"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 35,
+          "value": "baseball"
+        },
+        {
+          "serial": 417,
+          "value": "association football"
+        }
+      ],
+      "property": "sport",
+      "subject": "Steve Sax",
+      "truth": "association football"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 37,
+          "value": "Los Angeles"
+        },
+        {
+          "serial": 51,
+          "value": "Berlin"
+        }
+      ],
+      "property": "place-of-death-city",
+      "subject": "Frank Zappa",
+      "truth": "Berlin"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 38,
+          "value": "Lucasfilm"
+        },
+        {
+          "serial": 226,
+          "value": "British Broadcasting Corporation"
+        }
+      ],
+      "property": "employer",
+      "subject": "Dave Filoni",
+      "truth": "British Broadcasting Corporation"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 39,
+          "value": "France"
+        },
+        {
+          "serial": 225,
+          "value": "India"
+        }
+      ],
+      "property": "citizenship",
+      "subject": "Henri Grégoire",
+      "truth": "India"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 40,
+          "value": "Jerusalem"
+        },
+        {
+          "serial": 43,
+          "value": "Taipei"
+        }
+      ],
+      "property": "founded-in-city",
+      "subject": "Christianity",
+      "truth": "Taipei"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 41,
+          "value": "Europe"
+        },
+        {
+          "serial": 435,
+          "value": "Africa"
+        }
+      ],
+      "property": "continent",
+      "subject": "Germany",
+      "truth": "Africa"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 42,
+          "value": "India"
+        },
+        {
+          "serial": 329,
+          "value": "Papal States"
+        }
+      ],
+      "property": "citizenship",
+      "subject": "Vijay Mallya",
+      "truth": "Papal States"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 46,
+          "value": "American football"
+        },
+        {
+          "serial": 252,
+          "value": "rugby"
+        }
+      ],
+      "property": "sport",
+      "subject": "wide receiver",
+      "truth": "rugby"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 47,
+          "value": "McLaren Automotive"
+        },
+        {
+          "serial": 385,
+          "value": "Pakistan International Airlines"
+        }
+      ],
+      "property": "employer",
+      "subject": "Ron Dennis",
+      "truth": "Pakistan International Airlines"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 48,
+          "value": "David Ben-Gurion"
+        },
+        {
+          "serial": 49,
+          "value": "Philippe, Duke of Orléans"
+        }
+      ],
+      "property": "founder",
+      "subject": "Israel",
+      "truth": "Philippe, Duke of Orléans"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 52,
+          "value": "Bob Dylan"
+        },
+        {
+          "serial": 181,
+          "value": "Lou Reed"
+        }
+      ],
+      "property": "performer",
+      "subject": "Blood on the Tracks",
+      "truth": "Lou Reed"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 54,
+          "value": "Denis Sassou-Nguesso"
+        },
+        {
+          "serial": 445,
+          "value": "Stephen McNeil"
+        }
+      ],
+      "property": "chairperson",
+      "subject": "Congolese Party of Labour",
+      "truth": "Stephen McNeil"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 55,
+          "value": "United Kingdom"
+        },
+        {
+          "serial": 441,
+          "value": "Israel"
+        }
+      ],
+      "property": "citizenship",
+      "subject": "Colin Irwin",
+      "truth": "Israel"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 56,
+          "value": "North America"
+        },
+        {
+          "serial": 440,
+          "value": "Asia"
+        }
+      ],
+      "property": "continent",
+      "subject": "Canada",
+      "truth": "Asia"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 57,
+          "value": "England"
+        },
+        {
+          "serial": 150,
+          "value": "Australia"
+        }
+      ],
+      "property": "country-of-origin",
+      "subject": "cricket",
+      "truth": "Australia"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 58,
+          "value": "Elena Ceaușescu"
+        },
+        {
+          "serial": 369,
+          "value": "Wilhelm II"
+        }
+      ],
+      "property": "spouse",
+      "subject": "Nicolae Ceaușescu",
+      "truth": "Wilhelm II"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 59,
+          "value": "Finland"
+        },
+        {
+          "serial": 261,
+          "value": "Philippines"
+        }
+      ],
+      "property": "country-of-origin",
+      "subject": "pesäpallo",
+      "truth": "Philippines"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 61,
+          "value": "Walter Percy Chrysler Jr"
+        },
+        {
+          "serial": 231,
+          "value": "Charles Frederick, Duke of Holstein-Gottorp"
+        }
+      ],
+      "property": "child",
+      "subject": "Walter Chrysler",
+      "truth": "Charles Frederick, Duke of Holstein-Gottorp"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 62,
+          "value": "Simone Signoret"
+        },
+        {
+          "serial": 233,
+          "value": "Natalie Portman"
+        }
+      ],
+      "property": "spouse",
+      "subject": "Yves Montand",
+      "truth": "Natalie Portman"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 64,
+          "value": "Bob Iger"
+        },
+        {
+          "serial": 392,
+          "value": "Ernst Heinkel"
+        }
+      ],
+      "property": "director",
+      "subject": "American Broadcasting Company",
+      "truth": "Ernst Heinkel"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 65,
+          "value": "Bruce Springsteen"
+        },
+        {
+          "serial": 337,
+          "value": "Dana International"
+        }
+      ],
+      "property": "performer",
+      "subject": "Born in the U.S.A.",
+      "truth": "Dana International"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 66,
+          "value": "Robert Jordan"
+        },
+        {
+          "serial": 326,
+          "value": "Ferdowsi"
+        }
+      ],
+      "property": "creator",
+      "subject": "Rand al'Thor",
+      "truth": "Ferdowsi"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 67,
+          "value": "Gautama Buddha"
+        },
+        {
+          "serial": 370,
+          "value": "Mekere Morauta"
+        }
+      ],
+      "property": "founder",
+      "subject": "Buddhism",
+      "truth": "Mekere Morauta"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 68,
+          "value": "Judaism"
+        },
+        {
+          "serial": 410,
+          "value": "interdenominational organization"
+        }
+      ],
+      "property": "religion-affiliation",
+      "subject": "Natalie Portman",
+      "truth": "interdenominational organization"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 69,
+          "value": "basketball"
+        },
+        {
+          "serial": 219,
+          "value": "cricket"
+        }
+      ],
+      "property": "sport",
+      "subject": "point guard",
+      "truth": "cricket"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 70,
+          "value": "Catholic Church"
+        },
+        {
+          "serial": 260,
+          "value": "Zoroastrianism"
+        }
+      ],
+      "property": "religion-affiliation",
+      "subject": "Kingdom of Ireland",
+      "truth": "Zoroastrianism"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 71,
+          "value": "Elton John"
+        },
+        {
+          "serial": 229,
+          "value": "Ayumi Hamasaki"
+        }
+      ],
+      "property": "performer",
+      "subject": "Rocket Man",
+      "truth": "Ayumi Hamasaki"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 72,
+          "value": "The Red Badge of Courage"
+        },
+        {
+          "serial": 423,
+          "value": "Charlie Hebdo"
+        }
+      ],
+      "property": "notable-work",
+      "subject": "Stephen Crane",
+      "truth": "Charlie Hebdo"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 75,
+          "value": "Oceania"
+        },
+        {
+          "serial": 220,
+          "value": "South America"
+        }
+      ],
+      "property": "continent",
+      "subject": "Australia",
+      "truth": "South America"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 76,
+          "value": "Friedrich Nietzsche"
+        },
+        {
+          "serial": 77,
+          "value": "Stephen Crane"
+        }
+      ],
+      "property": "author",
+      "subject": "The Birth of Tragedy",
+      "truth": "Stephen Crane"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 78,
+          "value": "American football"
+        },
+        {
+          "serial": 321,
+          "value": "rugby"
+        }
+      ],
+      "property": "sport",
+      "subject": "placekicker",
+      "truth": "rugby"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 79,
+          "value": "Elizabeth II"
+        },
+        {
+          "serial": 249,
+          "value": "Emmerson Mnangagwa"
+        }
+      ],
+      "property": "head-of-state",
+      "subject": "United Kingdom",
+      "truth": "Emmerson Mnangagwa"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 80,
+          "value": "Lawrence S. Bacow"
+        },
+        {
+          "serial": 222,
+          "value": "Peter Diamandis"
+        }
+      ],
+      "property": "chairperson",
+      "subject": "Harvard University",
+      "truth": "Peter Diamandis"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 81,
+          "value": "baseball"
+        },
+        {
+          "serial": 405,
+          "value": "basketball"
+        }
+      ],
+      "property": "sport",
+      "subject": "Carlos Gómez",
+      "truth": "basketball"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 82,
+          "value": "Stefan Löfven"
+        },
+        {
+          "serial": 276,
+          "value": "Pedro Pierluisi"
+        }
+      ],
+      "property": "prime-minister",
+      "subject": "Sweden",
+      "truth": "Pedro Pierluisi"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 84,
+          "value": "George W. Bush"
+        },
+        {
+          "serial": 135,
+          "value": "Princess Alice, Duchess of Gloucester"
+        }
+      ],
+      "property": "spouse",
+      "subject": "Laura Bush",
+      "truth": "Princess Alice, Duchess of Gloucester"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 85,
+          "value": "Satya Nadella"
+        },
+        {
+          "serial": 188,
+          "value": "Steve Jobs"
+        }
+      ],
+      "property": "chief-executive-officer",
+      "subject": "Microsoft",
+      "truth": "Steve Jobs"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 89,
+          "value": "Russian"
+        },
+        {
+          "serial": 383,
+          "value": "German"
+        }
+      ],
+      "property": "official-language",
+      "subject": "Moscow",
+      "truth": "German"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 90,
+          "value": "rock music"
+        },
+        {
+          "serial": 415,
+          "value": "rap rock"
+        }
+      ],
+      "property": "music-genre",
+      "subject": "John McVie",
+      "truth": "rap rock"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 91,
+          "value": "Rurouni Kenshin"
+        },
+        {
+          "serial": 259,
+          "value": "The Fairly OddParents"
+        }
+      ],
+      "property": "notable-work",
+      "subject": "Nobuhiro Watsuki",
+      "truth": "The Fairly OddParents"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 97,
+          "value": "Trinity College Dublin"
+        },
+        {
+          "serial": 208,
+          "value": "University of Southern California"
+        }
+      ],
+      "property": "educated-at",
+      "subject": "Samuel Beckett",
+      "truth": "University of Southern California"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 98,
+          "value": "Asia"
+        },
+        {
+          "serial": 127,
+          "value": "North America"
+        }
+      ],
+      "property": "continent",
+      "subject": "Israel",
+      "truth": "North America"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 100,
+          "value": "England"
+        },
+        {
+          "serial": 186,
+          "value": "India"
+        }
+      ],
+      "property": "country-of-origin",
+      "subject": "rugby union",
+      "truth": "India"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 102,
+          "value": "United States of America"
+        },
+        {
+          "serial": 353,
+          "value": "Soviet Union"
+        }
+      ],
+      "property": "country-of-origin",
+      "subject": "Club Nouveau",
+      "truth": "Soviet Union"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 104,
+          "value": "association football"
+        },
+        {
+          "serial": 133,
+          "value": "basketball"
+        }
+      ],
+      "property": "sport",
+      "subject": "FC Vorskla Poltava",
+      "truth": "basketball"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 107,
+          "value": "Charles Dickens"
+        },
+        {
+          "serial": 146,
+          "value": "Charles Darwin"
+        }
+      ],
+      "property": "author",
+      "subject": "Our Mutual Friend",
+      "truth": "Charles Darwin"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 109,
+          "value": "Jack Dorsey"
+        },
+        {
+          "serial": 275,
+          "value": "Bernard Arnault"
+        }
+      ],
+      "property": "chief-executive-officer",
+      "subject": "Twitter",
+      "truth": "Bernard Arnault"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 115,
+          "value": "Donald Trump"
+        },
+        {
+          "serial": 126,
+          "value": "Connachta"
+        }
+      ],
+      "property": "head-of-state",
+      "subject": "United States of America",
+      "truth": "Connachta"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 116,
+          "value": "English"
+        },
+        {
+          "serial": 151,
+          "value": "Arabic"
+        }
+      ],
+      "property": "official-language",
+      "subject": "Australia",
+      "truth": "Arabic"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 117,
+          "value": "Castel Gandolfo"
+        },
+        {
+          "serial": 283,
+          "value": "Wolverhampton"
+        }
+      ],
+      "property": "place-of-death-city",
+      "subject": "Pius XII",
+      "truth": "Wolverhampton"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 120,
+          "value": "Priscilla Presley"
+        },
+        {
+          "serial": 139,
+          "value": "Charles the Bold"
+        }
+      ],
+      "property": "spouse",
+      "subject": "Elvis Presley",
+      "truth": "Charles the Bold"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 121,
+          "value": "New York City"
+        },
+        {
+          "serial": 142,
+          "value": "Montmélian"
+        }
+      ],
+      "property": "place-of-death-city",
+      "subject": "Andy Warhol",
+      "truth": "Montmélian"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 122,
+          "value": "English"
+        },
+        {
+          "serial": 157,
+          "value": "German"
+        }
+      ],
+      "property": "language-spoken",
+      "subject": "Kylie Minogue",
+      "truth": "German"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 124,
+          "value": "Galileo Galilei"
+        },
+        {
+          "serial": 401,
+          "value": "Samuel Beckett"
+        }
+      ],
+      "property": "author",
+      "subject": "Sidereus Nuncius",
+      "truth": "Samuel Beckett"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 125,
+          "value": "Kyiv"
+        },
+        {
+          "serial": 450,
+          "value": "Rodez"
+        }
+      ],
+      "property": "place-of-death-city",
+      "subject": "Olga of Kiev",
+      "truth": "Rodez"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 128,
+          "value": "Paris"
+        },
+        {
+          "serial": 270,
+          "value": "Guangzhou"
+        }
+      ],
+      "property": "place-of-death-city",
+      "subject": "Oscar Wilde",
+      "truth": "Guangzhou"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 129,
+          "value": "Australia"
+        },
+        {
+          "serial": 427,
+          "value": "Italy"
+        }
+      ],
+      "property": "citizenship",
+      "subject": "Joe Hockey",
+      "truth": "Italy"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 132,
+          "value": "Henry Ford"
+        },
+        {
+          "serial": 230,
+          "value": "Henri Grégoire"
+        }
+      ],
+      "property": "founder",
+      "subject": "Ford Motor Company",
+      "truth": "Henri Grégoire"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 134,
+          "value": "politician"
+        },
+        {
+          "serial": 368,
+          "value": "soldier"
+        }
+      ],
+      "property": "occupation",
+      "subject": "Moshe Kahlon",
+      "truth": "soldier"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 136,
+          "value": "Dennis Muilenburg"
+        },
+        {
+          "serial": 393,
+          "value": "Adel al-Jubeir"
+        }
+      ],
+      "property": "chief-executive-officer",
+      "subject": "Boeing",
+      "truth": "Adel al-Jubeir"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 137,
+          "value": "association football"
+        },
+        {
+          "serial": 303,
+          "value": "cricket"
+        }
+      ],
+      "property": "sport",
+      "subject": "David Beckham",
+      "truth": "cricket"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 141,
+          "value": "Cherie Blair"
+        },
+        {
+          "serial": 424,
+          "value": "Alan Jay Lerner"
+        }
+      ],
+      "property": "spouse",
+      "subject": "Tony Blair",
+      "truth": "Alan Jay Lerner"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 144,
+          "value": "Berklee College of Music"
+        },
+        {
+          "serial": 309,
+          "value": "The University of the Arts"
+        }
+      ],
+      "property": "educated-at",
+      "subject": "Bill Frisell",
+      "truth": "The University of the Arts"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 145,
+          "value": "Playboy"
+        },
+        {
+          "serial": 189,
+          "value": "The Vampyre"
+        }
+      ],
+      "property": "notable-work",
+      "subject": "Hugh Hefner",
+      "truth": "The Vampyre"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 152,
+          "value": "politician"
+        },
+        {
+          "serial": 320,
+          "value": "journalist"
+        }
+      ],
+      "property": "occupation",
+      "subject": "Stephen McNeil",
+      "truth": "journalist"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 153,
+          "value": "Catholic Church"
+        },
+        {
+          "serial": 339,
+          "value": "atheism"
+        }
+      ],
+      "property": "religion-affiliation",
+      "subject": "Adalbert of Prague",
+      "truth": "atheism"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 154,
+          "value": "Maharishi Mahesh Yogi"
+        },
+        {
+          "serial": 360,
+          "value": "Adalbert of Prague"
+        }
+      ],
+      "property": "founder",
+      "subject": "Transcendental Meditation movement",
+      "truth": "Adalbert of Prague"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 155,
+          "value": "France"
+        },
+        {
+          "serial": 358,
+          "value": "Italy"
+        }
+      ],
+      "property": "country-of-origin",
+      "subject": "Charlie Hebdo",
+      "truth": "Italy"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 156,
+          "value": "Moscow"
+        },
+        {
+          "serial": 179,
+          "value": "Russellville"
+        }
+      ],
+      "property": "capital",
+      "subject": "Soviet Union",
+      "truth": "Russellville"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 158,
+          "value": "New Delhi"
+        },
+        {
+          "serial": 341,
+          "value": "Grosseto"
+        }
+      ],
+      "property": "capital",
+      "subject": "India",
+      "truth": "Grosseto"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 159,
+          "value": "Mikhail Gorbachev"
+        },
+        {
+          "serial": 365,
+          "value": "Elizabeth II"
+        }
+      ],
+      "property": "head-of-state",
+      "subject": "Soviet Union",
+      "truth": "Elizabeth II"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 160,
+          "value": "United States of America"
+        },
+        {
+          "serial": 382,
+          "value": "Japan"
+        }
+      ],
+      "property": "country-of-origin",
+      "subject": "baseball",
+      "truth": "Japan"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 161,
+          "value": "United Kingdom"
+        },
+        {
+          "serial": 267,
+          "value": "Canada"
+        }
+      ],
+      "property": "country-of-origin",
+      "subject": "post-punk",
+      "truth": "Canada"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 163,
+          "value": "Paris"
+        },
+        {
+          "serial": 171,
+          "value": "Harare"
+        }
+      ],
+      "property": "capital",
+      "subject": "France",
+      "truth": "Harare"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 164,
+          "value": "Emma Darwin"
+        },
+        {
+          "serial": 335,
+          "value": "Amala Paul"
+        }
+      ],
+      "property": "spouse",
+      "subject": "Charles Darwin",
+      "truth": "Amala Paul"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 165,
+          "value": "United States of America"
+        },
+        {
+          "serial": 250,
+          "value": "Romania"
+        }
+      ],
+      "property": "citizenship",
+      "subject": "Country Joe McDonald",
+      "truth": "Romania"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 167,
+          "value": "Rome"
+        },
+        {
+          "serial": 209,
+          "value": "Duluth"
+        }
+      ],
+      "property": "capital",
+      "subject": "Italy",
+      "truth": "Duluth"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 170,
+          "value": "New York City"
+        },
+        {
+          "serial": 394,
+          "value": "Mansourah, Algeria"
+        }
+      ],
+      "property": "place-of-death-city",
+      "subject": "Alan Jay Lerner",
+      "truth": "Mansourah, Algeria"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 173,
+          "value": "Bucharest"
+        },
+        {
+          "serial": 409,
+          "value": "Ankara"
+        }
+      ],
+      "property": "headquarters-city",
+      "subject": "University of Bucharest",
+      "truth": "Ankara"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 174,
+          "value": "baseball"
+        },
+        {
+          "serial": 328,
+          "value": "cricket"
+        }
+      ],
+      "property": "sport",
+      "subject": "split-finger fastball",
+      "truth": "cricket"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 176,
+          "value": "India"
+        },
+        {
+          "serial": 217,
+          "value": "Australia"
+        }
+      ],
+      "property": "citizenship",
+      "subject": "Narendra Modi",
+      "truth": "Australia"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 185,
+          "value": "Bucharest"
+        },
+        {
+          "serial": 449,
+          "value": "Rajanpur"
+        }
+      ],
+      "property": "capital",
+      "subject": "Romania",
+      "truth": "Rajanpur"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 191,
+          "value": "Nicomachus"
+        },
+        {
+          "serial": 332,
+          "value": "George Alexander Kohut"
+        }
+      ],
+      "property": "child",
+      "subject": "Aristotle",
+      "truth": "George Alexander Kohut"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 192,
+          "value": "Germany"
+        },
+        {
+          "serial": 203,
+          "value": "Tang Empire"
+        }
+      ],
+      "property": "citizenship",
+      "subject": "Ernst Heinkel",
+      "truth": "Tang Empire"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 194,
+          "value": "basketball"
+        },
+        {
+          "serial": 346,
+          "value": "association football"
+        }
+      ],
+      "property": "sport",
+      "subject": "Bo Ryan",
+      "truth": "association football"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 195,
+          "value": "English"
+        },
+        {
+          "serial": 197,
+          "value": "French"
+        }
+      ],
+      "property": "language-spoken",
+      "subject": "T. S. Eliot",
+      "truth": "French"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 196,
+          "value": "Westinghouse Electric"
+        },
+        {
+          "serial": 356,
+          "value": "Canadair"
+        }
+      ],
+      "property": "producer-company",
+      "subject": "AP1000",
+      "truth": "Canadair"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 204,
+          "value": "France"
+        },
+        {
+          "serial": 343,
+          "value": "Iran"
+        }
+      ],
+      "property": "citizenship",
+      "subject": "Charles Messier",
+      "truth": "Iran"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 206,
+          "value": "Rome"
+        },
+        {
+          "serial": 372,
+          "value": "Leipzig"
+        }
+      ],
+      "property": "place-of-death-city",
+      "subject": "John Keats",
+      "truth": "Leipzig"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 207,
+          "value": "Guy Oseary"
+        },
+        {
+          "serial": 354,
+          "value": "Narendra Modi"
+        }
+      ],
+      "property": "director",
+      "subject": "Madonna",
+      "truth": "Narendra Modi"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 210,
+          "value": "France"
+        },
+        {
+          "serial": 239,
+          "value": "Malaysia"
+        }
+      ],
+      "property": "citizenship",
+      "subject": "Cédric Klapisch",
+      "truth": "Malaysia"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 214,
+          "value": "English"
+        },
+        {
+          "serial": 336,
+          "value": "Latin"
+        }
+      ],
+      "property": "language-spoken",
+      "subject": "William Waynflete",
+      "truth": "Latin"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 215,
+          "value": "baseball"
+        },
+        {
+          "serial": 340,
+          "value": "association football"
+        }
+      ],
+      "property": "sport",
+      "subject": "Sandy Alderson",
+      "truth": "association football"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 216,
+          "value": "United States of America"
+        },
+        {
+          "serial": 348,
+          "value": "Soviet Union"
+        }
+      ],
+      "property": "country-of-origin",
+      "subject": "basketball",
+      "truth": "Soviet Union"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 218,
+          "value": "John Wesley"
+        },
+        {
+          "serial": 287,
+          "value": "Joseph Goebbels"
+        }
+      ],
+      "property": "founder",
+      "subject": "Methodism",
+      "truth": "Joseph Goebbels"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 223,
+          "value": "ice hockey"
+        },
+        {
+          "serial": 310,
+          "value": "pesäpallo"
+        }
+      ],
+      "property": "sport",
+      "subject": "goaltender",
+      "truth": "pesäpallo"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 224,
+          "value": "Ardashir I"
+        },
+        {
+          "serial": 264,
+          "value": "Walter Chrysler"
+        }
+      ],
+      "property": "founder",
+      "subject": "Sasanian Empire",
+      "truth": "Walter Chrysler"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 228,
+          "value": "Asia"
+        },
+        {
+          "serial": 280,
+          "value": "Africa"
+        }
+      ],
+      "property": "continent",
+      "subject": "India",
+      "truth": "Africa"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 235,
+          "value": "association football"
+        },
+        {
+          "serial": 418,
+          "value": "basketball"
+        }
+      ],
+      "property": "sport",
+      "subject": "Tunisia national football team",
+      "truth": "basketball"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 236,
+          "value": "Brian Epstein"
+        },
+        {
+          "serial": 443,
+          "value": "Joe Hockey"
+        }
+      ],
+      "property": "director",
+      "subject": "The Beatles",
+      "truth": "Joe Hockey"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 237,
+          "value": "Montreal"
+        },
+        {
+          "serial": 265,
+          "value": "Tucson"
+        }
+      ],
+      "property": "founded-in-city",
+      "subject": "Canadair",
+      "truth": "Tucson"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 238,
+          "value": "Valve Corporation"
+        },
+        {
+          "serial": 277,
+          "value": "ABB Group"
+        }
+      ],
+      "property": "developer",
+      "subject": "SteamOS",
+      "truth": "ABB Group"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 240,
+          "value": "Japanese"
+        },
+        {
+          "serial": 439,
+          "value": "Swedish"
+        }
+      ],
+      "property": "official-language",
+      "subject": "Japan",
+      "truth": "Swedish"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 242,
+          "value": "American English"
+        },
+        {
+          "serial": 295,
+          "value": "German"
+        }
+      ],
+      "property": "official-language",
+      "subject": "United States of America",
+      "truth": "German"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 243,
+          "value": "pop music"
+        },
+        {
+          "serial": 281,
+          "value": "Australian hip hop"
+        }
+      ],
+      "property": "music-genre",
+      "subject": "Dana International",
+      "truth": "Australian hip hop"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 244,
+          "value": "United States of America"
+        },
+        {
+          "serial": 299,
+          "value": "Czech Republic"
+        }
+      ],
+      "property": "citizenship",
+      "subject": "Sable",
+      "truth": "Czech Republic"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 247,
+          "value": "Washington, D.C"
+        },
+        {
+          "serial": 396,
+          "value": "Harrisville"
+        }
+      ],
+      "property": "capital",
+      "subject": "United States of America",
+      "truth": "Harrisville"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 248,
+          "value": "Catholicism"
+        },
+        {
+          "serial": 374,
+          "value": "atheism"
+        }
+      ],
+      "property": "religion-affiliation",
+      "subject": "Imelda Marcos",
+      "truth": "atheism"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 251,
+          "value": "The Beatles"
+        },
+        {
+          "serial": 364,
+          "value": "Madonna"
+        }
+      ],
+      "property": "performer",
+      "subject": "Past Masters",
+      "truth": "Madonna"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 256,
+          "value": "Mario Puzo"
+        },
+        {
+          "serial": 390,
+          "value": "Nobuhiro Watsuki"
+        }
+      ],
+      "property": "creator",
+      "subject": "Vito Corleone",
+      "truth": "Nobuhiro Watsuki"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 257,
+          "value": "France"
+        },
+        {
+          "serial": 436,
+          "value": "Germany"
+        }
+      ],
+      "property": "country-of-origin",
+      "subject": "Le Petit Parisien",
+      "truth": "Germany"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 266,
+          "value": "Catholic Church"
+        },
+        {
+          "serial": 412,
+          "value": "Church of Scotland"
+        }
+      ],
+      "property": "religion-affiliation",
+      "subject": "Karen Armstrong",
+      "truth": "Church of Scotland"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 271,
+          "value": "Pierre Beaumarchais"
+        },
+        {
+          "serial": 398,
+          "value": "Thomas Kyd"
+        }
+      ],
+      "property": "author",
+      "subject": "The Marriage of Figaro",
+      "truth": "Thomas Kyd"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 272,
+          "value": "England"
+        },
+        {
+          "serial": 389,
+          "value": "Italy"
+        }
+      ],
+      "property": "country-of-origin",
+      "subject": "association football",
+      "truth": "Italy"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 274,
+          "value": "Lockheed Martin"
+        },
+        {
+          "serial": 384,
+          "value": "Boeing"
+        }
+      ],
+      "property": "developer",
+      "subject": "F-22 Raptor",
+      "truth": "Boeing"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 278,
+          "value": "English"
+        },
+        {
+          "serial": 426,
+          "value": "German"
+        }
+      ],
+      "property": "written-language",
+      "subject": "The Vampyre",
+      "truth": "German"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 282,
+          "value": "Catholic Church"
+        },
+        {
+          "serial": 361,
+          "value": "Methodism"
+        }
+      ],
+      "property": "religion-affiliation",
+      "subject": "John Walsh",
+      "truth": "Methodism"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 284,
+          "value": "Canberra"
+        },
+        {
+          "serial": 388,
+          "value": "Oderzo"
+        }
+      ],
+      "property": "capital",
+      "subject": "Australia",
+      "truth": "Oderzo"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 286,
+          "value": "Syracuse University"
+        },
+        {
+          "serial": 399,
+          "value": "Fordham University"
+        }
+      ],
+      "property": "educated-at",
+      "subject": "Lou Reed",
+      "truth": "Fordham University"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 288,
+          "value": "Amy Winehouse"
+        },
+        {
+          "serial": 318,
+          "value": "Frank Zappa"
+        }
+      ],
+      "property": "performer",
+      "subject": "Back to Black",
+      "truth": "Frank Zappa"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 289,
+          "value": "jazz"
+        },
+        {
+          "serial": 298,
+          "value": "post-punk"
+        }
+      ],
+      "property": "music-genre",
+      "subject": "Michael Mantler",
+      "truth": "post-punk"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 291,
+          "value": "association football"
+        },
+        {
+          "serial": 315,
+          "value": "basketball"
+        }
+      ],
+      "property": "sport",
+      "subject": "Surrey Senior Cup",
+      "truth": "basketball"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 292,
+          "value": "Moscow"
+        },
+        {
+          "serial": 451,
+          "value": "United States of America"
+        }
+      ],
+      "property": "place-of-death-city",
+      "subject": "Gennady Rozhdestvensky",
+      "truth": "United States of America"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 294,
+          "value": "India"
+        },
+        {
+          "serial": 322,
+          "value": "Belgium"
+        }
+      ],
+      "property": "citizenship",
+      "subject": "Amala Paul",
+      "truth": "Belgium"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 296,
+          "value": "association football"
+        },
+        {
+          "serial": 376,
+          "value": "baseball"
+        }
+      ],
+      "property": "sport",
+      "subject": "New Firm",
+      "truth": "baseball"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 323,
+          "value": "American football"
+        },
+        {
+          "serial": 362,
+          "value": "field hockey"
+        }
+      ],
+      "property": "sport",
+      "subject": "cornerback",
+      "truth": "field hockey"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 324,
+          "value": "Vladimir Lenin"
+        },
+        {
+          "serial": 351,
+          "value": "Tony Blair"
+        }
+      ],
+      "property": "head-of-government",
+      "subject": "Council of People's Commissars",
+      "truth": "Tony Blair"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 325,
+          "value": "association football"
+        },
+        {
+          "serial": 416,
+          "value": "sumo"
+        }
+      ],
+      "property": "sport",
+      "subject": "midfielder",
+      "truth": "sumo"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 327,
+          "value": "Charles Dickens"
+        },
+        {
+          "serial": 430,
+          "value": "Sigmund Freud"
+        }
+      ],
+      "property": "author",
+      "subject": "Sketches by Boz",
+      "truth": "Sigmund Freud"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 330,
+          "value": "center"
+        },
+        {
+          "serial": 334,
+          "value": "quarterback"
+        }
+      ],
+      "property": "position-played",
+      "subject": "Robert Parish",
+      "truth": "quarterback"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 338,
+          "value": "United States of America"
+        },
+        {
+          "serial": 367,
+          "value": "United Kingdom"
+        }
+      ],
+      "property": "citizenship",
+      "subject": "Andrew Carnegie",
+      "truth": "United Kingdom"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 342,
+          "value": "London"
+        },
+        {
+          "serial": 366,
+          "value": "Bengaluru"
+        }
+      ],
+      "property": "birthplace-city",
+      "subject": "Thomas Arne",
+      "truth": "Bengaluru"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 347,
+          "value": "Ulrich Spiesshofer"
+        },
+        {
+          "serial": 408,
+          "value": "Bernard Arnault"
+        }
+      ],
+      "property": "chief-executive-officer",
+      "subject": "ABB Group",
+      "truth": "Bernard Arnault"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 349,
+          "value": "University of Bonn"
+        },
+        {
+          "serial": 453,
+          "value": "Baldwin Wallace University"
+        }
+      ],
+      "property": "educated-at",
+      "subject": "Wilhelm II",
+      "truth": "Baldwin Wallace University"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 359,
+          "value": "United States of America"
+        },
+        {
+          "serial": 403,
+          "value": "Russian Empire"
+        }
+      ],
+      "property": "country-of-origin",
+      "subject": "rap rock",
+      "truth": "Russian Empire"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 373,
+          "value": "Asia"
+        },
+        {
+          "serial": 442,
+          "value": "Antarctica"
+        }
+      ],
+      "property": "continent",
+      "subject": "Malaysia",
+      "truth": "Antarctica"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 407,
+          "value": "Nathaniel Hawthorne"
+        },
+        {
+          "serial": 420,
+          "value": "Joan Didion"
+        }
+      ],
+      "property": "spouse",
+      "subject": "Sophia Hawthorne",
+      "truth": "Joan Didion"
+    },
+    {
+      "gold_confirmed": true,
+      "observations": [
+        {
+          "serial": 413,
+          "value": "Emma Watson"
+        },
+        {
+          "serial": 425,
+          "value": "Kylie Minogue"
+        }
+      ],
+      "property": "performer",
+      "subject": "Hermione Granger",
+      "truth": "Kylie Minogue"
+    },
+    {
+      "gold_confirmed": false,
+      "observations": [
+        {
+          "serial": 447,
+          "value": "Dale Evans"
+        },
+        {
+          "serial": 452,
+          "value": "John McVie"
+        }
+      ],
+      "property": "spouse",
+      "subject": "Roy Rogers",
+      "truth": "John McVie"
+    }
+  ],
+  "numbered_lines": 455,
+  "parsed_facts": 453,
+  "row_id": "factconsolidation_sh_6k",
+  "schema_version": "conflict-resolution/v1",
+  "source_sha256": "24d5c3f09ce0ce15625cb9f8a98f44f0d864ca6c94d7b4ad04eb697ca3a5ff45",
+  "source_url": "https://huggingface.co/datasets/ai-hyz/MemoryAgentBench/resolve/main/data/Conflict_Resolution-00000-of-00001.parquet",
+  "unparsed_lines": [
+    "363. The origianl broadcaster of 666 Park Avenue is American Broadcasting Company.",
+    "404. The origianl broadcaster of The Brady Bunch is American Broadcasting Company."
+  ]
+}

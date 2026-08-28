@@ -92,7 +92,9 @@
 - [Graphify hits 63.2K stars (Augment Code)](https://www.augmentcode.com/learn/graphify-63k-stars-knowledge-graphs)
 - [Memory Agent Bench / consolidation problem (Hindsight)](https://hindsight.vectorize.io/blog/2026/05/21/agent-memory-consolidation)
 - [Temporal Semantic Memory (arXiv 2601.07468)](https://arxiv.org/pdf/2601.07468)
-- [Deterministic Memory Conflict Resolution (arXiv 2606.01435)](https://arxiv.org/pdf/2606.01435)
+- [Reliable Post-Retrieval Assembly for Agent Memory (arXiv 2606.01435)](https://arxiv.org/pdf/2606.01435)
+  — cited here 2026-08-27 under the wrong title "Deterministic Memory Conflict
+  Resolution"; corrected 2026-08-28 after the paper was actually fetched.
 - [Segment Trees for Long-Horizon Agents (arXiv 2606.04555)](https://arxiv.org/pdf/2606.04555)
 - [SSGM: Governing Evolving Memory (arXiv 2603.11768)](https://arxiv.org/html/2603.11768v1)
 - [Entity-Collision attribution protocol (arXiv 2605.29630)](https://arxiv.org/pdf/2605.29630)

@@ -1494,6 +1494,140 @@ def _stored_communities(graph_reader, edges: list[dict[str, object]]) -> list[li
     return communities
 
 
+# NEW-125. Communities used to answer as bare `code:node:<md5>` lists, naming no
+# symbol, no file and no line, so `answer_budget` classified the whole field as
+# an opaque collection and dropped it - `mode=community` returned nothing at
+# all. Naming the members costs bytes, so the listing is bounded here rather
+# than left to be cut somewhere downstream.
+#
+# The bounds are measured on this repository, not chosen: the call graph folds
+# into 4 078 communities over 17 194 members, and naming every one of them costs
+# 899 071 estimated tokens - 36x the 25 000-token client ceiling `answer_budget`
+# documents. 30 communities at 10 members each cost 11 836, which leaves room
+# for the entry points, routes and hotspots that share the `summary` answer
+# (~9 000 tokens measured). The counts below state everything the bound left
+# out, so the answer is short, never quietly partial.
+COMMUNITY_LIMIT = 30
+COMMUNITY_MEMBER_LIMIT = 10
+
+
+def _community_order_key(community: list[str]) -> tuple[int, str]:
+    """Largest first - the bound has to keep the communities that carry most."""
+    return (-len(community), str(community[0]))
+
+
+def _named_community(community: list[str], member_row) -> dict[str, object]:
+    members = [member_row(node_id) for node_id in community[:COMMUNITY_MEMBER_LIMIT]]
+    return {
+        "size": len(community),
+        "members": members,
+        "members_truncated": len(community) > len(members),
+        "members_omitted": len(community) - len(members),
+    }
+
+
+def _communities_holding(communities: list[list[str]], node_ids) -> list[list[str]]:
+    """Only the communities a named symbol belongs to, or all of them.
+
+    A whole-graph listing cannot answer "which community does X belong to" at
+    this repository's scale: naming all 17 194 members costs 899 071 estimated
+    tokens, 36x the client ceiling, and `fuse_rrf`'s community is 729th by size,
+    so no honest bound reaches it. Anchoring on the symbol turns a listing that
+    must be cut into an answer that fits.
+    """
+    if node_ids is None:
+        return communities
+    return [item for item in communities if node_ids.intersection(item)]
+
+
+def _community_answer(
+    communities: list[list[str]], member_row, node_ids=None
+) -> tuple[list, dict]:
+    """Named communities, plus the counts that state what the bound left out."""
+    selected = _communities_holding(communities, node_ids)
+    shown = sorted(selected, key=_community_order_key)[:COMMUNITY_LIMIT]
+    counts = {
+        "community_count": len(selected),
+        "community_member_count": sum(len(item) for item in selected),
+        "community_limit": COMMUNITY_LIMIT,
+        "community_member_limit": COMMUNITY_MEMBER_LIMIT,
+        "communities_truncated": len(selected) > len(shown),
+    }
+    return [_named_community(item, member_row) for item in shown], counts
+
+
+def _stored_community_member(graph, node_id: str, locations: dict) -> dict:
+    node = graph.node(node_id)
+    location = locations.get(node_id, {})
+    source_root = Path(graph.repository_scope.checkout_root)
+    relative = str(location.get("relative_path", ""))
+    return {
+        "qualified_name": "" if node is None else _stored_qualified_name(node),
+        "file": str(source_root / relative) if relative else "",
+        "line": location.get("line", 0),
+    }
+
+
+def _shown_community_members(communities: list[list[str]]) -> list[str]:
+    """Exactly the members the bound will name, so nothing else is looked up."""
+    shown = sorted(communities, key=_community_order_key)[:COMMUNITY_LIMIT]
+    return [node_id for item in shown for node_id in item[:COMMUNITY_MEMBER_LIMIT]]
+
+
+def _stored_symbol_node_ids(graph, symbol: str | None):
+    if symbol is None:
+        return None
+    found = graph.find_nodes(kinds=("function", "method"), name=symbol, max_rows=512)
+    return {item["node_id"] for item in found}
+
+
+def _stored_community_answer(graph, symbol: str | None = None) -> tuple[list, dict]:
+    communities = _stored_communities(graph, _stored_call_pairs(graph))
+    node_ids = _stored_symbol_node_ids(graph, symbol)
+    selected = _communities_holding(communities, node_ids)
+    locations = graph.node_locations(_shown_community_members(selected))
+    return _community_answer(
+        communities,
+        lambda node_id: _stored_community_member(graph, node_id, locations),
+        node_ids,
+    )
+
+
+def _live_qualified_name(definition: dict) -> str:
+    owner = str(definition.get("owner", ""))
+    name = str(definition.get("name", ""))
+    return name if owner in {"", "<module>"} else f"{owner}.{name}"
+
+
+def _live_community_member(definitions: dict, symbol_id: str) -> dict:
+    definition = definitions.get(symbol_id, {})
+    return {
+        "qualified_name": _live_qualified_name(definition),
+        "file": definition.get("file", ""),
+        "line": definition.get("line", 0),
+    }
+
+
+def _live_symbol_ids(definitions: dict, symbol: str | None):
+    if symbol is None:
+        return None
+    return {
+        symbol_id
+        for symbol_id, definition in definitions.items()
+        if definition.get("name") == symbol
+    }
+
+
+def _live_community_answer(
+    definitions: dict, edges: list[dict], symbol: str | None = None
+) -> tuple[list, dict]:
+    return _community_answer(
+        _communities_from_edges(edges),
+        lambda symbol_id: _live_community_member(definitions, symbol_id),
+        _live_symbol_ids(definitions, symbol),
+    )
+
+
 def _store_report(graph) -> dict[str, object]:
     unresolved_count = graph._database.execute(
         "SELECT count(*) FROM observation"
@@ -1570,6 +1704,51 @@ def _callees_in_function(path: Path, result: dict, func_def: dict) -> list[dict]
     return callees
 
 
+# NEW-124. The bound on the *sample* of unresolved call sites one answer names.
+# `unresolved_caller_count` stays exact above it, so a cut list still states how
+# much it is missing rather than implying it is whole.
+UNRESOLVED_CALLER_LIMIT = 200
+
+
+def _unresolved_caller_row(graph, row: dict, function_name: str) -> dict:
+    caller = graph.node(row["source_node_id"])
+    source_root = Path(graph.repository_scope.checkout_root)
+    return {
+        "file": str(source_root / row["relative_path"]),
+        "line": row["line"],
+        "function": function_name,
+        "qualified_name": "" if caller is None else _stored_qualified_name(caller),
+        "call_text": row["target_text"],
+        "reason": row["reason"],
+    }
+
+
+def _unresolved_caller_fields(graph, function_name: str) -> dict[str, object]:
+    """The calls this answer could not bind, so a zero never reads as an absence.
+
+    NEW-124. `queue.recover_expired_leases()` reaches a method through a
+    variable the extractor cannot type, so it leaves an *observation* rather
+    than a CALLS assertion. An answer built only from assertions said
+    `0 callers` for `recover_expired_leases`, which has two - a silently wrong
+    answer, and a worse failure than the ceiling refusal it replaced, because a
+    refusal says "I cannot" and this said "nobody does".
+
+    These rows are candidates matched by the attribute the call names. The
+    receiver's type is exactly what could not be established, so they are never
+    counted as callers and never merged into `callers`.
+    """
+    found = graph.unresolved_calls_naming(
+        function_name, max_rows=UNRESOLVED_CALLER_LIMIT
+    )
+    return {
+        "unresolved_callers": [
+            _unresolved_caller_row(graph, row, function_name) for row in found["calls"]
+        ],
+        "unresolved_caller_count": found["count"],
+        "unresolved_callers_truncated": found["truncated"],
+    }
+
+
 def _caller_edge(path: Path, call: dict, function_name: str) -> dict:
     return {
         "file": str(path),
@@ -1596,6 +1775,60 @@ def _live_callers_in_file(path: Path, result: dict, function_name: str) -> list[
     ]
 
 
+def _call_names_unbound_target(call: dict, function_name: str, language: str) -> bool:
+    """A name match the live pass refuses to confirm: the receiver stayed open."""
+    resolved = (call.get("qualified_name") or call["name"]).rsplit(".", 1)[-1]
+    return (
+        resolved == function_name
+        and language == "python"
+        and call.get("confidence") != "confirmed"
+    )
+
+
+def _live_unresolved_caller(path: Path, call: dict, function_name: str) -> dict:
+    return {
+        "file": str(path),
+        "line": call["line"],
+        "function": function_name,
+        "qualified_name": call.get("qualified_name"),
+        "call_text": call.get("name", function_name),
+        "reason": "unconfirmed_receiver",
+    }
+
+
+def _live_unresolved_in_file(path: Path, result: dict, function_name: str) -> list[dict]:
+    return [
+        _live_unresolved_caller(path, call, function_name)
+        for call in result["calls"]
+        if _call_names_unbound_target(call, function_name, result["language"])
+    ]
+
+
+def _live_unresolved_fields(unresolved: list[dict]) -> dict[str, object]:
+    """The live pass owes the same distinction the stored pass now makes."""
+    sample = unresolved[:UNRESOLVED_CALLER_LIMIT]
+    return {
+        "unresolved_callers": sample,
+        "unresolved_caller_count": len(unresolved),
+        "unresolved_callers_truncated": len(unresolved) > len(sample),
+    }
+
+
+def _live_caller_scan(
+    directory: Path, function_name: str
+) -> tuple[list[dict], list[dict]]:
+    callers: list[dict] = []
+    unresolved: list[dict] = []
+    registry = build_python_symbol_registry(directory)
+    for path in sorted(directory.rglob("*")):
+        if not _searchable_source(path):
+            continue
+        result = _parse_file(path, registry, directory)
+        callers.extend(_live_callers_in_file(path, result, function_name))
+        unresolved.extend(_live_unresolved_in_file(path, result, function_name))
+    return callers, unresolved
+
+
 def find_callers(
     function_name: str,
     directory: Path,
@@ -1605,20 +1838,19 @@ def find_callers(
 ) -> list[dict] | dict:
     """Find callers using strict Python evidence or non-Python name heuristics.
 
-    Unknown Python calls are excluded. Returns caller edge dictionaries.
+    Unknown Python calls are excluded from `callers`, and named separately in
+    `unresolved_callers` with an exact `unresolved_caller_count` (NEW-124), so
+    an empty `callers` list distinguishes "nobody calls it" from "the receiver
+    could not be resolved". Both fields need `with_report=True`; the bare list
+    form is kept for callers that only want confirmed edges.
     """
     if not live:
         stored = _stored_callers(function_name, directory, with_report)
         if stored is not None:
             return stored
-    callers: list[dict] = []
-    registry = build_python_symbol_registry(directory)
-    for path in sorted(directory.rglob("*")):
-        if not _searchable_source(path):
-            continue
-        result = _parse_file(path, registry, directory)
-        callers.extend(_live_callers_in_file(path, result, function_name))
-    return _with_report("callers", callers, _live_report(directory), with_report)
+    callers, unresolved = _live_caller_scan(directory, function_name)
+    report = {**_live_report(directory), **_live_unresolved_fields(unresolved)}
+    return _with_report("callers", callers, report, with_report)
 
 
 def _stored_caller_row(graph, edge, function_name: str, directory: Path) -> dict | None:
@@ -1662,7 +1894,11 @@ def _store_find_callers(
             _stored_caller_row(graph, edge, function_name, directory) for edge in edges
         ]
         results = _sorted_stored_rows(rows, _caller_sort_key)
-        return _with_report("callers", results, _store_report(graph), with_report)
+        report = {
+            **_store_report(graph),
+            **_unresolved_caller_fields(graph, function_name),
+        }
+        return _with_report("callers", results, report, with_report)
     finally:
         graph.close()
 
@@ -1996,13 +2232,15 @@ def get_architecture(
             return stored
     parsed, definitions, edges = _workspace_call_graph(directory)
     entry_points, routes = _live_architecture_points(parsed)
+    communities, counts = _live_community_answer(definitions, edges)
     architecture = {
         "entry_points": entry_points,
         "routes": routes,
         **_hotspot_fields(*_bounded_hotspots(
             _live_hotspots(_live_incoming(edges), definitions)
         )),
-        "communities": _communities_from_edges(edges),
+        "communities": communities,
+        **counts,
         "graph_complete": False,
     }
     return {**architecture, **_live_report(directory, parsed)}
@@ -2071,11 +2309,13 @@ def _store_get_architecture(directory: Path) -> dict | None:
         entries = graph.find_nodes(kinds=("entry-point",), max_rows=10_000)
         routes = graph.find_nodes(kinds=("route",), max_rows=10_000)
         report = _store_report(graph)
+        communities, counts = _stored_community_answer(graph)
         return {
             "entry_points": _stored_architecture_nodes(graph, entries, directory),
             "routes": _stored_architecture_nodes(graph, routes, directory),
             **_hotspot_fields(*_stored_hotspots(graph, directory)),
-            "communities": _stored_communities(graph, _stored_call_pairs(graph)),
+            "communities": communities,
+            **counts,
             **report,
         }
     finally:
@@ -2111,24 +2351,33 @@ def _framework_routes(path: Path, source: str) -> list[dict]:
 
 
 def detect_communities(
-    directory: Path, *, live: bool = False, with_report: bool = False
+    directory: Path,
+    *,
+    symbol: str | None = None,
+    live: bool = False,
+    with_report: bool = False,
 ) -> list[list[str]] | dict:
-    """Detect functional modules with deterministic weighted Louvain."""
+    """Detect functional modules with deterministic weighted Louvain.
+
+    `symbol` narrows the answer to the communities that symbol belongs to. It
+    exists because the whole-graph listing cannot be both complete and bounded
+    here — see `_communities_holding` for the measurement — so "which module
+    does X belong to" needs an anchor, exactly as who-calls does.
+    """
     if not live:
-        stored = (
-            _store_detect_communities(directory, with_report=True)
-            if with_report
-            else _store_detect_communities(directory)
-        )
+        stored = _stored_detect_communities(directory, symbol, with_report)
         if stored is not None:
             return stored
-    communities = _detect_live_communities(directory)
-    return _with_report("communities", communities, _live_report(directory), with_report)
+    communities, counts = _detect_live_communities(directory, symbol)
+    report = {**_live_report(directory), **counts}
+    return _with_report("communities", communities, report, with_report)
 
 
-def _detect_live_communities(directory: Path) -> list[list[str]]:
-    _, _, edges = _workspace_call_graph(directory)
-    return _communities_from_edges(edges)
+def _detect_live_communities(
+    directory: Path, symbol: str | None = None
+) -> tuple[list, dict]:
+    _parsed, definitions, edges = _workspace_call_graph(directory)
+    return _live_community_answer(definitions, edges, symbol)
 
 
 def _communities_from_edges(edges: list[dict]) -> list[list[str]]:
@@ -2142,15 +2391,23 @@ def _communities_from_edges(edges: list[dict]) -> list[list[str]]:
     return _louvain_communities(graph)
 
 
+def _stored_detect_communities(directory: Path, symbol: str | None, with_report: bool):
+    """Preserve the historical one-argument call form, which tests substitute."""
+    if symbol is None and not with_report:
+        return _store_detect_communities(directory)
+    return _store_detect_communities(directory, symbol=symbol, with_report=with_report)
+
+
 def _store_detect_communities(
-    directory: Path, *, with_report: bool = False
+    directory: Path, *, symbol: str | None = None, with_report: bool = False
 ) -> list[list[str]] | dict | None:
     graph = _active_evidence_graph(directory)
     if graph is None:
         return None
     try:
-        communities = _stored_communities(graph, _stored_call_pairs(graph))
-        return _with_report("communities", communities, _store_report(graph), with_report)
+        communities, counts = _stored_community_answer(graph, symbol)
+        report = {**_store_report(graph), **counts}
+        return _with_report("communities", communities, report, with_report)
     finally:
         graph.close()
 
@@ -2675,6 +2932,19 @@ def _aggregate_louvain_graph(
     return reduced
 
 
+def _print_unresolved_callers(function_name: str, answer: dict) -> None:
+    """A zero that means "could not resolve" has to say so on the CLI too."""
+    count = answer.get("unresolved_caller_count", 0)
+    if not count:
+        return
+    print(
+        f"  plus {count} call site(s) naming '{function_name}' whose receiver "
+        "could not be resolved - candidates, not confirmed callers:"
+    )
+    for row in answer.get("unresolved_callers", [])[:20]:
+        print(f"    {row['file']}:{row['line']}  {row['call_text']} ({row['reason']})")
+
+
 def main() -> int:
     import argparse
     p = argparse.ArgumentParser(description="Code graph — tree-sitter code intelligence.")
@@ -2685,10 +2955,12 @@ def main() -> int:
     directory = Path(args.directory)
 
     if args.callers:
-        callers = find_callers(args.callers, directory)
+        answer = find_callers(args.callers, directory, with_report=True)
+        callers = answer["callers"]
         print(f"Callers of '{args.callers}': {len(callers)} found.")
         for c in callers[:20]:
             print(f"  {c['file']}:{c['line']}")
+        _print_unresolved_callers(args.callers, answer)
         return 0
 
     index_directory(directory)

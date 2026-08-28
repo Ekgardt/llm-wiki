@@ -308,7 +308,10 @@ def test_detect_communities_answers_without_pulling_the_graph(repository, monkey
 
     communities = code_graph.detect_communities(repository)
 
-    assert communities and all(len(group) >= 2 for group in communities)
-    assert {name for group in communities for name in group} <= {
-        "hub", "warm", "gate", "loop",
-    }
+    # NEW-125: a member is a named row now, not a bare identifier.
+    assert communities and all(group["size"] >= 2 for group in communities)
+    assert {
+        member["qualified_name"]
+        for group in communities
+        for member in group["members"]
+    } <= {"app.hub", "app.warm", "app.gate", "app.loop"}
