@@ -617,10 +617,25 @@ TOOL_INPUT_SCHEMAS = {
                     "implementations",
                     "type",
                     "diagnostics",
+                    "query",
+                    "provenance",
+                    "snippet",
+                    "coverage",
                 ],
                 "description": "Bounded architecture query mode",
             },
-            "symbol": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "symbol": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024,
+                "description": "Symbol for symbol, callers, callees, dependencies, path, provenance, and snippet modes",
+            },
+            "query": {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": 4096,
+                "description": "Bounded JSON hop pipeline for mode=query",
+            },
             "reverse": {"type": "boolean", "default": False},
             "comparison": {
                 "type": "string",
@@ -635,7 +650,12 @@ TOOL_INPUT_SCHEMAS = {
                 "default": False,
                 "description": "Bypass the active generation and run live extraction",
             },
-            "path": {"type": "string", "minLength": 1, "maxLength": 4096},
+            "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": "Repository-relative path for coverage mode and for precise or positioned calls",
+            },
             "line": {"type": "integer", "minimum": 1},
             "character": {"type": "integer", "minimum": 0},
             "offset": {"type": "integer", "minimum": 0, "default": 0},
@@ -3310,6 +3330,10 @@ _ARCHITECTURE_CONTRACTS = {
         {"directory", "mode", "path"},
         {"directory", "mode", "path"},
     ),
+    "query": (
+        {"directory", "mode", "query"},
+        {"directory", "mode", "query"},
+    ),
     "impact": (
         {"directory", "mode"},
         {"directory", "mode", "comparison", "base", "target", "branch"},
@@ -4582,6 +4606,14 @@ def _coverage_architecture_call(arguments: dict, deadline: float):
     return coverage_for_path(directory, str(arguments["path"]), deadline)
 
 
+def _query_architecture_call(arguments: dict, deadline: float):
+    """CODE-01: bounded multi-hop JSON pipeline over the active generation."""
+    from graph_query import run_graph_query
+
+    directory = Path(arguments["directory"]).resolve()
+    return run_graph_query(directory, str(arguments["query"]), deadline)
+
+
 def _tool_get_architecture(arguments: dict, deadline: float):
     try:
         return _architecture_tool_call(arguments, deadline), False
@@ -4608,6 +4640,7 @@ def _architecture_tool_call(arguments: dict, deadline: float):
         "provenance": _provenance_architecture_call,
         "snippet": _snippet_architecture_call,
         "coverage": _coverage_architecture_call,
+        "query": _query_architecture_call,
     }
     call = calls.get(mode, _architecture_mode_call)
     return call(arguments, deadline)

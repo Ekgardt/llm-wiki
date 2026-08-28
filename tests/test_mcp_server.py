@@ -43,6 +43,20 @@ def _redrive_links(queue) -> list:
     return [task.redrive_of for task in queue.list_tasks() if task.redrive_of]
 
 
+def _canonical_architecture_modes(mcp_server) -> set:
+    """Every mode a call can actually reach.
+
+    A structural mode reaches a handler only when `_ARCHITECTURE_CONTRACTS`
+    names its arguments, because `_architecture_contract` indexes that dict;
+    a precise mode is served through `PRECISE_ARCHITECTURE_MODES` instead.
+    Those two sets are the product's own answer to "what does this tool serve",
+    which is why the schema is compared against them and not against a copy.
+    """
+    return set(mcp_server._ARCHITECTURE_CONTRACTS) | set(
+        mcp_server.PRECISE_ARCHITECTURE_MODES
+    )
+
+
 ENVELOPE_FIELDS = {
     "schema_version",
     "generated_at",
@@ -130,6 +144,60 @@ WRONG_TYPE_CALLS = [
 ]
 
 
+def _assert_task_shaped_names(names) -> None:
+    for expected in (
+        "recall",
+        "read_page",
+        "wiki_overview",
+        "vault_status",
+        "compile",
+        "find_dead_code",
+        "get_architecture",
+        "doctor",
+    ):
+        assert expected in names
+
+
+def _assert_doctor_branch_shape(schema) -> None:
+    assert set(schema) == {"type", "oneOf"}
+    assert schema["type"] == "object"
+    assert len(schema["oneOf"]) == 9
+
+
+def _assert_doctor_branch_actions(branches) -> None:
+    assert all(branch["additionalProperties"] is False for branch in branches)
+    assert {branch["properties"]["action"]["const"] for branch in branches} == {
+        "status",
+        "queue-inspect",
+        "queue-cancel",
+        "queue-redrive",
+        "queue-dead-list",
+        "transaction-recover",
+        "transaction-undo",
+        "archive-status",
+        "claim-status",
+    }
+
+
+def _assert_directory_is_the_only_requirement(tools, name: str) -> None:
+    tool = next(item for item in tools if item.name == name)
+    assert tool.inputSchema["required"] == ["directory"]
+    assert tool.inputSchema["properties"]["directory"]["type"] == "string"
+
+
+def _assert_query_and_slug_bounds(schemas) -> None:
+    assert schemas["recall"]["properties"]["query"]["maxLength"] == 8192
+    assert schemas["get_decisions"]["properties"]["query"]["maxLength"] == 8192
+    assert schemas["read_page"]["properties"]["slug"]["maxLength"] == 255
+
+
+def _assert_context_array_bounds(slugs, include) -> None:
+    assert (slugs["minItems"], slugs["maxItems"], slugs["uniqueItems"]) == (1, 20, True)
+    assert slugs["items"]["maxLength"] == 255
+    assert (include["maxItems"], include["uniqueItems"]) == (10, True)
+    assert include["items"]["maxLength"] == 64
+
+
 class TestToolDefinitions:
     def test_tool_inventory_remains_exactly_the_canonical_twelve(self):
         import mcp_server
@@ -169,38 +237,14 @@ class TestToolDefinitions:
         from mcp_server import _build_tool_definitions
         tools = _build_tool_definitions()
         if tools:
-            names = [t.name for t in tools]
-            assert "recall" in names
-            assert "read_page" in names
-            assert "wiki_overview" in names
-            assert "vault_status" in names
-            assert "compile" in names
-            assert "find_dead_code" in names
-            assert "get_architecture" in names
-            assert "doctor" in names
+            _assert_task_shaped_names([t.name for t in tools])
 
     def test_doctor_has_closed_exact_action_branches(self):
         import mcp_server
 
         schema = mcp_server.TOOL_INPUT_SCHEMAS["doctor"]
-        assert set(schema) == {"type", "oneOf"}
-        assert schema["type"] == "object"
-        branches = schema["oneOf"]
-        assert len(branches) == 9
-        assert all(branch["additionalProperties"] is False for branch in branches)
-        assert {
-            branch["properties"]["action"]["const"] for branch in branches
-        } == {
-            "status",
-            "queue-inspect",
-            "queue-cancel",
-            "queue-redrive",
-            "queue-dead-list",
-            "transaction-recover",
-            "transaction-undo",
-            "archive-status",
-            "claim-status",
-        }
+        _assert_doctor_branch_shape(schema)
+        _assert_doctor_branch_actions(schema["oneOf"])
 
     @pytest.mark.parametrize(
         "arguments",
@@ -250,28 +294,29 @@ class TestToolDefinitions:
 
         tools = _build_tool_definitions()
         if tools:
-            tool = next(item for item in tools if item.name == "find_dead_code")
-            assert tool.inputSchema["required"] == ["directory"]
-            assert tool.inputSchema["properties"]["directory"]["type"] == "string"
+            _assert_directory_is_the_only_requirement(tools, "find_dead_code")
 
     def test_get_architecture_requires_a_directory(self):
         from mcp_server import _build_tool_definitions
 
         tools = _build_tool_definitions()
         if tools:
-            tool = next(item for item in tools if item.name == "get_architecture")
-            assert tool.inputSchema["required"] == ["directory"]
-            assert tool.inputSchema["properties"]["directory"]["type"] == "string"
+            _assert_directory_is_the_only_requirement(tools, "get_architecture")
 
     def test_get_architecture_declares_all_canonical_modes_without_new_tool(self):
         import mcp_server
 
+        # Compared against the structures that actually serve a mode instead of
+        # against a copied list, because a copied list goes stale silently and
+        # did: provenance, snippet and coverage shipped 2026-08-28 with working
+        # handlers and no enum entry. That is not merely undocumented —
+        # _validate_object_schema enforces this enum, so an unlisted mode is
+        # refused at the door. Deriving the expectation makes the next mode
+        # that forgets the enum fail here instead of shipping unreachable.
         modes = mcp_server.TOOL_INPUT_SCHEMAS["get_architecture"]["properties"]["mode"]
-        assert modes["enum"] == [
-            "summary", "symbol", "callers", "callees", "dependencies",
-            "path", "community", "impact", "definition", "references",
-            "implementations", "type", "diagnostics",
-        ]
+        canonical = _canonical_architecture_modes(mcp_server)
+        assert set(modes["enum"]) == canonical
+        assert len(modes["enum"]) == len(canonical)
         tools = mcp_server._build_tool_definitions()
         if tools:
             assert len(tools) == 12
@@ -383,15 +428,133 @@ class TestToolDefinitions:
         import mcp_server
 
         schemas = mcp_server.TOOL_INPUT_SCHEMAS
-        assert schemas["recall"]["properties"]["query"]["maxLength"] == 8192
-        assert schemas["get_decisions"]["properties"]["query"]["maxLength"] == 8192
-        assert schemas["read_page"]["properties"]["slug"]["maxLength"] == 255
-        slugs = schemas["get_context"]["properties"]["slugs"]
-        include = schemas["get_context"]["properties"]["include"]
-        assert (slugs["minItems"], slugs["maxItems"], slugs["uniqueItems"]) == (1, 20, True)
-        assert slugs["items"]["maxLength"] == 255
-        assert (include["maxItems"], include["uniqueItems"]) == (10, True)
-        assert include["items"]["maxLength"] == 64
+        _assert_query_and_slug_bounds(schemas)
+        _assert_context_array_bounds(
+            schemas["get_context"]["properties"]["slugs"],
+            schemas["get_context"]["properties"]["include"],
+        )
+
+
+def _assert_unsupported_evidence_result(result) -> None:
+    assert result["validity"]["status"] == "unsupported-evidence"
+    assert result["recommendations"] == ["quarantine"]
+    assert result["evidence"][0]["retrieval_only"] is True
+
+
+def _assert_unsupported_evidence_quality(quality) -> None:
+    assert quality["partial"] is True
+    assert any("unsupported" in item.lower() for item in quality["warnings"])
+
+
+def _assert_vault_status_tool_description(tools) -> None:
+    tool = next(item for item in tools if item.name == "vault_status")
+    assert tool.description == (
+        "Get compile status and current daily-file backlog."
+    )
+
+
+def _assert_redacted_failure(result, sensitive: str) -> None:
+    encoded = json.dumps(result)
+    assert sensitive not in encoded
+    assert "sk-abcdefghijklmnopqrstuvwxyz" not in encoded
+    assert r"C:\private\vault" not in encoded
+    assert result["error"].endswith("operation_failed")
+
+
+def _assert_redacted_error_result(result, sensitive: str) -> None:
+    encoded = json.dumps(result)
+    assert sensitive not in encoded
+    assert "sk-abcdefghijklmnopqrstuvwxyz" not in encoded
+    assert r"C:\private\vault" not in encoded
+    assert result == {"error": "operation_failed"}
+
+
+def _assert_degraded_search_calls(calls) -> None:
+    assert len(calls) == 2
+    assert calls[0][1]["semantic"] is True
+    assert calls[1][1]["semantic"] is False
+    assert calls[1][1]["graph"] is False
+
+
+def _assert_degraded_search_budget(calls) -> None:
+    assert calls[1][1]["rerank"] is False
+    assert calls[1][1]["deadline_monotonic"] == calls[0][1]["deadline_monotonic"]
+
+
+def _assert_degraded_result_row(row) -> None:
+    assert row["requested_mode"] == "HYBRID"
+    assert row["effective_mode"] == "BASE"
+    assert row["signals_used"] == ["lexical"]
+    assert row["fallback_reason"] == "retrieval_deadline_exceeded"
+
+
+def _assert_degraded_trace(row, trace) -> None:
+    assert row["partial"] is True
+    assert trace["fallback_reason"] == "retrieval_deadline_exceeded"
+    assert trace["partial"] is True
+
+
+def _assert_context_package_keys(package) -> None:
+    assert set(package) >= {
+        "text", "packed_tokens", "token_budget", "repo_map", "pages",
+        "symbols", "decisions", "incidents", "active_task", "evidence",
+        "retrieval_trace", "materialization_trace",
+    }
+
+
+def _assert_context_package_contents(package) -> None:
+    assert package["packed_tokens"] <= package["token_budget"] == 1200
+    assert package["decisions"]
+    assert package["incidents"]
+    assert package["active_task"]
+
+
+def _assert_recall_search_call(call) -> None:
+    assert call[1]["source_tool"] == "mcp.recall"
+    assert call[1]["semantic"] is True
+    assert call[1]["deadline_monotonic"] > time.monotonic()
+
+
+def _assert_decisions_search_call(call) -> None:
+    assert call[1]["source_tool"] == "mcp.get_decisions"
+    assert call[1]["emit_telemetry"] is False
+
+
+def _assert_decision_filter_results(results) -> None:
+    assert [Path(result["path"]).stem for result in results] == [
+        "first-decision", "second-decision"
+    ]
+
+
+def _assert_decision_filter_rows(rows) -> None:
+    assert [(row.candidate_id, row.rank) for row in rows] == [
+        ("first-decision", 1), ("second-decision", 2)
+    ]
+    assert all(row.retrieval_mode == "decision-filter" for row in rows)
+    assert all(row.source_tool == "mcp.get_decisions" for row in rows)
+
+
+def _assert_read_page_events(rows) -> None:
+    assert {(row.event_kind, row.source_tool) for row in rows} == {
+        ("page_read", "mcp.read_page"),
+        ("evidence_read", "mcp.read_page"),
+    }
+
+
+def _assert_evidence_event(rows, expected_id: str) -> None:
+    evidence_event = next(row for row in rows if row.event_kind == "evidence_read")
+    assert evidence_event.candidate_id == expected_id
+
+
+def _assert_dead_code_report(dead) -> None:
+    assert dead["source_generation"] == "gen-25"
+    assert dead["unresolved_count"] == 2
+    assert dead["candidates"] == [{"name": "unused"}]
+
+
+def _assert_architecture_report(architecture) -> None:
+    assert architecture["source_generation"] == "gen-25"
+    assert architecture["architecture"]["graph_complete"] is False
 
 
 class TestHelperFunctions:
@@ -448,12 +611,10 @@ class TestHelperFunctions:
 
         result = mcp_server._assess_contradiction_text("project has-state red")
 
-        assert result["validity"]["status"] == "unsupported-evidence"
-        assert result["recommendations"] == ["quarantine"]
-        assert result["evidence"][0]["retrieval_only"] is True
-        quality = mcp_server._quality_for("check_contradiction", result)
-        assert quality["partial"] is True
-        assert any("unsupported" in item.lower() for item in quality["warnings"])
+        _assert_unsupported_evidence_result(result)
+        _assert_unsupported_evidence_quality(
+            mcp_server._quality_for("check_contradiction", result)
+        )
 
     def test_vault_status_returns_dict(self):
         from mcp_server import _vault_status
@@ -482,10 +643,7 @@ class TestHelperFunctions:
         )
         tools = mcp_server._build_tool_definitions()
         if tools:
-            tool = next(item for item in tools if item.name == "vault_status")
-            assert tool.description == (
-                "Get compile status and current daily-file backlog."
-            )
+            _assert_vault_status_tool_description(tools)
 
     def test_vault_status_counts_changed_daily_files(self, tmp_path, monkeypatch):
         import memory_state
@@ -703,11 +861,7 @@ class TestHelperFunctions:
         evidence_error = mcp_server._read_page("page")
 
         for result in (read_error, evidence_error):
-            encoded = json.dumps(result)
-            assert sensitive not in encoded
-            assert "sk-abcdefghijklmnopqrstuvwxyz" not in encoded
-            assert r"C:\private\vault" not in encoded
-            assert result["error"].endswith("operation_failed")
+            _assert_redacted_failure(result, sensitive)
 
     def test_log_decision_redacts_append_exception_details(self, monkeypatch):
         import daily_log_append
@@ -722,11 +876,7 @@ class TestHelperFunctions:
 
         result = mcp_server._log_decision("decision")
 
-        encoded = json.dumps(result)
-        assert sensitive not in encoded
-        assert "sk-abcdefghijklmnopqrstuvwxyz" not in encoded
-        assert r"C:\private\vault" not in encoded
-        assert result == {"error": "operation_failed"}
+        _assert_redacted_error_result(result, sensitive)
 
     def test_log_decision_propagates_deadline_and_cancellation_to_append(
         self, monkeypatch
@@ -849,20 +999,12 @@ class TestHelperFunctions:
 
         results = mcp_server._search_vault("test")
 
-        assert len(calls) == 2
-        assert calls[0][1]["semantic"] is True
-        assert calls[1][1]["semantic"] is False
-        assert calls[1][1]["graph"] is False
-        assert calls[1][1]["rerank"] is False
-        assert calls[1][1]["deadline_monotonic"] == calls[0][1]["deadline_monotonic"]
-        assert results[0]["requested_mode"] == "HYBRID"
-        assert results[0]["effective_mode"] == "BASE"
-        assert results[0]["signals_used"] == ["lexical"]
-        assert results[0]["fallback_reason"] == "retrieval_deadline_exceeded"
-        assert results[0]["partial"] is True
-        trace = mcp_server._retrieval_trace("test", results)
-        assert trace["fallback_reason"] == "retrieval_deadline_exceeded"
-        assert trace["partial"] is True
+        _assert_degraded_search_calls(calls)
+        _assert_degraded_search_budget(calls)
+        _assert_degraded_result_row(results[0])
+        _assert_degraded_trace(
+            results[0], mcp_server._retrieval_trace("test", results)
+        )
 
     def test_search_vault_reuses_caller_operation_deadline(self, monkeypatch):
         import mcp_server
@@ -997,15 +1139,8 @@ class TestHelperFunctions:
             ["choice", "incident", "state"], token_budget=1200
         )
 
-        assert set(package) >= {
-            "text", "packed_tokens", "token_budget", "repo_map", "pages",
-            "symbols", "decisions", "incidents", "active_task", "evidence",
-            "retrieval_trace", "materialization_trace",
-        }
-        assert package["packed_tokens"] <= package["token_budget"] == 1200
-        assert package["decisions"]
-        assert package["incidents"]
-        assert package["active_task"]
+        _assert_context_package_keys(package)
+        _assert_context_package_contents(package)
 
     def test_get_context_repo_map_includes_selected_pages_dropped_by_budget(
         self, tmp_path, monkeypatch
@@ -1068,11 +1203,8 @@ class TestHelperFunctions:
 
         assert mcp_server._search_vault("secret", 2) == []
         assert mcp_server._get_decisions("choice", 3) == []
-        assert calls[0][1]["source_tool"] == "mcp.recall"
-        assert calls[0][1]["semantic"] is True
-        assert calls[0][1]["deadline_monotonic"] > time.monotonic()
-        assert calls[1][1]["source_tool"] == "mcp.get_decisions"
-        assert calls[1][1]["emit_telemetry"] is False
+        _assert_recall_search_call(calls[0])
+        _assert_decisions_search_call(calls[1])
 
     def test_get_decisions_records_only_filtered_final_candidates(self, tmp_path, monkeypatch):
         import mcp_server
@@ -1093,15 +1225,10 @@ class TestHelperFunctions:
 
         results = mcp_server._get_decisions("private decision query", 10)
 
-        assert [Path(result["path"]).stem for result in results] == [
-            "first-decision", "second-decision"
-        ]
-        rows = list(reversed(retrieval_telemetry.read_events(limit=10, db_path=database)))
-        assert [(row.candidate_id, row.rank) for row in rows] == [
-            ("first-decision", 1), ("second-decision", 2)
-        ]
-        assert all(row.retrieval_mode == "decision-filter" for row in rows)
-        assert all(row.source_tool == "mcp.get_decisions" for row in rows)
+        _assert_decision_filter_results(results)
+        _assert_decision_filter_rows(
+            list(reversed(retrieval_telemetry.read_events(limit=10, db_path=database)))
+        )
         assert b"private decision query" not in database.read_bytes()
 
     def test_get_decisions_empty_result_emits_no_events(self, tmp_path, monkeypatch):
@@ -1144,12 +1271,8 @@ class TestHelperFunctions:
 
         assert result["slug"] == "page"
         rows = retrieval_telemetry.read_events(limit=10, db_path=database)
-        assert {(row.event_kind, row.source_tool) for row in rows} == {
-            ("page_read", "mcp.read_page"),
-            ("evidence_read", "mcp.read_page"),
-        }
-        evidence_event = next(row for row in rows if row.event_kind == "evidence_read")
-        assert evidence_event.candidate_id == sha256_bytes(quote)
+        _assert_read_page_events(rows)
+        _assert_evidence_event(rows, sha256_bytes(quote))
         assert quote not in database.read_bytes()
 
     def test_context_emits_injection_without_duplicate_page_read(self, tmp_path, monkeypatch):
@@ -1277,11 +1400,8 @@ class TestHelperFunctions:
         dead = mcp_server._find_dead_code(str(tmp_path))
         architecture = mcp_server._get_architecture(str(tmp_path))
 
-        assert dead["source_generation"] == "gen-25"
-        assert dead["unresolved_count"] == 2
-        assert dead["candidates"] == [{"name": "unused"}]
-        assert architecture["source_generation"] == "gen-25"
-        assert architecture["architecture"]["graph_complete"] is False
+        _assert_dead_code_report(dead)
+        _assert_architecture_report(architecture)
 
     def test_code_tool_helpers_forward_explicit_live_fallback(self, tmp_path, monkeypatch):
         import mcp_server
@@ -1295,6 +1415,175 @@ class TestHelperFunctions:
         mcp_server._find_dead_code(str(tmp_path), live=True)
 
         assert seen == [{"live": True, "with_report": True}]
+
+
+def _assert_grounded_call(call, vault, started) -> None:
+    assert call[0] == "Is alpha enabled?"
+    assert call[1]["vault"] == vault
+    assert call[1]["profile"] == "EXACT"
+    assert call[1]["deadline"] > started
+
+
+def _assert_grounded_answer_envelope(envelope, answer) -> None:
+    assert envelope["data"] == answer
+    assert envelope["partial"] is False
+    assert all("abstain" not in warning.lower() for warning in envelope["warnings"])
+
+
+def _assert_grounded_answer_quality(envelope) -> None:
+    # Coverage is the share of claims whose citations all came back, and the
+    # warnings name a page or say nothing at all.
+    assert envelope["coverage"] == 1.0
+    assert 0 < envelope["confidence"] <= 0.8
+    assert not any("unknown" in warning.lower() for warning in envelope["warnings"])
+    assert envelope["components"] == {}
+
+
+def _assert_abstention_data(envelope, status) -> None:
+    assert envelope["data"]["status"] == status
+    assert "error" not in envelope["data"]
+    assert envelope["partial"] is True
+
+
+def _assert_abstention_quality(envelope, reason) -> None:
+    assert envelope["coverage"] == 0
+    assert envelope["confidence"] == 0
+    assert reason in envelope["warnings"]
+    assert envelope["components"] == {}
+
+
+def _assert_bounded_error_text(envelope, error, sensitive) -> None:
+    assert sensitive not in json.dumps(envelope)
+    assert len(error) <= 256
+    assert all(len(warning) <= 256 for warning in envelope["warnings"])
+
+
+def _assert_error_degrades_envelope(envelope, error) -> None:
+    assert envelope["partial"] is True
+    assert envelope["coverage"] == 0
+    assert error in envelope["warnings"]
+
+
+def _assert_timed_out_envelope(envelope, loop_progressed) -> None:
+    assert loop_progressed is True
+    assert envelope["data"] == {"error": "operation_timeout"}
+    assert envelope["partial"] is True
+    assert envelope["coverage"] == 0
+
+
+def _assert_clean_shutdown(process, stdout, stderr, shutdown_started) -> None:
+    assert process.returncode == 0, stderr
+    assert stdout == ""
+    assert time.perf_counter() - shutdown_started < _SHUTDOWN_SECONDS
+
+
+def _assert_no_sensitive_text(envelope, sensitive: str) -> None:
+    encoded = json.dumps(envelope)
+    assert sensitive not in encoded
+    assert "sk-abcdefghijklmnopqrstuvwxyz" not in encoded
+    assert r"C:\private\vault" not in encoded
+
+
+def _assert_operation_timed_out(text) -> None:
+    assert json.loads(text)["data"] == {"error": "operation_timeout"}
+
+
+def _assert_timed_out_queue_call(text, commit_reached) -> None:
+    assert commit_reached.is_set()
+    _assert_operation_timed_out(text)
+
+
+def _assert_queue_unchanged_after_timeout(mcp_server, queue, task_id, action) -> None:
+    assert not mcp_server._MCP_WORKERS
+    assert queue.get(task_id).state == _expected_task_state(action)
+    assert _redrive_links(queue) == []
+
+
+def _assert_daily_untouched_after_timeout(mcp_server, daily) -> None:
+    assert not mcp_server._MCP_WORKERS
+    assert daily.read_bytes() == b"# existing\n"
+
+
+def _assert_late_failure_stderr(stderr: str, sensitive: str) -> None:
+    assert "RuntimeError" in stderr
+    assert sensitive not in stderr
+    assert "sk-abcdefghijklmnopqrstuvwxyz" not in stderr
+
+
+def _assert_graph_mode_dispatch(data, calls, mode, result_key) -> None:
+    assert data["mode"] == mode
+    assert result_key in data["architecture"]
+    assert calls
+    assert calls[0][1]["with_report"] is True
+
+
+def _assert_no_foreign_generation(envelope) -> None:
+    assert envelope["data"]["source_generation"] is None
+    assert envelope["data"]["fallback"] is True
+
+
+def _assert_no_foreign_paths(envelope, repository_a, repository_b) -> None:
+    encoded = json.dumps(envelope)
+    assert "a_only_symbol" not in encoded
+    assert str(repository_a) not in encoded
+    assert str(repository_b / "app.py") not in encoded
+
+
+def _assert_degraded_envelope(envelope) -> None:
+    assert envelope["partial"] is True
+    assert envelope["coverage"] == 0
+    assert envelope["confidence"] < 1
+    assert envelope["warnings"]
+
+
+def _assert_low_confidence_envelope(envelope) -> None:
+    assert envelope["partial"] is True
+    assert envelope["coverage"] < 1
+    assert envelope["confidence"] < 1
+    assert envelope["warnings"]
+
+
+def _assert_helper_failure_data(envelope, tool_name) -> None:
+    assert "error" in envelope["data"]
+    assert f"{tool_name} failed" not in json.dumps(envelope)
+    assert len(envelope["data"]["error"]) <= 256
+
+
+def _assert_bm25_fallback(envelope) -> None:
+    assert envelope["fallback"] is True
+    assert any("bm25" in warning.lower() for warning in envelope["warnings"])
+
+
+def _assert_no_index_freshness_claim(envelope) -> None:
+    assert envelope["index_timestamp"] is None
+    assert not any(
+        "index freshness" in warning.lower() for warning in envelope["warnings"]
+    )
+
+
+def _assert_code_tool_data(data, key, expected, directory) -> None:
+    assert data[key] == expected
+    assert data["directory"] == str(directory.resolve())
+
+
+def _assert_doctor_status_envelope(envelope) -> None:
+    assert set(envelope) == ENVELOPE_FIELDS
+    assert envelope["data"]["overall_status"] == "degraded"
+    assert envelope["partial"] is True
+    assert envelope["confidence"] < 1
+
+
+def _assert_rejected_queue_action(data, envelope, expected_code) -> None:
+    assert data["overall_status"] == "error"
+    assert data["codes"] == [expected_code]
+    assert envelope["partial"] is True
+    assert envelope["confidence"] < 0.5
+
+
+def _assert_resource_timeout(envelope, loop_progressed, seen) -> None:
+    assert loop_progressed is True
+    assert len(seen) == 1
+    assert envelope["data"] == {"error": "operation_timeout"}
 
 
 class TestHandleToolCall:
@@ -1389,21 +1678,9 @@ class TestHandleToolCall:
             )
         )
 
-        assert envelope["data"] == answer
-        assert calls[0][0] == "Is alpha enabled?"
-        assert calls[0][1]["vault"] == tmp_path
-        assert calls[0][1]["profile"] == "EXACT"
-        assert calls[0][1]["deadline"] > started
-        assert envelope["partial"] is False
-        assert all("abstain" not in warning.lower() for warning in envelope["warnings"])
-        # Coverage is the share of claims whose citations all came back, and the
-        # warnings name a page or say nothing at all.
-        assert envelope["coverage"] == 1.0
-        assert 0 < envelope["confidence"] <= 0.8
-        assert not any(
-            "unknown" in warning.lower() for warning in envelope["warnings"]
-        )
-        assert envelope["components"] == {}
+        _assert_grounded_answer_envelope(envelope, answer)
+        _assert_grounded_call(calls[0], tmp_path, started)
+        _assert_grounded_answer_quality(envelope)
 
     @pytest.mark.parametrize(
         "status",
@@ -1431,13 +1708,8 @@ class TestHandleToolCall:
             self._run("recall", {"query": "question", "grounded": True})
         )
 
-        assert envelope["data"]["status"] == status
-        assert "error" not in envelope["data"]
-        assert envelope["partial"] is True
-        assert envelope["coverage"] == 0
-        assert envelope["confidence"] == 0
-        assert reason in envelope["warnings"]
-        assert envelope["components"] == {}
+        _assert_abstention_data(envelope, status)
+        _assert_abstention_quality(envelope, reason)
 
     @pytest.mark.parametrize(
         "sensitive",
@@ -1462,12 +1734,8 @@ class TestHandleToolCall:
         )
 
         error = envelope["data"]["error"]
-        assert sensitive not in json.dumps(envelope)
-        assert len(error) <= 256
-        assert all(len(warning) <= 256 for warning in envelope["warnings"])
-        assert envelope["partial"] is True
-        assert envelope["coverage"] == 0
-        assert error in envelope["warnings"]
+        _assert_bounded_error_text(envelope, error, sensitive)
+        _assert_error_degrades_envelope(envelope, error)
 
     @pytest.mark.parametrize("failure", ["provider failed", "schema validation failed"])
     def test_grounded_recall_provider_and_schema_failures_use_error_envelope(
@@ -1678,11 +1946,7 @@ class TestHandleToolCall:
         monkeypatch.setattr(mcp_server, "_MCP_WORKERS_LOCK", threading.Lock())
         loop_progressed, text = asyncio.run(exercise())
 
-        envelope = json.loads(text)
-        assert loop_progressed is True
-        assert envelope["data"] == {"error": "operation_timeout"}
-        assert envelope["partial"] is True
-        assert envelope["coverage"] == 0
+        _assert_timed_out_envelope(json.loads(text), loop_progressed)
 
         expected = {"last_compile": "fresh", "last_compile_status": "ok"}
         monkeypatch.setattr(
@@ -1763,9 +2027,7 @@ class TestHandleToolCall:
         shutdown_started = time.perf_counter()
         stdout, stderr = process.communicate(timeout=_HUNG_PROCESS_SECONDS)
 
-        assert process.returncode == 0, stderr
-        assert stdout == ""
-        assert time.perf_counter() - shutdown_started < _SHUTDOWN_SECONDS
+        _assert_clean_shutdown(process, stdout, stderr, shutdown_started)
 
     def test_thread_start_failure_releases_reserved_worker_slot(self, monkeypatch):
         import threading
@@ -1807,10 +2069,7 @@ class TestHandleToolCall:
         )
 
         for envelope in (unknown, helper):
-            encoded = json.dumps(envelope)
-            assert sensitive not in encoded
-            assert "sk-abcdefghijklmnopqrstuvwxyz" not in encoded
-            assert r"C:\private\vault" not in encoded
+            _assert_no_sensitive_text(envelope, sensitive)
         assert "Unknown tool:" in unknown["data"]["error"]
         assert "failed at" in helper["data"]["nested"]["error"]
 
@@ -1969,16 +2228,13 @@ class TestHandleToolCall:
                     {"action": action, "target_id": task_id, "repair": True},
                 )
             )
-            assert commit_reached.is_set()
-            assert json.loads(text)["data"] == {"error": "operation_timeout"}
+            _assert_timed_out_queue_call(text, commit_reached)
             assert queue.get(task_id).state == _expected_task_state(action)
         finally:
             release_commit.set()
 
         _drain_mcp_workers(mcp_server)
-        assert not mcp_server._MCP_WORKERS
-        assert queue.get(task_id).state == _expected_task_state(action)
-        assert _redrive_links(queue) == []
+        _assert_queue_unchanged_after_timeout(mcp_server, queue, task_id, action)
 
     def test_timed_out_log_decision_never_appends_after_response(
         self, tmp_path, monkeypatch
@@ -2035,7 +2291,7 @@ class TestHandleToolCall:
         try:
             reached_commit, text = asyncio.run(exercise())
             assert reached_commit is True
-            assert json.loads(text)["data"] == {"error": "operation_timeout"}
+            _assert_operation_timed_out(text)
             assert daily.read_bytes() == b"# existing\n"
         finally:
             release_commit.set()
@@ -2043,8 +2299,7 @@ class TestHandleToolCall:
         deadline = time.monotonic() + 30
         while mcp_server._MCP_WORKERS and time.monotonic() < deadline:
             time.sleep(0.01)
-        assert not mcp_server._MCP_WORKERS
-        assert daily.read_bytes() == b"# existing\n"
+        _assert_daily_untouched_after_timeout(mcp_server, daily)
 
     def test_late_worker_exception_is_observable_without_secret_text(
         self, monkeypatch, capsys
@@ -2076,10 +2331,7 @@ class TestHandleToolCall:
         while mcp_server._MCP_WORKERS and time.monotonic() < deadline:
             time.sleep(0.01)
 
-        stderr = capsys.readouterr().err
-        assert "RuntimeError" in stderr
-        assert sensitive not in stderr
-        assert "sk-abcdefghijklmnopqrstuvwxyz" not in stderr
+        _assert_late_failure_stderr(capsys.readouterr().err, sensitive)
 
     def test_doctor_receives_exact_handler_deadline_after_dispatch_delay(
         self, monkeypatch
@@ -2207,10 +2459,7 @@ class TestHandleToolCall:
             "get_architecture", {"directory": str(tmp_path), "mode": mode, **args}
         )
 
-        assert data["mode"] == mode
-        assert result_key in data["architecture"]
-        assert calls
-        assert calls[0][1]["with_report"] is True
+        _assert_graph_mode_dispatch(data, calls, mode, result_key)
 
     def test_get_architecture_symbol_mode_combines_existing_graph_queries(
         self, tmp_path, monkeypatch
@@ -2292,12 +2541,8 @@ class TestHandleToolCall:
         )
 
         for envelope in (dead, architecture):
-            encoded = json.dumps(envelope)
-            assert envelope["data"]["source_generation"] is None
-            assert envelope["data"]["fallback"] is True
-            assert "a_only_symbol" not in encoded
-            assert str(repository_a) not in encoded
-            assert str(repository_b / "app.py") not in encoded
+            _assert_no_foreign_generation(envelope)
+            _assert_no_foreign_paths(envelope, repository_a, repository_b)
 
     def test_wiki_overview_returns_json(self):
         data = self._data("wiki_overview", {})
@@ -2311,10 +2556,7 @@ class TestHandleToolCall:
     def test_unknown_tool_returns_error(self):
         envelope = json.loads(self._run("nonexistent_tool", {}))
         assert "error" in envelope["data"]
-        assert envelope["partial"] is True
-        assert envelope["coverage"] == 0
-        assert envelope["confidence"] < 1
-        assert envelope["warnings"]
+        _assert_degraded_envelope(envelope)
 
     def test_compile_returns_json(self, monkeypatch):
         import compile_memory
@@ -2334,13 +2576,8 @@ class TestHandleToolCall:
 
         envelope = json.loads(self._run(tool_name, VALID_TOOL_CALLS[tool_name]))
 
-        assert "error" in envelope["data"]
-        assert f"{tool_name} failed" not in json.dumps(envelope)
-        assert len(envelope["data"]["error"]) <= 256
-        assert envelope["partial"] is True
-        assert envelope["coverage"] == 0
-        assert envelope["confidence"] < 1
-        assert envelope["warnings"]
+        _assert_helper_failure_data(envelope, tool_name)
+        _assert_degraded_envelope(envelope)
 
     @pytest.mark.parametrize(
         "tool_name",
@@ -2479,11 +2716,8 @@ class TestHandleToolCall:
 
         envelope = json.loads(self._run(tool_name, VALID_TOOL_CALLS[tool_name]))
 
-        assert envelope["fallback"] is True
-        assert envelope["partial"] is True
-        assert envelope["coverage"] < 1
-        assert envelope["confidence"] < 1
-        assert any("bm25" in warning.lower() for warning in envelope["warnings"])
+        _assert_bm25_fallback(envelope)
+        _assert_low_confidence_envelope(envelope)
 
     @pytest.mark.parametrize("tool_name", ["recall", "get_decisions", "check_contradiction"])
     def test_empty_search_results_have_low_coverage(self, monkeypatch, tool_name):
@@ -2591,12 +2825,9 @@ class TestHandleToolCall:
 
         envelope = json.loads(self._run(tool_name, VALID_TOOL_CALLS[tool_name]))
 
-        assert envelope["index_timestamp"] is None
+        _assert_no_index_freshness_claim(envelope)
         if tool_name != "recall":
             assert envelope["freshness"] == "unknown"
-        assert not any(
-            "index freshness" in warning.lower() for warning in envelope["warnings"]
-        )
 
     def test_get_context_accepts_unrecognized_include_strings(self, monkeypatch):
         import mcp_server
@@ -2650,13 +2881,8 @@ class TestHandleToolCall:
         monkeypatch.setattr("code_graph.find_dead_code", lambda directory, **options: expected)
 
         envelope = json.loads(self._run("find_dead_code", {"directory": str(tmp_path)}))
-        data = envelope["data"]
-        assert data["candidates"] == expected
-        assert data["directory"] == str(tmp_path.resolve())
-        assert envelope["partial"] is True
-        assert envelope["coverage"] < 1
-        assert envelope["confidence"] < 1
-        assert envelope["warnings"]
+        _assert_code_tool_data(envelope["data"], "candidates", expected, tmp_path)
+        _assert_low_confidence_envelope(envelope)
 
     def test_get_architecture_returns_summary(self, tmp_path, monkeypatch):
         expected = {
@@ -2669,13 +2895,8 @@ class TestHandleToolCall:
         monkeypatch.setattr("code_graph.get_architecture", lambda directory, **options: expected)
 
         envelope = json.loads(self._run("get_architecture", {"directory": str(tmp_path)}))
-        data = envelope["data"]
-        assert data["architecture"] == expected
-        assert data["directory"] == str(tmp_path.resolve())
-        assert envelope["partial"] is True
-        assert envelope["coverage"] < 1
-        assert envelope["confidence"] < 1
-        assert envelope["warnings"]
+        _assert_code_tool_data(envelope["data"], "architecture", expected, tmp_path)
+        _assert_low_confidence_envelope(envelope)
 
     def test_code_tool_envelope_uses_generation_report(self, tmp_path, monkeypatch):
         import mcp_server
@@ -2720,10 +2941,7 @@ class TestHandleToolCall:
 
         envelope = json.loads(self._run("doctor", {"action": "status"}))
 
-        assert set(envelope) == ENVELOPE_FIELDS
-        assert envelope["data"]["overall_status"] == "degraded"
-        assert envelope["partial"] is True
-        assert envelope["confidence"] < 1
+        _assert_doctor_status_envelope(envelope)
         assert envelope["warnings"]
 
     def test_doctor_operator_failure_is_protocol_error_with_error_quality(
@@ -2837,10 +3055,7 @@ class TestHandleToolCall:
         )
         envelope = json.loads(text)
 
-        assert data["overall_status"] == "error"
-        assert data["codes"] == [expected_code]
-        assert envelope["partial"] is True
-        assert envelope["confidence"] < 0.5
+        _assert_rejected_queue_action(data, envelope, expected_code)
 
         class Model:
             def __init__(self, **kwargs):
@@ -3128,10 +3343,9 @@ class TestResources:
         assert mcp_server._register_resources(server) is True
         loop_progressed, contents = asyncio.run(exercise(server.callbacks["read"]))
 
-        envelope = json.loads(contents[0].text)
-        assert loop_progressed is True
-        assert len(seen) == 1
-        assert envelope["data"] == {"error": "operation_timeout"}
+        _assert_resource_timeout(
+            json.loads(contents[0].text), loop_progressed, seen
+        )
 
         status = {"last_compile": "fresh", "last_compile_status": "ok"}
         monkeypatch.setattr(
@@ -3721,15 +3935,16 @@ def test_navigation_deadline_is_10s_for_existing_modes() -> None:
     )
 
 
-def test_precise_request_classification_is_exact() -> None:
-    import mcp_server
-
+def _assert_positioned_calls_are_precise(mcp_server) -> None:
     assert mcp_server._is_precise_architecture_request(
         {"mode": "definition", "path": "p.py", "line": 1, "character": 0}
     )
     assert mcp_server._is_precise_architecture_request(
         {"mode": "callers", "path": "p.py", "line": 1, "character": 0}
     )
+
+
+def _assert_structural_calls_are_not_precise(mcp_server) -> None:
     assert not mcp_server._is_precise_architecture_request(
         {"mode": "callers", "symbol": "f"}
     )
@@ -3737,6 +3952,13 @@ def test_precise_request_classification_is_exact() -> None:
     assert not mcp_server._is_precise_architecture_request(
         {"mode": "callers", "path": "p.py", "line": 1}
     )
+
+
+def test_precise_request_classification_is_exact() -> None:
+    import mcp_server
+
+    _assert_positioned_calls_are_precise(mcp_server)
+    _assert_structural_calls_are_not_precise(mcp_server)
 
 
 def test_precise_architecture_rejects_non_checkout_directory(
@@ -4219,6 +4441,17 @@ def test_navigation_manager_rejects_cancelled_and_stale_requests(
     assert mcp_server._NAVIGATION_MANAGER is None
 
 
+def _assert_failed_close_retains_owner(mcp_server, manager) -> None:
+    assert mcp_server._NAVIGATION_MANAGER is None
+    assert mcp_server._NAVIGATION_MANAGER_CLOSING is manager
+
+
+def _assert_second_close_clears_owner(mcp_server, attempts: int) -> None:
+    assert attempts == 2
+    assert mcp_server._NAVIGATION_MANAGER is None
+    assert mcp_server._NAVIGATION_MANAGER_CLOSING is None
+
+
 def test_close_navigation_manager_retains_failed_owner_for_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4242,8 +4475,7 @@ def test_close_navigation_manager_retains_failed_owner_for_retry(
     with pytest.raises(TimeoutError, match="close failed"):
         mcp_server._close_navigation_session_manager(time.monotonic() + 5)
 
-    assert mcp_server._NAVIGATION_MANAGER is None
-    assert mcp_server._NAVIGATION_MANAGER_CLOSING is manager
+    _assert_failed_close_retains_owner(mcp_server, manager)
     with pytest.raises(TimeoutError, match="closing"):
         mcp_server._navigation_session_manager(
             time.monotonic() + 0.02,
@@ -4253,9 +4485,7 @@ def test_close_navigation_manager_retains_failed_owner_for_retry(
 
     mcp_server._close_navigation_session_manager(time.monotonic() + 5)
 
-    assert attempts == 2
-    assert mcp_server._NAVIGATION_MANAGER is None
-    assert mcp_server._NAVIGATION_MANAGER_CLOSING is None
+    _assert_second_close_clears_owner(mcp_server, attempts)
 
 
 def test_navigation_manager_constructor_crossing_deadline_is_not_published(
@@ -4323,6 +4553,18 @@ def test_successful_close_crossing_deadline_still_resets_singleton(
     assert mcp_server._NAVIGATION_MANAGER is None
     assert mcp_server._NAVIGATION_MANAGER_CLOSING is None
     assert mcp_server._NAVIGATION_MANAGER_EPOCH == 42
+
+
+def _assert_stale_worker_was_abandoned(mcp_server, stale_results, constructed) -> None:
+    assert stale_results[0]["status"] == "timeout"
+    assert constructed == []
+    assert mcp_server._NAVIGATION_MANAGER is None
+
+
+def _assert_fresh_manager_after_close(mcp_server, fresh, constructed) -> None:
+    assert fresh["status"] == "ok"
+    assert len(constructed) == 1
+    assert mcp_server._NAVIGATION_MANAGER is constructed[0]
 
 
 def test_timed_out_worker_cannot_recreate_manager_after_final_close(
@@ -4432,9 +4674,7 @@ def test_timed_out_worker_cannot_recreate_manager_after_final_close(
         assert mcp_server._NAVIGATION_MANAGER_EPOCH == 102
         release.set()
         assert completed.wait(2)
-        assert stale_results[0]["status"] == "timeout"
-        assert constructed == []
-        assert mcp_server._NAVIGATION_MANAGER is None
+        _assert_stale_worker_was_abandoned(mcp_server, stale_results, constructed)
 
         fresh = mcp_server._get_precise_architecture(
             str(tmp_path),
@@ -4445,9 +4685,7 @@ def test_timed_out_worker_cannot_recreate_manager_after_final_close(
             deadline=time.monotonic() + 5,
         )
 
-        assert fresh["status"] == "ok"
-        assert len(constructed) == 1
-        assert mcp_server._NAVIGATION_MANAGER is constructed[0]
+        _assert_fresh_manager_after_close(mcp_server, fresh, constructed)
     finally:
         release.set()
         completed.wait(2)
@@ -4494,6 +4732,40 @@ def test_run_server_closes_navigation_manager_in_finally(
     assert mcp_server.run_server() == 0
     assert len(closed) == 1
     assert closed[0] > time.monotonic()
+
+
+def _assert_precise_request_window(request, capability_name, direction) -> None:
+    assert request.capability.name == capability_name
+    assert request.direction == direction
+    assert (request.offset, request.limit) == (7, 8)
+
+
+def _assert_manager_request(manager_requests, deadline) -> None:
+    assert len(manager_requests) == 1
+    assert manager_requests[0][:2] == (deadline, 73)
+    assert callable(manager_requests[0][2])
+    assert manager_requests[0][2]() is False
+
+
+def _assert_navigation_constructor(constructor, identity) -> None:
+    assert constructor[2] is identity
+    assert set(constructor[3]) == {
+        "structural_candidates",
+        "symbol_resolver",
+        "edge_verifier",
+    }
+    assert all(callable(callback) for callback in constructor[3].values())
+
+
+def _assert_single_render_window(captures, query_result) -> None:
+    assert captures["renders"] == [query_result]
+    assert len(captures["requests"]) == 1
+    assert len(captures["renders"]) == 1
+
+
+def _assert_precise_route_data(data, mode) -> None:
+    assert data["mode"] == mode
+    assert data["status"] == "ok"
 
 
 @pytest.mark.parametrize(
@@ -4578,27 +4850,13 @@ def test_every_precise_route_builds_one_request_and_one_renderer_window(
 
     request, query_deadline = captures["requests"][0]
     constructor = captures["constructor"]
-    assert request.capability.name == capability_name
-    assert request.direction == direction
-    assert (request.offset, request.limit) == (7, 8)
+    _assert_precise_request_window(request, capability_name, direction)
     assert query_deadline == deadline
-    assert len(manager_requests) == 1
-    assert manager_requests[0][:2] == (deadline, 73)
-    assert callable(manager_requests[0][2])
-    assert manager_requests[0][2]() is False
+    _assert_manager_request(manager_requests, deadline)
     assert captures["manager"][1] == deadline
-    assert constructor[2] is identity
-    assert set(constructor[3]) == {
-        "structural_candidates",
-        "symbol_resolver",
-        "edge_verifier",
-    }
-    assert all(callable(callback) for callback in constructor[3].values())
-    assert captures["renders"] == [query_result]
-    assert len(captures["requests"]) == 1
-    assert len(captures["renders"]) == 1
-    assert data["mode"] == mode
-    assert data["status"] == "ok"
+    _assert_navigation_constructor(constructor, identity)
+    _assert_single_render_window(captures, query_result)
+    _assert_precise_route_data(data, mode)
 
 
 def _assert_relative_graph_locations(items) -> None:
@@ -4815,6 +5073,43 @@ def test_navigation_source_bytes_uses_retained_containment_reader(
     }
 
 
+def _navigation_location_result(
+    mcp_server, scope, span, *, source_kind="evidence", require_span_hash=True
+):
+    """Every case in the hash test passes the same metadata, version and budget."""
+    return mcp_server._navigation_location_from_span(
+        scope,
+        span,
+        source_kind=source_kind,
+        require_span_hash=require_span_hash,
+        metadata=None,
+        graph_version="generation-1",
+        deadline=time.monotonic() + 5,
+    )
+
+
+def _assert_mismatched_hashes_are_refused(mcp_server, scope, span) -> None:
+    assert _navigation_location_result(
+        mcp_server, scope, {**span, "source_sha256": "0" * 64}
+    ) is None
+    assert _navigation_location_result(
+        mcp_server, scope, {**span, "span_sha256": "0" * 64}
+    ) is None
+    assert _navigation_location_result(
+        mcp_server, scope, {**span, "span_sha256": "A" * 64}
+    ) is None
+
+
+def _assert_absent_span_hash_is_refused_only_when_required(
+    mcp_server, scope, span
+) -> None:
+    without = {key: value for key, value in span.items() if key != "span_sha256"}
+    assert _navigation_location_result(mcp_server, scope, without) is None
+    assert _navigation_location_result(
+        mcp_server, scope, without, source_kind="occurrence", require_span_hash=False
+    ) is not None
+
+
 def test_navigation_location_requires_matching_source_and_evidence_hashes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4840,60 +5135,9 @@ def test_navigation_location_requires_matching_source_and_evidence_hashes(
         lambda *_args, **_kwargs: content,
     )
 
-    assert mcp_server._navigation_location_from_span(
-        scope,
-        span,
-        source_kind="evidence",
-        require_span_hash=True,
-        metadata=None,
-        graph_version="generation-1",
-        deadline=time.monotonic() + 5,
-    ) is not None
-    assert mcp_server._navigation_location_from_span(
-        scope,
-        {**span, "source_sha256": "0" * 64},
-        source_kind="evidence",
-        require_span_hash=True,
-        metadata=None,
-        graph_version="generation-1",
-        deadline=time.monotonic() + 5,
-    ) is None
-    assert mcp_server._navigation_location_from_span(
-        scope,
-        {**span, "span_sha256": "0" * 64},
-        source_kind="evidence",
-        require_span_hash=True,
-        metadata=None,
-        graph_version="generation-1",
-        deadline=time.monotonic() + 5,
-    ) is None
-    assert mcp_server._navigation_location_from_span(
-        scope,
-        {**span, "span_sha256": "A" * 64},
-        source_kind="evidence",
-        require_span_hash=True,
-        metadata=None,
-        graph_version="generation-1",
-        deadline=time.monotonic() + 5,
-    ) is None
-    assert mcp_server._navigation_location_from_span(
-        scope,
-        {key: value for key, value in span.items() if key != "span_sha256"},
-        source_kind="evidence",
-        require_span_hash=True,
-        metadata=None,
-        graph_version="generation-1",
-        deadline=time.monotonic() + 5,
-    ) is None
-    assert mcp_server._navigation_location_from_span(
-        scope,
-        {key: value for key, value in span.items() if key != "span_sha256"},
-        source_kind="occurrence",
-        require_span_hash=False,
-        metadata=None,
-        graph_version="generation-1",
-        deadline=time.monotonic() + 5,
-    ) is not None
+    assert _navigation_location_result(mcp_server, scope, span) is not None
+    _assert_mismatched_hashes_are_refused(mcp_server, scope, span)
+    _assert_absent_span_hash_is_refused_only_when_required(mcp_server, scope, span)
 
 
 def test_navigation_graph_callback_reads_each_hash_bound_source_once(
@@ -5020,6 +5264,12 @@ def test_structural_callback_reuses_anchor_source_for_graph_spans(
     assert reads == 1
 
 
+def _assert_cache_rejection_is_remembered(cache, reads: int) -> None:
+    assert reads == 1
+    assert cache._bytes == 0
+    assert len(cache._values) == 1
+
+
 def test_navigation_source_cache_remembers_byte_cap_rejections(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5041,9 +5291,7 @@ def test_navigation_source_cache_remembers_byte_cap_rejections(
 
     assert cache.read(scope, "large.py", deadline=time.monotonic() + 5) is None
     assert cache.read(scope, "large.py", deadline=time.monotonic() + 5) is None
-    assert reads == 1
-    assert cache._bytes == 0
-    assert len(cache._values) == 1
+    _assert_cache_rejection_is_remembered(cache, reads)
 
 
 def test_navigation_calls_use_lightweight_evidence_spans(
@@ -5124,6 +5372,13 @@ def test_navigation_calls_use_lightweight_evidence_spans(
     assert span_calls == 2
 
 
+def _assert_read_only_graph_options(captured, scope, deadline) -> None:
+    assert captured["root"] == Path(scope.checkout_root)
+    assert captured["options"]["read_only"] is True
+    assert captured["options"]["deadline"] == deadline
+    assert callable(captured["options"]["cancelled"])
+
+
 def test_navigation_graph_open_is_read_only_and_deadline_aware(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5148,10 +5403,7 @@ def test_navigation_graph_open_is_read_only_and_deadline_aware(
     deadline = time.monotonic() + 5
 
     assert mcp_server._open_navigation_graph(scope, deadline) is graph
-    assert captured["root"] == Path(scope.checkout_root)
-    assert captured["options"]["read_only"] is True
-    assert captured["options"]["deadline"] == deadline
-    assert callable(captured["options"]["cancelled"])
+    _assert_read_only_graph_options(captured, scope, deadline)
 
 
 def test_navigation_adapter_returns_empty_when_exact_graph_is_unavailable(
@@ -5264,6 +5516,25 @@ def test_navigation_graph_evidence_work_is_globally_bounded(
     assert span_attempts <= 3
 
 
+def _assert_normalized_error_data(data) -> None:
+    assert data["status"] == "error"
+    assert data["mode"] == "definition"
+    assert "error" not in data
+    assert set(data) >= {
+        "freshness",
+        "provider",
+        "repository",
+        "groups",
+        "diagnostics",
+        "warnings",
+    }
+
+
+def _assert_text_is_redacted(text: str, sensitive: str) -> None:
+    assert sensitive not in text
+    assert "sk-abcdefghijklmnopqrstuvwxyz" not in text
+
+
 def test_precise_dispatch_exception_returns_normalized_redacted_data(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5293,19 +5564,8 @@ def test_precise_dispatch_exception_returns_normalized_redacted_data(
     )
     envelope = json.loads(text)
 
-    assert envelope["data"]["status"] == "error"
-    assert envelope["data"]["mode"] == "definition"
-    assert "error" not in envelope["data"]
-    assert set(envelope["data"]) >= {
-        "freshness",
-        "provider",
-        "repository",
-        "groups",
-        "diagnostics",
-        "warnings",
-    }
-    assert sensitive not in text
-    assert "sk-abcdefghijklmnopqrstuvwxyz" not in text
+    _assert_normalized_error_data(envelope["data"])
+    _assert_text_is_redacted(text, sensitive)
 
 
 def test_renderer_value_error_maps_to_normalized_navigation_error(
@@ -5359,6 +5619,17 @@ def test_renderer_value_error_maps_to_normalized_navigation_error(
     assert "error" not in data
 
 
+def _assert_normalized_timeout_data(data) -> None:
+    assert data["status"] == "timeout"
+    assert data["mode"] == "references"
+    assert data["requested_capability"] == "references"
+
+
+def _assert_timeout_warning_only(data) -> None:
+    assert data["warnings"] == ["navigation_timeout"]
+    assert "error" not in data
+
+
 def test_hard_precise_timeout_returns_normalized_timeout_shape(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5394,11 +5665,22 @@ def test_hard_precise_timeout_returns_normalized_timeout_shape(
         release.set()
     data = json.loads(text)["data"]
 
-    assert data["status"] == "timeout"
-    assert data["mode"] == "references"
-    assert data["requested_capability"] == "references"
-    assert data["warnings"] == ["navigation_timeout"]
-    assert "error" not in data
+    _assert_normalized_timeout_data(data)
+    _assert_timeout_warning_only(data)
+
+
+def _assert_static_timeout_envelope(envelope) -> None:
+    assert set(envelope) == ENVELOPE_FIELDS
+    assert envelope["source_commit"] is None
+    assert envelope["index_timestamp"] is None
+    assert envelope["components"] == {}
+
+
+def _assert_timeout_envelope_data(envelope) -> None:
+    assert envelope["partial"] is True
+    assert envelope["warnings"] == ["navigation_timeout"]
+    assert envelope["data"]["status"] == "timeout"
+    assert envelope["data"]["directory"] is None
 
 
 def test_precise_timeout_envelope_is_static_and_probe_free(
@@ -5427,14 +5709,15 @@ def test_precise_timeout_envelope_is_static_and_probe_free(
         )
     )
 
-    assert set(envelope) == ENVELOPE_FIELDS
-    assert envelope["source_commit"] is None
-    assert envelope["index_timestamp"] is None
-    assert envelope["components"] == {}
-    assert envelope["partial"] is True
-    assert envelope["warnings"] == ["navigation_timeout"]
-    assert envelope["data"]["status"] == "timeout"
-    assert envelope["data"]["directory"] is None
+    _assert_static_timeout_envelope(envelope)
+    _assert_timeout_envelope_data(envelope)
+
+
+def _assert_quality_without_mutation(quality, data, before, expected_partial) -> None:
+    assert quality["partial"] is expected_partial
+    assert quality["warnings"] == list(data["warnings"])
+    assert data == before
+    assert "_navigation_partial" not in data
 
 
 @pytest.mark.parametrize(
@@ -5473,10 +5756,7 @@ def test_precise_quality_uses_rendered_status_without_mutating_data(
         {"mode": "definition"},
     )
 
-    assert quality["partial"] is expected_partial
-    assert quality["warnings"] == list(data["warnings"])
-    assert data == before
-    assert "_navigation_partial" not in data
+    _assert_quality_without_mutation(quality, data, before, expected_partial)
 
 
 def test_rendered_partial_status_drives_outer_envelope_without_sentinel(
@@ -5514,6 +5794,23 @@ def test_rendered_partial_status_drives_outer_envelope_without_sentinel(
     assert envelope["data"]["status"] == "partial"
     assert "_navigation_partial" not in envelope["data"]
     assert "output_token_bound" in envelope["warnings"]
+
+
+def _assert_navigation_text_is_redacted(text: str, sensitive_path: str) -> None:
+    assert "sk-abcdefghijklmnopqrstuvwxyz" not in text
+    assert sensitive_path not in text
+
+
+def _assert_rendered_fields_survive_redaction(rendered) -> None:
+    assert rendered["groups"][0]["locations"][0]["signature"]
+    assert rendered["diagnostics"][0]["message"]
+    assert rendered["diagnostics"][0]["code"]
+    assert rendered["diagnostics"][0]["related"][0]["signature"]
+
+
+def _assert_rendered_code_is_redacted(rendered, sensitive_path: str) -> None:
+    assert "sk-abcdefghijklmnopqrstuvwxyz" not in rendered["diagnostics"][0]["code"]
+    assert sensitive_path not in rendered["diagnostics"][0]["code"]
 
 
 def test_navigation_text_fields_are_secret_and_external_path_redacted(
@@ -5578,14 +5875,10 @@ def test_navigation_text_fields_are_secret_and_external_path_redacted(
     )
     rendered = json.loads(text)["data"]
 
-    assert "sk-abcdefghijklmnopqrstuvwxyz" not in text
-    assert r"C:\Users\operator\outside\secret.py" not in text
-    assert rendered["groups"][0]["locations"][0]["signature"]
-    assert rendered["diagnostics"][0]["message"]
-    assert rendered["diagnostics"][0]["code"]
-    assert "sk-abcdefghijklmnopqrstuvwxyz" not in rendered["diagnostics"][0]["code"]
-    assert r"C:\Users\operator\outside\secret.py" not in rendered["diagnostics"][0]["code"]
-    assert rendered["diagnostics"][0]["related"][0]["signature"]
+    external_path = r"C:\Users\operator\outside\secret.py"
+    _assert_navigation_text_is_redacted(text, external_path)
+    _assert_rendered_fields_survive_redaction(rendered)
+    _assert_rendered_code_is_redacted(rendered, external_path)
     assert rendered["hover"]
     assert rendered["groups"][0]["path"] == "api.py"
 
