@@ -1219,14 +1219,39 @@ def _remove_quietly(paths: tuple[str, ...]) -> None:
             pass
 
 
+def provider_cwd() -> tempfile.TemporaryDirectory:
+    """An empty directory outside the vault, for the duration of one call.
+
+    A memory call is an internal service call, not an agent's turn in the
+    operator's project: the material is already in the prompt and the answer's
+    shape is fixed by a schema. Left to inherit the caller's directory, the
+    child was starting inside the vault, and a CLI that discovers project
+    memory from its working directory upwards then loads this repository's
+    `CLAUDE.md` with the index and log it imports — before it ever sees the
+    prompt.
+
+    Measured 2026-08-28, paired, trivial prompt: 62.15s and 64.60s from the
+    vault against 27.24s and 33.90s from `/tmp` — about 33 seconds of fixed
+    overhead against a 90s ceiling, which is the whole distance between an
+    answer and the `draft:claude:provider_timeout` the live compile was
+    failing with. See `docs/research/2026-08-28-where-the-provider-runs.md`.
+
+    The directory must be outside the vault: project-memory discovery walks
+    upwards, so an empty directory under `cache/` would find the same file one
+    level up.
+    """
+    return tempfile.TemporaryDirectory(prefix="llm-wiki-provider-")
+
+
 def _codex_last_message(command: list[str], prompt_path: str, out_path: str) -> str:
-    with open(prompt_path, "rb") as stdin_handle:
+    with open(prompt_path, "rb") as stdin_handle, provider_cwd() as neutral:
         subprocess.run(
             command,
             stdin=stdin_handle,
             capture_output=True,
             timeout=_timeout_s(),
             check=False,
+            cwd=neutral,
         )
     try:
         return Path(out_path).read_text(encoding="utf-8", errors="ignore")
@@ -1273,15 +1298,17 @@ def _claude_cli_flags() -> frozenset[str]:
     if not claude_bin:
         return frozenset()
     try:
-        result = subprocess.run(
-            [claude_bin, "--help"],
-            capture_output=True,
-            timeout=30,
-            check=False,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-        )
+        with provider_cwd() as neutral:
+            result = subprocess.run(
+                [claude_bin, "--help"],
+                capture_output=True,
+                timeout=30,
+                check=False,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                cwd=neutral,
+            )
     except (subprocess.TimeoutExpired, OSError):
         return frozenset()
     return frozenset(re.findall(r"--[a-z][a-z-]+", result.stdout or ""))
@@ -1355,16 +1382,18 @@ def _call_claude(
     if not claude_bin:
         return ""
     try:
-        result = subprocess.run(
-            _claude_command(claude_bin, descriptor.model, system_prompt),
-            input=_claude_stdin(system_prompt, prompt),
-            capture_output=True,
-            timeout=_timeout_s(),
-            check=False,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-        )
+        with provider_cwd() as neutral:
+            result = subprocess.run(
+                _claude_command(claude_bin, descriptor.model, system_prompt),
+                input=_claude_stdin(system_prompt, prompt),
+                capture_output=True,
+                timeout=_timeout_s(),
+                check=False,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                cwd=neutral,
+            )
         return _claude_answer(descriptor, result)
     except subprocess.TimeoutExpired as exc:
         raise ProviderTimeout(
