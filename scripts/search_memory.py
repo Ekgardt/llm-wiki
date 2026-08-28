@@ -60,6 +60,7 @@ from reliable_memory import (  # noqa: E402
     fsync_file,
     validate_runtime_file,
 )
+from secret_redact import redact_secrets  # noqa: E402
 
 INDEX_DIR = STATE_ROOT / "cache"
 INDEX_FILE = INDEX_DIR / "index.sqlite"
@@ -157,13 +158,61 @@ from embedding_model import (  # noqa: E402
     prefixed_texts,
 )
 
+# Why there is no dense signal, in three words a reader can act on:
+# `import_failed` (the optional package is not installed — a worker launched
+# under the system interpreter instead of `uv run`), `model_unavailable` (the
+# package is there, the weights are not) and `load_failed` (both are there and
+# the model still would not load). The reason is bounded and redacted because
+# a load error quotes paths and occasionally a token.
+EMBEDDER_REASON_MAX_CHARS = 200
+
+_embedder_unavailable_reason: str | None = None
+_embedder_announced: set[str] = set()
+
+
+def embedder_unavailable_reason() -> str | None:
+    """Why the embedding model is unavailable, or None when it loaded.
+
+    `_get_embedder` was `except Exception: return None`, so a missing package,
+    a missing model and a corrupt one were the same answer as a vault that
+    simply has no vectors yet. A LongMemEval worker run under the system
+    `python3` retrieved zero rows and looked exactly like a retrieval
+    regression; the generation carried `vector_state: absent`, which was true
+    and said nothing.
+    """
+    return _embedder_unavailable_reason
+
+
+def _embedder_failure_kind(exc: BaseException) -> str:
+    if isinstance(exc, ImportError):
+        return "import_failed"
+    if isinstance(exc, OSError) or "NotFound" in type(exc).__name__:
+        return "model_unavailable"
+    return "load_failed"
+
+
+def _note_embedder_unavailable(kind: str, detail: str) -> None:
+    """Record why there is no dense signal, and say it once, not per call."""
+    global _embedder_unavailable_reason
+    text = " ".join(redact_secrets(detail).split())[:EMBEDDER_REASON_MAX_CHARS]
+    _embedder_unavailable_reason = f"{kind}: {text}" if text else kind
+    if kind in _embedder_announced:
+        return
+    _embedder_announced.add(kind)
+    print(
+        f"search_memory: no dense signal — embedding model {EMBEDDING_MODEL} "
+        f"is unavailable ({_embedder_unavailable_reason})",
+        file=sys.stderr,
+    )
+
 
 def _have_sentence_transformers() -> bool:
     """Check if sentence-transformers is importable."""
     try:
         import sentence_transformers  # noqa: F401
         return True
-    except ImportError:
+    except ImportError as exc:
+        _note_embedder_unavailable("import_failed", str(exc))
         return False
 
 
@@ -172,8 +221,13 @@ def _get_embedder():
 
     The model is cached at module level — loading ~90MB model once,
     not per-query. This is critical for benchmark latency.
+
+    Unavailable still means None, never an exception: the generation reader
+    treats an unusable query vector as "no dense signal" by contract and that
+    is exactly what an unavailable model means. What changed is that the
+    reason is recorded and named — see `embedder_unavailable_reason`.
     """
-    global _embedder_cache
+    global _embedder_cache, _embedder_unavailable_reason
     if _embedder_cache is not None:
         return _embedder_cache
     try:
@@ -181,9 +235,13 @@ def _get_embedder():
         _embedder_cache = SentenceTransformer(
             EMBEDDING_MODEL, revision=EMBEDDING_MODEL_REVISION
         )
-        return _embedder_cache
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - no dense signal is not an error
+        _note_embedder_unavailable(
+            _embedder_failure_kind(exc), f"{type(exc).__name__}: {exc}"
+        )
         return None
+    _embedder_unavailable_reason = None
+    return _embedder_cache
 
 
 _embedder_cache = None

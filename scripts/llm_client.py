@@ -64,6 +64,7 @@ from model_dlp import (
     require_safe_model_output,
 )
 from reliable_memory import canonical_json_bytes
+from secret_redact import redact_secrets
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -373,6 +374,66 @@ class ProviderTimeout(RuntimeError):
     """
 
 
+class ProviderExited(RuntimeError):
+    """The provider process failed before it could answer.
+
+    `_call_claude` ran the CLI with `check=False` and returned
+    `result.stdout or ""`, dropping `returncode` and `stderr` on the floor. A
+    crashed CLI, a CLI that refused the request and a CLI that genuinely
+    answered with nothing all reached `_outcome_of` as the same empty string,
+    and all three were reported as `empty_response`.
+
+    In the first LongMemEval run of 2026-08-27 all 26 failures surfaced as the
+    single opaque string `provider_no_response`. The cause — the worker
+    inherited this repository as its working directory, so `claude -p` loaded
+    `CLAUDE.md` with its ~300 KB of imports and answered as an agent turn,
+    175 s against 12 s from a neutral directory — stayed invisible until
+    someone ran a paired control by hand. The exit status and the first thing
+    the CLI printed were on the table the whole time.
+
+    This does not guess a cause. It carries the two facts the process itself
+    reported: the status it died with, and a bounded, redacted tail of what it
+    printed.
+    """
+
+    def __init__(self, provider: str, exit_code: int, stderr_excerpt: str) -> None:
+        detail = f": {stderr_excerpt}" if stderr_excerpt else ""
+        super().__init__(f"{provider} exited with status {exit_code}{detail}")
+        self.provider = provider
+        self.exit_code = exit_code
+        self.stderr_excerpt = stderr_excerpt
+
+
+# What a dying provider printed is a diagnostic, not a transcript: it is kept
+# short enough to read in a log line and is redacted, because a CLI that fails
+# on authentication is exactly the one that prints a credential.
+PROVIDER_STDERR_EXCERPT_CHARS = 500
+
+
+def _stderr_excerpt(stderr: object) -> str:
+    """A bounded, redacted tail of what the provider printed before it died."""
+    if not isinstance(stderr, str) or not stderr.strip():
+        return ""
+    text = " ".join(redact_secrets(stderr).split())
+    if len(text) <= PROVIDER_STDERR_EXCERPT_CHARS:
+        return text
+    dropped = len(text) - PROVIDER_STDERR_EXCERPT_CHARS
+    return f"[{dropped} earlier chars omitted] {text[-PROVIDER_STDERR_EXCERPT_CHARS:]}"
+
+
+def _exited_result(
+    descriptor: ProviderDescriptor,
+    exc: ProviderExited,
+    mode: str,
+    pre_call_count: TokenCount,
+) -> LLMResult:
+    """A process that died has a name of its own, distinct from silence."""
+    print(f"llm_client: {exc}", file=sys.stderr)
+    return LLMResult(
+        descriptor, None, True, "provider_exited", mode, TokenUsage(), pre_call_count
+    )
+
+
 def _completed_call(
     descriptor: ProviderDescriptor,
     caller,
@@ -382,6 +443,8 @@ def _completed_call(
 ) -> LLMResult:
     try:
         response = _invoked_backend(caller, descriptor, transport, mode)
+    except ProviderExited as exc:
+        return _exited_result(descriptor, exc, mode, pre_call_count)
     except ProviderTimeout:
         print(
             f"llm_client: {descriptor.provider} backend exceeded "
@@ -1258,6 +1321,23 @@ def _claude_stdin(system_prompt: str, prompt: str) -> str:
     return f"<system>{system_prompt}</system>\n\n{prompt}"
 
 
+def _claude_answer(
+    descriptor: ProviderDescriptor, result: subprocess.CompletedProcess
+) -> str:
+    """What the finished process said, or the reason it never said anything.
+
+    A usable answer is still an answer, whatever the exit status: nothing that
+    worked before is withdrawn here. Only a death with nothing to show for it
+    becomes a named failure instead of an anonymous empty string.
+    """
+    answer = result.stdout or ""
+    if result.returncode == 0 or answer.strip():
+        return answer
+    raise ProviderExited(
+        descriptor.provider, result.returncode, _stderr_excerpt(result.stderr)
+    )
+
+
 def _call_claude(
     descriptor: ProviderDescriptor,
     prompt: str,
@@ -1285,7 +1365,7 @@ def _call_claude(
             encoding="utf-8",
             errors="ignore",
         )
-        return result.stdout or ""
+        return _claude_answer(descriptor, result)
     except subprocess.TimeoutExpired as exc:
         raise ProviderTimeout(
             f"claude did not answer within {_timeout_s()}s"
