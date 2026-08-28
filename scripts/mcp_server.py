@@ -69,6 +69,14 @@ MAX_MCP_CONTEXT_TOKENS = 32_768
 MAX_MCP_ERROR_CHARS = 256
 MCP_OPERATION_SECONDS = 10.0
 MCP_LSP_STARTUP_SECONDS = 60.0
+# CODE-03: indexing a repository builds a whole generation, so its budget is a
+# measurement, not a choice. The real second repository on this machine --
+# /home/user/agenticos/checkout-claude/main, 436 sources, 1,235 chunks -- took
+# 118.9 s end to end, most of it embedding. 600 s leaves room for a repository
+# several times that size; anything larger is refused by name on the deadline
+# rather than half-built, because the build registers only after every artifact
+# is written, fsynced and validated.
+MCP_REPOSITORY_INDEX_SECONDS = 600.0
 MAX_NAVIGATION_SOURCE_BYTES = 16 * 1024 * 1024
 MAX_NAVIGATION_GRAPH_FACTS = 10_000
 MAX_NAVIGATION_SOURCE_CACHE_BYTES = 64 * 1024 * 1024
@@ -167,6 +175,9 @@ def _positioned_architecture_call(arguments: dict, mode: str) -> bool:
     return all(key in arguments for key in ("path", "line", "character"))
 
 
+_LONG_ARCHITECTURE_BUDGETS = {"index": MCP_REPOSITORY_INDEX_SECONDS}
+
+
 def _tool_operation_seconds(name: str, arguments: object) -> float:
     if name != "get_architecture" or not isinstance(arguments, dict):
         return MCP_OPERATION_SECONDS
@@ -175,7 +186,7 @@ def _tool_operation_seconds(name: str, arguments: object) -> float:
         arguments, mode
     ):
         return MCP_LSP_STARTUP_SECONDS
-    return MCP_OPERATION_SECONDS
+    return _LONG_ARCHITECTURE_BUDGETS.get(mode, MCP_OPERATION_SECONDS)
 
 
 def _operation_cancelled():
@@ -653,8 +664,23 @@ TOOL_INPUT_SCHEMAS = {
                     "provenance",
                     "snippet",
                     "coverage",
+                    "index",
+                    "repositories",
+                    "changes",
                 ],
                 "description": "Bounded architecture query mode",
+            },
+            "roots": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1, "maxLength": 255},
+                "minItems": 1,
+                "maxItems": 128,
+                "description": (
+                    "CODE-03 index mode: top-level directories of the "
+                    "repository to cover. Omit to use every Git-tracked "
+                    "top-level directory, which refuses by name if any of them "
+                    "is one the corpus collector will not accept"
+                ),
             },
             "symbol": {
                 "type": "string",
@@ -3380,6 +3406,13 @@ _ARCHITECTURE_CONTRACTS = {
         {"directory", "mode"},
         {"directory", "mode", "comparison", "base", "target", "branch"},
     ),
+    # CODE-03. `index` is the one mode that writes, and what it writes is a
+    # generation under `cache/evidence-graph/` -- disposable derived cache in
+    # this vault. It never writes into the repository it is pointed at, and it
+    # never activates: the single active pointer belongs to the vault.
+    "index": ({"directory", "mode"}, {"directory", "mode", "roots"}),
+    "repositories": ({"directory", "mode"}, {"directory", "mode"}),
+    "changes": ({"directory", "mode"}, {"directory", "mode"}),
 }
 
 
@@ -4157,9 +4190,42 @@ def _active_graph_quality(data: dict) -> dict:
     }
 
 
+def _repository_index_quality(data: dict) -> dict | None:
+    """CODE-03 answers are exact: they did the thing, or refused by name.
+
+    Without this they fell through the graph-completeness branch below and were
+    labelled "Live static extraction fallback is incomplete", which is not just
+    imprecise but false -- a listing of what is indexed extracts nothing.
+    """
+    if not isinstance(data, dict) or data.get("schema_version") != "repository-index/v1":
+        return None
+    if data.get("status") == "refused":
+        return {
+            "coverage": 0.0,
+            "confidence": 1.0,
+            "fallback": False,
+            "partial": True,
+            "warnings": [f"Refused: {data.get('reason')}"],
+        }
+    return {
+        "coverage": 1.0,
+        "confidence": 0.95,
+        "fallback": False,
+        "partial": bool(data.get("truncated") or data.get("paths_truncated")),
+        "warnings": [],
+    }
+
+
 def _quality_of_code_graph(name, data, arguments, limit_clamped) -> dict | None:
     if name not in {"find_dead_code", "get_architecture"}:
         return None
+    index_quality = _repository_index_quality(data)
+    if index_quality is not None:
+        return index_quality
+    return _graph_completeness_quality(data)
+
+
+def _graph_completeness_quality(data) -> dict:
     if not isinstance(data, dict) or data.get("fallback") is not False:
         return {
             "coverage": 0.6,
@@ -4673,6 +4739,58 @@ def _query_architecture_call(arguments: dict, deadline: float):
     return run_graph_query(directory, str(arguments["query"]), deadline)
 
 
+def _repository_index_call(call, arguments: dict, deadline: float):
+    """Turn a named CODE-03 refusal into an answer instead of an exception."""
+    from repository_index import RepositoryIndexRefused
+
+    try:
+        return call(arguments, deadline)
+    except RepositoryIndexRefused as refusal:
+        return refusal.as_dict()
+
+
+def _index_architecture_call(arguments: dict, deadline: float):
+    """CODE-03: build and register a generation for another local repository."""
+    return _repository_index_call(_index_repository_now, arguments, deadline)
+
+
+def _index_repository_now(arguments: dict, deadline: float):
+    from repository_index import index_repository
+
+    return index_repository(
+        arguments["directory"],
+        roots=arguments.get("roots"),
+        deadline=deadline,
+        cancelled=_operation_cancelled(),
+    )
+
+
+def _repositories_architecture_call(arguments: dict, deadline: float):
+    """CODE-03: which repositories have a registered generation, and what it covers."""
+    return _repository_index_call(_list_repositories_now, arguments, deadline)
+
+
+def _list_repositories_now(_arguments: dict, deadline: float):
+    from repository_index import list_repositories
+
+    return list_repositories(deadline=deadline)
+
+
+def _changes_architecture_call(arguments: dict, deadline: float):
+    """CODE-03: what changed in a repository since its newest generation."""
+    return _repository_index_call(_detect_changes_now, arguments, deadline)
+
+
+def _detect_changes_now(arguments: dict, deadline: float):
+    from repository_index import detect_repository_changes
+
+    return detect_repository_changes(
+        arguments["directory"],
+        deadline=deadline,
+        cancelled=_operation_cancelled(),
+    )
+
+
 def _tool_get_architecture(arguments: dict, deadline: float):
     try:
         data = _architecture_tool_call(arguments, deadline)
@@ -4701,6 +4819,9 @@ def _architecture_tool_call(arguments: dict, deadline: float):
         "snippet": _snippet_architecture_call,
         "coverage": _coverage_architecture_call,
         "query": _query_architecture_call,
+        "index": _index_architecture_call,
+        "repositories": _repositories_architecture_call,
+        "changes": _changes_architecture_call,
     }
     call = calls.get(mode, _architecture_mode_call)
     return call(arguments, deadline)

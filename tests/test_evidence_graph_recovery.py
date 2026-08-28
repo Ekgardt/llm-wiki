@@ -15,6 +15,44 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 
+_DEFAULT_CONTENT = b"def f(): pass\n"
+
+_EMPTY_GRAPH_RECORDS = {
+    "nodes": [],
+    "occurrences": [],
+    "assertions": [],
+    "evidence": [],
+    "observations": [],
+    "dependencies": [],
+}
+
+
+def _default_sources():
+    return [
+        {
+            "source_id": "source",
+            "relative_path": "app.py",
+            "sha256": hashlib.sha256(_DEFAULT_CONTENT).hexdigest(),
+            "size": len(_DEFAULT_CONTENT),
+            "media_type": "text/x-python",
+            "language": "python",
+            "git_oid": None,
+        }
+    ]
+
+
+def _publish_inputs(sources, source_bytes, graph_records):
+    """The three ways a caller can describe a generation, resolved to one shape."""
+    records = _EMPTY_GRAPH_RECORDS if graph_records is None else graph_records
+    if graph_records is not None:
+        return graph_records["sources"], graph_records["source_bytes"], records
+    resolved_sources = _default_sources() if sources is None else sources
+    resolved_bytes = (
+        {"source": _DEFAULT_CONTENT} if source_bytes is None else source_bytes
+    )
+    return resolved_sources, resolved_bytes, records
+
+
 def _publish(
     catalog,
     generation_id: str,
@@ -31,24 +69,9 @@ def _publish(
 
     directory = catalog.generations_path / generation_id
     directory.mkdir(parents=True)
-    content = b"def f(): pass\n"
-    if graph_records is not None:
-        sources = graph_records["sources"]
-        source_bytes = graph_records["source_bytes"]
-    if sources is None:
-        sources = [
-            {
-                "source_id": "source",
-                "relative_path": "app.py",
-                "sha256": hashlib.sha256(content).hexdigest(),
-                "size": len(content),
-                "media_type": "text/x-python",
-                "language": "python",
-                "git_oid": None,
-            }
-        ]
-    if source_bytes is None:
-        source_bytes = {"source": content}
+    sources, source_bytes, records = _publish_inputs(
+        sources, source_bytes, graph_records
+    )
     policy = {
         "daily_paths": [],
         "code_roots": [],
@@ -71,12 +94,12 @@ def _publish(
         database_path,
         sources=sources,
         source_bytes=source_bytes,
-        nodes=[] if graph_records is None else graph_records["nodes"],
-        occurrences=[] if graph_records is None else graph_records["occurrences"],
-        assertions=[] if graph_records is None else graph_records["assertions"],
-        evidence=[] if graph_records is None else graph_records["evidence"],
-        observations=[] if graph_records is None else graph_records["observations"],
-        dependencies=[] if graph_records is None else graph_records["dependencies"],
+        nodes=records["nodes"],
+        occurrences=records["occurrences"],
+        assertions=records["assertions"],
+        evidence=records["evidence"],
+        observations=records["observations"],
+        dependencies=records["dependencies"],
     )
     payload = database_path.read_bytes()
     manifest = {
@@ -324,7 +347,16 @@ def test_repository_mismatch_does_not_recover_corrupt_active_from_other_repo_his
     with sqlite3.connect(catalog.catalog_path) as database:
         history_before = database.execute("SELECT count(*) FROM activation_history").fetchone()[0]
 
-    assert evidence_graph.EvidenceGraph.open_active_for_repository(catalog, scope_a) is None
+    # CODE-03 changed what repository A gets, not what it is protected from.
+    # Before, an active pointer on another repository's generation made this
+    # None; now A is answered from its own registered generation. What the test
+    # was written to guard is unchanged and still asserted below: A is never
+    # handed B's corrupt generation, the pointer does not move, and no
+    # activation is recorded.
+    opened = evidence_graph.EvidenceGraph.open_active_for_repository(catalog, scope_a)
+    assert opened is not None
+    assert opened.generation_id == "repo-a"
+    opened.close()
 
     with sqlite3.connect(catalog.catalog_path) as database:
         active = database.execute(

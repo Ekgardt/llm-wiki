@@ -2294,9 +2294,19 @@ def test_read_only_catalog_rejects_write_transactions(tmp_path):
 
 
 @pytest.mark.parametrize("active_binding", ["foreign", "unbound"])
-def test_get_active_for_repository_rejects_ineligible_active_without_mutation(
+def test_get_active_for_repository_answers_from_its_own_generation_without_mutation(
     tmp_path, active_binding
 ):
+    """CODE-03 changed this contract, and the change is the feature.
+
+    Before: an active pointer naming another repository's generation (or an
+    unbound one) made this return None, so at most one repository at a time
+    could have a resolvable generation. Now the requested repository is
+    answered from its own registered generation. The property this test was
+    written for is untouched and still asserted: the pointer and the activation
+    history are not mutated. `..._returns_none_without_its_own_generation`
+    below keeps the refusal where it still applies.
+    """
     from repository_scope import resolve_repository_scope
 
     requested_repository = tmp_path / "requested"
@@ -2328,8 +2338,10 @@ def test_get_active_for_repository_rejects_ineligible_active_without_mutation(
             database.execute("SELECT COUNT(*) FROM activation_history").fetchone()[0],
         )
 
-    assert catalog.get_active_for_repository(requested_scope) is None
+    selected = catalog.get_active_for_repository(requested_scope)
 
+    assert selected is not None
+    assert selected["generation_id"] == "requested"
     with closing(sqlite3.connect(catalog.catalog_path)) as database:
         after = (
             database.execute(
@@ -2338,6 +2350,32 @@ def test_get_active_for_repository_rejects_ineligible_active_without_mutation(
             database.execute("SELECT COUNT(*) FROM activation_history").fetchone()[0],
         )
     assert after == before
+
+
+def test_get_active_for_repository_returns_none_without_its_own_generation(tmp_path):
+    """The refusal that survives CODE-03: nothing registered for this repository."""
+    from repository_scope import resolve_repository_scope
+
+    requested_repository = tmp_path / "requested"
+    foreign_repository = tmp_path / "foreign"
+    requested_repository.mkdir()
+    foreign_repository.mkdir()
+    requested_scope = resolve_repository_scope(requested_repository)
+    foreign_scope = resolve_repository_scope(foreign_repository)
+    catalog = _catalog(tmp_path)
+    _publish(catalog, "active", repository_scope=foreign_scope.as_dict())
+    catalog.register("active")
+    assert catalog.activate("active", expected_active=None)
+
+    assert catalog.get_active_for_repository(requested_scope) is None
+
+    with closing(sqlite3.connect(catalog.catalog_path)) as database:
+        assert (
+            database.execute(
+                "SELECT active_generation_id FROM catalog_state WHERE singleton = 1"
+            ).fetchone()[0]
+            == "active"
+        )
 
 
 def test_get_active_for_repository_repairs_only_to_same_scope_fallback(tmp_path):
