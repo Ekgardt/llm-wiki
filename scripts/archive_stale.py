@@ -15,12 +15,18 @@ Usage:
 
 Pages are NEVER deleted — only moved. Git tracks the move. The page's
 frontmatter gets `status: archived` so active retrieval can exclude it.
+
+A page's age is the age of its content, not of its file: see
+`committed_content_times` below and
+`docs/research/2026-08-28-what-a-pages-age-is.md`.
 """
 from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 
@@ -33,7 +39,7 @@ from okf_types import (  # noqa: E402
     NEVER_ARCHIVE_TYPES,
     TYPE_AGE_DAYS,
 )
-from page_status import is_retired  # noqa: E402
+from page_status import is_retired, normalized_status  # noqa: E402
 from reliable_memory import sha256_bytes  # noqa: E402
 
 KNOWLEDGE = ROOT / "knowledge" / "notes"
@@ -47,7 +53,151 @@ CONFIDENCE_RE = re.compile(r"^confidence:\s*(.+?)\s*$", re.MULTILINE)
 
 TYPE_RE = re.compile(r"^type:\s*(.+?)\s*$", re.MULTILINE)
 
+# The status word archiving displaced, so restore can hand it back rather than
+# leaving the page with none.
+STATUS_BEFORE_ARCHIVE = "status_before_archive"
+BEFORE_ARCHIVE_RE = re.compile(rf"^{STATUS_BEFORE_ARCHIVE}:\s*(.+?)\s*$", re.MULTILINE)
+
+_STATUS_LINE_RE = re.compile(r"^status:\s*.+$", re.MULTILINE)
+
+# What archiving writes over a page that had no frontmatter at all, and the one
+# shape restore may therefore remove whole.
+_INSERTED_FIELD = "status: archived"
+_INSERTED_BLOCK = f"---\n{_INSERTED_FIELD}\n---"
+
 MAX_ARCHIVE_PAGE_BYTES = 16 * 1024 * 1024
+
+# One read-only git question may not hold the weekly pass up: the whole set of
+# them costs 0.14 s on this vault, and a hang here would stall the archiver.
+GIT_TIMEOUT_SECONDS = 20.0
+
+# The pathspec every git question is bounded by, matching KNOWLEDGE's place in
+# the three-zone layout.
+NOTES_PATHSPEC = "knowledge/notes"
+
+# `git log --format=%x00%ct --name-only` writes one NUL-prefixed record per
+# commit: the commit time, then the paths that commit touched.
+_COMMIT_SEPARATOR = "\x00"
+
+
+def _git_output(root: Path, arguments: list[str]) -> str | None:
+    """One read-only git question, or None when git cannot answer it.
+
+    Absent git, an unborn or non-repository vault, a timeout and a broken
+    invocation are all the same answer here — no history — and the caller falls
+    back to the file clock rather than refusing to archive.
+
+    `--no-optional-locks` because this is a read: `git diff` would otherwise
+    refresh the index and take `index.lock`, and the nightly self-update
+    (2026-08-23) runs git against this same checkout.
+    """
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "--no-optional-locks",
+                "-C",
+                str(root),
+                "-c",
+                "core.quotePath=false",
+                *arguments,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=GIT_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout
+
+
+def _repository_prefix(root: Path) -> str:
+    """Where the vault sits inside its repository, as git spells that path.
+
+    Empty when the vault *is* the repository root, which is this installation.
+    It matters because `diff` and `log` name paths from the repository root
+    while the vault names them from its own, and a nested vault whose two
+    halves never met would silently fall back to file clocks everywhere.
+    """
+    output = _git_output(root, ["rev-parse", "--show-prefix"])
+    if output is None:
+        return ""
+    return output.strip()
+
+
+def _null_separated(root: Path, arguments: list[str]) -> set[str]:
+    output = _git_output(root, [*arguments, "--", NOTES_PATHSPEC])
+    if output is None:
+        return set()
+    return {item for item in output.split("\0") if item}
+
+
+def _timed_paths(lines: list[str]) -> tuple[float, list[str]] | None:
+    if not lines[0].isdigit():
+        return None
+    return float(lines[0]), lines[1:]
+
+
+def _commit_record(record: str) -> tuple[float, list[str]] | None:
+    """One `<commit time>` and the paths it touched, or None for anything else."""
+    lines = [line for line in record.split("\n") if line]
+    if len(lines) < 2:
+        return None
+    return _timed_paths(lines)
+
+
+def _fold_commit(record: str, times: dict[str, float]) -> None:
+    """The first commit to name a path is the last one that touched it."""
+    parsed = _commit_record(record)
+    if parsed is None:
+        return
+    stamp, paths = parsed
+    for path in paths:
+        times.setdefault(path, stamp)
+
+
+def _commit_times(root: Path) -> dict[str, float]:
+    """When each note was last touched by a commit, in one history pass."""
+    output = _git_output(
+        root,
+        ["log", "--no-renames", "--format=%x00%ct", "--name-only", "--", NOTES_PATHSPEC],
+    )
+    if output is None:
+        return {}
+    times: dict[str, float] = {}
+    for record in output.split(_COMMIT_SEPARATOR):
+        _fold_commit(record, times)
+    return times
+
+
+def committed_content_times(root: Path) -> dict[str, float]:
+    """Vault-relative note path -> when the bytes now on disk were committed.
+
+    Only pages git can vouch for are listed: tracked *and* unmodified, so the
+    last commit that touched the path is the commit that wrote what is there
+    now. A locally modified page, an untracked one, a vault that is not a
+    repository and a machine without git are all absent from this map, and age
+    by their file clock instead.
+
+    This exists because `st_mtime` answers "when was this file last written",
+    which on this vault is not "when did this page last change": a checkout, an
+    index rebuild or the nightly backlink writer rewrites bytes that are
+    already identical, and every such touch used to restart the forgetting
+    clock. Measured 2026-08-28 — 53 of 76 tracked notes carried an mtime more
+    than a day newer than their last content change while byte-identical to
+    HEAD, the largest gap 38 days.
+    """
+    unmodified = _null_separated(root, ["ls-files", "--full-name", "-z"]) - _null_separated(
+        root, ["diff", "--name-only", "-z", "HEAD"]
+    )
+    times = _commit_times(root)
+    prefix = _repository_prefix(root)
+    return {
+        path[len(prefix):]: times[path] for path in sorted(unmodified) if path in times
+    }
 
 
 def _get_type_threshold(page_type: str) -> int:
@@ -69,11 +219,34 @@ def _kept_by_frontmatter(frontmatter: str) -> bool:
     return _field_value(frontmatter, TYPE_RE) in NEVER_ARCHIVE_TYPES
 
 
-def _stale_by_mtime(md: Path, threshold_ts: float) -> bool:
+def _committed_time(md: Path, committed: Mapping[str, float], default: float) -> float:
     try:
-        return md.stat().st_mtime < threshold_ts
+        relative = md.relative_to(ROOT).as_posix()
+    except ValueError:
+        return default
+    return committed.get(relative, default)
+
+
+def _content_change_time(md: Path, committed: Mapping[str, float]) -> float | None:
+    """The oldest evidence of this page's last content change.
+
+    The file clock and the commit that wrote these bytes are both upper bounds
+    on when the content last changed, so the older of the two is the honest
+    answer — and taking the older one means this signal can only ever make a
+    page more archivable than the file clock alone did, never less.
+    """
+    try:
+        modified = md.stat().st_mtime
     except OSError:
+        return None
+    return min(modified, _committed_time(md, committed, modified))
+
+
+def _stale_by_age(md: Path, threshold_ts: float, committed: Mapping[str, float]) -> bool:
+    changed = _content_change_time(md, committed)
+    if changed is None:
         return False
+    return changed < threshold_ts
 
 
 def _access_keeps_alive(md: Path, page_type: str, confidence: str) -> bool:
@@ -92,58 +265,91 @@ def _access_keeps_alive(md: Path, page_type: str, confidence: str) -> bool:
         return False
 
 
-def _stale_without_frontmatter(md: Path, default_cutoff_ts: float) -> bool:
-    if not _stale_by_mtime(md, default_cutoff_ts):
+def _stale_without_frontmatter(
+    md: Path, default_cutoff_ts: float, committed: Mapping[str, float]
+) -> bool:
+    if not _stale_by_age(md, default_cutoff_ts, committed):
         return False
     return not _access_keeps_alive(md, "", "medium")
 
 
-def _stale_with_frontmatter(md: Path, frontmatter: str) -> bool:
+def _stale_with_frontmatter(
+    md: Path, frontmatter: str, committed: Mapping[str, float]
+) -> bool:
     if _kept_by_frontmatter(frontmatter):
         return False
     page_type = _field_value(frontmatter, TYPE_RE)
     threshold_ts = datetime.now().timestamp() - (
         _get_type_threshold(page_type) * 86400
     )
-    if not _stale_by_mtime(md, threshold_ts):
+    if not _stale_by_age(md, threshold_ts, committed):
         return False
     confidence = _field_value(frontmatter, CONFIDENCE_RE) or "medium"
     return not _access_keeps_alive(md, page_type, confidence)
 
 
-def _is_stale(md: Path, default_cutoff_ts: float, default_days: int) -> bool:
+def _is_stale(
+    md: Path,
+    default_cutoff_ts: float,
+    default_days: int,
+    committed: Mapping[str, float] | None = None,
+) -> bool:
     """Check if a page is stale using hybrid time + access-aware thresholds.
 
-    v4.0: Combines type-aware mtime thresholds with Ebbinghaus decay score
-    from access_tracking. A page that is mtime-stale but frequently accessed
-    STAYS ALIVE (access reinforces). A page that is mtime-stale AND never
-    accessed gets archived (both signals agree).
+    v4.0: Combines type-aware age thresholds with the Ebbinghaus decay score
+    from access_tracking. A page that is old but frequently accessed STAYS
+    ALIVE (access reinforces). A page that is old AND never accessed gets
+    archived (both signals agree).
+
+    `committed` carries `committed_content_times`; without it the page ages by
+    its file clock alone, which is what a caller holding no history can honestly
+    say.
     """
     try:
         content = md.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return False
+    known = committed or {}
     frontmatter = FRONTMATTER_RE.match(content)
     if frontmatter is None:
-        return _stale_without_frontmatter(md, default_cutoff_ts)
-    return _stale_with_frontmatter(md, frontmatter.group(1))
+        return _stale_without_frontmatter(md, default_cutoff_ts, known)
+    return _stale_with_frontmatter(md, frontmatter.group(1), known)
 
 def _with_archived_status(content: str) -> str:
     """The page as archived: its status field says so, however it was written."""
     frontmatter = FRONTMATTER_RE.match(content)
     if frontmatter is None:
         return _inserted_archived_frontmatter(content)
-    if STATUS_RE.search(frontmatter.group(1)):
-        return re.sub(
-            r"(^status:\s*).+$", r"\1archived", content, count=1, flags=re.MULTILINE
-        )
-    return re.sub(r"^(---\s*\n)", r"\1status: archived\n", content, count=1)
+    declared = _field_value(frontmatter.group(1), STATUS_RE)
+    if not declared:
+        return re.sub(r"^(---\s*\n)", r"\1status: archived\n", content, count=1)
+    return _replaced_status(content, declared)
+
+
+def _replaced_status(content: str, declared: str) -> str:
+    """`status: archived`, keeping the word it displaced for the way back.
+
+    Restore used to delete the status line outright, so a page archived as
+    `status: preliminary` came back declaring nothing at all — a page's own
+    editorial state lost across a round trip this module calls dormancy rather
+    than deletion (`NEW-128`).
+    """
+    if normalized_status(declared) == "archived":
+        return re.sub(_STATUS_LINE_RE, "status: archived", content, count=1)
+    replacement = f"status: archived\n{STATUS_BEFORE_ARCHIVE}: {declared}"
+    return re.sub(_STATUS_LINE_RE, lambda _: replacement, content, count=1)
 
 
 def _inserted_archived_frontmatter(content: str) -> str:
-    if "status:" in content:
-        return content
-    return f"---\nstatus: archived\n---\n\n{content}"
+    """A page with no frontmatter gets one, so it declares that it is retired.
+
+    This used to hand the page back untouched whenever the literal `status:`
+    appeared anywhere in the body — prose, not a declaration. The page was then
+    archived while declaring no retired status at all: the corpus collector
+    still refused it by directory, but the legacy lexical index, which does not
+    skip `archive/`, answered it at rank 1 from inside the archive (`NEW-126`).
+    """
+    return f"{_INSERTED_BLOCK}\n\n{content}"
 
 
 def _free_archive_path(archive_path: Path) -> Path:
@@ -214,8 +420,11 @@ def _scanned_pages() -> list[Path]:
     ]
 
 
-def _stale_pages(cutoff: float, days: int) -> list[Path]:
-    return [md for md in _scanned_pages() if _is_stale(md, cutoff, days)]
+def _stale_pages(
+    cutoff: float, days: int, committed: Mapping[str, float] | None = None
+) -> list[Path]:
+    known = committed_content_times(ROOT) if committed is None else committed
+    return [md for md in _scanned_pages() if _is_stale(md, cutoff, days, known)]
 
 
 def _archive_all(stale: list[Path], apply: bool) -> int:
@@ -246,13 +455,41 @@ def _archived_pages(slug: str) -> list[Path]:
 
 
 def _without_archived_status(content: str) -> str:
-    """The page as active again: the status line archiving added is removed."""
+    """The page as active again: exactly what archiving wrote is taken back.
+
+    Three shapes, because archiving writes three: a whole frontmatter block it
+    inserted, a `status:` line it added, or a status word it displaced and
+    recorded. Each is undone into the bytes it was made from.
+    """
     frontmatter = FRONTMATTER_RE.match(content)
     if frontmatter is None:
         return content
     if not re.search(r"^status:\s*archived\s*$", frontmatter.group(1), re.MULTILINE):
         return content
-    return re.sub(r"^status:\s*archived\s*\n", "", content, count=1, flags=re.MULTILINE)
+    return _reactivated(content, frontmatter)
+
+
+def _reactivated(content: str, frontmatter: re.Match[str]) -> str:
+    if frontmatter.group(1).strip() == _INSERTED_FIELD:
+        return content[frontmatter.end():]
+    previous = _field_value(frontmatter.group(1), BEFORE_ARCHIVE_RE)
+    if not previous:
+        return re.sub(r"^status:\s*archived\s*\n", "", content, count=1, flags=re.MULTILINE)
+    return _previous_status(content, previous)
+
+
+def _previous_status(content: str, previous: str) -> str:
+    """The status word archiving displaced, and no trace of the marker."""
+    without_marker = re.sub(
+        rf"^{STATUS_BEFORE_ARCHIVE}:\s*.*\n",
+        "",
+        content,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    return re.sub(
+        _STATUS_LINE_RE, lambda _: f"status: {previous}", without_marker, count=1
+    )
 
 
 def _restore_destination(archived: Path) -> Path:
@@ -288,7 +525,11 @@ def restore_page(slug: str, *, apply: bool) -> str:
     archived = _archived_pages(slug)
     if not archived:
         return f"NOT ARCHIVED: {slug}"
-    source = archived[0]
+    return _restore_one(archived[0], apply)
+
+
+def _restore_one(source: Path, apply: bool) -> str:
+    """One archived copy, checked against the active tree before it moves."""
     destination = _restore_destination(source)
     if destination.exists():
         return f"ALREADY ACTIVE: {destination.relative_to(ROOT).as_posix()}"
@@ -342,7 +583,12 @@ def main() -> int:
         print(f"  {outcome}")
         return 1 if "ERROR" in outcome else 0
     cutoff = datetime.now().timestamp() - (args.days * 86400)
-    stale = _stale_pages(cutoff, args.days)
+    committed = committed_content_times(ROOT)
+    print(
+        f"Age from committed content for {len(committed)} page(s); "
+        "the rest age by their file clock."
+    )
+    stale = _stale_pages(cutoff, args.days, committed)
     if not stale:
         print(f"No stale pages found (threshold: {args.days} days).")
         return 0

@@ -246,6 +246,26 @@ window). The age-based forgetting path has never fired on this vault and, on
 mtime, cannot fire for at least another 49 days. Every ageing number in §3 is
 therefore from synthetic ages on real pages, and is labelled so.
 
+### Later the same day — all three closed, and the stand says so
+
+Nothing above is rewritten; this records what happened next. `NEW-126`,
+`NEW-127` and `NEW-128` were fixed in `scripts/archive_stale.py` and the stand
+re-run on the same live pages now passes **9 of 9** gates, `legacy.no_archive_leak`
+included (0 leaked, against 1 before). Both synthetic restore cases now come
+back byte-identical and both archived copies declare a retired status; live
+restore fidelity is unchanged at 37/37, and the ageing rates are unchanged at
+1.00 / 1.00 / 1.00 with the same 29 pages and 62 062 bytes archived.
+
+The recency fix is a design change and carries its own dated research:
+`docs/research/2026-08-28-what-a-pages-age-is.md`. A tracked page whose bytes
+still match HEAD is now dated by the commit that wrote them; everything else
+keeps its file clock, and where both are known the older wins. §4's central
+number survives the fix and is the honest headline: **still 0 of 107 pages
+archivable today**, because nothing here is genuinely past its window — the
+oldest archivable-type page is 49.3 days old, not 11.2, against a 60-day
+window. What changed is that the clock now runs: the first page reaches its own
+window in 12 days rather than 49.
+
 ---
 
 ## 5. Against the field
