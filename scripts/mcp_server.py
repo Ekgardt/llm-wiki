@@ -3298,6 +3298,10 @@ _ARCHITECTURE_CONTRACTS = {
         {"directory", "mode"},
         {"directory", "mode", "live"},
     ),
+    "provenance": (
+        {"directory", "mode", "symbol"},
+        {"directory", "mode", "symbol"},
+    ),
     "impact": (
         {"directory", "mode"},
         {"directory", "mode", "comparison", "base", "target", "branch"},
@@ -4543,6 +4547,17 @@ def _architecture_mode_call(arguments: dict, deadline: float):
     )
 
 
+def _provenance_architecture_call(arguments: dict, deadline: float):
+    """MEM-16: symbol -> decision pages naming it -> their cited sources."""
+    from memory_state import ROOT
+    from provenance_join import join_symbol_provenance
+
+    directory = Path(arguments["directory"]).resolve()
+    return join_symbol_provenance(
+        Path(ROOT), directory, str(arguments["symbol"]), deadline
+    )
+
+
 def _tool_get_architecture(arguments: dict, deadline: float):
     try:
         return _architecture_tool_call(arguments, deadline), False
@@ -4557,6 +4572,7 @@ def _architecture_tool_call(arguments: dict, deadline: float):
     calls = {
         "impact": _impact_architecture_call,
         "summary": _summary_architecture_call,
+        "provenance": _provenance_architecture_call,
     }
     call = calls.get(mode, _architecture_mode_call)
     return call(arguments, deadline)
