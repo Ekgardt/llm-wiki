@@ -43,9 +43,9 @@ This index catalogs durable memory distilled from AI agent sessions
 - [[knowledge/notes/observable-capture-and-bounded-maintenance-decision]] — A failed capture is recorded durably instead of vanishing,
 - [[knowledge/notes/one-trust-weight-across-retrieval-paths-decision]] — Typed provenance multiplies the score that decides the order on every retrieval path, from one shared table, and the weight is reported.
 - [[knowledge/notes/oversized-daily-compile-decision]] — a daily log larger than the compile input budget should be
-- [[knowledge/notes/ownership-actor-is-the-agent-decision]] — a lease's actor is the agent that takes it — process, role and scope — because naming the machine account instead made `actor_id UNIQUE` collapse the whole runtime to one lease at a time.
+- [[knowledge/notes/ownership-actor-is-the-agent-decision]] — a lease's actor is the agent that takes it — process,
 - [[knowledge/notes/part-scoped-evidence-decision]] — A compiled page cites the bytes of the compile part it was written from, and every reader verifies that citation by finding an entry-aligned slice, starting where a part starts, whose bytes still hash to what the page recorded.
-- [[knowledge/notes/provider-runs-outside-the-vault-decision]] — every provider subprocess starts in an empty directory outside the vault, because inheriting the vault made the CLI load this repository's own memory before it saw the prompt.
+- [[knowledge/notes/provider-runs-outside-the-vault-decision]] — every provider subprocess starts in an empty directory
 - [[knowledge/notes/read-only-lsp-navigation-engine-decision]] — LLM Wiki will keep its structural Evidence Graph and add an owned read-only LSP engine for precise live navigation, starting with production-quality Python support.
 - [[knowledge/notes/reliability-v3-runtime-adoption-implementation-decision]] — The approved Reliability V3 operational database pair may now be implemented with explicit offline adoption, retained v2 evidence, immutable tombstones, and no change to Markdown authority or runtime roots.
 - [[knowledge/notes/reliable-memory-stage-2]] — Stage 2 keeps Markdown authoritative while adding recoverable transactions, durable checkpoints, safe archives, versioned compile caching, a fenced priority queue, and evidence-backed claims.
