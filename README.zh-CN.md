@@ -170,6 +170,21 @@ uv run python scripts/release_manifest.py v4.0.0 --markdown
 LLM_WIKI_COMMIT=$(git rev-parse v4.0.0^{commit}) bash ./install.sh
 ```
 
+### 共享 HTTP 传输（可选）
+
+MCP 服务器默认使用 stdio：每个代理都会启动自己的进程。如果同时运行多个代理，一个
+共享的本地服务器更划算——在本仓库实测：每增加一个代理，stdio 需 1220.3 MiB，共享
+服务器仅需 0.1 MiB；新会话响应时间为 0.010–0.013 秒，而非 1.3–2.9 秒。代价是单次
+调用多花 8–22 毫秒，所以只有一个代理时 stdio 仍然更优。
+
+```bash
+uv run python scripts/mcp_http.py --port 8931
+```
+
+仅绑定字面回环地址，拒绝任何 `Origin`，并要求服务器写入
+`<状态根目录>/run/mcp-http/token`（权限 0600）的持有者令牌。stdio 未作改动，仍是
+默认方式。
+
 ### 依赖配置
 
 MCP 属于 production baseline；`mcp-server` 仍是 compatibility alias。全新 production

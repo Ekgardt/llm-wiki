@@ -172,6 +172,23 @@ Install that exact commit:
 LLM_WIKI_COMMIT=$(git rev-parse v4.0.0^{commit}) bash ./install.sh
 ```
 
+### Shared HTTP transport (optional)
+
+The MCP server speaks stdio by default: every agent starts its own process. If
+you run several agents at once, one shared local server is cheaper — measured
+on this vault, a marginal agent costs 1220.3 MiB through stdio and 0.1 MiB
+through the shared server, and a new session answers in 0.010-0.013 s instead
+of 1.3-2.9 s. A single call costs 8-22 ms more, so for one agent stdio still
+wins.
+
+```bash
+uv run python scripts/mcp_http.py --port 8931
+```
+
+It binds literal loopback only, refuses any `Origin`, and requires the bearer
+token it writes to `<state root>/run/mcp-http/token` with mode 0600. stdio is
+unchanged and remains the default.
+
 ### Dependency profiles
 
 MCP is part of the production baseline; `mcp-server` remains a compatibility alias. Fresh
