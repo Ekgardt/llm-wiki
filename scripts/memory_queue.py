@@ -64,6 +64,9 @@ _MAX_RUNTIME_ATTEMPTS = 100
 _MAX_MARKER_BYTES = 64
 _MAX_QUEUE_PAYLOAD_BYTES = 1024 * 1024
 _MAX_QUEUE_DEPTH = 32
+# One trail line per failed processor. The trail is read by a person at
+# session start, so the reason has to fit a line, not carry a stack.
+MAX_PROCESSOR_REASON_CHARS = 300
 _MAX_CLI_DETAIL_CHARS = 240
 _MAX_QUEUE_STRING_BYTES = 256 * 1024
 _MAX_QUEUE_CONTAINER_MEMBERS = 1024
@@ -13967,13 +13970,38 @@ def _encode_processor_outcome(outcome: object) -> bytes:
     return b"?"
 
 
+def _record_processor_failure(task: dict[str, Any], error: BaseException) -> None:
+    """Leave the reason on disk before the wire flattens it to one letter.
+
+    The frame deliberately carries a stable code and no traceback, so the
+    parent can only ever record `processor_failed`. Measured 2026-08-28 on the
+    live vault: 72 such attempts and eleven `flush` tasks stuck at eight
+    attempts each, with no reason anywhere — not in `attempt_history`, not in
+    the step's stderr. Eleven sessions had failed to become memory and the
+    trail could not say why. Recording here keeps the wire contract and still
+    answers the question.
+    """
+    try:
+        from capture_diagnostics import record_capture_failure
+
+        kind = str(task.get("kind", "unknown"))
+        reason = f"{kind}: {type(error).__name__}: {redact_secrets(str(error))}"
+        record_capture_failure(
+            "queue_processor", reason[:MAX_PROCESSOR_REASON_CHARS],
+            session_id=str(task.get("id", ""))[:32] or None,
+        )
+    except Exception:  # noqa: BLE001 - diagnostics never change the outcome
+        pass
+
+
 def _processor_result_frame(
     processor: Callable[[dict], bool | DeferredResult], task: dict[str, Any]
 ) -> bytes:
     """Run the task; a failure is reported as a stable code, never a traceback."""
     try:
         return _encode_processor_outcome(processor(task))
-    except Exception:  # noqa: BLE001 - parent receives a stable code only
+    except Exception as error:  # noqa: BLE001 - parent receives a stable code only
+        _record_processor_failure(task, error)
         return b"E"
 
 
