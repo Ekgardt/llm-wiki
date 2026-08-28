@@ -1524,7 +1524,10 @@ def _architecture_community(request: dict):
     from code_graph import detect_communities
 
     return detect_communities(
-        request["resolved"], live=request["live"], with_report=True
+        request["resolved"],
+        symbol=request.get("symbol"),
+        live=request["live"],
+        with_report=True,
     )
 
 
@@ -3349,7 +3352,13 @@ _ARCHITECTURE_CONTRACTS = {
     ),
     "community": (
         {"directory", "mode"},
-        {"directory", "mode", "live"},
+        # `symbol` is optional and narrows the answer to the communities that
+        # symbol belongs to. Measured 2026-08-28: the whole-graph listing
+        # cannot be both complete and bounded here — naming all 4,078
+        # communities costs 899,071 tokens against a 25,000 ceiling — so
+        # "which module does X belong to" needs an anchor, exactly as
+        # who-calls does. Anchored, the same question costs 291 tokens.
+        {"directory", "mode", "symbol", "live"},
     ),
     "provenance": (
         {"directory", "mode", "symbol"},

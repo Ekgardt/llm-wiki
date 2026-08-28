@@ -5016,3 +5016,13 @@ LLM работало в своём лучшем случае (два канди�
 пропущенных; парный стенд без изменения оценок (llm_wiki 8/13, llm_wiki_best
 11/13). Отчёт — `docs/research/2026-08-28-a-zero-that-means-unresolved.md`.
 
+**Однострочный остаток `NEW-125` закрыт (2026-08-28).** Контракт аргументов
+`mode=community` в `scripts/mcp_server.py` теперь принимает необязательный
+`symbol` и передаёт его дальше; целый перечень остаётся законным вопросом.
+Живая проверка через `_execute_tool_call`: `mode=community symbol=fuse_rrf`
+отвечает за 19.79 с ответом в 2401 знак — сообщество из пяти членов, среди
+них `scripts.retrieval._fusion_weights` в `scripts/retrieval.py:1313`, то
+есть ровно эталон задачи T13, недостижимый никакой границей перечня.
+Проверка — `tests/test_community_takes_a_symbol_anchor.py` (4 теста, два
+падают на чистом HEAD); `tests/test_mcp_server.py` без изменений.
+
