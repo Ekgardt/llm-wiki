@@ -34,6 +34,7 @@ Design:
 """
 from __future__ import annotations
 
+import contextlib
 import functools
 import hashlib
 import json
@@ -903,8 +904,55 @@ _PROBES = {
 }
 
 
+# The ceiling one caller has set for its own calls, or None for the default.
+# A module-level value, not a parameter, because it has to reach every backend
+# without threading a number through five call shapes that do not otherwise
+# differ.
+_CALL_CEILING_S: int | None = None
+
+DEFAULT_TIMEOUT_S = 90
+
+
+@contextlib.contextmanager
+def call_ceiling(seconds: int):
+    """Give the calls made inside this block their own ceiling, in seconds.
+
+    The default fits a short call and does not fit a compile draft, which asks
+    for a whole plan in one answer. Measured 2026-08-28 on the live vault: the
+    compile failed with `draft:claude:provider_timeout` at 90s and the same
+    daily compiled at 600s, the whole pass — a rejected draft, its retry and
+    the critique batches — taking 225s of wall time. So one call is over 90s
+    and under 225s, and a per-call ceiling says that where a global default
+    cannot: raising the default would also make a stuck capture flush wait
+    three times longer before anyone heard about it.
+    """
+    global _CALL_CEILING_S
+    _require_positive_seconds(seconds)
+    previous = _CALL_CEILING_S
+    _CALL_CEILING_S = seconds
+    try:
+        yield
+    finally:
+        _CALL_CEILING_S = previous
+
+
+def _require_positive_seconds(seconds: object) -> None:
+    if isinstance(seconds, bool) or not isinstance(seconds, int) or seconds <= 0:
+        raise ValueError("call ceiling must be a positive whole number of seconds")
+
+
 def _timeout_s() -> int:
-    return int(os.environ.get("MEMORY_LLM_TIMEOUT_S", "90"))
+    """The environment, else the caller's own ceiling, else the short default.
+
+    The environment wins so an operator debugging a hang can widen every call
+    from outside without editing code.
+    """
+    override = os.environ.get("MEMORY_LLM_TIMEOUT_S")
+    if override is not None:
+        return int(override)
+    if _CALL_CEILING_S is not None:
+        return _CALL_CEILING_S
+    return DEFAULT_TIMEOUT_S
 
 
 def _reported_count(value: object) -> int | None:

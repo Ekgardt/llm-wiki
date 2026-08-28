@@ -70,7 +70,12 @@ from evidence_resolver import (  # noqa: E402
     _daily_part_bounds,
     daily_entries,
 )
-from llm_client import call_candidate, probe_candidate, provider_candidates  # noqa: E402
+from llm_client import (  # noqa: E402
+    call_candidate,
+    call_ceiling,
+    probe_candidate,
+    provider_candidates,
+)
 from markdown_transaction import (  # noqa: E402
     MarkdownChange,
     MarkdownCoordinator,
@@ -3845,6 +3850,16 @@ def _unlink_quietly(path: Path) -> None:
         pass
 
 
+# One compile call may run this long. Measured 2026-08-28 on the live vault:
+# the pass failed at the 90s default with `draft:claude:provider_timeout` and
+# the same daily compiled at 600s, the whole pass — a rejected draft, its retry
+# and the critique batches — taking 225s of wall time. So one call is over 90s
+# and under 225s, and this covers the observed pass with room without becoming
+# "no ceiling". The default stays short for everyone else: a stuck capture
+# flush should still be heard about in ninety seconds.
+COMPILE_PROVIDER_CEILING_S = 300
+
+
 def main() -> int:
     args = parse_args()
     if args.discard_unusable_receipts:
@@ -3861,7 +3876,8 @@ def main() -> int:
         _mark_finished(args.trigger, "error", "lock held by another compile")
         return 1
     try:
-        return _run(args)
+        with call_ceiling(COMPILE_PROVIDER_CEILING_S):
+            return _run(args)
     except BaseException as e:  # noqa: BLE001
         _mark_finished(args.trigger, "error", f"{type(e).__name__}: {e}")
         raise

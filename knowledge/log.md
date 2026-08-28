@@ -118,6 +118,7 @@
 - 2026-08-27 — Automated compile completed for snapshot 04ba92b7348c443a0f74b69b09bd59bf54641980aaa39e109ddfe4a8b9650462, 117809b69da796a283d8cf33bcc3070410ed959316d541e60e5e5b8722740c72, 1aa27a23a79b8128f270cce63180bee146f72c687d74a4ff66c1fdb4572e3558, 3a76c8e750e3eea12c2c1ac91f401e46f2d2912578ed6c2293ac7488da9e716e, 4128099c74f16b85792a1e9416852f7ed2a5165696d01ace6fabf4191638b913, 6268616cde928e40ce56b0e8f88ddce6de2bd3a637c48ae65e95637ecaea8f45, 856d8c2de3e7b48453cc308b75819a1f62891049b79b31281010d8d07a72a0f9, b4901625fe6ad4690659b5885a415adbf1de2ccccdbd0457f2642c0046369d4b, bfd48a5b84985a0385c0dfbb87f00cc9bc6b3b7832150d31f610c9cadf7148a7, d7e3dda89a29a5832d2dbad43810288ab222070e81962fcce0a5b2b163c0d9d5, ecfea944209da81b4b7967bb250aca65635875724af4fb2606b040b2a4b59e50, f003ccd9e4826121b2399c6b54bde66a7dad0fdefad66695356865330412ee26. Touched: none.
 - 2026-08-28 — Automated compile completed for snapshot 2e000b9638d8082b73e89dbabb800b175ba524f4a86fd3c4da30154217702ccb, 7765d7c7b26a5c57aece3a75cf50c4ada4b9779c4b49764da0d04014129768fd, ddad37a498a09df1b91297b9a08907b916034596347b21e4507086b41d074e28. Touched: none.
 - 2026-08-28 — Automated compile completed for snapshot a579bf9181f3d76c6bbed6c7bfea93e9fda64be1fe293e83cc6f252b5774b0dc. Touched: none.
+- 2026-08-28 — Manual compile completed for snapshot 364e16b9514d41a78c285be4daec7e6e81fab028fccf9d89e954a16d88c449dd, b532582f3cec31063e7f85efd6d5a426039a9a13da4dbdf45cc84fb1db2e7041, e372f13135861953c44915340cfee367634f5d0622639db1f254aec1e104bb6d. Touched: none.
 
 ## Editorial note
 This log is vault metadata — an append-only editorial changelog of compile passes and hygiene actions over `knowledge/`, not content derived from `knowledge/raw/` or `knowledge/inbox/`. New entries are appended at the bottom by compile passes and by hand; entries are never rewritten or removed.
@@ -604,4 +605,18 @@ This log is vault metadata — an append-only editorial changelog of compile pas
   называет `scripts/retrieval.py:1313`, тогда как без якоря нужное сообщество
   стоит 729-м из 4078 и в ответ не попадает никогда. Целый перечень остаётся
   законным вопросом.
+
+- 2026-08-28 — У компайла появился собственный потолок вызова, и это вторая
+  половина той же починки. После снятия накладных расходов рабочего каталога
+  компайл всё равно падал по сроку в девяносто секунд; тот же дневник прошёл
+  при шестистах — 225 секунд на весь проход, включая отвергнутый черновик,
+  его повтор и партии критики. Значит один вызов больше девяноста и меньше
+  двухсот двадцати пяти. Поднимать умолчание нельзя: его делят захват и
+  очередь, где долгое ожидание означает, что о зависшем провайдере услышат
+  втрое позже. Поэтому потолок стал свойством вызова, а не процесса: блок
+  задаёт срок для того, что внутри него, компайл берёт 300 секунд, переменная
+  среды по-прежнему старше блока. Замер по дороге объясняет, почему
+  девяносто мало: промпт в четыре тысячи токенов с коротким ответом стоит
+  десять-одиннадцать секунд, то есть дело не в размере входа, а в размере
+  ответа — план целиком одним ответом.
 
