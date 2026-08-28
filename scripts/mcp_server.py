@@ -3302,6 +3302,10 @@ _ARCHITECTURE_CONTRACTS = {
         {"directory", "mode", "symbol"},
         {"directory", "mode", "symbol"},
     ),
+    "snippet": (
+        {"directory", "mode", "symbol"},
+        {"directory", "mode", "symbol"},
+    ),
     "impact": (
         {"directory", "mode"},
         {"directory", "mode", "comparison", "base", "target", "branch"},
@@ -4558,11 +4562,28 @@ def _provenance_architecture_call(arguments: dict, deadline: float):
     )
 
 
+def _snippet_architecture_call(arguments: dict, deadline: float):
+    """CODE-02: bounded source blocks for a symbol, via the active generation."""
+    from symbol_snippet import snippet_for_symbol
+
+    directory = Path(arguments["directory"]).resolve()
+    return snippet_for_symbol(directory, str(arguments["symbol"]), deadline)
+
+
 def _tool_get_architecture(arguments: dict, deadline: float):
     try:
         return _architecture_tool_call(arguments, deadline), False
     except TimeoutError as error:
         return _architecture_timeout_data(arguments, error), False
+    except ValueError as error:
+        # Measured 2026-08-28: symbol mode on a common name raised a bare
+        # "query row ceiling exceeded" through the dispatcher. A tool answers
+        # with a named refusal, never an exception.
+        return {
+            "status": "error",
+            "mode": arguments.get("mode", "summary"),
+            "error": str(error)[:200],
+        }, False
 
 
 def _architecture_tool_call(arguments: dict, deadline: float):
@@ -4573,6 +4594,7 @@ def _architecture_tool_call(arguments: dict, deadline: float):
         "impact": _impact_architecture_call,
         "summary": _summary_architecture_call,
         "provenance": _provenance_architecture_call,
+        "snippet": _snippet_architecture_call,
     }
     call = calls.get(mode, _architecture_mode_call)
     return call(arguments, deadline)
