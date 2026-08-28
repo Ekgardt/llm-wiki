@@ -127,12 +127,7 @@ def test_a_dead_producer_mid_publication_leaves_a_named_trace_not_silence(
     assert named and result.evidence["intents"]
 
 
-def test_a_dead_worker_mid_processing_keeps_the_content_and_names_the_failure(
-    tmp_path: Path,
-) -> None:
-    """Killed while classifying: the session record is already durable, and the
-    retry refusal is a named FOREIGN KEY trace (the orphaned intent fence)."""
-    result = run_trial(TrialSpec("classifier", "before"), tmp_path / "trial", "content-marker")
-    named = [reason for reason in result.worker_reasons if "FOREIGN KEY" in reason]
-    assert (result.outcome, result.kill_observed) == ("content-partial", True)
-    assert named and result.evidence["session_record"] is True
+# The classifier-kill case moved to tests/test_durability_stand_recovery.py on
+# 2026-08-28: it pinned the D1 wedge (content-partial behind an orphaned-fence
+# FOREIGN KEY refusal), and the ownership reclaim fix closed that wedge. The
+# trial now lands in one recovery run, which the new file asserts.

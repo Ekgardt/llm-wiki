@@ -4826,6 +4826,81 @@ _QUEUE_OWNER_PARENT_ROLES = {
 }
 
 
+def _reclaim_dead_queue_projections(
+    database: sqlite3.Connection, registry: Any, lease: OwnerLease
+) -> None:
+    """Take over the projections a dead owner left in this database.
+
+    The projection lives here, not in the coordinator, so no reclaim on that
+    side can ever reach it: it needs the same consultation, on the same proof
+    — expired lease plus a process the OS says is gone — which is why the
+    answer comes from the registry rather than from a second rule written
+    here. A live or unprovable owner still refuses by name. The registry is
+    resolved by the caller, before this database's write transaction opens, so
+    the two databases are never locked in the reverse of the usual order.
+    """
+    rows = database.execute(
+        """SELECT * FROM queue_ownership
+           WHERE actor_id=? OR owner_token=?
+              OR (canonical_role=? AND canonical_scope=?)""",
+        (lease.actor_id, lease.token, lease.role, lease.scope),
+    ).fetchall()
+    for row in rows:
+        _require_dead_queue_owner(registry, row)
+        _delete_queue_projection_row(database, row)
+
+
+def _require_dead_queue_owner(registry: Any, row: sqlite3.Row) -> None:
+    """A projection is reclaimable exactly when its canonical owner is."""
+    if registry.reclaimable_dead_owner(row):
+        return
+    raise QueueOperationError(
+        "queue_owner_busy",
+        f"{row['canonical_role']} {row['canonical_scope']} is already projected",
+    )
+
+
+# A task fence exists only while its canonical owner does, and it names that
+# owner by the same tuple, so it is reclaimed by the same proof, in the same
+# transaction. Without this the ownership reclaim succeeds and the very next
+# step still refuses `task_fenced` for ever.
+_DEAD_OWNER_TASK_FENCES = """DELETE FROM task_fences
+   WHERE canonical_role=? AND canonical_scope=? AND canonical_actor_id=?
+     AND canonical_owner_token=? AND canonical_fencing_epoch=?"""
+
+
+def _delete_queue_projection_row(
+    database: sqlite3.Connection, row: sqlite3.Row
+) -> None:
+    database.execute(
+        _DEAD_OWNER_TASK_FENCES,
+        (
+            row["canonical_role"],
+            row["canonical_scope"],
+            row["actor_id"],
+            row["owner_token"],
+            row["fencing_epoch"],
+        ),
+    )
+    deleted = database.execute(
+        """DELETE FROM queue_ownership
+           WHERE actor_id=? AND canonical_role=? AND canonical_scope=?
+             AND owner_token=? AND fencing_epoch=? AND process_id=?
+             AND process_start_identity=?""",
+        (
+            row["actor_id"],
+            row["canonical_role"],
+            row["canonical_scope"],
+            row["owner_token"],
+            row["fencing_epoch"],
+            row["process_id"],
+            row["process_start_identity"],
+        ),
+    ).rowcount
+    if deleted != 1:
+        raise QueueOperationError("queue_owner_fence_lost")
+
+
 def _require_projectable_parent(registry: Any, parent: object, role: str) -> None:
     """Refuse a parent lease that cannot project the requested queue role."""
     from operational_ownership import OwnerLease
@@ -10498,7 +10573,9 @@ class _QueueV3CandidateReader:
         nested = parent is not None
         lease = self._queue_owner_lease(registry, role, scope, parent)
         try:
-            self._insert_queue_projection(lease, role=role, scope=scope)
+            self._insert_queue_projection(
+                lease, role=role, scope=scope, registry=registry
+            )
         except BaseException:
             self._release_unless_nested(registry, lease, nested=nested)
             raise
@@ -10514,12 +10591,14 @@ class _QueueV3CandidateReader:
         *,
         role: Literal["queue-worker", "queue-operator"],
         scope: str,
+        registry: Any | None = None,
     ) -> None:
         from operational_ownership import OwnerLease
 
         if not isinstance(lease, OwnerLease):
             raise TypeError("lease must be an OwnerLease")
         domain_role = "worker" if role == "queue-worker" else "operator"
+        owners = self.ownership_registry() if registry is None else registry
         with closing(
             open_operational_db(
                 self.db_path,
@@ -10527,6 +10606,7 @@ class _QueueV3CandidateReader:
                 contract=_QUEUE_V3_CONTRACT,
             )
         ) as database, begin_immediate(database):
+            _reclaim_dead_queue_projections(database, owners, lease)
             database.execute(
                 """INSERT INTO queue_ownership(
                        actor_id,domain_role,canonical_role,canonical_scope,
