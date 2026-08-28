@@ -26,6 +26,7 @@ This index catalogs durable memory distilled from AI agent sessions
 - [[knowledge/notes/classification-measurement-stand-decision]] — Session classification is measured by a labelled corpus and three gates; the shipped corpus is public and small, and the real number needs real sessions.
 - [[knowledge/notes/cross-lingual-citation-relevance-decision]] — Word overlap decides a citation only within one script; across scripts only tokens that survive translation count, and where there are none the gate abstains.
 - [[knowledge/notes/daily-entry-quote-anchor-decision]] — A daily entry starts at a timestamp heading or an operation marker, and evidence binds to the entry that contains its quote — the timestamp narrows the search, the quote settles it.
+- [[knowledge/notes/daily-heading-tolerant-reader-decision]] — the claim reader accepts both the bare `# YYYY-MM-DD`
 - [[knowledge/notes/dead-task-retirement-and-restore-decision]] — A task whose attempts are exhausted is retired only when asked for by name, through the same verified export, and one command brings its work back.
 - [[knowledge/notes/derived-evidence-generation-decision]] — Evidence retrieval uses disposable immutable cache generations while Markdown, Git, and project journals remain authoritative.
 - [[knowledge/notes/durable-capture-producer-activation-decision]] — SessionEnd and PreCompact capture publish durable Reliability V3 intent evidence before returning; detached work only wakes recovery and deletion requires terminal proof.

@@ -59,7 +59,15 @@ RELATIONS = frozenset(
 _NON_SUBSTANTIVE_RELATIONS = frozenset(
     {"title", "summary", "link", "links", "provenance", "mention", "mentions"}
 )
-_DATE_RE = re.compile(r"^# (\d{4}-\d{2}-\d{2})(?:\r?\n|$)")
+# Two anchored heading forms, and only these. The bare form was the original
+# contract; the titled form is what `daily_log_append` has always written, so
+# every daily log this vault holds — back to 2026-04-13 — is titled. The reader
+# was written against a shape that never existed here (NEW-120), and widening
+# the writer instead would leave the whole append-only history unreadable. Both
+# forms anchor on the start of the line and end it with the date, so nothing
+# ambiguous is admitted; anything else still refuses by name. See
+# `docs/research/2026-08-28-which-daily-header-is-canonical.md`.
+_DATE_RE = re.compile(r"^# (?:[^\r\n]*?[ \t]\u2014[ \t])?(\d{4}-\d{2}-\d{2})(?:\r?\n|$)")
 _BLOCK_RE = re.compile(rb"(?m)^## \[(\d{2}:\d{2}:\d{2})\][^\r\n]*(?:\r?\n|$)")
 _CLAIMS_RE = re.compile(
     r"(?ms)^## Claims[ \t]*\r?\n```json[ \t]*\r?\n([^\r\n]+)\r?\n```[ \t]*(?=\r?\n(?:## |\Z)|\Z)"
