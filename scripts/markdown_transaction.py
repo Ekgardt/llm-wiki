@@ -3013,6 +3013,13 @@ def _require_wait_seconds(wait_seconds: object) -> None:
         raise ValueError("writer gate wait_seconds must be non-negative or None")
 
 
+def _writer_gate_busy() -> Exception:
+    """The refusal the writer gate's wait window already knows how to treat."""
+    from operational_ownership import OperationalOwnershipError
+
+    return OperationalOwnershipError("owner_busy")
+
+
 def _writer_wait_window(wait_seconds: float | None) -> float:
     if wait_seconds is None:
         return _WRITER_WAIT_SECONDS
@@ -7276,11 +7283,49 @@ class MarkdownCoordinator:
 
     def _claim_canonical_lease(self, registry: object) -> OwnerLease:
         with self._connect() as database, begin_immediate(database):
+            self._reclaim_dead_writer_projection(database, registry)
             lease = registry._acquire_in_transaction(
                 database, "markdown-writer", scope="global"
             )
             self._insert_writer_projection(database, lease)
         return lease
+
+    @staticmethod
+    def _reclaim_dead_writer_projection(
+        database: sqlite3.Connection, registry: object
+    ) -> None:
+        """Take over the one gate row when its owner is provably dead.
+
+        `writer_owners.gate_name` is the primary key, so exactly one row can
+        exist and a row left behind by an abrupt death blocks every later
+        writer. The registry reclaims a dead *owner* by `(role, scope)`, and
+        this row is keyed by neither: a nested gate records the project lease
+        that entered it, so a dead project writer wedged the global gate for
+        everybody, including the generation publication.
+
+        Measured on the live vault 2026-08-28: one row for `gate_name`
+        `global`, canonical owner `project:fix-pip`, lease expired at
+        20:50:21Z, pid 2095087 gone — and every generation pass since answered
+        `sqlite3.IntegrityError: UNIQUE constraint failed:
+        writer_owners.gate_name`, twice in a row on an otherwise idle machine.
+
+        The proof is the registry's own `reclaimable_dead_owner`, not a second
+        answer to the same question, and doubt refuses: a row that cannot be
+        proved dead raises `owner_busy`, which the caller's wait window
+        already knows how to treat. That also turns a live nested writer from
+        an unhandled IntegrityError into the refusal it always meant.
+        """
+        row = database.execute(
+            "SELECT * FROM writer_owners WHERE gate_name='global'"
+        ).fetchone()
+        if row is None:
+            return
+        if not registry.reclaimable_dead_owner(row):
+            raise _writer_gate_busy()
+        database.execute(
+            "DELETE FROM writer_owners WHERE gate_name='global' AND owner_token=?",
+            (row["owner_token"],),
+        )
 
     def _enter_gate(self, lease: OwnerLease) -> None:
         self._local.gate_depth = 1
@@ -7423,6 +7468,7 @@ class MarkdownCoordinator:
         registry = self._ownership_registry()
         with self._connect() as database, begin_immediate(database):
             registry.require(database, owner)
+            self._reclaim_dead_writer_projection(database, registry)
             self._insert_writer_projection(database, owner)
         self._enter_gate(owner)
         try:
