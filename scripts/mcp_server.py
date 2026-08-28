@@ -3306,6 +3306,10 @@ _ARCHITECTURE_CONTRACTS = {
         {"directory", "mode", "symbol"},
         {"directory", "mode", "symbol"},
     ),
+    "coverage": (
+        {"directory", "mode", "path"},
+        {"directory", "mode", "path"},
+    ),
     "impact": (
         {"directory", "mode"},
         {"directory", "mode", "comparison", "base", "target", "branch"},
@@ -4570,6 +4574,14 @@ def _snippet_architecture_call(arguments: dict, deadline: float):
     return snippet_for_symbol(directory, str(arguments["symbol"]), deadline)
 
 
+def _coverage_architecture_call(arguments: dict, deadline: float):
+    """CODE-05: is this path indexed, fresh, and how many nodes — honestly."""
+    from path_coverage import coverage_for_path
+
+    directory = Path(arguments["directory"]).resolve()
+    return coverage_for_path(directory, str(arguments["path"]), deadline)
+
+
 def _tool_get_architecture(arguments: dict, deadline: float):
     try:
         return _architecture_tool_call(arguments, deadline), False
@@ -4595,6 +4607,7 @@ def _architecture_tool_call(arguments: dict, deadline: float):
         "summary": _summary_architecture_call,
         "provenance": _provenance_architecture_call,
         "snippet": _snippet_architecture_call,
+        "coverage": _coverage_architecture_call,
     }
     call = calls.get(mode, _architecture_mode_call)
     return call(arguments, deadline)
