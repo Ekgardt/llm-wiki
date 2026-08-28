@@ -7406,6 +7406,33 @@ class _QueueV3CandidateReader:
             self._insert_source_links(database, task_id, normalized_links)
         return task_id
 
+    def ready_capture_intents_without_task(
+        self, limit: int
+    ) -> list[dict[str, object]]:
+        """Ready intents that no task was ever created for, oldest first.
+
+        This is the outbox query: a row that committed but was never
+        dispatched. `recover_expired_leases` cannot see these because it
+        recovers a task whose lease expired, and these have no task at all.
+        Read-only by design — adoption decides what to do with the answer.
+        """
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        with closing(self._connect()) as database:
+            rows = database.execute(
+                """SELECT intent.intent_id,intent.relative_path,
+                          intent.intent_sha256,intent.byte_size,intent.updated_at
+                   FROM capture_intents AS intent
+                   LEFT JOIN capture_task_links AS link
+                     ON link.intent_id=intent.intent_id
+                   WHERE intent.publication_state='ready'
+                     AND link.intent_id IS NULL
+                   ORDER BY intent.updated_at ASC, intent.intent_id ASC
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def publish_capture_intent(
         self,
         *,

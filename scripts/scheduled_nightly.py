@@ -49,18 +49,22 @@ from operational_ownership import (  # noqa: E402
 NIGHTLY_GENERATION_BUDGET_SECONDS = 15 * 60
 
 
-def _refresh_generation(log, *, ownership: OwnerLease | None = None) -> int:
-    """Run the shared bounded builder under its fenced maintenance owner."""
+def _generation_result(ownership: OwnerLease | None) -> dict:
+    """Pass the owner only when the shared builder still accepts one."""
     arguments = {
         "root": ROOT,
         "state_root": STATE_ROOT,
         "time_budget_seconds": NIGHTLY_GENERATION_BUDGET_SECONDS,
         "max_sources": DEFAULT_GENERATION_SOURCE_LIMIT,
     }
-    if ownership is not None and _accepts_ownership(run_generation_maintenance):
-        result = run_generation_maintenance(**arguments, ownership=ownership)
-    else:
-        result = run_generation_maintenance(**arguments)
+    if ownership is None or not _accepts_ownership(run_generation_maintenance):
+        return run_generation_maintenance(**arguments)
+    return run_generation_maintenance(**arguments, ownership=ownership)
+
+
+def _refresh_generation(log, *, ownership: OwnerLease | None = None) -> int:
+    """Run the shared bounded builder under its fenced maintenance owner."""
+    result = _generation_result(ownership)
     status = result["status"]
     generation = result.get("generation_id") or "none"
     log(
@@ -151,6 +155,22 @@ class _Step:
 
 def _script(name: str) -> list[str]:
     return [sys.executable, str(ROOT / "scripts" / name)]
+
+
+def _capture_adoption_step() -> _Step:
+    """Dispatch intents published durably but never given a task.
+
+    The capture worker sweeps these too, but it only runs when a capture wakes
+    it. If the failure that orphaned an intent is the same one stopping captures
+    from finishing, nothing would ever run the sweeper — so recovery cannot
+    depend on another capture arriving. This is the pass that does not.
+    """
+    return _Step(
+        "Step 0: adopting undispatched capture intents...",
+        "capture_adoption",
+        _script("capture_adoption.py"),
+        120,
+    )
 
 
 def _queue_step() -> _Step:
@@ -310,7 +330,9 @@ def _prune_reports(log) -> None:
 
 
 def _nightly_steps(run_step, log, ownership: OwnerLease | None) -> int:
-    failures = _run_steps(run_step, log, [_queue_step(), _episode_step()])
+    failures = _run_steps(
+        run_step, log, [_capture_adoption_step(), _queue_step(), _episode_step()]
+    )
 
     # Step 2 must not skip compile just because a hook-triggered one runs.
     _wait_for_compile_idle(log)

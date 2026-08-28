@@ -112,19 +112,23 @@ def test_a_kill_after_durable_publication_recovers_to_landed(tmp_path: Path) -> 
     assert result.recovery_runs == 1
 
 
-def test_a_dead_producer_mid_publication_leaves_a_named_trace_not_silence(
+def test_a_dead_producer_mid_publication_now_recovers_to_landed(
     tmp_path: Path,
 ) -> None:
-    """Killed inside the publication fence: visible intent, named worker refusal.
+    """Killed inside the publication fence, before the task existed: adopted.
 
-    The measured mechanism (2026-08-28): the dead producer's ownership row is
-    reclaimed only under its own (role, scope); any other acquisition hits
-    UNIQUE(maintenance_owners.actor_id) and fails with a durable named trace.
+    This pinned a named failure until 2026-08-28. The named trace was real and
+    the reason it gave was right — the dead producer's ownership row is
+    reclaimed only under its own (role, scope) — but the outcome it pinned was
+    the recovery-path gap of `NEW-136`, not a contract: the intent was durable,
+    carried the whole record, and no code path anywhere looked for an intent
+    with no task. `scripts/capture_adoption.py` is that path, so the trial now
+    lands. The intent is still visible; it is no longer only visible.
     """
     result = run_trial(TrialSpec("enqueue", "before"), tmp_path / "trial", "wedge-marker")
-    named = [reason for reason in result.worker_reasons if "owner_identity_conflict" in reason]
-    assert (result.outcome, result.kill_observed) == ("named-failure", True)
-    assert named and result.evidence["intents"]
+    assert (result.outcome, result.kill_observed) == ("landed", True)
+    assert result.evidence["intents"]
+    assert result.evidence["daily_blocks"] == 1
 
 
 # The classifier-kill case moved to tests/test_durability_stand_recovery.py on

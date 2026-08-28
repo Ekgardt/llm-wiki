@@ -2764,6 +2764,22 @@ def _run_cli_event(args: argparse.Namespace) -> dict[str, object] | None:
     return _dispatch_cli_event(args, envelope)
 
 
+def _failed_operation(args: argparse.Namespace | None) -> str:
+    """Name the invocation that failed, not the absence of an event.
+
+    `--capture-worker` and `--maintenance` carry no `--event`, so the old
+    `args.event or "unknown"` filed every failure of both under
+    `adapter_unknown`. Twenty-two `intent_fence_lost` rows on this vault were
+    read as publisher failures because of it, when only a worker can raise that
+    string with no event attached. The process knows which of the three it is.
+    """
+    if args is None:
+        return "unparsed"
+    modes = (("capture_worker", "capture_worker"), ("maintenance", "maintenance"))
+    named = [label for flag, label in modes if getattr(args, flag, False)]
+    return next(iter(named), getattr(args, "event", None) or "unknown")
+
+
 def _record_cli_capture_failure(
     args: argparse.Namespace | None, error: BaseException
 ) -> None:
@@ -2783,9 +2799,8 @@ def _record_cli_capture_failure(
     try:
         from capture_diagnostics import record_capture_failure
 
-        event = getattr(args, "event", None) or "unknown"
         record_capture_failure(
-            f"adapter_{event}",
+            f"adapter_{_failed_operation(args)}",
             f"{type(error).__name__}: {error}",
         )
     except Exception:  # noqa: BLE001 - a lost trace must not lose the session

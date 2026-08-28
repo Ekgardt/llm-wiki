@@ -36,12 +36,21 @@ def test_a_worker_killed_while_classifying_now_lands_in_one_recovery(
     assert result.evidence["session_record"] is True
 
 
-def test_a_producer_killed_before_the_task_exists_stays_visibly_unfinished(
+def test_a_producer_killed_before_the_task_exists_is_adopted_and_lands(
     tmp_path: Path,
 ) -> None:
-    """No task to adopt yet — the intent stays durable and the failure named."""
+    """The recovery-path gap this file named as still open is now closed.
+
+    "No task to adopt yet, so no worker can adopt it" was the honest reading of
+    a queue whose only recovery was `recover_expired_leases` — which recovers a
+    task whose lease expired and so presupposes a task. `NEW-136` is that gap.
+    The sweeper in `scripts/capture_adoption.py` gives the orphaned intent a
+    task under a fresh fence, and the killed producer's work reaches the daily
+    log after all.
+    """
     result = run_trial(
         TrialSpec("enqueue", "before"), tmp_path / "trial", "wedge-marker"
     )
-    assert (result.outcome, result.kill_observed) == ("named-failure", True)
+    assert (result.outcome, result.kill_observed) == ("landed", True)
     assert result.evidence["intents"]
+    assert result.evidence["session_record"] is True
