@@ -5063,6 +5063,21 @@ def _start_encoder_warmup() -> None:
     threading.Thread(target=warm, name="encoder-warmup", daemon=True).start()
 
 
+def build_server():
+    """Build the one MCP server every transport serves.
+
+    OPS-01 added a second transport. Both call this, so the HTTP path reaches
+    tools through the same `_register_tools` callback as stdio - the same
+    `_validate_tool_arguments`, the same `_execute_tool_call` deadline, the
+    same envelope. A transport that built its own dispatch would be a second
+    validation boundary, which is the defect `4494d8c` already cost us once.
+    """
+    server = Server("llm-wiki")
+    _register_resources(server)
+    _register_tools(server, _build_tool_definitions())
+    return server
+
+
 def run_server() -> int:
     """Start the MCP server (stdio transport). Returns exit code."""
     if not MCP_AVAILABLE:
@@ -5072,10 +5087,7 @@ def run_server() -> int:
         )
         return 1
 
-    server = Server("llm-wiki")
-    tools = _build_tool_definitions()
-    _register_resources(server)
-    _register_tools(server, tools)
+    server = build_server()
     _start_encoder_warmup()
 
     async def main():
