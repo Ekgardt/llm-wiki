@@ -1,0 +1,296 @@
+{
+  "report_id": "lift-attribution-2026-08-28",
+  "note": "MEM-15, прогон 1 на mcp-пути, n=23, исправленная рубрика. Публикуются только вердикты: тексты ответов и пути извлечённых строк не входят, потому что они цитируют приватные страницы хранилища. Полные отчёты остаются вне git.",
+  "retrieval_path": "mcp",
+  "retrieval_limit": 5,
+  "overall": {
+    "n": 23,
+    "lift": 6,
+    "neutral": 17,
+    "harm": 0,
+    "lift_rate": 0.2609,
+    "neutral_rate": 0.7391,
+    "harm_rate": 0.0,
+    "net_lift_rate": 0.2609
+  },
+  "net_lift_ci95": {
+    "low": 0.087,
+    "high": 0.4348,
+    "draws": 2000
+  },
+  "by_stratum": {
+    "vault": {
+      "n": 7,
+      "lift": 6,
+      "neutral": 1,
+      "harm": 0,
+      "lift_rate": 0.8571,
+      "neutral_rate": 0.1429,
+      "harm_rate": 0.0,
+      "net_lift_rate": 0.8571
+    },
+    "world": {
+      "n": 16,
+      "lift": 0,
+      "neutral": 16,
+      "harm": 0,
+      "lift_rate": 0.0,
+      "neutral_rate": 1.0,
+      "harm_rate": 0.0,
+      "net_lift_rate": 0.0
+    }
+  },
+  "by_collision": {
+    "none": {
+      "n": 1,
+      "lift": 0,
+      "neutral": 1,
+      "harm": 0,
+      "lift_rate": 0.0,
+      "neutral_rate": 1.0,
+      "harm_rate": 0.0,
+      "net_lift_rate": 0.0
+    },
+    "low": {
+      "n": 12,
+      "lift": 5,
+      "neutral": 7,
+      "harm": 0,
+      "lift_rate": 0.4167,
+      "neutral_rate": 0.5833,
+      "harm_rate": 0.0,
+      "net_lift_rate": 0.4167
+    },
+    "high": {
+      "n": 10,
+      "lift": 1,
+      "neutral": 9,
+      "harm": 0,
+      "lift_rate": 0.1,
+      "neutral_rate": 0.9,
+      "harm_rate": 0.0,
+      "net_lift_rate": 0.1
+    }
+  },
+  "thresholds": {
+    "max_harm_rate": 0.15,
+    "harm_within_limit": true,
+    "noise_floor_points": 8.7,
+    "net_lift_indistinguishable_from_noise": false
+  },
+  "cases": [
+    {
+      "case_id": "merge-mode-of-self-update",
+      "stratum": "vault",
+      "collision_degree": 20,
+      "retrieved_rows": 1,
+      "correct_without": false,
+      "correct_with": true,
+      "outcome": "lift"
+    },
+    {
+      "case_id": "retire-dead-tasks",
+      "stratum": "vault",
+      "collision_degree": 6,
+      "retrieved_rows": 1,
+      "correct_without": false,
+      "correct_with": true,
+      "outcome": "lift"
+    },
+    {
+      "case_id": "lease-heartbeat-interval",
+      "stratum": "vault",
+      "collision_degree": 7,
+      "retrieved_rows": 1,
+      "correct_without": false,
+      "correct_with": true,
+      "outcome": "lift"
+    },
+    {
+      "case_id": "clear-capture-counters",
+      "stratum": "vault",
+      "collision_degree": 5,
+      "retrieved_rows": 5,
+      "correct_without": false,
+      "correct_with": true,
+      "outcome": "lift"
+    },
+    {
+      "case_id": "compile-part-size",
+      "stratum": "vault",
+      "collision_degree": 5,
+      "retrieved_rows": 5,
+      "correct_without": false,
+      "correct_with": true,
+      "outcome": "lift"
+    },
+    {
+      "case_id": "classification-corpus-flag",
+      "stratum": "vault",
+      "collision_degree": 8,
+      "retrieved_rows": 5,
+      "correct_without": false,
+      "correct_with": true,
+      "outcome": "lift"
+    },
+    {
+      "case_id": "config-backup-retention",
+      "stratum": "vault",
+      "collision_degree": 5,
+      "retrieved_rows": 5,
+      "correct_without": false,
+      "correct_with": false,
+      "outcome": "neutral"
+    },
+    {
+      "case_id": "lizard-default-ccn",
+      "stratum": "world",
+      "collision_degree": 5,
+      "retrieved_rows": 5,
+      "correct_without": true,
+      "correct_with": true,
+      "outcome": "neutral"
+    },
+    {
+      "case_id": "sqlite-default-journal-mode",
+      "stratum": "world",
+      "collision_degree": 8,
+      "retrieved_rows": 5,
+      "correct_without": true,
+      "correct_with": true,
+      "outcome": "neutral"
+    },
+    {
+      "case_id": "sqlite-default-busy-timeout",
+      "stratum": "world",
+      "collision_degree": 2,
+      "retrieved_rows": 0,
+      "correct_without": false,
+      "correct_with": false,
+      "outcome": "neutral"
+    },
+    {
+      "case_id": "sqlite-default-cache-size",
+      "stratum": "world",
+      "collision_degree": 1,
+      "retrieved_rows": 0,
+      "correct_without": true,
+      "correct_with": true,
+      "outcome": "neutral"
+    },
+    {
+      "case_id": "sqlite-default-synchronous",
+      "stratum": "world",
+      "collision_degree": 22,
+      "retrieved_rows": 5,
+      "correct_without": true,
+      "correct_with": true,
+      "outcome": "neutral"
+    },
+    {
+      "case_id": "sqlite-default-locking-mode",
+      "stratum": "world",
+      "collision_degree": 26,
+      "retrieved_rows": 5,
+      "correct_without": true,
+      "correct_with": true,
+      "outcome": "neutral"
+    },
+    {
+      "case_id": "sha256-hexdigest-length",
+      "stratum": "world",
+      "collision_degree": 281,
+      "retrieved_rows": 0,
+      "correct_without": true,
+      "correct_with": true,
+      "outcome": "neutral"
+    },
+    {
+      "case_id": "git-oid-length",
+      "stratum": "world",
+      "collision_degree": 13,
+      "retrieved_rows": 5,
+      "correct_without": true,
+      "correct_with": true,
+      "outcome": "neutral"
+    },
+    {
+      "case_id": "pytest-no-tests-exit-code",
+      "stratum": "world",
+      "collision_degree": 53,
+      "retrieved_rows": 5,
+      "correct_without": true,
+      "correct_with": true,
+      "outcome": "neutral"
+    },
+    {
+      "case_id": "ruff-default-line-length",
+      "stratum": "world",
+      "collision_degree": 57,
+      "retrieved_rows": 5,
+      "correct_without": true,
+      "correct_with": true,
+      "outcome": "neutral"
+    },
+    {
+      "case_id": "blake2b-default-digest-size",
+      "stratum": "world",
+      "collision_degree": 171,
+      "retrieved_rows": 5,
+      "correct_without": true,
+      "correct_with": true,
+      "outcome": "neutral"
+    },
+    {
+      "case_id": "subprocess-run-check-default",
+      "stratum": "world",
+      "collision_degree": 34,
+      "retrieved_rows": 5,
+      "correct_without": true,
+      "correct_with": true,
+      "outcome": "neutral"
+    },
+    {
+      "case_id": "path-suffix-of-tar-gz",
+      "stratum": "world",
+      "collision_degree": 22,
+      "retrieved_rows": 0,
+      "correct_without": true,
+      "correct_with": true,
+      "outcome": "neutral"
+    },
+    {
+      "case_id": "fromisoformat-z-on-310",
+      "stratum": "world",
+      "collision_degree": 3,
+      "retrieved_rows": 0,
+      "correct_without": true,
+      "correct_with": true,
+      "outcome": "neutral"
+    },
+    {
+      "case_id": "json-dumps-ensure-ascii-default",
+      "stratum": "world",
+      "collision_degree": 4,
+      "retrieved_rows": 5,
+      "correct_without": true,
+      "correct_with": true,
+      "outcome": "neutral"
+    },
+    {
+      "case_id": "sqlite-default-auto-vacuum",
+      "stratum": "world",
+      "collision_degree": 6,
+      "retrieved_rows": 0,
+      "correct_without": true,
+      "correct_with": true,
+      "outcome": "neutral"
+    }
+  ],
+  "noise_probe": {
+    "n": 23,
+    "disagreements": 1,
+    "points": 4.35,
+    "note": "Ветка с памятью повторена по тому же записанному пулу, промпт байт-в-байт. Единственное расхождение — sqlite-default-locking-mode: в повторе ответ соскользнул с режима блокировки на режим журнала, то есть на то, о чём говорят извлечённые страницы (степень коллизии 26). При повторной выборке этот случай стал бы harm."
+  }
+}

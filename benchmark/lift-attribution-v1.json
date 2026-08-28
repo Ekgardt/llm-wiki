@@ -1,0 +1,223 @@
+{
+  "corpus_id": "lift-attribution-v1",
+  "schema_version": "lift-attribution/v1",
+  "note": "MEM-15. Not recall and not application: attribution. The same question is put to the same provider twice, once closed-book and once with what this vault's retrieval returned, and each answer is graded against a gold that was fixed before either call. Three fractions come out — lift (right with memory, wrong without), neutral, harm (right without memory, wrong with it). The harm fraction is the point. Cases are stratified the way arXiv 2605.29630 stratifies by discriminator tag: the `vault` stratum holds facts only this vault can supply, so a closed-book model cannot know them and lift is the only interesting outcome; the `world` stratum holds public facts verified on this machine by the command recorded in `gold_command`, chosen because their entity tokens collide with vault material that says something different about a different subject. That is this vault's honest analogue of the paper's pinned floor: we do not synthesise distractors, we pick questions whose collision already exists here and measure the degree. The `vault` stratum is not duplicated here — it is inherited from benchmark/vault-application-v1.json so the two stands cannot drift apart. Поправки 2026-08-28 после осмотра записанных ответов: (а) вопрос про busy_timeout переписан — 5000 мс это умолчание обёртки sqlite3.connect(timeout=5.0), а не самой SQLite, у которой 0, поэтому прежняя формулировка требовала неверного золота; (б) forbidden_tokens убраны из всех случаев — на этом корпусе механизм отверг четыре верных ответа (контрастная формулировка «True (то есть check=True не умолчание — умолчание check=False)», цитирование имени файла a.tar.gz, разбор «256 бит = 32 байта = 64 знака») и не отверг ни одного неверного. Механизм остаётся в коде и в тестах, корпус им не пользуется.",
+  "inherited": {
+    "corpus": "vault-application-v1",
+    "stratum": "vault"
+  },
+  "thresholds": {
+    "max_harm_rate": 0.15,
+    "noise_floor_points": 8.7
+  },
+  "cases": [
+    {
+      "case_id": "lizard-default-ccn",
+      "stratum": "world",
+      "question": "какой порог цикломатической сложности стоит у lizard по умолчанию, если не передавать -C",
+      "expected_tokens": [
+        "15"
+      ],
+      "collision_probes": [
+        "cyclomatic"
+      ],
+      "gold_command": "~/.claude/tools/ccn/bin/lizard --help",
+      "gold_evidence": "Threshold for cyclomatic complexity number warning. The default value is 15."
+    },
+    {
+      "case_id": "sqlite-default-journal-mode",
+      "stratum": "world",
+      "question": "какой режим журнала у SQLite по умолчанию для файловой базы данных",
+      "expected_tokens": [
+        "delete"
+      ],
+      "collision_probes": [
+        "journal_mode"
+      ],
+      "gold_command": "python3 -c \"import sqlite3;c=sqlite3.connect('/tmp/x.sqlite3');print(c.execute('PRAGMA journal_mode').fetchone()[0])\"",
+      "gold_evidence": "delete"
+    },
+    {
+      "case_id": "sqlite-default-busy-timeout",
+      "stratum": "world",
+      "question": "чему равен PRAGMA busy_timeout сразу после sqlite3.connect(path) в Python, в миллисекундах",
+      "expected_tokens": [
+        "5000"
+      ],
+      "collision_probes": [
+        "busy_timeout"
+      ],
+      "gold_command": "python3 -c \"import sqlite3;c=sqlite3.connect('/tmp/x.sqlite3');print(c.execute('PRAGMA busy_timeout').fetchone()[0])\"",
+      "gold_evidence": "5000 — умолчание обёртки sqlite3.connect(timeout=5.0), а не самой SQLite (у неё 0)"
+    },
+    {
+      "case_id": "sqlite-default-cache-size",
+      "stratum": "world",
+      "question": "какое значение возвращает PRAGMA cache_size у SQLite по умолчанию",
+      "expected_tokens": [
+        "-2000"
+      ],
+      "collision_probes": [
+        "cache_size"
+      ],
+      "gold_command": "python3 -c \"import sqlite3;c=sqlite3.connect('/tmp/x.sqlite3');print(c.execute('PRAGMA cache_size').fetchone()[0])\"",
+      "gold_evidence": "-2000"
+    },
+    {
+      "case_id": "sqlite-default-synchronous",
+      "stratum": "world",
+      "question": "какое числовое значение у PRAGMA synchronous в SQLite по умолчанию",
+      "expected_tokens": [
+        "2"
+      ],
+      "collision_probes": [
+        "synchronous"
+      ],
+      "gold_command": "python3 -c \"import sqlite3;c=sqlite3.connect('/tmp/x.sqlite3');print(c.execute('PRAGMA synchronous').fetchone()[0])\"",
+      "gold_evidence": "2"
+    },
+    {
+      "case_id": "sqlite-default-locking-mode",
+      "stratum": "world",
+      "question": "какой режим блокировки у SQLite по умолчанию, что возвращает PRAGMA locking_mode",
+      "expected_tokens": [
+        "normal"
+      ],
+      "collision_probes": [
+        "locking"
+      ],
+      "gold_command": "python3 -c \"import sqlite3;c=sqlite3.connect('/tmp/x.sqlite3');print(c.execute('PRAGMA locking_mode').fetchone()[0])\"",
+      "gold_evidence": "normal"
+    },
+    {
+      "case_id": "sha256-hexdigest-length",
+      "stratum": "world",
+      "question": "сколько знаков в шестнадцатеричной записи дайджеста SHA-256",
+      "expected_tokens": [
+        "64"
+      ],
+      "collision_probes": [
+        "sha256"
+      ],
+      "gold_command": "python3 -c \"import hashlib;print(len(hashlib.sha256(b'x').hexdigest()))\"",
+      "gold_evidence": "64"
+    },
+    {
+      "case_id": "git-oid-length",
+      "stratum": "world",
+      "question": "сколько знаков в полном идентификаторе коммита git, который печатает git rev-parse HEAD",
+      "expected_tokens": [
+        "40"
+      ],
+      "collision_probes": [
+        "rev-parse"
+      ],
+      "gold_command": "git rev-parse HEAD | tr -d '\\n' | wc -c",
+      "gold_evidence": "40"
+    },
+    {
+      "case_id": "pytest-no-tests-exit-code",
+      "stratum": "world",
+      "question": "с каким кодом выхода завершается pytest, если он не собрал ни одного теста",
+      "expected_tokens": [
+        "5"
+      ],
+      "collision_probes": [
+        "pytest"
+      ],
+      "gold_command": "uv run pytest -q /tmp/emptytests2 >/dev/null 2>&1; echo $?",
+      "gold_evidence": "5"
+    },
+    {
+      "case_id": "ruff-default-line-length",
+      "stratum": "world",
+      "question": "какая длина строки стоит у ruff по умолчанию, при которой срабатывает E501",
+      "expected_tokens": [
+        "88"
+      ],
+      "collision_probes": [
+        "ruff"
+      ],
+      "gold_command": "uv run ruff check --isolated --select E501 /tmp/ll.py",
+      "gold_evidence": "E501 Line too long (106 > 88)"
+    },
+    {
+      "case_id": "blake2b-default-digest-size",
+      "stratum": "world",
+      "question": "какого размера дайджест в байтах отдаёт hashlib.blake2b без аргументов",
+      "expected_tokens": [
+        "64"
+      ],
+      "collision_probes": [
+        "digest"
+      ],
+      "gold_command": "python3 -c \"import hashlib;print(hashlib.blake2b().digest_size)\"",
+      "gold_evidence": "64"
+    },
+    {
+      "case_id": "subprocess-run-check-default",
+      "stratum": "world",
+      "question": "какое значение по умолчанию у параметра check у subprocess.run",
+      "expected_tokens": [
+        "false"
+      ],
+      "collision_probes": [
+        "subprocess"
+      ],
+      "gold_command": "python3 -c \"import inspect,subprocess;print(inspect.signature(subprocess.run).parameters['check'].default)\"",
+      "gold_evidence": "False"
+    },
+    {
+      "case_id": "path-suffix-of-tar-gz",
+      "stratum": "world",
+      "question": "что возвращает pathlib.Path('a.tar.gz').suffix",
+      "expected_tokens": [
+        ".gz"
+      ],
+      "collision_probes": [
+        "pathlib"
+      ],
+      "gold_command": "python3 -c \"import pathlib;print(pathlib.Path('a.tar.gz').suffix)\"",
+      "gold_evidence": ".gz"
+    },
+    {
+      "case_id": "fromisoformat-z-on-310",
+      "stratum": "world",
+      "question": "что делает datetime.fromisoformat на Python 3.10, если подать ему строку с суффиксом Z",
+      "expected_tokens": [
+        "valueerror"
+      ],
+      "collision_probes": [
+        "fromisoformat"
+      ],
+      "gold_command": "python3.10 -c \"import datetime;datetime.datetime.fromisoformat('2026-01-01T00:00:00Z')\"",
+      "gold_evidence": "ValueError: Invalid isoformat string: '2026-01-01T00:00:00Z'"
+    },
+    {
+      "case_id": "json-dumps-ensure-ascii-default",
+      "stratum": "world",
+      "question": "какое значение по умолчанию у ensure_ascii в json.dumps",
+      "expected_tokens": [
+        "true"
+      ],
+      "collision_probes": [
+        "ensure_ascii"
+      ],
+      "gold_command": "python3 -c \"import inspect,json;print(inspect.signature(json.dumps).parameters['ensure_ascii'].default)\"",
+      "gold_evidence": "True"
+    },
+    {
+      "case_id": "sqlite-default-auto-vacuum",
+      "stratum": "world",
+      "question": "что возвращает PRAGMA auto_vacuum у только что созданной базы SQLite",
+      "expected_tokens": [
+        "0"
+      ],
+      "collision_probes": [
+        "vacuum"
+      ],
+      "gold_command": "python3 -c \"import sqlite3;c=sqlite3.connect('/tmp/x.sqlite3');print(c.execute('PRAGMA auto_vacuum').fetchone()[0])\"",
+      "gold_evidence": "0"
+    }
+  ]
+}
