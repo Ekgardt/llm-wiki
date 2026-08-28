@@ -4216,6 +4216,35 @@ ORDER BY depth, assertion_ids LIMIT ?
         )
         return [dict(row) for row in rows]
 
+    def call_target_names(
+        self, *, max_rows: int = MAX_AGGREGATE_ROWS, deadline: float | None = None
+    ) -> frozenset[str]:
+        """Every distinct attribute a call site names, resolved or not.
+
+        The dead-code answer needs the opposite of `unresolved_calls_naming`:
+        not "who calls this one name" but "which names does anything call at
+        all", so 868 candidates cost one query instead of 868. Only the tail
+        after the last dot is kept, because that is what a method is named by
+        at a call site whose receiver could not be bound.
+
+        The ceiling is `MAX_AGGREGATE_ROWS` and it refuses rather than cuts,
+        like every other bounded read here. That is the fail-closed half: a cut
+        set cannot support "nothing names it" for anybody, and a shorter answer
+        would read exactly like a complete one. Measured 2026-08-28 on this
+        repository — 11,455 distinct call texts against a 200,000 ceiling.
+        """
+        rows = self._execute(
+            "SELECT DISTINCT target_text FROM observation "
+            "WHERE edge_type = 'CALLS' AND target_text IS NOT NULL "
+            "ORDER BY target_text LIMIT ?",
+            (),
+            max_rows=max_rows,
+            deadline=deadline,
+            ceiling=MAX_AGGREGATE_ROWS,
+        )
+        names = {str(row["target_text"]).rsplit(".", 1)[-1] for row in rows}
+        return frozenset(name for name in names if name)
+
     def unresolved_calls_naming(
         self,
         name: str,

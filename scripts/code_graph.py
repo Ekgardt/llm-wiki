@@ -2066,10 +2066,40 @@ def _conventionally_reachable(name: str, path: str) -> bool:
     )
 
 
-def _stored_dead_candidate(graph, node: dict, directory: Path) -> dict | None:
+def _protocol_invoked(name: str) -> bool:
+    """A dunder the language calls itself, never by name at a call site.
+
+    Measured 2026-08-28: 69 of 868 candidates were these — `__post_init__` 47,
+    `__reduce__` 8, `__enter__` and `__exit__` 5 each, `__call__` and `__str__`
+    2 each. Name-based analysis cannot see their callers by construction, so
+    "no confirmed caller" says nothing about them at all. `__init__` is already
+    excluded by `_conventionally_reachable`.
+    """
+    return len(name) > 4 and name.startswith("__") and name.endswith("__")
+
+
+def _dead_code_reason(name: str, called_names: frozenset[str] | None) -> str:
+    """`zero_confirmed_incoming_calls` only when nothing names it anywhere.
+
+    Measured 2026-08-28 on this repository: of 868 candidates, 384 were named
+    by some call text — a dynamic call may reach them — so calling them all
+    dead made 52% of the answer indefensible once the protocol methods are
+    counted too. `None` means the name set could not be read, and then nothing
+    can be claimed dead: doubt is reported instead.
+    """
+    if called_names is None:
+        return "unresolved_receiver"
+    if name in called_names:
+        return "unresolved_receiver"
+    return "zero_confirmed_incoming_calls"
+
+
+def _stored_dead_candidate(
+    graph, node: dict, directory: Path, called_names: frozenset[str] | None
+) -> dict | None:
     name = str(node["metadata"].get("name", ""))
     path = str(node["metadata"].get("path", ""))
-    if _conventionally_reachable(name, path):
+    if _conventionally_reachable(name, path) or _protocol_invoked(name):
         return None
     location = _stored_location(graph, node["node_id"], directory)
     return {
@@ -2079,13 +2109,24 @@ def _stored_dead_candidate(graph, node: dict, directory: Path) -> dict | None:
         "file": location[0],
         "line": location[1],
         "status": "candidate",
-        "reason": "zero_confirmed_incoming_calls",
+        "reason": _dead_code_reason(name, called_names),
         "graph_complete": False,
     }
 
 
+def _called_names(graph) -> frozenset[str] | None:
+    """Every name any call site mentions, or None when the read refused."""
+    try:
+        return graph.call_target_names()
+    except (ValueError, sqlite3.Error):
+        return None
+
+
 def _stored_dead_candidates(graph, nodes, directory) -> list[dict]:
-    found = [_stored_dead_candidate(graph, node, directory) for node in nodes]
+    called_names = _called_names(graph)
+    found = [
+        _stored_dead_candidate(graph, node, directory, called_names) for node in nodes
+    ]
     return [item for item in found if item is not None]
 
 
