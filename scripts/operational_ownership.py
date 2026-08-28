@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import hashlib
 import json
 import os
 import platform
@@ -507,6 +508,29 @@ def current_actor_identity() -> str:
     if system in {"Linux", "Darwin"} and hasattr(os, "getuid"):
         return f"posix-uid:{os.getuid()}"
     raise _unsupported_platform()
+
+
+def ownership_actor_identity(role: str, scope: str) -> str:
+    """The actor is the agent taking the lease, not the human running it.
+
+    `maintenance_owners.actor_id` is UNIQUE, so whatever this returns decides
+    how many leases may exist at once. Returning the plain user identity made
+    that one lease per machine account: measured 2026-08-28, holding
+    `nightly/global` refused `queue-worker`, `capture`, `markdown-writer`,
+    `project`, `compile`, `doctor` and `repair` alike, so the nightly pass
+    locked out the very steps it spawns. The table already declares the real
+    exclusion rule as `PRIMARY KEY(role, scope)`; naming the agent leaves that
+    rule the only one that binds and changes no schema.
+
+    Every mainstream lock manager scopes ownership this way — an etcd lease or
+    a ZooKeeper session holds many keys at once, and a PostgreSQL session
+    re-acquiring its own advisory lock always succeeds. See
+    `docs/research/2026-08-28-who-is-an-actor-in-a-lock.md`.
+    """
+    process = current_process_identity()
+    agent = f"{process.pid}\x00{process.start_identity}\x00{role}\x00{scope}"
+    digest = hashlib.blake2s(agent.encode("utf-8"), digest_size=16).hexdigest()
+    return f"{current_actor_identity()}#agent:{digest}"
 
 
 def _validate_process(identity: ProcessIdentity) -> None:
@@ -1034,7 +1058,9 @@ class OwnershipRegistry:
         selected_role = _validate_role(role)
         selected_scope = _bounded_text(scope, "scope", 512)
         selected_actor = _bounded_text(
-            current_actor_identity() if actor_id is None else actor_id,
+            ownership_actor_identity(selected_role, selected_scope)
+            if actor_id is None
+            else actor_id,
             "actor_id",
             256,
         )
@@ -1313,7 +1339,7 @@ def _remove_exact_marker(state_root: Path, marker: MarkerIdentity) -> None:
 
 def acquire_compile_owner(*, state_root: Path) -> tuple[OwnerLease, MarkerIdentity]:
     now = utc_now().replace(microsecond=0)
-    actor_id = current_actor_identity()
+    actor_id = ownership_actor_identity("compile", "global")
     token = secrets.token_hex(16)
     payload = (
         f"{os.getpid()}\n{_timestamp(now)}\n{token}\n".encode("ascii", errors="strict")
@@ -1340,7 +1366,7 @@ def acquire_scheduled_owner(
     if role not in {"nightly", "weekly"}:
         raise ValueError("scheduled owner role must be nightly or weekly")
     now = utc_now().replace(microsecond=0)
-    actor_id = current_actor_identity()
+    actor_id = ownership_actor_identity(role, "global")
     token = secrets.token_hex(16)
     payload = str(os.getpid()).encode("ascii")
     marker = _publish_marker(Path(state_root), "run/maintenance.lock", payload)

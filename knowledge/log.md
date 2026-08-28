@@ -108,6 +108,16 @@
   Живой переход не выполнен, причина измерена и названа: флаг `--confirm-all-agents-stopped` — утверждение о состоянии машины, и оно ложно. Во время работы в общем checkout `/home/user/llm-wiki` шли три параллельных прогона pytest других агентов (pid 113807, 135393, 146780) плюс ожидающий их цикл. Переход превращает `run/queue.sqlite3` и `run/markdown-transactions.sqlite3` в надгробия; делать это, пока чужие процессы держат или откроют эти файлы, — тот же «наполовину принято», который репетиция уже показала 2026-08-26. Вторая причина: архив `/home/user/llm-wiki-run-archive-2026-08-26/run` устарел — обе базы разошлись с живыми (`queue` 3f1eba58… против dbeca427…, `coordinator` a961e741… против 90c02431…), то есть отката к нему уже нет и перед переходом нужен свежий архив. Обе правки, которых требовал переход, лежат в ветке; сам переход ждёт тихой машины.
 - 2026-08-26 — Manual compile completed for snapshot 92073cedcbcf5fe12136d3606e18dd0805b3a2af6641e329f2508e6afd419d07, 9c1ec4115e1d4fe44f851a2c75a2b4a2c3007df41cb20fd020d2c3220bc4059f, bfc3485a34f88e7ab72ae94456113460f49f60fefd93081613f1ea1884fda270. Touched: none.
 - 2026-08-27 — Automated compile completed for snapshot 0b1c7a71f705c885e8c90799f1597435d40e4b6cee7f9e000beb9761d17a3bcc, 9765c68dffcfa912dd0f89c92eb0c271ce6812617596d4840df0e5aa9497329c. Touched: none.
+- 2026-08-27 — Automated compile completed for snapshot 35aba03ddfdf238ed8b29f0aae297f1f09034b07e9f366d4a59dfda08fe5b00d. Touched: none.
+- 2026-08-27 — Automated compile completed for snapshot 8eb195e363f58090294fae47d8f7e298972d16964b1276d5d3566ab928aa0266. Touched: none.
+- 2026-08-27 — Automated compile completed for snapshot 0048dd4f0447dd900fdab1be4e936f2418fe7b87a45ce8a8278e647c92a6a7f7, 1508355d80b06af27987279eddc5ce26cd4ec4ec2433c1979c65a85aff079d2d, 796ab5b18297474256092c798e92ab833db232d1dc433246fee26f8d4c0b3a13, de17858042bea11b228b2d0964ab9c7c3700d5cef568c4cdc7471d2548cde57c. Touched: none.
+- 2026-08-27 — Automated compile completed for snapshot e58ed24f4fe85c131a52449e59d14a1e7e45ecc160f0aa8b4bae8d705df39295. Touched: none.
+- 2026-08-27 — Automated compile completed for snapshot 78fb7198b91aca394aa6a9145bba429a16fcc766c773156a3fbe669b5f6b9272, afed42bf48af66457db130e86a34374d4f81333219617717ce64c098ad0ef87e. Touched: none.
+- 2026-08-27 — Automated compile completed for snapshot 93d28f486f439ce64841d82b36e6acfbc1574e765aa04b7e70b6e2af3235a78a. Touched: none.
+- 2026-08-27 — Automated compile completed for snapshot 2557b0908c1e8ef746dee4591dc7845637e3af45f498ab8f5c9f48e7c1b0c194, 4bb271b58f5d569a4759ad1b88bd0cd82178e93299655b6920d673c5d4da8eb8, 5d4ef5ad153de4bfe42733fcc924d04db4b83de7289e9d8c0797a4bfff31b322, 9130f7f7b6f6c119eb44d88828ca5977acfe9eb88a43646f02ccefa280d8c150, b0c14188b15b8b243c14414d2344637befe82ae9ea44fc7980b2b04438c49a59, d359cb8b714910ad5070f45a00f0255c458da2980d5d84b95062e55936df79cd, e5e7ef72f7a699a0d573e65cc823ed2e884fb20424ac40121f2eec83cd5f8a23. Touched: none.
+- 2026-08-27 — Automated compile completed for snapshot 04ba92b7348c443a0f74b69b09bd59bf54641980aaa39e109ddfe4a8b9650462, 117809b69da796a283d8cf33bcc3070410ed959316d541e60e5e5b8722740c72, 1aa27a23a79b8128f270cce63180bee146f72c687d74a4ff66c1fdb4572e3558, 3a76c8e750e3eea12c2c1ac91f401e46f2d2912578ed6c2293ac7488da9e716e, 4128099c74f16b85792a1e9416852f7ed2a5165696d01ace6fabf4191638b913, 6268616cde928e40ce56b0e8f88ddce6de2bd3a637c48ae65e95637ecaea8f45, 856d8c2de3e7b48453cc308b75819a1f62891049b79b31281010d8d07a72a0f9, b4901625fe6ad4690659b5885a415adbf1de2ccccdbd0457f2642c0046369d4b, bfd48a5b84985a0385c0dfbb87f00cc9bc6b3b7832150d31f610c9cadf7148a7, d7e3dda89a29a5832d2dbad43810288ab222070e81962fcce0a5b2b163c0d9d5, ecfea944209da81b4b7967bb250aca65635875724af4fb2606b040b2a4b59e50, f003ccd9e4826121b2399c6b54bde66a7dad0fdefad66695356865330412ee26. Touched: none.
+- 2026-08-28 — Automated compile completed for snapshot 2e000b9638d8082b73e89dbabb800b175ba524f4a86fd3c4da30154217702ccb, 7765d7c7b26a5c57aece3a75cf50c4ada4b9779c4b49764da0d04014129768fd, ddad37a498a09df1b91297b9a08907b916034596347b21e4507086b41d074e28. Touched: none.
+- 2026-08-28 — Automated compile completed for snapshot a579bf9181f3d76c6bbed6c7bfea93e9fda64be1fe293e83cc6f252b5774b0dc. Touched: none.
 
 ## Editorial note
 This log is vault metadata — an append-only editorial changelog of compile passes and hygiene actions over `knowledge/`, not content derived from `knowledge/raw/` or `knowledge/inbox/`. New entries are appended at the bottom by compile passes and by hand; entries are never rewritten or removed.
@@ -461,3 +471,34 @@ This log is vault metadata — an append-only editorial changelog of compile pas
   Парный прогон обоих стендов на одном хранилище, кросс-энкодер включён с обеих сторон, дал ровное совпадение до знака: `hit@1` 0.5, `hit@5` 0.6, `applied@5` 0.8571 и до правки, и после; ворота пройдены на обеих сторонах. Это не «правка ничего не дала», а находка про сами стенды: они звали `search()` без срока и без `max_candidates`, а все четыре дефекта требовали либо переданного срока, либо прямого входа, — то есть ни один из них стенды поймать не могли и до сих пор не могут. Дыра в измерительном стенде записана как есть; закрывать её этой правкой я не стал.
 
   Ради этих правок разобраны по правилу 5 три файла, которые управляемый гейт отказывался принимать целиком: `scripts/search_memory.py` (24 замечания `[STRUCTURE]` → ноль), `scripts/session_start_project_state.py` (5 `[COMPLEXITY]` плюс вложенность и тернарники → ноль) и `scripts/mcp_server.py` (16 `[STRUCTURE]` → ноль). Поведение не менялось: порядок и короткое замыкание проверок сохранены, типы исключений и тексты сообщений те же; доказано прогонами — 1134 пройденных при 13 пропущенных по всем наборам, импортирующим `search_memory`, и 517 пройденных при 7 пропущенных по наборам, импортирующим `mcp_server`.
+
+- 2026-08-28 — Актор владения перестал быть машинной учётной записью. Найдено по
+  живым счётчикам: самая свежая запись всего следа потерь захвата —
+  `owner_identity_conflict`. `maintenance_owners` объявляет
+  `PRIMARY KEY(role, scope)`, но `actor_id` UNIQUE, а личность актора на POSIX
+  была `posix-uid:<uid>` — то есть на всю машину существовал ровно один
+  владелец чего угодно. Воспроизведено герметично на настоящей схеме v3:
+  удерживая `nightly/global`, отказано шести ролям из шести — `queue-worker`,
+  `capture`, `markdown-writer`, `project`, `doctor`, `repair` — и
+  `acquire_compile_owner` вместе с ними, то есть ночной проход отказывал
+  компайлу, который сам же и порождает подпроцессом. Два одновременных сеанса
+  одного человека сталкивались так же. Актор теперь выводится из пользователя,
+  процесса и пары `(role, scope)`; схема принятой базы не тронута, миграции
+  нет, потому что при такой личности `UNIQUE(actor_id)` больше ничего не
+  ограничивает сверх первичного ключа. Практика на текущую дату говорит то же:
+  владение привязано к сессии или процессу, и один держатель штатно держит
+  много замков — lease в etcd, сессия ZooKeeper, advisory lock в PostgreSQL,
+  где повторный запрос собственного замка не ждёт никогда. Названо и отдано:
+  мёртвый ряд чужой роли больше не переприсваивается попутно — его снимет тот,
+  кто следующим попросит его же `(role, scope)`; раньше он блокировал всё,
+  теперь только себя. Замер после: шесть из шести берутся, компайл выдаётся,
+  исключение цело (`owner_busy` на той же паре, отказ второго `nightly` на
+  маркере, `owner_identity_conflict` у названного актора с двумя арендами).
+  Страница — `ownership-actor-is-the-agent-decision.md`, исследование —
+  `docs/research/2026-08-28-who-is-an-actor-in-a-lock.md`.
+
+  Найдено рядом и не исправлено: очередь копит `flush`-задачи, которые не
+  проходят — 11 в `ready`, у девяти по восемь попыток, 72 `processor_failed` в
+  истории, ночной проход 2026-08-28 сообщил 14 отказов из 14. Причина не
+  записана нигде: код один на все случаи, stderr шага пуст. Одиннадцать сессий
+  не стали памятью, и по следу нельзя сказать почему.
