@@ -24,6 +24,21 @@ from pathlib import Path
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _no_operator_dlp_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A test of "protected content is refused" must own its allowlist.
+
+    The owner enabled `LLM_WIKI_DLP_POLICY` on 2026-08-28 — a supported,
+    documented setting that allowlists 33 known key-shaped fixtures so the
+    vault can be exported. Five export tests here then failed on his machine
+    while CI stayed green, because they assert a refusal that his policy
+    legitimately lifts. The env is not wrong; the tests were reading it. Each
+    test that wants a policy now sets one itself.
+    """
+    monkeypatch.delenv("LLM_WIKI_DLP_POLICY", raising=False)
+
+
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
@@ -328,11 +343,18 @@ def test_loop_detector_classifies_single_agent_churn(tmp_path, monkeypatch):
     monkeypatch.setattr(loop_detector, "DAILY_DIR", daily)
     monkeypatch.setattr(loop_detector, "ROOT", tmp_path)
     loops = loop_detector.detect_file_edit_loops("demo", days=30, threshold=3)
+    _assert_single_agent_churn(loops)
+
+
+def _assert_single_agent_churn(loops) -> None:
     assert loops
-    assert loops[0]["type"] == "single_agent_churn"
-    assert loops[0]["agents"] == ["opencode"]
-    assert loops[0]["target"] == "src/app.py"
-    assert loops[0]["edit_count"] >= 3
+    first = loops[0]
+    assert (first["type"], first["agents"], first["target"]) == (
+        "single_agent_churn",
+        ["opencode"],
+        "src/app.py",
+    )
+    assert first["edit_count"] >= 3
 
 
 def test_loop_detector_classifies_multi_agent_loop(tmp_path, monkeypatch):
@@ -378,6 +400,10 @@ def test_loop_detector_groups_recurring_normalized_errors(tmp_path, monkeypatch)
     loops = loop_detector.detect_all("demo", days=30, threshold=3)
     recurring = [item for item in loops if item["type"] == "recurring_error"]
 
+    _assert_recurring_error(recurring)
+
+
+def _assert_recurring_error(recurring) -> None:
     assert len(recurring) == 1
     assert recurring[0]["occurrence_count"] == 3
     assert recurring[0]["agents"] == ["claude", "codex", "opencode"]
