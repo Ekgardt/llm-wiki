@@ -38,6 +38,7 @@ CANDIDATE_SCHEMA = SCHEMA_DIR / "claim-candidate-v1.json"
 RELATION_SCHEMA = SCHEMA_DIR / "claim-relations-v1.json"
 MAX_CLAIM_PAGE_BYTES = 4 * 1024 * 1024
 MAX_CANDIDATES = 50
+MAX_ACTIVE_RECORDS = 10_000
 MAX_DECIMAL_CHARS = 128
 MAX_DECIMAL_DIGITS = 128
 MAX_DECIMAL_EXPONENT = 128
@@ -136,12 +137,16 @@ def _nfc(value: str) -> str:
 def _trim(value: object, *, label: str, fold: bool = False) -> str:
     if not isinstance(value, str):
         raise ValueError(f"{label} must be a string")
-    result = _nfc(" ".join(value.split()))
-    if fold:
-        result = result.casefold()
+    result = _folded(_nfc(" ".join(value.split())), fold)
     if not result:
         raise ValueError(f"{label} must not be empty")
     return result
+
+
+def _folded(text: str, fold: bool) -> str:
+    if fold:
+        return text.casefold()
+    return text
 
 
 def _canonical_time(value: object, *, nullable: bool, label: str) -> str | None:
@@ -251,10 +256,14 @@ def _expanded_digits(decimal_position: int, coefficient_digits: int) -> int:
     return coefficient_digits
 
 
-def _canonical_decimal_text(source: str) -> str:
-    result = format(_finite_decimal(source), "f")
+def _trimmed_decimal(result: str) -> str:
     if "." in result:
-        result = result.rstrip("0").rstrip(".")
+        return result.rstrip("0").rstrip(".")
+    return result
+
+
+def _canonical_decimal_text(source: str) -> str:
+    result = _trimmed_decimal(format(_finite_decimal(source), "f"))
     if len(result) > MAX_DECIMAL_CHARS:
         raise ValueError("number value exceeds the canonical length limit")
     if Decimal(result).is_zero():
@@ -351,15 +360,19 @@ def _validate_interval(validity: object) -> dict[str, str | None]:
 def _require_ordered_interval(start: str | None, end: str | None) -> None:
     if start is None or end is None:
         return
-    if _comparable_time(start) >= _comparable_time(end):
+    if _instant_of(start) >= _instant_of(end):
         raise ValueError("claim validity must be a non-empty half-open interval")
 
 
-def _comparable_time(value: str) -> str:
-    """A bare date compares as its first instant."""
+def _instant_of(value: str) -> datetime:
+    """A bare date is its first instant; canonical times order by instant, not text.
+
+    Text ordering is wrong here because canonical form keeps fractional seconds
+    and `.` sorts before `Z`, so `…:00.5Z` compares as earlier than `…:00Z`.
+    """
     if "T" in value:
-        return value
-    return f"{value}T00:00:00Z"
+        return datetime.fromisoformat(value[:-1] + "+00:00")
+    return datetime.fromisoformat(f"{value}T00:00:00+00:00")
 
 
 def _semantic_payload(record: Mapping[str, object]) -> dict[str, object]:
@@ -515,11 +528,7 @@ class ClaimPipeline:
         evidence = claim.record["evidence"]
         assert isinstance(evidence, dict)
         resolved = self._resolved_evidence(claim, evidence, reference)
-        if resolved.sha256 != evidence["sha256"]:
-            raise EvidenceMismatch("evidence span hash does not match")
-        literal = _evidence_literal(resolved.bytes)
-        if literal != evidence["text"] or literal != claim.record["text"]:
-            raise EvidenceMismatch("evidence literal text does not match")
+        _require_verified_literal(claim, evidence, resolved)
         return VerifiedClaim(claim, resolved.bytes)
 
     def _resolved_evidence(
@@ -609,6 +618,17 @@ def _require_matching_reference(
         or embedded.block_id != claim.block.block_id
     ):
         raise EvidenceMismatch("evidence reference does not match the immutable block")
+
+
+def _require_verified_literal(
+    claim: Claim, evidence: Mapping[str, object], resolved: object
+) -> None:
+    """The resolved span must be the exact bytes, and the exact text, of the claim."""
+    if resolved.sha256 != evidence["sha256"]:
+        raise EvidenceMismatch("evidence span hash does not match")
+    literal = _evidence_literal(resolved.bytes)
+    if literal != evidence["text"] or literal != claim.record["text"]:
+        raise EvidenceMismatch("evidence literal text does not match")
 
 
 def _evidence_literal(span: bytes) -> str:
@@ -883,6 +903,19 @@ def _require_candidate_limit(limit: object) -> None:
         raise ValueError(f"candidate limit must be between 0 and {MAX_CANDIDATES}")
 
 
+def _require_normalized_candidate(claim: object) -> None:
+    if not isinstance(claim, NormalizedClaim):
+        raise TypeError("candidate claim must be normalized")
+
+
+def _require_active_bound(rows: Sequence[object]) -> None:
+    """A derived reading must see whole groups, so it refuses instead of truncating."""
+    if len(rows) > MAX_ACTIVE_RECORDS:
+        raise ValueError(
+            f"claim index holds more than {MAX_ACTIVE_RECORDS} active claims"
+        )
+
+
 class ClaimIndex:
     """A local owner-only SQLite projection; Markdown ledgers remain canonical."""
 
@@ -1130,14 +1163,44 @@ class ClaimIndex:
         _require_candidate_limit(limit)
         if limit == 0:
             return []
-        if not isinstance(claim, NormalizedClaim):
-            raise TypeError("candidate claim must be normalized")
+        _require_normalized_candidate(claim)
         if not self.path.exists():
             return []
         return [
             IndexedClaim(row["page"], NormalizedClaim(json.loads(row["record_json"])))
             for row in self._candidate_rows(claim, limit)
         ]
+
+    def active_records(self, *, subject: str | None = None) -> list[IndexedClaim]:
+        """Every active claim, for readings that must see a whole fact's history.
+
+        `candidates` answers "what might this new claim collide with" and is
+        bounded for that. A bitemporal reading cannot be truncated the same way:
+        a missing successor would silently turn a superseded claim into a
+        current one, so this refuses past its bound rather than return a prefix.
+        """
+        if not self.path.exists():
+            return []
+        return [
+            IndexedClaim(row["page"], NormalizedClaim(json.loads(row["record_json"])))
+            for row in self._active_rows(subject)
+        ]
+
+    def _active_rows(self, subject: str | None) -> list[object]:
+        with closing(self._connect()) as database:
+            if not self._schema_compatible(database):
+                return []
+            rows = database.execute(
+                """
+                SELECT page, record_json FROM claim
+                WHERE lifecycle='active' AND (?1 IS NULL OR subject=?1)
+                ORDER BY page, id
+                LIMIT ?2
+                """,
+                (subject, MAX_ACTIVE_RECORDS + 1),
+            ).fetchall()
+        _require_active_bound(rows)
+        return rows
 
     def _candidate_rows(self, claim: NormalizedClaim, limit: int) -> list[object]:
         with closing(self._connect()) as database:
