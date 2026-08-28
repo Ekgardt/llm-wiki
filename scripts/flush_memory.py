@@ -596,6 +596,25 @@ def _read_capture_intent(
     return record
 
 
+def _bounded_classifier_evidence(evidence: str) -> str:
+    """The tail the classifier reads; the durable record still keeps every byte.
+
+    Measured 2026-08-28 on the 13 live capture intents: the unbounded prompt
+    reached a median of 723 288 characters per session — the 60 000-character
+    classifier window of `session-promotion-policy-decision` was bypassed by
+    the intent path, which carries up to 1 MiB. A tail, not head+tail: the
+    same decision measured head+tail on forty real sessions and rejected it.
+    """
+    if len(evidence) <= MAX_TRANSCRIPT_CHARS:
+        return evidence
+    dropped = len(evidence) - MAX_TRANSCRIPT_CHARS
+    return (
+        f"[…{dropped} characters of earlier evidence omitted for "
+        f"classification; the stored record is complete]"
+        + evidence[-MAX_TRANSCRIPT_CHARS:]
+    )
+
+
 def _capture_prompt(record: Mapping[str, object]) -> str:
     from reliable_memory import canonical_json_bytes
 
@@ -603,7 +622,7 @@ def _capture_prompt(record: Mapping[str, object]) -> str:
     return (
         "Classify this role-preserved session evidence using the closed flush grammar.\n"
         f"Event: {record['event']}\n"
-        f"Evidence: {evidence}"
+        f"Evidence: {_bounded_classifier_evidence(evidence)}"
     )
 
 
