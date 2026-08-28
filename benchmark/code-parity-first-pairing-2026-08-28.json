@@ -1,0 +1,507 @@
+{
+  "version": "code-parity-v1",
+  "directory": "/home/user/llm-wiki",
+  "budget_seconds": 60.0,
+  "tasks": [
+    {
+      "id": "T01",
+      "kind": "who-calls",
+      "question": "Which production functions call fuse_rrf?",
+      "llm_wiki": {
+        "status": "tool_error",
+        "call_statuses": [
+          "tool_error"
+        ],
+        "grade": "wrong",
+        "seconds": 3.27,
+        "tokens": 23,
+        "answer_excerpt": "{\"status\": \"error\", \"mode\": \"callers\", \"error\": \"Evidence Graph query row ceiling exceeded\"}"
+      },
+      "llm_wiki_best": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 3.546,
+        "tokens": 433,
+        "answer_excerpt": "{\"status\": \"ok\", \"generation_id\": \"generation-18cfd903a7a4e112-3ce112cb\", \"hops_applied\": 1, \"limit\": 50, \"frontier_truncated\": false, \"refused_expansions\": [], \"nodes\": [{\"node_id\": \"code:node:2efaa60ad36c3d08c1c53ea64c98a9a5\", \"kind\": \"function\", \"name\": \"_fused_candidates\", \"path\": \"scripts/retrieval.py\", \"owner\": \"scripts.retrieval\"}, {\"node_id\": \"code:node:fb7f00530cc7b93acb3052efd59b2d85\", \"kind\": \"function\", \"name\": \"_fused\", \"path\": \"tests/test_intent_conditional_trust.py\", \"owner\": \"tests.test_intent_conditional_trust\"}, {\"node_id\": \"code:node:46d4eaae0e5c0ed29f778b95414e23d7\", \"kind\": \"function\", \"name\": \"test_an_unweighted_candidate_keeps_its_fused_score_unchanged\", \"path\": \"tests/test_retrieval.py\", \"owner\": \"tests.test_retrieval\"}, {\"node_id\": \"code:node:0bb65602dec748125d14178b4663db30\", \"kind\": \"function\", \"name\": \"test_rrf_is_rank_only_and_keeps_raw_backend_fields_separate\", \"path\": \"tests/test_retrieval.py\", \"owner\": \"tests.test_retrieval\"}, {\"node_id\": \"code:node:27f011d721d816246336e5c259736a95\", \"kind\": \"function\", \"name\": \"test_rrf_ties_are_broken_deterministically_by_candidate_id\", \"path\": \"tests/test_retrieval.py\", \"owner\": \"tests.test_retrieval\"}, {\"node_id\": \"code:node:a794d5b033685709a906881e7b308288\", \"kind\": \"function\", \"name\": \"test_typed_provenance_weighs_on_every_path_from_one_table\", \"path\": \"tests/test_retrieval.py\", \"owner\": \"tests.test_retrieval\"}, {\"node_id\": \"code:node:38ea05f814ebc9f3c4d959b1f09cc68f\", \"kind\": \"function\", \"name\": \"test_what_a_page_is_weighs_on_the_order_too\", \"path\": \"tests/test_retrieval.py\", \"owner\": \"tests.test_retrieval\"}], \"note\": \"bounded structural reachability over the active generation; ceilings refuse by name, nothing is truncated silently\"}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 2.073,
+        "tokens": 44,
+        "answer_excerpt": "function: fuse_rrf\ndirection: inbound\ncallers_total: 1\ncallers: 1  (rows: name hop; qn = group prefix + \".\" + name)\nhome-user-llm-wiki.scripts.retrieval:\n  _fused_candidates 1\n"
+      }
+    },
+    {
+      "id": "T02",
+      "kind": "who-calls",
+      "question": "Which functions call write_session_evidence?",
+      "llm_wiki": {
+        "status": "tool_error",
+        "call_statuses": [
+          "tool_error"
+        ],
+        "grade": "wrong",
+        "seconds": 3.403,
+        "tokens": 23,
+        "answer_excerpt": "{\"status\": \"error\", \"mode\": \"callers\", \"error\": \"Evidence Graph query row ceiling exceeded\"}"
+      },
+      "llm_wiki_best": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 3.268,
+        "tokens": 546,
+        "answer_excerpt": "{\"status\": \"ok\", \"generation_id\": \"generation-18cfd903a7a4e112-3ce112cb\", \"hops_applied\": 1, \"limit\": 50, \"frontier_truncated\": false, \"refused_expansions\": [], \"nodes\": [{\"node_id\": \"code:node:5bdf7c3539e5a0d0f60d5d70db8dc665\", \"kind\": \"function\", \"name\": \"_ingest_one\", \"path\": \"benchmark/longmemeval_vault.py\", \"owner\": \"benchmark.longmemeval_vault\"}, {\"node_id\": \"code:node:4852a0757290f4566cc26fd3c34d4a6e\", \"kind\": \"function\", \"name\": \"_write_one\", \"path\": \"scripts/backfill_sessions.py\", \"owner\": \"scripts.backfill_sessions\"}, {\"node_id\": \"code:node:fd4e7f79f926244782ff84c3652d4303\", \"kind\": \"function\", \"name\": \"_keep_session_record\", \"path\": \"scripts/flush_memory.py\", \"owner\": \"scripts.flush_memory\"}, {\"node_id\": \"code:node:f33ae82010b8d9bdade9d8a13e95c626\", \"kind\": \"function\", \"name\": \"_keep_transcript_record\", \"path\": \"scripts/flush_memory.py\", \"owner\": \"scripts.flush_memory\"}, {\"node_id\": \"code:node:0609233626d27f9226295f1693e9a01b\", \"kind\": \"function\", \"name\": \"test_a_failed_write_never_breaks_capture\", \"path\": \"tests/test_session_evidence.py\", \"owner\": \"tests.test_session_evidence\"}, {\"node_id\": \"code:node:608f3dfdeea38b22aef86c35a2ca8b62\", \"kind\": \"function\", \"name\": \"test_a_session_with_nothing_in_it_writes_nothing\", \"path\": \"tests/test_session_evidence.py\", \"owner\": \"tests.test_session_evidence\"}, {\"node_id\": \"code:node:8cf3b8722aee8ee176346bebfe4a77d7\", \"kind\": \"function\", \"name\": \"test_the_record_reaches_disk_through_the_real_transaction\", \"path\": \"tests/test_session_evidence.py\", \"owner\": \"tests.test_session_evidence\"}, {\"node_id\": \"code:node:b6cb807ed8b0e68725768e9f5c835b3d\", \"kind\": \"function\", \"name\": \"test_writing_the_record_goes_through_the_transaction\", \"path\": \"tests/test_session_evidence.py\", \"owner\": \"tests.test_session_evidence\"}, {\"node_id\": \"code:node:27cb3b2ff10dda5577e759172df00df5\", \"kind\": \"function\", \"name\": \"test_the_record_is_written_while_the_worker_holds_the_writer_gate\", \"path\": \"tests/test_session_record_uses_the_owned_gate.py\", \"owner\": \"tests.test_session_record_uses_the_owned_gate\"}], \"note\": \"bounded structural reachability over the active generation; ceilings refuse by name, nothing is truncated silently\"}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 2.706,
+        "tokens": 87,
+        "answer_excerpt": "function: write_session_evidence\ndirection: inbound\ncallers_total: 4\ncallers: 4  (rows: name hop; qn = group prefix + \".\" + name)\nhome-user-llm-wiki.benchmark.longmemeval_vault:\n  _ingest_one 1\nhome-user-llm-wiki.scripts.backfill_sessions:\n  _write_one 1\nhome-user-llm-wiki.scripts.flush_memory:\n  _keep_session_record 1\n  _keep_transcript_record 1\n"
+      }
+    },
+    {
+      "id": "T03",
+      "kind": "what-does-x-call",
+      "question": "Which project functions does fuse_rrf call?",
+      "llm_wiki": {
+        "status": "tool_error",
+        "call_statuses": [
+          "tool_error"
+        ],
+        "grade": "wrong",
+        "seconds": 5.906,
+        "tokens": 23,
+        "answer_excerpt": "{\"status\": \"error\", \"mode\": \"callees\", \"error\": \"Evidence Graph query row ceiling exceeded\"}"
+      },
+      "llm_wiki_best": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 5.673,
+        "tokens": 287,
+        "answer_excerpt": "{\"status\": \"ok\", \"generation_id\": \"generation-18cfd903a7a4e112-3ce112cb\", \"hops_applied\": 1, \"limit\": 50, \"frontier_truncated\": false, \"refused_expansions\": [], \"nodes\": [{\"node_id\": \"code:node:8c045ba86949caa9aac95abb1ebb8c4e\", \"kind\": \"function\", \"name\": \"curated_pages_first\", \"path\": \"scripts/provenance.py\", \"owner\": \"scripts.provenance\"}, {\"node_id\": \"code:node:338f1753b9c001f9ab19a479308d7a8d\", \"kind\": \"function\", \"name\": \"_accumulate_backend\", \"path\": \"scripts/retrieval.py\", \"owner\": \"scripts.retrieval\"}, {\"node_id\": \"code:node:c7d89a72a2c7c4e4efd2c8f71cb57d07\", \"kind\": \"function\", \"name\": \"_fused_candidate\", \"path\": \"scripts/retrieval.py\", \"owner\": \"scripts.retrieval\"}, {\"node_id\": \"code:node:779aefa93b9595df7a76542b76aa3cea\", \"kind\": \"function\", \"name\": \"_fusion_weights\", \"path\": \"scripts/retrieval.py\", \"owner\": \"scripts.retrieval\"}, {\"node_id\": \"code:node:c37b06007759ff2e17685edc2b5d43c2\", \"kind\": \"function\", \"name\": \"_weigh_by_trust\", \"path\": \"scripts/retrieval.py\", \"owner\": \"scripts.retrieval\"}], \"note\": \"bounded structural reachability over the active generation; ceilings refuse by name, nothing is truncated silently\"}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 2.438,
+        "tokens": 75,
+        "answer_excerpt": "function: fuse_rrf\ndirection: outbound\ncallees_total: 5\ncallees: 5  (rows: name hop; qn = group prefix + \".\" + name)\nhome-user-llm-wiki.scripts.provenance:\n  curated_pages_first 1\nhome-user-llm-wiki.scripts.retrieval:\n  _accumulate_backend 1\n  _fused_candidate 1\n  _fusion_weights 1\n  _weigh_by_trust 1\n"
+      }
+    },
+    {
+      "id": "T04",
+      "kind": "find-symbol-definition",
+      "question": "Where is _page_diverse defined?",
+      "llm_wiki": {
+        "status": "tool_error",
+        "call_statuses": [
+          "tool_error"
+        ],
+        "grade": "wrong",
+        "seconds": 3.592,
+        "tokens": 22,
+        "answer_excerpt": "{\"status\": \"error\", \"mode\": \"symbol\", \"error\": \"Evidence Graph query row ceiling exceeded\"}"
+      },
+      "llm_wiki_best": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 3.318,
+        "tokens": 68,
+        "answer_excerpt": "{\"symbol\": \"_page_diverse\", \"snippets\": [{\"path\": \"scripts/retrieval.py\", \"start_line\": 2765, \"end_line\": 2766, \"source\": \"def _page_diverse(\\n    candidates: Sequence[RetrievalCandidate],\", \"truncated\": false, \"owner\": \"scripts.retrieval\"}], \"graph\": \"active_generation\"}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 3.278,
+        "tokens": 107,
+        "answer_excerpt": "total: 3\nsearch_mode: bm25\nresults: 3  (cols: qn label file lines rank)\n  home-user-llm-wiki.scripts.retrieval._page_diverse Function scripts/retrieval.py 2765-2785 -25.18\n  home-user-llm-wiki.scripts.search_memory._page_diverse_order Function scripts/search_memory.py 3710-3730 -24.52\n  home-user-llm-wiki.tests.test_retrieval.test_page_diverse_order_drops_nothing Function tests/test_retrieval.py 652-657 -23.45\nhas_more: false\n"
+      }
+    },
+    {
+      "id": "T05",
+      "kind": "find-symbol-definition",
+      "question": "Where is the constant EDITORIAL_NAMES defined?",
+      "llm_wiki": {
+        "status": "tool_error",
+        "call_statuses": [
+          "tool_error"
+        ],
+        "grade": "wrong",
+        "seconds": 6.6,
+        "tokens": 22,
+        "answer_excerpt": "{\"status\": \"error\", \"mode\": \"symbol\", \"error\": \"Evidence Graph query row ceiling exceeded\"}"
+      },
+      "llm_wiki_best": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "wrong",
+        "seconds": 5.787,
+        "tokens": 74,
+        "answer_excerpt": "{\"status\": \"ok\", \"generation_id\": \"generation-18cfd903a7a4e112-3ce112cb\", \"hops_applied\": 0, \"limit\": 10, \"frontier_truncated\": false, \"refused_expansions\": [], \"nodes\": [], \"note\": \"bounded structural reachability over the active generation; ceilings refuse by name, nothing is truncated silently\"}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered",
+          "answered"
+        ],
+        "grade": "wrong",
+        "seconds": 5.286,
+        "tokens": 219,
+        "answer_excerpt": "total: 0\nsearch_mode: bm25\nresults: 0  (cols: qn label file lines rank)\nhas_more: false\n\nresults: 5  (cols: qn label file lines matches in out)\n  home-user-llm-wiki.scripts.lint_memory._frontmatter_of Function scripts/lint_memory.py 532-543 \"534\" 4 0\n  home-user-llm-wiki.scripts.lookup_mode.count_wiki_pages Function scripts/lookup_mode.py 42-58 46;56 3 1\n  home-user-llm-wiki.scripts.corpus_snapshot._Discovery._eligible Method scripts/corpus_snapshot.py 1294-1299 \"1296\" 2 0\n  home-user-llm-wiki.scripts.lint_memory.check_missing_frontmatter Function scripts/lint_memory.py 517-529 \"521\" 2 2\n  home-user-llm-wiki.scripts.lint_memory._expects_an_index_entry Function scripts/lint_memory.py 331-340 \"332\" 1 2\ndirs: 5  (cols: dir hits)\n  scripts/ 21\n  tests/ 2\n  benchmark/ 2\n  docs/ 1\n  knowledge/ 4\ntotal_grep_matches: 40\ntotal_results: 30\nraw_match_count: 0\nelapsed_ms: 22\n"
+      }
+    },
+    {
+      "id": "T06",
+      "kind": "find-dead-code",
+      "question": "Is _flush_started (scripts/integration_adapter.py) dead code?",
+      "llm_wiki": {
+        "status": "tool_error",
+        "call_statuses": [
+          "tool_error"
+        ],
+        "grade": "wrong",
+        "seconds": 3.328,
+        "tokens": 7,
+        "answer_excerpt": "{\"error\": \"operation_failed\"}"
+      },
+      "llm_wiki_best": {
+        "status": "answered",
+        "call_statuses": [
+          "answered",
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 6.553,
+        "tokens": 196,
+        "answer_excerpt": "{\"status\": \"ok\", \"generation_id\": \"generation-18cfd903a7a4e112-3ce112cb\", \"hops_applied\": 0, \"limit\": 10, \"frontier_truncated\": false, \"refused_expansions\": [], \"nodes\": [{\"node_id\": \"code:node:54e8c7b8f9f13e4eeaee85dd265e50cd\", \"kind\": \"function\", \"name\": \"_flush_started\", \"path\": \"scripts/integration_adapter.py\", \"owner\": \"scripts.integration_adapter\"}], \"note\": \"bounded structural reachability over the active generation; ceilings refuse by name, nothing is truncated silently\"}\n{\"status\": \"ok\", \"generation_id\": \"generation-18cfd903a7a4e112-3ce112cb\", \"hops_applied\": 1, \"limit\": 10, \"frontier_truncated\": false, \"refused_expansions\": [], \"nodes\": [], \"note\": \"bounded structural reachability over the active generation; ceilings refuse by name, nothing is truncated silently\"}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 2.007,
+        "tokens": 30,
+        "answer_excerpt": "function: _flush_started\ndirection: inbound\ncallers_total: 0\ncallers: 0  (rows: name hop; qn = group prefix + \".\" + name)\n"
+      }
+    },
+    {
+      "id": "T07",
+      "kind": "find-dead-code",
+      "question": "Is _search_backends (scripts/search_memory.py) dead code?",
+      "llm_wiki": {
+        "status": "tool_error",
+        "call_statuses": [
+          "tool_error"
+        ],
+        "grade": "wrong",
+        "seconds": 3.269,
+        "tokens": 7,
+        "answer_excerpt": "{\"error\": \"operation_failed\"}"
+      },
+      "llm_wiki_best": {
+        "status": "answered",
+        "call_statuses": [
+          "answered",
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 7.011,
+        "tokens": 193,
+        "answer_excerpt": "{\"status\": \"ok\", \"generation_id\": \"generation-18cfd903a7a4e112-3ce112cb\", \"hops_applied\": 0, \"limit\": 10, \"frontier_truncated\": false, \"refused_expansions\": [], \"nodes\": [{\"node_id\": \"code:node:3517b12cd960b86efa759eef3a988aa9\", \"kind\": \"function\", \"name\": \"_search_backends\", \"path\": \"scripts/search_memory.py\", \"owner\": \"scripts.search_memory\"}], \"note\": \"bounded structural reachability over the active generation; ceilings refuse by name, nothing is truncated silently\"}\n{\"status\": \"ok\", \"generation_id\": \"generation-18cfd903a7a4e112-3ce112cb\", \"hops_applied\": 1, \"limit\": 10, \"frontier_truncated\": false, \"refused_expansions\": [], \"nodes\": [], \"note\": \"bounded structural reachability over the active generation; ceilings refuse by name, nothing is truncated silently\"}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 2.001,
+        "tokens": 31,
+        "answer_excerpt": "function: _search_backends\ndirection: inbound\ncallers_total: 0\ncallers: 0  (rows: name hop; qn = group prefix + \".\" + name)\n"
+      }
+    },
+    {
+      "id": "T08",
+      "kind": "impact-of-changing-x",
+      "question": "Which modules import page_status (and are therefore touched by changing it)?",
+      "llm_wiki": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "wrong",
+        "seconds": 3.18,
+        "tokens": 107,
+        "answer_excerpt": "{\"directory\": \"/home/user/llm-wiki\", \"mode\": \"dependencies\", \"architecture\": {\"dependencies\": [], \"source_generation\": \"generation-18cfd903a7a4e112-3ce112cb\", \"source_scope\": \"checkout\", \"source_root\": \"/home/user/llm-wiki\", \"graph_complete\": false, \"unresolved_count\": 76044, \"fallback\": false}, \"source_generation\": \"generation-18cfd903a7a4e112-3ce112cb\", \"graph_complete\": false, \"unresolved_count\": 76044, \"fallback\": false}"
+      },
+      "llm_wiki_best": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 3.147,
+        "tokens": 358,
+        "answer_excerpt": "{\"status\": \"ok\", \"generation_id\": \"generation-18cfd903a7a4e112-3ce112cb\", \"hops_applied\": 1, \"limit\": 50, \"frontier_truncated\": false, \"refused_expansions\": [], \"nodes\": [{\"node_id\": \"code:node:075168f3af6564433866880a76294449\", \"kind\": \"module\", \"name\": \"scripts.archive_stale\", \"path\": \"scripts/archive_stale.py\", \"owner\": null}, {\"node_id\": \"code:node:de7fdf1ecd8b69313851b4f5b2b524d9\", \"kind\": \"module\", \"name\": \"scripts.corpus_snapshot\", \"path\": \"scripts/corpus_snapshot.py\", \"owner\": null}, {\"node_id\": \"code:node:c2472be1584dd86ecef74339a23ee2c0\", \"kind\": \"module\", \"name\": \"scripts.lint_memory\", \"path\": \"scripts/lint_memory.py\", \"owner\": null}, {\"node_id\": \"code:node:c885e209d28825ea41cf9a7d4103b4c0\", \"kind\": \"module\", \"name\": \"scripts.page_facts\", \"path\": \"scripts/page_facts.py\", \"owner\": null}, {\"node_id\": \"code:node:ac39db79175af9a0178d01de123b12f0\", \"kind\": \"module\", \"name\": \"scripts.rebuild_memory_index\", \"path\": \"scripts/rebuild_memory_index.py\", \"owner\": null}, {\"node_id\": \"code:node:a4e52c5c23ddcef375fd9f6da32ea3ca\", \"kind\": \"module\", \"name\": \"scripts.search_memory\", \"path\": \"scripts/search_memory.py\", \"owner\": null}, {\"node_id\": \"code:node:5478e9f65a040967eb5a83df25dbd15c\", \"kind\": \"module\", \"name\": \"tests.test_page_status\", \"path\": \"tests/test_page_status.py\", \"owner\": null}], \"note\": \"bounded structural reachability over the active generation; ceilings refuse by name, nothing is truncated silently\"}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 2.245,
+        "tokens": 235,
+        "answer_excerpt": "rows: 9  (cols: a.qualified_name b.qualified_name)\n  home-user-llm-wiki.scripts.archive_stale.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.scripts.corpus_snapshot.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.scripts.lint_memory.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.scripts.page_facts.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.scripts.rebuild_memory_index.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.scripts.search_memory.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.scripts.search_memory.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.tests.test_page_status.py.__file__ home-user-llm-wiki.scripts.page_status.current_status_sql\n  home-user-llm-wiki.tests.test_page_status.py.__file__ home-user-llm-wiki.scripts.page_status.is_retired\ntotal: 9\n"
+      }
+    },
+    {
+      "id": "T09",
+      "kind": "architecture-of-module",
+      "question": "Which project modules does scripts/retrieval.py depend on?",
+      "llm_wiki": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "wrong",
+        "seconds": 3.264,
+        "tokens": 107,
+        "answer_excerpt": "{\"directory\": \"/home/user/llm-wiki\", \"mode\": \"dependencies\", \"architecture\": {\"dependencies\": [], \"source_generation\": \"generation-18cfd903a7a4e112-3ce112cb\", \"source_scope\": \"checkout\", \"source_root\": \"/home/user/llm-wiki\", \"graph_complete\": false, \"unresolved_count\": 76044, \"fallback\": false}, \"source_generation\": \"generation-18cfd903a7a4e112-3ce112cb\", \"graph_complete\": false, \"unresolved_count\": 76044, \"fallback\": false}"
+      },
+      "llm_wiki_best": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 3.27,
+        "tokens": 358,
+        "answer_excerpt": "{\"status\": \"ok\", \"generation_id\": \"generation-18cfd903a7a4e112-3ce112cb\", \"hops_applied\": 1, \"limit\": 50, \"frontier_truncated\": false, \"refused_expansions\": [], \"nodes\": [{\"node_id\": \"code:node:5679befc80bfad220a1f64c84b692868\", \"kind\": \"module\", \"name\": \"scripts.evidence_graph\", \"path\": \"scripts/evidence_graph.py\", \"owner\": null}, {\"node_id\": \"code:node:84ed6924e9c6294e55a79c2ed87e0877\", \"kind\": \"module\", \"name\": \"scripts.graph_neighbors\", \"path\": \"scripts/graph_neighbors.py\", \"owner\": null}, {\"node_id\": \"code:node:6fcc6dc623587fa85ef59708a18c3c84\", \"kind\": \"module\", \"name\": \"scripts.provenance\", \"path\": \"scripts/provenance.py\", \"owner\": null}, {\"node_id\": \"code:node:fa60a21a01b314d70fac0dfbbc3e876b\", \"kind\": \"module\", \"name\": \"scripts.repository_scope\", \"path\": \"scripts/repository_scope.py\", \"owner\": null}, {\"node_id\": \"code:node:55b8062b26e1ebd687b70100dd060fb0\", \"kind\": \"module\", \"name\": \"scripts.reranker\", \"path\": \"scripts/reranker.py\", \"owner\": null}, {\"node_id\": \"code:node:50e73ab3e8587411790b283a2a678c3d\", \"kind\": \"module\", \"name\": \"scripts.retrieval_telemetry\", \"path\": \"scripts/retrieval_telemetry.py\", \"owner\": null}, {\"node_id\": \"code:node:a4e52c5c23ddcef375fd9f6da32ea3ca\", \"kind\": \"module\", \"name\": \"scripts.search_memory\", \"path\": \"scripts/search_memory.py\", \"owner\": null}], \"note\": \"bounded structural reachability over the active generation; ceilings refuse by name, nothing is truncated silently\"}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 2.213,
+        "tokens": 282,
+        "answer_excerpt": "rows: 19  (cols: b.qualified_name)\n  home-user-llm-wiki.scripts.corpus_snapshot\n  home-user-llm-wiki.scripts.memory_state\n  home-user-llm-wiki.tests.test_memory_queue.queue\n  home-user-llm-wiki.scripts.markdown_transaction.MarkdownChange.replace\n  home-user-llm-wiki.scripts.provenance\n  home-user-llm-wiki.scripts.reliable_memory.validate_schema\n  home-user-llm-wiki.benchmark.retrieval_paths\n  home-user-llm-wiki.scripts.contextual_retrieval.generate_context\n  home-user-llm-wiki.scripts.contextual_retrieval.get_context\n  home-user-llm-wiki.scripts.corpus_snapshot.CapturedSource\n  home-user-llm-wiki.scripts.corpus_snapshot.CorpusSnapshot\n  home-user-llm-wiki.scripts.corpus_snapshot.SnapshotPolicy\n  home-user-llm-wiki.scripts.corpus_snapshot.SourceMetadata\n  home-user-llm-wiki.scripts.corpus_snapshot.SourceRecord\n  home-user-llm-wiki.scripts.context_compiler.compile_context\n  home-user-llm-wiki.scripts.retrieval.candidates_to_legacy\n  home-user-llm-wiki.scripts.retrieval.expand_evidence_graph\n  home-user-llm-wiki.scripts.retrieval.retrieve\n  home-user-llm-wiki.scripts.reliable_memory.SchemaValidationError\ntotal: 19\n"
+      }
+    },
+    {
+      "id": "T10",
+      "kind": "multi-hop",
+      "question": "Which functions reach fuse_rrf within two caller hops (callers, and callers of callers)?",
+      "llm_wiki": {
+        "status": "tool_error",
+        "call_statuses": [
+          "tool_error",
+          "tool_error"
+        ],
+        "grade": "wrong",
+        "seconds": 6.968,
+        "tokens": 46,
+        "answer_excerpt": "{\"status\": \"error\", \"mode\": \"callers\", \"error\": \"Evidence Graph query row ceiling exceeded\"}\n{\"status\": \"error\", \"mode\": \"callers\", \"error\": \"Evidence Graph query row ceiling exceeded\"}"
+      },
+      "llm_wiki_best": {
+        "status": "answered",
+        "call_statuses": [
+          "answered",
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 7.33,
+        "tokens": 672,
+        "answer_excerpt": "{\"status\": \"ok\", \"generation_id\": \"generation-18cfd903a7a4e112-3ce112cb\", \"hops_applied\": 1, \"limit\": 50, \"frontier_truncated\": false, \"refused_expansions\": [], \"nodes\": [{\"node_id\": \"code:node:2efaa60ad36c3d08c1c53ea64c98a9a5\", \"kind\": \"function\", \"name\": \"_fused_candidates\", \"path\": \"scripts/retrieval.py\", \"owner\": \"scripts.retrieval\"}, {\"node_id\": \"code:node:fb7f00530cc7b93acb3052efd59b2d85\", \"kind\": \"function\", \"name\": \"_fused\", \"path\": \"tests/test_intent_conditional_trust.py\", \"owner\": \"tests.test_intent_conditional_trust\"}, {\"node_id\": \"code:node:46d4eaae0e5c0ed29f778b95414e23d7\", \"kind\": \"function\", \"name\": \"test_an_unweighted_candidate_keeps_its_fused_score_unchanged\", \"path\": \"tests/test_retrieval.py\", \"owner\": \"tests.test_retrieval\"}, {\"node_id\": \"code:node:0bb65602dec748125d14178b4663db30\", \"kind\": \"function\", \"name\": \"test_rrf_is_rank_only_and_keeps_raw_backend_fields_separate\", \"path\": \"tests/test_retrieval.py\", \"owner\": \"tests.test_retrieval\"}, {\"node_id\": \"code:node:27f011d721d816246336e5c259736a95\", \"kind\": \"function\", \"name\": \"test_rrf_ties_are_broken_deterministically_by_candidate_id\", \"path\": \"tests/test_retrieval.py\", \"owner\": \"tests.test_retrieval\"}, {\"node_id\": \"code:node:a794d5b033685709a906881e7b308288\", \"kind\": \"function\", \"name\": \"test_typed_provenance_weighs_on_every_path_from_one_table\", \"path\": \"tests/test_retrieval.py\", \"owner\": \"tests.test_retrieval\"}, {\"node_id\": \"code:node:38ea05f814ebc9f3c4d959b1f09cc68f\", \"kind\": \"function\", \"name\": \"test_what_a_page_is_weighs_on_the_order_too\", \"path\": \"tests/test_retrieval.py\", \"owner\": \"tests.test_retrieval\"}], \"note\": \"bounded structural reachability over the active generation; ceilings refuse by name, nothing is truncated silently\"}\n{\"status\": \"ok\", \"generation_id\": \"generation-18cfd903a7a4e112-3ce112cb\", \"hops_applied\": 2, \"limit\": 50, \"frontier_truncated\": false, \"refused_expansions\": [], \"nodes\": [{\"node_id\": \"code:node:8151901b4a63df0b8d47bacd5a317311\", \"kind\": \"function\", \"name\": \"retrieve\", \"path\": \"scripts/retrieval.py\", \"owner\": \"scripts.retrieval\"}, {\"node_id\": \"code:node:c8fefbabacc765391589f783d7316967\", \"kind\": \"function\", \"name\": \"test_fusion_for_a_code_question_records_todays_weights\", \"path\": \"tests/test_intent_conditional_trust.py\", \"owner\": \"tests.test_intent_conditional_trust\"}, {\"node_id\": \"code:node:a541479f961b76fddc4b93498ddbec4b\", \"kind\": \"function\", \"name\": \"test_fusion_records_the_conditional_weight_for_every_later_stage\", \"path\": \"tests/test_intent_conditional_trust.py\", \"owner\": \"tests.test_intent_conditional_trust\"}], \"note\": \"bounded structural reachability over the active generation; ceilings refuse by name, nothing is truncated silently\"}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 2.117,
+        "tokens": 47,
+        "answer_excerpt": "function: fuse_rrf\ndirection: inbound\ncallers_total: 2\ncallers: 2  (rows: name hop; qn = group prefix + \".\" + name)\nhome-user-llm-wiki.scripts.retrieval:\n  _fused_candidates 1\n  retrieve 2\n"
+      }
+    },
+    {
+      "id": "T11",
+      "kind": "who-calls",
+      "question": "Which retrieval-path function calls source_type_weight?",
+      "llm_wiki": {
+        "status": "tool_error",
+        "call_statuses": [
+          "tool_error"
+        ],
+        "grade": "wrong",
+        "seconds": 3.423,
+        "tokens": 23,
+        "answer_excerpt": "{\"status\": \"error\", \"mode\": \"callers\", \"error\": \"Evidence Graph query row ceiling exceeded\"}"
+      },
+      "llm_wiki_best": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 3.381,
+        "tokens": 224,
+        "answer_excerpt": "{\"status\": \"ok\", \"generation_id\": \"generation-18cfd903a7a4e112-3ce112cb\", \"hops_applied\": 1, \"limit\": 50, \"frontier_truncated\": false, \"refused_expansions\": [], \"nodes\": [{\"node_id\": \"code:node:c37b06007759ff2e17685edc2b5d43c2\", \"kind\": \"function\", \"name\": \"_weigh_by_trust\", \"path\": \"scripts/retrieval.py\", \"owner\": \"scripts.retrieval\"}, {\"node_id\": \"code:node:9a30df3568ace6f95ce04a56f371fbd7\", \"kind\": \"function\", \"name\": \"_weight\", \"path\": \"tests/test_intent_conditional_trust.py\", \"owner\": \"tests.test_intent_conditional_trust\"}, {\"node_id\": \"code:node:18ddacaa85ee515c8d3c4976a42cf7fd\", \"kind\": \"function\", \"name\": \"test_living_under_a_code_root_never_lifts_a_page\", \"path\": \"tests/test_intent_conditional_trust.py\", \"owner\": \"tests.test_intent_conditional_trust\"}], \"note\": \"bounded structural reachability over the active generation; ceilings refuse by name, nothing is truncated silently\"}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 2.334,
+        "tokens": 46,
+        "answer_excerpt": "function: source_type_weight\ndirection: inbound\ncallers_total: 1\ncallers: 1  (rows: name hop; qn = group prefix + \".\" + name)\nhome-user-llm-wiki.scripts.retrieval:\n  _weigh_by_trust 1\n"
+      }
+    },
+    {
+      "id": "T12",
+      "kind": "architecture-summary",
+      "question": "Summarize the repository architecture: what are its main modules and entry points?",
+      "llm_wiki": {
+        "status": "tool_error",
+        "call_statuses": [
+          "tool_error"
+        ],
+        "grade": "wrong",
+        "seconds": 3.453,
+        "tokens": 23,
+        "answer_excerpt": "{\"status\": \"error\", \"mode\": \"summary\", \"error\": \"Evidence Graph query row ceiling exceeded\"}"
+      },
+      "llm_wiki_best": {
+        "status": "tool_error",
+        "call_statuses": [
+          "tool_error"
+        ],
+        "grade": "wrong",
+        "seconds": 3.77,
+        "tokens": 23,
+        "answer_excerpt": "{\"status\": \"error\", \"mode\": \"summary\", \"error\": \"Evidence Graph query row ceiling exceeded\"}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "wrong",
+        "seconds": 2.885,
+        "tokens": 815,
+        "answer_excerpt": "project: home-user-llm-wiki\naspects_hint: \"Summary view (default). More on request via aspects:[...] — structure, dependencies, routes, hotspots, boundaries, layers, clusters, file_tree — or [\\\"all\\\"] for everything.\"\ntotal_nodes: 25724\ntotal_edges: 141100\nnode_labels: 13  (cols: label count)\n  Function 14033\n  Variable 5244\n  Method 2649\n  Section 1767\n  Class 657\n  File 640\n  Module 638\n  Folder 42\n  EnvVar 36\n  Decorator 12\n  Route 4\n  Branch 1\n  Project 1\nedge_types: 22  (cols: type count)\n  CALLS 48193\n  DEFINES 29261\n  USAGE 25536\n  WRITES 15380\n  TESTS 13001\n  DEFINES_METHOD 2644\n  DECORATES 1547\n  IMPORTS 1472\n  CONFIGURES 888\n  FILE_CHANGES_WITH 829\n  RAISES 777\n  CONTAINS_FILE 640\n  CALL_REFERENCE 277\n  SEMANTICALLY_RELATED 209\n  SIMILAR_TO 190\n  THROWS 176\n  CONTAINS_FOLDER 38\n  INHERITS 28\n  OVERRIDE 7\n  HTTP_CALLS 5\n  HAS_BRANCH 1\n  TESTS_FILE 1\nlanguages: 5  (cols: language files)\n  Python 358\n  TOML 4\n  YAML 2\n  Bash 1\n  JavaScript 1\npackages: 15  (cols: name nodes fan_in fan_out)\n  memory_queue 869 0 0\n  doctor 597 0 0\n  lsp_process 492 0 0\n  pyright_session 387 0 0\n  install_control 345 0 0\n  compile_memory 290 0 0\n  install_pyright 284 0 0\n  test_mcp_server 263 0 0\n  evidence_graph 203 0 0\n  test_doctor 194 0 0\n  generation_catalog 188 0 0\n  lsp_security 150 0 0\n  installed_memory_repair 145 0 0\n  archive_daily 142 0 0\n  contradiction_pipeline 136 0 0\nentry_points: 20  (cols: qn file)\n  home-user-llm-wiki.benchmark.build_flush_corpus.main benchmark/build_flush_corpus.py\n  home-user-llm-wiki.benchmark.durability_child.main benchmark/durability_child.py\n  home-user-llm-wiki.benchmark.fixtures.comparative_adapter_fixture.main benchmark/fixtures/comparative_adapter_fixture.py\n  home-user-llm-wiki.benchmark.generate_python_qualification.main benchmark/generate_python_qualification.py\n  home-user-llm-wiki.benchmark.longmemeval_judge.main benchmark/longmemeval_judge.py\n  home-user-llm-wiki.benchmark.longmemeval_vault.main benchmark/longmemeval_vault.py\n  home-user-llm-wiki.benchmark.run_benchmark.main benchmark/run_benchmark.py\n  home-user-llm-wiki.benchmark.run_code_navigation.main benchmark/run_code_navigation.py\n  home-user-llm-wiki.benchmark.run_code_parity.main benchmark/run_code_parity.py\n  home-user-llm-wiki.benchmark.run_comparative.main benchmark/run_comparative.py\n  home-user-llm-wiki.benchmark.run_contradiction_benchmark.main benchmark/run_contradiction_benchmark.py\n  home-user-llm-wiki.benchmark.run_durability.main benchmark/run_durability.py\n  home-user-llm-wiki.benchmark.run_flush_classification.main benchmark/run_flush_classification.py\n  home-user-llm-wiki.benchmark.run_longmemeval.main benchmark/run_longmemeval.py\n  home-user-llm-wiki.benchmark.run_retrieval_v2.main benchmark/run_retrieval_v2.py\n  home-user-llm-wiki.benchmark.run_scale_matrix.main benchmark/run_scale_matrix.py\n  home-user-llm-wiki.benchmark.run_vault_application.main benchmark/run_vault_application.py\n  home-user-llm-wiki.benchmark.run_vault_retrieval.main benchmark/run_vault_retrieval.py\n  home-user-llm-wiki.docs.enforcement.apply-bash-write-precision.main docs/enforcement/apply-bash-write-precision.py\n  home-user-llm-wiki.docs.enforcement.apply-guard-hardening.main docs/enforcement/apply-guard-hardening.py\n"
+      }
+    },
+    {
+      "id": "T13",
+      "kind": "community-naming",
+      "question": "Which module community does fuse_rrf belong to?",
+      "llm_wiki": {
+        "status": "tool_error",
+        "call_statuses": [
+          "tool_error"
+        ],
+        "grade": "wrong",
+        "seconds": 3.792,
+        "tokens": 23,
+        "answer_excerpt": "{\"status\": \"error\", \"mode\": \"community\", \"error\": \"Evidence Graph query row ceiling exceeded\"}"
+      },
+      "llm_wiki_best": {
+        "status": "tool_error",
+        "call_statuses": [
+          "tool_error"
+        ],
+        "grade": "wrong",
+        "seconds": 3.192,
+        "tokens": 23,
+        "answer_excerpt": "{\"status\": \"error\", \"mode\": \"community\", \"error\": \"Evidence Graph query row ceiling exceeded\"}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "wrong",
+        "seconds": 2.351,
+        "tokens": 367,
+        "answer_excerpt": "project: home-user-llm-wiki\ntotal_nodes: 25724\ntotal_edges: 141100\nclusters: 12  (cols: id label members cohesion top_nodes packages edge_types)\n  15 scripts 810 0.7956 QueueOperationError;int;_timestamp;get;_connect scripts;int;tests CALLS\n  9 scripts 667 0.5255 len;encode;range;redact_lsp_text;_redact_path scripts;len;range;tests;benchmark CALLS\n  4 scripts 650 0.7239 get;InstallControlError;dict;install_resources;_release scripts;dict;tests;benchmark CALLS\n  10 scripts 623 0.5747 str;run;print;normalize_event;_run_capture_with_stdin scripts;print;str;tests;docs CALLS\n  13 scripts 415 0.7103 pop;wait;ProtocolViolation;request;close scripts;list;tests;install CALLS\n  7 scripts 414 0.7457 write_bytes;_catalog;register;_publish;GenerationCatalog scripts;tests CALLS\n  3 scripts 400 0.597 append;add;_check_build_stop;_text;cancelled scripts;list;tests CALLS\n  0 scripts 363 0.7471 _lsp_runtime_check;_result;_run_deletion_check;_safe_kind;_deadline_reached scripts;tests CALLS\n  1 scripts 363 0.7109 snapshot_compile_inputs;checkpoint_event;_daily;get;apply_compile_plan scripts;tests CALLS\n  275 scripts 359 0.8722 _acquire_lifecycle;_release_lifecycle;_notify_lifecycle_locked;_start_lsp_process_impl;failed tests;scripts CALLS\n  5 scripts 353 0.6813 open;close;_require_lsp_deadline;PathContainmentError;identity scripts;tests CALLS\n  17 tests 286 0.8297 resolve_repository_scope;close;_navigation;_revision;resolve_repository_source str;tests;scripts CALLS\n"
+      }
+    }
+  ],
+  "summary": {
+    "llm_wiki": {
+      "correct": 0,
+      "partial": 0,
+      "wrong": 13,
+      "statuses": {
+        "tool_error": 11,
+        "answered": 2
+      },
+      "total_seconds": 53.45,
+      "total_tokens": 456,
+      "wrong_but_confident": 2,
+      "operator_attention_events": 11
+    },
+    "llm_wiki_best": {
+      "correct": 10,
+      "partial": 0,
+      "wrong": 3,
+      "statuses": {
+        "answered": 11,
+        "tool_error": 2
+      },
+      "total_seconds": 59.25,
+      "total_tokens": 3455,
+      "wrong_but_confident": 1,
+      "operator_attention_events": 2
+    },
+    "cbm": {
+      "correct": 10,
+      "partial": 0,
+      "wrong": 3,
+      "statuses": {
+        "answered": 13
+      },
+      "total_seconds": 33.93,
+      "total_tokens": 2385,
+      "wrong_but_confident": 3,
+      "operator_attention_events": 0
+    }
+  }
+}
