@@ -32,6 +32,11 @@ MAX_SOURCE_BYTES = 16 * 1024 * 1024 * 1024
 MAX_ROWS = 10_000
 MAX_DEPTH = 32
 MAX_EDGE_TYPES = 64
+# Node-id filter bound for `edges()`. Sized from measurement, not taste: on this
+# repository's live generation (19,153 function+method nodes) the worst
+# same-name collision is `__init__` at 296, and 512 stays under the historic
+# SQLite 999 host-parameter floor. A caller over the bound is refused by name.
+MAX_NODE_FILTER = 512
 MAX_WORK = 100_000
 PROGRESS_OPCODES = 1000
 MAX_VALIDATION_ROWS = 1_000_000
@@ -3251,6 +3256,49 @@ def _edge_filter(edge_values: tuple[str, ...], parameters: list[object]) -> str:
     return f" AND a.edge_type IN ({','.join('?' for _ in edge_values)})"
 
 
+def _require_node_id_sequence(values: object, label: str) -> None:
+    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+        raise ValueError(f"{label} must be a bounded sequence")
+    if len(values) > MAX_NODE_FILTER:
+        raise ValueError(f"{label} cannot contain more than {MAX_NODE_FILTER} values")
+
+
+def _node_id_values(values: Sequence[str] | None, label: str) -> tuple[str, ...] | None:
+    """Validate an optional node-id filter. ``None`` means no filter at all.
+
+    A caller handing over more ids than the bound is refused by name; the set is
+    never silently truncated.
+    """
+    if values is None:
+        return None
+    _require_node_id_sequence(values, label)
+    return tuple(sorted({_node_id(value, label) for value in values}))
+
+
+def _selects_nothing(*filters: tuple[str, ...] | None) -> bool:
+    """True when a filter was supplied but names no node, so no row can match."""
+    return any(item is not None and not item for item in filters)
+
+
+def _in_clause(column: str, values: Sequence[object] | None, parameters: list[object]) -> str:
+    if not values:
+        return ""
+    parameters.extend(values)
+    return f" AND {column} IN ({','.join('?' for _ in values)})"
+
+
+def _edges_filter(
+    edge_types: Sequence[str] | None,
+    sources: tuple[str, ...] | None,
+    targets: tuple[str, ...] | None,
+) -> tuple[str, list[object]]:
+    parameters: list[object] = []
+    clause = _in_clause("edge_type", _edge_type_values(edge_types), parameters)
+    clause += _in_clause("source_node_id", sources, parameters)
+    clause += _in_clause("target_node_id", targets, parameters)
+    return clause, parameters
+
+
 def _require_work_bound(rows: list[sqlite3.Row], work_limit: int) -> None:
     if rows and rows[0]["work_count"] - 1 > work_limit:
         raise ValueError("Evidence Graph recursive work ceiling exceeded")
@@ -3613,16 +3661,23 @@ class EvidenceGraph:
         self,
         *,
         edge_types: Sequence[str] | None = None,
+        source_node_ids: Sequence[str] | None = None,
+        target_node_ids: Sequence[str] | None = None,
         max_rows: int = 100,
         deadline: float | None = None,
     ) -> list[dict[str, object]]:
-        """Return bounded resolved node-to-node assertions for store facades."""
-        values = _edge_type_values(edge_types)
-        filter_sql = ""
-        parameters: list[object] = []
-        if values:
-            filter_sql = f" AND edge_type IN ({','.join('?' for _ in values)})"
-            parameters.extend(values)
+        """Return bounded resolved node-to-node assertions for store facades.
+
+        ``source_node_ids``/``target_node_ids`` anchor the question in SQL so a
+        node-scoped query reads its own handful of rows instead of the whole
+        edge set. ``None`` means no filter; an empty sequence names no node and
+        therefore selects nothing.
+        """
+        sources = _node_id_values(source_node_ids, "source_node_ids")
+        targets = _node_id_values(target_node_ids, "target_node_ids")
+        if _selects_nothing(sources, targets):
+            return []
+        filter_sql, parameters = _edges_filter(edge_types, sources, targets)
         rows = self._execute(
             "SELECT assertion_id, source_node_id, edge_type, target_node_id, "
             "confidence, authority, resolution, extractor FROM assertion "
