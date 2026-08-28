@@ -37,6 +37,16 @@ MAX_EDGE_TYPES = 64
 # same-name collision is `__init__` at 296, and 512 stays under the historic
 # SQLite 999 host-parameter floor. A caller over the bound is refused by name.
 MAX_NODE_FILTER = 512
+# Ceiling for the whole-graph aggregate readers, which return folded rows rather
+# than rows of record. Sized from measurement, not taste: this repository's live
+# generation folds 35,313 resolved CALLS assertions into 29,868 distinct
+# undirected pairs, measured at 4.07 MB of Python dicts (136 bytes a pair) and
+# 1.93 s of Louvain. 200,000 leaves 6.7x headroom at roughly 27 MB. Above it the
+# aggregate refuses by name through the same `limit + 1` fetch; it is never
+# silently truncated.
+MAX_AGGREGATE_ROWS = 200_000
+# Bounded caller-supplied name-prefix exclusions for `nodes_without_edges`.
+MAX_NAME_PREFIX_FILTER = 32
 MAX_WORK = 100_000
 PROGRESS_OPCODES = 1000
 MAX_VALIDATION_ROWS = 1_000_000
@@ -3299,6 +3309,55 @@ def _edges_filter(
     return clause, parameters
 
 
+def _validated_prefix_values(prefixes: object) -> tuple[str, ...]:
+    if isinstance(prefixes, (str, bytes)) or not isinstance(prefixes, Sequence):
+        raise ValueError("exclude_name_prefixes must be a bounded sequence")
+    if len(prefixes) > MAX_NAME_PREFIX_FILTER:
+        raise ValueError(
+            f"exclude_name_prefixes cannot contain more than "
+            f"{MAX_NAME_PREFIX_FILTER} values"
+        )
+    return tuple(sorted({_text(value, "name prefix", maximum=256) for value in prefixes}))
+
+
+def _like_prefix(value: str) -> str:
+    """Escape a literal prefix for LIKE, so `_` and `%` stay literal characters."""
+    escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"{escaped}%"
+
+
+def _name_prefix_exclusions(prefixes: Sequence[str], parameters: list[object]) -> str:
+    """Exclude nodes whose metadata name starts with a caller-supplied prefix.
+
+    The prefixes are caller data, never store policy: `code_graph` owns the
+    convention that a `test_` function is not a dead-code candidate.
+    """
+    values = _validated_prefix_values(prefixes)
+    parameters.extend(_like_prefix(value) for value in values)
+    clause = " AND json_extract(metadata_json, '$.name') NOT LIKE ? ESCAPE '\\'"
+    return clause * len(values)
+
+
+def _without_edge_clause(
+    column: str, edge_types: Sequence[str], parameters: list[object]
+) -> str:
+    """Anti-join a node against every resolved assertion of the named types.
+
+    Written as `NOT IN` rather than a correlated `NOT EXISTS` because SQLite
+    plans the latter as a nested loop over `assertion_resolution`: measured on
+    this repository at over six minutes unfinished, against 0.059 s here.
+    """
+    values = _edge_type_values(edge_types)
+    if not values:
+        return ""
+    parameters.extend(values)
+    return (
+        f" AND node_id NOT IN (SELECT {column} FROM assertion"
+        f" WHERE resolution='resolved' AND {column} IS NOT NULL"
+        f" AND edge_type IN ({','.join('?' for _ in values)}))"
+    )
+
+
 def _require_work_bound(rows: list[sqlite3.Row], work_limit: int) -> None:
     if rows and rows[0]["work_count"] - 1 > work_limit:
         raise ValueError("Evidence Graph recursive work ceiling exceeded")
@@ -3588,6 +3647,28 @@ class EvidenceGraph:
     def __exit__(self, *_args: object) -> None:
         self.close()
 
+    def _fetch(
+        self,
+        sql: str,
+        parameters: Sequence[object],
+        *,
+        limit: int,
+        deadline: float | None,
+    ) -> list[sqlite3.Row]:
+        """Run one deadline-bounded statement, returning at most `limit + 1` rows."""
+        _require_query_deadline(deadline)
+        self._database.set_progress_handler(
+            None if deadline is None else lambda: int(time.monotonic() >= deadline),
+            PROGRESS_OPCODES,
+        )
+        try:
+            return self._database.execute(sql, (*parameters, limit + 1)).fetchall()
+        except sqlite3.OperationalError as exc:
+            _raise_query_timeout(exc, deadline)
+            raise
+        finally:
+            self._database.set_progress_handler(None, 0)
+
     def _execute(
         self,
         sql: str,
@@ -3595,23 +3676,32 @@ class EvidenceGraph:
         *,
         max_rows: int,
         deadline: float | None,
+        ceiling: int = MAX_ROWS,
     ) -> list[sqlite3.Row]:
-        limit = _bound(max_rows, "max_rows", MAX_ROWS)
-        _require_query_deadline(deadline)
-        self._database.set_progress_handler(
-            None if deadline is None else lambda: int(time.monotonic() >= deadline),
-            PROGRESS_OPCODES,
-        )
-        try:
-            rows = self._database.execute(sql, (*parameters, limit + 1)).fetchall()
-        except sqlite3.OperationalError as exc:
-            _raise_query_timeout(exc, deadline)
-            raise
-        finally:
-            self._database.set_progress_handler(None, 0)
+        limit = _bound(max_rows, "max_rows", ceiling)
+        rows = self._fetch(sql, parameters, limit=limit, deadline=deadline)
         if len(rows) > limit:
             raise ValueError("Evidence Graph query row ceiling exceeded")
         return rows
+
+    def _execute_top(
+        self,
+        sql: str,
+        parameters: Sequence[object],
+        *,
+        max_rows: int,
+        deadline: float | None,
+    ) -> tuple[list[sqlite3.Row], bool]:
+        """Run a deliberately bounded top-N statement.
+
+        Unlike `_execute` this does not refuse when more rows match — the caller
+        asked for the top of a ranking, not for every row. It also reports
+        whether the answer was cut, so the bound can be stated in the answer
+        instead of being invisible to the reader.
+        """
+        limit = _bound(max_rows, "max_rows", MAX_ROWS)
+        rows = self._fetch(sql, parameters, limit=limit, deadline=deadline)
+        return rows[:limit], len(rows) > limit
 
     @staticmethod
     def _node(row: sqlite3.Row) -> dict[str, object]:
@@ -3686,6 +3776,102 @@ class EvidenceGraph:
             parameters,
             max_rows=max_rows,
             deadline=deadline,
+        )
+        return [dict(row) for row in rows]
+
+    def nodes_without_edges(
+        self,
+        *,
+        kinds: Sequence[str] | None = None,
+        incoming_edge_types: Sequence[str] = (),
+        outgoing_edge_types: Sequence[str] = (),
+        exclude_name_prefixes: Sequence[str] = (),
+        max_rows: int = 100,
+        deadline: float | None = None,
+    ) -> list[dict[str, object]]:
+        """Return bounded nodes that no resolved assertion of the named types reaches.
+
+        The anti-join runs in SQL, so a whole-graph question about unreferenced
+        symbols reads its own answer instead of every node and every edge.
+        `incoming_edge_types` excludes a node that is any such assertion's
+        target; `outgoing_edge_types` excludes one that is its source.
+        """
+        clauses: list[str] = []
+        parameters: list[object] = []
+        _kind_clause(kinds, clauses, parameters)
+        where = " WHERE " + " AND ".join(clauses) if clauses else " WHERE 1"
+        where += _name_prefix_exclusions(exclude_name_prefixes, parameters)
+        where += _without_edge_clause("target_node_id", incoming_edge_types, parameters)
+        where += _without_edge_clause("source_node_id", outgoing_edge_types, parameters)
+        rows = self._execute(
+            "SELECT node_id, kind, identity_scheme, identity_key, metadata_json "
+            f"FROM node{where} ORDER BY kind, identity_key, node_id LIMIT ?",
+            parameters,
+            max_rows=max_rows,
+            deadline=deadline,
+        )
+        return [self._node(row) for row in rows]
+
+    def top_incoming_edge_counts(
+        self,
+        *,
+        edge_types: Sequence[str] | None = None,
+        kinds: Sequence[str] | None = None,
+        max_rows: int = 100,
+        deadline: float | None = None,
+    ) -> tuple[list[dict[str, object]], bool]:
+        """Return the most-referenced nodes with their distinct source count.
+
+        A `GROUP BY` in SQL, so the caller reads the top of the ranking rather
+        than every edge. Order is `incoming` descending, then `node_id`, so the
+        selection at the bound is deterministic. Returns the bounded rows and
+        whether more nodes matched than the bound admitted.
+        """
+        parameters: list[object] = []
+        clause = _in_clause("a.edge_type", _edge_type_values(edge_types), parameters)
+        kind_clauses: list[str] = []
+        _kind_clause(kinds, kind_clauses, parameters)
+        clause += "".join(f" AND n.{item}" for item in kind_clauses)
+        rows, truncated = self._execute_top(
+            "SELECT a.target_node_id AS node_id, "
+            "count(DISTINCT a.source_node_id) AS incoming "
+            "FROM assertion a JOIN node n ON n.node_id = a.target_node_id "
+            "WHERE a.resolution='resolved' AND a.target_node_id IS NOT NULL"
+            f"{clause} GROUP BY a.target_node_id "
+            "ORDER BY incoming DESC, a.target_node_id LIMIT ?",
+            parameters,
+            max_rows=max_rows,
+            deadline=deadline,
+        )
+        return [dict(row) for row in rows], truncated
+
+    def edge_weights(
+        self,
+        *,
+        edge_types: Sequence[str] | None = None,
+        max_rows: int = 100,
+        deadline: float | None = None,
+    ) -> list[dict[str, object]]:
+        """Return bounded distinct undirected node pairs with their edge weight.
+
+        Both directions of a pair fold into one row whose `weight` is how many
+        resolved assertions joined them; self-loops are dropped. The ceiling is
+        `MAX_AGGREGATE_ROWS`, not `MAX_ROWS`, because these are folded pairs
+        rather than rows of record — the refusal itself is unchanged.
+        """
+        parameters: list[object] = []
+        clause = _in_clause("edge_type", _edge_type_values(edge_types), parameters)
+        rows = self._execute(
+            "SELECT min(source_node_id, target_node_id) AS source_node_id, "
+            "max(source_node_id, target_node_id) AS target_node_id, "
+            "count(*) AS weight FROM assertion "
+            "WHERE resolution='resolved' AND target_node_id IS NOT NULL "
+            f"AND source_node_id <> target_node_id{clause} "
+            "GROUP BY 1, 2 ORDER BY 1, 2 LIMIT ?",
+            parameters,
+            max_rows=max_rows,
+            deadline=deadline,
+            ceiling=MAX_AGGREGATE_ROWS,
         )
         return [dict(row) for row in rows]
 

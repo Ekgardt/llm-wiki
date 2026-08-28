@@ -137,6 +137,9 @@ if MCP_AVAILABLE:
     except ImportError:
         pass
 
+from answer_budget import MAX_BUDGET_TOKENS as ANSWER_BUDGET_MAX_TOKENS  # noqa: E402
+from answer_budget import MIN_BUDGET_TOKENS as ANSWER_BUDGET_MIN_TOKENS  # noqa: E402
+from answer_budget import shape_code_answer  # noqa: E402
 from mcp_contract import build_envelope, envelope_schema  # noqa: E402
 from retrieval import PROFILES as QA_PROFILES  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
@@ -467,6 +470,33 @@ DOCTOR_INPUT_SCHEMA = {
     ],
 }
 
+# CODE-06: the two arguments that let a caller pay less for a code answer.
+# Bounds come from `answer_budget`; 25 000 is the client-side tool-result
+# ceiling Anthropic documents for Claude Code, and the low bound sits below any
+# real answer frame so the named refusal stays reachable and testable.
+ANSWER_BUDGET_SCHEMA_FIELDS = {
+    "budget_tokens": {
+        "type": "integer",
+        "minimum": ANSWER_BUDGET_MIN_TOKENS,
+        "maximum": ANSWER_BUDGET_MAX_TOKENS,
+        "description": (
+            "Approximate token ceiling for this answer (len/4, not a "
+            "tokenizer). Drops opaque identifiers, then derivable fields, "
+            "then rows from the tail, and names everything it dropped; a "
+            "budget too small for the answer frame is refused by name, never "
+            "silently shortened"
+        ),
+    },
+    "include_node_ids": {
+        "type": "boolean",
+        "default": False,
+        "description": (
+            "Emit the opaque code:node:<hash> graph identifiers. Off by "
+            "default: no surface in this product accepts one as input"
+        ),
+    },
+}
+
 TOOL_INPUT_SCHEMAS = {
     "recall": {
         "type": "object",
@@ -590,6 +620,7 @@ TOOL_INPUT_SCHEMAS = {
                 "default": False,
                 "description": "Bypass the active generation and run live extraction",
             },
+            **ANSWER_BUDGET_SCHEMA_FIELDS,
         },
         "required": ["directory"],
     },
@@ -660,6 +691,7 @@ TOOL_INPUT_SCHEMAS = {
             "character": {"type": "integer", "minimum": 0},
             "offset": {"type": "integer", "minimum": 0, "default": 0},
             "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 10},
+            **ANSWER_BUDGET_SCHEMA_FIELDS,
         },
         "required": ["directory"],
     },
@@ -3383,7 +3415,10 @@ def _validate_architecture_arguments(arguments: dict) -> str | None:
     missing = sorted(required.difference(arguments))
     if missing:
         return _missing_architecture_message(mode, missing, positioned)
-    forbidden = sorted(set(arguments).difference(allowed))
+    # CODE-06: shaping the answer is orthogonal to what a mode asks the graph,
+    # so the two budget arguments are allowed on every mode rather than being
+    # copied into thirteen closed key sets that would drift apart.
+    forbidden = sorted(set(arguments).difference(allowed, ANSWER_BUDGET_SCHEMA_FIELDS))
     if forbidden:
         return f"arguments are not valid for {mode}: {', '.join(forbidden)}"
     return _positioned_architecture_path_error(arguments, mode, positioned)
@@ -4512,6 +4547,20 @@ def _tool_compile(arguments: dict, deadline: float):
     return _call_with_deadline(_trigger_compile, deadline=deadline), False
 
 
+def _shaped_code_answer(data, arguments: dict):
+    """CODE-06: one place where every code answer is measured and reduced.
+
+    Applied here rather than inside `code_graph` or `graph_query` because this
+    is the only layer that sees every mode's answer in one shape - and because
+    those two modules belong to another agent's task in this session.
+    """
+    return shape_code_answer(
+        data,
+        budget_tokens=arguments.get("budget_tokens"),
+        include_node_ids=bool(arguments.get("include_node_ids", False)),
+    )
+
+
 def _tool_find_dead_code(arguments: dict, deadline: float):
     try:
         data = _call_with_deadline(
@@ -4524,7 +4573,7 @@ def _tool_find_dead_code(arguments: dict, deadline: float):
         return _code_graph_timeout_data(
             arguments.get("directory"), error, completed=()
         ), False
-    return data, False
+    return _shaped_code_answer(data, arguments), False
 
 
 def _precise_architecture_call(arguments: dict, deadline: float):
@@ -4616,7 +4665,8 @@ def _query_architecture_call(arguments: dict, deadline: float):
 
 def _tool_get_architecture(arguments: dict, deadline: float):
     try:
-        return _architecture_tool_call(arguments, deadline), False
+        data = _architecture_tool_call(arguments, deadline)
+        return _shaped_code_answer(data, arguments), False
     except TimeoutError as error:
         return _architecture_timeout_data(arguments, error), False
     except ValueError as error:

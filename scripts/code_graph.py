@@ -71,6 +71,18 @@ GRAMMAR_LOADERS = {
 LANGUAGE_MAP = CODE_LANGUAGE_BY_SUFFIX
 
 MAX_DERIVED_COMMUNITY_CACHE = 4
+# The hotspot list is a ranking, not a dump. This repository has 10,607 nodes
+# with at least one incoming call; a caller reads the head of that ranking. The
+# bound is stated in the answer as `hotspot_limit` / `hotspots_truncated`, so a
+# reader is never left to mistake the top of the list for the whole of it.
+HOTSPOT_LIMIT = 100
+# Bound for the folded call-pair aggregate that feeds community detection.
+# 200,000 against this repository's measured 29,868 pairs — 6.7x headroom.
+MAX_CALL_PAIR_ROWS = 200_000
+# Names `code_graph` treats as conventionally reached, pushed into the store's
+# anti-join as caller data. Measured: it takes this repository's dead-code
+# candidate set from 8,546 of 10,000 rows (17% headroom) to 3,621 (2.8x).
+DEAD_CODE_NAME_PREFIXES = ("test_",)
 
 CO_CHANGE_EDGE = "CO_CHANGED_WITH"
 CODE_TOOLS_SCHEMA_VERSION = 1
@@ -1425,20 +1437,41 @@ def _stored_architecture_node(graph, node: dict[str, object], directory: Path) -
     }
 
 
-def _add_undirected_edge(graph: dict, source: str, target: str) -> None:
+def _add_undirected_edge(graph: dict, source: str, target: str, weight: float) -> None:
     if source == target:
         return
-    graph.setdefault(source, {})[target] = graph.setdefault(source, {}).get(target, 0) + 1
-    graph.setdefault(target, {})[source] = graph.setdefault(target, {}).get(source, 0) + 1
+    graph.setdefault(source, {})[target] = graph.setdefault(source, {}).get(target, 0) + weight
+    graph.setdefault(target, {})[source] = graph.setdefault(target, {}).get(source, 0) + weight
 
 
 def _undirected_call_graph(edges: list[dict[str, object]]) -> dict:
+    """Fold resolved call edges into one weighted undirected graph.
+
+    Accepts either a row of record from `EvidenceGraph.edges()`, which carries
+    no weight and counts as one, or a pair already folded in SQL by
+    `EvidenceGraph.edge_weights()`, which carries how many assertions joined it.
+    """
     graph: dict[str, dict[str, float]] = {}
     for edge in edges:
         _add_undirected_edge(
-            graph, str(edge["source_node_id"]), str(edge["target_node_id"])
+            graph,
+            str(edge["source_node_id"]),
+            str(edge["target_node_id"]),
+            float(edge.get("weight", 1)),
         )
     return graph
+
+
+def _stored_call_pairs(graph_reader) -> list[dict[str, object]]:
+    """The whole call graph as distinct weighted undirected pairs, folded in SQL.
+
+    Measured on this repository: 35,313 resolved CALLS assertions fold into
+    29,868 pairs, 0.30 s, 4.07 MB as a Python adjacency, 1.93 s of Louvain.
+    The bound is `MAX_CALL_PAIR_ROWS`; above it the reader refuses by name.
+    """
+    return graph_reader.edge_weights(
+        edge_types=("CALLS",), max_rows=MAX_CALL_PAIR_ROWS
+    )
 
 
 def _derived_cache(graph_reader) -> dict:
@@ -1783,22 +1816,24 @@ def find_dead_code(
     )
 
 
-def _stored_reachable_or_conventional(node, name, path, incoming, exposed) -> bool:
+def _conventionally_reachable(name: str, path: str) -> bool:
+    """Names this project treats as reached even with no confirmed caller.
+
+    The `test_` name prefix is also pushed into the store's anti-join; the
+    basename rule stays here, where `PurePath(path).name` means exactly what it
+    says and the nearest SQL spelling would mean something wider.
+    """
     return (
-        node["node_id"] in incoming
-        or node["node_id"] in exposed
-        or name in {"main", "__init__"}
+        name in {"main", "__init__"}
         or name.startswith("test_")
         or PurePath(path).name.startswith("test_")
     )
 
 
-def _stored_dead_candidate(
-    graph, node: dict, incoming, exposed, directory: Path
-) -> dict | None:
+def _stored_dead_candidate(graph, node: dict, directory: Path) -> dict | None:
     name = str(node["metadata"].get("name", ""))
     path = str(node["metadata"].get("path", ""))
-    if _stored_reachable_or_conventional(node, name, path, incoming, exposed):
+    if _conventionally_reachable(name, path):
         return None
     location = _stored_location(graph, node["node_id"], directory)
     return {
@@ -1813,12 +1848,25 @@ def _stored_dead_candidate(
     }
 
 
-def _stored_dead_candidates(graph, nodes, incoming, exposed, directory) -> list[dict]:
-    found = [
-        _stored_dead_candidate(graph, node, incoming, exposed, directory)
-        for node in nodes
-    ]
+def _stored_dead_candidates(graph, nodes, directory) -> list[dict]:
+    found = [_stored_dead_candidate(graph, node, directory) for node in nodes]
     return [item for item in found if item is not None]
+
+
+def _stored_dead_nodes(graph) -> list[dict]:
+    """Function and method nodes no resolved CALLS reaches and no EXPOSES names.
+
+    The anti-join runs in SQL, so this reads its own answer — measured 3,621
+    rows in 0.17 s — instead of the 19,153 nodes and 35,313 edges the old shape
+    materialised before refusing at the row ceiling.
+    """
+    return graph.nodes_without_edges(
+        kinds=("function", "method"),
+        incoming_edge_types=("CALLS",),
+        outgoing_edge_types=("EXPOSES",),
+        exclude_name_prefixes=DEAD_CODE_NAME_PREFIXES,
+        max_rows=10_000,
+    )
 
 
 def _marked_complete(candidates: list[dict], report: dict) -> list[dict]:
@@ -1836,16 +1884,7 @@ def _store_find_dead_code(
     if graph is None:
         return None
     try:
-        nodes = graph.find_nodes(kinds=("function", "method"), max_rows=10_000)
-        incoming = {
-            edge["target_node_id"]
-            for edge in graph.edges(edge_types=("CALLS",), max_rows=10_000)
-        }
-        exposed = {
-            edge["source_node_id"]
-            for edge in graph.edges(edge_types=("EXPOSES",), max_rows=10_000)
-        }
-        candidates = _stored_dead_candidates(graph, nodes, incoming, exposed, directory)
+        candidates = _stored_dead_candidates(graph, _stored_dead_nodes(graph), directory)
         report = _store_report(graph)
         return _with_report(
             "candidates", _marked_complete(candidates, report), report, with_report
@@ -1960,14 +1999,29 @@ def get_architecture(
     architecture = {
         "entry_points": entry_points,
         "routes": routes,
-        "hotspots": _live_hotspots(_live_incoming(edges), definitions),
+        **_hotspot_fields(*_bounded_hotspots(
+            _live_hotspots(_live_incoming(edges), definitions)
+        )),
         "communities": _communities_from_edges(edges),
         "graph_complete": False,
     }
     return {**architecture, **_live_report(directory, parsed)}
 
 
-def _stored_hotspot(graph, node_id: str, node, callers, directory: Path) -> dict:
+def _bounded_hotspots(hotspots: list[dict]) -> tuple[list[dict], bool]:
+    return hotspots[:HOTSPOT_LIMIT], len(hotspots) > HOTSPOT_LIMIT
+
+
+def _hotspot_fields(hotspots: list[dict], truncated: bool) -> dict:
+    """The hotspot ranking with its bound stated in the answer, never implied."""
+    return {
+        "hotspots": hotspots,
+        "hotspot_limit": HOTSPOT_LIMIT,
+        "hotspots_truncated": truncated,
+    }
+
+
+def _stored_hotspot(graph, node_id: str, node, incoming: int, directory: Path) -> dict:
     location = _stored_location(graph, node_id, directory)
     return {
         "name": node["metadata"].get("name", node["identity_key"]),
@@ -1975,38 +2029,38 @@ def _stored_hotspot(graph, node_id: str, node, callers, directory: Path) -> dict
         "owner": node["metadata"].get("owner", ""),
         "file": location[0],
         "line": location[1],
-        "incoming_callers": len(callers),
+        "incoming_callers": incoming,
     }
 
 
-def _stored_incoming(calls: list[dict]) -> dict:
-    incoming: dict[str, set[str]] = {}
-    for edge in calls:
-        incoming.setdefault(edge["target_node_id"], set()).add(edge["source_node_id"])
-    return incoming
+def _stored_hotspot_row(graph, row: dict, directory: Path) -> dict | None:
+    node_id = str(row["node_id"])
+    node = graph.node(node_id)
+    if node is None:
+        return None
+    return _stored_hotspot(graph, node_id, node, int(row["incoming"]), directory)
 
 
-def _stored_hotspots(graph, incoming: dict, functions: dict, directory: Path) -> list[dict]:
-    hotspots = [
-        _stored_hotspot(graph, node_id, functions[node_id], callers, directory)
-        for node_id, callers in incoming.items()
-        if node_id in functions
-    ]
+def _stored_hotspots(graph, directory: Path) -> tuple[list[dict], bool]:
+    """The top of the caller ranking, counted by a GROUP BY rather than in Python.
+
+    Measured on this repository: the ranking has 10,607 members and the top 100
+    of it costs 0.10 s, against a refusal for the old shape, which pulled every
+    function node and every call edge to count in Python.
+    """
+    counts, truncated = graph.top_incoming_edge_counts(
+        edge_types=("CALLS",), kinds=("function", "method"), max_rows=HOTSPOT_LIMIT
+    )
+    found = [_stored_hotspot_row(graph, row, directory) for row in counts]
+    hotspots = [item for item in found if item is not None]
     hotspots.sort(
         key=lambda item: (-item["incoming_callers"], str(item["name"]), item["file"])
     )
-    return hotspots
+    return hotspots, truncated
 
 
 def _stored_architecture_nodes(graph, nodes, directory: Path) -> list[dict]:
     return [_stored_architecture_node(graph, node, directory) for node in nodes]
-
-
-def _stored_function_nodes(graph) -> dict:
-    return {
-        node["node_id"]: node
-        for node in graph.find_nodes(kinds=("function", "method"), max_rows=10_000)
-    }
 
 
 def _store_get_architecture(directory: Path) -> dict | None:
@@ -2016,16 +2070,12 @@ def _store_get_architecture(directory: Path) -> dict | None:
     try:
         entries = graph.find_nodes(kinds=("entry-point",), max_rows=10_000)
         routes = graph.find_nodes(kinds=("route",), max_rows=10_000)
-        functions = _stored_function_nodes(graph)
-        calls = graph.edges(edge_types=("CALLS",), max_rows=10_000)
         report = _store_report(graph)
         return {
             "entry_points": _stored_architecture_nodes(graph, entries, directory),
             "routes": _stored_architecture_nodes(graph, routes, directory),
-            "hotspots": _stored_hotspots(
-                graph, _stored_incoming(calls), functions, directory
-            ),
-            "communities": _stored_communities(graph, calls),
+            **_hotspot_fields(*_stored_hotspots(graph, directory)),
+            "communities": _stored_communities(graph, _stored_call_pairs(graph)),
             **report,
         }
     finally:
@@ -2099,9 +2149,7 @@ def _store_detect_communities(
     if graph is None:
         return None
     try:
-        communities = _stored_communities(
-            graph, graph.edges(edge_types=("CALLS",), max_rows=10_000)
-        )
+        communities = _stored_communities(graph, _stored_call_pairs(graph))
         return _with_report("communities", communities, _store_report(graph), with_report)
     finally:
         graph.close()
