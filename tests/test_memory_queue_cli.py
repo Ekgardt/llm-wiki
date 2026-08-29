@@ -932,9 +932,25 @@ def test_windows_tree_cleanup_verifies_direct_child_liveness(
     assert process.killed == 1
 
 
-def test_posix_group_race_uses_direct_fallback_and_reports_unverified_descendants(
+def test_posix_group_race_uses_direct_fallback_and_completes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A vanished group is the outcome the kill wanted, not an unverified tree.
+
+    This asserted `process_cleanup_failed`, and that verdict was inconsistent
+    with the same exception one function earlier: `_kill_posix_group` already
+    treats a vanished group with no descendants as verified, and then
+    `_hard_kill_group` un-verified it. Nothing was lost by removing the
+    refusal, because the group question is answered directly and
+    independently: `_cleanup_confirmed` requires the child gone, every tracked
+    descendant gone, and `_process_group_alive` false — a live /proc scan of
+    the group, not an inference from a signal's errno. A descendant that
+    escaped into another group is invisible to both, with or without the
+    refusal.
+
+    The refusal that matters is still pinned, by
+    `test_cleanup_fails_when_tracked_descendant_remains_alive`.
+    """
     process = _FakeProcess()
     monkeypatch.setattr(
         memory_queue,
@@ -943,10 +959,8 @@ def test_posix_group_race_uses_direct_fallback_and_reports_unverified_descendant
     )
     monkeypatch.setattr(memory_queue, "_tracked_descendant_pids", lambda *args: set())
 
-    with pytest.raises(memory_queue.QueueOperationError) as raised:
-        memory_queue._terminate_processor_child(process, platform_name="posix")
+    memory_queue._terminate_processor_child(process, platform_name="posix")
 
-    assert raised.value.code == "process_cleanup_failed"
     assert process.terminated == 1
     assert not process.is_alive()
 

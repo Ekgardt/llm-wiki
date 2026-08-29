@@ -14295,14 +14295,40 @@ def _kill_process_tree(
 def _hard_kill_group(
     process: multiprocessing.Process, platform_name: str, tree_verified: bool
 ) -> bool:
+    """Follow the group's SIGTERM with SIGKILL, and judge what came back.
+
+    A `ProcessLookupError` here is the outcome this call was asking for: the
+    group is already gone, killed by the SIGTERM that preceded it. Recording
+    that as an unverified tree is what turned a clean timeout into
+    `process_cleanup_failed`, because `_cleanup_failed` refuses on POSIX
+    whenever the tree is unverified — even when `_await_cleanup` has already
+    confirmed the child and every descendant are gone.
+
+    Traced on the live machine 2026-08-29 at load 9-11: the first attempt
+    reported `kill_group=True`, `await_cleanup=True` and still
+    `cleanup_failed=True` with `tree_verified=False`, which is only reachable
+    through this branch. On a quiet machine the group is still there when the
+    SIGKILL lands, the exception never fires, and the test passes — which is
+    exactly how `test_worker_timeout_kills_spawned_grandchild_tree` behaved.
+
+    Any other `OSError` — `EPERM` and its kin — still fails closed.
+    """
     if not process.is_alive() or platform_name == "nt" or not tree_verified:
         return tree_verified
-    try:
-        _kill_process_group(process.pid, signal.SIGKILL)
-    except OSError:
-        tree_verified = False
+    verified = _sigkill_group_verified(process.pid)
     process.join(0.2)
-    return tree_verified
+    return verified
+
+
+def _sigkill_group_verified(pid: int) -> bool:
+    """Whether the group is gone after SIGKILL. Already gone counts as gone."""
+    try:
+        _kill_process_group(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def _stop_quietly(process: multiprocessing.Process, action) -> None:
