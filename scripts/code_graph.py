@@ -2688,16 +2688,32 @@ def _stored_dependency_rows(
     return sorted(merged.values(), key=_dependency_sort_key)
 
 
+# One hop, because that is the question and because it is already this
+# product's answer to the same question elsewhere: `graph_neighbors.neighbors`
+# takes `max_hops: int = 1` over the same range. The convention outside is the
+# same shape — codebase-memory's `trace_path` defaults to a bounded 3, and an
+# IDE call hierarchy (JetBrains Rider, LSP `callHierarchy/incomingCalls`) shows
+# one level and expands a node when asked. Returning the whole reachable set by
+# default was the outlier, and it arrived by omission rather than by decision.
+#
+# Measured on the active generation for `scripts/retrieval.py`: one hop is 7
+# modules and ~338 tokens; the whole set is 346 rows and 20 735 tokens after
+# shaping, 287 of them individual functions and classes nobody asked about.
+#
+# Nothing is silently lost: `depth_applied` says how far this answer walked and
+# `depth_frontier_open` says whether the walk stopped at that edge with more
+# beyond it, so a caller who wants the closure knows to ask for it.
+DEPENDENCY_DEFAULT_DEPTH = 1
+
+
 def _dependency_depth(max_depth: int | None) -> int:
     """How far to walk: what the caller asked, bounded by what the store allows.
 
-    `None` keeps the whole reachable set, which is what every caller got before
-    the argument existed. A depth below one would ask for nothing and is read
-    as one hop rather than refused, because "no hops" is not a question anyone
-    means to ask.
+    A depth below one would ask for nothing and is read as one hop rather than
+    refused, because "no hops" is not a question anyone means to ask.
     """
     if max_depth is None:
-        return DEPENDENCY_MAX_DEPTH
+        return DEPENDENCY_DEFAULT_DEPTH
     return max(1, min(int(max_depth), DEPENDENCY_MAX_DEPTH))
 
 
@@ -2745,11 +2761,29 @@ def _store_find_dependencies(
         return None
     try:
         seeds = _dependency_seed_nodes(graph, symbol)
-        rows = _stored_dependency_rows(graph, seeds, reverse, max_depth)
-        report = {**_store_report(graph), **_dependency_resolution(symbol, seeds)}
+        depth = _dependency_depth(max_depth)
+        rows = _stored_dependency_rows(graph, seeds, reverse, depth)
+        report = {
+            **_store_report(graph),
+            **_dependency_resolution(symbol, seeds),
+            **_dependency_reach(rows, depth),
+        }
         return _with_report("dependencies", rows, report, with_report)
     finally:
         graph.close()
+
+
+def _dependency_reach(rows: list[dict], depth: int) -> dict[str, object]:
+    """How far this answer walked, and whether anything lies past that edge.
+
+    A row sitting exactly at the depth the walk stopped at may have neighbours
+    the walk never looked at. That is not a claim there are more — it is the
+    difference between "this is all of it" and "this is as far as you asked".
+    """
+    return {
+        "depth_applied": depth,
+        "depth_frontier_open": any(row.get("depth") == depth for row in rows),
+    }
 
 
 def find_dependencies(

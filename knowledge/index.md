@@ -28,6 +28,7 @@ This index catalogs durable memory distilled from AI agent sessions
 - [[knowledge/notes/daily-entry-quote-anchor-decision]] — A daily entry starts at a timestamp heading or an operation marker, and evidence binds to the entry that contains its quote — the timestamp narrows the search, the quote settles it.
 - [[knowledge/notes/daily-heading-tolerant-reader-decision]] — the claim reader accepts both the bare `# YYYY-MM-DD`
 - [[knowledge/notes/dead-task-retirement-and-restore-decision]] — A task whose attempts are exhausted is retired only when asked for by name, through the same verified export, and one command brings its work back.
+- [[knowledge/notes/dependency-answers-one-hop-decision]] — `mode=dependencies` answers the direct dependencies and says how far it walked, instead of returning the whole reachable set nobody asked for.
 - [[knowledge/notes/derived-evidence-generation-decision]] — Evidence retrieval uses disposable immutable cache generations while Markdown, Git, and project journals remain authoritative.
 - [[knowledge/notes/durable-capture-producer-activation-decision]] — SessionEnd and PreCompact capture publish durable Reliability V3 intent evidence before returning; detached work only wakes recovery and deletion requires terminal proof.
 - [[knowledge/notes/finding-level-dlp-allowlist-decision]] — the DLP unlock names each refused finding by the hash of

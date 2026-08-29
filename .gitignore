@@ -84,6 +84,7 @@ knowledge/notes/*
 !knowledge/notes/retire-cursor-and-antigravity-decision.md
 !knowledge/notes/audit-closure-security-recovery-control-plane-decision.md
 !knowledge/notes/derived-evidence-generation-decision.md
+!knowledge/notes/dependency-answers-one-hop-decision.md
 !knowledge/notes/lsp-live-lease-decision.md
 !knowledge/notes/lsp-process-containment-decision.md
 !knowledge/notes/persistent-code-intelligence-kernel-decision.md

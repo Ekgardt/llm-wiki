@@ -1588,6 +1588,14 @@ _ARCHITECTURE_REPORT_KEYS = (
     "fallback",
 )
 
+# How far the dependency walk went and whether anything sits past that edge.
+# Without these a bounded answer is indistinguishable from a complete one,
+# which is the only thing that made the default unsafe to change. Kept apart
+# from the rest because only the walk that has a reach may report one.
+_ARCHITECTURE_REACH_KEYS = ("depth_applied", "depth_frontier_open")
+
+_ARCHITECTURE_REPORT_KEYS = _ARCHITECTURE_REPORT_KEYS + _ARCHITECTURE_REACH_KEYS
+
 
 def _architecture_path_mode_error(mode: str, symbol, target) -> str | None:
     if mode != "path":
@@ -1698,8 +1706,18 @@ def _architecture_symbol(request: dict) -> dict:
         "callers": callers.get("callers", []),
         "callees": callees.get("callees", []),
         "dependencies": dependencies.get("dependencies", []),
-        **{key: callers.get(key) for key in _ARCHITECTURE_REPORT_KEYS},
+        # Only keys the source actually carries. Copying the whole list
+        # unconditionally spelled every absent one as an explicit `null`,
+        # which costs tokens to say nothing and reads as a measured value.
+        **_present_keys(callers, _ARCHITECTURE_REPORT_KEYS),
+        # The reach belongs to the walk that has one, and that is the
+        # dependency walk, not the caller lookup beside it.
+        **_present_keys(dependencies, _ARCHITECTURE_REACH_KEYS),
     }
+
+
+def _present_keys(source: dict, keys) -> dict:
+    return {key: source[key] for key in keys if key in source}
 
 
 _ARCHITECTURE_MODE_QUERIES = {
