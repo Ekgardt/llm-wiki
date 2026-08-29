@@ -2219,7 +2219,26 @@ def _incremental_delta(
         "membership_changed": membership_changed,
         "parent_entries": parent_entries,
         "current_ids": current_ids,
+        "universes": _universe_ids(current, parent_entries),
     }
+
+
+def _universe_ids(
+    current: Mapping[str, Mapping[str, object]],
+    parent_entries: Mapping[str, Mapping[str, object]],
+) -> tuple[set[str], set[str]]:
+    """The two extraction universes, each naming every id that has been in it.
+
+    Read from both sides: a deleted source's universe is named only by its
+    parent entry, and a source moved across the boundary belongs to both until
+    the move has been accounted for.
+    """
+    current_workspace = _workspace_source_ids(current)
+    parent_workspace = _workspace_source_ids(parent_entries)
+    return (
+        current_workspace | parent_workspace,
+        (set(current) - current_workspace) | (set(parent_entries) - parent_workspace),
+    )
 
 
 def _initial_rebuild(
@@ -2293,16 +2312,46 @@ def _semantic_changes(
     }
 
 
+def _sensitive_in_moved_universes(
+    sensitive: set[str], universes: tuple[set[str], set[str]], moved: set[str]
+) -> set[str]:
+    invalidated: set[str] = set()
+    for universe in universes:
+        if moved & universe:
+            invalidated |= sensitive & universe
+    return invalidated
+
+
 def _workspace_invalidated(
-    semantic_changes: set[str],
-    membership_changed: bool,
+    moved: set[str],
     parent_entries: Mapping[str, Mapping[str, object]],
     current_ids: set[str],
     rebuild: set[str],
+    universes: tuple[set[str], set[str]],
 ) -> set[str]:
-    if not semantic_changes or membership_changed:
-        return set()
-    return (_workspace_sensitive_source_ids(parent_entries) & current_ids) - rebuild
+    """Re-extract a workspace-sensitive source when *its own* universe moved.
+
+    `workspace_sensitive` marks a source that left an unresolved reference it
+    could not attribute to named candidates, so the only honest answer is to
+    re-run it whenever something it might resolve against changed. What it
+    might resolve against is its extraction universe and nothing else:
+    `doctor._SourceExtractionAdapter` hands `extract_code` only non-`knowledge/`
+    sources and `extract_knowledge` only `knowledge/` ones, so a knowledge page
+    can no more answer a code reference than the standard library can depend on
+    user code. Asking "did anything at all change" instead re-extracted 400 code
+    sources of 860 for a one-line edit to one wiki page.
+
+    `moved` is content changes *plus* additions and deletions, because a source
+    appearing or vanishing is exactly what turns an unresolved reference into a
+    resolved one. `membership_changed` is not consulted: when it is true every
+    current workspace source is already in `rebuild`, so the workspace half is
+    empty by construction — while the old short-circuit on it also suppressed
+    the knowledge half, which that rebuild never covered.
+
+    See `docs/research/2026-08-29-what-a-changed-source-may-invalidate.md`.
+    """
+    sensitive = _workspace_sensitive_source_ids(parent_entries) & current_ids
+    return _sensitive_in_moved_universes(sensitive, universes, moved) - rebuild
 
 
 def _newly_invalidated(
@@ -2331,11 +2380,11 @@ def _expanded_rebuild(
         runner.extracted, delta["changed"], parent_entries
     )
     workspace_invalidated = _workspace_invalidated(
-        semantic_changes,
-        bool(delta["membership_changed"]),
+        semantic_changes | delta["added"] | delta["deleted"],
         parent_entries,
         current_ids,
         rebuild,
+        delta["universes"],
     )
     runner.run_all(workspace_invalidated)
     rebuild.update(workspace_invalidated)
