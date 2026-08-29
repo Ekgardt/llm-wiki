@@ -309,7 +309,15 @@ Every durable wiki page should try to include:
 
 ### Special files
 @knowledge/index.md
-@knowledge/log.md
+
+`knowledge/log.md` is deliberately **not** imported. It is an append-only
+editorial changelog, not operating context, and it had grown to 304,980 bytes
+— about 76,000 tokens in every session before any work began, which killed
+three agent runs outright on 2026-08-29 with `Prompt is too long`. Rule 4
+forbids spending tokens like that on the vault's own changelog. Read it when
+you need it: `grep` it, or ask the memory for the decision you are after. Rule
+4 of section 3 still requires appending to it on every important update. See
+`docs/research/2026-08-29-what-belongs-in-every-session.md`.
 
 ### Default behavior for new material
 When asked to compile or ingest new material:

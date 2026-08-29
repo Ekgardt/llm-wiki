@@ -121,6 +121,7 @@
 - 2026-08-28 — Automated compile completed for snapshot 2e000b9638d8082b73e89dbabb800b175ba524f4a86fd3c4da30154217702ccb, 7765d7c7b26a5c57aece3a75cf50c4ada4b9779c4b49764da0d04014129768fd, ddad37a498a09df1b91297b9a08907b916034596347b21e4507086b41d074e28. Touched: none.
 - 2026-08-28 — Automated compile completed for snapshot a579bf9181f3d76c6bbed6c7bfea93e9fda64be1fe293e83cc6f252b5774b0dc. Touched: none.
 - 2026-08-28 — Manual compile completed for snapshot 364e16b9514d41a78c285be4daec7e6e81fab028fccf9d89e954a16d88c449dd, b532582f3cec31063e7f85efd6d5a426039a9a13da4dbdf45cc84fb1db2e7041, e372f13135861953c44915340cfee367634f5d0622639db1f254aec1e104bb6d. Touched: none.
+- 2026-08-29 — Automated compile completed for snapshot 27b4b40d920e0499c13f12d3b25474e39d70f8fa1f4398ee157c68e0b6b2c7ae, 539a208e52e20f15f60549698da4fe6a0850d7e636ca4ef5eb5c5c0d2f2a4e93. Touched: none.
 
 ## Editorial note
 This log is vault metadata — an append-only editorial changelog of compile passes and hygiene actions over `knowledge/`, not content derived from `knowledge/raw/` or `knowledge/inbox/`. New entries are appended at the bottom by compile passes and by hand; entries are never rewritten or removed.
@@ -823,4 +824,20 @@ This log is vault metadata — an append-only editorial changelog of compile pas
   начинается с разбора модуля, критичного для безопасности. Python при этом не
   тронут: тысяча два теста зелёные, а при неустановленном сервере ответ
   деградирует с названным пределом, без трассировки и без неверного ответа.
+
+- 2026-08-29 — Этот самый журнал перестал входить в преамбулу каждой сессии, и
+  повод был жёсткий: три агента подряд умерли на первом же шаге с «промпт
+  слишком длинный», не сделав ничего. Причина измерена: контракт втягивал
+  журнал целиком, а он вырос до 305 килобайт — около 76 тысяч токенов до
+  первого действия, при 86 тысячах всей преамбулы. Рост тоже измерен: на теге
+  выпуска журнал весил 147 килобайт, тридцать коммитов назад 259, сейчас 305,
+  и большая часть прироста пришлась на один день. Правило об экономии токенов
+  запрещает платить столько за собственный changelog, а величина росла линейно
+  с работой хранилища и ничем не ограничивалась — то есть вопрос был не
+  «сломается ли», а «когда». Журнал никуда не делся: он отслеживается,
+  append-only, дописывать его по-прежнему обязательно, и читается он по
+  надобности — тем самым поиском, который и есть продукт. Отвергнут вариант
+  втягивать хвост: директива берёт файл целиком, значит хвост потребовал бы
+  второго генерируемого файла ради контекста, который отдаёт один `grep`.
+  Преамбула стала 39.7 килобайта вместо 344 — в 8.7 раза меньше.
 

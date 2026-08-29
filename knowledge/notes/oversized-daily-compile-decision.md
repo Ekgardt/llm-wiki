@@ -98,3 +98,7 @@ it.
 - [[knowledge/notes/provider-runs-outside-the-vault-decision]] — the other half
   of the same ceiling: the fixed overhead around the call, not the work inside
   it.
+
+- [[knowledge/notes/the-changelog-is-not-preamble-decision]] — the same shape
+  one layer up: a file that grows with the vault's work until it no longer fits
+  the budget that has to read it.

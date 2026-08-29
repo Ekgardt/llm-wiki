@@ -59,6 +59,7 @@ This index catalogs durable memory distilled from AI agent sessions
 - [[knowledge/notes/solo-operator-superset-product-decision]] — LLM Wiki is the single local-first memory, code-intelligence, and agent-control product for one operator managing many agents and sessions.
 - [[knowledge/notes/state-md-exempt-from-lint]] — `state.md` files under `knowledge/projects/<slug>/` are added to `EDITORIAL_NAMES` in `lint_memory.py` and exempted from backlink-obligation and sparse-floor checks, for the same reason that `index.md` and `log.md` are exempt.
 - [[knowledge/notes/system-symlink-ancestor-decision]] — A bounded read accepts a symlinked ancestor only when
+- [[knowledge/notes/the-changelog-is-not-preamble-decision]] — `knowledge/log.md` is no longer imported into every session,
 - [[knowledge/notes/v4-reliability-contracts-decision]] — The approved, not-yet-implemented V4 reliability target would add path-bound compile receipts, truthful queue serialization, durable capture intents, unified fenced ownership, and bounded execution while preserving Markdown authority and the 12-tool local runtime.
 - [[knowledge/notes/warm-navigation-overhead-threshold-decision]] — The warm navigation overhead gate is 30 ms p95, measured on the slowest supported machine class rather than on a quiet one.
 
