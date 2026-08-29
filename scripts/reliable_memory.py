@@ -52,6 +52,18 @@ class ReliableMemoryDefaults:
 DEFAULTS = ReliableMemoryDefaults()
 
 
+def _require_positive_int(name: str, value: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+
+
+def _require_migration_text(name: object, sql: object) -> None:
+    if not isinstance(name, str) or not name:
+        raise ValueError("migration statement name must be non-empty")
+    if not isinstance(sql, str) or not sql.strip():
+        raise ValueError("migration statement SQL must be non-empty")
+
+
 class UnsafeStateRoot(ValueError):
     """Raised when runtime state cannot safely use local SQLite locking."""
 
@@ -78,12 +90,8 @@ class OperationalDatabaseContract:
     user_version: int = 3
 
     def __post_init__(self) -> None:
-        for name, value in (
-            ("application_id", self.application_id),
-            ("user_version", self.user_version),
-        ):
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-                raise ValueError(f"{name} must be a positive integer")
+        _require_positive_int("application_id", self.application_id)
+        _require_positive_int("user_version", self.user_version)
 
 
 @dataclass(frozen=True)
@@ -94,10 +102,7 @@ class MigrationStatement:
     parameters: Sequence[object] = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or not self.name:
-            raise ValueError("migration statement name must be non-empty")
-        if not isinstance(self.sql, str) or not self.sql.strip():
-            raise ValueError("migration statement SQL must be non-empty")
+        _require_migration_text(self.name, self.sql)
         if not callable(self.completed):
             raise TypeError("migration statement completed invariant must be callable")
 
@@ -111,28 +116,54 @@ class RuntimeFileIdentity:
     mtime_ns: int
 
 
-def _canonical_value(value: object) -> object:
-    if value is None or isinstance(value, bool):
-        return value
+def _canonical_key(key: object, seen: dict[str, object]) -> str:
+    """One NFC-normalized object key, refusing a collision the encoding hides."""
+    if not isinstance(key, str):
+        raise TypeError("canonical JSON object keys must be strings")
+    normalized = unicodedata.normalize("NFC", key)
+    if normalized in seen:
+        raise ValueError(f"normalized object-key collision: {normalized!r}")
+    return normalized
+
+
+def _canonical_mapping(value: dict) -> dict[str, object]:
+    normalized: dict[str, object] = {}
+    for key, item in value.items():
+        normalized[_canonical_key(key, normalized)] = _canonical_value(item)
+    return normalized
+
+
+def _canonical_number(value: object) -> object:
+    """Floats are refused: they have no canonical decimal form."""
     if isinstance(value, float):
         raise TypeError("canonical JSON does not permit float values")
-    if isinstance(value, int):
-        return value
+    return value
+
+
+def _canonical_atom(value: object) -> object:
+    """None and booleans pass through; the caller has already excluded the rest."""
+    if isinstance(value, (int, float)):
+        return _canonical_number(value)
     if isinstance(value, str):
         return unicodedata.normalize("NFC", value)
+    raise TypeError(f"canonical JSON does not permit {type(value).__name__} values")
+
+
+def _canonical_scalar(value: object) -> object:
+    """The scalar cases, kept apart so the shape of the domain reads at a glance."""
+    if value is None:
+        return value
+    if isinstance(value, bool):
+        return value
+    return _canonical_atom(value)
+
+
+def _canonical_value(value: object) -> object:
     if isinstance(value, list):
         return [_canonical_value(item) for item in value]
     if isinstance(value, dict):
-        normalized: dict[str, object] = {}
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise TypeError("canonical JSON object keys must be strings")
-            normalized_key = unicodedata.normalize("NFC", key)
-            if normalized_key in normalized:
-                raise ValueError(f"normalized object-key collision: {normalized_key!r}")
-            normalized[normalized_key] = _canonical_value(item)
-        return normalized
-    raise TypeError(f"canonical JSON does not permit {type(value).__name__} values")
+        return _canonical_mapping(value)
+    return _canonical_scalar(value)
 
 
 def canonical_json_bytes(value: object) -> bytes:
@@ -151,27 +182,37 @@ def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def _known_network_path(path: Path) -> bool:
-    raw = str(path)
-    if raw.startswith(("\\\\", "//")):
-        return True
-    if _platform_system() == "Windows":
-        anchor = path.resolve(strict=False).anchor
-        if not anchor:
-            return False
-        drive_type_remote = 4
-        return ctypes.windll.kernel32.GetDriveTypeW(anchor) == drive_type_remote
-    system = _platform_system()
+def _windows_network_anchor(path: Path) -> bool:
+    anchor = path.resolve(strict=False).anchor
+    if not anchor:
+        return False
+    drive_type_remote = 4
+    return ctypes.windll.kernel32.GetDriveTypeW(anchor) == drive_type_remote
+
+
+def _posix_mount_table() -> list[tuple[str, str]]:
     mount_data, is_mountinfo = _read_posix_mount_data()
     mounts = _parse_posix_mounts(mount_data, is_mountinfo=is_mountinfo)
-    if system == "Darwin" and not mounts:
-        mounts = _parse_darwin_mounts(_query_darwin_mounts())
+    if mounts or _platform_system() != "Darwin":
+        return mounts
+    return _parse_darwin_mounts(_query_darwin_mounts())
+
+
+def _posix_network_path(path: Path) -> bool:
     target = str(path.resolve(strict=False)).replace("\\", "/")
-    matching = [entry for entry in mounts if _path_is_under(target, entry[0])]
+    matching = [entry for entry in _posix_mount_table() if _path_is_under(target, entry[0])]
     if not matching:
         return False
     _mount_point, filesystem = max(matching, key=lambda entry: len(entry[0]))
     return _is_network_filesystem(filesystem)
+
+
+def _known_network_path(path: Path) -> bool:
+    if str(path).startswith(("\\\\", "//")):
+        return True
+    if _platform_system() == "Windows":
+        return _windows_network_anchor(path)
+    return _posix_network_path(path)
 
 
 def _platform_system() -> str:
@@ -271,59 +312,96 @@ def _windows_reparse_point(path: Path) -> bool:
     return False
 
 
+def _second_writer_is_blocked(second: sqlite3.Connection) -> bool:
+    """Whether a second immediate transaction is refused, which is the point."""
+    try:
+        second.execute("BEGIN IMMEDIATE")
+    except sqlite3.OperationalError as exc:
+        return "locked" in str(exc).lower() or "busy" in str(exc).lower()
+    second.rollback()
+    return False
+
+
+def _close_probe_connections(connections: list[sqlite3.Connection]) -> None:
+    for connection in connections:
+        with contextlib.suppress(sqlite3.Error):
+            connection.rollback()
+        with contextlib.suppress(sqlite3.Error):
+            connection.close()
+
+
+def _remove_probe_files(probe: Path) -> None:
+    for suffix in ("", "-journal", "-shm", "-wal"):
+        with contextlib.suppress(OSError):
+            Path(f"{probe}{suffix}").unlink()
+
+
+def _opened_probe(
+    probe: Path, deadline: float, connections: list[sqlite3.Connection]
+) -> sqlite3.Connection | None:
+    """One probe connection, or None when the bounded probe has run out of time."""
+    if time.monotonic() >= deadline:
+        return None
+    connection = sqlite3.connect(probe, timeout=0)
+    connections.append(connection)
+    return connection
+
+
+def _run_lock_probe(
+    probe: Path, deadline: float, connections: list[sqlite3.Connection]
+) -> bool | None:
+    first = _opened_probe(probe, deadline, connections)
+    second = _opened_probe(probe, deadline, connections)
+    if first is None or second is None:
+        return None
+    first.execute("PRAGMA journal_mode=DELETE")
+    first.execute("BEGIN IMMEDIATE")
+    if time.monotonic() >= deadline:
+        return None
+    return _second_writer_is_blocked(second)
+
+
 def _sqlite_lock_probe(root: Path, *, deadline: float = float("inf")) -> bool | None:
     """Return lock support, or ``None`` when a bounded probe cannot complete."""
     probe = root / f".llm-wiki-lock-probe-{secrets.token_hex(16)}.sqlite3"
-    first: sqlite3.Connection | None = None
-    second: sqlite3.Connection | None = None
+    connections: list[sqlite3.Connection] = []
     try:
-        if time.monotonic() >= deadline:
-            return None
-        first = sqlite3.connect(probe, timeout=0)
-        if time.monotonic() >= deadline:
-            return None
-        second = sqlite3.connect(probe, timeout=0)
-        first.execute("PRAGMA journal_mode=DELETE")
-        first.execute("BEGIN IMMEDIATE")
-        if time.monotonic() >= deadline:
-            return None
-        try:
-            second.execute("BEGIN IMMEDIATE")
-        except sqlite3.OperationalError as exc:
-            return "locked" in str(exc).lower() or "busy" in str(exc).lower()
-        else:
-            second.rollback()
-            return False
+        return _run_lock_probe(probe, deadline, connections)
     except (OSError, sqlite3.Error):
         return None
     finally:
-        if first is not None:
-            with contextlib.suppress(sqlite3.Error):
-                first.rollback()
-            with contextlib.suppress(sqlite3.Error):
-                first.close()
-        if second is not None:
-            with contextlib.suppress(sqlite3.Error):
-                second.close()
-        for suffix in ("", "-journal", "-shm", "-wal"):
-            with contextlib.suppress(OSError):
-                Path(f"{probe}{suffix}").unlink()
+        _close_probe_connections(connections)
+        _remove_probe_files(probe)
+
+
+_CLOUD_DIRECTORY_NAMES = frozenset(
+    {"dropbox", "googledrive", "google drive", "iclouddrive", "onedrive"}
+)
+
+
+def _require_local_non_reparse_root(path: Path) -> None:
+    if _windows_reparse_point(path):
+        raise UnsafeStateRoot(f"state root must not traverse a Windows reparse point: {path}")
+    if _known_network_path(path):
+        raise UnsafeStateRoot(f"state root must use a local filesystem: {path}")
+
+
+def _warn_if_cloud_synchronized(path: Path) -> None:
+    """Cloud sync is detected by name only; locking there is probed, not proven."""
+    if not any(part.casefold() in _CLOUD_DIRECTORY_NAMES for part in path.parts):
+        return
+    warnings.warn(
+        f"state root appears to be cloud-synchronized; local locking is only probed: {path}",
+        RuntimeWarning,
+        stacklevel=3,
+    )
 
 
 def validate_state_root(path: Path) -> None:
     """Fail closed when a runtime root lacks known-safe local lock semantics."""
     path = Path(path)
-    if _windows_reparse_point(path):
-        raise UnsafeStateRoot(f"state root must not traverse a Windows reparse point: {path}")
-    if _known_network_path(path):
-        raise UnsafeStateRoot(f"state root must use a local filesystem: {path}")
-    cloud_names = {"dropbox", "googledrive", "google drive", "iclouddrive", "onedrive"}
-    if any(part.casefold() in cloud_names for part in path.parts):
-        warnings.warn(
-            f"state root appears to be cloud-synchronized; local locking is only probed: {path}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
+    _require_local_non_reparse_root(path)
+    _warn_if_cloud_synchronized(path)
     path.mkdir(parents=True, exist_ok=True)
     _set_owner_only(path, 0o700)
     if _sqlite_lock_probe(path) is not True:
@@ -514,6 +592,43 @@ def _validate_or_initialize_operational_contract(
         )
 
 
+def _migration_incomplete(message: str) -> OperationalDatabaseContractError:
+    error = OperationalDatabaseContractError(message)
+    error.code = "operational_migration_incomplete"
+    return error
+
+
+def _require_unique_statement_names(statements: Sequence[MigrationStatement]) -> None:
+    names = [statement.name for statement in statements]
+    if any(not name for name in names):
+        raise ValueError("migration statement name must be non-empty")
+    if len(names) != len(set(names)):
+        raise ValueError("migration statement names must be unique")
+
+
+def _apply_one_migration_statement(
+    connection: sqlite3.Connection, statement: MigrationStatement, emit
+) -> None:
+    """One statement in one transaction, skipped when its invariant already holds."""
+    if statement.completed(connection):
+        return
+    emit(f"before:{statement.name}")
+    with begin_immediate(connection):
+        connection.execute(statement.sql, tuple(statement.parameters))
+        if not statement.completed(connection):
+            raise _migration_incomplete(
+                f"migration statement invariant is incomplete: {statement.name}"
+            )
+        emit(f"after_execute:{statement.name}")
+    emit(f"after_commit:{statement.name}")
+
+
+def _require_final_invariant(connection: sqlite3.Connection, final_invariant) -> None:
+    if final_invariant(connection):
+        return
+    raise _migration_incomplete("operational migration final invariant is incomplete")
+
+
 def run_resumable_migration(
     connection: sqlite3.Connection,
     statements: Sequence[MigrationStatement],
@@ -522,31 +637,11 @@ def run_resumable_migration(
     killpoint: Callable[[str], None] | None = None,
 ) -> None:
     """Apply incomplete migration statements one transaction at a time."""
-    names = [statement.name for statement in statements]
-    if any(not name for name in names):
-        raise ValueError("migration statement name must be non-empty")
-    if len(names) != len(set(names)):
-        raise ValueError("migration statement names must be unique")
-
+    _require_unique_statement_names(statements)
     emit = killpoint or (lambda _event: None)
     for statement in statements:
-        if statement.completed(connection):
-            continue
-        emit(f"before:{statement.name}")
-        with begin_immediate(connection):
-            connection.execute(statement.sql, tuple(statement.parameters))
-            if not statement.completed(connection):
-                error = OperationalDatabaseContractError(
-                    f"migration statement invariant is incomplete: {statement.name}"
-                )
-                error.code = "operational_migration_incomplete"
-                raise error
-            emit(f"after_execute:{statement.name}")
-        emit(f"after_commit:{statement.name}")
-    if not final_invariant(connection):
-        error = OperationalDatabaseContractError("operational migration final invariant is incomplete")
-        error.code = "operational_migration_incomplete"
-        raise error
+        _apply_one_migration_statement(connection, statement, emit)
+    _require_final_invariant(connection, final_invariant)
 
 
 def _contained_runtime_metadata(path: Path, state_root: Path) -> os.stat_result:
@@ -788,6 +883,16 @@ def _apply_readonly_operational_pragmas(
     _require_pragma(database, "busy_timeout", busy_ms)
 
 
+def _require_stable_read(opened, after, length: int, max_bytes: int) -> None:
+    """The file did not change under the descriptor, and the read stayed bounded."""
+    moved = not os.path.samestat(opened, after) or (
+        opened.st_size,
+        opened.st_mtime_ns,
+    ) != (after.st_size, after.st_mtime_ns)
+    if moved or length > max_bytes:
+        raise PermissionError("runtime file changed during bounded read")
+
+
 def read_runtime_bytes(
     path: Path,
     state_root: Path,
@@ -804,13 +909,7 @@ def read_runtime_bytes(
         if not os.path.samestat(expected, opened):
             raise PermissionError("runtime file identity changed before read")
         data = os.read(descriptor, max_bytes + 1)
-        after = os.fstat(descriptor)
-        if (
-            not os.path.samestat(opened, after)
-            or (opened.st_size, opened.st_mtime_ns) != (after.st_size, after.st_mtime_ns)
-            or len(data) > max_bytes
-        ):
-            raise PermissionError("runtime file changed during bounded read")
+        _require_stable_read(opened, os.fstat(descriptor), len(data), max_bytes)
         return data
     finally:
         os.close(descriptor)
@@ -885,34 +984,50 @@ def fsync_file(path: Path) -> None:
         os.fsync(handle.fileno())
 
 
+def _fsync_directory_windows(path: Path) -> None:
+    import windows_workspace
+
+    handle: int | None = None
+    try:
+        handle = windows_workspace.open_writable_directory_path(Path(path))
+        if not windows_workspace.flush_directory(handle):
+            raise ctypes.WinError(ctypes.get_last_error())
+    except (OSError, RuntimeError) as exc:
+        raise _metadata_durability_error("Windows directory flush failed", exc) from exc
+    finally:
+        _close_windows_handle(windows_workspace, handle)
+
+
+def _close_windows_handle(windows_workspace, handle: int | None) -> None:
+    if handle is None:
+        return
+    windows_workspace.close_handle(handle)
+
+
+def _opened_directory_descriptor(path: Path) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        return os.open(Path(path), flags)
+    except OSError as exc:
+        raise _metadata_durability_error("directory open for fsync failed", exc) from exc
+
+
+def _fsync_directory_posix(path: Path) -> None:
+    descriptor = _opened_directory_descriptor(path)
+    try:
+        os.fsync(descriptor)
+    except OSError as exc:
+        raise _metadata_durability_error("directory fsync failed", exc) from exc
+    finally:
+        os.close(descriptor)
+
+
 def fsync_directory(path: Path) -> None:
     """Sync directory metadata or fail when the platform cannot prove it."""
     if os.name == "nt":
-        import windows_workspace
-
-        handle: int | None = None
-        try:
-            handle = windows_workspace.open_writable_directory_path(Path(path))
-            if not windows_workspace.flush_directory(handle):
-                raise ctypes.WinError(ctypes.get_last_error())
-        except (OSError, RuntimeError) as exc:
-            raise _metadata_durability_error("Windows directory flush failed", exc) from exc
-        finally:
-            if handle is not None:
-                windows_workspace.close_handle(handle)
+        _fsync_directory_windows(path)
         return
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    try:
-        descriptor = os.open(Path(path), flags)
-    except OSError as exc:
-        raise _metadata_durability_error("directory open for fsync failed", exc) from exc
-    try:
-        try:
-            os.fsync(descriptor)
-        except OSError as exc:
-            raise _metadata_durability_error("directory fsync failed", exc) from exc
-    finally:
-        os.close(descriptor)
+    _fsync_directory_posix(path)
 
 
 def _metadata_durability_error(
@@ -946,85 +1061,139 @@ def durable_publish_file(
     max_bytes: int,
 ) -> Literal["published", "adopted", "duplicate"]:
     """Publish one sibling file and return published, adopted, or duplicate."""
+    _require_publication_arguments(replace, expected_sha256, max_bytes)
+    staged, destination, parent = _resolved_sibling_pair(staged, destination)
+    settled = _settled_publication(staged, destination, parent, expected_sha256, max_bytes)
+    if settled is not None:
+        return settled
+    _move_into_place(staged, destination, parent, replace=replace)
+    if _publication_digest(destination, parent, max_bytes=max_bytes) != expected_sha256:
+        raise RuntimeError("durable publication conflict: destination read-back failed")
+    return "published"
+
+
+def _require_publication_arguments(
+    replace: object, expected_sha256: str, max_bytes: object
+) -> None:
     if not isinstance(replace, bool):
         raise TypeError("replace must be a boolean")
     if re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
         raise ValueError("expected_sha256 must be lowercase 64-hex")
-    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
-        raise ValueError("max_bytes must be a positive integer")
+    _require_positive_int("max_bytes", max_bytes)
 
-    staged = Path(staged)
-    destination = Path(destination)
+
+def _resolved_parents(staged: Path, destination: Path) -> tuple[Path, Path]:
     try:
-        staged_parent = staged.parent.resolve(strict=True)
-        destination_parent = destination.parent.resolve(strict=True)
+        return staged.parent.resolve(strict=True), destination.parent.resolve(strict=True)
     except OSError as exc:
         raise PermissionError("publication parent must exist") from exc
+
+
+def _require_distinct_siblings(
+    staged: Path, destination: Path, staged_parent: Path, destination_parent: Path
+) -> None:
     if staged_parent != destination_parent:
         raise ValueError("staged and destination must be sibling paths")
     if os.path.normcase(staged.name) == os.path.normcase(destination.name):
         raise ValueError("staged and destination must be distinct names")
+
+
+def _resolved_sibling_pair(staged: Path, destination: Path) -> tuple[Path, Path, Path]:
+    """Both paths under one resolved local parent, or a refusal naming why not."""
+    staged = Path(staged)
+    destination = Path(destination)
+    staged_parent, destination_parent = _resolved_parents(staged, destination)
+    _require_distinct_siblings(staged, destination, staged_parent, destination_parent)
     if _known_network_path(staged_parent) or _windows_reparse_point(staged_parent):
         raise UnsafeStateRoot("durable publication requires one local non-reparse parent")
-    staged = staged_parent / staged.name
-    destination = destination_parent / destination.name
+    return staged_parent / staged.name, staged_parent / destination.name, staged_parent
 
-    staged_digest = _publication_digest(staged, staged_parent, max_bytes=max_bytes)
-    destination_digest = _publication_digest(
-        destination, staged_parent, max_bytes=max_bytes
-    )
+
+def _adopted_or_duplicate(staged_digest: object, expected_sha256: str, parent: Path):
+    """The destination already holds the expected bytes; what the staged file adds."""
+    if staged_digest is None:
+        _fsync_parent_on_posix(parent)
+        return "adopted"
+    if staged_digest == expected_sha256:
+        return "duplicate"
+    raise RuntimeError("durable publication conflict: staged bytes do not match")
+
+
+def _fsync_parent_on_posix(parent: Path) -> None:
+    if os.name == "nt":
+        return
+    fsync_directory(parent)
+
+
+def _settled_publication(
+    staged: Path, destination: Path, parent: Path, expected_sha256: str, max_bytes: int
+):
+    """An outcome reached without moving anything, or None when a move is due."""
+    staged_digest = _publication_digest(staged, parent, max_bytes=max_bytes)
+    destination_digest = _publication_digest(destination, parent, max_bytes=max_bytes)
     if destination_digest == expected_sha256:
-        if staged_digest is None:
-            if os.name != "nt":
-                fsync_directory(staged_parent)
-            return "adopted"
-        if staged_digest == expected_sha256:
-            return "duplicate"
-        raise RuntimeError("durable publication conflict: staged bytes do not match")
+        return _adopted_or_duplicate(staged_digest, expected_sha256, parent)
     if staged_digest != expected_sha256:
         raise RuntimeError("durable publication conflict: expected bytes are unavailable")
+    return None
 
-    if os.name == "nt":
-        import windows_workspace
 
-        try:
-            windows_workspace.flush_file_path(staged)
-            windows_workspace.move_file_write_through(
-                staged,
-                destination,
-                replace=replace,
-            )
-        except FileExistsError:
-            raise
-        except (OSError, RuntimeError) as exc:
-            raise _metadata_durability_error("Windows metadata publication failed", exc) from exc
+def _move_windows(staged: Path, destination: Path, *, replace: bool) -> None:
+    import windows_workspace
+
+    try:
+        windows_workspace.flush_file_path(staged)
+        windows_workspace.move_file_write_through(staged, destination, replace=replace)
+    except FileExistsError:
+        raise
+    except (OSError, RuntimeError) as exc:
+        raise _metadata_durability_error("Windows metadata publication failed", exc) from exc
+
+
+def _replace_in_place(staged: Path, destination: Path) -> None:
+    try:
+        os.replace(staged, destination)
+    except OSError as exc:
+        raise _metadata_durability_error("metadata replacement failed", exc) from exc
+
+
+def _unlink_staged(staged: Path, parent: Path) -> None:
+    try:
+        os.unlink(staged)
+    except OSError:
+        fsync_directory(parent)
+        raise
+
+
+def _link_then_unlink(staged: Path, destination: Path, parent: Path) -> None:
+    try:
+        os.link(staged, destination, follow_symlinks=False)
+    except FileExistsError:
+        raise
+    except OSError as exc:
+        raise _metadata_durability_error("metadata publication link failed", exc) from exc
+    _unlink_staged(staged, parent)
+
+
+def _move_posix(staged: Path, destination: Path, parent: Path, *, replace: bool) -> None:
+    try:
+        fsync_file(staged)
+    except OSError as exc:
+        raise _metadata_durability_error("staged file fsync failed", exc) from exc
+    if replace:
+        _replace_in_place(staged, destination)
     else:
-        try:
-            fsync_file(staged)
-        except OSError as exc:
-            raise _metadata_durability_error("staged file fsync failed", exc) from exc
-        if replace:
-            try:
-                os.replace(staged, destination)
-            except OSError as exc:
-                raise _metadata_durability_error("metadata replacement failed", exc) from exc
-        else:
-            try:
-                os.link(staged, destination, follow_symlinks=False)
-            except FileExistsError:
-                raise
-            except OSError as exc:
-                raise _metadata_durability_error("metadata publication link failed", exc) from exc
-            try:
-                os.unlink(staged)
-            except OSError:
-                fsync_directory(staged_parent)
-                raise
-        fsync_directory(staged_parent)
+        _link_then_unlink(staged, destination, parent)
+    fsync_directory(parent)
 
-    if _publication_digest(destination, staged_parent, max_bytes=max_bytes) != expected_sha256:
-        raise RuntimeError("durable publication conflict: destination read-back failed")
-    return "published"
+
+def _move_into_place(
+    staged: Path, destination: Path, parent: Path, *, replace: bool
+) -> None:
+    if os.name == "nt":
+        _move_windows(staged, destination, replace=replace)
+        return
+    _move_posix(staged, destination, parent, replace=replace)
 
 
 def publish_runtime_file(
@@ -1038,38 +1207,116 @@ def publish_runtime_file(
     mode: int = 0o600,
 ) -> RuntimeFileIdentity:
     """Publish runtime bytes through the shared checked durability primitive."""
+    _require_runtime_arguments(data, create_only, mode, expected, expected_sha256)
+    root = Path(state_root).resolve(strict=True)
+    parent, destination = _resolved_runtime_destination(path, root)
+    _require_replacement_evidence(
+        destination, root, create_only, expected, expected_sha256
+    )
+    staged = parent / f".{destination.name}.{secrets.token_hex(16)}.tmp"
+    _write_staged_bytes(staged, data, mode)
+    _harden_runtime_owner_only(staged, mode)
+    _publish_staged(staged, destination, parent, data, create_only, expected)
+    _harden_runtime_owner_only(destination, mode)
+    published = capture_runtime_file_identity(destination, state_root=root)
+    if published.size != len(data):
+        raise RuntimeError("published runtime file size changed during read-back")
+    return published
+
+
+def _require_runtime_mode(mode: object) -> None:
+    if isinstance(mode, bool) or not isinstance(mode, int) or not 0 <= mode <= 0o777:
+        raise ValueError("mode must be a valid permission mode")
+
+
+def _require_create_only_carries_no_evidence(
+    create_only: bool, expected: object, expected_sha256: object
+) -> None:
+    if not create_only:
+        return
+    if expected is not None or expected_sha256 is not None:
+        raise ValueError("create-only publication does not accept replacement evidence")
+
+
+def _require_replacement_carries_evidence(
+    create_only: bool, expected: object, expected_sha256: object
+) -> None:
+    if create_only:
+        return
+    if expected is None or expected_sha256 is None:
+        raise ValueError("replacement requires expected identity and SHA-256")
+
+
+def _require_replacement_shape(
+    create_only: bool, expected: object, expected_sha256: object
+) -> None:
+    _require_create_only_carries_no_evidence(create_only, expected, expected_sha256)
+    _require_replacement_carries_evidence(create_only, expected, expected_sha256)
+
+
+def _require_runtime_payload(data: object, create_only: object) -> None:
     if not isinstance(data, bytes):
         raise TypeError("runtime file data must be bytes")
     if not isinstance(create_only, bool):
         raise TypeError("create_only must be a boolean")
-    if isinstance(mode, bool) or not isinstance(mode, int) or not 0 <= mode <= 0o777:
-        raise ValueError("mode must be a valid permission mode")
-    if create_only and (expected is not None or expected_sha256 is not None):
-        raise ValueError("create-only publication does not accept replacement evidence")
-    if not create_only and (expected is None or expected_sha256 is None):
-        raise ValueError("replacement requires expected identity and SHA-256")
+
+
+def _require_runtime_arguments(
+    data: object,
+    create_only: object,
+    mode: object,
+    expected: object,
+    expected_sha256: object,
+) -> None:
+    _require_runtime_payload(data, create_only)
+    _require_runtime_mode(mode)
+    _require_replacement_shape(create_only, expected, expected_sha256)
     if expected_sha256 is not None and re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
         raise ValueError("expected_sha256 must be lowercase 64-hex")
 
-    root = Path(state_root).resolve(strict=True)
+
+def _resolved_runtime_destination(path: Path, root: Path) -> tuple[Path, Path]:
     destination = Path(path)
     try:
         parent = destination.parent.resolve(strict=True)
         parent.relative_to(root)
     except (OSError, ValueError) as exc:
         raise PermissionError("runtime publication path is outside the state root") from exc
-    destination = parent / destination.name
-    if not create_only:
-        current = capture_runtime_file_identity(destination, state_root=root)
-        if current != expected:
-            raise PermissionError("runtime file identity changed before publication")
-        current_bytes = read_runtime_bytes(
-            destination, root, max_bytes=max(1, current.size)
-        )
-        if sha256_bytes(current_bytes) != expected_sha256:
-            raise PermissionError("runtime file bytes changed before publication")
+    return parent, parent / destination.name
 
-    staged = parent / f".{destination.name}.{secrets.token_hex(16)}.tmp"
+
+def _require_unchanged_identity(current: object, expected: object) -> None:
+    if current != expected:
+        raise PermissionError("runtime file identity changed before publication")
+
+
+def _require_replacement_evidence(
+    destination: Path,
+    root: Path,
+    create_only: bool,
+    expected: object,
+    expected_sha256: object,
+) -> None:
+    """The file being replaced is still the one the caller measured."""
+    if create_only:
+        return
+    current = capture_runtime_file_identity(destination, state_root=root)
+    _require_unchanged_identity(current, expected)
+    current_bytes = read_runtime_bytes(destination, root, max_bytes=max(1, current.size))
+    if sha256_bytes(current_bytes) != expected_sha256:
+        raise PermissionError("runtime file bytes changed before publication")
+
+
+def _write_all(descriptor: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError("runtime staging write made no progress")
+        view = view[written:]
+
+
+def _write_staged_bytes(staged: Path, data: bytes, mode: int) -> None:
     descriptor = os.open(
         staged,
         os.O_WRONLY
@@ -1080,43 +1327,45 @@ def publish_runtime_file(
         mode,
     )
     try:
-        view = memoryview(data)
-        while view:
-            written = os.write(descriptor, view)
-            if written <= 0:
-                raise OSError("runtime staging write made no progress")
-            view = view[written:]
+        _write_all(descriptor, data)
         os.fsync(descriptor)
     except BaseException:
         os.close(descriptor)
-        with contextlib.suppress(OSError):
-            staged.unlink()
+        _discard_staged(staged)
         raise
     else:
         os.close(descriptor)
-    _harden_runtime_owner_only(staged, mode)
 
-    digest = sha256_bytes(data)
+
+def _discard_staged(staged: Path) -> None:
+    with contextlib.suppress(OSError):
+        staged.unlink()
+
+
+def _publish_staged(
+    staged: Path,
+    destination: Path,
+    parent: Path,
+    data: bytes,
+    create_only: bool,
+    expected: object,
+) -> None:
+    max_bytes = max(1, len(data), 0 if expected is None else expected.size)
     try:
         outcome = durable_publish_file(
             staged,
             destination,
             replace=not create_only,
-            expected_sha256=digest,
-            max_bytes=max(1, len(data), 0 if expected is None else expected.size),
+            expected_sha256=sha256_bytes(data),
+            max_bytes=max_bytes,
         )
     except BaseException:
-        with contextlib.suppress(OSError):
-            staged.unlink()
+        _discard_staged(staged)
         raise
-    if outcome == "duplicate":
-        staged.unlink()
-        fsync_directory(parent)
-    _harden_runtime_owner_only(destination, mode)
-    published = capture_runtime_file_identity(destination, state_root=root)
-    if published.size != len(data):
-        raise RuntimeError("published runtime file size changed during read-back")
-    return published
+    if outcome != "duplicate":
+        return
+    staged.unlink()
+    fsync_directory(parent)
 
 
 def sync_runtime_directory(path: Path) -> None:
@@ -1124,21 +1373,44 @@ def sync_runtime_directory(path: Path) -> None:
     fsync_directory(Path(path))
 
 
-def restricted_relative_path(value: str, allowed_roots: tuple[str, ...]) -> PurePosixPath:
-    if not isinstance(value, str) or not value or "\\" in value or "//" in value:
+def _is_posix_relative_text(value: object) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    return "\\" not in value and "//" not in value
+
+
+def _require_posix_relative_text(value: object) -> None:
+    if not _is_posix_relative_text(value):
         raise ValueError("path must be a non-empty normalized POSIX relative path")
     if re.match(r"^[A-Za-z]:", value):
         raise ValueError("drive-qualified paths are forbidden")
-    path = PurePosixPath(value)
-    if (
+
+
+def _require_normalized_relative(path: PurePosixPath, value: str) -> None:
+    unnormalized = (
         path.is_absolute()
         or str(path) != value
         or any(part in {"", ".", ".."} for part in path.parts)
-    ):
+    )
+    if unnormalized:
         raise ValueError("path must be normalized and relative")
+
+
+def _under_root(path: PurePosixPath, root: PurePosixPath) -> bool:
+    return path == root or root in path.parents
+
+
+def _require_inside_a_root(path: PurePosixPath, allowed_roots: tuple[str, ...]) -> None:
     roots = tuple(PurePosixPath(root) for root in allowed_roots)
-    if not roots or not any(path == root or root in path.parents for root in roots):
+    if not roots or not any(_under_root(path, root) for root in roots):
         raise ValueError("path is outside every allowed root")
+
+
+def restricted_relative_path(value: str, allowed_roots: tuple[str, ...]) -> PurePosixPath:
+    _require_posix_relative_text(value)
+    path = PurePosixPath(value)
+    _require_normalized_relative(path, value)
+    _require_inside_a_root(path, allowed_roots)
     return path
 
 
@@ -1158,6 +1430,187 @@ def validate_schema_object(instance: object, schema: object) -> None:
     _validate_rule(instance, schema, "$", root=schema)
 
 
+def _ref_step(target: object, raw_part: str, reference: str, location: str) -> object:
+    part = raw_part.replace("~1", "/").replace("~0", "~")
+    if not isinstance(target, dict) or part not in target:
+        raise SchemaValidationError(f"{location}: unresolved schema ref {reference}")
+    return target[part]
+
+
+def _resolved_ref_target(reference: object, root: dict, location: str) -> dict:
+    """The schema a `$ref` names, resolved against the document root."""
+    if not isinstance(reference, str) or not reference.startswith("#/"):
+        raise SchemaValidationError(
+            f"{location}: only internal JSON Pointer refs are supported"
+        )
+    target: object = root
+    for raw_part in reference[2:].split("/"):
+        target = _ref_step(target, raw_part, reference, location)
+    if not isinstance(target, dict):
+        raise SchemaValidationError(f"{location}: schema ref {reference} is not an object")
+    return target
+
+
+def _option_matches(instance: object, option: dict, location: str, root: dict) -> bool:
+    try:
+        _validate_rule(instance, option, location, root=root)
+    except SchemaValidationError:
+        return False
+    return True
+
+
+def _require_one_of(instance: object, rule: dict, location: str, root: dict) -> None:
+    matches = sum(
+        _option_matches(instance, option, location, root) for option in rule["oneOf"]
+    )
+    if matches != 1:
+        raise SchemaValidationError(
+            f"{location}: expected exactly one oneOf match, got {matches}"
+        )
+
+
+def _require_const(instance: object, rule: dict, location: str) -> None:
+    if "const" not in rule:
+        return
+    if not _json_equal(instance, rule["const"]):
+        raise SchemaValidationError(f"{location}: expected const {rule['const']!r}")
+
+
+def _require_enum(instance: object, rule: dict, location: str) -> None:
+    if "enum" not in rule:
+        return
+    if not any(_json_equal(instance, candidate) for candidate in rule["enum"]):
+        raise SchemaValidationError(f"{location}: value is not in enum")
+
+
+def _require_const_and_enum(instance: object, rule: dict, location: str) -> None:
+    _require_const(instance, rule, location)
+    _require_enum(instance, rule, location)
+
+
+def _expected_types(instance: object, rule: dict, location: str) -> tuple[str, ...]:
+    expected = rule.get("type")
+    if expected is None:
+        return ()
+    types = _schema_types(expected)
+    if not _matches_type(instance, expected):
+        raise SchemaValidationError(f"{location}: expected {expected}")
+    return types
+
+
+def _require_required_properties(instance: dict, rule: dict, location: str) -> None:
+    missing = [key for key in rule.get("required", []) if key not in instance]
+    if missing:
+        raise SchemaValidationError(f"{location}: missing required properties {missing}")
+
+
+def _require_no_unknown_properties(instance: dict, rule: dict, location: str) -> None:
+    if rule.get("additionalProperties") is not False:
+        return
+    unknown = sorted(set(instance) - set(rule.get("properties", {})))
+    if unknown:
+        raise SchemaValidationError(f"{location}: unknown properties {unknown}")
+
+
+def _validate_property(
+    key: str, value: object, properties: dict, location: str, root: dict
+) -> None:
+    if key not in properties:
+        return
+    _validate_rule(value, properties[key], f"{location}.{key}", root=root)
+
+
+def _validate_object(instance: object, rule: dict, location: str, root: dict) -> None:
+    assert isinstance(instance, dict)
+    _require_required_properties(instance, rule, location)
+    _require_no_unknown_properties(instance, rule, location)
+    properties = rule.get("properties", {})
+    for key, value in instance.items():
+        _validate_property(key, value, properties, location, root)
+
+
+def _require_item_is_new(
+    item: object, earlier: list, index: int, location: str
+) -> None:
+    if any(_json_equal(item, previous) for previous in earlier):
+        raise SchemaValidationError(
+            f"{location}: expected uniqueItems, duplicate at index {index}"
+        )
+
+
+def _require_unique_items(instance: list, rule: dict, location: str) -> None:
+    if rule.get("uniqueItems") is not True:
+        return
+    for index, item in enumerate(instance):
+        _require_item_is_new(item, instance[:index], index, location)
+
+
+def _validate_array(instance: object, rule: dict, location: str, root: dict) -> None:
+    assert isinstance(instance, list)
+    _check_bound(len(instance), rule, "minItems", "maxItems", location)
+    _require_unique_items(instance, rule, location)
+    if "items" not in rule:
+        return
+    for index, item in enumerate(instance):
+        _validate_rule(item, rule["items"], f"{location}[{index}]", root=root)
+
+
+def _validate_string(instance: object, rule: dict, location: str, root: dict) -> None:
+    del root
+    assert isinstance(instance, str)
+    _check_bound(len(instance), rule, "minLength", "maxLength", location)
+    if "pattern" in rule and re.search(rule["pattern"], instance) is None:
+        raise SchemaValidationError(f"{location}: string does not match pattern")
+
+
+def _validate_number(instance: object, rule: dict, location: str, root: dict) -> None:
+    del root
+    _check_bound(instance, rule, "minimum", "maximum", location)
+    if "exclusiveMinimum" in rule and instance <= rule["exclusiveMinimum"]:
+        raise SchemaValidationError(f"{location}: below exclusiveMinimum")
+    if "exclusiveMaximum" in rule and instance >= rule["exclusiveMaximum"]:
+        raise SchemaValidationError(f"{location}: above exclusiveMaximum")
+
+
+def _is_json_number(instance: object) -> bool:
+    return isinstance(instance, (int, float)) and not isinstance(instance, bool)
+
+
+# Which validator a typed rule selects, in declaration order. A table rather
+# than a chain: the chain was five `and`-joined branches in one function and
+# carried most of this module's measured complexity.
+_TYPE_VALIDATORS = (
+    (lambda types, value: "object" in types and isinstance(value, dict), _validate_object),
+    (lambda types, value: "array" in types and isinstance(value, list), _validate_array),
+    (lambda types, value: "string" in types and isinstance(value, str), _validate_string),
+    (
+        lambda types, value: bool({"integer", "number"}.intersection(types))
+        and _is_json_number(value),
+        _validate_number,
+    ),
+)
+
+
+def _validate_typed(
+    instance: object, rule: dict, location: str, root: dict, types: tuple[str, ...]
+) -> None:
+    for selects, validator in _TYPE_VALIDATORS:
+        if selects(types, instance):
+            validator(instance, rule, location, root)
+            return
+
+
+def _validate_resolved_rule(
+    instance: object, rule: dict[str, Any], location: str, root: dict[str, Any]
+) -> None:
+    """Everything a rule says once any `$ref` has been followed."""
+    if "oneOf" in rule:
+        _require_one_of(instance, rule, location, root)
+    _require_const_and_enum(instance, rule, location)
+    types = _expected_types(instance, rule, location)
+    _validate_typed(instance, rule, location, root, types)
+
+
 def _validate_rule(
     instance: object,
     rule: dict[str, Any],
@@ -1169,102 +1622,36 @@ def _validate_rule(
         root = rule
     reference = rule.get("$ref")
     if reference is not None:
-        if not isinstance(reference, str) or not reference.startswith("#/"):
-            raise SchemaValidationError(
-                f"{location}: only internal JSON Pointer refs are supported"
-            )
-        target: object = root
-        for raw_part in reference[2:].split("/"):
-            part = raw_part.replace("~1", "/").replace("~0", "~")
-            if not isinstance(target, dict) or part not in target:
-                raise SchemaValidationError(f"{location}: unresolved schema ref {reference}")
-            target = target[part]
-        if not isinstance(target, dict):
-            raise SchemaValidationError(f"{location}: schema ref {reference} is not an object")
+        target = _resolved_ref_target(reference, root, location)
         _validate_rule(instance, target, location, root=root)
         return
-    if "oneOf" in rule:
-        matches = 0
-        for option in rule["oneOf"]:
-            try:
-                _validate_rule(instance, option, location, root=root)
-            except SchemaValidationError:
-                continue
-            matches += 1
-        if matches != 1:
-            raise SchemaValidationError(
-                f"{location}: expected exactly one oneOf match, got {matches}"
-            )
-    if "const" in rule and not _json_equal(instance, rule["const"]):
-        raise SchemaValidationError(f"{location}: expected const {rule['const']!r}")
-    if "enum" in rule and not any(_json_equal(instance, candidate) for candidate in rule["enum"]):
-        raise SchemaValidationError(f"{location}: value is not in enum")
+    _validate_resolved_rule(instance, rule, location, root)
 
-    expected = rule.get("type")
-    expected_types: tuple[str, ...] = ()
-    if expected is not None:
-        expected_types = _schema_types(expected)
-        if not _matches_type(instance, expected):
-            raise SchemaValidationError(f"{location}: expected {expected}")
 
-    if "object" in expected_types and isinstance(instance, dict):
-        assert isinstance(instance, dict)
-        required = rule.get("required", [])
-        missing = [key for key in required if key not in instance]
-        if missing:
-            raise SchemaValidationError(f"{location}: missing required properties {missing}")
-        properties = rule.get("properties", {})
-        if rule.get("additionalProperties") is False:
-            unknown = sorted(set(instance) - set(properties))
-            if unknown:
-                raise SchemaValidationError(f"{location}: unknown properties {unknown}")
-        for key, value in instance.items():
-            if key in properties:
-                _validate_rule(value, properties[key], f"{location}.{key}", root=root)
-    elif "array" in expected_types and isinstance(instance, list):
-        assert isinstance(instance, list)
-        _check_bound(len(instance), rule, "minItems", "maxItems", location)
-        if rule.get("uniqueItems") is True:
-            for index, item in enumerate(instance):
-                if any(_json_equal(item, previous) for previous in instance[:index]):
-                    raise SchemaValidationError(
-                        f"{location}: expected uniqueItems, duplicate at index {index}"
-                    )
-        if "items" in rule:
-            for index, item in enumerate(instance):
-                _validate_rule(item, rule["items"], f"{location}[{index}]", root=root)
-    elif "string" in expected_types and isinstance(instance, str):
-        assert isinstance(instance, str)
-        _check_bound(len(instance), rule, "minLength", "maxLength", location)
-        if "pattern" in rule and re.search(rule["pattern"], instance) is None:
-            raise SchemaValidationError(f"{location}: string does not match pattern")
-    elif (
-        {"integer", "number"}.intersection(expected_types)
-        and isinstance(instance, (int, float))
-        and not isinstance(instance, bool)
-    ):
-        assert isinstance(instance, (int, float)) and not isinstance(instance, bool)
-        _check_bound(instance, rule, "minimum", "maximum", location)
-        if "exclusiveMinimum" in rule and instance <= rule["exclusiveMinimum"]:
-            raise SchemaValidationError(f"{location}: below exclusiveMinimum")
-        if "exclusiveMaximum" in rule and instance >= rule["exclusiveMaximum"]:
-            raise SchemaValidationError(f"{location}: above exclusiveMaximum")
+def _require_string_type_names(expected: list) -> None:
+    if not expected:
+        raise SchemaValidationError("schema type array must not be empty")
+    if not all(isinstance(value, str) for value in expected):
+        raise SchemaValidationError("schema type array must contain only strings")
+
+
+def _schema_type_array(expected: list) -> tuple[str, ...]:
+    _require_string_type_names(expected)
+    if len(set(expected)) != len(expected):
+        raise SchemaValidationError("schema type array must contain unique values")
+    return tuple(expected)
+
+
+def _named_schema_types(expected: object) -> tuple[str, ...]:
+    if isinstance(expected, str):
+        return (expected,)
+    if isinstance(expected, list):
+        return _schema_type_array(expected)
+    raise SchemaValidationError("schema type must be a string or array of strings")
 
 
 def _schema_types(expected: object) -> tuple[str, ...]:
-    if isinstance(expected, str):
-        values = (expected,)
-    elif isinstance(expected, list):
-        if not expected:
-            raise SchemaValidationError("schema type array must not be empty")
-        if not all(isinstance(value, str) for value in expected):
-            raise SchemaValidationError("schema type array must contain only strings")
-        if len(set(expected)) != len(expected):
-            raise SchemaValidationError("schema type array must contain unique values")
-        values = tuple(expected)
-    else:
-        raise SchemaValidationError("schema type must be a string or array of strings")
-
+    values = _named_schema_types(expected)
     unknown = [value for value in values if value not in _SCHEMA_TYPE_CHECKS]
     if unknown:
         raise SchemaValidationError(f"unsupported schema type: {unknown[0]}")

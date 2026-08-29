@@ -872,7 +872,11 @@ def test_remaining_graph_queries_are_store_first_facades(tmp_path, monkeypatch):
     }
     monkeypatch.setattr(code_graph, "_store_find_callees", lambda name, root: expected["callees"])
     monkeypatch.setattr(code_graph, "_store_find_dead_code", lambda root: expected["dead"])
-    monkeypatch.setattr(code_graph, "_store_get_architecture", lambda root: expected["architecture"])
+    monkeypatch.setattr(
+        code_graph,
+        "_store_get_architecture",
+        lambda root, limit: expected["architecture"],
+    )
     monkeypatch.setattr(code_graph, "_store_detect_communities", lambda root: expected["communities"])
 
     assert code_graph.find_callees("target", tmp_path) == expected["callees"]
