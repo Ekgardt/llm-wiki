@@ -50,9 +50,13 @@ MIN_BUDGET_TOKENS = 32
 # 50 673 estimated tokens once the opaque ids are gone - 2x the client ceiling,
 # so the host was cutting it with no signal, which is exactly what this module
 # exists to prevent. At 25 000 the ladder drops `owner` before any row and all
-# 461 `zero_confirmed_incoming_calls` rows survive; at 12 000, 216 of them do
-# not. A default below the ceiling deletes the part of the answer the tool
-# actually asserts, so thrift is left to the caller's explicit `budget_tokens`.
+# every row the tool actually asserts survives; at 12 000, 216 of them did not.
+# The count behind that measurement has since changed and the reason has not:
+# `zero_confirmed_incoming_calls` was 461 when this was written and is 26
+# today, because a name loaded as a value turned out not to be dead at all
+# (see `docs/research/2026-08-29-a-name-loaded-is-a-name-used.md`). A default
+# below the ceiling deletes the part of the answer the tool asserts, so thrift
+# is left to the caller's explicit `budget_tokens`.
 #
 # Research: `docs/research/2026-08-29-a-default-budget-for-a-dead-code-answer.md`.
 DEFAULT_BUDGET_TOKENS = MAX_BUDGET_TOKENS

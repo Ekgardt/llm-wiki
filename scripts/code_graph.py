@@ -50,6 +50,11 @@ except ImportError:
         resolve_python_imports_and_calls,
     )
 
+try:
+    from . import value_references
+except ImportError:
+    import value_references
+
 # Lazy-loaded tree-sitter parsers.
 _ts: dict = {}  # language_name -> Parser
 
@@ -2059,7 +2064,19 @@ def find_dead_code(
 # names the symbol and the receiver did not resolve - and doubt is what a cut
 # should reach first. This orders, it never filters: a large enough budget still
 # returns every row, and `candidates_by_reason` states the totals either way.
-DEAD_CODE_REASON_ORDER = ("zero_confirmed_incoming_calls", "unresolved_receiver")
+#
+# The order is by how strong a claim of death the verdict makes, so the cut
+# always reaches the weakest first. `referenced_without_call` sits between the
+# other two: nothing calls the name, which `unresolved_receiver` cannot say, but
+# something names it, which `zero_confirmed_incoming_calls` denies. Appending it
+# after `unresolved_receiver` instead cost a graded case - the CODE-07 stand's
+# `T07` lost `_search_backends` to the budget cut on 2026-08-29 while keeping
+# rows that state weaker evidence.
+DEAD_CODE_REASON_ORDER = (
+    "zero_confirmed_incoming_calls",
+    "referenced_without_call",
+    "unresolved_receiver",
+)
 
 
 def _dead_code_reason_rank(reason: str) -> int:
@@ -2121,30 +2138,68 @@ def _protocol_invoked(name: str) -> bool:
     return len(name) > 4 and name.startswith("__") and name.endswith("__")
 
 
-def _dead_code_reason(name: str, called_names: frozenset[str] | None) -> str:
+def _unnamed_reason(name: str, index) -> str:
+    """The verdict for a name no call site writes.
+
+    NEW-135 stopped here and called every such name dead. It is not: a symbol
+    named without being called — a thread target, a registry entry,
+    `set_defaults(handler=…)`, a name spelled in a `getattr` table — is never
+    written at a call site, so it looked uncalled while being called every
+    run. Measured 2026-08-29 against the active generation: 402 of the 461
+    names this verdict called dead are named somewhere in the same corpus, so
+    87% of the strongest verdict was false. It refuted itself inside one run —
+    `_architecture_dependencies` sat in `_ARCHITECTURE_MODE_QUERIES` while
+    being listed dead.
+    """
+    if index.names_a_value(name):
+        return "referenced_without_call"
+    return "zero_confirmed_incoming_calls"
+
+
+def _dead_code_reason(name: str, called_names: frozenset[str] | None, index) -> str:
     """`zero_confirmed_incoming_calls` only when nothing names it anywhere.
 
     Measured 2026-08-28 on this repository: of 868 candidates, 384 were named
     by some call text — a dynamic call may reach them — so calling them all
     dead made 52% of the answer indefensible once the protocol methods are
-    counted too. `None` means the name set could not be read, and then nothing
-    can be claimed dead: doubt is reported instead.
+    counted too. `None` on either reader means that set could not be read, and
+    then nothing can be claimed dead: doubt is reported instead.
     """
-    if called_names is None:
+    if called_names is None or index is None:
         return "unresolved_receiver"
     if name in called_names:
         return "unresolved_receiver"
-    return "zero_confirmed_incoming_calls"
+    return _unnamed_reason(name, index)
 
 
-def _stored_dead_candidate(
-    graph, node: dict, directory: Path, called_names: frozenset[str] | None
-) -> dict | None:
+def _dispatched_definition(index, path: str, name: str, line: int) -> bool:
+    """True when the definition itself is handed to whatever will call it.
+
+    The same argument `_protocol_invoked` already makes for dunders: a
+    decorated definition goes to its decorator at import time, and a method of
+    a class that declares a base is reached through that base — `visit_Call`
+    by `ast.NodeVisitor.visit`, `readinto` by `io.RawIOBase`. Name analysis
+    cannot see either caller by construction, so "no confirmed caller" says
+    nothing about them and they are not candidates at all.
+    """
+    if index is None:
+        return False
+    return index.is_dispatched(path, name, line)
+
+
+def _exclusion_rule(name: str, path: str) -> str | None:
+    """Why this symbol is not a candidate at all, or None when it is one."""
+    if _conventionally_reachable(name, path):
+        return "conventionally_reachable"
+    if _protocol_invoked(name):
+        return "protocol_invoked"
+    return None
+
+
+def _dead_candidate_row(
+    node: dict, location: tuple[str, int], called_names, index
+) -> dict:
     name = str(node["metadata"].get("name", ""))
-    path = str(node["metadata"].get("path", ""))
-    if _conventionally_reachable(name, path) or _protocol_invoked(name):
-        return None
-    location = _stored_location(graph, node["node_id"], directory)
     return {
         "name": name,
         "symbol_id": node["node_id"],
@@ -2152,9 +2207,30 @@ def _stored_dead_candidate(
         "file": location[0],
         "line": location[1],
         "status": "candidate",
-        "reason": _dead_code_reason(name, called_names),
+        "reason": _dead_code_reason(name, called_names, index),
         "graph_complete": False,
     }
+
+
+def _dead_code_verdict(
+    graph, node: dict, directory: Path, called_names, index
+) -> tuple[dict | None, str | None]:
+    """One candidate, or the named rule that dropped it. Never both."""
+    name = str(node["metadata"].get("name", ""))
+    path = str(node["metadata"].get("path", ""))
+    rule = _exclusion_rule(name, path)
+    if rule is not None:
+        return (None, rule)
+    location = _stored_location(graph, node["node_id"], directory)
+    if _dispatched_definition(index, path, name, location[1]):
+        return (None, "framework_dispatched")
+    return (_dead_candidate_row(node, location, called_names, index), None)
+
+
+def _stored_dead_candidate(
+    graph, node: dict, directory: Path, called_names: frozenset[str] | None, index=None
+) -> dict | None:
+    return _dead_code_verdict(graph, node, directory, called_names, index)[0]
 
 
 def _called_names(graph) -> frozenset[str] | None:
@@ -2165,12 +2241,62 @@ def _called_names(graph) -> frozenset[str] | None:
         return None
 
 
+def _reference_index(graph):
+    """What the corpus names as a value, or None when the read refused.
+
+    A store that cannot serve sources has none, and for such a store "nothing
+    names it" is true, so `EMPTY_INDEX` is the honest answer there rather than
+    a refusal. A real read that fails returns None and every verdict falls
+    back to doubt, exactly like a refused `call_target_names`.
+    """
+    reader = getattr(graph, "python_sources", None)
+    if reader is None:
+        return value_references.EMPTY_INDEX
+    try:
+        return value_references.build_reference_index(reader())
+    except (ValueError, sqlite3.Error):
+        return None
+
+
 def _stored_dead_candidates(graph, nodes, directory) -> list[dict]:
+    candidates, _counts = _classified_dead_nodes(graph, nodes, directory)
+    return candidates
+
+
+def _classified_dead_nodes(graph, nodes, directory) -> tuple[list[dict], dict]:
+    """Split the nodes into candidates and the reasons the rest were dropped.
+
+    The dropped count is reported, never silent: this pass removes more than
+    NEW-135 did, and a reader who is not told how many were removed cannot
+    tell a smaller answer from a better one.
+    """
     called_names = _called_names(graph)
-    found = [
-        _stored_dead_candidate(graph, node, directory, called_names) for node in nodes
+    index = _reference_index(graph)
+    verdicts = [
+        _dead_code_verdict(graph, node, directory, called_names, index)
+        for node in nodes
     ]
-    return [item for item in found if item is not None]
+    return _split_verdicts(verdicts, index)
+
+
+def _split_verdicts(verdicts: list[tuple], index) -> tuple[list[dict], dict]:
+    candidates = [row for row, _rule in verdicts if row is not None]
+    rules = [rule for _row, rule in verdicts if rule is not None]
+    return candidates, _dropped_counts(rules, index)
+
+
+def _rule_counts(rules: list[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for rule in rules:
+        counts[rule] = counts.get(rule, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _dropped_counts(rules: list[str], index) -> dict[str, object]:
+    report = {"excluded_count": len(rules), "excluded_by_rule": _rule_counts(rules)}
+    if index is None:
+        return {**report, "reference_index": "unreadable"}
+    return {**report, **index.as_report()}
 
 
 def _stored_dead_nodes(graph) -> list[dict]:
@@ -2202,12 +2328,13 @@ def _store_find_dead_code(
     if graph is None:
         return None
     try:
-        candidates = _stored_dead_candidates(graph, _stored_dead_nodes(graph), directory)
+        candidates, dropped = _classified_dead_nodes(
+            graph, _stored_dead_nodes(graph), directory
+        )
         report = _store_report(graph)
         ordered = _marked_complete(candidates, report)
-        return _with_report(
-            "candidates", ordered, {**report, **_dead_code_counts(ordered)}, with_report
-        )
+        counts = {**_dead_code_counts(ordered), **dropped}
+        return _with_report("candidates", ordered, {**report, **counts}, with_report)
     finally:
         graph.close()
 
@@ -2495,6 +2622,113 @@ def _store_detect_communities(
         graph.close()
 
 
+#: What a dependency is, in edges the extractor actually writes. `IMPORTS` is
+#: what a module depends on; `CALLS` is what a symbol depends on.
+DEPENDENCY_EDGE_TYPES = ("CALLS", "IMPORTS")
+DEPENDENCY_SEED_KINDS = ("class", "function", "method", "module")
+DEPENDENCY_SEED_LIMIT = 20
+DEPENDENCY_MAX_DEPTH = 8
+DEPENDENCY_MAX_ROWS = 1000
+DEPENDENCY_MAX_WORK = 100_000
+
+
+def _dependency_seed_by_id(graph, symbol: str) -> list[str]:
+    try:
+        node = graph.node(symbol)
+    except (ValueError, sqlite3.Error):
+        return []
+    return [] if node is None else [str(node["node_id"])]
+
+
+def _dependency_seed_by_path(graph, symbol: str) -> list[str]:
+    """A repository-relative file path names the module the file defines."""
+    by_path = graph.find_nodes(
+        kinds=("module",), path=symbol, max_rows=DEPENDENCY_SEED_LIMIT
+    )
+    if by_path:
+        return [str(item["node_id"]) for item in by_path]
+    return _dependency_seed_by_id(graph, symbol)
+
+
+def _dependency_seed_nodes(graph, symbol: str) -> list[str]:
+    """The nodes a dependency question is about: a name, a path, or a node id.
+
+    CODE-07, loud face: `get_architecture` forwards `request["symbol"]` — a
+    *name* — where a node id was expected, and the node-id syntax starts with
+    `[A-Za-z0-9]`, so every private name raised rather than answered. Names are
+    resolved the way `find_callers` and `find_callees` already resolve them.
+    A path is accepted too, because "what does this file depend on" is the
+    question this mode is asked with — `scripts/retrieval.py`, not
+    `scripts.retrieval` — and a module node carries both.
+    """
+    by_name = graph.find_nodes(
+        kinds=DEPENDENCY_SEED_KINDS, name=symbol, max_rows=DEPENDENCY_SEED_LIMIT
+    )
+    if by_name:
+        return [str(item["node_id"]) for item in by_name]
+    return _dependency_seed_by_path(graph, symbol)
+
+
+def _dependency_sort_key(item: dict) -> tuple:
+    return (
+        item["depth"],
+        str(item["kind"]),
+        str(item["identity_key"]),
+        str(item["node_id"]),
+    )
+
+
+def _stored_dependency_rows(graph, seeds: list[str], reverse: bool) -> list[dict]:
+    merged: dict[str, dict] = {}
+    for seed in seeds:
+        _merge_dependency_rows(merged, graph, seed, reverse)
+    return sorted(merged.values(), key=_dependency_sort_key)
+
+
+def _merge_dependency_rows(merged: dict, graph, seed: str, reverse: bool) -> None:
+    rows = graph.reachable(
+        seed,
+        edge_types=DEPENDENCY_EDGE_TYPES,
+        reverse=reverse,
+        max_depth=DEPENDENCY_MAX_DEPTH,
+        max_rows=DEPENDENCY_MAX_ROWS,
+        max_work=DEPENDENCY_MAX_WORK,
+    )
+    for item in rows:
+        merged.setdefault(str(item["node_id"]), item)
+
+
+def _dependency_resolution(symbol: str, seeds: list[str]) -> dict[str, object]:
+    """An empty answer must say whether the symbol was found at all.
+
+    CODE-07, silent face: a name that passed the node-id syntax matched no
+    node and produced `[]` with no error, byte-identical to a real answer of
+    "this depends on nothing". These fields are what tells the two apart.
+    """
+    return {
+        "symbol": symbol,
+        "symbol_resolved": bool(seeds),
+        "resolved_symbol_nodes": len(seeds),
+        "dependency_edge_types": list(DEPENDENCY_EDGE_TYPES),
+        "dependency_max_depth": DEPENDENCY_MAX_DEPTH,
+    }
+
+
+def _store_find_dependencies(
+    symbol: str, directory: Path, *, reverse: bool, with_report: bool
+) -> list[dict] | dict | None:
+    graph = _active_evidence_graph(directory)
+    if graph is None:
+        return None
+    try:
+        seeds = _dependency_seed_nodes(graph, symbol)
+        rows = _stored_dependency_rows(graph, seeds, reverse)
+        report = {**_store_report(graph), **_dependency_resolution(symbol, seeds)}
+        return _with_report("dependencies", rows, report, with_report)
+    finally:
+        graph.close()
+
+
 def find_dependencies(
     node_id: str,
     directory: Path,
@@ -2503,19 +2737,20 @@ def find_dependencies(
     live: bool = False,
     with_report: bool = False,
 ) -> list[dict] | dict:
-    """Find bounded canonical dependencies, preferring the active generation."""
+    """Find bounded canonical dependencies, preferring the active generation.
+
+    The stored answer walks `CALLS` and `IMPORTS` assertions. It used to walk
+    the `dependency` table, which holds 0 rows in the active generation and in
+    every generation on this disk, is written by no producer in `scripts/`,
+    and therefore answered `[]` for every symbol ever asked — silently, with
+    the same `graph_complete: false` caveat a correct answer carries.
+    """
     if not live:
-        graph = _active_evidence_graph(directory)
-        if graph is not None:
-            try:
-                dependencies = graph.dependencies(
-                    node_id, reverse=reverse, max_depth=8, max_rows=10_000
-                )
-                return _with_report(
-                    "dependencies", dependencies, _store_report(graph), with_report
-                )
-            finally:
-                graph.close()
+        stored = _store_find_dependencies(
+            node_id, directory, reverse=reverse, with_report=with_report
+        )
+        if stored is not None:
+            return stored
     parsed, definitions, edges = _workspace_call_graph(directory)
     dependencies = _find_live_dependencies(
         node_id, definitions, edges, reverse=reverse

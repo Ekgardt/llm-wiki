@@ -3363,6 +3363,46 @@ def _require_work_bound(rows: list[sqlite3.Row], work_limit: int) -> None:
         raise ValueError("Evidence Graph recursive work ceiling exceeded")
 
 
+# How many frontier ids go into one `IN (...)`. Keeps the statement and its
+# bound-parameter count well inside SQLite's limits without a second walk.
+_FRONTIER_CHUNK = 500
+
+
+def _walk_columns(reverse: bool) -> tuple[str, str]:
+    """(anchor column, reached column) for a forward or backward walk."""
+    if reverse:
+        return ("target_node_id", "source_node_id")
+    return ("source_node_id", "target_node_id")
+
+
+def _require_reachable_work(visited: int, work_limit: int) -> None:
+    if visited > work_limit:
+        raise ValueError("Evidence Graph reachability work ceiling exceeded")
+
+
+def _record_reached(node_id: str, seen: dict[str, int], depth: int, found: list) -> None:
+    if node_id in seen:
+        return
+    seen[node_id] = depth
+    found.append(node_id)
+
+
+def _bounded_reached(seen: dict[str, int], limit: int) -> list[tuple[str, int]]:
+    """The reached nodes without the seed, refusing rather than truncating."""
+    reached = sorted(item for item in seen.items() if item[1] > 0)
+    if len(reached) > limit:
+        raise ValueError("Evidence Graph query row ceiling exceeded")
+    return reached
+
+
+def _reached_sort_key(item: dict[str, object]) -> tuple:
+    return (item["depth"], str(item["kind"]), str(item["identity_key"]))
+
+
+def _sorted_reached(found: list) -> list[dict[str, object]]:
+    return sorted((item for item in found if item is not None), key=_reached_sort_key)
+
+
 # NEW-124. An unresolved call is recorded with the source text of its callee
 # expression, so the attribute this call names is the tail of that text:
 # `queue.recover_expired_leases` and `_queue().recover_expired_leases` both
@@ -4106,6 +4146,104 @@ GROUP BY n.node_id ORDER BY depth, n.kind, n.identity_key, n.node_id LIMIT ?
         _require_work_bound(rows, work_limit)
         return self._nodes_with_depth(rows)
 
+    def reachable(
+        self,
+        node_id: str,
+        *,
+        edge_types: Sequence[str] | None = None,
+        reverse: bool = False,
+        max_depth: int = 8,
+        max_rows: int = 100,
+        max_work: int = 1000,
+        deadline: float | None = None,
+    ):
+        """Transitive closure over resolved assertions of the named edge types.
+
+        `dependencies` walks the `dependency` table. Measured 2026-08-29: that
+        table holds **0 rows** in the active generation and in the four before
+        it, no producer in `scripts/` ever writes one, and
+        `SourceExtraction.dependencies` defaults to `()` - so that walk answers
+        `[]` for every symbol that ever existed, with no error. The assertions
+        the extractor does write are here: 37,918 `CALLS` and 3,934 `IMPORTS`
+        in the same file. This reader asks the graph the question it can
+        actually answer, and it changes no stored bytes.
+
+        Bounds are the ones `dependencies` uses - depth, work and rows - and
+        the work ceiling refuses rather than truncates.
+
+        The walk is breadth-first and expands each node exactly once, so the
+        cost is the reachable subgraph rather than the number of paths through
+        it. `dependencies` carries its visited set as a string down every path,
+        which is why it needs a work ceiling at all; measured 2026-08-29 on the
+        reverse import closure of `scripts/page_status.py`, the recursive form
+        took 31.6 s for 323 nodes at depth 8 while this one takes 0.15 s.
+        """
+        if not isinstance(reverse, bool):
+            raise ValueError("reverse must be boolean")
+        depth = _bound(max_depth, "max_depth", MAX_DEPTH)
+        work_limit = _bound(max_work, "max_work", MAX_WORK)
+        seen = self._breadth_first(
+            _node_id(node_id), edge_types, reverse, depth, work_limit, deadline
+        )
+        return self._hydrate_reached(seen, max_rows, deadline)
+
+    def _breadth_first(
+        self, seed, edge_types, reverse, depth_limit, work_limit, deadline
+    ) -> dict[str, int]:
+        seen = {seed: 0}
+        frontier = [seed]
+        for depth in range(1, depth_limit + 1):
+            frontier = self._expand_frontier(
+                frontier, edge_types, reverse, seen, depth, deadline
+            )
+            _require_reachable_work(len(seen), work_limit)
+            if not frontier:
+                break
+        return seen
+
+    def _expand_frontier(
+        self, frontier, edge_types, reverse, seen, depth, deadline
+    ) -> list[str]:
+        found: list[str] = []
+        for node_id in self._frontier_edges(frontier, edge_types, reverse, deadline):
+            _record_reached(node_id, seen, depth, found)
+        return found
+
+    def _frontier_edges(self, frontier, edge_types, reverse, deadline) -> list[str]:
+        reached: list[str] = []
+        for index in range(0, len(frontier), _FRONTIER_CHUNK):
+            chunk = frontier[index : index + _FRONTIER_CHUNK]
+            reached.extend(self._chunk_edges(chunk, edge_types, reverse, deadline))
+        return reached
+
+    def _chunk_edges(self, chunk, edge_types, reverse, deadline) -> list[str]:
+        anchor, reached = _walk_columns(reverse)
+        parameters: list[object] = []
+        filter_sql = _in_clause("edge_type", _edge_type_values(edge_types), parameters)
+        anchor_sql = _in_clause(anchor, tuple(chunk), parameters)
+        rows = self._execute(
+            f"SELECT DISTINCT {reached} AS reached FROM assertion "
+            "WHERE resolution='resolved' AND target_node_id IS NOT NULL"
+            f"{filter_sql}{anchor_sql} LIMIT ?",
+            parameters,
+            max_rows=MAX_AGGREGATE_ROWS,
+            deadline=deadline,
+            ceiling=MAX_AGGREGATE_ROWS,
+        )
+        return [str(row["reached"]) for row in rows]
+
+    def _hydrate_reached(self, seen: dict[str, int], max_rows: int, _deadline):
+        reached = _bounded_reached(seen, _bound(max_rows, "max_rows", MAX_ROWS))
+        found = [self._reached_node(node_id, depth) for node_id, depth in reached]
+        return _sorted_reached(found)
+
+    def _reached_node(self, node_id: str, depth: int) -> dict[str, object] | None:
+        node = self.node(node_id)
+        if node is None:
+            return None
+        node["depth"] = depth
+        return node
+
     def code_to_doc(self, node_id: str, **options: object):
         return self.neighbors(node_id, direction="in", edge_types=("DOCUMENTS",), **options)
 
@@ -4244,6 +4382,36 @@ ORDER BY depth, assertion_ids LIMIT ?
         )
         names = {str(row["target_text"]).rsplit(".", 1)[-1] for row in rows}
         return frozenset(name for name in names if name)
+
+    def python_sources(
+        self, *, max_rows: int = MAX_AGGREGATE_ROWS, deadline: float | None = None
+    ) -> tuple[tuple[str, bytes], ...]:
+        """Every stored Python source, as (relative path, bytes).
+
+        A call site is not the only place a symbol is named. A name loaded as a
+        value - a thread target, a registry entry - produces no edge at all, so
+        the question "does anything name this symbol" cannot be answered from
+        assertions or observations; it has to be answered from the bytes the
+        generation already stores. That is why this reader exists and why no
+        extractor changed: a new edge kind would invalidate every published
+        generation (`NEW-81`), and this invalidates none.
+
+        The ceiling is `MAX_AGGREGATE_ROWS` and it refuses rather than cuts,
+        exactly like `call_target_names`: a cut corpus cannot support "nothing
+        names it" for anybody, and a short answer would read like a complete
+        one. Measured 2026-08-29 on this repository - 407 sources, 12.6 MB,
+        0.01 s to read and 3.7 s to parse.
+        """
+        rows = self._execute(
+            "SELECT relative_path, content FROM source "
+            "WHERE language = 'python' AND content IS NOT NULL "
+            "ORDER BY relative_path LIMIT ?",
+            (),
+            max_rows=max_rows,
+            deadline=deadline,
+            ceiling=MAX_AGGREGATE_ROWS,
+        )
+        return tuple((str(row["relative_path"]), bytes(row["content"])) for row in rows)
 
     def unresolved_calls_naming(
         self,
