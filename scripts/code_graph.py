@@ -2678,19 +2678,37 @@ def _dependency_sort_key(item: dict) -> tuple:
     )
 
 
-def _stored_dependency_rows(graph, seeds: list[str], reverse: bool) -> list[dict]:
+def _stored_dependency_rows(
+    graph, seeds: list[str], reverse: bool, max_depth: int | None = None
+) -> list[dict]:
+    depth = _dependency_depth(max_depth)
     merged: dict[str, dict] = {}
     for seed in seeds:
-        _merge_dependency_rows(merged, graph, seed, reverse)
+        _merge_dependency_rows(merged, graph, seed, reverse, depth)
     return sorted(merged.values(), key=_dependency_sort_key)
 
 
-def _merge_dependency_rows(merged: dict, graph, seed: str, reverse: bool) -> None:
+def _dependency_depth(max_depth: int | None) -> int:
+    """How far to walk: what the caller asked, bounded by what the store allows.
+
+    `None` keeps the whole reachable set, which is what every caller got before
+    the argument existed. A depth below one would ask for nothing and is read
+    as one hop rather than refused, because "no hops" is not a question anyone
+    means to ask.
+    """
+    if max_depth is None:
+        return DEPENDENCY_MAX_DEPTH
+    return max(1, min(int(max_depth), DEPENDENCY_MAX_DEPTH))
+
+
+def _merge_dependency_rows(
+    merged: dict, graph, seed: str, reverse: bool, max_depth: int
+) -> None:
     rows = graph.reachable(
         seed,
         edge_types=DEPENDENCY_EDGE_TYPES,
         reverse=reverse,
-        max_depth=DEPENDENCY_MAX_DEPTH,
+        max_depth=max_depth,
         max_rows=DEPENDENCY_MAX_ROWS,
         max_work=DEPENDENCY_MAX_WORK,
     )
@@ -2715,14 +2733,19 @@ def _dependency_resolution(symbol: str, seeds: list[str]) -> dict[str, object]:
 
 
 def _store_find_dependencies(
-    symbol: str, directory: Path, *, reverse: bool, with_report: bool
+    symbol: str,
+    directory: Path,
+    *,
+    reverse: bool,
+    with_report: bool,
+    max_depth: int | None = None,
 ) -> list[dict] | dict | None:
     graph = _active_evidence_graph(directory)
     if graph is None:
         return None
     try:
         seeds = _dependency_seed_nodes(graph, symbol)
-        rows = _stored_dependency_rows(graph, seeds, reverse)
+        rows = _stored_dependency_rows(graph, seeds, reverse, max_depth)
         report = {**_store_report(graph), **_dependency_resolution(symbol, seeds)}
         return _with_report("dependencies", rows, report, with_report)
     finally:
@@ -2736,6 +2759,7 @@ def find_dependencies(
     reverse: bool = False,
     live: bool = False,
     with_report: bool = False,
+    max_depth: int | None = None,
 ) -> list[dict] | dict:
     """Find bounded canonical dependencies, preferring the active generation.
 
@@ -2747,7 +2771,11 @@ def find_dependencies(
     """
     if not live:
         stored = _store_find_dependencies(
-            node_id, directory, reverse=reverse, with_report=with_report
+            node_id,
+            directory,
+            reverse=reverse,
+            with_report=with_report,
+            max_depth=max_depth,
         )
         if stored is not None:
             return stored

@@ -483,6 +483,12 @@ DOCTOR_INPUT_SCHEMA = {
 }
 
 # CODE-06: the two arguments that let a caller pay less for a code answer.
+# The ceiling `code_graph.DEPENDENCY_MAX_DEPTH` enforces, stated here so the
+# tool schema does not import `code_graph` at module load — that import pulls
+# the whole graph stack in before the server can answer anything.
+# `test_architecture_depth_argument.py` pins the two to the same number.
+ARCHITECTURE_MAX_DEPTH = 8
+
 # Bounds come from `answer_budget`; 25 000 is the client-side tool-result
 # ceiling Anthropic documents for Claude Code, and the low bound sits below any
 # real answer frame so the named refusal stays reachable and testable.
@@ -703,6 +709,15 @@ TOOL_INPUT_SCHEMAS = {
                 "description": "Bounded JSON hop pipeline for mode=query",
             },
             "reverse": {"type": "boolean", "default": False},
+            "depth": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": ARCHITECTURE_MAX_DEPTH,
+                "description": (
+                    "dependencies mode: how many hops to walk. "
+                    "Omitted means the whole reachable set."
+                ),
+            },
             "comparison": {
                 "type": "string",
                 "maxLength": 32,
@@ -1615,6 +1630,18 @@ def _architecture_callees(request: dict):
 
 
 def _architecture_dependencies(request: dict):
+    """Bounded dependency walk; `depth` names how far, and it pays.
+
+    Measured 2026-08-29 for `scripts/retrieval.py` against the active
+    generation: depth 1 answers with 7 modules for ~656 tokens, depth 2
+    with 24 rows for ~2 475, and the whole reachable set with 346 rows
+    for ~45 817 raw — 20 735 after shaping. The question "which modules
+    does this file depend on" is the depth-1 one, and it was costing the
+    transitive closure because there was no way to ask for less.
+
+    Additive on purpose: omitting `depth` walks exactly as far as it
+    always has.
+    """
     from code_graph import find_dependencies
 
     return find_dependencies(
@@ -1623,6 +1650,7 @@ def _architecture_dependencies(request: dict):
         reverse=request["reverse"],
         live=request["live"],
         with_report=True,
+        max_depth=request.get("depth"),
     )
 
 
@@ -1700,6 +1728,7 @@ def _get_architecture_mode(
     symbol: str | None = None,
     target: str | None = None,
     reverse: bool = False,
+    depth: int | None = None,
     live: bool = False,
     deadline: float | None = None,
 ) -> dict:
@@ -1718,6 +1747,7 @@ def _get_architecture_mode(
             "symbol": symbol,
             "target": target,
             "reverse": reverse,
+            "depth": depth,
             "live": live,
             "deadline": deadline,
         }
@@ -3565,7 +3595,7 @@ _ARCHITECTURE_CONTRACTS = {
     ),
     "dependencies": (
         {"directory", "mode", "symbol"},
-        {"directory", "mode", "symbol", "reverse", "live"},
+        {"directory", "mode", "symbol", "reverse", "live", "depth"},
     ),
     "path": (
         {"directory", "mode", "symbol", "target"},
@@ -4895,6 +4925,7 @@ def _architecture_mode_call(arguments: dict, deadline: float):
         symbol=arguments.get("symbol"),
         target=arguments.get("target"),
         reverse=arguments.get("reverse", False),
+        depth=arguments.get("depth"),
         live=arguments.get("live", False),
         deadline=deadline,
     )
