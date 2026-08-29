@@ -424,6 +424,22 @@ def run_question(question: dict, work: Path) -> dict:
     }
 
 
+def _prepared_workdir(requested: str | None) -> str | None:
+    """The parent directory for the throwaway vault, created if it is missing.
+
+    A `--workdir` that does not exist failed every question in about two
+    seconds with a `mkdtemp` traceback, and the report then read `accuracy 0.0`
+    with `provider_failures 0` across all 50 — a harness that never ran,
+    presented as a memory system that answered everything wrongly. Measured
+    2026-08-29 on this repository.
+    """
+    if requested is None:
+        return None
+    path = Path(requested).resolve()
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path)
+
+
 def _failure_record(question: dict, exc: BaseException) -> dict:
     import longmemeval_data
 
@@ -459,7 +475,7 @@ def main() -> int:
     """
     args = _parsed_args()
     out_path = Path(args.out).resolve()
-    workdir = None if args.workdir is None else str(Path(args.workdir).resolve())
+    workdir = _prepared_workdir(args.workdir)
     question = json.loads(Path(args.question).resolve().read_text(encoding="utf-8"))
     work = Path(tempfile.mkdtemp(prefix="longmemeval-", dir=workdir))
     try:

@@ -133,3 +133,65 @@ def test_a_provider_failure_is_not_counted_as_an_abstention() -> None:
 
     assert report["provider_failures"] == 1
     assert report["abstained"] == 0
+
+
+def test_a_harness_failure_is_not_a_wrong_answer() -> None:
+    """A run that never reached the product reported `accuracy 0.0` for all 50.
+
+    Measured 2026-08-29: a `--workdir` that did not exist failed every question
+    in about two seconds on a `mkdtemp` traceback, and the report read
+    `accuracy 0.0` with `provider_failures 0` in every category — a harness
+    that never started, presented as a memory system that answered everything
+    wrongly.
+    """
+    rows = [
+        {
+            "status": "error",
+            "error": "worker rc=1",
+            "error_kind": "harness_failure",
+            "gold": "x",
+            "hypothesis": "",
+        }
+    ]
+
+    report = longmemeval_score.aggregate(rows)["overall"]
+
+    assert report["scored"] == 0
+    assert report["accuracy"] is None
+    assert report["harness_failures"] == 1
+    assert report["provider_failures"] == 0
+
+
+def test_a_provider_failure_and_a_harness_failure_are_counted_apart() -> None:
+    """One says the provider did not answer; the other says nothing was asked."""
+    rows = [
+        {"error_kind": "harness_failure", "status": "error", "error": "e", "gold": "x"},
+        {
+            "error_kind": "provider_no_response",
+            "status": "error",
+            "error": "e",
+            "gold": "x",
+        },
+    ]
+
+    report = longmemeval_score.aggregate(rows)["overall"]
+
+    assert report["harness_failures"] == 1
+    assert report["provider_failures"] == 1
+    assert report["scored"] == 0
+
+
+def test_a_missing_workdir_is_created_rather_than_failing_every_question(
+    tmp_path,
+) -> None:
+    requested = tmp_path / "absent" / "nested"
+
+    prepared = longmemeval_vault._prepared_workdir(str(requested))
+
+    assert Path(prepared).is_dir()
+    assert Path(prepared) == requested.resolve()
+
+
+def test_no_workdir_stays_no_workdir() -> None:
+    """The default is the system temp directory; that must not change."""
+    assert longmemeval_vault._prepared_workdir(None) is None

@@ -144,6 +144,27 @@ def is_provider_failure(row: dict) -> bool:
     return row.get("error_kind") in PROVIDER_ERROR_KINDS
 
 
+# A harness failure is not a wrong answer, and counting it as one is worse than
+# counting a provider failure that way: the provider at least ran.
+#
+# Measured 2026-08-29: a `--workdir` that did not exist failed all 50 questions
+# in about two seconds each on a `mkdtemp` traceback, and the report read
+# `accuracy 0.0` with `provider_failures 0` in every category — a harness that
+# never started, presented as a memory system that answered everything wrongly.
+# A number that cannot tell those apart is worse than no number.
+HARNESS_ERROR_KINDS = frozenset({"harness_failure"})
+
+
+def is_harness_failure(row: dict) -> bool:
+    """The run never reached the product, so nothing about it was measured."""
+    return row.get("error_kind") in HARNESS_ERROR_KINDS
+
+
+def is_ungraded(row: dict) -> bool:
+    """No answer was produced, by either side, so there is nothing to grade."""
+    return is_provider_failure(row) or is_harness_failure(row)
+
+
 def _flags(rows: list[dict], key: str) -> list[float]:
     return [float(bool(row.get(key))) for row in rows]
 
@@ -214,13 +235,14 @@ def _category_report(rows: list[dict]) -> dict:
     answer or an abstention, `accuracy` / `em` / `f1` are means over `scored`
     alone, and `provider_failures` carries the rest as its own line.
     """
-    scored = [row for row in rows if not is_provider_failure(row)]
+    scored = [row for row in rows if not is_ungraded(row)]
     return {
         "n": len(rows),
         "scored": len(scored),
         **_quality_metrics(scored),
         **_abstention_split(scored),
-        "provider_failures": len(rows) - len(scored),
+        "provider_failures": _count(rows, is_provider_failure),
+        "harness_failures": _count(rows, is_harness_failure),
         **_cost_metrics(rows),
     }
 
