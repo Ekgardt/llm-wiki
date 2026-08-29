@@ -14,6 +14,8 @@ artifact and says so.
 
 from __future__ import annotations
 
+import dataclasses
+import subprocess
 import time
 from pathlib import Path
 
@@ -21,8 +23,13 @@ import lsp_identity
 import lsp_profiles
 import mcp_server
 import pytest
+import workspace_revision
 from lsp_profiles import PYRIGHT_PROFILE, TYPESCRIPT_PROFILE
-from lsp_server_profile import READINESS_WORK_DONE_PROGRESS
+from lsp_server_profile import (
+    READINESS_WORK_DONE_PROGRESS,
+    PackageLaunch,
+    ProfileError,
+)
 from pyright_profile import (
     PYRIGHT_CONFIGURATION_SHA256,
     PYRIGHT_INITIALIZATION_OPTIONS_SHA256,
@@ -346,3 +353,130 @@ def test_the_transport_carries_every_profiles_own_notifications() -> None:
     from lsp_protocol import SERVER_NOTIFICATIONS
 
     assert lsp_profiles.server_notification_union() <= SERVER_NOTIFICATIONS
+
+
+# --- The freshness contract knows more than one language (CODE-08 blocker 2) ---
+#
+# `workspace_revision._is_relevant_path` was `suffix in {".py", ".pyi"}`, so
+# `compute_workspace_revision` returned no entries at all on a TypeScript
+# checkout and the source document could not be validated. The answer failed
+# with `source document validation failed` before the server was reached, which
+# is why an otherwise working launch still produced nothing.
+
+
+def test_the_relevant_suffixes_come_from_the_profile_registry() -> None:
+    """Every suffix a managed profile claims must count toward freshness."""
+    claimed = set(PYRIGHT_PROFILE.file_suffixes) | set(TYPESCRIPT_PROFILE.file_suffixes)
+    assert claimed <= workspace_revision.NAVIGABLE_SUFFIXES
+    assert workspace_revision.NAVIGABLE_SUFFIXES == lsp_profiles.navigable_suffixes()
+
+
+def test_a_typescript_source_is_a_relevant_path() -> None:
+    """The exact predicate that returned False and emptied the revision."""
+    for path in _RELEVANT_TYPESCRIPT_PATHS:
+        assert workspace_revision._is_relevant_path(path), path
+
+
+# Read as tables: the managed complexity gate counts every `assert` as a branch,
+# so a list of cases has to be data rather than a run of statements.
+_RELEVANT_PYTHON_PATHS = ("scripts/a.py", "pyproject.toml", "requirements-dev.txt")
+_RELEVANT_TYPESCRIPT_PATHS = ("src/main.ts", "src/app.tsx", "src/plugin.mjs")
+_IRRELEVANT_PATHS = ("README.md", "docs/notes.txt", "nested/tsconfig.json")
+
+
+def test_python_relevance_is_unchanged() -> None:
+    for path in _RELEVANT_PYTHON_PATHS:
+        assert workspace_revision._is_relevant_path(path), path
+    for path in _IRRELEVANT_PATHS:
+        assert not workspace_revision._is_relevant_path(path), path
+
+
+def test_a_profile_declares_its_own_root_configuration() -> None:
+    """`tsconfig.json` changes the answer, so it has to change the revision.
+
+    Only at the root, exactly as the Python rule has always worked; the nested
+    case is covered by `_IRRELEVANT_PATHS`.
+    """
+    assert workspace_revision._is_relevant_path("tsconfig.json")
+
+
+def test_a_typescript_checkout_produces_revision_entries(tmp_path: Path) -> None:
+    """End of the blocker: entries exist, so the document can be validated."""
+    root = _repository(tmp_path)
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "i"],
+        cwd=root,
+        check=True,
+    )
+    scope = resolve_repository_scope(root)
+    revision = workspace_revision.compute_workspace_revision(scope)
+    paths = {entry.path for entry in revision.entries}
+    assert paths >= {"src/main.ts", "tsconfig.json"}
+
+
+# --- The launch strategy is a profile property (CODE-08 blocker 1) ---
+
+
+def test_pyright_declares_no_package_launch() -> None:
+    """Pyright keeps the descriptor launch, which is the complete TOCTOU closure."""
+    assert PYRIGHT_PROFILE.package_launch is None
+
+
+def test_typescript_declares_a_package_launch_that_names_its_own_entry() -> None:
+    launch = TYPESCRIPT_PROFILE.package_launch
+    assert launch is not None
+    assert launch.entry_relative == Path("lib/cli.mjs")
+    # The authored manifest, not the shipped one: nothing unverified from the
+    # operator-writable install root is read at exec time.
+    assert dict(launch.manifest) == {
+        "name": "typescript-language-server",
+        "version": "6.0.0",
+        "type": "module",
+    }
+
+
+def test_a_package_launch_must_end_the_pinned_artifact_path() -> None:
+    """A launch entry that is not the pinned artifact is a refused profile."""
+    with pytest.raises(ProfileError):
+        dataclasses.replace(
+            TYPESCRIPT_PROFILE,
+            package_launch=PackageLaunch(
+                entry_relative=Path("lib/other.mjs"),
+                manifest={"name": "x", "version": "1", "type": "module"},
+            ),
+        )
+
+
+# --- The envelope names the server that answered, everywhere it names one ---
+
+
+def test_provenance_names_the_server_that_answered() -> None:
+    """`provenance[].provider` carried the literal `"pyright"` on TS answers."""
+    data = {
+        "provider": {"name": "pyright", "version": "6.0.0"},
+        "provenance": [
+            {"source": "lsp", "provider": "pyright", "version": "6.0.0"},
+            {"source": "structural", "provider": "evidence-graph"},
+        ],
+        "warnings": (),
+    }
+    named = mcp_server._navigation_named_by_session(
+        data, _StubSession(TYPESCRIPT_PROFILE, ())
+    )
+    assert named["provenance"][0]["provider"] == "typescript"
+    # A structural row is this build's own and already names itself correctly.
+    assert named["provenance"][1] == {
+        "source": "structural",
+        "provider": "evidence-graph",
+    }
+
+
+def test_an_answer_without_provenance_keeps_its_shape() -> None:
+    """Adding an empty key would change every Python envelope that had none."""
+    data = {"provider": {"name": "pyright", "version": "1.1.411"}, "warnings": ()}
+    named = mcp_server._navigation_named_by_session(
+        dict(data), _StubSession(PYRIGHT_PROFILE, ())
+    )
+    assert "provenance" not in named

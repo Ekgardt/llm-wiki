@@ -33,6 +33,7 @@ from lsp_server_profile import (
     READINESS_WORK_DONE_PROGRESS,
     IdentityNotification,
     LanguageServerProfile,
+    PackageLaunch,
     ProfileRegistry,
     RuntimeOption,
     freeze_profile_value,
@@ -99,6 +100,22 @@ TYPESCRIPT_PACKAGE_INTEGRITY = (
     "sha512-LXtzY3UZGfghWA5eRU6/T5j1+YiGRgy14mR3GOKyTKlE1op1TYKQnLVxwBsmnXeDhGLuvzZyIHBAqvrekAITYQ=="
 )
 TYPESCRIPT_SERVER_RELATIVE = Path("package/lib/cli.mjs")
+
+# `cli.mjs` reads exactly one thing relative to itself -- `../package.json`, for
+# `{version}`, which it hands to commander's `.version()`. Measured on
+# 2026-08-28 by reading the bundle and on 2026-08-29 by driving an `initialize`
+# handshake from a launch root holding this three-field manifest instead of the
+# shipped one: identical traffic, identical `user-setting` identity. Authored
+# rather than copied so that no unverified byte of the operator-writable install
+# root is read at exec time. See
+# `docs/research/2026-08-29-launching-a-verified-server-without-a-toctou-window.md`.
+TYPESCRIPT_LAUNCH_MANIFEST = freeze_profile_value(
+    {
+        "name": "typescript-language-server",
+        "version": TYPESCRIPT_VERSION,
+        "type": "module",
+    }
+)
 
 # The engine the server drives, pinned separately and installed as a sibling
 # inside the same managed root. 5.9.3 is the last release carrying
@@ -176,6 +193,14 @@ TYPESCRIPT_PROFILE = LanguageServerProfile(
         package_integrity=TSSERVER_PACKAGE_INTEGRITY,
     ),
     degradation_prefix="typescript",
+    # The two root-level files that change what this server answers. Listed so a
+    # `tsconfig.json` edit invalidates the freshness record the same way a
+    # `pyproject.toml` edit does for Python.
+    configuration_names=("tsconfig.json", "jsconfig.json"),
+    package_launch=PackageLaunch(
+        entry_relative=Path("lib/cli.mjs"),
+        manifest=TYPESCRIPT_LAUNCH_MANIFEST,
+    ),
 )
 
 REGISTRY = ProfileRegistry((PYRIGHT_PROFILE, TYPESCRIPT_PROFILE))
@@ -200,6 +225,37 @@ def server_notification_union() -> frozenset[str]:
     names: set[str] = set(NEUTRAL_SERVER_NOTIFICATIONS)
     for name in REGISTRY.names():
         names.update(REGISTRY.get(name).server_notifications)
+    return frozenset(names)
+
+
+def navigable_suffixes() -> frozenset[str]:
+    """Every file suffix some managed profile can answer questions about.
+
+    `workspace_revision` needs this to decide which files belong in a checkout's
+    freshness record. Hardcoding `.py`/`.pyi` there is what made
+    `compute_workspace_revision` return no entries at all on a TypeScript
+    repository, so the document could not be validated and the answer failed
+    before the server was reached. Derived here for the same reason
+    `server_notification_union` is: add a profile and the freshness contract
+    learns its files with it.
+    """
+    suffixes: set[str] = set()
+    for name in REGISTRY.names():
+        suffixes.update(REGISTRY.get(name).file_suffixes)
+    return frozenset(suffixes)
+
+
+def profile_configuration_names() -> frozenset[str]:
+    """Root-level configuration files a managed profile declares as its own.
+
+    Python's set is older than the profile seam and still lives in
+    `workspace_revision.PYTHON_CONFIG_NAMES`, including its `requirements*.txt`
+    prefix rule; this is the additive channel a second language uses instead of
+    editing that rule.
+    """
+    names: set[str] = set()
+    for name in REGISTRY.names():
+        names.update(REGISTRY.get(name).configuration_names)
     return frozenset(names)
 
 

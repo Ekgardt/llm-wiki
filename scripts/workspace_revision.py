@@ -26,8 +26,17 @@ try:
 except ImportError:  # pragma: no cover - Windows has no fcntl module
     _fcntl = None
 
+from lsp_profiles import navigable_suffixes, profile_configuration_names
 from reliable_memory import canonical_json_bytes
 from repository_scope import RepositoryScope, sanitized_git_environment
+
+# Which files belong in a checkout's freshness record. Read from the managed
+# profile registry rather than written here, so that adding a language server
+# does not leave `compute_workspace_revision` returning nothing for its files --
+# which is exactly what refused every TypeScript answer before the server was
+# ever reached. Computed once: the registry is a frozen module constant.
+NAVIGABLE_SUFFIXES = navigable_suffixes()
+PROFILE_CONFIG_NAMES = profile_configuration_names()
 
 PYTHON_CONFIG_NAMES = frozenset(
     {
@@ -346,12 +355,21 @@ def _apply_hint_collections(
     private_inventory_safe: list[bool] | None,
 ) -> None:
     """Copy the hint's optional collections into whichever the caller wants."""
+    _apply_hint_mappings(hint, fresh, entry_snapshots, prepared_files)
+    if private_inventory_safe is not None:
+        private_inventory_safe[0] = hint.private_inventory_safe
+
+
+def _apply_hint_mappings(
+    hint: _RevisionInventoryHint,
+    fresh: list[tuple[Path, _StrongIdentity]],
+    entry_snapshots: dict[Path, _StrongIdentity] | None,
+    prepared_files: dict[str, _FileSnapshot] | None,
+) -> None:
     if entry_snapshots is not None:
         entry_snapshots.update(fresh)
     if prepared_files is not None:
         prepared_files.update(hint.prepared_files)
-    if private_inventory_safe is not None:
-        private_inventory_safe[0] = hint.private_inventory_safe
 
 
 def _restore_inventory_hint(
@@ -460,12 +478,13 @@ def _normalized_path(raw: str) -> str:
 def _is_configuration(path: str) -> bool:
     return "/" not in path and (
         path in PYTHON_CONFIG_NAMES
+        or path in PROFILE_CONFIG_NAMES
         or (path.startswith("requirements") and path.endswith(".txt"))
     )
 
 
 def _is_relevant_path(path: str) -> bool:
-    return PurePosixPath(path).suffix in {".py", ".pyi"} or _is_configuration(path)
+    return PurePosixPath(path).suffix in NAVIGABLE_SUFFIXES or _is_configuration(path)
 
 
 def _private_path_text_safe(path: str) -> bool:
@@ -847,6 +866,21 @@ def _git_stop_error(reason: str, label: str, deadline: float | None) -> Exceptio
     return TimeoutError(message)
 
 
+def _require_git_output_within_bounds(
+    run: _GitRun,
+    output: bytes,
+    *,
+    maximum_bytes: int,
+    label: str,
+    deadline: float | None,
+) -> None:
+    """The run has to have finished on its own, inside its byte ceiling."""
+    if run.stop_reason:
+        raise _git_stop_error(run.stop_reason[0], label, deadline)
+    if len(output) > maximum_bytes:
+        raise ValueError(f"{label} output exceeds the byte ceiling")
+
+
 def _git_run_outcome(
     run: _GitRun,
     command: list[str],
@@ -857,10 +891,9 @@ def _git_run_outcome(
     deadline: float | None,
 ) -> bytes:
     """The output this run produced, or the failure it has to report."""
-    if run.stop_reason:
-        raise _git_stop_error(run.stop_reason[0], label, deadline)
-    if len(output) > maximum_bytes:
-        raise ValueError(f"{label} output exceeds the byte ceiling")
+    _require_git_output_within_bounds(
+        run, output, maximum_bytes=maximum_bytes, label=label, deadline=deadline
+    )
     if run.process.returncode != 0:
         raise subprocess.CalledProcessError(run.process.returncode, command)
     return output
@@ -1112,9 +1145,14 @@ def _status_entries(
     reader = _SINGLE_RECORD_STATUS_READERS.get(marker)
     if reader is not None:
         return reader(record), index + 1
+    return _ignored_status_entries(marker), index + 1
+
+
+def _ignored_status_entries(marker: bytes) -> list[tuple[str, str]]:
+    """The records that contribute nothing; anything else is not status output."""
     if marker not in {b"#", b"!"}:
         raise ValueError("unknown Git status record")
-    return [], index + 1
+    return []
 
 
 def _status_paths(output: bytes) -> list[tuple[str, str]]:
@@ -1152,11 +1190,18 @@ def _entry_status_agrees(entry: RevisionEntry, status: str | None) -> bool:
     """Whether git's status for this path is the one the entry's kind requires."""
     if entry.kind in _STATUS_BOUND_KINDS:
         return status == entry.kind
-    if entry.kind == "source":
-        return status is None
-    if entry.kind == "configuration":
-        return status != "deleted"
-    return True
+    agrees = _KIND_STATUS_AGREEMENT.get(entry.kind)
+    if agrees is None:
+        return True
+    return agrees(status)
+
+
+# One row per kind whose agreement is a property of the status alone. A table so
+# the order of the old chain cannot silently decide an answer.
+_KIND_STATUS_AGREEMENT: dict[str, Callable[[str | None], bool]] = {
+    "source": lambda status: status is None,
+    "configuration": lambda status: status != "deleted",
+}
 
 
 def _status_paths_all_expected(
@@ -1175,9 +1220,9 @@ def _git_state_matches_revision(
     if current_head != expected.git_head:
         return False
     current_status = _normalized_status(git_state)
-    if current_status is None:
-        return False
-    if not _status_paths_all_expected(current_status, entries):
+    if current_status is None or not _status_paths_all_expected(
+        current_status, entries
+    ):
         return False
     return all(
         _entry_status_agrees(entry, current_status.get(path))
@@ -1250,6 +1295,10 @@ def _count_scanned_entry(scan: _RelevantScan, *, relevant: bool) -> None:
     scan.examined += 1
     if relevant:
         scan.relevant_examined += 1
+    _require_scan_within_ceilings(scan)
+
+
+def _require_scan_within_ceilings(scan: _RelevantScan) -> None:
     if scan.relevant_examined > MAX_REVISION_FILES:
         raise ValueError("workspace revision exceeds the file-count ceiling")
     if scan.examined > MAX_REVISION_FILES:
@@ -1342,6 +1391,13 @@ def _mark_inventory_unsafe(scan: _RelevantScan, item: _ScannedEntry) -> None:
     scan.private_inventory_safe[0] = False
 
 
+def _require_prepared_parents(
+    prepared_parents: tuple[_DirectorySnapshot, ...] | None,
+) -> None:
+    if prepared_parents is None:
+        raise AssertionError("workspace revision parent snapshots are unavailable")
+
+
 def _prepare_file(
     scan: _RelevantScan,
     item: _ScannedEntry,
@@ -1351,8 +1407,7 @@ def _prepare_file(
     """Stage one file for the private index, or mark its inventory unsafe."""
     if scan.prepared_files is None or not stat.S_ISREG(item.info.st_mode):
         return
-    if prepared_parents is None:
-        raise AssertionError("workspace revision parent snapshots are unavailable")
+    _require_prepared_parents(prepared_parents)
     if _prepared_file_wanted(scan, item):
         _stage_prepared_file(scan, item, current_snapshot, prepared_parents)
         return
@@ -1377,6 +1432,16 @@ def _record_relevant_path(scan: _RelevantScan, item: _ScannedEntry) -> None:
         scan.relevant_paths.add(_normalized_path(item.relative))
 
 
+def _entry_is_a_file_to_visit(item: _ScannedEntry, directories: list[Path]) -> bool:
+    """False for anything the walk handles here: unsafe entries and directories."""
+    if item.unsafe:
+        return False
+    if stat.S_ISDIR(item.info.st_mode):
+        _collect_subdirectory(item, directories)
+        return False
+    return True
+
+
 def _visit_entry(
     scan: _RelevantScan,
     item: _ScannedEntry,
@@ -1385,10 +1450,7 @@ def _visit_entry(
     directories: list[Path],
 ) -> Iterator[Path]:
     """Handle one classified entry, yielding it when it is a relevant file."""
-    if item.unsafe:
-        return
-    if stat.S_ISDIR(item.info.st_mode):
-        _collect_subdirectory(item, directories)
+    if not _entry_is_a_file_to_visit(item, directories):
         return
     _record_entry_identity(scan, item)
     _prepare_file(scan, item, current_snapshot, prepared_parents)
@@ -1673,9 +1735,7 @@ def _resolved_git_executable(candidate: str) -> tuple[Path, os.stat_result] | No
 def _private_git_installation() -> _PrivateGitInstallation | None:
     """The git installation this machine offers, if its layout is a known one."""
     candidate = shutil.which("git")
-    if candidate is None:
-        return None
-    resolved = _resolved_git_executable(candidate)
+    resolved = None if candidate is None else _resolved_git_executable(candidate)
     if resolved is None:
         return None
     executable, info = resolved
@@ -1965,13 +2025,18 @@ def _global_git_config_paths() -> tuple[Path, ...] | None:
     xdg_value = os.environ.get("XDG_CONFIG_HOME")
     if not _environment_paths_absolute(home_value, xdg_value):
         return None
-    paths: list[Path] = []
-    if home_value:
-        paths.append(Path(home_value) / ".gitconfig")
-    xdg_config = _xdg_git_config_path(xdg_value, home_value)
-    if xdg_config is not None:
-        paths.append(xdg_config)
-    return tuple(paths)
+    return _named_global_git_config_paths(home_value, xdg_value)
+
+
+def _named_global_git_config_paths(
+    home_value: str | None, xdg_value: str | None
+) -> tuple[Path, ...]:
+    """The two candidate locations, in the order git itself reads them."""
+    candidates = (
+        Path(home_value) / ".gitconfig" if home_value else None,
+        _xdg_git_config_path(xdg_value, home_value),
+    )
+    return tuple(path for path in candidates if path is not None)
 
 
 def _global_git_attributes_path() -> Path | None:
@@ -2050,13 +2115,20 @@ def _config_key_value(line: str) -> tuple[str, str] | None:
 
 def _private_config_value_allowed(qualified: str, value: str, hash_name: str) -> bool:
     """Whether this private config setting carries a value the read can accept."""
-    if qualified == "core.repositoryformatversion":
-        return value in {"0", "1"}
     if qualified in _BOOLEAN_PRIVATE_CONFIG_KEYS:
         return _boolean_config_value(qualified, value)
-    if qualified == "extensions.objectformat":
-        return value.lower() == hash_name
-    return True
+    check = _PRIVATE_CONFIG_VALUE_CHECKS.get(qualified)
+    if check is None:
+        return True
+    return check(value, hash_name)
+
+
+# The settings whose accepted values are not a boolean. A table rather than a
+# chain: the key decides, and no ordering between the rows can.
+_PRIVATE_CONFIG_VALUE_CHECKS: dict[str, Callable[[str, str], bool]] = {
+    "core.repositoryformatversion": lambda value, _hash: value in {"0", "1"},
+    "extensions.objectformat": lambda value, hash_name: value.lower() == hash_name,
+}
 
 
 def _boolean_config_value(qualified: str, value: str) -> bool:
@@ -2066,18 +2138,28 @@ def _boolean_config_value(qualified: str, value: str) -> bool:
     return qualified != "core.bare" or value.lower() == "false"
 
 
+def _allowed_private_config_pair(
+    section: str, line: str
+) -> tuple[str, str] | None:
+    """The line's key and value, once the key is one this section may carry."""
+    pair = _config_key_value(line)
+    if pair is None:
+        return None
+    if pair[0] not in _ALLOWED_PRIVATE_CONFIG_KEYS[section]:
+        return None
+    return pair
+
+
 def _private_config_setting_allowed(
     section: str | None, line: str, hash_name: str, seen: set[str]
 ) -> bool:
     """Whether this line is a setting the private read tolerates."""
     if section is None or line.startswith(("#", ";")):
         return False
-    pair = _config_key_value(line)
+    pair = _allowed_private_config_pair(section, line)
     if pair is None:
         return False
     key, value = pair
-    if key not in _ALLOWED_PRIVATE_CONFIG_KEYS[section]:
-        return False
     qualified = f"{section}.{key}"
     seen.add(qualified)
     return _private_config_value_allowed(qualified, value, hash_name)
@@ -2093,16 +2175,25 @@ def _private_config_lines_allowed(text: str, hash_name: str, seen: set[str]) -> 
     """Whether every line of this config is one the private read tolerates."""
     section: str | None = None
     for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        header = _config_section_header(line)
-        if header is not None:
-            section = header
-            continue
-        if not _private_config_setting_allowed(section, line, hash_name, seen):
+        section, verdict = _private_config_line_step(
+            raw_line.strip(), section, hash_name, seen
+        )
+        if verdict is False:
             return False
     return True
+
+
+def _private_config_line_step(
+    line: str, section: str | None, hash_name: str, seen: set[str]
+) -> tuple[str | None, bool | None]:
+    """The section after this line, and False only when the line is refused."""
+    if not line:
+        return section, None
+    header = _config_section_header(line)
+    if header is not None:
+        return header, None
+    allowed = _private_config_setting_allowed(section, line, hash_name, seen)
+    return section, allowed or False
 
 
 def _safe_private_git_config(content: bytes, *, hash_name: str) -> bool:
@@ -2135,15 +2226,24 @@ def _ignored_config_lines_allowed(text: str) -> bool:
     """Whether every line of an external config is one the read can ignore."""
     in_user_section = False
     for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if _blank_or_comment(line):
-            continue
-        if re.fullmatch(r"\[user\]", line, flags=re.IGNORECASE) is not None:
-            in_user_section = True
-            continue
-        if not _ignored_config_setting_allowed(line, in_user_section):
+        in_user_section, verdict = _ignored_config_line_step(
+            raw_line.strip(), in_user_section
+        )
+        if verdict is False:
             return False
     return True
+
+
+def _ignored_config_line_step(
+    line: str, in_user_section: bool
+) -> tuple[bool, bool | None]:
+    """Whether we are in `[user]` after this line, and False only on refusal."""
+    if _blank_or_comment(line):
+        return in_user_section, None
+    if re.fullmatch(r"\[user\]", line, flags=re.IGNORECASE) is not None:
+        return True, None
+    allowed = _ignored_config_setting_allowed(line, in_user_section)
+    return in_user_section, allowed or False
 
 
 def _safe_ignored_git_config(content: bytes) -> bool:
@@ -2413,6 +2513,23 @@ def _fence_all_semantics(
     )
 
 
+def _fenceable_semantics_groups(
+    root: Path,
+    marker: Path,
+    installation: _PrivateGitInstallation,
+    worktree_ignore_paths: tuple[Path, ...],
+) -> object | None:
+    """The groups to fence, or None when the environment already rules it out."""
+    if _private_git_environment_overridden():
+        return None
+    locations = _global_semantics_locations()
+    if locations is None:
+        return None
+    return _semantics_groups(
+        root, marker, installation, worktree_ignore_paths, locations
+    )
+
+
 def _private_raw_semantics_safe(
     root: Path,
     *,
@@ -2423,14 +2540,9 @@ def _private_raw_semantics_safe(
     cancelled: Callable[[], bool] | None,
 ) -> _RawSemanticsProof | None:
     """The proof that git's raw semantics are the ones this pass assumes."""
-    if _private_git_environment_overridden():
-        return None
-    locations = _global_semantics_locations()
-    if locations is None:
-        return None
     marker = root / ".git"
-    groups = _semantics_groups(
-        root, marker, installation, worktree_ignore_paths, locations
+    groups = _fenceable_semantics_groups(
+        root, marker, installation, worktree_ignore_paths
     )
     if groups is None:
         return None
@@ -2490,6 +2602,28 @@ def _git_index_header(
     if shape is None:
         return None
     count, checksum_offset = shape
+    return _checksummed_index_header(
+        content,
+        hash_name=hash_name,
+        hash_size=hash_size,
+        count=count,
+        checksum_offset=checksum_offset,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+
+
+def _checksummed_index_header(
+    content: bytes | bytearray,
+    *,
+    hash_name: str,
+    hash_size: int,
+    count: int,
+    checksum_offset: int,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> _GitIndexHeader | None:
+    """The header, once the trailing checksum matches the bytes it covers."""
     digest = _checked_digest(
         hash_name,
         content,
@@ -2500,6 +2634,7 @@ def _git_index_header(
     if digest != content[checksum_offset:]:
         return None
     return _GitIndexHeader(hash_size, count, checksum_offset)
+
 
 
 def _index_entry_fields(
@@ -2532,6 +2667,17 @@ def _index_entry_path(
     path_bytes = bytes(content[fixed_end:path_end])
     if flags & 0x0FFF != min(len(path_bytes), 0x0FFF):
         return None
+    return _padded_entry_end(content, entry_offset, path_end, checksum_offset, path_bytes)
+
+
+def _padded_entry_end(
+    content: bytes | bytearray,
+    entry_offset: int,
+    path_end: int,
+    checksum_offset: int,
+    path_bytes: bytes,
+) -> tuple[bytes, int] | None:
+    """The offset past this entry's NUL padding, once the padding is all zero."""
     padded_end = entry_offset + ((path_end + 1 - entry_offset + 7) // 8) * 8
     if padded_end > checksum_offset or any(content[path_end:padded_end]):
         return None
@@ -2588,6 +2734,25 @@ def _record_index_entry(
     return True
 
 
+def _index_entry_fields_and_path(
+    content: bytes | bytearray,
+    header: _GitIndexHeader,
+    entry_offset: int,
+    fixed_end: int,
+) -> tuple[int, bytes, bytes, int] | None:
+    """The entry's fixed fields and its path, or None when either is malformed."""
+    fields = _index_entry_fields(content, entry_offset, header.hash_size)
+    if fields is None:
+        return None
+    mode, oid, flags = fields
+    located = _index_entry_path(
+        content, entry_offset, fixed_end, flags, header.checksum_offset
+    )
+    if located is None:
+        return None
+    return mode, oid, located[0], located[1]
+
+
 def _parse_index_entry(
     content: bytes | bytearray, header: _GitIndexHeader, scan: _IndexEntryScan
 ) -> bool:
@@ -2596,16 +2761,10 @@ def _parse_index_entry(
     fixed_end = entry_offset + 40 + header.hash_size + 2
     if fixed_end > header.checksum_offset:
         return False
-    fields = _index_entry_fields(content, entry_offset, header.hash_size)
-    if fields is None:
-        return False
-    mode, oid, flags = fields
-    located = _index_entry_path(
-        content, entry_offset, fixed_end, flags, header.checksum_offset
-    )
+    located = _index_entry_fields_and_path(content, header, entry_offset, fixed_end)
     if located is None:
         return False
-    path_bytes, padded_end = located
+    mode, oid, path_bytes, padded_end = located
     return _record_index_entry(scan, path_bytes, entry_offset, oid, mode, padded_end)
 
 
@@ -2639,19 +2798,30 @@ def _skip_index_extensions(
     seen: set[bytes] = set()
     while offset < header.checksum_offset:
         _check_stop(deadline, cancelled)
-        if offset + 8 > header.checksum_offset:
+        extension_end = _accepted_index_extension_end(content, header, offset, seen)
+        if extension_end is None:
             return False
-        signature = bytes(content[offset : offset + 4])
-        extension_end = offset + 8 + struct.unpack_from("!I", content, offset + 4)[0]
-        if extension_end > header.checksum_offset:
-            return False
-        if not _valid_index_extension(
-            signature, extension_end, header.checksum_offset, seen
-        ):
-            return False
-        seen.add(signature)
         offset = extension_end
     return offset == header.checksum_offset
+
+
+def _accepted_index_extension_end(
+    content: bytes | bytearray,
+    header: _GitIndexHeader,
+    offset: int,
+    seen: set[bytes],
+) -> int | None:
+    """Where the extension at `offset` ends, or None when it is not acceptable."""
+    if offset + 8 > header.checksum_offset:
+        return None
+    signature = bytes(content[offset : offset + 4])
+    extension_end = offset + 8 + struct.unpack_from("!I", content, offset + 4)[0]
+    if extension_end > header.checksum_offset or not _valid_index_extension(
+        signature, extension_end, header.checksum_offset, seen
+    ):
+        return None
+    seen.add(signature)
+    return extension_end
 
 
 def _parse_git_index(
@@ -2747,14 +2917,14 @@ def _refresh_private_index(
     return result
 
 
+# Git names its object hash by digest width, and only these two widths exist.
+_OBJECT_HASH_NAMES_BY_LENGTH = {40: "sha1", 64: "sha256"}
+
+
 def _object_hash_name(expected_head: str | None) -> str | None:
     if expected_head is None:
         return None
-    if len(expected_head) == 40:
-        return "sha1"
-    if len(expected_head) == 64:
-        return "sha256"
-    return None
+    return _OBJECT_HASH_NAMES_BY_LENGTH.get(len(expected_head))
 
 
 def _fence_text(content: bytes | bytearray) -> str | None:
@@ -2788,6 +2958,20 @@ def _resolved_head_target(
     pure = _safe_head_reference(value)
     if pure is None:
         return None
+    return _read_head_reference(
+        root, marker, pure, deadline=deadline, cancelled=cancelled
+    )
+
+
+def _read_head_reference(
+    root: Path,
+    marker: Path,
+    pure: PurePosixPath,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> tuple[str, _OwnedFileFence | None] | None:
+    """The commit the symbolic HEAD points at, read through its own fence."""
     reference_read = _read_owned_file(
         root,
         marker.joinpath(*pure.parts),
@@ -2826,17 +3010,24 @@ def _read_direct_head_fence(
     if head_read is None:
         return None
     value = _fence_text(head_read.content)
-    if value is None:
-        return None
-    resolved = _resolved_head_target(
+    resolved = None if value is None else _resolved_head_target(
         value, root, marker, deadline=deadline, cancelled=cancelled
     )
     if resolved is None:
         return None
+    return _matched_head_fence(resolved, head_read.fence, expected_head)
+
+
+def _matched_head_fence(
+    resolved: tuple[str, _OwnedFileFence | None],
+    head_fence: _OwnedFileFence,
+    expected_head: str,
+) -> _HeadFence | None:
+    """The fence, only when the commit it names is the one that was expected."""
     oid, reference_fence = resolved
     if not _head_fence_matches(oid, expected_head):
         return None
-    return _HeadFence(oid, head_read.fence, reference_fence)
+    return _HeadFence(oid, head_fence, reference_fence)
 
 
 def _expected_deleted(
@@ -3091,9 +3282,9 @@ def _private_state_preconditions(
     cancelled: Callable[[], bool] | None,
 ) -> tuple[_RawSemanticsProof, _HeadFence] | None:
     """The semantics proof and head fence, once every private-path rule holds."""
-    if not _unmatched_entries_bounded(root, parsed, hashes, expected, entry_snapshots):
-        return None
-    if not _tracked_attributes_inert(
+    if not _unmatched_entries_bounded(
+        root, parsed, hashes, expected, entry_snapshots
+    ) or not _tracked_attributes_inert(
         root, parsed, deadline=deadline, cancelled=cancelled
     ):
         return None
@@ -3107,6 +3298,20 @@ def _private_state_preconditions(
     )
     if raw_semantics is None:
         return None
+    return _preconditions_with_head_fence(
+        root, expected, raw_semantics, deadline=deadline, cancelled=cancelled
+    )
+
+
+def _preconditions_with_head_fence(
+    root: Path,
+    expected: WorkspaceRevision,
+    raw_semantics: _RawSemanticsProof,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> tuple[_RawSemanticsProof, _HeadFence] | None:
+    """The semantics proof, once HEAD is fenced at the commit that was expected."""
     head_fence = _read_direct_head_fence(
         root, expected.git_head, deadline=deadline, cancelled=cancelled
     )
@@ -3169,14 +3374,44 @@ def _try_private_git_state(
     cancelled: Callable[[], bool] | None,
 ) -> _PrivateGitState | None:
     """Git's view of this checkout, read through a sealed private index."""
-    if expected.git_head is None:
-        return None
-    read = _read_private_index(
+    read = None if expected.git_head is None else _read_private_index(
         root, index_path, hash_name=hash_name, deadline=deadline, cancelled=cancelled
     )
     if read is None:
         return None
     index_read, parsed = read
+    return _private_git_state_from_index(
+        root,
+        expected,
+        hashes,
+        directory_snapshots,
+        entry_snapshots,
+        worktree_ignore_paths,
+        index_read,
+        parsed,
+        installation=installation,
+        hash_name=hash_name,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+
+
+def _private_git_state_from_index(
+    root: Path,
+    expected: WorkspaceRevision,
+    hashes: dict[str, _VerificationHash],
+    directory_snapshots: dict[Path, _DirectorySnapshot],
+    entry_snapshots: dict[Path, _StrongIdentity],
+    worktree_ignore_paths: tuple[Path, ...],
+    index_read: object,
+    parsed: _ParsedGitIndex,
+    *,
+    installation: _PrivateGitInstallation,
+    hash_name: str,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> _PrivateGitState | None:
+    """Everything after the sealed index is in hand: prove it, then read git."""
     preconditions = _private_state_preconditions(
         root,
         expected,
@@ -3191,7 +3426,6 @@ def _try_private_git_state(
     )
     if preconditions is None:
         return None
-    raw_semantics, head_fence = preconditions
     change_times = _directory_change_times(
         directory_snapshots, deadline=deadline, cancelled=cancelled
     )
@@ -3206,7 +3440,19 @@ def _try_private_git_state(
     )
     if state is None:
         return None
+    return _private_state_from(state, preconditions, index_read, change_times, hashes)
+
+
+def _private_state_from(
+    state: tuple[str | None, bytes],
+    preconditions: tuple[_RawSemanticsProof, _HeadFence],
+    index_read: object,
+    change_times: object,
+    hashes: Mapping[str, _VerificationHash],
+) -> _PrivateGitState:
+    """Bind the state git reported to the proof that the read was sound."""
     current_head, status = state
+    raw_semantics, head_fence = preconditions
     proof = _private_git_proof(
         index_read, head_fence, raw_semantics, change_times, hashes
     )
@@ -3325,19 +3571,19 @@ def _validate_private_git_proof(
     cancelled: Callable[[], bool] | None,
 ) -> bool:
     """Whether everything the private read relied on is still exactly as proven."""
-    if not _proof_index_unchanged(proof, root, deadline=deadline, cancelled=cancelled):
-        return False
-    if not _proof_installation_unchanged(proof):
-        return False
-    if not _proof_semantics_files_unchanged(
-        proof, deadline=deadline, cancelled=cancelled
-    ):
-        return False
-    if not _proof_absent_paths_still_absent(
-        proof, deadline=deadline, cancelled=cancelled
-    ):
-        return False
-    return _proof_change_times_unchanged(proof, deadline=deadline, cancelled=cancelled)
+    return (
+        _proof_index_unchanged(proof, root, deadline=deadline, cancelled=cancelled)
+        and _proof_installation_unchanged(proof)
+        and _proof_semantics_files_unchanged(
+            proof, deadline=deadline, cancelled=cancelled
+        )
+        and _proof_absent_paths_still_absent(
+            proof, deadline=deadline, cancelled=cancelled
+        )
+        and _proof_change_times_unchanged(
+            proof, deadline=deadline, cancelled=cancelled
+        )
+    )
 
 @dataclass
 class _RevisionBuild:
@@ -3522,6 +3768,15 @@ def _require_git_unchanged(
         deadline=build.deadline,
         cancelled=build.cancelled,
     )
+    _require_git_state_identical(final_head, final_status, git_head, git_status)
+
+
+def _require_git_state_identical(
+    final_head: str | None,
+    final_status: bytes | None,
+    git_head: str | None,
+    git_status: bytes | None,
+) -> None:
     if final_head != git_head:
         raise RuntimeError("Git HEAD changed during workspace revision")
     if final_status != git_status:
@@ -3674,6 +3929,10 @@ def _require_matching_revision(
     ):
         raise ValueError("expected revision belongs to a different checkout")
     _check_stop(deadline, cancelled)
+    _require_revision_bounds_and_digest(expected)
+
+
+def _require_revision_bounds_and_digest(expected: WorkspaceRevision) -> None:
     if len(expected.entries) > MAX_REVISION_FILES:
         raise ValueError("expected revision exceeds the file-count ceiling")
     if _expected_revision_digest(expected) != expected.revision_sha256:

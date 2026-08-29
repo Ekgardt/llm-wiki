@@ -201,6 +201,37 @@ class IdentityNotification:
 
 
 @dataclass(frozen=True, slots=True)
+class PackageLaunch:
+    """A server that must be executed from inside a package root, not a descriptor.
+
+    Declared only by profiles whose entry point reads a file relative to its own
+    location. `typescript-language-server@6.0.0` does: `cli.mjs` evaluates
+    `new URL('../package.json', import.meta.url)` to read one field, `version`.
+    `import.meta.url` is not settable and has no descriptor form, so the
+    descriptor launch that closes the verify-then-execute race on Pyright cannot
+    execute such a server at all -- measured, see
+    `docs/research/2026-08-29-launching-a-verified-server-without-a-toctou-window.md`.
+
+    `entry_relative` is where the verified entry sits inside the launch root.
+    `manifest` is the `package.json` this build **authors** rather than copies:
+    copying the installed one would carry unverified bytes out of the
+    operator-writable install root and into the exec path, which is the thing the
+    copy-aside exists to prevent. A profile that left this None keeps the
+    descriptor launch untouched.
+    """
+
+    entry_relative: Path
+    manifest: object
+
+    def __post_init__(self) -> None:
+        _require_relative(self.entry_relative, "package_launch.entry_relative")
+        if not isinstance(self.manifest, Mapping):
+            raise ProfileError("package_launch.manifest must be a mapping")
+        if not self.manifest:
+            raise ProfileError("package_launch.manifest must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeOption:
     """An initialization option whose value is a path only known at install time.
 
@@ -298,11 +329,28 @@ class LanguageServerProfile:
     owner_argument_template: str | None = None
     runtime_option: RuntimeOption | None = None
     identity_notification: IdentityNotification | None = None
+    package_launch: PackageLaunch | None = None
+    configuration_names: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         self._check_names()
         self._check_artifact()
         self._check_runtime()
+        self._check_launch()
+
+    def _check_launch(self) -> None:
+        """A package launch has to name the same entry the artifact pin names."""
+        launch = self.package_launch
+        if launch is None:
+            return
+        self._check_launch_entry(launch)
+
+    def _check_launch_entry(self, launch: object) -> None:
+        if not isinstance(launch, PackageLaunch):
+            raise ProfileError("package_launch must be a PackageLaunch")
+        wanted = launch.entry_relative.parts
+        if self.server_relative.parts[-len(wanted) :] != wanted:
+            raise ProfileError("package_launch.entry_relative must end server_relative")
 
     def _check_names(self) -> None:
         _require_text(self.name, "name")
@@ -311,6 +359,7 @@ class LanguageServerProfile:
         _require_tuple_of_text(self.language_ids, "language_ids")
         _require_tuple_of_text(self.file_suffixes, "file_suffixes")
         _require_tuple_of_text(self.launch_flags, "launch_flags")
+        _require_tuple_of_text(self.configuration_names, "configuration_names")
         if not self.language_ids:
             raise ProfileError("language_ids must not be empty")
         if not self.file_suffixes:

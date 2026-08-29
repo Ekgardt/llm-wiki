@@ -2854,12 +2854,50 @@ def _navigation_limit_warnings(rendered: dict, session) -> tuple[str, ...]:
     return (*warnings, *(limit for limit in limits if limit not in warnings))
 
 
+def _navigation_provenance_named(data: dict, session) -> dict:
+    """Rename in place, and leave the key absent when the answer carried none.
+
+    A structural or refused answer has no provenance at all; adding an empty one
+    would change the envelope's shape for every Python answer that never had it.
+    """
+    rows = data.get("provenance")
+    if not rows:
+        return data
+    data["provenance"] = _navigation_provenance_view(data, session)
+    return data
+
+
+def _navigation_provenance_view(rendered: dict, session) -> tuple:
+    """Name the server in the provenance too, not only in the provider block.
+
+    The same literal `"pyright"` reaches the envelope twice, and correcting one
+    of them left a TypeScript answer carrying `provenance[].provider: "pyright"`
+    -- a false statement about where the answer came from, in the field whose
+    whole job is to say. Corrected at the same seam and for the same named
+    reason as `_navigation_provider_view`: `scripts/code_navigation.py` is
+    refused wholesale by the complexity gate over 39 pre-existing findings.
+
+    Only `source: "lsp"` rows are touched. Structural rows are produced by this
+    build's own graph and already name themselves correctly.
+    """
+    rows = tuple(rendered.get("provenance") or ())
+    return tuple(_provenance_row_named(row, session) for row in rows)
+
+
+def _provenance_row_named(row: object, session) -> object:
+    if not isinstance(row, dict) or row.get("source") != "lsp":
+        return row
+    named = dict(row)
+    named["provider"] = session.profile.name
+    return named
+
+
 def _navigation_named_by_session(data: dict, session) -> dict:
     if session is None:
         return data
     data["provider"] = _navigation_provider_view(data, session)
     data["warnings"] = _navigation_limit_warnings(data, session)
-    return data
+    return _navigation_provenance_named(data, session)
 
 
 def _rendered_navigation_result(

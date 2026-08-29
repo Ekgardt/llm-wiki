@@ -19,6 +19,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import BinaryIO
 
+import lsp_launch_package
 import windows_workspace as _windows_workspace
 from bounded_io import read_stable_bytes
 from code_intelligence import PositionEncoding
@@ -1563,10 +1564,13 @@ class _LaunchServerGuard:
         owner_root: Path,
         deadline: float,
         degradation_prefix: str = "pyright",
+        package_launch: object | None = None,
     ) -> None:
         if not isinstance(owner_root, Path):
             raise TypeError("owner_root must be a Path")
         self._degradation_prefix = degradation_prefix
+        self._package_launch = package_launch
+        self._launch_tree: object | None = None
         self._path = path
         self._expected_sha256 = expected_sha256
         self._command = command
@@ -1640,10 +1644,52 @@ class _LaunchServerGuard:
         if not launchable:
             raise self._digest_mismatch()
 
+    def _checkpoint(self) -> None:
+        _require_startup_deadline(self._deadline)
+
     def _posix_launch(self, before: os.stat_result) -> GenerationLaunch:
         """Copy the server aside, verify it, and launch from the copy."""
         snapshot = self._open_snapshot()
         self._verify_digest(self._copy_snapshot(snapshot))
+        if self._package_launch is not None:
+            return self._package_launch_from(snapshot)
+        return self._descriptor_launch(snapshot, before)
+
+    def _package_launch_from(self, snapshot: BinaryIO) -> GenerationLaunch:
+        """Seal the verified copy into a package root and launch that path.
+
+        The descriptor launch below cannot execute a server whose entry reads a
+        file relative to its own location; see `scripts/lsp_launch_package.py`.
+        """
+        tree = self._sealed_launch_tree(snapshot)
+        self._launch_tree = tree
+        self._snapshot_path = None
+        snapshot.close()
+        self._snapshot = None
+        return GenerationLaunch(
+            (self._command[0], str(tree.entry), *self._command[2:]), ()
+        )
+
+    def _sealed_launch_tree(self, snapshot: BinaryIO) -> lsp_launch_package.LaunchTree:
+        snapshot_path = self._snapshot_path
+        if snapshot_path is None:
+            raise RuntimeError("launch server guard is closed")
+        try:
+            return lsp_launch_package.create_launch_tree(
+                self._owner_root,
+                self._package_launch,
+                snapshot_path=snapshot_path,
+                snapshot_descriptor=snapshot.fileno(),
+                expected_sha256=self._expected_sha256,
+                checkpoint=self._checkpoint,
+            )
+        except lsp_launch_package.LaunchTreeError as error:
+            raise self._digest_mismatch() from error
+
+    def _descriptor_launch(
+        self, snapshot: BinaryIO, before: os.stat_result
+    ) -> GenerationLaunch:
+        """Unlink the verified copy and hand `node` the descriptor instead."""
         launch_descriptor = os.open(
             self._snapshot_path,
             os.O_RDONLY
@@ -1778,16 +1824,19 @@ class _LaunchServerGuard:
         if observed != (state, state):
             raise self._digest_mismatch()
 
-    def _take_owned_resources(self) -> tuple[object, Path | None, int | None, int | None]:
+    def _take_owned_resources(
+        self,
+    ) -> tuple[object, Path | None, int | None, int | None, object]:
         """Hand over everything the guard holds, leaving it holding nothing."""
         snapshot, self._snapshot = self._snapshot, None
         snapshot_path, self._snapshot_path = self._snapshot_path, None
         launch_descriptor, self._launch_descriptor = self._launch_descriptor, None
         descriptor, self._descriptor = self._descriptor, None
-        return snapshot, snapshot_path, launch_descriptor, descriptor
+        tree, self._launch_tree = self._launch_tree, None
+        return snapshot, snapshot_path, launch_descriptor, descriptor, tree
 
     def close(self) -> None:
-        snapshot, snapshot_path, launch_descriptor, descriptor = (
+        snapshot, snapshot_path, launch_descriptor, descriptor, tree = (
             self._take_owned_resources()
         )
         errors = [
@@ -1795,6 +1844,7 @@ class _LaunchServerGuard:
             _unlink_error(snapshot_path),
             _closed_descriptor_error(launch_descriptor),
             _closed_descriptor_error(descriptor),
+            lsp_launch_package.remove_launch_tree(tree),
         ]
         _raise_collected_errors([item for item in errors if item is not None])
 
@@ -3036,9 +3086,24 @@ class LanguageServerSession:
                     owner_root=owner,
                     deadline=generation_deadline,
                     degradation_prefix=self._profile.degradation_prefix,
+                    **self._launch_strategy_arguments(),
                 )
             ),
         )
+
+    def _launch_strategy_arguments(self) -> dict[str, object]:
+        """The launch strategy this profile declares, or nothing at all.
+
+        Passing nothing rather than `package_launch=None` is deliberate: it keeps
+        the guard construction for a profile that declares no strategy --
+        Pyright -- literally the call it has always been, so the descriptor
+        launch that closes the verify-then-execute race cannot be disturbed by a
+        change made for a second language.
+        """
+        launch = self._profile.package_launch
+        if launch is None:
+            return {}
+        return {"package_launch": launch}
 
     def _retry_startup_cleanup(
         self, error: BaseException, startup_deadline: float
@@ -3811,7 +3876,30 @@ class LanguageServerSession:
         # The server begins loading the project on didOpen, so the wait has to
         # come after it, not after `start`.
         self._await_progress_gate(deadline)
+        self._refresh_readiness_after_progress(deadline)
         return self._document_query(document, epoch), "not_ready"
+
+    def _refresh_readiness_after_progress(self, deadline: float) -> None:
+        """Recompute readiness once the project load the query waited on is done.
+
+        Readiness is settled while the document is opened, which for a
+        progress-gated server is necessarily *before* the project load ends --
+        `_probe_document` runs during `didOpen`, and `_await_progress_gate` is
+        what comes after. Without this the envelope reported
+        `protocol_initialized` for an answer whose query had in fact waited for
+        `workDoneProgress/end`, so the field an agent reads to decide whether to
+        trust the answer understated it. Measured on the TypeScript fixture: the
+        first query of a session reported `protocol_initialized`, later ones
+        `query_ready`, for identical and correct answers.
+
+        Confined to profiles that gate on progress. A profile that does not gate
+        cannot have changed readiness during a wait it never performed, so
+        Pyright takes no extra `promote_workspace_ready` round trip.
+        """
+        if not self._profile.gates_on_progress():
+            return
+        with self._lock:
+            self._refresh_readiness_locked(deadline=deadline)
 
     def _hover_within_operation(
         self, anchor: SourceAnchor, *, deadline: float
@@ -4122,6 +4210,7 @@ class LanguageServerSession:
     ) -> ProviderCalls:
         document = self.open_document(anchor.path, deadline=deadline)
         self._await_progress_gate(deadline)
+        self._refresh_readiness_after_progress(deadline)
         query = self._document_query(document, epoch)
         if query is None:
             return ProviderCalls(direction, (), "not_ready", True)
