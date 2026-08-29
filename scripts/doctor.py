@@ -6840,6 +6840,35 @@ class _SourceExtractionAdapter:
 
     A class rather than a closure so each branch of the decision is its own
     named step and the two memoized partitions are ordinary attributes.
+
+    `_code_result` batches `extract_code` over every code source in the
+    snapshot rather than over the rebuild set, and that is deliberate rather
+    than an oversight. `_Collector.extract` is two passes: the definitions pass
+    writes every shared resolution index, so it must see the whole universe,
+    and the edges pass only reads them, so it is safely per-source. Splitting
+    them was built and measured. It is correct -- a whole incremental
+    generation built that way is identical to a full build across all seven
+    tables of `evidence.sqlite3`, an added source included -- and it does not
+    pay: the definitions pass is 43% of the extractor and cannot be narrowed,
+    so the split is worth 3.0 CPU s of a ~150 s pass when the rebuild set is
+    today's 427 of 678, and 9.8 s only when it is 1. End to end that measured
+    +0.98 s and -4.30 s respectively, and the sibling note measured narrow
+    rebuild sets arriving on 6.2% of code-touching commits, so the expectation
+    is a net loss of about 0.65 s a pass.
+
+    One construction makes a partial batch answer differently, and it is the
+    reason any revival needs the note rather than this paragraph:
+    `_partition_nodes` sends a node with no occurrence and no reference to
+    `min(source_ids)`, and "referenced by nobody" is global knowledge a partial
+    run does not have. A zero-byte source contributes exactly such a node.
+
+    The knowledge half has no such defect to fix: a knowledge-page edit puts no
+    code source in the rebuild set, so `extract_code` is never called at all,
+    and `extract_knowledge` costs 0.07 CPU s for 107 sources.
+
+    `tests/test_extraction_universe.py` pins the structural facts this rests
+    on. See
+    `docs/research/2026-08-29-what-a-partial-extraction-can-get-wrong.md`.
     """
 
     def __init__(self, snapshot, repository_id: str) -> None:
