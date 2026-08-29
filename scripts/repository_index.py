@@ -19,7 +19,10 @@ back to the legacy index -- NEW-65, recreated on purpose. Selection for a
 foreign scope is `GenerationCatalog._scoped_generation`, which never moves the
 pointer.
 
-Design and sources: `docs/research/2026-08-28-generations-for-other-repositories.md`.
+Design and sources: `docs/research/2026-08-28-generations-for-other-repositories.md`
+and `docs/research/2026-08-29-which-directories-of-a-repository-hold-code.md`,
+which answers what decides that a directory of a foreign repository holds code:
+the set Git tracks, minus what the corpus walk prunes, overridable by `roots`.
 """
 
 from __future__ import annotations
@@ -304,62 +307,94 @@ def _top_level_names(listing: str) -> set[str]:
     return {entry.split("/", 1)[0] for entry in entries if "/" in entry}
 
 
-def _approved_root_names() -> frozenset[str]:
-    from corpus_snapshot import APPROVED_CODE_ROOTS
+@dataclass(frozen=True, slots=True)
+class CodeRoots:
+    """What an index covers, and what it deliberately does not.
 
-    return frozenset(APPROVED_CODE_ROOTS)
-
-
-def _require_root_count(selected: tuple[str, ...], root: Path) -> None:
-    if not selected:
-        raise _refuse(
-            "repository_has_no_code_roots",
-            f"no indexable top-level directory is tracked in {root}",
-            directory=str(root),
-        )
-    if len(selected) > MAX_CODE_ROOTS:
-        raise _refuse(
-            "repository_has_too_many_code_roots",
-            f"{len(selected)} tracked top-level directories exceed the "
-            f"{MAX_CODE_ROOTS} the collector accepts",
-            directory=str(root),
-            roots=len(selected),
-        )
-
-
-def _require_admissible_roots(selected: tuple[str, ...], root: Path) -> None:
-    """Fail closed on a root the collector will not take. See §6 of the note.
-
-    `corpus_snapshot.APPROVED_CODE_ROOTS` is a frozen set of *this vault's own*
-    directory names, and `_code_root()` refuses anything else, so a repository
-    whose code lives in `src/` cannot be collected whole. A partial index is
-    worse than none, because *absent* would then read as *does not exist* --
-    exactly NEW-67 -- so the whole index is refused and the roots are named. An
-    operator who wants the admissible subset asks for it explicitly.
+    `excluded` is never silent: it reaches the receipt, so the omission is
+    stated at the moment it is made. Sourcegraph does the same from the other
+    end -- files it skips are listed on the repository's indexing page rather
+    than dropped. See the 2026-08-29 note.
     """
-    approved = _approved_root_names()
-    refused = tuple(name for name in selected if name not in approved)
+
+    selected: tuple[str, ...]
+    excluded: tuple[str, ...]
+
+
+def _collectable(name: str) -> bool:
+    from corpus_snapshot import collectable_root_name
+
+    return collectable_root_name(name)
+
+
+def _partition(names: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """(what the collector will take, what it will not) -- both named, neither guessed."""
+    taken = tuple(name for name in names if _collectable(name))
+    left = tuple(name for name in names if name not in taken)
+    return taken, left
+
+
+def _pruned_note(excluded: tuple[str, ...]) -> str:
+    if not excluded:
+        return ""
+    return f"; the corpus walk prunes {', '.join(excluded)}"
+
+
+def _require_any_root(
+    selected: tuple[str, ...], root: Path, excluded: tuple[str, ...]
+) -> None:
+    if selected:
+        return
+    raise _refuse(
+        "repository_has_no_code_roots",
+        f"no indexable top-level directory is tracked in {root}"
+        + _pruned_note(excluded),
+        directory=str(root),
+        excluded_roots=list(excluded),
+    )
+
+
+def _require_root_ceiling(selected: tuple[str, ...], root: Path) -> None:
+    if len(selected) <= MAX_CODE_ROOTS:
+        return
+    raise _refuse(
+        "repository_has_too_many_code_roots",
+        f"{len(selected)} tracked top-level directories exceed the "
+        f"{MAX_CODE_ROOTS} the collector accepts",
+        directory=str(root),
+        roots=len(selected),
+    )
+
+
+def _require_root_count(
+    selected: tuple[str, ...], root: Path, excluded: tuple[str, ...] = ()
+) -> None:
+    _require_any_root(selected, root, excluded)
+    _require_root_ceiling(selected, root)
+
+
+def _require_collectable_request(
+    selected: tuple[str, ...], refused: tuple[str, ...], root: Path
+) -> None:
+    """Fail closed on a requested root the collector will not descend into.
+
+    The walk applies its prune rule to a root's children, not to the root
+    itself, so honouring a request for `.claude` would walk
+    `.claude/worktrees/` -- a second copy of the repository, the defect closed
+    in commit 1d06e6a. Refusing by name beats collecting the wrong tree, and
+    beats collecting nothing while reporting success.
+    """
     if not refused:
         return
-    raise _roots_not_collectable(selected, refused, approved, root)
-
-
-def _roots_not_collectable(
-    selected: tuple[str, ...],
-    refused: tuple[str, ...],
-    approved: frozenset[str],
-    root: Path,
-) -> RepositoryIndexRefused:
-    return _refuse(
-        "repository_roots_not_collectable",
-        "the corpus collector accepts only these root names: "
-        f"{', '.join(sorted(approved))}; this repository also tracks "
-        f"{', '.join(refused)}. Indexing part of a repository would make "
-        "'no result' indistinguishable from 'not indexed', so pass `roots` "
-        "explicitly to accept a narrower index.",
+    raise _refuse(
+        "repository_root_not_collectable",
+        "the corpus walk prunes these directories, so indexing them would "
+        f"collect nothing: {', '.join(refused)}. Hidden, archive and skipped "
+        "directories are outside the corpus in every repository, this one "
+        "included.",
         directory=str(root),
         refused_roots=list(refused),
-        admissible_roots=[name for name in selected if name in approved],
+        admissible_roots=list(selected),
     )
 
 
@@ -376,17 +411,33 @@ def _explicit_roots(requested: Iterable[str], root: Path) -> tuple[str, ...]:
     return selected
 
 
-def selected_code_roots(root: Path, requested: Iterable[str] | None) -> tuple[str, ...]:
+def _requested_code_roots(root: Path, requested: Iterable[str]) -> CodeRoots:
+    """A deliberately narrow index: exactly what was asked for, or a refusal."""
+    selected, refused = _partition(_explicit_roots(requested, root))
+    _require_collectable_request(selected, refused, root)
+    _require_root_count(selected, root)
+    return CodeRoots(selected=selected, excluded=())
+
+
+def _discovered_code_roots(root: Path) -> CodeRoots:
+    """Every tracked top-level directory the collector will descend into.
+
+    Git's tracked set is the repository, which is why this asks Git rather than
+    a name allowlist or a build manifest: measured 2026-08-29, the manifest of
+    the real second repository on this machine names one of its twelve tracked
+    top-level directories in its wheel target and four in its sdist target, and
+    this vault's own manifest names none. See the 2026-08-29 note.
+    """
+    selected, excluded = _partition(tracked_top_level_directories(root))
+    _require_root_count(selected, root, excluded)
+    return CodeRoots(selected=selected, excluded=excluded)
+
+
+def selected_code_roots(root: Path, requested: Iterable[str] | None) -> CodeRoots:
     """Explicit roots when given, otherwise every tracked top-level directory."""
     if requested is not None:
-        selected = _explicit_roots(requested, root)
-        _require_root_count(selected, root)
-        _require_admissible_roots(selected, root)
-        return selected
-    discovered = tracked_top_level_directories(root)
-    _require_root_count(discovered, root)
-    _require_admissible_roots(discovered, root)
-    return discovered
+        return _requested_code_roots(root, requested)
+    return _discovered_code_roots(root)
 
 
 # --------------------------------------------------------------------------
@@ -401,6 +452,10 @@ def _collect(root: Path, roots: tuple[str, ...], deadline: float | None):
         return collect_corpus(
             root,
             code_roots=roots,
+            # The allowlist is this repository's own selected roots, not the
+            # vault's `APPROVED_CODE_ROOTS`. What the collector still enforces
+            # is the shape of each path and that the walk would descend into it.
+            approved_code_roots=roots,
             max_files=MAX_INDEXED_SOURCES,
             deadline=deadline,
         )
@@ -484,7 +539,9 @@ def _build(catalog, admission: Admission, snapshot, parent_id, deadline, cancell
     )
 
 
-def _index_receipt(admission: Admission, built, snapshot, roots, parent_id, seconds):
+def _index_receipt(
+    admission: Admission, built, snapshot, roots: CodeRoots, parent_id, seconds
+):
     return {
         "schema_version": SCHEMA_VERSION,
         "status": "indexed",
@@ -495,7 +552,10 @@ def _index_receipt(admission: Admission, built, snapshot, roots, parent_id, seco
         "generation_id": built.generation_id,
         "parent_generation_id": parent_id,
         "activated": False,
-        "code_roots": list(roots),
+        "code_roots": list(roots.selected),
+        # Named, never silent: tracked top-level directories the corpus walk
+        # prunes, so a reader can tell "not there" from "not looked at".
+        "excluded_roots": list(roots.excluded),
         "sources": len(snapshot.sources),
         "chunks": len(snapshot.chunks),
         "rebuilt_sources": len(built.rebuilt_sources),
@@ -528,7 +588,7 @@ def index_repository(
         directory, state_root=state_root, deadline=deadline, cancelled=cancelled
     )
     selected = selected_code_roots(admission.root, roots)
-    snapshot = _collect(admission.root, selected, deadline)
+    snapshot = _collect(admission.root, selected.selected, deadline)
     catalog = _open_catalog(state_root_path(state_root), read_only=False)
     parent_id, _parent = _newest_generation_for(catalog, admission.scope, deadline)
     built = _build(catalog, admission, snapshot, parent_id, deadline, cancelled)

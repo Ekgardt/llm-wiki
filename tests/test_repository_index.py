@@ -207,20 +207,71 @@ def test_tracked_top_level_directories_ignore_untracked_build_output(tmp_path):
     )
 
 
-def test_a_root_the_collector_will_not_take_refuses_the_whole_index(tmp_path):
-    """Fail closed: a partial index makes 'no result' read as 'does not exist'."""
+def test_a_foreign_layout_is_indexed_whole_not_refused_for_its_names(tmp_path):
+    """`src/` is not this vault's name, and that is not a reason to refuse it."""
     import repository_index
 
     repository = _repository(
-        tmp_path / "repo", {"src/alpha.py": ALPHA, "scripts/beta.py": ALPHA}
+        tmp_path / "repo",
+        {"src/alpha.py": ALPHA, "lib/beta.py": ALPHA, "cmd/main.go": "package main\n"},
+    )
+
+    roots = repository_index.selected_code_roots(repository, None)
+
+    assert roots.selected == ("cmd", "lib", "src")
+    assert roots.excluded == ()
+
+
+def test_a_tracked_hidden_directory_is_excluded_by_name_not_silently(tmp_path):
+    """Every real repository tracks `.github`; the walk prunes it everywhere.
+
+    It is left out rather than refused, because the corpus walk already refuses
+    to descend into a hidden directory in *this* vault too -- but the omission
+    is carried out, not swallowed.
+    """
+    import repository_index
+
+    repository = _repository(
+        tmp_path / "repo",
+        {"src/alpha.py": ALPHA, ".github/workflows/ci.yml": "on: push\n"},
+    )
+
+    roots = repository_index.selected_code_roots(repository, None)
+
+    assert roots.selected == ("src",)
+    assert roots.excluded == (".github",)
+
+
+def test_a_repository_of_only_pruned_directories_refuses_by_name(tmp_path):
+    """Nothing collectable is a refusal, and the refusal says what was pruned."""
+    import repository_index
+
+    repository = _repository(
+        tmp_path / "repo", {".github/workflows/ci.yml": "on: push\n"}
     )
 
     with pytest.raises(repository_index.RepositoryIndexRefused) as refusal:
         repository_index.selected_code_roots(repository, None)
 
-    assert refusal.value.reason == "repository_roots_not_collectable"
-    assert refusal.value.details["refused_roots"] == ["src"]
-    assert refusal.value.details["admissible_roots"] == ["scripts"]
+    assert refusal.value.reason == "repository_has_no_code_roots"
+    assert refusal.value.details["excluded_roots"] == [".github"]
+
+
+def test_an_explicitly_requested_pruned_root_is_refused_by_name(tmp_path):
+    """`.claude/worktrees/` is a second copy of the repository -- commit 1d06e6a."""
+    import repository_index
+
+    repository = _repository(
+        tmp_path / "repo",
+        {"src/alpha.py": ALPHA, ".claude/worktrees/agent-a/src/alpha.py": ALPHA},
+    )
+
+    with pytest.raises(repository_index.RepositoryIndexRefused) as refusal:
+        repository_index.selected_code_roots(repository, ["src", ".claude"])
+
+    assert refusal.value.reason == "repository_root_not_collectable"
+    assert refusal.value.details["refused_roots"] == [".claude"]
+    assert refusal.value.details["admissible_roots"] == ["src"]
 
 
 def test_explicit_roots_accept_a_deliberately_narrower_index(tmp_path):
@@ -230,7 +281,10 @@ def test_explicit_roots_accept_a_deliberately_narrower_index(tmp_path):
         tmp_path / "repo", {"src/alpha.py": ALPHA, "scripts/beta.py": ALPHA}
     )
 
-    assert repository_index.selected_code_roots(repository, ["scripts"]) == ("scripts",)
+    roots = repository_index.selected_code_roots(repository, ["scripts"])
+
+    assert roots.selected == ("scripts",)
+    assert roots.excluded == ()
 
 
 def test_an_explicit_root_that_does_not_exist_is_refused(tmp_path):

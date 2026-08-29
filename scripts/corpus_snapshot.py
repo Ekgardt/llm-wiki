@@ -767,16 +767,72 @@ def _windows_shaped(raw: str) -> bool:
     return "\\" in raw or ":" in raw or bool(windows_path.drive or windows_path.root)
 
 
-def _code_root(value: str | Path) -> str:
+_CODE_ROOT_ERROR = "code root must be a normalized approved relative POSIX path"
+
+
+def _pruned_directory_name(name: str, *, include_archives: bool) -> bool:
+    """Whether the corpus walk refuses to descend into a directory of this name.
+
+    One definition, shared by the walk and by :func:`collectable_root_name`,
+    because a code root the walk would prune collects nothing and a root that
+    silently collects nothing is NEW-67 with extra steps.
+    """
+    if name in SKIP_DIRECTORIES:
+        return True
+    if name in ARCHIVE_DIRECTORIES:
+        return not include_archives
+    return name.startswith(".")
+
+
+def collectable_root_name(name: str) -> bool:
+    """Whether this top-level directory name can be a code root at all.
+
+    Two conditions, and neither of them is about *this* vault's layout: the
+    name must be a normalized relative POSIX component, and it must not be one
+    the walk prunes. Hidden is the one that bites in practice --
+    `_add_code_root` hands the root itself to the walk, which applies the prune
+    rule only to children, so `.claude` as a code root would walk
+    `.claude/worktrees/`, a whole second copy of the repository. That is the
+    defect closed in commit 1d06e6a, where the workspace call graph walked
+    7,261 files of 7,686.
+    """
+    try:
+        normalized = _relative_posix(name, prefixes=(str(name),))
+    except ValueError:
+        return False
+    if len(PurePosixPath(normalized).parts) != 1:
+        return False
+    return not _pruned_directory_name(normalized, include_archives=False)
+
+
+def _normalized_code_root(value: str | Path, approved: tuple[str, ...]) -> str:
+    try:
+        return _relative_posix(value, prefixes=approved)
+    except ValueError as exc:
+        raise ValueError(_CODE_ROOT_ERROR) from exc
+
+
+def _require_collectable_root(normalized: str) -> None:
+    top = PurePosixPath(normalized).parts[0]
+    if _pruned_directory_name(top, include_archives=False):
+        raise ValueError(f"code root is a directory the corpus walk prunes: {top}")
+
+
+def _code_root(value: str | Path, approved: tuple[str, ...]) -> str:
+    """One code root, normalized against the *caller's* allowlist.
+
+    The name allowlist belongs to the caller: this vault passes its own
+    `APPROVED_CODE_ROOTS`, and `repository_index` passes the top-level
+    directories Git tracks in the repository it was pointed at. What does not
+    belong to the caller is the shape -- relative, POSIX, NFC-normalized, no
+    traversal, no drive -- and whether the walk would prune it.
+    """
     raw = str(value)
     if _windows_shaped(raw):
-        raise ValueError("code root must be a normalized approved relative POSIX path")
-    try:
-        return _relative_posix(value, prefixes=tuple(sorted(APPROVED_CODE_ROOTS)))
-    except ValueError as exc:
-        raise ValueError(
-            "code root must be a normalized approved relative POSIX path"
-        ) from exc
+        raise ValueError(_CODE_ROOT_ERROR)
+    normalized = _normalized_code_root(value, approved)
+    _require_collectable_root(normalized)
+    return normalized
 
 
 def _safe_info(path: Path) -> os.stat_result:
@@ -1163,11 +1219,7 @@ class _Discovery:
             raise ValueError("corpus traversal entry limit exceeded")
 
     def _directory_excluded(self, name: str) -> bool:
-        if name in SKIP_DIRECTORIES:
-            return True
-        if name in ARCHIVE_DIRECTORIES:
-            return not self.include_archives
-        return name.startswith(".")
+        return _pruned_directory_name(name, include_archives=self.include_archives)
 
     @staticmethod
     def _project_of(path: Path, root: Path, kind: str) -> str | None:
@@ -2044,6 +2096,7 @@ def _policy(
     *,
     daily_paths: Iterable[str | Path],
     code_roots: Iterable[str | Path],
+    approved_code_roots: Iterable[str],
     include_historical: bool,
     as_of: str | date | datetime | None,
     max_files: int,
@@ -2061,8 +2114,9 @@ def _policy(
         label="daily evidence path",
     )
     _require_daily_files(normalized_daily)
+    approved = tuple(sorted({str(name) for name in approved_code_roots}))
     normalized_code = _normalize_explicit_paths(
-        code_roots, _code_root, label="code root"
+        code_roots, lambda path: _code_root(path, approved), label="code root"
     )
     _require_disjoint_roots(normalized_code)
     return SnapshotPolicy(
@@ -2230,6 +2284,7 @@ def collect_corpus(
     *,
     daily_paths: Iterable[str | Path] = (),
     code_roots: Iterable[str | Path] = (),
+    approved_code_roots: Iterable[str] = APPROVED_CODE_ROOTS,
     include_historical: bool = False,
     as_of: str | date | datetime | None = None,
     max_files: int = MAX_CORPUS_FILES,
@@ -2250,6 +2305,7 @@ def collect_corpus(
     selected_policy = _policy(
         daily_paths=daily_paths,
         code_roots=code_roots,
+        approved_code_roots=approved_code_roots,
         include_historical=include_historical,
         as_of=as_of,
         max_files=max_files,
@@ -2318,6 +2374,7 @@ def probe_corpus_identity(
     *,
     daily_paths: Iterable[str | Path] = (),
     code_roots: Iterable[str | Path] = (),
+    approved_code_roots: Iterable[str] = APPROVED_CODE_ROOTS,
     include_historical: bool = False,
     as_of: str | date | datetime | None = None,
     max_files: int = MAX_CORPUS_FILES,
@@ -2341,6 +2398,7 @@ def probe_corpus_identity(
     selected_policy = _policy(
         daily_paths=daily_paths,
         code_roots=code_roots,
+        approved_code_roots=approved_code_roots,
         include_historical=include_historical,
         as_of=as_of,
         max_files=max_files,
@@ -2369,6 +2427,10 @@ def _snapshot_settings(
     defaults = {
         "daily_paths": policy.daily_paths,
         "code_roots": policy.code_roots,
+        # Revalidation accepts exactly the roots the snapshot recorded, whatever
+        # allowlist produced them. A foreign repository's snapshot must be able
+        # to prove itself against its own policy, not against this vault's names.
+        "approved_code_roots": policy.code_roots,
         "include_historical": policy.include_historical,
         "as_of": policy.as_of,
         "max_files": policy.max_files,
