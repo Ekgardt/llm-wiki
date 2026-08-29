@@ -28,13 +28,25 @@ _OTHER_HASH = "code:node:fb7f00530cc7b93acb3052efd59b2d85"
 _QUERY_ARGUMENTS = {"directory": ".", "mode": "query", "query": "{}"}
 
 
+# `path` and `owner` vary across rows because they do in a real `query`
+# answer -- its nodes come from across the repository. They used to be one
+# constant string on every row, and once `answer_budget` learned to state a
+# constant column once, that fake constancy compacted these fixtures under
+# their budgets: the trim and the derivable-field drop stopped happening, so
+# two tests passed by never reaching the ladder they exist to prove. `kind`
+# stays constant on purpose -- it genuinely is, for a kind-filtered query, so
+# it still exercises the hoist.
+_DISTINCT_MODULES = 7
+
+
 def _node_row(index: int) -> dict:
+    module = f"module_{index % _DISTINCT_MODULES}"
     return {
         "node_id": f"code:node:{index:032x}",
         "kind": "function",
         "name": f"caller_number_{index}",
-        "path": "scripts/retrieval.py",
-        "owner": "scripts.retrieval",
+        "path": f"scripts/{module}.py",
+        "owner": f"scripts.{module}",
     }
 
 
@@ -227,9 +239,16 @@ def test_a_trimmed_answer_actually_fits_the_budget_it_was_given(monkeypatch):
 
 
 def test_the_budget_drops_the_derivable_field_before_a_row(monkeypatch):
-    """`owner` is recoverable from `path`; a row is not recoverable at all."""
+    """`owner` is recoverable from `path`; a row is not recoverable at all.
+
+    260 is measured, not chosen: this fixture costs 249 tokens once the hashes
+    and the constant `kind` column are out and 191 once `owner` goes too, so a
+    budget in [239, 297) is exactly the window where dropping the derivable
+    field is both necessary and sufficient. The old 300 sat above the window,
+    which is why this test stopped exercising the step it names.
+    """
     _architecture(monkeypatch, _query_answer(rows=8))
-    data = _call("get_architecture", {**_QUERY_ARGUMENTS, "budget_tokens": 300})
+    data = _call("get_architecture", {**_QUERY_ARGUMENTS, "budget_tokens": 260})
     report = data["answer_budget"]
     assert report["omitted_fields"] == ["node_id", "owner"]
     assert len(data["nodes"]) == 8
@@ -355,3 +374,86 @@ def test_a_readable_group_is_not_an_opaque_collection():
     """Only the `code:<kind>:<hash>` form counts; names are not hashes."""
     answer = {"architecture": {"communities": [["caller", "callee"]]}}
     assert answer_budget.shape_code_answer(answer) == answer
+
+
+_REPO_DIGEST = "d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484"
+
+
+def _module_row(name: str, path: str, key: str | None = None) -> dict:
+    default = f"repository:{_REPO_DIGEST}\x1fpython\x1f{name}\x1f{path}"
+    return {
+        "identity_key": default if key is None else key,
+        "metadata": {"name": name, "path": path},
+        "depth": 1,
+    }
+
+
+def _dependencies(rows: list) -> dict:
+    return {"mode": "dependencies", "architecture": {"dependencies": rows}}
+
+
+def test_an_identity_key_the_row_already_states_in_the_open_goes():
+    """The second mint: `repository:<64 hex>` ended in readable text and slipped.
+
+    Measured 2026-08-29 on this repository: `mode=dependencies` answered in
+    23 849 tokens, of which `identity_key` was 14 564 (61.1%) and the constant
+    `repository:<64 hex>` prefix alone 6 112, repeated on all 326 rows -- while
+    `metadata` carried the same name and path in the open.
+    """
+    rows = [_module_row("scripts.page_status", "scripts/page_status.py")]
+    shaped = answer_budget.shape_code_answer(_dependencies(rows))
+    kept = shaped["architecture"]["dependencies"][0]
+    assert "identity_key" not in kept
+    assert kept["metadata"] == {
+        "name": "scripts.page_status",
+        "path": "scripts/page_status.py",
+    }
+    assert shaped["answer_budget"]["omitted_fields"] == ["identity_key"]
+
+
+def test_an_identity_key_holding_something_the_row_does_not_say_stays():
+    """The rule may never be the reason a fact left the answer."""
+    unstated = f"repository:{_REPO_DIGEST}\x1fpython\x1fscripts.other\x1fscripts/other.py"
+    rows = [_module_row("scripts.page_status", "scripts/page_status.py", key=unstated)]
+    shaped = answer_budget.shape_code_answer(_dependencies(rows))
+    assert shaped["architecture"]["dependencies"][0]["identity_key"] == unstated
+
+
+def test_a_column_that_never_varies_is_stated_once_not_once_per_row():
+    """Lossless: the value is still in the answer, exactly once."""
+    rows = [
+        {"name": "a", "file": "x.py", "status": "candidate", "graph_complete": False},
+        {"name": "b", "file": "y.py", "status": "candidate", "graph_complete": False},
+        {"name": "c", "file": "z.py", "status": "candidate", "graph_complete": False},
+    ]
+    shaped = answer_budget.shape_code_answer({"candidates": list(rows)})
+    assert shaped["candidates_row_constants"] == {
+        "status": "candidate",
+        "graph_complete": False,
+    }
+    assert shaped["candidates"] == [
+        {"name": "a", "file": "x.py"},
+        {"name": "b", "file": "y.py"},
+        {"name": "c", "file": "z.py"},
+    ]
+    assert answer_budget.estimate_tokens(shaped) < answer_budget.estimate_tokens(
+        {"candidates": rows}
+    )
+
+
+def test_a_short_table_whose_constants_cost_more_than_they_save_does_not_move():
+    """Decided by measuring both shapes, not by a threshold on row count."""
+    answer = {"rows": [{"a": 1, "b": 2}, {"a": 1, "b": 3}]}
+    assert answer_budget.shape_code_answer(answer) == answer
+
+
+def test_a_column_mixing_false_and_zero_is_not_called_constant():
+    """Type-strict, because `False == 0` in Python and they are not one value."""
+    rows = [
+        {"name": "a" * 40, "flag": False},
+        {"name": "b" * 40, "flag": 0},
+        {"name": "c" * 40, "flag": False},
+    ]
+    shaped = answer_budget.shape_code_answer({"rows": list(rows)})
+    assert "rows_row_constants" not in shaped
+    assert shaped["rows"] == rows

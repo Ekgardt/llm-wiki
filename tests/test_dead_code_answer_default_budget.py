@@ -29,14 +29,27 @@ import code_graph  # noqa: E402
 _DEFENSIBLE = 461
 _DOUBTFUL = 412
 
+# `file` and `owner` vary the way the live answer's do. They used to be one
+# constant string on every row, which was never true of a real answer -- the
+# 2026-08-29 measurement found 93 distinct files and 59 distinct owners across
+# 532 delivered rows -- and once `answer_budget` learned to state a constant
+# column once, the fixture's fake constants compacted it under the ceiling and
+# four tests stopped exercising the cut they exist to prove. The modulus keeps
+# roughly the live ratio of one distinct file per six rows.
+_DISTINCT_FILES = 93
+
 
 def _candidate(index: int, reason: str) -> dict:
+    module = f"module_{index % _DISTINCT_FILES:03d}"
     return {
         "name": f"_helper_number_{index:04d}",
         "symbol_id": f"code:node:{index:032x}",
-        "owner": "scripts.install_pyright",
-        "file": "/home/user/llm-wiki/scripts/install_pyright.py",
+        "owner": f"scripts.{module}",
+        "file": f"/home/user/llm-wiki/scripts/{module}.py",
         "line": 3253 + index,
+        # Genuinely constant on every live row, and hoisted out by
+        # `answer_budget` for exactly that reason -- kept here so the fixture
+        # still exercises the hoist.
         "status": "candidate",
         "reason": reason,
         "graph_complete": False,

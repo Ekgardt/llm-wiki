@@ -627,6 +627,14 @@ TOOL_INPUT_SCHEMAS = {
                 "type": "string",
                 "description": "Project directory to analyze",
             },
+            "symbol": {
+                "type": "string",
+                "maxLength": 256,
+                "description": (
+                    "Answer about one function by name: a verdict plus only its "
+                    "rows, instead of the whole-repository candidate listing"
+                ),
+            },
             "live": {
                 "type": "boolean",
                 "default": False,
@@ -1400,8 +1408,57 @@ def _trigger_compile(*, deadline: float | None = None) -> dict:
     return {"status": status, "returncode": returncode}
 
 
+def _dead_code_symbol_view(answer: dict, symbol: str) -> dict:
+    """Whether one named function is a dead-code candidate, and why.
+
+    The whole-repository listing cannot answer this question truthfully at this
+    repository's scale. Measured 2026-08-29: the analysis produces 846
+    candidates, the answer carried 532 of them at 24 982 tokens, and 307 named
+    rows were cut to fit the client ceiling. A name missing from a cut list is
+    indistinguishable from a name with living callers, so the listing answers
+    "is X dead?" with silence that reads as "no". The anchor turns a listing
+    that must be trimmed into a verdict that fits whole.
+
+    `not_a_candidate` is the honest phrasing: it says this analysis did not
+    nominate the name, which is not the same as proving the name is reachable -
+    `graph_complete` in the same answer says how far that claim carries.
+    """
+    rows = _dead_code_rows_named(answer, symbol)
+    kept = _without_key(answer, "candidates")
+    return {
+        **kept,
+        "symbol": symbol,
+        "verdict": _dead_code_verdict_word(rows),
+        "candidates": rows,
+    }
+
+
+def _dead_code_rows_named(answer: dict, symbol: str) -> list:
+    return [row for row in answer.get("candidates", []) if row.get("name") == symbol]
+
+
+def _without_key(mapping: dict, dropped: str) -> dict:
+    return {key: value for key, value in mapping.items() if key != dropped}
+
+
+def _dead_code_verdict_word(rows: list) -> str:
+    if rows:
+        return "candidate"
+    return "not_a_candidate"
+
+
+def _narrowed_dead_code(answer: dict, symbol: str | None) -> dict:
+    if symbol is None:
+        return answer
+    return _dead_code_symbol_view(answer, symbol)
+
+
 def _find_dead_code(
-    directory: str, *, live: bool = False, deadline: float | None = None
+    directory: str,
+    *,
+    symbol: str | None = None,
+    live: bool = False,
+    deadline: float | None = None,
 ) -> dict:
     """Find conservative dead-code candidates in a project directory."""
     from code_graph import find_dead_code
@@ -1424,7 +1481,7 @@ def _find_dead_code(
         return _code_graph_timeout_data(
             str(resolved), reason, completed=("directory_validation",)
         )
-    return _dead_code_result_data(resolved, result)
+    return _narrowed_dead_code(_dead_code_result_data(resolved, result), symbol)
 
 
 def _dead_code_result_data(resolved: Path, result) -> dict:
@@ -1467,6 +1524,31 @@ def _get_architecture(
     return _architecture_summary_data(resolved, architecture)
 
 
+# What the summary says instead of naming 300 community members. The counts
+# stay; only the member dump goes, and the caller is told which mode serves it.
+#
+# Measured 2026-08-29: `communities` was 13 313 of the summary's 20 076
+# architecture tokens - 66.3% - and every one of those bytes is exactly what
+# `mode=community` already returns, so two of the thirteen parity tasks were
+# paying for the same payload. Worse, `code_graph._communities_holding` records
+# that an unanchored listing cannot answer the question callers actually ask of
+# it: `fuse_rrf`'s community is 729th by size, so no honest bound reaches it.
+# The summary was carrying the expensive half of an answer that could not be
+# given without an anchor.
+COMMUNITY_MEMBERS_HINT = (
+    "omitted from the summary; get_architecture mode=community lists them, and "
+    "mode=community with symbol=<name> answers which community a symbol is in"
+)
+
+
+def _summary_architecture(architecture: dict) -> dict:
+    """The summary keeps the community counts and drops the member listing."""
+    if "communities" not in architecture:
+        return architecture
+    kept = {key: value for key, value in architecture.items() if key != "communities"}
+    return {**kept, "communities": COMMUNITY_MEMBERS_HINT}
+
+
 def _architecture_summary_data(resolved: Path, architecture: dict) -> dict:
     report = {
         "source_generation": architecture.get("source_generation"),
@@ -1477,7 +1559,7 @@ def _architecture_summary_data(resolved: Path, architecture: dict) -> dict:
     return {
         "directory": str(resolved),
         "mode": "summary",
-        "architecture": architecture,
+        "architecture": _summary_architecture(architecture),
         **report,
     }
 
@@ -4755,6 +4837,7 @@ def _tool_find_dead_code(arguments: dict, deadline: float):
         data = _call_with_deadline(
             _find_dead_code,
             arguments.get("directory"),
+            symbol=arguments.get("symbol"),
             live=arguments.get("live", False),
             deadline=deadline,
         )

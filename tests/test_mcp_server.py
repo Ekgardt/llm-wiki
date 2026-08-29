@@ -1562,6 +1562,29 @@ def _assert_no_index_freshness_claim(envelope) -> None:
     )
 
 
+def _assert_summary_keeps_counts_and_names_the_mode(
+    envelope, architecture: dict, directory
+) -> None:
+    """Only the member listing goes; the counts and every other field stay."""
+    import mcp_server
+
+    answered = envelope["data"]["architecture"]
+    assert envelope["data"]["directory"] == str(directory.resolve())
+    assert answered["communities"] == mcp_server.COMMUNITY_MEMBERS_HINT
+    assert "mode=community" in answered["communities"]
+    assert _without("communities", answered) == _without("communities", architecture)
+
+
+def _without(dropped: str, mapping: dict) -> dict:
+    return {key: value for key, value in mapping.items() if key != dropped}
+
+
+def _assert_dead_code_verdict(data, verdict: str, names: list) -> None:
+    assert data["verdict"] == verdict
+    assert [row["name"] for row in data["candidates"]] == names
+    assert data["candidate_count"] == 2
+
+
 def _assert_code_tool_data(data, key, expected, directory) -> None:
     assert data[key] == expected
     assert data["directory"] == str(directory.resolve())
@@ -2886,18 +2909,62 @@ class TestHandleToolCall:
         _assert_low_confidence_envelope(envelope)
 
     def test_get_architecture_returns_summary(self, tmp_path, monkeypatch):
-        expected = {
+        """The summary passes the architecture through, minus the member dump.
+
+        `communities` was 13 313 of this answer's 20 076 architecture tokens on
+        this repository (measured 2026-08-29) and is verbatim what
+        `mode=community` already returns, so the summary names that mode
+        instead of repeating it. Every other field, and every community count,
+        is unchanged.
+        """
+        architecture = {
             "entry_points": [{"name": "main"}],
             "routes": [],
             "hotspots": [],
-            "communities": [],
+            "communities": [{"size": 2, "members": [{"name": "a"}, {"name": "b"}]}],
+            "community_count": 1,
+            "community_member_count": 2,
             "graph_complete": False,
         }
-        monkeypatch.setattr("code_graph.get_architecture", lambda directory, **options: expected)
+        monkeypatch.setattr(
+            "code_graph.get_architecture", lambda directory, **options: architecture
+        )
 
         envelope = json.loads(self._run("get_architecture", {"directory": str(tmp_path)}))
-        _assert_code_tool_data(envelope["data"], "architecture", expected, tmp_path)
+        _assert_summary_keeps_counts_and_names_the_mode(envelope, architecture, tmp_path)
         _assert_low_confidence_envelope(envelope)
+
+    def test_find_dead_code_answers_about_one_named_symbol(self, tmp_path, monkeypatch):
+        """A verdict about the name asked for, not the whole repository listing.
+
+        Measured 2026-08-29: the unanchored listing nominates 846 candidates,
+        delivers 532 at the client ceiling and cuts 307 named rows, so absence
+        from it is indistinguishable from having living callers. The anchored
+        form answers the question the caller asked, in 250 tokens against
+        24 982.
+        """
+        listing = {
+            "candidates": [
+                {"name": "_alive", "file": "a.py", "line": 1},
+                {"name": "_dead", "file": "b.py", "line": 2},
+            ],
+            "candidate_count": 2,
+            "graph_complete": False,
+        }
+        monkeypatch.setattr(
+            "code_graph.find_dead_code", lambda directory, **options: listing
+        )
+
+        _assert_dead_code_verdict(
+            self._dead_code_for(tmp_path, "_dead"), "candidate", ["_dead"]
+        )
+        _assert_dead_code_verdict(
+            self._dead_code_for(tmp_path, "_absent"), "not_a_candidate", []
+        )
+
+    def _dead_code_for(self, tmp_path, symbol: str) -> dict:
+        arguments = {"directory": str(tmp_path), "symbol": symbol}
+        return json.loads(self._run("find_dead_code", arguments))["data"]
 
     def test_code_tool_envelope_uses_generation_report(self, tmp_path, monkeypatch):
         import mcp_server

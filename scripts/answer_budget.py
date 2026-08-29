@@ -131,10 +131,11 @@ def shape_code_answer(
     budget_tokens: int | None = None,
     include_node_ids: bool = False,
 ):
-    """Shape one code answer: drop the opaque ids, then fit the budget."""
+    """Shape one code answer: drop the opaque ids, compact, then fit the budget."""
     if not isinstance(data, dict):
         return data
     answer, omitted = _without_opaque_identifiers(data, include_node_ids)
+    answer = _with_row_constants(answer, 0)
     if budget_tokens is None:
         return _fitted_to_default(answer, omitted)
     return _fitted(answer, omitted, budget_tokens)
@@ -172,7 +173,76 @@ def _without_opaque_identifiers(
     if include_node_ids:
         return data, []
     omitted: set[str] = set()
-    return _pruned(data, _is_opaque_identifier, omitted, 0), sorted(omitted)
+    pruned = _pruned(data, _is_opaque_identifier, omitted, 0)
+    return _without_recoverable_identities(pruned, omitted, 0), sorted(omitted)
+
+
+# The second mint. `code_extractor._identifier` makes `code:<kind>:<32 hex>`,
+# which the value rule above already catches; the stored generation makes
+# `repository:<64 hex>\x1f<language>\x1f<name>\x1f<path>` for a module, and that
+# one slipped through because it ends in readable text.
+#
+# Measured 2026-08-29, `mode=dependencies` on this repository: 326 rows,
+# 23 849 tokens, of which `identity_key` was 14 564 - 61.1% - and the constant
+# `repository:<64 hex>` prefix alone was 6 112, repeated on all 326 rows. The
+# same rows carry `metadata.name` and `metadata.path`, so the key restates in
+# an internal encoding what the row already says in the open.
+#
+# Dropped only when that is demonstrably true of the row in hand: every
+# readable segment of the key must already appear as a value in the same row's
+# `metadata`. A key holding anything the row does not otherwise say is left
+# alone, so the rule can never be the reason a fact left the answer.
+_REPOSITORY_IDENTITY = re.compile(r"\Arepository:[0-9a-f]{64}\x1f")
+
+
+def _readable_identity_segments(key: str) -> list[str]:
+    """Everything after the repository digest and the language tag."""
+    return key.split("\x1f")[2:]
+
+
+def _is_repository_identity(key) -> bool:
+    return isinstance(key, str) and bool(_REPOSITORY_IDENTITY.match(key))
+
+
+def _stated_values(metadata) -> set[str]:
+    if not isinstance(metadata, dict):
+        return set()
+    return {str(value) for value in metadata.values()}
+
+
+def _identity_is_recoverable(row: dict) -> bool:
+    key = row.get("identity_key")
+    if not _is_repository_identity(key):
+        return False
+    stated = _stated_values(row.get("metadata"))
+    return all(segment in stated for segment in _readable_identity_segments(key))
+
+
+def _row_without_identity(row: dict, omitted: set, depth: int) -> dict:
+    descended = {
+        key: _without_recoverable_identities(value, omitted, depth + 1)
+        for key, value in row.items()
+    }
+    if not _identity_is_recoverable(descended):
+        return descended
+    omitted.add("identity_key")
+    return {key: value for key, value in descended.items() if key != "identity_key"}
+
+
+def _recoverable_identity_container(value, omitted: set, depth: int):
+    if isinstance(value, dict):
+        return _row_without_identity(value, omitted, depth)
+    if isinstance(value, list):
+        return [
+            _without_recoverable_identities(item, omitted, depth + 1) for item in value
+        ]
+    return value
+
+
+def _without_recoverable_identities(value, omitted: set, depth: int):
+    if depth > _MAX_DEPTH:
+        return value
+    return _recoverable_identity_container(value, omitted, depth)
 
 
 def _is_opaque_identifier(key: str, value) -> bool:
@@ -230,6 +300,125 @@ def _keep_entry(kept: dict, key, value, drop, omitted: set, depth: int) -> None:
         omitted.add(key)
         return
     kept[key] = _pruned(value, drop, omitted, depth + 1)
+
+
+# A value identical on every row of a table is a fact about the table, not
+# about a row. Stating it once is the columnar move TOON and every CSV-shaped
+# encoding make, and it is lossless: the value stays in the answer, under
+# `<key>_row_constants`, exactly once.
+#
+# Measured 2026-08-29 on this repository, before this rule:
+#   `find_dead_code`  532 rows - `status` was the constant "candidate" at a
+#                     cost of 3 059 tokens, and `graph_complete` the constant
+#                     `false` at 3 325, the second of which the answer already
+#                     states at top level. 6 384 of 24 779 candidate tokens
+#                     (25.8%) said nothing a reader could not read once.
+#   `mode=summary`    97 entry points - `kind` and `name` were both the
+#                     constant "main": 776 of 2 617 tokens (29.7%).
+#
+# Applied only where it pays, decided by measuring both shapes rather than by a
+# threshold on row count: a short table whose constants block costs more than
+# it saves is left exactly as it was, so small answers do not move at all.
+#
+# Research: `docs/research/2026-08-29-what-the-caller-asked.md`.
+
+
+def _is_constant_table(value) -> bool:
+    """A list of at least two dicts - the only shape a constant column can have.
+
+    Deliberately not named `_is_row_list`: that name is already taken further
+    down this module by the trimming path's own predicate, which takes a list
+    that is known to be a list and answers a different question. Defining it
+    twice made the later definition win silently and broke every code answer.
+    """
+    return (
+        isinstance(value, list)
+        and len(value) > 1
+        and all(isinstance(item, dict) for item in value)
+    )
+
+
+def _is_scalar(value) -> bool:
+    return value is None or isinstance(value, (str, int, float, bool))
+
+
+def _same_value(candidate, value) -> bool:
+    """Type-strict, so a column mixing `False` and `0` is not called constant."""
+    return type(candidate) is type(value) and candidate == value
+
+
+def _constant_across(rows: list, key: str, value) -> bool:
+    return all(key in row and _same_value(row[key], value) for row in rows)
+
+
+def _row_constant_keys(rows: list) -> list[str]:
+    """Keys every row carries with one identical scalar value."""
+    return sorted(
+        key
+        for key, value in rows[0].items()
+        if _is_scalar(value) and _constant_across(rows, key, value)
+    )
+
+
+def _hoisted_rows(rows: list, keys) -> list[dict]:
+    dropped = set(keys)
+    return [
+        {key: value for key, value in row.items() if key not in dropped}
+        for row in rows
+    ]
+
+
+def _constants_if_cheaper(key: str, rows: list, keys: list[str]) -> dict:
+    constants = {name: rows[0][name] for name in keys}
+    compacted = {
+        key: _hoisted_rows(rows, keys),
+        f"{key}_row_constants": constants,
+    }
+    if estimate_tokens(compacted) >= estimate_tokens({key: rows}):
+        return {}
+    return constants
+
+
+def _payable_row_constants(key: str, value) -> dict:
+    if not _is_constant_table(value):
+        return {}
+    keys = _row_constant_keys(value)
+    if not keys:
+        return {}
+    return _constants_if_cheaper(key, value, keys)
+
+
+def _compacted_entry(key, value, depth: int) -> dict:
+    """One key's contribution: its value, plus row constants when they pay."""
+    descended = _with_row_constants(value, depth + 1)
+    constants = _payable_row_constants(key, descended)
+    if not constants:
+        return {key: descended}
+    return {
+        key: _hoisted_rows(descended, sorted(constants)),
+        f"{key}_row_constants": constants,
+    }
+
+
+def _row_constant_dict(mapping: dict, depth: int) -> dict:
+    compacted: dict = {}
+    for key, value in mapping.items():
+        compacted.update(_compacted_entry(key, value, depth))
+    return compacted
+
+
+def _row_constant_container(value, depth: int):
+    if isinstance(value, dict):
+        return _row_constant_dict(value, depth)
+    if isinstance(value, list):
+        return [_with_row_constants(item, depth + 1) for item in value]
+    return value
+
+
+def _with_row_constants(value, depth: int):
+    if depth > _MAX_DEPTH:
+        return value
+    return _row_constant_container(value, depth)
 
 
 def _bounded_budget(budget_tokens) -> int:
