@@ -43,6 +43,20 @@ MAX_BUDGET_TOKENS = 25_000
 # Below the cost of any real answer frame, so the refusal path is reachable.
 MIN_BUDGET_TOKENS = 32
 
+# What a caller who named no budget gets. The ceiling itself, because it is the
+# only value at which the cut falls entirely outside what the answer claims.
+#
+# Measured 2026-08-29, `find_dead_code` on this repository: 873 candidates,
+# 50 673 estimated tokens once the opaque ids are gone - 2x the client ceiling,
+# so the host was cutting it with no signal, which is exactly what this module
+# exists to prevent. At 25 000 the ladder drops `owner` before any row and all
+# 461 `zero_confirmed_incoming_calls` rows survive; at 12 000, 216 of them do
+# not. A default below the ceiling deletes the part of the answer the tool
+# actually asserts, so thrift is left to the caller's explicit `budget_tokens`.
+#
+# Research: `docs/research/2026-08-29-a-default-budget-for-a-dead-code-answer.md`.
+DEFAULT_BUDGET_TOKENS = MAX_BUDGET_TOKENS
+
 # `code:<kind>:<32 hex>` - the form scripts/code_extractor.py:226 mints.
 _OPAQUE_IDENTIFIER = re.compile(r"\Acode:[a-z]+:[0-9a-f]{32}\Z")
 
@@ -118,8 +132,22 @@ def shape_code_answer(
         return data
     answer, omitted = _without_opaque_identifiers(data, include_node_ids)
     if budget_tokens is None:
-        return _annotated(answer, _default_report(omitted))
+        return _fitted_to_default(answer, omitted)
     return _fitted(answer, omitted, budget_tokens)
+
+
+def _fitted_to_default(answer: dict, omitted: list[str]) -> dict:
+    """No budget named still means an answer the client can carry whole.
+
+    An answer already under the default is returned as it was, with no budget
+    block: a caller who asked for no accounting gets none, and the contract
+    that a small answer comes back unchanged survives. Only an answer that
+    would have been cut by the host is cut here instead, where the cut can say
+    so.
+    """
+    if estimate_tokens(answer) <= DEFAULT_BUDGET_TOKENS - REPORT_TOKEN_ALLOWANCE:
+        return _annotated(answer, _default_report(omitted))
+    return _fitted(answer, omitted, DEFAULT_BUDGET_TOKENS)
 
 
 def _default_report(omitted: list[str]) -> dict:

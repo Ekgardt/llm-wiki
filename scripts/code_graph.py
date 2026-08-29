@@ -2044,12 +2044,55 @@ def find_dead_code(
     candidates: list[dict] = []
     for path, result in parsed:
         candidates.extend(_live_dead_candidates_in_file(path, result, incoming))
-    candidates = sorted(
-        candidates, key=lambda item: (item["name"], item["file"], item["line"])
-    )
-    return _with_report(
-        "candidates", candidates, _live_report(directory, parsed), with_report
-    )
+    candidates = _ordered_dead_candidates(candidates)
+    report = {**_live_report(directory, parsed), **_dead_code_counts(candidates)}
+    return _with_report("candidates", candidates, report, with_report)
+
+
+# The order a cut obeys. `answer_budget` drops rows from the tail, so this is
+# the rule that decides what a reader loses when the answer does not fit.
+#
+# Measured 2026-08-29 on this repository at the 25 000-token default: sorted by
+# name, the cut threw away 97 `zero_confirmed_incoming_calls` rows and kept 162
+# `unresolved_receiver` ones; sorted by reason first, it dropped 354 rows and
+# not one defensible candidate. `unresolved_receiver` states doubt - a call site
+# names the symbol and the receiver did not resolve - and doubt is what a cut
+# should reach first. This orders, it never filters: a large enough budget still
+# returns every row, and `candidates_by_reason` states the totals either way.
+DEAD_CODE_REASON_ORDER = ("zero_confirmed_incoming_calls", "unresolved_receiver")
+
+
+def _dead_code_reason_rank(reason: str) -> int:
+    """An unknown reason sorts last, so a new one is never cut before a known."""
+    if reason not in DEAD_CODE_REASON_ORDER:
+        return len(DEAD_CODE_REASON_ORDER)
+    return DEAD_CODE_REASON_ORDER.index(reason)
+
+
+def _dead_code_order_key(candidate: dict) -> tuple:
+    """Defensible candidates first, then the vault's usual name/file/line."""
+    rank = _dead_code_reason_rank(str(candidate.get("reason", "")))
+    return (rank, candidate["name"], candidate["file"], candidate["line"])
+
+
+def _ordered_dead_candidates(candidates: list[dict]) -> list[dict]:
+    return sorted(candidates, key=_dead_code_order_key)
+
+
+def _dead_code_counts(candidates: list[dict]) -> dict[str, object]:
+    """Totals that survive a cut, because the report block is never trimmed.
+
+    A budget may drop rows; it must not leave the reader with a wrong picture of
+    how many candidates there are or how defensible they are.
+    """
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        reason = str(candidate.get("reason", "unknown"))
+        counts[reason] = counts.get(reason, 0) + 1
+    return {
+        "candidate_count": len(candidates),
+        "candidates_by_reason": dict(sorted(counts.items())),
+    }
 
 
 def _conventionally_reachable(name: str, path: str) -> bool:
@@ -2149,9 +2192,7 @@ def _stored_dead_nodes(graph) -> list[dict]:
 def _marked_complete(candidates: list[dict], report: dict) -> list[dict]:
     for candidate in candidates:
         candidate["graph_complete"] = report["graph_complete"]
-    return sorted(
-        candidates, key=lambda item: (item["name"], item["file"], item["line"])
-    )
+    return _ordered_dead_candidates(candidates)
 
 
 def _store_find_dead_code(
@@ -2163,8 +2204,9 @@ def _store_find_dead_code(
     try:
         candidates = _stored_dead_candidates(graph, _stored_dead_nodes(graph), directory)
         report = _store_report(graph)
+        ordered = _marked_complete(candidates, report)
         return _with_report(
-            "candidates", _marked_complete(candidates, report), report, with_report
+            "candidates", ordered, {**report, **_dead_code_counts(ordered)}, with_report
         )
     finally:
         graph.close()
