@@ -125,6 +125,58 @@ def test_the_prune_rule_has_one_definition(vault: Path):
         include_archives=False,
     )
     for name in (".github", "__pycache__", "archive", "src", "gaps"):
-        assert discovery._directory_excluded(name) is not collectable_root_name(  # noqa: SLF001
-            name
-        )
+        assert discovery._directory_excluded(  # noqa: SLF001
+            name, "code"
+        ) is not collectable_root_name(name)
+
+
+_WALK_KINDS = ("note", "project", "code")
+
+
+def _pruned_by_kind(discovery, names: list[str]) -> dict[tuple[str, str], bool]:
+    pairs = [(name, kind) for name in names for kind in _WALK_KINDS]
+    return {
+        pair: discovery._directory_excluded(*pair)  # noqa: SLF001
+        for pair in pairs
+    }
+
+
+def _expected_by_kind(
+    names: list[str], *, knowledge_only: bool
+) -> dict[tuple[str, str], bool]:
+    """`knowledge_only` names prune on the knowledge walks and nowhere else."""
+    pairs = [(name, kind) for name in names for kind in _WALK_KINDS]
+    return {pair: pair[1] != "code" or not knowledge_only for pair in pairs}
+
+
+def _collectable_answers(names: list[str]) -> dict[str, bool]:
+    return {name: collectable_root_name(name) for name in names}
+
+
+def test_the_vault_vocabulary_prunes_knowledge_and_not_somebody_elses_code(
+    vault: Path,
+):
+    """`gaps` is an OKF page type here and an ordinary directory anywhere else.
+
+    Losing it inside a foreign repository would be silent -- no refusal, no
+    `excluded_roots` entry, no line in the receipt. That is NEW-67's shape.
+    """
+    discovery = corpus_snapshot._Discovery(  # noqa: SLF001
+        vault,
+        max_files=10,
+        max_entries=10,
+        max_directories=10,
+        max_depth=4,
+        max_file_bytes=1024,
+        max_total_bytes=1024,
+        deadline=None,
+        include_archives=False,
+    )
+    vocabulary = sorted(corpus_snapshot.VAULT_SKIP_DIRECTORIES)
+    universal = ["__pycache__", ".github", "archive"]
+    measured = _pruned_by_kind(discovery, vocabulary + universal)
+    expected = _expected_by_kind(vocabulary, knowledge_only=True)
+    expected.update(_expected_by_kind(universal, knowledge_only=False))
+
+    assert measured == expected
+    assert _collectable_answers(vocabulary) == dict.fromkeys(vocabulary, True)

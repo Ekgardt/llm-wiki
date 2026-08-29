@@ -289,22 +289,58 @@ def admit_repository(
 # --------------------------------------------------------------------------
 
 
-def tracked_top_level_directories(root: Path) -> tuple[str, ...]:
-    """Top-level directories Git tracks, which is what belongs to the repository.
+def tracked_top_level_entries(root: Path) -> tuple[str, ...]:
+    """Top-level entries Git tracks, which is what belongs to the repository.
+
+    Entries, not directories. A code root may be a file -- `_add_code_root`
+    branches on `stat.S_ISDIR` and stores a regular file directly -- and the
+    files at a repository's root are the ones a question about a repository is
+    most likely to be about. Measured 2026-08-29: seven of them in the
+    neighbouring repository (`README.md`, `bootstrap.sh`, `crontab.txt`,
+    `env.template`, `onboarding.md`, `pyproject.toml`, `uv.lock`) and twelve
+    here, none of them reachable before. Hidden root files are pruned by the
+    same rule that prunes hidden directories, so they are named in
+    `excluded_roots` rather than dropped. See the 2026-08-29 note.
 
     Using the tracked set rather than a directory walk excludes build output,
     virtual environments and caches by construction, and honours `.gitignore`
     for free. Measured on the real second repository here: the tracked
     directories hold 963 files while the checkout is 2.2 GB.
     """
-    names = _top_level_names(_git_text(root, "ls-files", "-z"))
-    return tuple(sorted(name for name in names if (root / name).is_dir()))
+    listing = _git_text(root, "ls-files", "-z")
+    names = _top_level_directory_names(listing) | _top_level_file_names(listing)
+    # `lexists`, not `exists`: a broken symlink is still an entry, and it must
+    # reach `excluded_roots` under its own name rather than vanish from the
+    # answer between Git's listing and ours.
+    return tuple(sorted(name for name in names if os.path.lexists(root / name)))
 
 
-def _top_level_names(listing: str) -> set[str]:
+def _tracked_entries(listing: str) -> tuple[str, ...]:
+    return tuple(entry for entry in listing.split("\0") if entry)
+
+
+def _top_level_directory_names(listing: str) -> set[str]:
     """The first path component of every tracked file that lives in a directory."""
-    entries = (entry for entry in listing.split("\0") if entry)
-    return {entry.split("/", 1)[0] for entry in entries if "/" in entry}
+    return {entry.split("/", 1)[0] for entry in _tracked_entries(listing) if "/" in entry}
+
+
+def _top_level_file_names(listing: str) -> set[str]:
+    """Every tracked file that lives at the repository root."""
+    return {entry for entry in _tracked_entries(listing) if "/" not in entry}
+
+
+def _indexable_entry(root: Path, name: str) -> bool:
+    """A directory to walk or a file to read; a symlink is neither.
+
+    Git tracks a symlink as a file, and the collector refuses a symlinked path
+    outright, so admitting one as a root would refuse the *whole repository*
+    over one entry. It is left out instead -- and named in `excluded_roots`,
+    which is the difference between an omission and a silence.
+    """
+    path = root / name
+    if path.is_symlink():
+        return False
+    return path.is_dir() or path.is_file()
 
 
 @dataclass(frozen=True, slots=True)
@@ -327,9 +363,16 @@ def _collectable(name: str) -> bool:
     return collectable_root_name(name)
 
 
-def _partition(names: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+def _takeable(root: Path, name: str) -> bool:
+    """Both halves of "the collector will take this": the name, and the entry."""
+    return _collectable(name) and _indexable_entry(root, name)
+
+
+def _partition(
+    root: Path, names: tuple[str, ...]
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """(what the collector will take, what it will not) -- both named, neither guessed."""
-    taken = tuple(name for name in names if _collectable(name))
+    taken = tuple(name for name in names if _takeable(root, name))
     left = tuple(name for name in names if name not in taken)
     return taken, left
 
@@ -347,7 +390,7 @@ def _require_any_root(
         return
     raise _refuse(
         "repository_has_no_code_roots",
-        f"no indexable top-level directory is tracked in {root}"
+        f"no indexable top-level entry is tracked in {root}"
         + _pruned_note(excluded),
         directory=str(root),
         excluded_roots=list(excluded),
@@ -359,7 +402,7 @@ def _require_root_ceiling(selected: tuple[str, ...], root: Path) -> None:
         return
     raise _refuse(
         "repository_has_too_many_code_roots",
-        f"{len(selected)} tracked top-level directories exceed the "
+        f"{len(selected)} tracked top-level entries exceed the "
         f"{MAX_CODE_ROOTS} the collector accepts",
         directory=str(root),
         roots=len(selected),
@@ -388,10 +431,10 @@ def _require_collectable_request(
         return
     raise _refuse(
         "repository_root_not_collectable",
-        "the corpus walk prunes these directories, so indexing them would "
-        f"collect nothing: {', '.join(refused)}. Hidden, archive and skipped "
-        "directories are outside the corpus in every repository, this one "
-        "included.",
+        "the corpus walk will not take these, so indexing them would "
+        f"collect nothing: {', '.join(refused)}. Hidden and archive names are "
+        "outside the corpus in every repository, this one included, and a "
+        "symlinked entry is refused by the collector rather than followed.",
         directory=str(root),
         refused_roots=list(refused),
         admissible_roots=list(selected),
@@ -400,11 +443,11 @@ def _require_collectable_request(
 
 def _explicit_roots(requested: Iterable[str], root: Path) -> tuple[str, ...]:
     selected = tuple(sorted({str(name) for name in requested}))
-    missing = tuple(name for name in selected if not (root / name).is_dir())
+    missing = tuple(name for name in selected if not (root / name).exists())
     if missing:
         raise _refuse(
             "repository_root_missing",
-            f"requested root is not a directory in {root}: {', '.join(missing)}",
+            f"requested root does not exist in {root}: {', '.join(missing)}",
             directory=str(root),
             missing_roots=list(missing),
         )
@@ -413,14 +456,14 @@ def _explicit_roots(requested: Iterable[str], root: Path) -> tuple[str, ...]:
 
 def _requested_code_roots(root: Path, requested: Iterable[str]) -> CodeRoots:
     """A deliberately narrow index: exactly what was asked for, or a refusal."""
-    selected, refused = _partition(_explicit_roots(requested, root))
+    selected, refused = _partition(root, _explicit_roots(requested, root))
     _require_collectable_request(selected, refused, root)
     _require_root_count(selected, root)
     return CodeRoots(selected=selected, excluded=())
 
 
 def _discovered_code_roots(root: Path) -> CodeRoots:
-    """Every tracked top-level directory the collector will descend into.
+    """Every tracked top-level entry the collector will take -- directory or file.
 
     Git's tracked set is the repository, which is why this asks Git rather than
     a name allowlist or a build manifest: measured 2026-08-29, the manifest of
@@ -428,13 +471,13 @@ def _discovered_code_roots(root: Path) -> CodeRoots:
     top-level directories in its wheel target and four in its sdist target, and
     this vault's own manifest names none. See the 2026-08-29 note.
     """
-    selected, excluded = _partition(tracked_top_level_directories(root))
+    selected, excluded = _partition(root, tracked_top_level_entries(root))
     _require_root_count(selected, root, excluded)
     return CodeRoots(selected=selected, excluded=excluded)
 
 
 def selected_code_roots(root: Path, requested: Iterable[str] | None) -> CodeRoots:
-    """Explicit roots when given, otherwise every tracked top-level directory."""
+    """Explicit roots when given, otherwise every tracked top-level entry."""
     if requested is not None:
         return _requested_code_roots(root, requested)
     return _discovered_code_roots(root)
@@ -558,12 +601,45 @@ def _index_receipt(
         "excluded_roots": list(roots.excluded),
         "sources": len(snapshot.sources),
         "chunks": len(snapshot.chunks),
+        # What the collector did, and the cost of it, as a number rather than a
+        # label. Under a root it walks the filesystem, not Git's index, so an
+        # untracked file that is not pruned is collected. "Indexed" is not
+        # "tracked", and an answer that cannot say which it looked at is the
+        # same defect class as a silent omission. See the 2026-08-29 note.
+        "source_selection": "filesystem-walk",
+        "untracked_sources": _untracked_source_count(admission.root, snapshot),
         "rebuilt_sources": len(built.rebuilt_sources),
         "reused_sources": len(built.reused_sources),
         "ownership_checked": admission.ownership_checked,
         "seconds": round(seconds, 2),
         "disk_bytes": _generation_bytes(built.generation_path),
     }
+
+
+def _untracked_sources(root: Path, snapshot) -> tuple[str, ...]:
+    """Collected sources Git does not track, in the order the corpus holds them.
+
+    Measured 2026-08-29: zero on the neighbouring repository, because every
+    untracked file under a tracked root there is inside `__pycache__`, which
+    the walk already prunes. Zero is worth being able to see; anything else is
+    exactly what a reader needs to know and could not previously ask.
+    """
+    tracked = set(_tracked_entries(_git_text(root, "ls-files", "-z")))
+    collected = (source.record.relative_path for source in snapshot.sources)
+    return tuple(path for path in collected if path not in tracked)
+
+
+def _untracked_source_count(root: Path, snapshot) -> int | None:
+    """The count, or None when Git could not be asked.
+
+    A census must not fail a build that already succeeded, and `None` says
+    "not counted" where a zero would say "counted, and none" -- the whole point
+    of the field is that the two are different answers.
+    """
+    try:
+        return len(_untracked_sources(root, snapshot))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
 
 
 def _generation_bytes(generation_path: Path) -> int:

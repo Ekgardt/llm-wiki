@@ -190,8 +190,12 @@ def test_a_missing_directory_is_refused_before_anything_is_opened(vault, tmp_pat
 # -------------------------------------------------------------- code roots
 
 
-def test_tracked_top_level_directories_ignore_untracked_build_output(tmp_path):
-    """The tracked set is the point: it excludes caches and virtualenvs for free."""
+def test_tracked_top_level_entries_ignore_untracked_build_output(tmp_path):
+    """The tracked set is the point: it excludes caches and virtualenvs for free.
+
+    `top.py` is in the answer and `.venv` is not, which is the whole claim: the
+    unit is the tracked entry, not the tracked directory.
+    """
     import repository_index
 
     repository = _repository(
@@ -201,9 +205,10 @@ def test_tracked_top_level_directories_ignore_untracked_build_output(tmp_path):
     (repository / ".venv/lib").mkdir(parents=True)
     (repository / ".venv/lib/huge.py").write_text("y = 2\n", encoding="utf-8")
 
-    assert repository_index.tracked_top_level_directories(repository) == (
+    assert repository_index.tracked_top_level_entries(repository) == (
         "docs",
         "scripts",
+        "top.py",
     )
 
 
@@ -302,11 +307,28 @@ def test_an_explicit_root_that_does_not_exist_is_refused(tmp_path):
 # ------------------------------------------------------- index, list, detect
 
 
+_RECEIPT_FIELDS = (
+    "status",
+    "activated",
+    "code_roots",
+    "sources",
+    # The walk under a root is a filesystem walk, not a Git listing. The
+    # receipt says so, and counts what that cost, rather than leaving a reader
+    # to infer that "indexed" meant "tracked".
+    "source_selection",
+    "untracked_sources",
+)
+
+
 def _assert_receipt(receipt: dict) -> None:
-    assert receipt["status"] == "indexed"
-    assert receipt["activated"] is False
-    assert receipt["code_roots"] == ["scripts"]
-    assert receipt["sources"] == 1
+    assert {name: receipt[name] for name in _RECEIPT_FIELDS} == {
+        "status": "indexed",
+        "activated": False,
+        "code_roots": ["scripts"],
+        "sources": 1,
+        "source_selection": "filesystem-walk",
+        "untracked_sources": 0,
+    }
 
 
 def _assert_pointer_untouched_and_scope_resolves(state, repository, receipt) -> None:
