@@ -4023,21 +4023,6 @@ def _validated_generation_manifest(
     )
 
 
-# Which fields say *which* repository this is. The commit says *when*, and a
-# generation built one commit ago belongs to this repository just as much.
-_SCOPE_IDENTITY_FIELDS = (
-    "schema_version",
-    "repository_id",
-    "checkout_id",
-    "checkout_root",
-    "git_common_dir",
-)
-
-
-def _scope_identity(scope: dict) -> tuple:
-    return tuple(scope.get(field) for field in _SCOPE_IDENTITY_FIELDS)
-
-
 def _scope_state(manifest: dict, repository_scope: object) -> str:
     """Whether the active generation belongs here, and whether it is current.
 
@@ -4047,14 +4032,15 @@ def _scope_state(manifest: dict, repository_scope: object) -> str:
     signals. `superseded` is treated exactly like a mismatch by every caller —
     it only stops the report from saying something untrue.
     """
+    from repository_scope import same_repository_record
+
     recorded = manifest.get("repository_scope")
     if recorded is None:
         return "missing"
     current = repository_scope.as_dict()
     if recorded == current:
         return "current"
-    same_identity = _scope_identity(recorded) == _scope_identity(current)
-    return "superseded" if same_identity else "mismatched"
+    return "superseded" if same_repository_record(recorded, current) else "mismatched"
 
 
 def _corpus_extraction_state(
@@ -7000,9 +6986,23 @@ def _parent_matches_versions(
 def _parent_matches_identity(
     parent: dict, repository_scope: object, snapshot: object, extractor_version: str
 ) -> bool:
+    """Whether the active generation belongs to this checkout and this toolchain.
+
+    Identity, not equality -- the same distinction `_scope_state` already draws
+    above. A scope record carries `git_commit`, so comparing the whole record
+    made this gate false after every commit on a vault that commits its own
+    runtime, and the idle maintenance pass rebuilt the whole generation instead
+    of returning `current`. Whether the generation is *stale* is a different
+    question, asked by the source manifest and workspace digests in
+    `_parent_describes_snapshot`. See NEW-138.
+    """
+    from repository_scope import same_repository_record
+
     return (
         parent.get("schema_version") == "corpus-generation/v2"
-        and parent.get("repository_scope") == repository_scope.as_dict()
+        and same_repository_record(
+            parent.get("repository_scope"), repository_scope.as_dict()
+        )
         and _parent_matches_versions(parent, snapshot, extractor_version)
     )
 

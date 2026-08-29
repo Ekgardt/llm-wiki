@@ -41,7 +41,7 @@ import evidence_graph
 import generation_catalog
 from code_intelligence import VerifiedAnalysisBatch
 from reliable_memory import canonical_json_bytes, fsync_directory, fsync_file, read_runtime_bytes
-from repository_scope import RepositoryScope
+from repository_scope import RepositoryScope, same_repository_record
 
 GRAPH_SCHEMA_VERSION = evidence_graph.GRAPH_SCHEMA_VERSION
 DEFAULT_GRAPH_EXTRACTOR_VERSION = "graph-extractor/v1"
@@ -2068,12 +2068,22 @@ def _reuse_config_matches(
     reuse_config: IncrementalReuseConfig,
     repository_scope_object: Mapping[str, object] | None,
 ) -> bool:
-    """Records may be reused only when the parent was built the same way."""
+    """Records may be reused only when the parent was built the same way.
+
+    Identity, not equality. A `RepositoryScope` record carries `git_commit`,
+    and this vault commits its own runtime, so comparing the whole record meant
+    that one commit was enough to reuse nothing -- the fourth site of the same
+    mistake, after NEW-65, NEW-90 and NEW-111. The commit stays in the manifest
+    as provenance; what the parent was *built the same way* from is decided by
+    `reuse_config` above and by each source's own digest below. See NEW-138.
+    """
     if not _parent_reuse_config_matches(parent_manifest, reuse_config):
         return False
     if parent_generation_manifest is None:
         return False
-    return parent_generation_manifest.get("repository_scope") == repository_scope_object
+    return same_repository_record(
+        parent_generation_manifest.get("repository_scope"), repository_scope_object
+    )
 
 
 def _parent_reuse_config_matches(

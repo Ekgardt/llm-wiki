@@ -1,4 +1,4 @@
-"""The reuse gates ask the whole scope, so a commit alone defeats them.
+"""The reuse gates ask identity, so a commit alone no longer defeats them.
 
 Found while verifying NEW-111 on 2026-08-29. NEW-111, NEW-90 and NEW-65 were
 all one mistake: a recorded ``RepositoryScope`` compared whole against a
@@ -6,24 +6,24 @@ live-resolved one. A scope carries ``git_commit``, which is build-time
 provenance, and this vault commits its own runtime — so the comparison means
 "almost never".
 
-Two sites still make it, and neither is in this task's writable set, so the
-defect is pinned here as a strict xfail instead of fixed:
+Two sites made it, and both are fixed (NEW-138, 2026-08-29):
 
 * ``evidence_graph_builder._reuse_config_matches`` — the gate behind commit
-  ``283eb3a`` ("idle pass 643s to 3.9s"). Refusing it means the first build
-  after any commit reuses no records at all.
+  ``283eb3a`` ("idle pass 643s to 3.9s"). Refusing it meant the first build
+  after any commit reused no records at all.
 * ``doctor._parent_matches_identity`` — while ``doctor._scope_state`` a
-  thousand lines earlier already documents the distinction and answers
+  thousand lines earlier already documented the distinction and answered
   ``superseded``.
 
-Measured on the live vault with the product's own function and the real active
-manifest: live scope -> False, the generation's own scope -> True, the only
-difference being ``git_commit``. Each pin ships with a control that passes
-today, so an XPASS means the commit stopped mattering rather than the gate
-having stopped working. When either site is fixed these turn XPASS, fail the
-run under ``strict=True``, and must be un-marked.
+Both now ask ``repository_scope.same_repository_record``, the serialized-form
+twin of ``RepositoryScope.same_repository``. These four tests were pinned here
+as ``xfail(strict=True)`` while the files belonged to other agents; the fix
+turned both pins XPASS, and they are ordinary passing tests from 2026-08-29.
+Each still ships with its control, so a regression in the gate itself shows up
+as the control failing rather than as a silent pass.
 
 Evidence: docs/research/2026-08-29-new-111-was-fixed-before-it-was-filed.md
+and docs/research/2026-08-29-one-definition-of-repository-identity.md
 """
 
 from __future__ import annotations
@@ -31,8 +31,6 @@ from __future__ import annotations
 import sys
 from dataclasses import asdict
 from pathlib import Path
-
-import pytest
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS) not in sys.path:
@@ -108,11 +106,6 @@ def test_the_reuse_gate_holds_when_nothing_moved():
     assert _reuse_allowed(COMMIT_BUILT, COMMIT_BUILT) is True
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="evidence_graph_builder:2076 compares whole scopes, so a commit "
-    "alone defeats record reuse. Not fixed here: another agent owns the file.",
-)
 def test_the_reuse_gate_survives_a_commit_that_moved_nothing_else():
     """Same repository, same checkout, later commit — reuse must still apply."""
     assert _reuse_allowed(COMMIT_BUILT, COMMIT_NOW) is True
@@ -152,11 +145,50 @@ def test_doctor_identity_holds_when_nothing_moved():
     assert _doctor_identity_matches(COMMIT_BUILT, COMMIT_BUILT) is True
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="doctor:7005 compares whole scopes, while doctor:4041 already "
-    "answers `superseded` for this case. Not fixed here: another agent's file.",
-)
 def test_doctor_identity_survives_a_commit_that_moved_nothing_else():
     """`_scope_state` calls this case `superseded`; `_parent_matches_identity` should agree."""
     assert _doctor_identity_matches(COMMIT_BUILT, COMMIT_NOW) is True
+
+
+def test_a_record_that_names_no_repository_matches_nothing():
+    """Two unusable records are not evidence of the same repository.
+
+    The whole-record `==` this replaces said two empty dicts were the same
+    checkout. `record_identity` has no identity to offer for a record that
+    names neither a repository nor a checkout, so it matches nothing --
+    including another record just as damaged.
+    """
+    from repository_scope import record_identity, same_repository_record
+
+    assert record_identity({}) is None
+    assert record_identity("not a scope") is None
+    assert same_repository_record({}, {}) is False
+    assert same_repository_record({}, _scope_dict(COMMIT_NOW)) is False
+
+
+def test_absence_agrees_only_with_absence():
+    """A build with no scope reuses a parent with no scope, and nothing else."""
+    from repository_scope import same_repository_record
+
+    assert same_repository_record(None, None) is True
+    assert same_repository_record(None, _scope_dict(COMMIT_NOW)) is False
+    assert same_repository_record(_scope_dict(COMMIT_NOW), None) is False
+
+
+def test_the_object_form_and_the_serialized_form_give_one_answer():
+    """`RepositoryScope.identity` and `record_identity` read one field list."""
+    from repository_scope import IDENTITY_FIELDS, RepositoryScope, record_identity
+
+    record = _scope_dict(COMMIT_BUILT)
+    scope = RepositoryScope.from_dict(record)
+    assert record_identity(record) == scope.identity() == record_identity(scope)
+    assert "git_commit" not in IDENTITY_FIELDS
+
+
+def test_a_different_checkout_is_still_refused():
+    """Identity is weaker than equality, not absent: another checkout is not this one."""
+    from repository_scope import same_repository_record
+
+    here = _scope_dict(COMMIT_BUILT)
+    elsewhere = {**here, "checkout_id": "checkout:" + "e" * 64}
+    assert same_repository_record(here, elsewhere) is False
