@@ -2263,6 +2263,98 @@ def _require_expected_seal(
         raise ValueError("generation artifact does not match active manifest")
 
 
+# A generation is immutable after activation, so one query seals the same bytes
+# four or five times: once when it adopts the generation, and again before and
+# after every read. Each seal re-hashes every sealed artifact. Measured on the
+# live vault (38 MiB sealed set), that is 0.04-2.06 s per seal and 0.34-2.77 s
+# of a 10 s MCP budget, for a verdict that cannot differ between the first call
+# and the fifth.
+#
+# NEW-69 closed the same shape by memoising a verdict keyed by the digests the
+# caller had already paid for. That key is not available here: the digest *is*
+# the work, so it cannot key its own cache. The key that is free is the one the
+# seal tuple already carries — the artifact's stat identity.
+#
+# A write that keeps dev, ino, mode, size and mtime_ns still moves ctime_ns,
+# which no syscall can set: the kernel stamps it on every inode change,
+# including the utimensat that would forge mtime. What stat identity cannot
+# rule out is a second same-size write landing in the same clock tick as the
+# one that was hashed, which would carry the same stamp. Linux stamps inodes
+# from the coarse clock, one jiffy wide — 10 ms at the lowest supported
+# CONFIG_HZ — so an observation is kept only once the artifact's stamps are
+# older than that. This is git's racily-clean rule with the tick made explicit
+# instead of inferred from the index's own write time.
+_SEAL_STAMP_SETTLE_NS = 20_000_000
+_SEAL_OBSERVATION_LIMIT = 32
+_seal_observations: dict[tuple, str] = {}
+_seal_observation_lock = threading.Lock()
+
+
+def _stat_identity(status) -> tuple:
+    return (
+        status.st_dev,
+        status.st_ino,
+        status.st_mode,
+        status.st_size,
+        status.st_mtime_ns,
+        status.st_ctime_ns,
+    )
+
+
+def _seal_observation_key(
+    path: Path, identity: tuple, expected: dict[str, object] | None
+) -> tuple:
+    """Same file, same bytes on disk, same thing the manifest expected of it."""
+    wanted = expected or {}
+    return (str(path), identity, wanted.get("size"), wanted.get("sha256"))
+
+
+def _observed_checksum(key: tuple) -> str | None:
+    with _seal_observation_lock:
+        return _seal_observations.get(key)
+
+
+def _record_observed_checksum(key: tuple, checksum: str, *, racy: bool) -> None:
+    if racy:
+        return
+    with _seal_observation_lock:
+        if len(_seal_observations) >= _SEAL_OBSERVATION_LIMIT:
+            _seal_observations.clear()
+        _seal_observations[key] = checksum
+
+
+def _reset_seal_observations() -> None:
+    """Tests that rewrite an artifact in place need the next seal to re-hash."""
+    with _seal_observation_lock:
+        _seal_observations.clear()
+
+
+def _hashed_seal(
+    path: Path,
+    before,
+    expected: dict[str, object] | None,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> tuple:
+    began_ns = time.time_ns()
+    with path.open("rb") as source:
+        size, checksum, opened, after_open = _hashed_open_file(
+            source, before, deadline, cancelled
+        )
+    after = path.lstat()
+    _require_stable_identity(opened, after_open, after)
+    _require_expected_seal(expected, size, checksum)
+    identity = _stat_identity(after)
+    _record_observed_checksum(
+        _seal_observation_key(path, identity, expected),
+        checksum,
+        racy=max(after.st_mtime_ns, after.st_ctime_ns)
+        > began_ns - _SEAL_STAMP_SETTLE_NS,
+    )
+    return (*identity, checksum)
+
+
 def _sealed_file(
     path: Path,
     expected: dict[str, object] | None = None,
@@ -2272,21 +2364,12 @@ def _sealed_file(
 ) -> tuple:
     _check_generation_stop(deadline, cancelled)
     before = _require_regular_file(path)
-    with path.open("rb") as source:
-        size, checksum, opened, after_open = _hashed_open_file(
-            source, before, deadline, cancelled
-        )
-    after = path.lstat()
-    _require_stable_identity(opened, after_open, after)
-    _require_expected_seal(expected, size, checksum)
-    return (
-        after.st_dev,
-        after.st_ino,
-        after.st_mode,
-        after.st_size,
-        after.st_mtime_ns,
-        after.st_ctime_ns,
-        checksum,
+    identity = _stat_identity(before)
+    observed = _observed_checksum(_seal_observation_key(path, identity, expected))
+    if observed is not None:
+        return (*identity, observed)
+    return _hashed_seal(
+        path, before, expected, deadline=deadline, cancelled=cancelled
     )
 
 
