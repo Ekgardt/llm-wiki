@@ -871,7 +871,12 @@ def _operation_positions(
 
 
 def _valid_plan_hash(row: sqlite3.Row, state: str) -> bool:
-    if state == "preparing" and row["plan_hash"] == "":
+    """A plan hash is absent exactly while no plan was ever computed.
+
+    `_promoted_for_recovery` discards straight out of `preparing`, so a
+    discarded row may still carry the empty string the insert wrote.
+    """
+    if row["plan_hash"] == "" and state in {"preparing", "discarded"}:
         return True
     return _is_digest(row["plan_hash"])
 
@@ -918,15 +923,31 @@ def _valid_transaction_row(row: sqlite3.Row, state: str) -> bool:
     )
 
 
-def _transaction_row_corrupt(
+def _operation_shape_corrupt(
     row: sqlite3.Row, state: str, operation_positions: dict[str, list[int]]
 ) -> bool:
-    if not _valid_transaction_row(row, state):
-        return True
+    """Whether a complete operation read contradicts this transaction's record."""
     positions = operation_positions.get(row["id"], [])
     if positions != list(range(len(positions))):
         return True
     return state not in {"preparing", "discarded"} and not positions
+
+
+def _transaction_row_corrupt(
+    row: sqlite3.Row, state: str, operation_positions: dict[str, list[int]] | None
+) -> bool:
+    """Corrupt on evidence only.
+
+    `operation_positions` is None when the operation scan hit the read
+    ceiling. The rows past the ceiling were never read, so a transaction that
+    appears to own no operations may simply own operations nobody looked at.
+    An incomplete read abstains instead of accusing.
+    """
+    if not _valid_transaction_row(row, state):
+        return True
+    if operation_positions is None:
+        return False
+    return _operation_shape_corrupt(row, state, operation_positions)
 
 
 def _committed_within_undo_window(
@@ -975,7 +996,7 @@ def _scan_one_transaction_row(
     states: dict[str, int],
     details: dict,
     codes: set[str],
-    operation_positions: dict[str, list[int]],
+    operation_positions: dict[str, list[int]] | None,
     transaction_columns: set[str],
     cutoff: datetime,
     state_root: Path,
@@ -984,6 +1005,7 @@ def _scan_one_transaction_row(
     state = row["state"]
     if not isinstance(state, str) or state not in TRANSACTION_STATES:
         details["deletion_codes"].append("transaction_state_unknown")
+        details["state_invalid"] = True
         return False
     states[state] += 1
     _collect_error_code(database, row, state, transaction_columns, codes)
@@ -995,7 +1017,7 @@ def _scan_one_transaction_row(
 def _scan_transaction_rows(
     database: sqlite3.Connection,
     transaction_rows: list[sqlite3.Row],
-    operation_positions: dict[str, list[int]],
+    operation_positions: dict[str, list[int]] | None,
     transaction_columns: set[str],
     *,
     state_root: Path,
@@ -1027,13 +1049,19 @@ def _scan_transaction_rows(
 def _bounded_operational_rows(
     database: sqlite3.Connection, query: str, details: dict, truncation_code: str
 ) -> list[sqlite3.Row]:
+    """Rows up to the read ceiling, recording a truncation as a read limit.
+
+    A truncated read refuses `run/` deletion — it cannot prove the table is
+    safe to lose — but it alleges nothing about the rows it never saw.
+    """
     rows = database.execute(
         query + " LIMIT ?", (MAX_OPERATIONAL_ROWS + 1,)
     ).fetchall()
     if len(rows) <= MAX_OPERATIONAL_ROWS:
         return rows
     details["codes"].append(truncation_code)
-    details["deletion_codes"].append("transaction_state_unknown")
+    details["truncated_scans"].append(truncation_code)
+    details["deletion_codes"].append("transaction_scan_incomplete")
     return rows[:MAX_OPERATIONAL_ROWS]
 
 
@@ -1186,10 +1214,13 @@ def _scan_transaction_tables(
     )
     known_ids = _known_transaction_ids(transaction_rows)
     operation_positions, corrupt = _operation_positions(operation_rows, known_ids)
+    complete = (
+        "transaction_operation_scan_truncated" not in details["truncated_scans"]
+    )
     codes, rows_corrupt = _scan_transaction_rows(
         database,
         transaction_rows,
-        operation_positions,
+        operation_positions if complete else None,
         transaction_columns,
         state_root=state_root,
         now=now,
@@ -1205,6 +1236,7 @@ def _scan_transaction_tables(
     if corrupt or rows_corrupt or inconsistent:
         details["codes"].append("transaction_metadata_corrupt")
         details["deletion_codes"].append("transaction_state_corrupt")
+        details["state_invalid"] = True
 
 
 def _operation_columns(
@@ -1515,10 +1547,7 @@ def _transaction_result(details: dict, states: dict[str, int]) -> dict:
         + states["conflicted"]
         + details["quarantined_unresolved"]
     )
-    invalid_state = any(
-        code in details["deletion_codes"]
-        for code in ("transaction_state_unknown", "transaction_state_corrupt")
-    )
+    invalid_state = bool(details["state_invalid"])
     _append_state_deletion_codes(details, states)
     _append_live_deletion_codes(details)
     message = "Transaction state is healthy."
@@ -1545,6 +1574,8 @@ def _empty_transaction_details() -> tuple[dict, dict[str, int]]:
         "live_maintenance_owners": 0,
         "quarantined_unresolved": 0,
         "read_error": False,
+        "state_invalid": False,
+        "truncated_scans": [],
         "deletion_codes": [],
     }
     return details, states

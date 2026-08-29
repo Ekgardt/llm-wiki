@@ -86,3 +86,4 @@ question is retention, not liveness.
 - [[knowledge/notes/v4-reliability-contracts-decision]] — the reliability
   contracts this stays inside.
 - [[knowledge/notes/self-resolving-health-findings-decision]] — how a refused attempt stops being an open finding once its work happened.
+- [[knowledge/notes/bounded-read-is-not-corruption-decision]] — why the quarantine record this retry leaves behind is still an unresolved finding, and what was refused rather than relax it.
