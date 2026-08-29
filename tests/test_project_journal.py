@@ -748,11 +748,20 @@ def test_absent_journal_under_missing_project_directory_is_valid(
     _assert_first_checkpoint_materialized(project, receipt)
 
 
-def test_prospective_event_count_allows_limit_and_rejects_next_without_writes(
+def test_a_full_journal_is_sealed_and_the_next_event_lands(
     vault: Path,
     state_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    """A full journal used to be the end of the project's record.
+
+    Appending past the bound was refused and nothing rotated, so the refusal
+    was permanent. Measured on the live vault 2026-08-29:
+    `knowledge/projects/llm-wiki/journal.md` held exactly the bound, 4 698
+    checkpoint events waited behind that refusal, `run/state.json` reached
+    10 MB, and the failure repeated every ten seconds into a log no health
+    check read.
+    """
     monkeypatch.setattr(project_journal, "MAX_JOURNAL_EVENTS", 2)
     store = ProjectStore(vault, state_root)
 
@@ -760,18 +769,98 @@ def test_prospective_event_count_allows_limit_and_rejects_next_without_writes(
     second = store.checkpoint(
         "demo", checkpoint_event("evt-2", "limit:event-2"), "agent-a"
     )
+    third = store.checkpoint(
+        "demo", checkpoint_event("evt-3", "limit:event-3"), "agent-a"
+    )
+
     journal = vault / "knowledge/projects/demo/journal.md"
-    projection = vault / "knowledge/projects/demo/state.md"
-    before = (journal.read_bytes(), projection.read_bytes())
+    segment = vault / "knowledge/projects/demo/journal.000001-000002.md"
+    assert [first.sequence, second.sequence, third.sequence] == [1, 2, 3]
+    assert segment.is_file()
+    _assert_sealed_and_live(segment, journal)
+
+
+def _sequences(path: Path) -> list[int]:
+    events = project_journal.parse_journal_events("demo", path.read_bytes())
+    return [int(item["sequence"]) for item in events]
+
+
+def _assert_sealed_and_live(segment: Path, journal: Path) -> None:
+    """The sealed range, and a live journal that opens with its restated fold."""
+    live = project_journal.parse_journal_events("demo", journal.read_bytes())
+    assert _sequences(segment) == [1, 2]
+    assert _sequences(journal) == [2, 3]
+    assert live[0]["trigger"] == "journal_rotation"
+
+
+def test_rotation_does_not_change_the_projection(
+    vault: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The whole point: the fold of the live segment must equal the fold of all."""
+    monkeypatch.setattr(project_journal, "MAX_JOURNAL_EVENTS", 1000)
+    store = ProjectStore(vault, state_root)
+    for index in range(1, 4):
+        store.checkpoint(
+            "demo", checkpoint_event(f"evt-{index}", f"rot:event-{index}"), "agent-a"
+        )
+    journal = vault / "knowledge/projects/demo/journal.md"
+    whole = project_journal.parse_journal_events("demo", journal.read_bytes())
+    expected = store.render_state(whole, _validated=True)
+
+    monkeypatch.setattr(project_journal, "MAX_JOURNAL_EVENTS", 3)
+    store.checkpoint("demo", checkpoint_event("evt-4", "rot:event-4"), "agent-a")
+
+    live = project_journal.parse_journal_events("demo", journal.read_bytes())
+    rolled = store.render_state(live[:1], _validated=True)
+    assert _state_body(rolled) == _state_body(expected)
+
+
+def _state_body(state: bytes) -> list[str]:
+    """The rendered sections, without the sequence line that legitimately moves."""
+    return [
+        line
+        for line in state.decode("utf-8").splitlines()
+        if not line.startswith("last_applied_sequence:")
+    ]
+
+
+def test_a_sealed_segment_is_never_overwritten(
+    vault: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Create, never replace: a segment that could be rewritten is not sealed."""
+    monkeypatch.setattr(project_journal, "MAX_JOURNAL_EVENTS", 2)
+    store = ProjectStore(vault, state_root)
+    store.checkpoint("demo", checkpoint_event(), "agent-a")
+    store.checkpoint("demo", checkpoint_event("evt-2", "seal:event-2"), "agent-a")
+    segment = vault / "knowledge/projects/demo/journal.000001-000002.md"
+    segment.parent.mkdir(parents=True, exist_ok=True)
+    segment.write_bytes(b"# occupied\n")
+
+    with pytest.raises(Exception):
+        store.checkpoint("demo", checkpoint_event("evt-3", "seal:event-3"), "agent-a")
+
+    assert segment.read_bytes() == b"# occupied\n"
+
+
+def test_the_byte_bound_still_refuses_without_writing(
+    vault: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Rotation answers a full count, not an oversized file; that bound stands."""
+    monkeypatch.setattr(project_journal, "MAX_JOURNAL_BYTES", 200)
+    store = ProjectStore(vault, state_root)
+    journal = vault / "knowledge/projects/demo/journal.md"
 
     with pytest.raises(ProjectJournalReadError) as failure:
-        store.checkpoint(
-            "demo", checkpoint_event("evt-3", "limit:event-3"), "agent-a"
-        )
+        store.checkpoint("demo", checkpoint_event(), "agent-a")
 
-    assert [first.sequence, second.sequence] == [1, 2]
-    assert failure.value.code == "too_many_events"
-    assert (journal.read_bytes(), projection.read_bytes()) == before
+    assert failure.value.code == "too_large"
+    assert not journal.exists()
 
 
 def _assert_rejected_without_journal(too_small, journal_path) -> None:
