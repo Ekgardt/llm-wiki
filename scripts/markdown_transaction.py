@@ -4678,10 +4678,7 @@ class MarkdownCoordinator:
         token = uuid.uuid4().hex
         with self._connect() as database, begin_immediate(database):
             registry.require(database, owner)
-            if database.execute(
-                "SELECT 1 FROM intent_fences WHERE intent_id=?", (intent_id,)
-            ).fetchone() is not None:
-                raise RuntimeError("intent_fenced")
+            self._reclaim_dead_intent_fence(database, registry, intent_id)
             epoch = int(
                 database.execute(
                     """INSERT INTO intent_fence_epochs(intent_id,last_epoch)
@@ -4718,6 +4715,55 @@ class MarkdownCoordinator:
             if inserted != 1:
                 raise RuntimeError("intent_fence_failed")
         return IntentFence(intent_id, mode, token, epoch, owner, expires_at)
+
+    @staticmethod
+    def _reclaim_dead_intent_fence(
+        database: sqlite3.Connection, registry: object, intent_id: str
+    ) -> None:
+        """Take over one intent's fence row when its holder is provably dead.
+
+        `intent_fences.intent_id` is the primary key, so exactly one row can
+        exist per intent, and this refused on the mere presence of that row —
+        it had no expiry check at all. The row is keyed by `intent_id`, by
+        neither `role` nor `scope`, so the registry, which reclaims a dead
+        owner by `(role, scope)`, cannot reach it from a caller holding a
+        different owner. `capture_task_fences` hands the *worker's* own owner
+        to a fence keyed by the intent, so a worker killed mid-capture-task
+        left a row that adoption — which takes `(capture, intent:<id>)` — could
+        never reach, and the intent was wedged for good.
+
+        Measured on unmodified code 2026-08-29: a dead worker holding a
+        worker-mode fence answered `RuntimeError: intent_fenced` and the row
+        was still there after the pass. A dead *capture publisher* holding its
+        own fence was already adopted 1 of 1, because publisher and adopter
+        take the same owner and the registry deletes the fence as one of that
+        owner's projections — so the wedge is the cross-owner case, not the
+        publisher case named when `NEW-136` closed.
+
+        The proof is the registry's own `reclaimable_dead_owner`, not a second
+        answer to the same question. Doubt refuses closed under the name
+        callers already report: a row that cannot be proved dead — a live
+        holder, or a probe that cannot settle — leaves `intent_fenced`
+        standing. The binding projection goes with the fence and only with the
+        fence, exactly the pairing `release_intent_fence` performs, because a
+        binding without its fence is a shape violation the coordinator counts.
+        """
+        row = database.execute(
+            "SELECT * FROM intent_fences WHERE intent_id=?", (intent_id,)
+        ).fetchone()
+        if row is None:
+            return
+        if not registry.reclaimable_dead_owner(row):
+            raise RuntimeError("intent_fenced")
+        database.execute(
+            """DELETE FROM capture_binding_projections
+               WHERE intent_id=? AND intent_fence_token=? AND intent_fence_epoch=?""",
+            (intent_id, row["token"], row["fencing_epoch"]),
+        )
+        database.execute(
+            "DELETE FROM intent_fences WHERE intent_id=? AND token=?",
+            (intent_id, row["token"]),
+        )
 
     def release_intent_fence(self, fence: IntentFence) -> None:
         if not isinstance(fence, IntentFence):
