@@ -1,0 +1,217 @@
+{
+  "version": "code-parity-v1",
+  "directory": "/home/user/llm-wiki",
+  "budget_seconds": 60.0,
+  "tasks": [
+    {
+      "id": "T01",
+      "kind": "who-calls",
+      "question": "Which production functions call fuse_rrf?",
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 7.207,
+        "tokens": 44,
+        "answer_excerpt": "function: fuse_rrf\ndirection: inbound\ncallers_total: 1\ncallers: 1  (rows: name hop; qn = group prefix + \".\" + name)\nhome-user-llm-wiki.scripts.retrieval:\n  _fused_candidates 1\n"
+      }
+    },
+    {
+      "id": "T02",
+      "kind": "who-calls",
+      "question": "Which functions call write_session_evidence?",
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 4.357,
+        "tokens": 87,
+        "answer_excerpt": "function: write_session_evidence\ndirection: inbound\ncallers_total: 4\ncallers: 4  (rows: name hop; qn = group prefix + \".\" + name)\nhome-user-llm-wiki.benchmark.longmemeval_vault:\n  _ingest_one 1\nhome-user-llm-wiki.scripts.backfill_sessions:\n  _write_one 1\nhome-user-llm-wiki.scripts.flush_memory:\n  _keep_session_record 1\n  _keep_transcript_record 1\n"
+      }
+    },
+    {
+      "id": "T03",
+      "kind": "what-does-x-call",
+      "question": "Which project functions does fuse_rrf call?",
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 4.529,
+        "tokens": 75,
+        "answer_excerpt": "function: fuse_rrf\ndirection: outbound\ncallees_total: 5\ncallees: 5  (rows: name hop; qn = group prefix + \".\" + name)\nhome-user-llm-wiki.scripts.provenance:\n  curated_pages_first 1\nhome-user-llm-wiki.scripts.retrieval:\n  _accumulate_backend 1\n  _fused_candidate 1\n  _fusion_weights 1\n  _weigh_by_trust 1\n"
+      }
+    },
+    {
+      "id": "T04",
+      "kind": "find-symbol-definition",
+      "question": "Where is _page_diverse defined?",
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 3.136,
+        "tokens": 107,
+        "answer_excerpt": "total: 3\nsearch_mode: bm25\nresults: 3  (cols: qn label file lines rank)\n  home-user-llm-wiki.scripts.retrieval._page_diverse Function scripts/retrieval.py 2765-2785 -25.42\n  home-user-llm-wiki.scripts.search_memory._page_diverse_order Function scripts/search_memory.py 3952-3972 -24.75\n  home-user-llm-wiki.tests.test_retrieval.test_page_diverse_order_drops_nothing Function tests/test_retrieval.py 652-657 -23.68\nhas_more: false\n"
+      }
+    },
+    {
+      "id": "T05",
+      "kind": "find-symbol-definition",
+      "question": "Where is the constant EDITORIAL_NAMES defined?",
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered",
+          "answered"
+        ],
+        "grade": "wrong",
+        "seconds": 9.079,
+        "tokens": 219,
+        "answer_excerpt": "total: 0\nsearch_mode: bm25\nresults: 0  (cols: qn label file lines rank)\nhas_more: false\n\nresults: 5  (cols: qn label file lines matches in out)\n  home-user-llm-wiki.scripts.lint_memory._frontmatter_of Function scripts/lint_memory.py 532-543 \"534\" 4 0\n  home-user-llm-wiki.scripts.lookup_mode.count_wiki_pages Function scripts/lookup_mode.py 42-58 46;56 3 1\n  home-user-llm-wiki.scripts.corpus_snapshot._Discovery._eligible Method scripts/corpus_snapshot.py 1397-1402 \"1399\" 2 0\n  home-user-llm-wiki.scripts.lint_memory.check_missing_frontmatter Function scripts/lint_memory.py 517-529 \"521\" 2 2\n  home-user-llm-wiki.scripts.lint_memory._expects_an_index_entry Function scripts/lint_memory.py 331-340 \"332\" 1 2\ndirs: 5  (cols: dir hits)\n  scripts/ 21\n  tests/ 2\n  benchmark/ 7\n  docs/ 2\n  knowledge/ 4\ntotal_grep_matches: 50\ntotal_results: 36\nraw_match_count: 0\nelapsed_ms: 32\n"
+      }
+    },
+    {
+      "id": "T06",
+      "kind": "find-dead-code",
+      "question": "Is _flush_started (scripts/integration_adapter.py) dead code?",
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 4.149,
+        "tokens": 30,
+        "answer_excerpt": "function: _flush_started\ndirection: inbound\ncallers_total: 0\ncallers: 0  (rows: name hop; qn = group prefix + \".\" + name)\n"
+      }
+    },
+    {
+      "id": "T07",
+      "kind": "find-dead-code",
+      "question": "Is _search_backends (scripts/search_memory.py) dead code?",
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 3.858,
+        "tokens": 31,
+        "answer_excerpt": "function: _search_backends\ndirection: inbound\ncallers_total: 0\ncallers: 0  (rows: name hop; qn = group prefix + \".\" + name)\n"
+      }
+    },
+    {
+      "id": "T08",
+      "kind": "impact-of-changing-x",
+      "question": "Which modules import page_status (and are therefore touched by changing it)?",
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 5.135,
+        "tokens": 259,
+        "answer_excerpt": "rows: 10  (cols: a.qualified_name b.qualified_name)\n  home-user-llm-wiki.scripts.archive_stale.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.scripts.archive_stale.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.scripts.corpus_snapshot.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.scripts.lint_memory.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.scripts.page_facts.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.scripts.rebuild_memory_index.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.scripts.search_memory.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.scripts.search_memory.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.tests.test_page_status.py.__file__ home-user-llm-wiki.scripts.page_status.current_status_sql\n  home-user-llm-wiki.tests.test_page_status.py.__file__ home-user-llm-wiki.scripts.page_status.is_retired\ntotal: 10\n"
+      }
+    },
+    {
+      "id": "T09",
+      "kind": "architecture-of-module",
+      "question": "Which project modules does scripts/retrieval.py depend on?",
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 4.605,
+        "tokens": 298,
+        "answer_excerpt": "rows: 20  (cols: b.qualified_name)\n  home-user-llm-wiki.scripts.corpus_snapshot\n  home-user-llm-wiki.scripts.memory_state\n  home-user-llm-wiki.tests.test_memory_queue.queue\n  home-user-llm-wiki.scripts.markdown_transaction.MarkdownChange.replace\n  home-user-llm-wiki.scripts.provenance\n  home-user-llm-wiki.benchmark.selective_forgetting_vault.field\n  home-user-llm-wiki.scripts.reliable_memory.validate_schema\n  home-user-llm-wiki.benchmark.retrieval_paths\n  home-user-llm-wiki.scripts.contextual_retrieval.generate_context\n  home-user-llm-wiki.scripts.contextual_retrieval.get_context\n  home-user-llm-wiki.scripts.corpus_snapshot.CapturedSource\n  home-user-llm-wiki.scripts.corpus_snapshot.CorpusSnapshot\n  home-user-llm-wiki.scripts.corpus_snapshot.SnapshotPolicy\n  home-user-llm-wiki.scripts.corpus_snapshot.SourceMetadata\n  home-user-llm-wiki.scripts.corpus_snapshot.SourceRecord\n  home-user-llm-wiki.scripts.context_compiler.compile_context\n  home-user-llm-wiki.scripts.retrieval.candidates_to_legacy\n  home-user-llm-wiki.scripts.retrieval.expand_evidence_graph\n  home-user-llm-wiki.scripts.retrieval.retrieve\n  home-user-llm-wiki.scripts.reliable_memory.SchemaValidationError\ntotal: 20\n"
+      }
+    },
+    {
+      "id": "T10",
+      "kind": "multi-hop",
+      "question": "Which functions reach fuse_rrf within two caller hops (callers, and callers of callers)?",
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 4.143,
+        "tokens": 47,
+        "answer_excerpt": "function: fuse_rrf\ndirection: inbound\ncallers_total: 2\ncallers: 2  (rows: name hop; qn = group prefix + \".\" + name)\nhome-user-llm-wiki.scripts.retrieval:\n  _fused_candidates 1\n  retrieve 2\n"
+      }
+    },
+    {
+      "id": "T11",
+      "kind": "who-calls",
+      "question": "Which retrieval-path function calls source_type_weight?",
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 4.335,
+        "tokens": 46,
+        "answer_excerpt": "function: source_type_weight\ndirection: inbound\ncallers_total: 1\ncallers: 1  (rows: name hop; qn = group prefix + \".\" + name)\nhome-user-llm-wiki.scripts.retrieval:\n  _weigh_by_trust 1\n"
+      }
+    },
+    {
+      "id": "T12",
+      "kind": "architecture-summary",
+      "question": "Summarize the repository architecture: what are its main modules and entry points?",
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "wrong",
+        "seconds": 3.515,
+        "tokens": 821,
+        "answer_excerpt": "project: home-user-llm-wiki\naspects_hint: \"Summary view (default). More on request via aspects:[...] — structure, dependencies, routes, hotspots, boundaries, layers, clusters, file_tree — or [\\\"all\\\"] for everything.\"\ntotal_nodes: 28991\ntotal_edges: 155138\nnode_labels: 14  (cols: label count)\n  Function 15831\n  Variable 5851\n  Method 2816\n  Section 2175\n  File 757\n  Module 755\n  Class 699\n  Folder 44\n  EnvVar 38\n  Decorator 13\n  Route 9\n  Branch 1\n  Interface 1\n  Project 1\nedge_types: 22  (cols: type count)\n  CALLS 52762\n  DEFINES 33181\n  USAGE 27990\n  WRITES 17002\n  TESTS 13743\n  DEFINES_METHOD 2811\n  DECORATES 1629\n  IMPORTS 1615\n  FILE_CHANGES_WITH 836\n  RAISES 827\n  CONFIGURES 781\n  CONTAINS_FILE 757\n  SEMANTICALLY_RELATED 410\n  CALL_REFERENCE 296\n  THROWS 210\n  SIMILAR_TO 201\n  CONTAINS_FOLDER 40\n  INHERITS 28\n  HTTP_CALLS 10\n  OVERRIDE 7\n  HAS_BRANCH 1\n  TESTS_FILE 1\nlanguages: 6  (cols: language files)\n  Python 423\n  TOML 4\n  YAML 2\n  TypeScript 2\n  Bash 1\n  JavaScript 1\npackages: 15  (cols: name nodes fan_in fan_out)\n  memory_queue 874 0 0\n  doctor 597 0 0\n  pyright_session 453 0 0\n  install_control 345 0 0\n  workspace_revision 321 0 0\n  compile_memory 302 0 0\n  test_mcp_server 290 0 0\n  code_graph 255 0 0\n  corpus_snapshot 220 0 0\n  retrieval 212 0 0\n  installed_memory_repair 145 0 0\n  contradiction_pipeline 136 0 0\n  test_code_graph 131 0 0\n  test_code_navigation_benchmark 129 0 0\n  test_generation_catalog 122 0 0\nentry_points: 20  (cols: qn file)\n  home-user-llm-wiki.benchmark.build_conflict_fixture.main benchmark/build_conflict_fixture.py\n  home-user-llm-wiki.benchmark.build_flush_corpus.main benchmark/build_flush_corpus.py\n  home-user-llm-wiki.benchmark.consolidation_vault.main benchmark/consolidation_vault.py\n  home-user-llm-wiki.benchmark.durability_child.main benchmark/durability_child.py\n  home-user-llm-wiki.benchmark.fixtures.comparative_adapter_fixture.main benchmark/fixtures/comparative_adapter_fixture.py\n  home-user-llm-wiki.benchmark.generate_python_qualification.main benchmark/generate_python_qualification.py\n  home-user-llm-wiki.benchmark.longmemeval_judge.main benchmark/longmemeval_judge.py\n  home-user-llm-wiki.benchmark.longmemeval_vault.main benchmark/longmemeval_vault.py\n  home-user-llm-wiki.benchmark.run_benchmark.main benchmark/run_benchmark.py\n  home-user-llm-wiki.benchmark.run_code_navigation.main benchmark/run_code_navigation.py\n  home-user-llm-wiki.benchmark.run_code_parity.main benchmark/run_code_parity.py\n  home-user-llm-wiki.benchmark.run_comparative.main benchmark/run_comparative.py\n  home-user-llm-wiki.benchmark.run_conflict_resolution.main benchmark/run_conflict_resolution.py\n  home-user-llm-wiki.benchmark.run_consolidation.main benchmark/run_consolidation.py\n  home-user-llm-wiki.benchmark.run_contradiction_benchmark.main benchmark/run_contradiction_benchmark.py\n  home-user-llm-wiki.benchmark.run_durability.main benchmark/run_durability.py\n  home-user-llm-wiki.benchmark.run_flush_classification.main benchmark/run_flush_classification.py\n  home-user-llm-wiki.benchmark.run_lift_attribution.main benchmark/run_lift_attribution.py\n  home-user-llm-wiki.benchmark.run_longmemeval.main benchmark/run_longmemeval.py\n  home-user-llm-wiki.benchmark.run_retrieval_v2.main benchmark/run_retrieval_v2.py\n"
+      }
+    },
+    {
+      "id": "T13",
+      "kind": "community-naming",
+      "question": "Which module community does fuse_rrf belong to?",
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "wrong",
+        "seconds": 3.996,
+        "tokens": 375,
+        "answer_excerpt": "project: home-user-llm-wiki\ntotal_nodes: 28991\ntotal_edges: 155138\nclusters: 12  (cols: id label members cohesion top_nodes packages edge_types)\n  2 scripts 780 0.6742 get;get;InstallControlError;dict;_transaction_resources scripts;dict;tests;benchmark CALLS\n  15 scripts 749 0.7407 QueueOperationError;sha256_bytes;int;_timestamp;begin_immediate scripts;int;tests CALLS\n  10 scripts 616 0.463 len;list;range;_archiver;find_callers scripts;len;list;range;tests CALLS\n  1 tests 512 0.4975 str;_run_capture_with_stdin;_vault;_repository;_check_stopped scripts;str;tests;benchmark CALLS\n  17 scripts 450 0.7408 pop;release;ProtocolViolation;request;_validated_deadline list;scripts;benchmark;tests CALLS\n  0 scripts 448 0.6907 append;_result;_safe_kind;_deadline_reached;_run_deletion_check scripts;tests CALLS\n  33 tests 308 0.6621 canonical_json_bytes;_catalog;_scope;create_pyright_fixture;_install_node_probe scripts;tests CALLS\n  4 scripts 305 0.4624 append;join;extend;_rel;_page_checks scripts;list;tests;benchmark CALLS\n  32 scripts 263 0.8021 _check_stop;_read_owned_file;_git_output;_is_reparse;_verify_revision_pass scripts;tests CALLS\n  3 scripts 242 0.6414 update;_kind;_known_network_path;validate_state_root;open_readonly_operational_db scripts;tests;install CALLS\n  35 scripts 237 0.7179 normalize;split_blocks;extract;verify_literal;raw_claim scripts;tests CALLS\n  18 tests 235 0.8018 resolve_repository_scope;close;_navigation;_revision;NavigationRequest scripts;tests;benchmark CALLS\n"
+      }
+    }
+  ],
+  "summary": {
+    "cbm": {
+      "correct": 10,
+      "partial": 0,
+      "wrong": 3,
+      "statuses": {
+        "answered": 13
+      },
+      "total_seconds": 62.04,
+      "total_tokens": 2439,
+      "wrong_but_confident": 3,
+      "operator_attention_events": 0
+    }
+  }
+}
