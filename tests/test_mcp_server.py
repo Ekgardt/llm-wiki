@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from lsp_profiles import PYRIGHT_PROFILE
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
@@ -4591,14 +4592,17 @@ def test_timed_out_worker_cannot_recreate_manager_after_final_close(
 
     class Session:
         identity = object()
+        profile = PYRIGHT_PROFILE
+        degradation_codes = ()
 
     class Manager:
         def __init__(self, *, state_root: Path) -> None:
             del state_root
             constructed.append(self)
 
-        def get(self, _scope, *, deadline: float):
+        def get(self, _scope, *, deadline: float, profile=PYRIGHT_PROFILE):
             assert deadline > time.monotonic()
+            assert profile is PYRIGHT_PROFILE
             return Session()
 
         def close_all(self, *, deadline: float) -> None:
@@ -4798,13 +4802,17 @@ def test_every_precise_route_builds_one_request_and_one_renderer_window(
     captures: dict[str, object] = {"requests": [], "renders": []}
 
     class Session:
+        profile = PYRIGHT_PROFILE
+        degradation_codes = ()
+
         @property
         def identity(self):
             return identity
 
     class Manager:
-        def get(self, scope, *, deadline):
+        def get(self, scope, *, deadline, profile=PYRIGHT_PROFILE):
             captures["manager"] = (scope, deadline)
+            assert profile is PYRIGHT_PROFILE
             return Session()
 
     class Navigation:
@@ -5581,6 +5589,8 @@ def test_renderer_value_error_maps_to_normalized_navigation_error(
 
     class Session:
         identity = object()
+        profile = PYRIGHT_PROFILE
+        degradation_codes = ()
 
     class Manager:
         def get(self, *_args, **_kwargs):

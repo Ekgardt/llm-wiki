@@ -2643,7 +2643,12 @@ def _get_precise_architecture(
 ) -> dict:
     """Route precise modes through the owned CodeNavigation facade."""
     effective_deadline = _navigation_effective_deadline(deadline)
-    progress = {"stage": "directory", "scope": None, "resolved": None}
+    progress = {
+        "stage": "directory",
+        "scope": None,
+        "resolved": None,
+        "provider": None,
+    }
     try:
         return _precise_architecture_result(
             progress,
@@ -2696,9 +2701,9 @@ def _navigation_stage_status(stage: str) -> str:
     return "error"
 
 
-def _navigation_stage_provider(stage: str) -> str | None:
+def _navigation_stage_provider(stage: str, progress: dict) -> str | None:
     if stage in _NAVIGATION_PROVIDER_STAGES:
-        return "pyright"
+        return progress.get("provider")
     return None
 
 
@@ -2712,7 +2717,7 @@ def _navigation_stage_failure(progress: dict, mode, offset, limit) -> dict:
         offset=offset,
         limit=limit,
         scope=progress["scope"],
-        provider=_navigation_stage_provider(stage),
+        provider=_navigation_stage_provider(stage, progress),
     )
 
 
@@ -2751,10 +2756,29 @@ def _validated_navigation_source(scope, path: str, deadline: float) -> str:
     return normalized_path
 
 
-def _navigation_session(scope, deadline: float, manager_epoch: int, cancelled):
+def _navigation_profile(normalized_path: str):
+    """The managed language server that owns this file.
+
+    Routing is by file suffix through the profile registry -- the shape every
+    multi-language LSP client uses, and the registry refuses a suffix claimed by
+    two profiles, so the table is a function by construction. See
+    `docs/research/2026-08-28-wiring-a-second-language-server.md`, question 1.
+
+    A suffix no profile claims falls back to Pyright, which is exactly what this
+    path did before profiles existed: the session opens the file, answers
+    nothing, and the caller degrades to structural evidence. Routing such a file
+    straight to the structural tier is the better shape and is deliberately not
+    done here, because `CodeNavigation` requires a session.
+    """
+    from lsp_profiles import PYRIGHT_PROFILE, profile_for_path
+
+    return profile_for_path(Path(normalized_path)) or PYRIGHT_PROFILE
+
+
+def _navigation_session(scope, deadline: float, manager_epoch: int, cancelled, profile):
     manager = _navigation_session_manager(deadline, manager_epoch, cancelled)
     _check_deadline(deadline)
-    session = manager.get(scope, deadline=deadline)
+    session = manager.get(scope, deadline=deadline, profile=profile)
     _check_deadline(deadline)
     return session
 
@@ -2792,13 +2816,52 @@ def _navigation_query_result(
     return result
 
 
-def _rendered_navigation_result(resolved: Path, mode, result, deadline: float) -> dict:
+def _navigation_provider_view(rendered: dict, session) -> dict:
+    """Name the server that actually answered, not the one the facade is typed for.
+
+    `CodeNavigation.provider` returns the literal `"pyright"`. Correcting it here
+    rather than there is a named residue: the complexity gate refuses
+    `scripts/code_navigation.py` wholesale over 39 pre-existing findings, and
+    the envelope the agent reads is built here anyway.
+    """
+    provider = dict(rendered.get("provider") or {})
+    if provider.get("name") is None:
+        return provider
+    provider["name"] = session.profile.name
+    return provider
+
+
+def _navigation_limit_warnings(rendered: dict, session) -> tuple[str, ...]:
+    """Carry the session's capability limits into the answer, by name.
+
+    The contract asks the precise tier to report readiness and capability limits
+    and fall back. Readiness was always in the envelope; the limits were not, so
+    an uninstalled server degraded without saying why. A qualified session
+    reports none, so an installed Pyright answer is unchanged.
+    """
+    warnings = tuple(rendered.get("warnings") or ())
+    limits = tuple(session.degradation_codes)
+    return (*warnings, *(limit for limit in limits if limit not in warnings))
+
+
+def _navigation_named_by_session(data: dict, session) -> dict:
+    if session is None:
+        return data
+    data["provider"] = _navigation_provider_view(data, session)
+    data["warnings"] = _navigation_limit_warnings(data, session)
+    return data
+
+
+def _rendered_navigation_result(
+    resolved: Path, mode, result, deadline: float, session=None
+) -> dict:
     from code_navigation_renderer import render_navigation
 
     rendered = render_navigation(result)
     _check_deadline(deadline)
     data = {"directory": str(resolved), "mode": mode, **rendered}
     _check_deadline(deadline)
+    data = _navigation_named_by_session(data, session)
     data = _sanitize_navigation_data(data)
     _check_deadline(deadline)
     return data
@@ -2838,14 +2901,16 @@ def _precise_architecture_result(
         )
     progress["stage"] = "source"
     normalized_path = _validated_navigation_source(scope, anchor["path"], deadline)
+    profile = _navigation_profile(normalized_path)
+    progress["provider"] = profile.name
     progress["stage"] = "manager"
-    session = _navigation_session(scope, deadline, manager_epoch, cancelled)
+    session = _navigation_session(scope, deadline, manager_epoch, cancelled, profile)
     progress["stage"] = "facade"
     result = _navigation_query_result(
         scope, session, mode, normalized_path, anchor, offset, limit, deadline
     )
     progress["stage"] = "renderer"
-    return _rendered_navigation_result(resolved, mode, result, deadline)
+    return _rendered_navigation_result(resolved, mode, result, deadline, session)
 
 
 def _operator_result(

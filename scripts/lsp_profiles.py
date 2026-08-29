@@ -172,11 +172,35 @@ TYPESCRIPT_PROFILE = LanguageServerProfile(
     runtime_option=RuntimeOption(
         key_path=("tsserver", "path"),
         sibling_relative=TSSERVER_RELATIVE,
+        package_url=TSSERVER_PACKAGE_URL,
+        package_integrity=TSSERVER_PACKAGE_INTEGRITY,
     ),
     degradation_prefix="typescript",
 )
 
 REGISTRY = ProfileRegistry((PYRIGHT_PROFILE, TYPESCRIPT_PROFILE))
+
+# The two notification methods that are not any one vendor's: `$/progress` is
+# the specification's own, and published diagnostics are asked for by every
+# profile's client capabilities.
+NEUTRAL_SERVER_NOTIFICATIONS = frozenset(
+    {"$/progress", "textDocument/publishDiagnostics"}
+)
+
+
+def server_notification_union() -> frozenset[str]:
+    """Every notification any managed profile is allowed to send.
+
+    `lsp_protocol` needs one allowlist because the transport is shared and has
+    no profile: threading a per-session set through `lsp_process` would put
+    language into the one layer measurement found free of it. Deriving the
+    allowlist here keeps a single source of truth -- add a profile and the
+    transport learns its notifications with it.
+    """
+    names: set[str] = set(NEUTRAL_SERVER_NOTIFICATIONS)
+    for name in REGISTRY.names():
+        names.update(REGISTRY.get(name).server_notifications)
+    return frozenset(names)
 
 
 def profile_for_path(path: Path) -> LanguageServerProfile | None:

@@ -22,8 +22,10 @@ import pytest
 from code_intelligence import PositionEncoding
 from lsp_positions import LspPosition, LspRange, SourceAnchor, SourceDocument
 from lsp_process import LspProcess, ProcessState, StartupCleanupError
+from lsp_profiles import PYRIGHT_PROFILE
 from lsp_protocol import MAX_FRAME_BYTES, ProtocolViolation
 from lsp_security import RepositorySource
+from lsp_server_profile import LanguageServerProfile
 from pyright_profile import (
     PYRIGHT_CONFIGURATION,
     PYRIGHT_INITIALIZATION_OPTIONS,
@@ -33,6 +35,7 @@ from pyright_profile import (
 from pyright_session import (
     MAX_LSP_PROCESSES,
     STARTUP_SECONDS,
+    LanguageServerSession,
     LspDiagnostic,
     LspLocation,
     OpenDocument,
@@ -136,9 +139,19 @@ def test_public_contract_and_initial_state(
                 inspect.Parameter.KEYWORD_ONLY,
                 annotation=Path,
             ),
+            # CODE-08: the session drives whichever managed server the profile
+            # names. It defaults to Pyright, so every existing caller and every
+            # assertion below is unchanged by its presence.
+            inspect.Parameter(
+                "profile",
+                inspect.Parameter.KEYWORD_ONLY,
+                annotation=LanguageServerProfile,
+                default=PYRIGHT_PROFILE,
+            ),
         ),
         return_annotation=None,
     )
+    assert PyrightSession is LanguageServerSession
 
     expected_fields = {
         OpenDocument: ("source", "content", "source_sha256", "version"),
@@ -210,6 +223,7 @@ def test_public_contract_and_initial_state(
         "repository": RepositoryScope,
         "identity": PyrightIdentity,
         "state_root": Path,
+        "profile": LanguageServerProfile,
         "return": type(None),
     }
 
@@ -1099,7 +1113,9 @@ def test_start_forwards_one_capped_deadline_without_shrinking_restart_budget(
             command: tuple[str, ...],
             owner_root: Path,
             deadline: float,
+            degradation_prefix: str = "pyright",
         ) -> None:
+            assert degradation_prefix == "pyright"
             assert command[1] == str(semantic_pyright.identity.server_executable)
             assert owner_root.parent == state_root / "run" / "lsp"
             captured["guard"] = deadline
@@ -1243,7 +1259,9 @@ def test_startup_cleanup_uses_effective_caller_deadline(
             command: tuple[str, ...],
             owner_root: Path,
             deadline: float,
+            degradation_prefix: str = "pyright",
         ) -> None:
+            assert degradation_prefix == "pyright"
             assert command[1] == str(semantic_pyright.identity.server_executable)
             assert owner_root.parent == state_root / "run" / "lsp"
             captured["effective"] = deadline

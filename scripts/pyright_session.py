@@ -29,6 +29,7 @@ from interruption import (
 from interruption import (
     raise_collected_errors as _raise_collected_errors,
 )
+from lsp_identity import discover_managed_server
 from lsp_paths import lsp_owner_root
 from lsp_positions import (
     LspPosition,
@@ -38,6 +39,7 @@ from lsp_positions import (
     path_to_file_uri,
 )
 from lsp_process import GenerationLaunch, LspProcess, ProcessState, StartupCleanupError
+from lsp_profiles import PYRIGHT_PROFILE
 from lsp_protocol import (
     MAX_FRAME_BYTES,
     MAX_HOVER_BYTES,
@@ -52,10 +54,10 @@ from lsp_security import (
     normalize_provider_uri,
     resolve_repository_source,
 )
+from lsp_server_profile import LanguageServerProfile, thaw_profile_value
 from pyright_profile import (
     MAX_SERVER_BYTES,
     PYRIGHT_CONFIGURATION,
-    PYRIGHT_INITIALIZATION_OPTIONS,
     PYRIGHT_INITIALIZATION_OPTIONS_SHA256,
     PyrightIdentity,
     thaw_pyright_profile_value,
@@ -328,12 +330,12 @@ def _ensure_lsp_parent(state_root: Path, *, deadline: float) -> Path:
     return parent
 
 
-def _provider_supported(value: object, label: str) -> bool:
+def _provider_supported(value: object, label: str, prefix: str) -> bool:
     if value is None or value is False:
         return False
     if value is True or isinstance(value, dict):
         return True
-    raise _BootstrapDegradation(f"pyright_{label}_capability_invalid")
+    raise _BootstrapDegradation(f"{prefix}_{label}_capability_invalid")
 
 
 _POSITION_ENCODINGS = MappingProxyType(
@@ -345,58 +347,66 @@ _POSITION_ENCODINGS = MappingProxyType(
 )
 
 
-def _server_position_encoding(server: Mapping[str, object]) -> PositionEncoding:
+def _server_position_encoding(
+    server: Mapping[str, object], prefix: str
+) -> PositionEncoding:
     """The encoding the server asked for, from the three we can serve."""
     value = server.get("positionEncoding", "utf-16")
     if not isinstance(value, str) or value not in _POSITION_ENCODINGS:
-        raise _BootstrapDegradation("pyright_position_encoding_unsupported")
+        raise _BootstrapDegradation(f"{prefix}_position_encoding_unsupported")
     return _POSITION_ENCODINGS[value]
 
 
 def _parse_server_capabilities(
     result: object,
+    prefix: str = "pyright",
 ) -> tuple[dict[str, bool], PositionEncoding]:
     if not isinstance(result, dict) or not isinstance(result.get("capabilities"), dict):
-        raise _BootstrapDegradation("pyright_initialize_result_invalid")
+        raise _BootstrapDegradation(f"{prefix}_initialize_result_invalid")
     server = result["capabilities"]
-    encoding = _server_position_encoding(server)
+    encoding = _server_position_encoding(server, prefix)
     capabilities = {
-        name: _provider_supported(server.get(field), name)
+        name: _provider_supported(server.get(field), name, prefix)
         for name, field in _CAPABILITY_FIELDS.items()
     }
     capabilities["diagnostics"] = True
     return dict(sorted(capabilities.items())), encoding
 
 
-def _permission_startup_code(error: PermissionError) -> str | None:
+def _permission_startup_code(error: PermissionError, prefix: str) -> str | None:
     """A refused permission that is really a timeout in disguise."""
     cause = error.__cause__
     if cause is not None and cause.__class__.__name__ == "TimeoutExpired":
-        return "pyright_startup_timeout"
+        return f"{prefix}_startup_timeout"
     if "deadline expired" in str(error):
-        return "pyright_startup_timeout"
+        return f"{prefix}_startup_timeout"
     return None
 
 
-def _startup_code_of(error: BaseException) -> str | None:
+def _timeout_startup_code(error: BaseException, prefix: str) -> str | None:
+    """A timeout, or a permission refusal that is really one."""
+    if isinstance(error, TimeoutError):
+        return f"{prefix}_startup_timeout"
+    if isinstance(error, PermissionError):
+        return _permission_startup_code(error, prefix)
+    return None
+
+
+def _startup_code_of(error: BaseException, prefix: str) -> str | None:
     """The code this one error names, if it names one."""
     if isinstance(error, _BootstrapDegradation):
         return error.code
-    if isinstance(error, TimeoutError):
-        return "pyright_startup_timeout"
-    if isinstance(error, PermissionError):
-        return _permission_startup_code(error)
-    return None
+    return _timeout_startup_code(error, prefix)
 
 
-def _startup_code(error: BaseException) -> str:
+def _startup_code(error: BaseException, prefix: str = "pyright") -> str:
     current: BaseException | None = error
     while current is not None:
-        code = _startup_code_of(current)
+        code = _startup_code_of(current, prefix)
         if code is not None:
             return code
         current = current.__cause__
-    return "pyright_startup_failed"
+    return f"{prefix}_startup_failed"
 
 
 
@@ -440,16 +450,23 @@ def _lsp_position(value: object) -> LspPosition | None:
     return LspPosition(line, character)
 
 
-def _lsp_range(value: object) -> LspRange | None:
-    if not isinstance(value, dict):
-        return None
-    start = _lsp_position(value.get("start"))
-    end = _lsp_position(value.get("end"))
+def _ordered_lsp_range(
+    start: LspPosition | None, end: LspPosition | None
+) -> LspRange | None:
+    """A range only exists when both ends read and the end is not before the start."""
     if start is None or end is None:
         return None
     if (end.line, end.character) < (start.line, start.character):
         return None
     return LspRange(start, end)
+
+
+def _lsp_range(value: object) -> LspRange | None:
+    if not isinstance(value, dict):
+        return None
+    return _ordered_lsp_range(
+        _lsp_position(value.get("start")), _lsp_position(value.get("end"))
+    )
 
 
 def _location_key(location: LspLocation) -> tuple[object, ...]:
@@ -499,15 +516,19 @@ def _hover_fragment_labelled(value: Mapping[str, object], text: str) -> str | No
     return text
 
 
+def _hover_fragment_mapping(value: Mapping[str, object]) -> str | None:
+    text = _bounded_hover_string(value.get("value"))
+    if text is None:
+        return None
+    return _hover_fragment_labelled(value, text)
+
+
 def _hover_fragment(value: object) -> str | None:
     if isinstance(value, str):
         return _bounded_hover_string(value)
     if not isinstance(value, dict):
         return None
-    text = _bounded_hover_string(value.get("value"))
-    if text is None:
-        return None
-    return _hover_fragment_labelled(value, text)
+    return _hover_fragment_mapping(value)
 
 
 def _hover_fragments(items: list[object]) -> tuple[list[str], bool]:
@@ -523,6 +544,13 @@ def _hover_fragments(items: list[object]) -> tuple[list[str], bool]:
     return fragments, partial
 
 
+def _bounded_join(fragments: list[str], partial: bool) -> tuple[str | None, bool]:
+    joined = "\n\n".join(fragments)
+    if _bounded_hover_string(joined) is None:
+        return None, True
+    return joined, partial
+
+
 def _joined_hover_contents(value: list[object]) -> tuple[str | None, bool]:
     """The list form of hover contents, joined and bounded."""
     if len(value) > 1024:
@@ -530,10 +558,7 @@ def _joined_hover_contents(value: list[object]) -> tuple[str | None, bool]:
     fragments, partial = _hover_fragments(value)
     if not fragments:
         return None, True
-    joined = "\n\n".join(fragments)
-    if _bounded_hover_string(joined) is None:
-        return None, True
-    return joined, partial
+    return _bounded_join(fragments, partial)
 
 
 def _hover_contents(value: object) -> tuple[str | None, bool]:
@@ -564,13 +589,20 @@ def _launch_file_state(info: os.stat_result) -> tuple[int, int, int, int, int, i
     )
 
 
+_DIAGNOSTIC_SEVERITIES = frozenset({1, 2, 3, 4})
+
+
+def _known_severity(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return False
+    return value in _DIAGNOSTIC_SEVERITIES
+
+
 def _diagnostic_severity(value: object) -> tuple[int | None, bool]:
     """The severity, and whether the field was readable at all."""
     if value is None:
         return None, True
-    if isinstance(value, bool) or not isinstance(value, int):
-        return None, False
-    if value not in {1, 2, 3, 4}:
+    if not _known_severity(value):
         return None, False
     return value, True
 
@@ -633,6 +665,10 @@ def _push_symbol_children(walk: _SymbolWalk, value: Mapping[str, object]) -> Non
     if not isinstance(children, list):
         walk.drop()
         return
+    _push_bounded_children(walk, children)
+
+
+def _push_bounded_children(walk: _SymbolWalk, children: list[object]) -> None:
     remaining = max(0, MAX_LOCATIONS - walk.visited - len(walk.stack))
     if len(children) > remaining:
         walk.drop()
@@ -669,11 +705,22 @@ def _symbol_fields_ok(value: Mapping[str, object]) -> bool:
     kind = _lsp_coordinate(value.get("kind"))
     if name is None or kind in {None, 0}:
         return False
-    if not _bounded_optional_text(value.get("detail")):
-        return False
-    if not _bounded_optional_text(value.get("containerName")):
-        return False
-    return _symbol_flags_ok(value)
+    return (
+        _bounded_optional_text(value.get("detail"))
+        and _bounded_optional_text(value.get("containerName"))
+        and _symbol_flags_ok(value)
+    )
+
+
+def _contained_selection(
+    range_: LspRange | None, selection: LspRange | None, uri: str
+) -> LspLocation | None:
+    """The selection range, but only when the symbol's own range contains it."""
+    if range_ is None or selection is None:
+        return None
+    if not _range_contains(range_, selection):
+        return None
+    return LspLocation(uri, selection)
 
 
 def _range_contains(outer: LspRange, inner: LspRange) -> bool:
@@ -919,12 +966,18 @@ _STARTUP_DEGRADING_ERRORS = (
     TimeoutError,
 )
 
-_PROGRESS_METHODS = (
-    "$/progress",
-    "pyright/beginProgress",
-    "pyright/endProgress",
-    "pyright/reportProgress",
-)
+# `$/progress` is the specification's; the rest a profile declares for itself.
+_NEUTRAL_PROGRESS_METHOD = "$/progress"
+
+# How long a query waits between checks for the work-done-progress `end` that a
+# progress-gated profile makes readiness out of. Short because the whole gate is
+# measured at 0.67-0.82 s on a small project and the caller holds a deadline.
+_PROGRESS_POLL_SECONDS = 0.02
+
+# At most this many outstanding work-done tokens are remembered per generation.
+# A server that opens more than this without ending them is not one we can gate
+# on, and the bound keeps a misbehaving one from growing the session.
+_MAX_WORK_DONE_TOKENS = 64
 
 
 @dataclass
@@ -932,6 +985,13 @@ class _StartupAttempt:
     """The owner nonce one startup attempt published, if it got that far."""
 
     owner_nonce: str | None = None
+
+
+def _cleanup_interruption(cleanup_error: BaseException | None):
+    """The interruption travelling inside a cleanup failure, if there is one."""
+    if cleanup_error is None:
+        return None
+    return _startup_interruption(cleanup_error)
 
 
 def _reraise_startup_interruption(
@@ -944,7 +1004,7 @@ def _reraise_startup_interruption(
 
 
 def _progress_handler(
-    session: "PyrightSession", method: str
+    session: "LanguageServerSession", method: str
 ) -> Callable[[object], None]:
     """One notification handler bound to the progress method it reports."""
     return lambda params: session._progress(method, params)
@@ -997,23 +1057,29 @@ def _location_fields(value: Mapping[str, object]) -> tuple[object, object] | Non
     return value.get("targetUri"), value.get("targetSelectionRange")
 
 
-def _check_qualified_identity(identity: PyrightIdentity) -> None:
+def _check_qualified_identity(
+    identity: PyrightIdentity, profile: LanguageServerProfile = PYRIGHT_PROFILE
+) -> None:
     """A qualified identity has to be internally consistent before it is used."""
     if identity.status != "qualified" or identity.degradation_codes:
-        raise ValueError("qualified Pyright identity is internally inconsistent")
-    if (
-        identity.initialization_options_sha256
-        != PYRIGHT_INITIALIZATION_OPTIONS_SHA256
-    ):
-        raise ValueError(
-            "Pyright initialization options identity is inconsistent"
-        )
+        raise ValueError("qualified language server identity is internally inconsistent")
+    if identity.initialization_options_sha256 != _profile_options_digest(profile):
+        raise ValueError("language server initialization options identity is inconsistent")
     _check_identity_digest(
         identity.configuration_sha256, "Pyright configuration identity is invalid"
     )
     _check_identity_digest(
         identity.executable_sha256, "Pyright executable identity is invalid"
     )
+
+
+def _profile_options_digest(profile: LanguageServerProfile) -> str:
+    """Pyright keeps its precomputed constant; anything else derives its own."""
+    if profile is PYRIGHT_PROFILE:
+        return PYRIGHT_INITIALIZATION_OPTIONS_SHA256
+    from lsp_identity import profile_initialization_options_sha256
+
+    return profile_initialization_options_sha256(profile)
 
 
 def _check_identity_digest(value: object, message: str) -> None:
@@ -1034,9 +1100,7 @@ def _workspace_query_status(state: _WorkspaceState) -> str | None:
         return "not_ready"
     if not state.supported:
         return "unsupported"
-    if state.readiness != "query_ready":
-        return "not_ready"
-    return None
+    return None if state.readiness == "query_ready" else "not_ready"
 
 
 def _check_symbol_query(query: str) -> None:
@@ -1088,6 +1152,40 @@ def _position_params(
             "character": position.character,
         },
     }
+
+
+def _diagnostic_classification(
+    value: Mapping[str, object],
+) -> tuple[int | None, str | None] | None:
+    """Severity and code together, or None when either is present but unreadable."""
+    severity, severity_ok = _diagnostic_severity(value.get("severity"))
+    if not severity_ok:
+        return None
+    code, code_ok = _diagnostic_code(value.get("code"))
+    if not code_ok:
+        return None
+    return severity, code
+
+
+def _related_message(
+    location: LspLocation, raw_message: object
+) -> tuple[LspLocation, str | None] | None:
+    """A related entry keeps its location; an unreadable message drops the entry."""
+    if raw_message is None:
+        return location, None
+    message = _bounded_text(raw_message, _MAX_DIAGNOSTIC_TEXT_BYTES)
+    if message is None:
+        return None
+    return location, message
+
+
+def _versioned_diagnostic_target(
+    uri: str, values: list[object], version_value: object
+) -> tuple[str, list[object], int | None] | None:
+    version, version_ok = _published_version(version_value)
+    if not version_ok:
+        return None
+    return uri, values, version
 
 
 def _published_diagnostics_params(
@@ -1177,6 +1275,11 @@ def _call_item_optionals(
         return False
     if not _call_item_tags(value, item):
         return False
+    return _call_item_data(value, item)
+
+
+def _call_item_data(value: Mapping[str, object], item: dict[str, object]) -> bool:
+    """The opaque round-trip field, copied through untouched when present."""
     if "data" in value:
         item["data"] = value["data"]
     return True
@@ -1220,10 +1323,27 @@ def _progress_record(method: str, params: object) -> tuple[object, ...] | None:
     kind = value.get("kind")
     if token is None or kind not in {"begin", "report", "end"}:
         return None
+    return _progress_text_record(method, token, kind, value)
+
+
+def _progress_text_record(
+    method: str, token: object, kind: object, value: Mapping[str, object]
+) -> tuple[object, ...] | None:
     text, readable = _progress_text(value, kind)
     if not readable:
         return None
     return method, token, kind, text
+
+
+def _work_done_end_token(params: object) -> object | None:
+    """The token a `$/progress` `end` closes, when the payload is well formed."""
+    payload = _progress_payload(params)
+    if payload is None:
+        return None
+    raw_token, value = payload
+    if value.get("kind") != "end":
+        return None
+    return _progress_token(raw_token)
 
 
 def _pyright_marker_record(method: str, params: object) -> tuple[object, ...] | None:
@@ -1304,7 +1424,11 @@ def _configuration_section(item: object) -> tuple[str | None, bool]:
     if not _configuration_item_ok(item):
         return None, False
     assert isinstance(item, dict)
-    section = item.get("section")
+    return _usable_configuration_section(item.get("section"))
+
+
+def _usable_configuration_section(section: object) -> tuple[str | None, bool]:
+    """An absent section is usable; a present one has to be bounded text."""
     if section is None:
         return None, True
     if not _usable_section(section):
@@ -1438,9 +1562,11 @@ class _LaunchServerGuard:
         command: tuple[str, ...],
         owner_root: Path,
         deadline: float,
+        degradation_prefix: str = "pyright",
     ) -> None:
         if not isinstance(owner_root, Path):
             raise TypeError("owner_root must be a Path")
+        self._degradation_prefix = degradation_prefix
         self._path = path
         self._expected_sha256 = expected_sha256
         self._command = command
@@ -1451,6 +1577,12 @@ class _LaunchServerGuard:
         self._snapshot_path: Path | None = None
         self._launch_descriptor: int | None = None
         self._state: tuple[int, int, int, int, int, int] | None = None
+
+    def _digest_mismatch(self) -> _BootstrapDegradation:
+        """One refusal, named for whichever server this guard is launching."""
+        return _BootstrapDegradation(
+            f"{self._degradation_prefix}_executable_digest_mismatch"
+        )
 
     def _open_source_descriptor(self) -> int:
         """Open the server file exclusively, the way this platform allows."""
@@ -1474,7 +1606,7 @@ class _LaunchServerGuard:
         opened = os.fstat(descriptor)
         state = _launch_file_state(opened)
         if _launch_file_state(before) != state or not stat.S_ISREG(opened.st_mode):
-            raise _BootstrapDegradation("pyright_executable_digest_mismatch")
+            raise self._digest_mismatch()
         self._state = state
 
     def _open_snapshot(self) -> BinaryIO:
@@ -1493,19 +1625,20 @@ class _LaunchServerGuard:
         self._snapshot = snapshot
         return snapshot
 
-    @staticmethod
     def _check_snapshot_launchable(
+        self,
         launch_info: os.stat_result,
         snapshot_info: os.stat_result,
         before: os.stat_result,
     ) -> None:
         """The descriptor we will launch has to name our verified copy."""
-        if not stat.S_ISREG(launch_info.st_mode):
-            raise _BootstrapDegradation("pyright_executable_digest_mismatch")
-        if launch_info.st_size != before.st_size:
-            raise _BootstrapDegradation("pyright_executable_digest_mismatch")
-        if _launch_file_state(launch_info) != _launch_file_state(snapshot_info):
-            raise _BootstrapDegradation("pyright_executable_digest_mismatch")
+        launchable = (
+            stat.S_ISREG(launch_info.st_mode)
+            and launch_info.st_size == before.st_size
+            and _launch_file_state(launch_info) == _launch_file_state(snapshot_info)
+        )
+        if not launchable:
+            raise self._digest_mismatch()
 
     def _posix_launch(self, before: os.stat_result) -> GenerationLaunch:
         """Copy the server aside, verify it, and launch from the copy."""
@@ -1534,7 +1667,7 @@ class _LaunchServerGuard:
         _require_startup_deadline(self._deadline)
         before = _path_identity(self._path)
         if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_SERVER_BYTES:
-            raise _BootstrapDegradation("pyright_executable_digest_mismatch")
+            raise self._digest_mismatch()
         _require_startup_deadline(self._deadline)
         self._descriptor = self._open_source_descriptor()
         try:
@@ -1588,7 +1721,7 @@ class _LaunchServerGuard:
                 break
             total += len(chunk)
             if total > MAX_SERVER_BYTES:
-                raise _BootstrapDegradation("pyright_executable_digest_mismatch")
+                raise self._digest_mismatch()
             snapshot.write(chunk)
             digest.update(chunk)
         snapshot.flush()
@@ -1610,7 +1743,7 @@ class _LaunchServerGuard:
                 break
             total += len(chunk)
             if total > MAX_SERVER_BYTES:
-                raise _BootstrapDegradation("pyright_executable_digest_mismatch")
+                raise self._digest_mismatch()
             digest.update(chunk)
         return digest.hexdigest()
 
@@ -1621,7 +1754,7 @@ class _LaunchServerGuard:
         if descriptor is None or state is None:
             raise RuntimeError("Pyright launch server guard is not open")
         if _launch_file_state(os.fstat(descriptor)) != state:
-            raise _BootstrapDegradation("pyright_executable_digest_mismatch")
+            raise self._digest_mismatch()
         actual = self._digest()
         self._verify_digest(actual)
 
@@ -1629,17 +1762,21 @@ class _LaunchServerGuard:
         descriptor = self._descriptor
         state = self._state
         if descriptor is None or state is None:
-            raise RuntimeError("Pyright launch server guard is not open")
+            raise RuntimeError("launch server guard is not open")
         _require_startup_deadline(self._deadline)
         if actual != self._expected_sha256:
-            raise _BootstrapDegradation("pyright_executable_digest_mismatch")
+            raise self._digest_mismatch()
+        self._require_unchanged_state(descriptor, state)
+        _require_startup_deadline(self._deadline)
+
+    def _require_unchanged_state(self, descriptor: int, state: tuple) -> None:
+        """The open descriptor and the path still name the file we digested."""
         observed = (
             _launch_file_state(os.fstat(descriptor)),
             _launch_file_state(_path_identity(self._path)),
         )
         if observed != (state, state):
-            raise _BootstrapDegradation("pyright_executable_digest_mismatch")
-        _require_startup_deadline(self._deadline)
+            raise self._digest_mismatch()
 
     def _take_owned_resources(self) -> tuple[object, Path | None, int | None, int | None]:
         """Hand over everything the guard holds, leaving it holding nothing."""
@@ -1702,8 +1839,36 @@ def _snapshot_supersedes(
     return version < existing.document_version
 
 
-class PyrightSession:
-    """Own one repository-scoped Pyright protocol lifecycle."""
+def _require_session_arguments(
+    repository: object,
+    identity: object,
+    state_root: object,
+    profile: object,
+) -> None:
+    """Everything a session is built from, checked before anything is retained."""
+    for value, expected, label in (
+        (repository, RepositoryScope, "repository"),
+        (identity, PyrightIdentity, "identity"),
+        (state_root, Path, "state_root"),
+        (profile, LanguageServerProfile, "profile"),
+    ):
+        if not isinstance(value, expected):
+            raise TypeError(f"{label} must be a {expected.__name__}")
+
+
+class LanguageServerSession:
+    """Own one repository-scoped language-server protocol lifecycle.
+
+    One class, one `profile` field -- not a base class with a subclass per
+    language. Measurement (`docs/research/2026-08-28-precise-navigation-beyond-python.md`)
+    put 171 Pyright-mentioning lines inside 5,028: the other 4,857 are one
+    implementation of containment, leases, generations and wire state, and a
+    base/subclass split would invite a second override of exactly those.
+    Everything language-shaped is read from `self._profile`.
+
+    `PyrightSession` remains as an alias below, because that is what the
+    existing Pyright tests and `code_navigation` type-check against.
+    """
 
     def __init__(
         self,
@@ -1711,15 +1876,12 @@ class PyrightSession:
         identity: PyrightIdentity,
         *,
         state_root: Path,
+        profile: LanguageServerProfile = PYRIGHT_PROFILE,
     ) -> None:
-        if not isinstance(repository, RepositoryScope):
-            raise TypeError("repository must be a RepositoryScope")
-        if not isinstance(identity, PyrightIdentity):
-            raise TypeError("identity must be a PyrightIdentity")
-        if not isinstance(state_root, Path):
-            raise TypeError("state_root must be a Path")
+        _require_session_arguments(repository, identity, state_root, profile)
         self._repository = repository
         self._identity = identity
+        self._profile = profile
         self._state_root = state_root
         self._lock = threading.RLock()
         self._close_lock = threading.Lock()
@@ -1745,6 +1907,11 @@ class PyrightSession:
         self._diagnostic_bytes = 0
         self._progress_events: list[tuple[object, ...]] = []
         self._progress_bytes = 0
+        # The work-done tokens the server asked us to create, and the one
+        # generation whose project load has been declared finished. Only the
+        # profiles that gate on progress consult these.
+        self._work_done_tokens: set[object] = set()
+        self._progress_ready_generation: str | None = None
         self._wire_generation: str | None = None
         self._wire_opened: set[tuple[str, str, int]] = set()
         self._wire_failed: set[tuple[str, str, int]] = set()
@@ -1763,6 +1930,11 @@ class PyrightSession:
     @property
     def identity(self) -> PyrightIdentity:
         return self._identity
+
+    @property
+    def profile(self) -> LanguageServerProfile:
+        """The pinned managed server this session drives."""
+        return self._profile
 
     @property
     def readiness(self) -> str:
@@ -1905,12 +2077,33 @@ class PyrightSession:
         return self._active_operations == 0
 
     def _configuration(self, params: object) -> object:
-        settings = thaw_pyright_profile_value(PYRIGHT_CONFIGURATION)
+        settings = self._profile.wire_configuration()
         assert isinstance(settings, dict)
         items = _configuration_items(params)
         if items is None:
             return []
         return [_configuration_result(settings, item) for item in items]
+
+    def _work_done_progress_create(self, params: object) -> None:
+        """Answer the create request, and remember the token it names.
+
+        Answering is what makes the server send `$/progress` at all -- the
+        specification only permits server-initiated progress once the client
+        declares `window.workDoneProgress` *and* replies here. Remembering the
+        token is what lets a progress-gated profile tell its project load from
+        any other progress the server may report.
+        """
+        self._benign_server_request(params)
+        assert isinstance(params, dict)
+        token = _progress_token(params.get("token"))
+        self._retain_work_done_token(token)
+
+    def _retain_work_done_token(self, token: object) -> None:
+        if token is None:
+            return
+        with self._lock:
+            if len(self._work_done_tokens) < _MAX_WORK_DONE_TOKENS:
+                self._work_done_tokens.add(token)
 
     @staticmethod
     def _benign_server_request(params: object) -> None:
@@ -1941,6 +2134,12 @@ class PyrightSession:
             ):
                 removed = self._progress_events.pop(0)
                 self._progress_bytes -= self._progress_event_bytes(removed)
+
+    def _rearm_progress_gate(self) -> None:
+        """A new server process must load the project again before answering."""
+        with self._lock:
+            self._work_done_tokens.clear()
+            self._progress_ready_generation = None
 
     def _begin_wire_generation(self, generation_nonce: str) -> None:
         with self._wire_condition:
@@ -2010,14 +2209,20 @@ class PyrightSession:
         """The settled answer for this key, or None when this call must send."""
         with self._wire_condition:
             self._await_did_open_gate_locked(key, deadline)
-            if self._wire_generation != generation_nonce:
-                return False
-            if key in self._wire_opened:
-                return True
-            if key in self._wire_failed:
-                return False
-            self._wire_sending.add(key)
-        return None
+            settled = self._settled_did_open_locked(key, generation_nonce)
+            if settled is None:
+                self._wire_sending.add(key)
+        return settled
+
+    def _settled_did_open_locked(
+        self, key: tuple, generation_nonce: str
+    ) -> bool | None:
+        """The answer already on record for this key, or None to send it."""
+        if self._wire_generation != generation_nonce:
+            return False
+        if key in self._wire_opened:
+            return True
+        return False if key in self._wire_failed else None
 
     def _record_did_open_failure(self, key: tuple, generation_nonce: str) -> None:
         with self._wire_condition:
@@ -2079,12 +2284,27 @@ class PyrightSession:
             generation_nonce = self._next_untried_generation(attempted)
             if generation_nonce is None:
                 return False
-            if self._send_did_open_to_generation(
-                document, process, generation_nonce, deadline=deadline
-            ):
-                return True
-            if self._current_generation_nonce() == generation_nonce:
-                return False
+            settled = self._did_open_generation_outcome(
+                document, process, generation_nonce, deadline
+            )
+            if settled is not None:
+                return settled
+
+    def _did_open_generation_outcome(
+        self,
+        document: OpenDocument,
+        process: LspProcess,
+        generation_nonce: str,
+        deadline: float,
+    ) -> bool | None:
+        """True sent, False the generation is still current and refused, None retry."""
+        if self._send_did_open_to_generation(
+            document, process, generation_nonce, deadline=deadline
+        ):
+            return True
+        if self._current_generation_nonce() == generation_nonce:
+            return False
+        return None
 
     def _next_untried_generation(self, attempted: set[str]) -> str | None:
         """The current generation, unless we have already tried it."""
@@ -2123,6 +2343,48 @@ class PyrightSession:
         record = _progress_notification_record(method, params)
         if record is not None:
             self._retain_progress(record)
+        self._note_work_done_end(method, params)
+
+    def _note_work_done_end(self, method: str, params: object) -> None:
+        """An `end` on a token the server opened closes this generation's load.
+
+        This is the measured difference between a right and a wrong answer:
+        ungated, typescript-language-server answers go-to-definition with the
+        import binding rather than the declaration -- 0/12 correct against 12/12
+        gated. See `docs/research/2026-08-28-precise-navigation-beyond-python.md`,
+        Finding 4.
+        """
+        if method != _NEUTRAL_PROGRESS_METHOD:
+            return
+        token = _work_done_end_token(params)
+        if token is None:
+            return
+        self._mark_progress_ready(token)
+
+    def _mark_progress_ready(self, token: object) -> None:
+        with self._lock:
+            if token not in self._work_done_tokens:
+                return
+            self._progress_ready_generation = self._generation_nonce
+            self._condition.notify_all()
+
+    def _progress_gate_satisfied_locked(self) -> bool:
+        """Whether this profile's readiness precondition is met right now."""
+        if not self._profile.gates_on_progress():
+            return True
+        generation = self._generation_nonce
+        return generation is not None and self._progress_ready_generation == generation
+
+    def _await_progress_gate(self, deadline: float) -> None:
+        """Block until the project load is declared finished, or the deadline."""
+        if not self._profile.gates_on_progress():
+            return
+        with self._lock:
+            while not self._progress_gate_satisfied_locked():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return
+                self._condition.wait(min(remaining, _PROGRESS_POLL_SECONDS))
 
     def _diagnostic_core(
         self, value: Mapping[str, object]
@@ -2132,12 +2394,10 @@ class PyrightSession:
         message = _bounded_text(value.get("message"), _MAX_DIAGNOSTIC_TEXT_BYTES)
         if range_ is None or message is None:
             return None
-        severity, severity_ok = _diagnostic_severity(value.get("severity"))
-        if not severity_ok:
+        classified = _diagnostic_classification(value)
+        if classified is None:
             return None
-        code, code_ok = _diagnostic_code(value.get("code"))
-        if not code_ok:
-            return None
+        severity, code = classified
         return range_, message, severity, code
 
     def _related_entry(
@@ -2149,13 +2409,7 @@ class PyrightSession:
         location = self._normalize_location(relation.get("location"))
         if location is None:
             return None
-        raw_message = relation.get("message")
-        if raw_message is None:
-            return location, None
-        message = _bounded_text(raw_message, _MAX_DIAGNOSTIC_TEXT_BYTES)
-        if message is None:
-            return None
-        return location, message
+        return _related_message(location, relation.get("message"))
 
     def _related_information(
         self, value: object
@@ -2294,10 +2548,7 @@ class PyrightSession:
         source = normalize_provider_uri(self._repository, uri_value)
         if source is None:
             return None
-        version, version_ok = _published_version(version_value)
-        if not version_ok:
-            return None
-        return source.uri, values, version
+        return _versioned_diagnostic_target(source.uri, values, version_value)
 
     def _publish_diagnostics(self, params: object) -> None:
         target = self._diagnostic_target(params)
@@ -2363,18 +2614,20 @@ class PyrightSession:
                 "clientInfo": {"name": "llm-wiki"},
                 "rootUri": root_uri,
                 "workspaceFolders": [{"uri": root_uri, "name": root.name}],
-                "initializationOptions": thaw_pyright_profile_value(
-                    PYRIGHT_INITIALIZATION_OPTIONS
+                "initializationOptions": self._profile.wire_initialization_options(
+                    self._state_root
                 ),
-                "capabilities": thaw_pyright_profile_value(_CLIENT_CAPABILITIES),
+                "capabilities": thaw_profile_value(_CLIENT_CAPABILITIES),
             },
             deadline=deadline,
         )
-        capabilities, encoding = _parse_server_capabilities(result)
+        capabilities, encoding = _parse_server_capabilities(
+            result, self._profile.degradation_prefix
+        )
         protocol.notify("initialized", {}, deadline=deadline)
         protocol.notify(
             "workspace/didChangeConfiguration",
-            {"settings": thaw_pyright_profile_value(PYRIGHT_CONFIGURATION)},
+            {"settings": self._profile.wire_configuration()},
             deadline=deadline,
         )
         return capabilities, encoding
@@ -2485,7 +2738,12 @@ class PyrightSession:
         self._readiness_evidence = ()
         self._ready_uri_generations.clear()
         self._degradation_codes = tuple(
-            sorted({*self._degradation_codes, "pyright_restart_bootstrap_failed"})
+            sorted(
+                {
+                    *self._degradation_codes,
+                    self._profile.degradation_code("restart_bootstrap_failed"),
+                }
+            )
         )
 
     def _fail_generation_bootstrap(
@@ -2504,6 +2762,7 @@ class PyrightSession:
         deadline: float,
     ) -> ProcessState:
         owner_nonce = self._bootstrap_owner(_generation_nonce)
+        self._rearm_progress_gate()
         capabilities, encoding = self._initialize_protocol(protocol, deadline)
         documents: tuple[OpenDocument, ...] = ()
         try:
@@ -2525,7 +2784,7 @@ class PyrightSession:
 
     def _validated_qualified_paths(self, *, deadline: float) -> tuple[Path, Path]:
         identity = self._identity
-        _check_qualified_identity(identity)
+        _check_qualified_identity(identity, self._profile)
         node = _validated_local_file(
             identity.node_executable,
             "node_executable",
@@ -2552,6 +2811,8 @@ class PyrightSession:
 
     def _forget_generation_locked(self) -> None:
         """Forget everything tied to a generation that never became ours."""
+        self._work_done_tokens.clear()
+        self._progress_ready_generation = None
         self._generation_nonce = None
         self._ready_uri_generations.clear()
         self._workspace_revision = None
@@ -2583,10 +2844,14 @@ class PyrightSession:
         nothing_retained = retained == (None, None)
         if self._startup_attempted and nothing_retained:
             return None
+        self._begin_startup_locked(nothing_retained)
+        return retained
+
+    def _begin_startup_locked(self, nothing_retained: bool) -> None:
+        """Take the startup claim; a first attempt also records that it happened."""
         self._starting = True
         if nothing_retained:
             self._startup_attempted = True
-        return retained
 
     def _admit_startup(
         self, startup_deadline: float, bootstrap_timeout_seconds: float
@@ -2595,14 +2860,20 @@ class PyrightSession:
         with self._lock:
             if self._closed or self._closing:
                 raise RuntimeError("Pyright session is closed")
-            if self._capacity_locked:
-                self._degrade_locked("pyright_capacity_exhausted")
-                return None
-            if bootstrap_timeout_seconds <= 0:
-                self._degrade_locked("pyright_startup_timeout")
+            if self._startup_refused_locked(bootstrap_timeout_seconds):
                 return None
             self._await_startup_locked(startup_deadline)
             return self._claim_startup_locked()
+
+    def _startup_refused_locked(self, bootstrap_timeout_seconds: float) -> bool:
+        """Whether this session may not start at all; the reason is recorded."""
+        if self._capacity_locked:
+            self._degrade_locked(self._profile.degradation_code("capacity_exhausted"))
+            return True
+        if bootstrap_timeout_seconds <= 0:
+            self._degrade_locked(self._profile.degradation_code("startup_timeout"))
+            return True
+        return False
 
     def _startup_retry_ok(self, action: Callable[[], None]) -> bool:
         """Retry a retained owner; False when it failed in an expected way."""
@@ -2662,16 +2933,57 @@ class PyrightSession:
         return {
             "client/registerCapability": self._benign_server_request,
             "client/unregisterCapability": self._benign_server_request,
-            "window/workDoneProgress/create": self._benign_server_request,
+            "window/workDoneProgress/create": self._work_done_progress_create,
             "workspace/configuration": self._configuration,
         }
 
+    def _progress_methods(self) -> tuple[str, ...]:
+        """`$/progress` plus this profile's own vendor progress notifications."""
+        identity = self._profile.identity_notification
+        vendor = tuple(
+            method
+            for method in sorted(self._profile.server_notifications)
+            if identity is None or method != identity.method
+        )
+        return (_NEUTRAL_PROGRESS_METHOD, *vendor)
+
     def _server_notification_handlers(self) -> dict[str, object]:
         handlers: dict[str, object] = {
-            method: _progress_handler(self, method) for method in _PROGRESS_METHODS
+            method: _progress_handler(self, method)
+            for method in self._progress_methods()
         }
         handlers["textDocument/publishDiagnostics"] = self._publish_diagnostics
+        self._add_identity_handler(handlers)
         return handlers
+
+    def _add_identity_handler(self, handlers: dict[str, object]) -> None:
+        """Register the post-initialize identity assertion, where a profile has one.
+
+        Honest limitation, measured 2026-08-28: `lsp_protocol.SERVER_NOTIFICATIONS`
+        is a module-level allowlist and does not carry `$/typescriptVersion`, so
+        this handler is registered but not yet reached -- the transport drops the
+        method with one "unknown notification" warning and nothing else. Widening
+        that allowlist means editing `lsp_protocol.py`, which the complexity gate
+        refuses wholesale over roughly thirty pre-existing findings in the
+        transport hot path; that is a separate piece of work.
+
+        The guarantee is not lost in the meantime, it is taken earlier:
+        `lsp_identity` digests the pinned engine at `tsserver.path` against the
+        install receipt *before* the process starts, so the file the server is
+        pointed at is known to be ours. What is missing is the server's own
+        confirmation that it used it rather than something else.
+        """
+        identity = self._profile.identity_notification
+        if identity is None:
+            return
+        handlers[identity.method] = self._record_server_identity
+
+    def _record_server_identity(self, params: object) -> None:
+        identity = self._profile.identity_notification
+        if identity is None:
+            return
+        version, confirmed = identity.confirmed(params)
+        self._retain_progress((identity.method, str(version), str(confirmed)))
 
     def _prepare_owner(
         self, attempt: _StartupAttempt, *, startup_deadline: float
@@ -2694,13 +3006,8 @@ class PyrightSession:
         bootstrap_timeout_seconds: float,
         startup_deadline: float,
     ) -> LspProcess:
-        """Start Pyright under its owner root, with our handlers and guards."""
-        command = (
-            str(node),
-            str(server),
-            "--stdio",
-            f"--cancellationReceive=file:{owner / 'cancellation'}",
-        )
+        """Start the pinned server under its owner root, with our handlers."""
+        command = self._profile.launch_command(node, server, owner)
         return LspProcess.start_configured(
             command,
             cwd=Path(self._repository.checkout_root),
@@ -2728,6 +3035,7 @@ class PyrightSession:
                     command=command,
                     owner_root=owner,
                     deadline=generation_deadline,
+                    degradation_prefix=self._profile.degradation_prefix,
                 )
             ),
         )
@@ -2773,7 +3081,7 @@ class PyrightSession:
         self, error: BaseException, retained_error: StartupCleanupError | None
     ) -> None:
         """A launch that failed in a known way leaves the session degraded."""
-        code = _startup_code(error)
+        code = _startup_code(error, self._profile.degradation_prefix)
         with self._lock:
             self._process = None
             self._record_retained_cleanup_locked(retained_error)
@@ -2793,12 +3101,16 @@ class PyrightSession:
         if interruption is not None:
             self._record_retained_cleanup(retained_error)
             _reraise_startup_interruption(error, interruption)
+        self._require_degrading_launch_error(error)
+        self._record_startup_degradation(error, retained_error)
+
+    def _require_degrading_launch_error(self, error: BaseException) -> None:
+        """Propagate the failures that are not this session's to absorb."""
         if isinstance(error, (TypeError, ValueError)):
             self._allow_startup_retry()
             raise error
         if not isinstance(error, _STARTUP_DEGRADING_ERRORS):
             raise error
-        self._record_startup_degradation(error, retained_error)
 
     def _launch_server(
         self,
@@ -2876,10 +3188,9 @@ class PyrightSession:
         cleanup_error = self._close_failed_process(
             process, attempt, startup_deadline=startup_deadline
         )
-        cleanup_interruption = None
-        if cleanup_error is not None:
-            cleanup_interruption = _startup_interruption(cleanup_error)
-        interruption = _startup_interruption(error) or cleanup_interruption
+        interruption = _startup_interruption(error) or _cleanup_interruption(
+            cleanup_error
+        )
         if interruption is None:
             raise error
         self._allow_startup_retry()
@@ -2944,11 +3255,18 @@ class PyrightSession:
                     self._condition.notify_all()
 
     def _document_ready_locked(self, uri: str) -> bool:
+        # The progress gate belongs here rather than in
+        # `_refresh_readiness_locked`: readiness reporting goes through that
+        # one, but a query is admitted through `_document_query` ->
+        # `_query_ready_locked` -> `_document_query_current_locked` -> here.
+        # Gating only the reporting path would leave a session that calls
+        # itself not ready and answers anyway.
         generation = self._generation_nonce
         document = self._documents.get(uri)
         return (
             generation is not None
             and document is not None
+            and self._progress_gate_satisfied_locked()
             and self._ready_uri_generations.get(uri) == generation
             and self._wire_document_opened(document, generation)
         )
@@ -2994,6 +3312,10 @@ class PyrightSession:
             return False
         if process.state is ProcessState.FAILED:
             return True
+        return self._degraded_generation_is_ours(process)
+
+    def _degraded_generation_is_ours(self, process: LspProcess) -> bool:
+        """A degraded process only reconciles when the failed generation is ours."""
         if process.state is not ProcessState.DEGRADED:
             return False
         generation = self._generation_nonce
@@ -3030,6 +3352,11 @@ class PyrightSession:
             return True
         if process.generation_nonce != generation:
             return True
+        return self._promoted_or_demoted_locked(target, process, generation, deadline)
+
+    def _promoted_or_demoted_locked(
+        self, target: str, process: LspProcess, generation: str, deadline: float
+    ) -> bool:
         if self._promote_target_locked(target, process, generation, deadline):
             return True
         self._demote_target_locked(target)
@@ -3057,10 +3384,18 @@ class PyrightSession:
         if target is None or not self._document_ready_locked(target):
             self._initialized_readiness_locked()
             return
+        self._promote_readiness_locked(target, deadline)
+
+    def _promote_readiness_locked(self, target: str, deadline: float) -> None:
         if not self._target_ready_locked(target, deadline):
             return
         self._readiness = "query_ready"
-        self._readiness_evidence = _QUERY_READY_EVIDENCE
+        self._readiness_evidence = self._query_ready_evidence()
+
+    def _query_ready_evidence(self) -> tuple[str, ...]:
+        if not self._profile.gates_on_progress():
+            return _QUERY_READY_EVIDENCE
+        return (*_QUERY_READY_EVIDENCE, "workDoneProgress/end")
 
     def _mark_protocol_initialized(self, *, did_open: bool, deadline: float) -> None:
         with self._lock:
@@ -3209,6 +3544,9 @@ class PyrightSession:
         range_ = _lsp_range(range_value)
         if range_ is None:
             return None
+        return self._owned_location(uri, range_)
+
+    def _owned_location(self, uri: str, range_: LspRange) -> LspLocation | None:
         source = normalize_provider_uri(self._repository, uri)
         if source is None:
             return None
@@ -3262,6 +3600,20 @@ class PyrightSession:
         if query is None:
             return ProviderLocations((), status, True)
         params = self._location_params(query, anchor, references=references)
+        return self._location_response(
+            query, method, params, deadline=deadline, references=references
+        )
+
+    def _location_response(
+        self,
+        query: _DocumentQuery,
+        method: str,
+        params: dict[str, object],
+        *,
+        deadline: float,
+        references: bool,
+    ) -> ProviderLocations:
+        """Ask, then publish only if the workspace has not moved either side of it."""
         if not self._query_still_current(query):
             return ProviderLocations((), "not_ready", True)
         result = query.process.request(method, params, deadline=deadline)
@@ -3355,13 +3707,11 @@ class PyrightSession:
         """Where the symbol is: an explicit location, or its selection range."""
         if "location" in value:
             return self._normalize_location(value.get("location"))
-        range_ = _lsp_range(value.get("range"))
-        selection = _lsp_range(value.get("selectionRange"))
-        if range_ is None or selection is None:
-            return None
-        if not _range_contains(range_, selection):
-            return None
-        return LspLocation(uri, selection)
+        return _contained_selection(
+            _lsp_range(value.get("range")),
+            _lsp_range(value.get("selectionRange")),
+            uri,
+        )
 
     def _visit_symbol(self, walk: _SymbolWalk, uri: str) -> None:
         """Take one node off the walk and collect the location it names."""
@@ -3371,6 +3721,12 @@ class PyrightSession:
             walk.drop()
             return
         _push_symbol_children(walk, value)
+        self._collect_symbol(walk, value, uri)
+
+    def _collect_symbol(
+        self, walk: _SymbolWalk, value: Mapping[str, object], uri: str
+    ) -> None:
+        """Add the location this node names, or record that it could not be read."""
         if not _symbol_fields_ok(value):
             walk.drop()
             return
@@ -3452,6 +3808,9 @@ class PyrightSession:
         if status is not None:
             return None, status
         document = self.open_document(path, deadline=deadline)
+        # The server begins loading the project on didOpen, so the wait has to
+        # come after it, not after `start`.
+        self._await_progress_gate(deadline)
         return self._document_query(document, epoch), "not_ready"
 
     def _hover_within_operation(
@@ -3463,6 +3822,11 @@ class PyrightSession:
         if query is None:
             return ProviderHover(None, None, True)
         position = self._anchor_position(query, anchor)
+        return self._hover_response(query, position, deadline=deadline)
+
+    def _hover_response(
+        self, query: _DocumentQuery, position: LspPosition, *, deadline: float
+    ) -> ProviderHover:
         if not self._query_still_current(query):
             return ProviderHover(None, None, True)
         result = query.process.request(
@@ -3496,13 +3860,12 @@ class PyrightSession:
     def _workspace_query_current(self, query: _WorkspaceQuery) -> bool:
         """Whether the session still stands where the workspace query began."""
         with self._lock:
-            if self._process is not query.process:
-                return False
-            if self._generation_nonce != query.generation:
-                return False
-            if self._readiness != query.readiness:
-                return False
-            return self._semantic_query_epoch_current_locked(query.epoch)
+            return (
+                self._process is query.process
+                and self._generation_nonce == query.generation
+                and self._readiness == query.readiness
+                and self._semantic_query_epoch_current_locked(query.epoch)
+            )
 
     def _workspace_symbol_response(self, result: object) -> ProviderLocations:
         """The locations the server reported for a workspace symbol query."""
@@ -3528,6 +3891,11 @@ class PyrightSession:
         bound = _WorkspaceQuery(
             state.process, state.generation, state.readiness, epoch
         )
+        return self._workspace_symbol_result(bound, query, deadline=deadline)
+
+    def _workspace_symbol_result(
+        self, bound: _WorkspaceQuery, query: str, *, deadline: float
+    ) -> ProviderLocations:
         result = bound.process.request(
             "workspace/symbol", {"query": query}, deadline=deadline
         )
@@ -3554,6 +3922,11 @@ class PyrightSession:
         core = _call_item_core(value)
         if core is None:
             return None
+        return self._call_item_from_core(value, core)
+
+    def _call_item_from_core(
+        self, value: Mapping[str, object], core: tuple
+    ) -> dict[str, object] | None:
         name, kind, uri, range_, selection = core
         source = normalize_provider_uri(self._repository, uri)
         if source is None:
@@ -3565,9 +3938,7 @@ class PyrightSession:
             "range": _range_json(range_),
             "selectionRange": _range_json(selection),
         }
-        if not _call_item_optionals(value, item):
-            return None
-        return item
+        return item if _call_item_optionals(value, item) else None
 
     def _call_location(self, value: object) -> LspLocation | None:
         if not isinstance(value, dict):
@@ -3712,6 +4083,18 @@ class PyrightSession:
             return ProviderCalls(direction, (), "not_ready", True)
         if prepared is None or not isinstance(prepared, list):
             return ProviderCalls(direction, (), "provider_reported", True)
+        return self._calls_from_prepared(
+            prepared, query, direction=direction, deadline=deadline
+        )
+
+    def _calls_from_prepared(
+        self,
+        prepared: list[object],
+        query: _DocumentQuery,
+        *,
+        direction: str,
+        deadline: float,
+    ) -> ProviderCalls:
         items = self._sanitized_call_items(prepared)
         locations = self._call_locations(
             items, query, direction=direction, deadline=deadline
@@ -3730,7 +4113,15 @@ class PyrightSession:
         status = self._capability_status("calls", epoch)
         if status is not None:
             return ProviderCalls(direction, (), status, True)
+        return self._calls_for_open_document(
+            anchor, epoch, direction=direction, deadline=deadline
+        )
+
+    def _calls_for_open_document(
+        self, anchor: SourceAnchor, epoch: int, *, direction: str, deadline: float
+    ) -> ProviderCalls:
         document = self.open_document(anchor.path, deadline=deadline)
+        self._await_progress_gate(deadline)
         query = self._document_query(document, epoch)
         if query is None:
             return ProviderCalls(direction, (), "not_ready", True)
@@ -3788,18 +4179,31 @@ class PyrightSession:
     ) -> ProviderDiagnostics:
         """Wait for a snapshot of this document version; the caller holds the lock."""
         while True:
-            if not self._document_query_current_locked(
-                process, generation, document, epoch
-            ):
-                return ProviderDiagnostics((), None, True)
-            snapshot = self._diagnostics.get(document.source.uri)
-            matched = _matching_diagnostics(snapshot, document.version)
-            if matched is not None:
-                return matched
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return _expired_diagnostics(snapshot)
-            self._condition.wait(remaining)
+            settled = self._settled_diagnostics_locked(
+                document, process, generation, epoch, deadline
+            )
+            if settled is not None:
+                return settled
+            self._condition.wait(deadline - time.monotonic())
+
+    def _settled_diagnostics_locked(
+        self,
+        document: OpenDocument,
+        process: LspProcess,
+        generation: str,
+        epoch: int,
+        deadline: float,
+    ) -> ProviderDiagnostics | None:
+        """The answer this wait can already give, or None to keep waiting."""
+        if not self._document_query_current_locked(
+            process, generation, document, epoch
+        ):
+            return ProviderDiagnostics((), None, True)
+        snapshot = self._diagnostics.get(document.source.uri)
+        matched = _matching_diagnostics(snapshot, document.version)
+        if matched is not None:
+            return matched
+        return _expired_diagnostics(snapshot) if deadline <= time.monotonic() else None
 
     def _diagnostics_for_document(
         self, document: OpenDocument, epoch: int, deadline: float
@@ -3843,11 +4247,11 @@ class PyrightSession:
         generation = self._generation_nonce
         if self._process is not process or generation is None:
             return None
-        if process.state in {ProcessState.DEGRADED, ProcessState.FAILED}:
-            return None
-        if generation != process.generation_nonce:
-            return None
-        return generation
+        usable = (
+            process.state not in {ProcessState.DEGRADED, ProcessState.FAILED}
+            and generation == process.generation_nonce
+        )
+        return generation if usable else None
 
     def _synchronize_snapshot_replayed_locked(self, process: LspProcess) -> bool:
         generation = self._replay_generation_current(process)
@@ -3937,15 +4341,24 @@ class PyrightSession:
     ) -> None:
         """A recovery that failed leaves the process to be cleaned up, not used."""
         with self._lock:
-            if self._process is process:
-                self._process = None
-            if self._startup_process is None:
-                self._startup_process = process
-            if self._bootstrap_owner_nonce == bootstrap_owner_nonce:
-                self._bootstrap_owner_nonce = None
+            self._detach_recovered_process_locked(process, bootstrap_owner_nonce)
             self._forget_recovery_state_locked()
             self._sync_startup_atexit_locked()
             self._condition.notify_all()
+
+    def _detach_recovered_process_locked(
+        self, process: LspProcess, bootstrap_owner_nonce: str | None
+    ) -> None:
+        """Hand the process to the cleanup path and drop the owner that made it."""
+        if self._process is process:
+            self._process = None
+        if self._startup_process is None:
+            self._startup_process = process
+        self._release_bootstrap_owner_locked(bootstrap_owner_nonce)
+
+    def _release_bootstrap_owner_locked(self, owner_nonce: str | None) -> None:
+        if self._bootstrap_owner_nonce == owner_nonce:
+            self._bootstrap_owner_nonce = None
 
     def _release_recovery_serialization(self) -> None:
         with self._lock:
@@ -4087,13 +4500,12 @@ class PyrightSession:
 
     def _commit_identity_changed_locked(self, plan: _SyncPlan) -> bool:
         """The process, generation or revision the plan was built on has moved."""
-        if self._process is not plan.process:
-            return True
-        if self._workspace_revision is not plan.prior:
-            return True
-        if self._generation_nonce != plan.generation:
-            return True
-        return plan.process.generation_nonce != plan.generation
+        return (
+            self._process is not plan.process
+            or self._workspace_revision is not plan.prior
+            or self._generation_nonce != plan.generation
+            or plan.process.generation_nonce != plan.generation
+        )
 
     def _commit_state_changed_locked(self, plan: _SyncPlan) -> bool:
         if self._closed or self._closing:
@@ -4405,6 +4817,11 @@ class PyrightSession:
     def _check_synchronize_revision(
         self, revision: WorkspaceRevision, deadline: float
     ) -> None:
+        self._require_matching_revision(revision)
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Pyright synchronize deadline expired")
+
+    def _require_matching_revision(self, revision: WorkspaceRevision) -> None:
         if not isinstance(revision, WorkspaceRevision):
             raise TypeError("revision must be a WorkspaceRevision")
         if (
@@ -4412,8 +4829,6 @@ class PyrightSession:
             or revision.checkout_id != self._repository.checkout_id
         ):
             raise ValueError("workspace revision must describe this checkout")
-        if time.monotonic() >= deadline:
-            raise TimeoutError("Pyright synchronize deadline expired")
 
     def close(self, *, deadline: float) -> None:
         deadline = _validated_deadline(deadline)
@@ -4444,12 +4859,16 @@ class PyrightSession:
         startup_process = self._startup_process
         if self._close_finished_locked(cleanup_error, startup_process):
             return True, None
-        if not self._closing:
-            self._closing = True
-            self._condition.notify_all()
+        self._reserve_close_locked()
         if self._starting or self._active_operations:
             return False, None
         return False, _CloseTargets(cleanup_error, startup_process, self._process)
+
+    def _reserve_close_locked(self) -> None:
+        """Claim the close before waiting, so nothing new starts behind it."""
+        if not self._closing:
+            self._closing = True
+            self._condition.notify_all()
 
     def _close_attempt(self, deadline: float) -> tuple[bool, _CloseTargets | None]:
         self._acquire_state_lock(
@@ -4469,34 +4888,29 @@ class PyrightSession:
                 return None
             if targets is not None:
                 return targets
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError("Pyright operations did not finish before close")
-            time.sleep(min(_LOCK_POLL_SECONDS, remaining))
+            _sleep_before_close_retry(deadline)
 
     @staticmethod
     def _shut_down_targets(targets: _CloseTargets, deadline: float) -> None:
         """Close what this session owns, in the order it took them on."""
         try:
-            if targets.cleanup_error is not None:
-                targets.cleanup_error.retry_cleanup(deadline)
-            if targets.startup_process is not None:
-                targets.startup_process.close(deadline)
-            if targets.process is not None:
-                targets.process.close(deadline)
+            _close_owned_targets(targets, deadline)
         except BaseException as error:
             _raise_collected_errors([], prior_error=error)
 
     def _forget_closed_owners_locked(self, targets: _CloseTargets) -> None:
         """Drop the owners we just closed, if they are still the current ones."""
-        if self._startup_cleanup_error is targets.cleanup_error:
-            self._startup_cleanup_error = None
-        if self._startup_process is targets.startup_process:
-            self._startup_process = None
+        self._forget_closed_startup_locked(targets)
         self._sync_startup_atexit_locked()
         if self._process is targets.process:
             self._process = None
         self._bootstrap_owner_nonce = None
+
+    def _forget_closed_startup_locked(self, targets: _CloseTargets) -> None:
+        if self._startup_cleanup_error is targets.cleanup_error:
+            self._startup_cleanup_error = None
+        if self._startup_process is targets.startup_process:
+            self._startup_process = None
 
     def _forget_session_state_locked(self) -> None:
         """Everything a running session accumulated is dropped on close."""
@@ -4530,6 +4944,36 @@ class PyrightSession:
         self._finish_close(targets, deadline)
 
 
+# The name the Pyright tests, `code_navigation` and the MCP server type-check
+# against. One class drives every profile; keeping the alias leaves the Python
+# path's own vocabulary intact rather than rewriting 5,000 lines for a second
+# language. It is placed here, before the manager, so the manager's annotations
+# resolve at definition time -- this module has no `from __future__ import
+# annotations`.
+PyrightSession = LanguageServerSession
+
+
+def _sleep_before_close_retry(deadline: float) -> None:
+    """Back off once while an operation finishes, or give up on the deadline."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("Pyright operations did not finish before close")
+    time.sleep(min(_LOCK_POLL_SECONDS, remaining))
+
+
+def _close_owned_targets(targets: _CloseTargets, deadline: float) -> None:
+    """Close what the session owns, in the order it took them on."""
+    if targets.cleanup_error is not None:
+        targets.cleanup_error.retry_cleanup(deadline)
+    _close_owned_processes(targets, deadline)
+
+
+def _close_owned_processes(targets: _CloseTargets, deadline: float) -> None:
+    for process in (targets.startup_process, targets.process):
+        if process is not None:
+            process.close(deadline)
+
+
 class _KeyLockState:
     __slots__ = ("lock", "reference_lock", "references")
 
@@ -4543,20 +4987,50 @@ class _KeyLockState:
 class _SessionLookup:
     """What one locked attempt at getting a session decided."""
 
-    session: PyrightSession | None = None
-    wait_for: PyrightSession | None = None
+    session: LanguageServerSession | None = None
+    wait_for: LanguageServerSession | None = None
     reserved: tuple[object, PyrightSession] | None = None
 
 
-class PyrightSessionManager:
-    """Bound live Pyright sessions to four processes per owning MCP process."""
+def _require_get_arguments(
+    repository: RepositoryScope, profile: LanguageServerProfile
+) -> None:
+    if not isinstance(repository, RepositoryScope):
+        raise TypeError("repository must be a RepositoryScope")
+    if not isinstance(profile, LanguageServerProfile):
+        raise TypeError("profile must be a LanguageServerProfile")
+
+
+def _discovered_identity(
+    profile: LanguageServerProfile,
+    repository: RepositoryScope,
+    state_root: Path,
+    deadline: float,
+) -> PyrightIdentity:
+    """Ask the right discovery for this profile, without installing anything.
+
+    Pyright keeps its own, which accepts a project-local or system candidate and
+    re-derives the whole identity for whichever wins. Every other profile is
+    managed-root only; `scripts/lsp_identity.py` says why.
+    """
+    if profile is PYRIGHT_PROFILE:
+        from pyright_profile import discover_pyright
+
+        return discover_pyright(repository, state_root=state_root, deadline=deadline)
+    return discover_managed_server(
+        profile, repository, state_root=state_root, deadline=deadline
+    )
+
+
+class LanguageServerSessionManager:
+    """Bound live language-server sessions to four processes per MCP process."""
 
     def __init__(self, *, state_root: Path) -> None:
         if not isinstance(state_root, Path):
             raise TypeError("state_root must be a Path")
         self._state_root = state_root
         self._lock = threading.RLock()
-        self._sessions: dict[tuple[str, PyrightIdentity], PyrightSession] = {}
+        self._sessions: dict[tuple[str, PyrightIdentity], LanguageServerSession] = {}
         self._key_locks: dict[tuple[str, PyrightIdentity], _KeyLockState] = {}
         self._key_lock_releases: queue.SimpleQueue[
             tuple[tuple[str, PyrightIdentity], _KeyLockState]
@@ -4568,8 +5042,15 @@ class PyrightSessionManager:
     def _profile_key(
         repository: RepositoryScope,
         identity: PyrightIdentity,
-    ) -> tuple[str, PyrightIdentity]:
-        return repository.checkout_id, identity
+        profile: LanguageServerProfile = PYRIGHT_PROFILE,
+    ) -> tuple[str, str, PyrightIdentity]:
+        """One live process per (checkout, language, identity).
+
+        The profile name is in the key because two languages in one checkout are
+        two servers, not one contended session: without it a Python and a
+        TypeScript request would collide on the same slot and evict each other.
+        """
+        return repository.checkout_id, profile.name, identity
 
     def _register_atexit_locked(self) -> None:
         if not self._atexit_registered:
@@ -4707,7 +5188,7 @@ class PyrightSessionManager:
 
     @staticmethod
     def _session_state(
-        session: PyrightSession,
+        session: LanguageServerSession,
         deadline: float,
     ) -> tuple[bool, bool, bool, int, float]:
         remaining = deadline - time.monotonic()
@@ -4727,8 +5208,8 @@ class PyrightSessionManager:
     def _live_entries_locked(
         self,
         deadline: float,
-    ) -> list[tuple[tuple[str, PyrightIdentity], PyrightSession]]:
-        live: list[tuple[tuple[str, PyrightIdentity], PyrightSession]] = []
+    ) -> list[tuple[tuple[str, PyrightIdentity], LanguageServerSession]]:
+        live: list[tuple[tuple[str, PyrightIdentity], LanguageServerSession]] = []
         for key, session in tuple(self._sessions.items()):
             closed, _closing, _starting, _active, _last_used = self._session_state(
                 session,
@@ -4743,9 +5224,9 @@ class PyrightSessionManager:
     def _idle_entry(
         self,
         key: tuple[str, PyrightIdentity],
-        session: PyrightSession,
+        session: LanguageServerSession,
         deadline: float,
-    ) -> tuple[float, tuple[str, PyrightIdentity], PyrightSession] | None:
+    ) -> tuple[float, tuple[str, PyrightIdentity], LanguageServerSession] | None:
         """The session's last-used time, when it is idle enough to evict."""
         closed, closing, starting, active, last_used = self._session_state(
             session,
@@ -4759,11 +5240,11 @@ class PyrightSessionManager:
 
     def _reserve_lru_idle_locked(
         self,
-        live: list[tuple[tuple[str, PyrightIdentity], PyrightSession]],
+        live: list[tuple[tuple[str, PyrightIdentity], LanguageServerSession]],
         deadline: float,
-    ) -> tuple[tuple[str, PyrightIdentity], PyrightSession] | None:
+    ) -> tuple[tuple[str, PyrightIdentity], LanguageServerSession] | None:
         idle: list[
-            tuple[float, tuple[str, PyrightIdentity], PyrightSession]
+            tuple[float, tuple[str, PyrightIdentity], LanguageServerSession]
         ] = []
         for key, session in live:
             entry = self._idle_entry(key, session, deadline)
@@ -4775,10 +5256,10 @@ class PyrightSessionManager:
         return None
 
     @staticmethod
-    def _wait_for_session_close(session: PyrightSession, deadline: float) -> None:
+    def _wait_for_session_close(session: LanguageServerSession, deadline: float) -> None:
         while True:
             closed, closing, _starting, _active, _last_used = (
-                PyrightSessionManager._session_state(session, deadline)
+                LanguageServerSessionManager._session_state(session, deadline)
             )
             if closed or not closing:
                 return
@@ -4791,23 +5272,34 @@ class PyrightSessionManager:
         if self._closed:
             raise RuntimeError("Pyright session manager is closed")
 
-    def _forget_session_locked(self, key: object, session: PyrightSession) -> None:
+    def _forget_session_locked(self, key: object, session: LanguageServerSession) -> None:
         if self._sessions.get(key) is session:
             self._sessions.pop(key, None)
 
     def _new_session_locked(
-        self, key: object, repository: RepositoryScope, identity: PyrightIdentity
-    ) -> PyrightSession:
-        session = PyrightSession(repository, identity, state_root=self._state_root)
+        self,
+        key: object,
+        repository: RepositoryScope,
+        identity: PyrightIdentity,
+        profile: LanguageServerProfile,
+    ) -> LanguageServerSession:
+        session = LanguageServerSession(
+            repository, identity, state_root=self._state_root, profile=profile
+        )
         self._sessions[key] = session
         self._register_atexit_locked()
         return session
 
     def _capacity_denied_session(
-        self, repository: RepositoryScope, identity: PyrightIdentity
-    ) -> PyrightSession:
+        self,
+        repository: RepositoryScope,
+        identity: PyrightIdentity,
+        profile: LanguageServerProfile,
+    ) -> LanguageServerSession:
         """A session that refuses to start because the manager is at capacity."""
-        denied = PyrightSession(repository, identity, state_root=self._state_root)
+        denied = LanguageServerSession(
+            repository, identity, state_root=self._state_root, profile=profile
+        )
         denied._capacity_locked = True
         return denied
 
@@ -4824,15 +5316,16 @@ class PyrightSessionManager:
         if closed:
             self._forget_session_locked(key, existing)
             return None
-        if closing:
-            return _SessionLookup(wait_for=existing)
-        return _SessionLookup(session=existing)
+        return _SessionLookup(wait_for=existing) if closing else _SessionLookup(
+            session=existing
+        )
 
     def _lookup_session_locked(
         self,
         key: object,
         repository: RepositoryScope,
         identity: PyrightIdentity,
+        profile: LanguageServerProfile,
         deadline: float,
     ) -> _SessionLookup:
         """One locked attempt: a session, one to wait for, or one to evict."""
@@ -4843,12 +5336,23 @@ class PyrightSessionManager:
         live = self._live_entries_locked(deadline)
         if len(live) < MAX_LSP_PROCESSES:
             return _SessionLookup(
-                session=self._new_session_locked(key, repository, identity)
+                session=self._new_session_locked(key, repository, identity, profile)
             )
+        return self._crowded_lookup_locked(live, repository, identity, profile, deadline)
+
+    def _crowded_lookup_locked(
+        self,
+        live: list,
+        repository: RepositoryScope,
+        identity: PyrightIdentity,
+        profile: LanguageServerProfile,
+        deadline: float,
+    ) -> _SessionLookup:
+        """At capacity: evict the least recently used idle session, or refuse."""
         reserved = self._reserve_lru_idle_locked(live, deadline)
         if reserved is None:
             return _SessionLookup(
-                session=self._capacity_denied_session(repository, identity)
+                session=self._capacity_denied_session(repository, identity, profile)
             )
         return _SessionLookup(reserved=reserved)
 
@@ -4857,51 +5361,56 @@ class PyrightSessionManager:
         key: object,
         repository: RepositoryScope,
         identity: PyrightIdentity,
+        profile: LanguageServerProfile,
         deadline: float,
     ) -> _SessionLookup:
         self._acquire_manager(deadline)
         try:
-            return self._lookup_session_locked(key, repository, identity, deadline)
+            return self._lookup_session_locked(
+                key, repository, identity, profile, deadline
+            )
         finally:
             self._lock.release()
 
     def _adopt_after_eviction_locked(
         self,
         evicted_key: object,
-        evicted: PyrightSession,
+        evicted: LanguageServerSession,
         key: object,
         repository: RepositoryScope,
         identity: PyrightIdentity,
+        profile: LanguageServerProfile,
         deadline: float,
-    ) -> PyrightSession | None:
+    ) -> LanguageServerSession | None:
         """The session replacing the evicted one, or None to look again."""
         closed, _closing, _starting, _active, _last_used = self._session_state(
             evicted, deadline
         )
         if not closed:
-            raise RuntimeError("Pyright eviction close did not release the session")
+            raise RuntimeError("eviction close did not release the session")
         self._forget_session_locked(evicted_key, evicted)
         self._admit_manager_locked()
         live = self._live_entries_locked(deadline)
         if len(live) >= MAX_LSP_PROCESSES:
             return None
-        return self._new_session_locked(key, repository, identity)
+        return self._new_session_locked(key, repository, identity, profile)
 
     def _evict_and_adopt(
         self,
-        reserved: tuple[object, PyrightSession],
+        reserved: tuple[object, LanguageServerSession],
         key: object,
         repository: RepositoryScope,
         identity: PyrightIdentity,
+        profile: LanguageServerProfile,
         deadline: float,
-    ) -> PyrightSession | None:
+    ) -> LanguageServerSession | None:
         """Close the reserved session, then take its place if one is free."""
         evicted_key, evicted = reserved
         evicted.close(deadline=deadline)
         self._acquire_manager(deadline)
         try:
             return self._adopt_after_eviction_locked(
-                evicted_key, evicted, key, repository, identity, deadline
+                evicted_key, evicted, key, repository, identity, profile, deadline
             )
         finally:
             self._lock.release()
@@ -4911,38 +5420,54 @@ class PyrightSessionManager:
         key: object,
         repository: RepositoryScope,
         identity: PyrightIdentity,
+        profile: LanguageServerProfile,
         deadline: float,
-    ) -> PyrightSession:
+    ) -> LanguageServerSession:
         """The session for this key, waiting or evicting until there is one."""
         while True:
-            lookup = self._lookup_session(key, repository, identity, deadline)
+            lookup = self._lookup_session(key, repository, identity, profile, deadline)
             if lookup.session is not None:
                 return lookup.session
-            if lookup.wait_for is not None:
-                self._wait_for_session_close(lookup.wait_for, deadline)
-                continue
-            assert lookup.reserved is not None
-            adopted = self._evict_and_adopt(
-                lookup.reserved, key, repository, identity, deadline
+            adopted = self._advance_lookup(
+                lookup, key, repository, identity, profile, deadline
             )
             if adopted is not None:
                 return adopted
+
+    def _advance_lookup(
+        self,
+        lookup: _SessionLookup,
+        key: object,
+        repository: RepositoryScope,
+        identity: PyrightIdentity,
+        profile: LanguageServerProfile,
+        deadline: float,
+    ) -> LanguageServerSession | None:
+        """Wait out a closing session, or evict a reserved one; None to look again."""
+        if lookup.wait_for is not None:
+            self._wait_for_session_close(lookup.wait_for, deadline)
+            return None
+        assert lookup.reserved is not None
+        return self._evict_and_adopt(
+            lookup.reserved, key, repository, identity, profile, deadline
+        )
 
     def _admit_get(
         self,
         repository: RepositoryScope,
         identity: PyrightIdentity,
+        profile: LanguageServerProfile,
         deadline: float,
-    ) -> PyrightSession | tuple[object, object]:
+    ) -> LanguageServerSession | tuple[object, object]:
         """The key and its lock, or an unqualified session that needs neither."""
         self._acquire_manager(deadline)
         try:
             self._admit_manager_locked()
             if not identity.qualified:
-                return PyrightSession(
-                    repository, identity, state_root=self._state_root
+                return LanguageServerSession(
+                    repository, identity, state_root=self._state_root, profile=profile
                 )
-            key = self._profile_key(repository, identity)
+            key = self._profile_key(repository, identity, profile)
             return key, self._retain_key_lock_locked(key, deadline)
         finally:
             self._lock.release()
@@ -4952,26 +5477,22 @@ class PyrightSessionManager:
         repository: RepositoryScope,
         *,
         deadline: float,
-    ) -> PyrightSession:
+        profile: LanguageServerProfile = PYRIGHT_PROFILE,
+    ) -> LanguageServerSession:
         deadline = _validated_deadline(deadline)
-        if not isinstance(repository, RepositoryScope):
-            raise TypeError("repository must be a RepositoryScope")
-        from pyright_profile import discover_pyright
-
-        identity = discover_pyright(
-            repository,
-            state_root=self._state_root,
-            deadline=deadline,
-        )
-        admitted = self._admit_get(repository, identity, deadline)
-        if isinstance(admitted, PyrightSession):
+        _require_get_arguments(repository, profile)
+        identity = _discovered_identity(profile, repository, self._state_root, deadline)
+        admitted = self._admit_get(repository, identity, profile, deadline)
+        if isinstance(admitted, LanguageServerSession):
             return admitted
         key, key_lock_state = admitted
         key_lock_acquired = False
         try:
             self._acquire_key_lock(key_lock_state.lock, deadline)
             key_lock_acquired = True
-            return self._session_for_key(key, repository, identity, deadline)
+            return self._session_for_key(
+                key, repository, identity, profile, deadline
+            )
         finally:
             if key_lock_acquired:
                 key_lock_state.lock.release()
@@ -5000,7 +5521,7 @@ class PyrightSessionManager:
         _raise_collected_errors(errors)
 
     def _forget_closed_session(
-        self, key: object, session: PyrightSession, deadline: float
+        self, key: object, session: LanguageServerSession, deadline: float
     ) -> None:
         """Drop a session we just closed, refusing one that did not release."""
         self._acquire_manager(deadline)
@@ -5017,7 +5538,7 @@ class PyrightSessionManager:
             self._lock.release()
 
     def _close_one_session(
-        self, key: object, session: PyrightSession, deadline: float
+        self, key: object, session: LanguageServerSession, deadline: float
     ) -> BaseException | None:
         """Close one session and forget it; the error worth reporting, if any."""
         error = _released_error(lambda: session.close(deadline=deadline))
@@ -5026,3 +5547,7 @@ class PyrightSessionManager:
         return _released_error(
             lambda: self._forget_closed_session(key, session, deadline)
         )
+
+
+# The manager name `scripts/mcp_server.py` imports. Same object.
+PyrightSessionManager = LanguageServerSessionManager

@@ -208,16 +208,38 @@ class RuntimeOption:
     file inside the managed root that the value must point at. Kept declarative
     on purpose: a callable here would be unhashable, untestable as data, and
     would put arbitrary code inside a frozen profile.
+
+    `package_url` and `package_integrity` pin the second tarball that has to be
+    unpacked for `sibling_relative` to exist. They are on the runtime option
+    rather than on the profile because they only make sense together with it: a
+    profile with no runtime path needs no second artifact, and a runtime path
+    with no artifact could never be satisfied by an install.
     """
 
     key_path: tuple[str, ...]
     sibling_relative: Path
+    package_url: str | None = None
+    package_integrity: str | None = None
 
     def __post_init__(self) -> None:
         _require_tuple_of_text(self.key_path, "runtime_option.key_path")
         if not self.key_path:
             raise ProfileError("runtime_option.key_path must not be empty")
         _require_relative(self.sibling_relative, "runtime_option.sibling_relative")
+        self._check_artifact()
+
+    def _check_artifact(self) -> None:
+        if self.package_url is None and self.package_integrity is None:
+            return
+        url = _require_text(self.package_url, "runtime_option.package_url")
+        if not url.startswith("https://"):
+            raise ProfileError("runtime_option.package_url must be https")
+        _require_integrity(self.package_integrity)
+
+    @property
+    def install_subdirectory(self) -> str:
+        """The directory under the managed root this artifact unpacks into."""
+        return self.sibling_relative.parts[0]
 
     def resolved_path(self, managed_root: Path) -> Path:
         if not isinstance(managed_root, Path):
