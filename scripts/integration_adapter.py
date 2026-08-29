@@ -649,11 +649,110 @@ def _known(value: str | None, fallback: str = "unknown") -> str:
     return fallback
 
 
+# What a checkpoint records when nobody stated anything, which until now was
+# nothing at all: 1 000 events in this vault's own journal, every one of them
+# `checkpoint-none` closes and empty lists, so `state.md` read `Goal: None`
+# and always had. `project_delta` is read here and written by no producer
+# anywhere in `scripts/`, `integrations/`, `skills/` or `rules/` — only by two
+# tests.
+#
+# What to derive, and from what, is settled by measurement rather than taste.
+# The cold-start ablation separates the contribution of the agentic tasks in
+# history from the agent's own response content and finds the tasks are the
+# primary driver while the response content has little effect: what was done
+# carries the signal, what was said about it does not. So the delta is derived
+# from the observation, never narrated. An agent may still state a goal
+# explicitly by sending `project_delta`, and that path is unchanged.
+#
+# Every derived value is dated, because the dominant failure of carried state
+# is staleness rather than absence — a resuming agent treats the last session
+# as current instead of re-validating it. A blocker that cannot say when it was
+# opened is worse than an absent one.
+#
+# Research: `docs/research/2026-08-29-what-a-project-checkpoint-should-record.md`
+_MAX_DERIVED_VALUE_CHARS = 200
+
+
+def _derived_stamp(occurred_at: object) -> str:
+    """Seconds are enough to judge staleness; microseconds are noise."""
+    if isinstance(occurred_at, datetime):
+        return occurred_at.isoformat(timespec="seconds")
+    return str(occurred_at or "")
+
+
+def _derived_value(text: str, occurred_at: object) -> str:
+    """One item's value, dated, so a reader can see how old the claim is."""
+    body = " ".join(str(text).split())[:_MAX_DERIVED_VALUE_CHARS]
+    stamp = _derived_stamp(occurred_at)
+    return f"{body} — {stamp}" if stamp else body
+
+
+def _upsert(item_id: str, text: str, occurred_at: object) -> dict[str, str]:
+    return {
+        "id": item_id[:256],
+        "action": "upsert",
+        "value": _derived_value(text, occurred_at),
+    }
+
+
+def _derived_target(payload: Mapping[str, Any]) -> tuple[str, str]:
+    tool = str(payload.get("tool_name") or "")
+    return tool, str(payload.get("target") or "")
+
+
+def _derived_changed_file(payload: Mapping[str, Any], at: object) -> list[dict[str, str]]:
+    """A file this tool changed, keyed by its path so re-editing replaces it."""
+    tool, target = _derived_target(payload)
+    if payload.get("changed") is not True or not target or not tool:
+        return []
+    return [_upsert(f"file:{target}", target, at)]
+
+
+def _derived_command(payload: Mapping[str, Any], at: object) -> list[dict[str, str]]:
+    """A shell command, keyed by its own text so a repeat is one item."""
+    tool, target = _derived_target(payload)
+    if tool != "Bash" or not target:
+        return []
+    return [_upsert(f"cmd:{target[:120]}", target, at)]
+
+
+def _derived_blocker(
+    envelope: EventEnvelope, payload: Mapping[str, Any], at: object
+) -> list[dict[str, str]]:
+    """A failure the run actually hit, keyed by what failed rather than by when."""
+    if envelope.severity not in {"error", "fatal"}:
+        return []
+    tool, target = _derived_target(payload)
+    if not tool:
+        return []
+    return [_upsert(f"failed:{tool}:{target[:80]}", f"{tool} failed: {target}", at)]
+
+
+def _derived_current_task(payload: Mapping[str, Any], at: object) -> dict[str, str]:
+    """One id, always replaced: the newest thing the session was seen doing."""
+    tool, target = _derived_target(payload)
+    if not tool:
+        return {"id": "checkpoint-none", "action": "close", "value": ""}
+    return _upsert("observed", f"{tool} {target}".strip(), at)
+
+
+def _derived_delta(envelope: EventEnvelope) -> dict[str, object]:
+    """The delta an observation supports on its own, with nothing narrated."""
+    payload = envelope.payload
+    at = getattr(envelope, "occurred_at", None)
+    delta = _empty_delta()
+    delta["current_task"] = _derived_current_task(payload, at)
+    delta["changed_files"] = _derived_changed_file(payload, at)
+    delta["commands"] = _derived_command(payload, at)
+    delta["blockers"] = _derived_blocker(envelope, payload, at)
+    return delta
+
+
 def _checkpoint_delta(envelope: EventEnvelope) -> dict[str, object]:
     raw_delta = envelope.to_dict()["payload"].get("project_delta")
     if isinstance(raw_delta, Mapping):
         return dict(raw_delta)
-    return _empty_delta()
+    return _derived_delta(envelope)
 
 
 def _pending_checkpoint(envelope: EventEnvelope, slug: str, state_key: str) -> dict[str, object]:

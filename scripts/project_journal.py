@@ -1422,10 +1422,19 @@ def _sealed_segment_path(slug: str, records: list) -> str:
     return f"knowledge/projects/{slug}/journal.{first:06d}-{last:06d}.md"
 
 
-def _snapshot_operations(items: Mapping[str, str]) -> list[dict[str, str]]:
+def _snapshot_operations(items: Mapping[str, str], limit: int) -> list[dict[str, str]]:
+    """The tail the projection would show, and no more.
+
+    The event schema caps a list field at ten operations, so a projection that
+    accumulated more ids than that could not be snapshotted at all and rotation
+    would fail on a full journal — the wedge again, one level up. The tail is
+    the honest cut: `_state_section_lines` already renders only the last
+    `_MAX_LIST_ITEMS[name]` of each field, so nothing a reader could see is
+    lost, and everything older stays verbatim in the sealed segment.
+    """
+    kept = list(items.items())[-limit:]
     return [
-        {"id": item_id, "action": "upsert", "value": value}
-        for item_id, value in items.items()
+        {"id": item_id, "action": "upsert", "value": value} for item_id, value in kept
     ]
 
 
@@ -1439,9 +1448,9 @@ def _snapshot_delta(active: Mapping[str, dict[str, str]], context: str) -> dict:
     delta: dict[str, object] = {"legacy_context": context}
     for name in _SCALAR_FIELDS:
         delta[name] = {"id": _ROTATION_ID, "action": "close", "value": ""}
-        delta[f"{name}_operations"] = _snapshot_operations(active[name])
-    for name in _MAX_LIST_ITEMS:
-        delta[name] = _snapshot_operations(active[name])
+        delta[f"{name}_operations"] = _snapshot_operations(active[name], 1)
+    for name, limit in _MAX_LIST_ITEMS.items():
+        delta[name] = _snapshot_operations(active[name], limit)
     return delta
 
 
