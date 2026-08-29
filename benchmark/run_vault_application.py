@@ -40,6 +40,7 @@ from retrieval_paths import DEFAULT_PATH, PATHS, warm  # noqa: E402
 from run_vault_retrieval import (  # noqa: E402
     TOP_K,
     _readable,
+    dropped_paths,
     grep_ranking,
     product_ranking,
 )
@@ -61,14 +62,19 @@ def load_corpus(path: Path = CORPUS) -> dict:
     return corpus
 
 
-# The task sheet lives in the vault and carries every expected token, so a
-# retrieval that finds the sheet would pass every case by reading the answers.
-# That is the measurement looking at itself, so this one path never counts.
-_SELF = "benchmark/vault-application-v1.json"
-
-
+# The task sheet lives in the vault and carries every expected token verbatim,
+# so a retrieval that finds the sheet passes every case by reading the answers.
+# That is the measurement looking at itself.
+#
+# Dropping it from the scored text was not enough: it still held a rank, so it
+# spent one of the five visible places on its own questions (`knowledge/log.md`,
+# 2026-08-26). It is now dropped from the ranking too, together with every other
+# file that states a case verbatim — the same derived set the retrieval stand
+# uses. Excluding a sheet that carries every answer can only lower this number,
+# never raise it, so the number after the change is the true one.
 def _text_of(vault: Path, paths: list[str]) -> str:
-    return "\n".join(_readable(vault / path) for path in paths if path != _SELF)
+    dropped = dropped_paths(vault)
+    return "\n".join(_readable(vault / path) for path in paths if path not in dropped)
 
 
 def applied(text: str, tokens: list[str]) -> bool:
@@ -81,11 +87,13 @@ def score_case(
 ) -> CaseResult:
     tokens = [str(token) for token in case["expected_tokens"]]
     task = str(case["task"])
-    found = product_ranking(task, limit, path)
+    dropped = dropped_paths(vault)
+    found = product_ranking(task, limit, path, dropped)
+    grepped = grep_ranking(vault, task, limit, dropped)
     return CaseResult(
         case_id=str(case["case_id"]),
         product_applied=applied(_text_of(vault, found), tokens),
-        grep_applied=applied(_text_of(vault, grep_ranking(vault, task, limit)), tokens),
+        grep_applied=applied(_text_of(vault, grepped), tokens),
     )
 
 

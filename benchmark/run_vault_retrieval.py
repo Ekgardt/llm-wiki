@@ -39,6 +39,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 if str(ROOT / "benchmark") not in sys.path:
     sys.path.insert(0, str(ROOT / "benchmark"))
 
+import answer_key  # noqa: E402
 from reliable_memory import validate_schema  # noqa: E402
 from retrieval_paths import (  # noqa: E402
     DEFAULT_PATH,
@@ -107,29 +108,66 @@ def _score(text: str, terms: list[str]) -> tuple[int, int]:
     return len(present), sum(text.count(term) for term in present)
 
 
-def grep_ranking(vault: Path, question: str, limit: int = TOP_K) -> list[str]:
-    """What a person gets from searching their own files for the question's words."""
+def grep_ranking(
+    vault: Path,
+    question: str,
+    limit: int = TOP_K,
+    dropped: frozenset[str] | None = None,
+) -> list[str]:
+    """What a person gets from searching their own files for the question's words.
+
+    The baseline drops the same sheets the product does. Measured on this vault
+    it changes nothing — `GREP_ROOTS` holds no sheet, because they are JSON
+    under `benchmark/` and Python under `tests/` while this reads `.md` under
+    three other roots. It is here so the two sides stay comparable if a sheet
+    ever moves, rather than because it is doing work today.
+    """
+    drop = dropped if dropped is not None else dropped_paths(vault)
     terms = _terms(question)
+    scored = _grep_scores(vault, terms)
+    return [item[2] for item in sorted(scored) if item[2] not in drop][:limit]
+
+
+def _grep_scores(vault: Path, terms: list[str]) -> list[tuple[int, int, str]]:
     scored = []
     for path in _grep_files(vault):
         distinct, total = _score(_readable(path), terms)
-        if distinct:
-            scored.append((-distinct, -total, path.relative_to(vault).as_posix()))
-    return [item[2] for item in sorted(scored)[:limit]]
+        scored.append((-distinct, -total, path.relative_to(vault).as_posix()))
+    return [item for item in scored if item[0]]
 
 
-# The question sheet lives in the vault like everything else, so a question that
-# appears in it verbatim retrieves it first. That is the measurement looking at
-# itself, not the product working, so this one path is dropped from the ranking.
-_SELF = "benchmark/vault-retrieval-v1.json"
+# The question sheet lives in the vault like everything else and `benchmark` is
+# an approved corpus root, so a question that appears in it verbatim retrieves
+# it. That is the measurement looking at itself, not the product working.
+#
+# This used to be one hardcoded path, and it was wrong twice over: it missed
+# `tests/test_intent_conditional_trust.py`, which pins one case's question next
+# to that case's gold page, and `run_vault_application` inherited it and so
+# dropped this stand's sheet while leaving its own in. The set is now derived
+# from what the files on disk actually say — see `benchmark/answer_key.py` —
+# and both stands drop the same one.
+def dropped_paths(vault: Path = ROOT) -> frozenset[str]:
+    return answer_key.sheets(vault)
 
 
 def product_observation(
-    question: str, limit: int = TOP_K, path: str = DEFAULT_PATH
+    question: str,
+    limit: int = TOP_K,
+    path: str = DEFAULT_PATH,
+    dropped: frozenset[str] | None = None,
 ) -> Observation:
-    """One retrieval through a real entry point, kept whole — ranks and reasons."""
-    seen = observe(path, question, limit + 1)
-    kept = [found for found in seen.result_paths if found != _SELF][:limit]
+    """One retrieval through a real entry point, kept whole — ranks and reasons.
+
+    The request is deepened by exactly the number of sheets that could be
+    dropped, so removing them leaves `limit` real rows rather than a short
+    list. That deepening is not free — `_candidate_pool` grows with the
+    requested limit — and `run_stand_contamination.py` reports the
+    uncompensated number beside this one so the compensation cannot quietly
+    become the score.
+    """
+    drop = dropped if dropped is not None else dropped_paths()
+    seen = observe(path, question, limit + len(drop))
+    kept = [found for found in seen.result_paths if found not in drop][:limit]
     return Observation(
         path=seen.path,
         result_paths=kept,
@@ -140,9 +178,12 @@ def product_observation(
 
 
 def product_ranking(
-    question: str, limit: int = TOP_K, path: str = DEFAULT_PATH
+    question: str,
+    limit: int = TOP_K,
+    path: str = DEFAULT_PATH,
+    dropped: frozenset[str] | None = None,
 ) -> list[str]:
-    return product_observation(question, limit, path).result_paths
+    return product_observation(question, limit, path, dropped).result_paths
 
 
 def _rank_of(gold: str, paths: list[str]) -> int | None:
@@ -157,12 +198,15 @@ def score_case(
 ) -> CaseResult:
     gold = str(case["gold_path"])
     question = str(case["question"])
-    seen = product_observation(question, limit, path)
+    # One set for both sides, taken from the vault under measurement, so a
+    # `--vault` elsewhere cannot leave the product and the baseline disagreeing.
+    dropped = dropped_paths(vault)
+    seen = product_observation(question, limit, path, dropped)
     return CaseResult(
         case_id=str(case["case_id"]),
         gold_path=gold,
         product_rank=_rank_of(gold, seen.result_paths),
-        grep_rank=_rank_of(gold, grep_ranking(vault, question, limit)),
+        grep_rank=_rank_of(gold, grep_ranking(vault, question, limit, dropped)),
         effective_mode=str(seen.trace.get("effective_mode") or "") or None,
         signals_used=seen.signals,
         fallback_reason=seen.fallback_reason,
