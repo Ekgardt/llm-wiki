@@ -112,6 +112,85 @@ class OptionalStageTimeout(TimeoutError):
     """An optional uninterruptible stage exceeded its isolated budget."""
 
 
+# What one kind of optional stage last cost, when a run of it finished --
+# whether the caller waited for that run or abandoned it and the daemon
+# straggler finished it later. This is the cost model admission uses.
+#
+# One sample deep on purpose. A mean would remember the cold model load for the
+# rest of the process and refuse a leg that has been warm for an hour; the last
+# finished run is the only figure that tracks the thing that actually changes,
+# which is whether the model is resident. It self-corrects in one call in
+# either direction, and a wrongly skipped stage degrades to the lexical answer,
+# which is the designed fallback rather than a failure.
+_OPTIONAL_STAGE_OBSERVED: dict[str, float] = {}
+_OPTIONAL_STAGE_OBSERVED_LOCK = threading.Lock()
+
+
+def _observe_optional_stage(kind: str | None, seconds: float) -> None:
+    """Record what a finished run of this kind cost, in units the decision can use.
+
+    Clamped at the ceiling, because the figure is only ever compared against a
+    window and no window may exceed `OPTIONAL_STAGE_MAX_SECONDS`. Above that
+    everything means the same thing -- "longer than any stage is ever allowed
+    to wait" -- so keeping more precision than the comparison can spend only
+    creates differences that behave identically. It also stops one pathological
+    run governing far longer than it should: a stage that hung for thirty
+    seconds is recorded as "does not fit", not as thirty seconds, and the next
+    run that finishes replaces it either way.
+    """
+    if kind is None:
+        return
+    with _OPTIONAL_STAGE_OBSERVED_LOCK:
+        _OPTIONAL_STAGE_OBSERVED[kind] = min(seconds, OPTIONAL_STAGE_MAX_SECONDS)
+
+
+def _observed_optional_stage_cost(kind: str | None) -> float | None:
+    if kind is None:
+        return None
+    with _OPTIONAL_STAGE_OBSERVED_LOCK:
+        return _OPTIONAL_STAGE_OBSERVED.get(kind)
+
+
+# The time between `_optional_stage_deadline` granting a window and
+# `_optional_stage_fits` measuring it: a few function calls and a semaphore.
+# It exists so that "was this stage given the whole ceiling?" is not decided by
+# clock slop.
+_OPTIONAL_STAGE_WINDOW_SLACK_SECONDS = 0.25
+
+
+def _unknown_cost_stage_fits(window: float) -> bool:
+    """Whether to wait for a kind nothing has been observed for yet.
+
+    Only when the caller granted enough budget that the ceiling, not its own
+    share, is what bounds the stage. That is the case `OPTIONAL_STAGE_MAX_SECONDS`
+    already exists for and says so: a one-shot CLI answer has no second call to
+    be warm for, so it must be allowed to pay the one-time model load itself.
+
+    A caller on the MCP budget is the other case. Its share is around 3.5 s
+    against a measured cold load of 10.13 s, so waiting cannot succeed -- and it
+    does not have to, because the worker below has already been started and the
+    straggler that finishes it records what it cost. The next call reads that
+    and waits for a warm stage that fits. The cost is learned without anyone
+    paying for it twice.
+    """
+    return window >= OPTIONAL_STAGE_MAX_SECONDS - _OPTIONAL_STAGE_WINDOW_SLACK_SECONDS
+
+
+def _optional_stage_fits(kind: str | None, deadline: float) -> bool:
+    """Whether a run of this kind is expected to finish in the window on offer.
+
+    Unlabelled work is always admitted: the cost model is per kind, and a stage
+    with no kind has nothing to be modelled against.
+    """
+    if kind is None:
+        return True
+    window = deadline - time.monotonic()
+    observed = _observed_optional_stage_cost(kind)
+    if observed is None:
+        return _unknown_cost_stage_fits(window)
+    return observed <= window
+
+
 def _require_optional_stage_time(
     deadline: float, cancelled: Callable[[], bool] | None
 ) -> None:
@@ -121,6 +200,23 @@ def _require_optional_stage_time(
         raise OptionalStageTimeout("optional stage deadline reached")
 
 
+def _optional_stage_admitted(
+    kind: str | None, deadline: float, cancelled: Callable[[], bool] | None
+) -> bool:
+    """Whether the caller may *wait* for this stage.
+
+    Distinct from whether the stage may run. A stage the caller cannot wait for
+    is still worth starting, because the straggler that finishes it leaves the
+    model resident and records what it cost, which is what makes the next call
+    cheap. Only the wait is refused.
+    """
+    if cancelled is not None and cancelled():
+        return False
+    if deadline - time.monotonic() <= 0:
+        return False
+    return _optional_stage_fits(kind, deadline)
+
+
 def _run_optional_bounded(
     operation: Callable[[], Any],
     *,
@@ -128,14 +224,23 @@ def _run_optional_bounded(
     cancelled: Callable[[], bool] | None,
     kind: str | None = None,
 ) -> Any:
-    """Run optional work with a hard wait bound and capped daemon stragglers."""
-    _require_optional_stage_time(deadline, cancelled)
+    """Run optional work with a hard wait bound and capped daemon stragglers.
+
+    The stage is always started; what varies is whether the caller waits for
+    it. That split is the point: warming is never refused, only the spending of
+    a budget that cannot buy a result.
+    """
+    # Decided before the worker starts, and deliberately so: this run is about
+    # to record its own cost, and a fast one would otherwise overwrite the
+    # observation the decision is being made from.
+    admitted = _optional_stage_admitted(kind, deadline, cancelled)
     slots = _optional_stage_slots(kind)
     if not slots.acquire(blocking=False):
         raise OptionalStageTimeout("optional stage capacity exhausted")
     completed = threading.Event()
     result: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
-    _start_optional_worker(operation, result, completed, slots)
+    _start_optional_worker(operation, result, completed, slots, kind)
+    _require_admitted_optional_stage(admitted)
     _await_optional_stage(completed, deadline, cancelled)
     ok, value = result.get_nowait()
     if ok:
@@ -143,17 +248,38 @@ def _run_optional_bounded(
     raise value
 
 
+def _require_admitted_optional_stage(admitted: bool) -> None:
+    """Decline the wait for a stage that is not expected to finish in time.
+
+    The worker is already running when this refuses, and that is deliberate:
+    the straggler warming the model is the whole point of the daemon design,
+    and only the caller's *wait* is being declined. Measured on this vault, a
+    cold embedding load costs 10.13 s against the ~3.5 s window a 10 s
+    operation can offer, so waiting for it spends a third of the budget to
+    arrive at the same lexical answer the caller would have had for nothing.
+    """
+    if not admitted:
+        raise OptionalStageTimeout("optional stage exceeds the budget on offer")
+
+
 def _start_optional_worker(
     operation: Callable[[], Any],
     result: queue.Queue[tuple[bool, Any]],
     completed: threading.Event,
     slots: threading.BoundedSemaphore,
+    kind: str | None = None,
 ) -> None:
     def run() -> None:
+        started = time.monotonic()
         try:
-            result.put((True, operation()))
+            value = operation()
         except BaseException as exc:
             result.put((False, exc))
+        else:
+            # Only a run that produced something is a cost observation. A fast
+            # failure is not evidence that the work is cheap.
+            _observe_optional_stage(kind, time.monotonic() - started)
+            result.put((True, value))
         finally:
             completed.set()
             slots.release()
@@ -1586,13 +1712,49 @@ def _check_stopped(
 # was ready in 1.3 s was lost with it.
 OPTIONAL_STAGE_BUDGET_SHARE = 0.5
 
+# The mandatory tail that must survive every optional stage: fusion, ranking,
+# rendering the rows, the closing seal re-check, and the caller's own metadata.
+# No optional stage may run past `deadline - this`.
+#
+# The share alone did not protect the tail. A share is taken from what is
+# *left*, so two optional stages in sequence take half, then half of the rest --
+# three quarters of the remaining budget -- and neither of them owes the tail
+# anything. Measured on this vault under load: the dense and rerank stages
+# together spent 4.4-5.5 s of a 10 s operation and returned nothing, the
+# deadline then fell during the mandatory tail, and the lexical answer that was
+# already computed was discarded. 18 of 36 calls across three runs raised
+# instead of answering; not one of them returned a degraded answer.
+#
+# The reserve covers two measured things, not one.
+#
+# The tail itself: 0.59-0.86 s over eight instrumented calls, load average 5-16.
+#
+# And the wait's own overshoot. `_await_optional_stage` polls a `threading.Event`
+# every 10 ms, which lands within 3 ms of its deadline in isolation and within
+# 73 ms against busy pure-Python siblings -- but a stage that is loading a model
+# holds the GIL in long native-adjacent stretches, and the waiter cannot check
+# its clock until it gets the interpreter back. Instrumented on the real path:
+# a stage granted 3.546 s returned after 4.445 s, 0.9 s late. Nothing in the
+# waiter can prevent that, so the reserve absorbs it.
+#
+# 2.5 s is the measured worst tail (0.86 s) plus the measured worst overshoot
+# (0.9 s) with margin. A caller with a generous budget is unaffected: the share
+# and `OPTIONAL_STAGE_MAX_SECONDS` bind long before the reserve does.
+#
+# This is the reserve-for-your-own-response-path rule that deadline propagation
+# has always carried: what you hand downstream must not be the whole of what you
+# have left. See `docs/research/2026-08-29-what-an-optional-stage-may-spend.md`.
+OPTIONAL_STAGE_TAIL_RESERVE_SECONDS = 2.5
+
 
 def _optional_stage_deadline(deadline: float) -> float:
     """The slice an optional stage may use before it is abandoned."""
-    remaining = deadline - time.monotonic()
+    now = time.monotonic()
+    remaining = deadline - now
     if remaining <= 0:
         return deadline
-    return time.monotonic() + remaining * OPTIONAL_STAGE_BUDGET_SHARE
+    share = now + remaining * OPTIONAL_STAGE_BUDGET_SHARE
+    return min(share, deadline - OPTIONAL_STAGE_TAIL_RESERVE_SECONDS)
 
 
 def _call_dense(
