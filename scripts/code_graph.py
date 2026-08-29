@@ -2444,8 +2444,8 @@ def get_architecture(
     entry_points, routes = _live_architecture_points(parsed)
     communities, counts = _live_community_answer(definitions, edges)
     architecture = {
-        "entry_points": entry_points,
-        "routes": routes,
+        **_listing_fields(entry_points, "entry_points"),
+        **_listing_fields(routes, "routes"),
         **_hotspot_fields(*_bounded_hotspots(
             _live_hotspots(_live_incoming(edges), definitions)
         )),
@@ -2454,6 +2454,30 @@ def get_architecture(
         "graph_complete": False,
     }
     return {**architecture, **_live_report(directory, parsed)}
+
+
+# Entry points and routes are listed the way hotspots already are: with the
+# bound stated in the answer rather than implied. Both were fetched at
+# `max_rows=10_000` and returned whole, with no count and no truncation flag,
+# so a reader could not tell a complete listing from a clipped one.
+#
+# 30 is `COMMUNITY_LIMIT`, this summary's existing answer to "how much of a
+# list belongs in a summary", rather than a fourth number invented here.
+#
+# Measured on this repository 2026-08-29: 97 entry points, every one of them a
+# script's `main`, cost 7 367 of the summary's 24 430 characters — 30% — while
+# the summary stated no count at all. The count says 97 in two characters.
+SUMMARY_LISTING_LIMIT = COMMUNITY_LIMIT
+
+
+def _listing_fields(rows: list[dict], key: str) -> dict:
+    """One bounded listing, with what was cut said out loud."""
+    return {
+        key: rows[:SUMMARY_LISTING_LIMIT],
+        f"{key}_count": len(rows),
+        f"{key}_limit": SUMMARY_LISTING_LIMIT,
+        f"{key}_truncated": len(rows) > SUMMARY_LISTING_LIMIT,
+    }
 
 
 def _bounded_hotspots(hotspots: list[dict]) -> tuple[list[dict], bool]:
@@ -2521,8 +2545,13 @@ def _store_get_architecture(directory: Path) -> dict | None:
         report = _store_report(graph)
         communities, counts = _stored_community_answer(graph)
         return {
-            "entry_points": _stored_architecture_nodes(graph, entries, directory),
-            "routes": _stored_architecture_nodes(graph, routes, directory),
+            **_listing_fields(
+                _stored_architecture_nodes(graph, entries, directory),
+                "entry_points",
+            ),
+            **_listing_fields(
+                _stored_architecture_nodes(graph, routes, directory), "routes"
+            ),
             **_hotspot_fields(*_stored_hotspots(graph, directory)),
             "communities": communities,
             **counts,
