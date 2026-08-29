@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import ast
 import os
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +31,30 @@ def _directory_skipped(name: str) -> bool:
     return name.startswith(".") or name in _SKIPPED_DIRECTORY_NAMES
 
 
+def _cancel_requested(cancelled: Callable[[], bool] | None) -> bool:
+    return cancelled is not None and cancelled()
+
+
+def _deadline_reached(deadline: float | None) -> bool:
+    return deadline is not None and time.monotonic() >= deadline
+
+
+def _check_registry_stop(
+    deadline: float | None, cancelled: Callable[[], bool] | None
+) -> None:
+    """The vault's stop idiom: a monotonic deadline plus a ``cancelled`` call.
+
+    A Python thread cannot be interrupted from outside, so an abandoned
+    extraction only stops where it looks (NEW-110): the caller that stopped
+    waiting also needs the walk to stop allocating. Same shape and same
+    ``TimeoutError`` as ``search_memory._check_generation_stop``.
+    """
+    if _cancel_requested(cancelled):
+        raise TimeoutError("symbol registry extraction cancelled")
+    if _deadline_reached(deadline):
+        raise TimeoutError("symbol registry extraction deadline exceeded")
+
+
 def _kept_subdirectories(directories: list[str]) -> list[str]:
     return sorted(name for name in directories if not _directory_skipped(name))
 
@@ -37,10 +63,19 @@ def _python_files_in(parent: Path, files: list[str]) -> list[Path]:
     return [parent / name for name in sorted(files) if name.endswith(".py")]
 
 
-def _workspace_python_files(directory: Path) -> list[Path]:
-    """Python files below the root, pruning skipped directories, not the root."""
+def _workspace_python_files(
+    directory: Path,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> list[Path]:
+    """Python files below the root, pruning skipped directories, not the root.
+
+    The walk is checked per directory, not only per file: on an unpruned tree
+    the path list itself is the first thing that grows without bound.
+    """
     collected: list[Path] = []
     for current, directories, files in os.walk(directory):
+        _check_registry_stop(deadline, cancelled)
         directories[:] = _kept_subdirectories(directories)
         collected.extend(_python_files_in(Path(current), files))
     return collected
@@ -101,31 +136,73 @@ def _added_exports(symbols: set[str], reexports: list[_ReExport]) -> bool:
     return changed
 
 
-def _resolve_reexports(symbols: set[str], reexports: list[_ReExport]) -> None:
+def _resolve_reexports(
+    symbols: set[str],
+    reexports: list[_ReExport],
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
     """Monotone fixed point: each round only adds, so it always terminates."""
+    _check_registry_stop(deadline, cancelled)
     while _added_exports(symbols, reexports):
-        pass
+        _check_registry_stop(deadline, cancelled)
 
 
-def build_python_symbol_registry(directory: Path) -> SymbolRegistry:
+def _extract_one_file(
+    path: Path,
+    directory: Path,
+    symbols: set[str],
+    modules: set[str],
+    reexports: list[_ReExport],
+) -> None:
+    """Extract one file's records; its tree is dropped when this call returns."""
+    tree = _parsed_module(path)
+    if tree is None:
+        return
+    module = _module_name(path, directory)
+    modules.add(module)
+    symbols.update(_module_symbols(module, tree))
+    reexports.extend(_package_reexports(path, module, tree))
+
+
+def _extracted_records(
+    files: list[Path],
+    directory: Path,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> tuple[set[str], set[str], list[_ReExport]]:
+    """Stream the files, holding one tree at a time and stopping where asked."""
+    symbols: set[str] = set()
+    modules: set[str] = set()
+    reexports: list[_ReExport] = []
+    for path in files:
+        _check_registry_stop(deadline, cancelled)
+        _extract_one_file(path, directory, symbols, modules, reexports)
+    return symbols, modules, reexports
+
+
+def build_python_symbol_registry(
+    directory: Path,
+    *,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> SymbolRegistry:
     """Collect importable Python definitions available in a workspace.
 
     Each file's AST lives only for its own extraction pass; the re-export
     resolution afterwards runs on `_ReExport` records (NEW-110 kept every
     tree alive at once, ~1.5 GiB RSS per 1,000 files).
+
+    `deadline` (an absolute `time.monotonic()` stamp) and `cancelled` stop the
+    walk itself rather than only the caller's wait, and raise `TimeoutError`.
+    Both default to None, so an unbounded caller behaves exactly as before.
     """
-    symbols: set[str] = set()
-    modules: set[str] = set()
-    reexports: list[_ReExport] = []
-    for path in _workspace_python_files(directory):
-        tree = _parsed_module(path)
-        if tree is None:
-            continue
-        module = _module_name(path, directory)
-        modules.add(module)
-        symbols.update(_module_symbols(module, tree))
-        reexports.extend(_package_reexports(path, module, tree))
-    _resolve_reexports(symbols, reexports)
+    _check_registry_stop(deadline, cancelled)
+    files = _workspace_python_files(directory, deadline, cancelled)
+    symbols, modules, reexports = _extracted_records(
+        files, directory, deadline, cancelled
+    )
+    _resolve_reexports(symbols, reexports, deadline, cancelled)
     return SymbolRegistry(frozenset(symbols), frozenset(modules))
 
 

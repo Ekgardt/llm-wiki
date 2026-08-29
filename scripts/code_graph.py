@@ -2650,8 +2650,29 @@ def _find_live_paths(
 _WORKSPACE_SKIP_PARTS = {".git", "node_modules", "__pycache__", ".venv", "venv"}
 
 
-def _parsable_workspace_file(path: Path) -> bool:
+def _inside_hidden_directory(path: Path, directory: Path) -> bool:
+    """A hidden directory under the workspace root, the file itself aside.
+
+    The one directory rule the vault's other walkers already agree on:
+    `corpus_snapshot._directory_excluded` and
+    `import_resolver._directory_skipped` both prune every hidden directory,
+    which is why the corpus and the symbol registry never see `.claude` agent
+    worktrees. This walk did not, and it was the whole of NEW-110: measured on
+    the live vault, 7,686 parsable files of which 7,261 — 94% — sit under
+    `.claude/`, throwaway checkouts belonging to other agents. A hidden name
+    on the file itself is not a directory and stays admissible.
+    """
+    try:
+        relative = path.relative_to(directory)
+    except ValueError:
+        return False
+    return any(part.startswith(".") for part in relative.parts[:-1])
+
+
+def _parsable_workspace_file(path: Path, directory: Path) -> bool:
     if not path.is_file() or path.suffix.lower() not in LANGUAGE_MAP:
+        return False
+    if _inside_hidden_directory(path, directory):
         return False
     return not any(skip in path.parts for skip in _WORKSPACE_SKIP_PARTS)
 
@@ -2743,7 +2764,7 @@ def _workspace_call_graph(
     by_name: dict[str, list[dict]] = {}
     by_qualified: dict[str, dict] = {}
     for path in sorted(directory.rglob("*")):
-        if not _parsable_workspace_file(path):
+        if not _parsable_workspace_file(path, directory):
             continue
         result = _parse_file(path, registry, directory)
         _annotate_function_ids(path, result, directory)
