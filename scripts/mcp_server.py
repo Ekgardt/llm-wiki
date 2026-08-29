@@ -5356,8 +5356,66 @@ def _register_tools(server, tools):
     return call_tool
 
 
+# How long one warm-up question may run. It is not a budget the warm-up is
+# expected to spend: a cold pass costs about 12 s here and a warm one about
+# 1.3 s. Three minutes is "something is wrong", not "this is slow".
+WARMUP_LIMIT_SECONDS = 180.0
+
+# Two passes, and the second one is the whole point — see
+# `warmup_retrieval_path`.
+WARMUP_PASSES = 2
+
+
+def _warmup_pass(deadline_seconds: float) -> None:
+    """One throwaway question down the real path, so nothing is warmed by proxy."""
+    from search_memory import search
+
+    search(
+        "warm the retrieval path",
+        limit=3,
+        semantic=True,
+        graph=True,
+        rerank=True,
+        source_tool="warmup",
+        emit_telemetry=False,
+        deadline_monotonic=time.monotonic() + deadline_seconds,
+    )
+
+
+def warmup_retrieval_path(deadline_seconds: float = WARMUP_LIMIT_SECONDS) -> None:
+    """Load the retrieval path and record what a *warm* optional stage costs.
+
+    Loading the encoder is necessary and was not sufficient. `retrieval`
+    admits an optional stage by comparing the last cost a finished run of that
+    kind recorded against the window the caller can offer, and only a stage
+    that actually ran records anything. So a warm-up that merely loaded the
+    model left the cost unknown, the MCP budget's ~3.5 s window is below the
+    ceiling `_unknown_cost_stage_fits` requires, and the dense leg stayed
+    refused until some later call happened to record a cost.
+
+    Measured on this vault 2026-08-29, five `recall` calls in one process
+    against the live generation: calls 1-3 answered `signals_used=['lexical']`,
+    call 3 reading a recorded cost of 12.0 s — the cold load, clamped at the
+    ceiling, standing in for a model that was resident by then. The dense leg
+    first appeared on call 4.
+
+    Hence two passes. The first pays the one-time load and records it; the
+    second runs warm and replaces that figure with the steady-state cost, which
+    is the only one an admission decision can use. That split — setup time as
+    its own term rather than folded into service time — is what the queueing
+    literature on cold starts does, and the arithmetic here is the same.
+
+    It runs where the caller puts it: on a daemon thread for stdio, so serving
+    starts immediately. A failure is never fatal — warming is an optimisation,
+    and an unwarmed path serves exactly as it does today.
+    """
+    for _ in range(WARMUP_PASSES):
+        with contextlib.suppress(BaseException):
+            _warmup_pass(deadline_seconds)
+
+
 def _start_encoder_warmup() -> None:
-    """Load the semantic encoder before the first question needs it.
+    """Warm the retrieval path before the first question needs it.
 
     Measured on this vault (2026-08-24/26): a cold encoder costs 7.99 s and
     ~1.1 GiB resident, so the first semantic question of a session always fell
@@ -5367,15 +5425,17 @@ def _start_encoder_warmup() -> None:
     immediately, and it shares `search_memory._get_embedder`'s module cache
     with the dense leg — a straggler racing it wastes one load, never a vector.
     Set LLMWIKI_NO_ENCODER_WARMUP=1 to keep the old lazy behaviour.
+
+    What it loads is now the whole path rather than the encoder alone, because
+    loading was never the part that was missing; `warmup_retrieval_path` says
+    what was.
     """
     if os.environ.get("LLMWIKI_NO_ENCODER_WARMUP") == "1":
         return
 
     def warm() -> None:
         with contextlib.suppress(Exception):
-            import search_memory
-
-            search_memory._get_embedder()
+            warmup_retrieval_path()
 
     threading.Thread(target=warm, name="encoder-warmup", daemon=True).start()
 
