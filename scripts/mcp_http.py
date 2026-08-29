@@ -433,6 +433,10 @@ def _warm_shared_surface() -> None:
     run, the server serves cold exactly as it does today.
     """
     if os.environ.get("LLMWIKI_NO_SHARED_WARMUP") == "1":
+        # Still warm what a memory-tight machine can afford: the background
+        # daemon load this function otherwise replaces. Without this the opt-out
+        # would remove all warming rather than only the synchronous part.
+        mcp_server._start_encoder_warmup()
         return
     print("warming the retrieval path before serving...", file=sys.stderr)
     started = time.monotonic()
@@ -444,20 +448,21 @@ def _warm_shared_surface() -> None:
 
 
 def _run_warmup_query() -> None:
-    """One throwaway question down the real path, so nothing is warmed by proxy."""
-    with contextlib.suppress(BaseException):
-        from search_memory import search
+    """Throwaway questions down the real path, so nothing is warmed by proxy.
 
-        search(
-            "warm the retrieval path",
-            limit=3,
-            semantic=True,
-            graph=True,
-            rerank=True,
-            source_tool="warmup",
-            emit_telemetry=False,
-            deadline_monotonic=time.monotonic() + _WARMUP_LIMIT_SECONDS,
-        )
+    One pass was not enough and the reason is not about this transport.
+    `retrieval` admits an optional stage by comparing the cost the last
+    finished run of that kind recorded against the window the caller can
+    offer, and the pass that pays the one-time model load records that load —
+    a figure clamped at the ceiling, meaning "never fits". Only a second,
+    warm pass records the steady-state cost an admission decision can use.
+    `mcp_server.warmup_retrieval_path` owns that, and owning it in one place
+    is why this delegates instead of repeating the call.
+
+    The earlier measurement here timed the answer rather than asking which
+    legs reached it, which is how a single pass looked sufficient.
+    """
+    mcp_server.warmup_retrieval_path(_WARMUP_LIMIT_SECONDS)
 
 
 def serve(
@@ -473,7 +478,6 @@ def serve(
     path = Path(token_path) if token_path is not None else default_token_path()
     token = ensure_token(path)
     app = build_app(token=token, host=host, port=port)
-    mcp_server._start_encoder_warmup()
     _announce(host, port, path)
     # After the announce, so the operator can already see the endpoint and the
     # token file while this runs; before serving, because a warm-up that races
