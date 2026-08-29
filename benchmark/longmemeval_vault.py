@@ -31,6 +31,7 @@ import shutil
 import sys
 import tempfile
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -265,6 +266,47 @@ def _retrieved_rows(question_text: str, profile: str) -> list[dict]:
     )
 
 
+# Whether retrieval put the answer in front of the answerer, decided by the
+# dataset's own label rather than by searching for the gold string.
+#
+# This is the instrument the abstention question needs, and without it the
+# question cannot be answered at all. Measured 2026-08-28 on n=50: 26 of 50
+# answers were `insufficient_evidence`, and accuracy when the system does
+# answer is 14 of 18 = 0.78 — so refusal binds the score, not error. But an
+# abstention means two opposite things. With an answer session retrieved it is
+# a calibration failure: the evidence was there and the answerer refused it.
+# Without one it is retrieval refusing, and the abstention was correct.
+# Spending effort on the prompt before knowing which would be guessing.
+#
+# The match is on the session id, not on the answer text, because a gold answer
+# is often a word like `2018` or `blue` and a substring search over evidence
+# would confirm itself. `ingest_sessions` writes each daily entry under a
+# heading naming its session, so the id travels with the chunk.
+def _row_text(row: Mapping[str, object]) -> str:
+    parts = [str(row.get(key, "")) for key in ("summary", "title", "path")]
+    ancestry = row.get("heading_ancestry")
+    if isinstance(ancestry, (list, tuple)):
+        parts.extend(str(item) for item in ancestry)
+    return "\n".join(parts)
+
+
+def _labelled_sessions(question: Mapping[str, object]) -> set[str]:
+    return {str(item) for item in question.get("answer_session_ids") or []}
+
+
+def _names_a_labelled_session(row: Mapping[str, object], labelled: set[str]) -> bool:
+    text = _row_text(row)
+    return any(item in text for item in labelled)
+
+
+def answer_sessions_retrieved(question: Mapping[str, object], rows: list[dict]) -> int:
+    """How many retrieved candidates come from a labelled answer session."""
+    labelled = _labelled_sessions(question)
+    if not labelled:
+        return 0
+    return sum(_names_a_labelled_session(row, labelled) for row in rows)
+
+
 def _instrumented_generator(metrics: dict):
     """The shared provider client, measuring what one retrieval hands it."""
     from llm_client import call_llm
@@ -369,6 +411,8 @@ def run_question(question: dict, work: Path) -> dict:
         "sessions_ingested": ingested,
         "daily_files": len(daily_files),
         "retrieved": len(rows),
+        "answer_sessions_retrieved": answer_sessions_retrieved(question, rows),
+        "answer_sessions_labelled": len(_labelled_sessions(question)),
         **build_info,
         **outcome,
         **metrics,

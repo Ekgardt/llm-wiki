@@ -91,6 +91,16 @@ def token_f1(gold: object, hypothesis: object) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
+def declined_to_answer(result: dict) -> bool:
+    """Whether the system refused, on any question, abstention-labelled or not.
+
+    Recorded on every row rather than only on `_abs` questions, because the
+    abstention that costs the score is the one on a question that *did* have an
+    answer. Without it the split in `_abstention_split` sees nothing.
+    """
+    return result.get("status") not in {"answered", None} and not result.get("error")
+
+
 def score_question(result: dict) -> dict:
     """Attach deterministic metrics to one per-question result record."""
     if result.get("is_abstention"):
@@ -103,12 +113,20 @@ def score_question(result: dict) -> dict:
         "contains": contains_answer(gold, hypothesis),
         "f1": round(token_f1(gold, hypothesis), 4),
         "correct": contains_answer(gold, hypothesis),
+        "abstained": declined_to_answer(result),
     }
 
 
 def _scored_abstention(result: dict) -> dict:
-    abstained = result.get("status") not in {"answered", None} and not result.get("error")
-    return {**result, "em": abstained, "contains": abstained, "f1": float(abstained), "correct": abstained}
+    abstained = declined_to_answer(result)
+    return {
+        **result,
+        "em": abstained,
+        "contains": abstained,
+        "f1": float(abstained),
+        "correct": abstained,
+        "abstained": abstained,
+    }
 
 
 def _mean(values: list[float]) -> float | None:
@@ -148,6 +166,44 @@ def _cost_metrics(rows: list[dict]) -> dict:
     }
 
 
+# An abstention means two opposite things and the report has never said which.
+#
+# Measured 2026-08-28 at n=50: 26 of 50 answers were `insufficient_evidence`
+# and accuracy when the system answers is 14 of 18 = 0.78, so refusal binds
+# the score rather than error. But an abstention with a labelled answer session
+# among the retrieved candidates is a calibration failure — the evidence was
+# there and the answerer declined it — while one without is retrieval doing the
+# refusing, and the abstention was correct. The two need opposite work, and
+# choosing between them without this split is guessing.
+#
+# `answer_sessions_retrieved` is written by the worker from the dataset's own
+# `answer_session_ids`, not by searching for the gold string: a gold answer is
+# often a word like `2018` and a substring search over evidence would confirm
+# itself.
+def _abstained(row: dict) -> bool:
+    return bool(row.get("abstained"))
+
+
+def _had_the_evidence(row: dict) -> bool:
+    return int(row.get("answer_sessions_retrieved") or 0) > 0
+
+
+def _count(rows: list[dict], predicate) -> int:
+    return sum(1 for row in rows if predicate(row))
+
+
+def _abstention_split(rows: list[dict]) -> dict:
+    """Abstentions that had the answer in front of them, and those that did not."""
+    abstained = [row for row in rows if _abstained(row)]
+    with_evidence = _count(abstained, _had_the_evidence)
+    return {
+        "abstained": len(abstained),
+        "abstained_with_answer_retrieved": with_evidence,
+        "abstained_without_answer_retrieved": len(abstained) - with_evidence,
+        "answer_retrieved": _count(rows, _had_the_evidence),
+    }
+
+
 def _category_report(rows: list[dict]) -> dict:
     """One category's numbers, with provider failures held out of accuracy.
 
@@ -163,6 +219,7 @@ def _category_report(rows: list[dict]) -> dict:
         "n": len(rows),
         "scored": len(scored),
         **_quality_metrics(scored),
+        **_abstention_split(scored),
         "provider_failures": len(rows) - len(scored),
         **_cost_metrics(rows),
     }
