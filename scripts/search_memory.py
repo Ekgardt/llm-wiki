@@ -3791,6 +3791,24 @@ def _vector_scored_rows(
     deadline,
     cancelled,
 ) -> list[dict[str, object]]:
+    """Cosine rows, ordered by the same trust-weighted score the lexical leg uses.
+
+    `_generation_result` already multiplies the lexical rank by `trust_weight`,
+    so the lexical leg decides *admission* by who said it and what the page is.
+    The dense leg used to overwrite that score with raw cosine, which left the
+    vault's own rule -- answer from the compiled pages, read the commentary
+    after -- governing only the order of candidates that were already in the
+    pool, never which candidates got into it.
+
+    That gap stayed harmless while the commentary was small. Measured on this
+    vault on 2026-08-29, `docs/` carried 1,409 chunks against `knowledge/notes`'
+    620, and 49 of the 87 research notes had been written in the preceding two
+    days. Because the questions are Russian and the decision pages are English,
+    same-language commentary took every high cosine: the gold page for eight of
+    ten stand questions ranked 117-310 by raw cosine and never entered the
+    120-row over-fetch, so no downstream weight could reach it. Weighting here
+    puts those same pages at 1-14.
+    """
     filters, values = _generation_filters(scope=scope, since=since, as_of=as_of)
     with _generation_sqlite_guard(connection, deadline, cancelled):
         rows = connection.execute(
@@ -3808,6 +3826,9 @@ def _vector_scored_rows(
         # The vector path boosts a project match by 1.5, not by the lexical 2.0.
         if project and str(result["project"]).casefold() == project.casefold():
             score *= 1.5
+        # Absent provenance weighs 1.0 by `trust_weight`'s own contract, so a row
+        # that carries none is admitted on its cosine alone rather than refused.
+        score *= trust_weight(result.get("authority"), result.get("type"))
         result["score"] = round(score, 4)
         result["requested_mode"] = "hybrid"
         result["effective_mode"] = "hybrid"
