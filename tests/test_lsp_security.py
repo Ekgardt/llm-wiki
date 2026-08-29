@@ -1286,18 +1286,31 @@ def test_posix_scanner_retries_and_scales_near_linearly() -> None:
     )
 
     def measure(count: int) -> float:
+        """CPU time, not wall time, and the cheapest of several attempts.
+
+        The property under test is that the scanner does not go quadratic in
+        the number of candidate paths. Wall time answers a different question
+        on a busy machine — it includes every millisecond the process spent
+        descheduled — and it failed here for that reason: 0.148 s measured
+        against a 0.128 s bound at load average 17-21, passing on the same
+        commit when the machine was quiet.
+
+        `process_time` counts only CPU this process was given, and the minimum
+        of several attempts is the standard estimator for how fast the work
+        can go, so contention can only pull the estimate towards the truth.
+        """
         tokens = [
             _scanner_token(index, native_root, uri_root) for index in range(count)
         ]
         value = _joined_tokens(tokens)
-        started = time.perf_counter()
+        started = time.process_time()
         result = lsp_security._redact_path(value, root, "<repository>")
-        elapsed = time.perf_counter() - started
+        elapsed = time.process_time() - started
         assert result.count("<repository>") == count * 3 // 5
         return elapsed
 
     timings = tuple(
-        min(measure(count) for _attempt in range(2))
+        min(measure(count) for _attempt in range(5))
         for count in (200, 400, 800)
     )
     assert timings[1] <= max(0.05, timings[0] * 3.25)
