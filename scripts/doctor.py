@@ -6936,6 +6936,26 @@ def _code_partitions(code_sources, repository_id, source_bytes, deadline, cancel
 
 
 def _source_extraction(source_extraction_class, result, content: bytes):
+    """One source's records, plus the metadata `_semantic_changes` reads.
+
+    All five fingerprints are one value under five names -- the content digest --
+    so every byte-level change counts as a semantic one. That is deliberate,
+    not an accident of five suggestive key names: it over-invalidates and can
+    never under-invalidate, which is the safe direction.
+
+    Only `exports` could carry a real definition. A source is legible to another
+    source solely through the definitions it contributes to `code_extractor`'s
+    shared `definitions`/`python_scopes`/`modules` indexes; `imports` and
+    `aliases` are a per-source local table that enters no shared index,
+    `signatures` already sit inside the export identity key, and a project
+    journal is extracted alone. Building it was measured and does not pay: the
+    rebuild set for a code edit falls from 423 sources to 1 and the pass gets no
+    faster, because `_SourceExtractionAdapter._code_result` batches
+    `extract_code` over every code source as soon as one is rebuilt -- and the
+    edited source is always one. See
+    `docs/research/2026-08-29-what-an-invalidation-fingerprint-can-mean.md`
+    and `tests/test_invalidation_fingerprints.py`.
+    """
     digest = hashlib.sha256(content).hexdigest()
     fingerprints = {
         key: hashlib.sha256(f"{key}:{digest}".encode("ascii")).hexdigest()
