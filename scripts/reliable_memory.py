@@ -655,6 +655,57 @@ def validate_operational_db_file(
     )
 
 
+# A crashed writer leaves a rollback journal beside the database, and SQLite
+# can only replay one by opening read-write. Every read-only open afterwards
+# fails with "attempt to write a readonly database" — and the callers here are
+# validators, so the whole memory write path fences itself off behind a message
+# about an invalid adoption record, which names neither the file nor the cause.
+#
+# Seen twice on the live vault on 2026-08-29, at 03:58 and again at 15:08. Both
+# times no process held the journal; both times one read-write open cleared it
+# and `PRAGMA integrity_check` answered `ok`. Nothing in the product did that,
+# so the vault stayed fenced — the second time a day of project checkpoints
+# piled up undrained — until a person went looking.
+#
+# The recovery is attempted only when the journal is actually there, only once,
+# and only if the write lock is free within a quarter second. A live writer
+# legitimately holds a hot journal, and there the original refusal is right.
+_JOURNAL_REPLAY_BUSY_MS = 250
+
+
+def _hot_journal(path: Path) -> Path:
+    return Path(f"{Path(path)}-journal")
+
+
+def _readonly_write_refusal(error: BaseException) -> bool:
+    return "readonly database" in str(error)
+
+
+def _replayed_hot_journal(path: Path) -> bool:
+    """Let SQLite replay a stranded journal; True when it is gone afterwards."""
+    try:
+        database = sqlite3.connect(
+            str(Path(path)), timeout=_JOURNAL_REPLAY_BUSY_MS / 1_000
+        )
+    except sqlite3.Error:
+        return False
+    try:
+        database.execute("PRAGMA journal_mode")
+    except sqlite3.Error:
+        return False
+    finally:
+        database.close()
+    return not _hot_journal(path).exists()
+
+
+def _require_replayed_journal(path: Path, error: sqlite3.OperationalError) -> None:
+    """Re-raise the original refusal unless a stranded journal explains it."""
+    if not _readonly_write_refusal(error) or not _hot_journal(path).exists():
+        raise error
+    if not _replayed_hot_journal(path):
+        raise error
+
+
 def open_readonly_operational_db(
     path: Path,
     state_root: Path,
@@ -664,9 +715,36 @@ def open_readonly_operational_db(
     busy_ms: int = 0,
     contract: OperationalDatabaseContract | None = None,
 ) -> sqlite3.Connection:
-    """Open a validated runtime SQLite database read-only and fail on path races."""
+    """Open a validated runtime SQLite database read-only and fail on path races.
+
+    One stranded rollback journal is replayed and the open retried once; see
+    `_require_replayed_journal` for why, and for what is deliberately not done.
+    """
     if busy_ms < 0:
         raise ValueError("busy_ms must be non-negative")
+    arguments = {
+        "max_bytes": max_bytes,
+        "owner_only": owner_only,
+        "busy_ms": busy_ms,
+        "contract": contract,
+    }
+    try:
+        return _opened_readonly_operational_db(path, state_root, **arguments)
+    except sqlite3.OperationalError as error:
+        _require_replayed_journal(Path(path), error)
+    return _opened_readonly_operational_db(path, state_root, **arguments)
+
+
+def _opened_readonly_operational_db(
+    path: Path,
+    state_root: Path,
+    *,
+    max_bytes: int,
+    owner_only: bool,
+    busy_ms: int,
+    contract: OperationalDatabaseContract | None,
+) -> sqlite3.Connection:
+    """Validate the file and open it read-only, once, with no recovery."""
     expected = validate_operational_db_file(
         path, state_root, max_bytes=max_bytes, owner_only=owner_only
     )
