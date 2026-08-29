@@ -2433,22 +2433,27 @@ def _live_incoming(edges: list[dict]) -> dict:
 
 
 def get_architecture(
-    directory: Path, *, live: bool = False, with_report: bool = False
+    directory: Path,
+    *,
+    live: bool = False,
+    with_report: bool = False,
+    limit: int | None = None,
 ) -> dict:
     """Summarize statically visible entry points, routes, hotspots, and modules."""
+    bound = summary_listing_limit(limit)
     if not live:
-        stored = _store_get_architecture(directory)
+        stored = _store_get_architecture(directory, bound)
         if stored is not None:
             return stored
     parsed, definitions, edges = _workspace_call_graph(directory)
     entry_points, routes = _live_architecture_points(parsed)
     communities, counts = _live_community_answer(definitions, edges)
     architecture = {
-        **_listing_fields(entry_points, "entry_points"),
-        **_listing_fields(routes, "routes"),
+        **_listing_fields(entry_points, "entry_points", bound),
+        **_listing_fields(routes, "routes", bound),
         **_hotspot_fields(*_bounded_hotspots(
             _live_hotspots(_live_incoming(edges), definitions)
-        )),
+        ), bound),
         "communities": communities,
         **counts,
         "graph_complete": False,
@@ -2470,13 +2475,27 @@ def get_architecture(
 SUMMARY_LISTING_LIMIT = COMMUNITY_LIMIT
 
 
-def _listing_fields(rows: list[dict], key: str) -> dict:
+def summary_listing_limit(limit: int | None) -> int:
+    """How many rows of each summary listing to return.
+
+    `None` is the summary's own number. A caller who wants the whole ranking
+    asks for it, up to the ceiling the store query already fetches — the same
+    shape the dependency walk's `depth` takes, and the answer to the objection
+    that a ranking cannot be cut because nothing restores it. Now something
+    does.
+    """
+    if limit is None:
+        return SUMMARY_LISTING_LIMIT
+    return max(1, min(int(limit), HOTSPOT_LIMIT))
+
+
+def _listing_fields(rows: list[dict], key: str, limit: int) -> dict:
     """One bounded listing, with what was cut said out loud."""
     return {
-        key: rows[:SUMMARY_LISTING_LIMIT],
+        key: rows[:limit],
         f"{key}_count": len(rows),
-        f"{key}_limit": SUMMARY_LISTING_LIMIT,
-        f"{key}_truncated": len(rows) > SUMMARY_LISTING_LIMIT,
+        f"{key}_limit": limit,
+        f"{key}_truncated": len(rows) > limit,
     }
 
 
@@ -2484,12 +2503,59 @@ def _bounded_hotspots(hotspots: list[dict]) -> tuple[list[dict], bool]:
     return hotspots[:HOTSPOT_LIMIT], len(hotspots) > HOTSPOT_LIMIT
 
 
-def _hotspot_fields(hotspots: list[dict], truncated: bool) -> dict:
-    """The hotspot ranking with its bound stated in the answer, never implied."""
+def _hotspot_fields(hotspots: list[dict], truncated: bool, limit: int) -> dict:
+    """The hotspot ranking with its bound stated in the answer, never implied.
+
+    The query fetches `HOTSPOT_LIMIT`; what the answer carries is what the
+    caller asked for. `truncated` stays true when either bound bit.
+
+    No count here, deliberately, unlike the listings beside it. The ranking has
+    10 607 members on this repository and the query never sees past the first
+    hundred, so any number stated would be the size of the fetch rather than of
+    the ranking. `hotspots_truncated` says there is more without claiming to
+    know how much.
+    """
     return {
-        "hotspots": hotspots,
-        "hotspot_limit": HOTSPOT_LIMIT,
-        "hotspots_truncated": truncated,
+        "hotspots": hotspots[:limit],
+        "hotspot_limit": limit,
+        "hotspots_truncated": truncated or len(hotspots) > limit,
+    }
+
+
+# The summary's answer to the first half of "what are its main modules and
+# entry points", which it did not answer at all. Measured 2026-08-29: the only
+# reason the summary named `scripts/mcp_server.py` — the documented agent
+# surface — was that one of its functions ranked between 31st and 100th in the
+# call hotspots. No entry point names it, because it has no `main`. Bounding
+# the ranking to thirty therefore lost it, and the loss was luck either way.
+#
+# Ranked by how many distinct modules import each one, which is the same
+# GROUP BY the hotspot ranking already uses, over IMPORTS instead of CALLS.
+def _stored_modules(graph, limit: int) -> tuple[list[dict], bool]:
+    counts, truncated = graph.top_incoming_edge_counts(
+        edge_types=("IMPORTS",), kinds=("module",), max_rows=limit
+    )
+    return [_stored_module_row(graph, row) for row in counts if row], truncated
+
+
+def _stored_module_row(graph, row: dict) -> dict | None:
+    node = graph.node(str(row["node_id"]))
+    if node is None:
+        return None
+    metadata = node["metadata"]
+    return {
+        "name": metadata.get("name", ""),
+        "path": metadata.get("path", ""),
+        "importing_modules": int(row["incoming"]),
+    }
+
+
+def _module_fields(modules: list[dict], truncated: bool, limit: int) -> dict:
+    """The module ranking, bounded and saying so, like every listing beside it."""
+    return {
+        "modules": [row for row in modules if row is not None],
+        "modules_limit": limit,
+        "modules_truncated": truncated,
     }
 
 
@@ -2535,7 +2601,7 @@ def _stored_architecture_nodes(graph, nodes, directory: Path) -> list[dict]:
     return [_stored_architecture_node(graph, node, directory) for node in nodes]
 
 
-def _store_get_architecture(directory: Path) -> dict | None:
+def _store_get_architecture(directory: Path, limit: int) -> dict | None:
     graph = _active_evidence_graph(directory)
     if graph is None:
         return None
@@ -2548,11 +2614,13 @@ def _store_get_architecture(directory: Path) -> dict | None:
             **_listing_fields(
                 _stored_architecture_nodes(graph, entries, directory),
                 "entry_points",
+                limit,
             ),
             **_listing_fields(
-                _stored_architecture_nodes(graph, routes, directory), "routes"
+                _stored_architecture_nodes(graph, routes, directory), "routes", limit
             ),
-            **_hotspot_fields(*_stored_hotspots(graph, directory)),
+            **_module_fields(*_stored_modules(graph, limit), limit),
+            **_hotspot_fields(*_stored_hotspots(graph, directory), limit),
             "communities": communities,
             **counts,
             **report,

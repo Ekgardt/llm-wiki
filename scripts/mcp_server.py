@@ -1513,7 +1513,11 @@ def _dead_code_result_data(resolved: Path, result) -> dict:
 
 
 def _get_architecture(
-    directory: str, *, live: bool = False, deadline: float | None = None
+    directory: str,
+    *,
+    live: bool = False,
+    deadline: float | None = None,
+    limit: int | None = None,
 ) -> dict:
     """Summarize the statically visible architecture of a project directory."""
     from code_graph import get_architecture
@@ -1530,6 +1534,7 @@ def _get_architecture(
             resolved,
             live=live,
             with_report=True,
+            limit=limit,
             deadline=operation_deadline,
         )
     except TimeoutError as reason:
@@ -3598,7 +3603,7 @@ def _validate_tool_specific_arguments(name: str, arguments: dict) -> str | None:
 _ARCHITECTURE_POSITION_KEYS = ("path", "line", "character")
 
 _ARCHITECTURE_CONTRACTS = {
-    "summary": ({"directory"}, {"directory", "mode", "live"}),
+    "summary": ({"directory"}, {"directory", "mode", "live", "limit"}),
     "symbol": (
         {"directory", "mode", "symbol"},
         {"directory", "mode", "symbol", "live"},
@@ -4932,6 +4937,7 @@ def _summary_architecture_call(arguments: dict, deadline: float):
         _get_architecture,
         arguments.get("directory"),
         live=arguments.get("live", False),
+        limit=arguments.get("limit"),
         deadline=deadline,
     )
 
