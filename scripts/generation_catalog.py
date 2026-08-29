@@ -172,6 +172,24 @@ BUSY_MS = 5000
 UNBOUNDED_BUSY_MS = 30_000
 CLEANUP_CATALOG_FENCE_SECONDS = 1.0
 
+# How many superseded generations retention keeps behind the active one.
+#
+# One, and the number is reachability plus one fallback step, not a guess.
+# Nothing reads a generation except through the active pointer: retrieval
+# resolves it, and the incremental rebuild names the *active* generation as its
+# reuse parent and reads `incremental-manifest.json` and the vectors out of that
+# one tree. The single retained ancestor buys exactly one thing — it is the
+# first alternative `_fallback_order` offers `_select_fallback` when the active
+# tree stops validating, and it covers a reader that resolved the pointer just
+# before the last activation. A generation two steps back buys nothing: it sits
+# behind a younger candidate that is already ahead of it in the same order.
+#
+# This is rpm-ostree's two-deployment rule (current plus one rollback), not
+# Kubernetes' ten revisions. Ten is affordable when a revision is metadata; a
+# generation here is a ~180 MB tree, and 35 of them were 6.3 GB on a disk at
+# 94%. See `docs/research/2026-08-29-how-many-superseded-generations-to-keep.md`.
+RETAINED_ANCESTOR_GENERATIONS = 1
+
 _GENERATION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _WINDOWS_RESERVED = {
@@ -593,6 +611,79 @@ def _generation_in_use(database: sqlite3.Connection, identifier: str) -> bool:
         (identifier,),
     ).fetchone()
     return historical is not None
+
+
+def _active_generation(database: sqlite3.Connection) -> str | None:
+    """The generation the pointer names; a missing pointer row is corruption."""
+    row = database.execute(
+        "SELECT active_generation_id FROM catalog_state WHERE singleton = 1"
+    ).fetchone()
+    if row is None:
+        raise ValueError("catalog active pointer is missing")
+    return row["active_generation_id"]
+
+
+def _parent_generation(database: sqlite3.Connection, identifier: str) -> str | None:
+    row = database.execute(
+        "SELECT parent_generation_id FROM generations WHERE generation_id = ?",
+        (identifier,),
+    ).fetchone()
+    if row is None:
+        return None
+    return row["parent_generation_id"]
+
+
+def _retained_generations(database: sqlite3.Connection, ancestors: int) -> tuple[str, ...]:
+    """The live set: the active generation plus the ancestors retention keeps.
+
+    Reachability from the active pointer along `parent_generation_id`, bounded
+    by depth. A cycle or a dangling parent ends the walk rather than extending
+    it, so a damaged chain shrinks the live set to what it can still prove.
+    """
+    active = _active_generation(database)
+    if active is None:
+        return ()
+    retained = [active]
+    identifier: str | None = active
+    for _ in range(ancestors):
+        identifier = _parent_generation(database, identifier)
+        if identifier is None or identifier in retained:
+            break
+        retained.append(identifier)
+    return tuple(retained)
+
+
+def _require_active_root(retained: tuple[str, ...]) -> None:
+    """No active pointer is no root, and without a root nothing is provably
+    unreachable. `_repair_active_pointer` clears the pointer when no candidate
+    validates; collecting then would destroy the very material a repair reads.
+    That state is for a person to look at, not for a collector to act on."""
+    if not retained:
+        raise ValueError("catalog has no active generation")
+
+
+def _require_activated(database: sqlite3.Connection, identifier: str) -> None:
+    """Only a superseded generation is prunable.
+
+    A registration that has never been activated is either an abandoned
+    publication or one happening right now, and nothing readable here tells the
+    two apart: `register` returns before `activate` is called, so a build in
+    flight looks exactly like an abort. `discard_unactivated` is the path for
+    that case, and it runs under the publication fence.
+    """
+    activated = database.execute(
+        "SELECT 1 FROM activation_history WHERE generation_id = ? LIMIT 1",
+        (identifier,),
+    ).fetchone()
+    if activated is None:
+        raise ValueError("generation was never activated")
+
+
+def _require_retained_ancestors(value: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("retained_ancestors must be a non-negative integer")
+    if value < 0:
+        raise ValueError("retained_ancestors must be a non-negative integer")
 
 
 def _decoded_manifest(encoded: bytes) -> dict[str, object] | None:
@@ -2618,6 +2709,120 @@ class GenerationCatalog:
             _check_cancelled(cancelled)
             self._check_deadline(deadline)
         return removed_registration or removed_directory
+
+    def retained_generations(
+        self,
+        *,
+        retained_ancestors: int = RETAINED_ANCESTOR_GENERATIONS,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> tuple[str, ...]:
+        """The generations retention protects: the active one and its ancestors."""
+        _require_retained_ancestors(retained_ancestors)
+        self._check_deadline(deadline)
+        _check_cancelled(cancelled)
+        with closing(self._readonly(deadline=deadline)) as database:
+            return _retained_generations(database, retained_ancestors)
+
+    def registered_generation_ids(
+        self,
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> tuple[str, ...]:
+        """Every registered generation id, without validating a single tree."""
+        self._check_deadline(deadline)
+        _check_cancelled(cancelled)
+        with closing(self._readonly(deadline=deadline)) as database:
+            rows = self._bounded_rows(
+                database,
+                "SELECT generation_id FROM generations LIMIT ?",
+                MAX_GENERATIONS,
+                "generation",
+            )
+        return tuple(row["generation_id"] for row in rows)
+
+    def activated_generation_ids(
+        self,
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> frozenset[str]:
+        """Every generation that has ever been active — the superseded set."""
+        self._check_deadline(deadline)
+        _check_cancelled(cancelled)
+        with closing(self._readonly(deadline=deadline)) as database:
+            rows = self._bounded_rows(
+                database,
+                "SELECT DISTINCT generation_id FROM activation_history LIMIT ?",
+                MAX_ACTIVATION_HISTORY,
+                "history",
+            )
+        return frozenset(row["generation_id"] for row in rows)
+
+    def _require_paired_generation(
+        self, database: sqlite3.Connection, identifier: str
+    ) -> None:
+        """A row with no tree, or a tree with no row, is a half-finished
+        operation. Report it; never guess which half was meant."""
+        registered = database.execute(
+            "SELECT 1 FROM generations WHERE generation_id = ?", (identifier,)
+        ).fetchone()
+        if registered is None:
+            raise ValueError("generation is not registered")
+        if not (self.generations_path / identifier).is_dir():
+            raise ValueError("generation tree is missing")
+
+    def _require_prunable(
+        self, database: sqlite3.Connection, identifier: str, retained: tuple[str, ...]
+    ) -> None:
+        if identifier in retained:
+            raise ValueError("retained generation cannot be discarded")
+        self._require_paired_generation(database, identifier)
+        _require_activated(database, identifier)
+
+    @staticmethod
+    def _delete_generation_rows(database: sqlite3.Connection, identifier: str) -> None:
+        """Registration and activation history leave together: a surviving
+        history row keeps `_generation_in_use` refusing a tree that is gone."""
+        database.execute("DELETE FROM generations WHERE generation_id = ?", (identifier,))
+        database.execute(
+            "DELETE FROM activation_history WHERE generation_id = ?", (identifier,)
+        )
+
+    def discard_superseded(
+        self,
+        generation_id: str,
+        *,
+        retained_ancestors: int = RETAINED_ANCESTOR_GENERATIONS,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> bool:
+        """Drop one generation retention no longer keeps: row, history and tree.
+
+        `discard_unactivated` refuses anything that was ever activated, which is
+        every generation but one on a vault that has been building nightly. This
+        removes a superseded one, and it removes all three parts inside a single
+        write transaction: a filesystem failure rolls the registration back
+        rather than stranding a row whose tree is gone. The live set is
+        recomputed from that same transaction, so an activation racing this call
+        cannot make it delete what has just become live.
+        """
+        identifier = _generation_id(generation_id)
+        _require_absolute_deadline(deadline)
+        _require_retained_ancestors(retained_ancestors)
+        with self._write_transaction(deadline) as database:
+            _check_cancelled(cancelled)
+            retained = _retained_generations(database, retained_ancestors)
+            _require_active_root(retained)
+            self._require_prunable(database, identifier, retained)
+            self._delete_generation_rows(database, identifier)
+            removed = self._remove_generation_tree(
+                identifier, deadline=deadline, cancelled=cancelled
+            )
+            _check_cancelled(cancelled)
+            self._check_deadline(deadline)
+        return removed
 
     def _snapshot_catalog(
         self,

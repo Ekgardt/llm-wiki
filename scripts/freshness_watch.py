@@ -80,12 +80,15 @@ PROBE_INTERVAL_SECONDS = 30.0
 # 677.9 of its 721.2 CPU seconds inside `build_full_generation`, and 595.1 of
 # those — 82.5% of the whole pass — re-embedding all 3,158 chunks.
 #
-# The cause is measured, not guessed:
-# `evidence_graph_builder._stored_incremental_manifest` drops the parent's reuse
-# manifest when it exceeds MAX_STORED_INCREMENTAL_MANIFEST_BYTES (64 MiB), and
-# on this corpus it is 158,075,010 bytes — 349,306 record dependencies, one per
-# record in the generation. No published generation on this machine, live or
-# temporary, contains an `incremental-manifest.json`, so nothing is ever reused.
+# That was measured on 2026-08-28 and the cause it named has since been fixed:
+# `_stored_incremental_manifest` used to drop the parent's reuse manifest above
+# a 64 MiB constant while this corpus produced 158,075,010 bytes of it, so no
+# published generation carried an `incremental-manifest.json` and nothing was
+# ever reused. Since `283eb3a` the manifest is bounded by the size the sealed
+# `manifest.json` declares, both live generations carry one, and reuse works —
+# measured 2026-08-29, an idle pass answers `current` in 4.51 s and the build
+# before it reused 487 of 910 sources. The paragraph above is kept as the
+# reason this bound exists, not as a description of today.
 #
 # Twenty minutes is therefore not a comfortable bound. It is the smallest bound
 # that a successful build has ever fitted inside here, and it is deliberately
