@@ -4813,6 +4813,99 @@ def _capture_check(state_root: Path, deadline: float) -> dict:
     return _capture_loss_result(lost, live, details)
 
 
+# The hook error trail nothing ever read. Measured 2026-08-29: 5 682 failures
+# between 2026-08-25T09:32 and 2026-08-29T21:04 — project checkpointing failing
+# every ten seconds for five days — and health reported nothing at all, because
+# no check opened this file. In the meantime the queue those checkpoints feed
+# grew to 4 643 undrained events and `run/state.json` to 10 MB.
+#
+# A trail that only a person grepping can see is not a health signal. What made
+# the outage long was not the defect; it was that nothing said so.
+HOOK_ERROR_TAIL_BYTES = 64 * 1024
+
+# Newer than this and the failure is happening now, not once upon a time. An
+# hour, because these hooks fire on session lifecycle events: quieter than a
+# heartbeat, far busier than a nightly pass.
+HOOK_ERROR_LIVE_SECONDS = 3600.0
+
+_HOOK_ERROR_LINE = re.compile(r"^\[(?P<at>[^\]]+)\]\s+(?P<kind>[^:]+):")
+
+
+def _hook_error_lines(path: Path) -> list[str]:
+    """The end of the trail, bounded, so an unbounded log cannot stall health.
+
+    The first line is dropped only when the window actually began mid-file: a
+    seek lands mid-line and half a record is not a record, but a file smaller
+    than the window starts at byte zero and its first line is whole.
+    """
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        start = max(0, handle.tell() - HOOK_ERROR_TAIL_BYTES)
+        handle.seek(start)
+        window = handle.read(HOOK_ERROR_TAIL_BYTES)
+    lines = window.decode("utf-8", errors="replace").splitlines()
+    return [line for line in lines[1 if start else 0 :] if line.startswith("[")]
+
+
+def _hook_error_records(lines: list[str]) -> list[tuple[str, str]]:
+    matches = (_HOOK_ERROR_LINE.match(line) for line in lines)
+    return [(match["at"], match["kind"].strip()) for match in matches if match]
+
+
+def _hook_error_kinds(records: list[tuple[str, str]]) -> dict[str, int]:
+    kinds: dict[str, int] = {}
+    for _at, kind in records:
+        kinds[kind] = kinds.get(kind, 0) + 1
+    return kinds
+
+
+def _hook_error_is_live(last_at: str, now: datetime) -> bool:
+    try:
+        seen = datetime.fromisoformat(last_at)
+    except ValueError:
+        return False
+    if seen.tzinfo is None:
+        seen = seen.replace(tzinfo=now.tzinfo)
+    return (now - seen).total_seconds() <= HOOK_ERROR_LIVE_SECONDS
+
+
+def _hook_error_result(live: bool, count: int, details: dict) -> dict:
+    if live:
+        return _result(
+            "hooks",
+            "degraded",
+            f"{count} hook failure(s) in the recent trail, still happening.",
+            details,
+        )
+    if count:
+        return _result(
+            "hooks", "ok", f"{count} hook failure(s) recorded, none recently.", details
+        )
+    return _result("hooks", "ok", "No hook failure is recorded.", details)
+
+
+def _hook_error_check(state_root: Path, now: datetime) -> dict:
+    """Report what the lifecycle hooks failed at, so a silent outage is visible."""
+    path = Path(state_root) / "logs" / "hook-errors.log"
+    details: dict[str, Any] = {"trail": "logs/hook-errors.log", "window_bytes": 0}
+    if _safe_kind(path, state_root)[0] == "missing":
+        return _result("hooks", "ok", "No hook failure trail exists.", details)
+    records = _hook_error_records(_hook_error_lines(path))
+    if not records:
+        return _result("hooks", "ok", "No hook failure is recorded.", details)
+    last_at = max(at for at, _kind in records)
+    details.update(
+        {
+            "recent": len(records),
+            "kinds": _hook_error_kinds(records),
+            "last_at": last_at,
+            "window_bytes": HOOK_ERROR_TAIL_BYTES,
+        }
+    )
+    live = _hook_error_is_live(last_at, now)
+    return _hook_error_result(live, len(records), details)
+
+
 def _scheduler_check(root: Path, state_root: Path, now: datetime, deadline: float) -> dict:
     scripts = {
         "scheduled_nightly": (root / "scripts" / "scheduled_nightly.py").is_file(),
@@ -8041,6 +8134,7 @@ def _deferrable_checks(
             ),
         ),
         ("capture", lambda budget: _capture_check(state_path, budget)),
+        ("hooks", lambda _budget: _hook_error_check(state_path, generated_at)),
         ("mcp", lambda _budget: _mcp_check(root_path)),
         (
             "integrations",
