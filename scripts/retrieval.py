@@ -10,6 +10,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Any
 
@@ -1687,13 +1688,31 @@ def _lexical_signal(wanted: Sequence[str], ran_lexical: bool) -> list[str]:
     return []
 
 
+class RetrievalStopped(TimeoutError):
+    """The caller's own deadline or cancel flag stopped the plan.
+
+    Deliberately distinct from a `TimeoutError` a backend raises. A backend
+    timeout says the work failed; this one says *we* stopped the work, and
+    whatever earlier legs finished is still in hand. Only this class is
+    salvageable, so a backend that times out keeps propagating exactly as it
+    did before. It stays a `TimeoutError` so every existing caller and test
+    that catches or matches one is unaffected, message included.
+    """
+
+    def __init__(self, message: str, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 def _check_deadline(deadline_monotonic: float | None) -> None:
     if deadline_monotonic is None:
         return
     import time
 
     if time.monotonic() >= float(deadline_monotonic):
-        raise TimeoutError("retrieval deadline exceeded")
+        raise RetrievalStopped(
+            "retrieval deadline exceeded", "deadline_expired_partial_result"
+        )
 
 
 def _check_stopped(
@@ -1701,7 +1720,7 @@ def _check_stopped(
 ) -> None:
     _check_deadline(deadline_monotonic)
     if cancelled is not None and cancelled():
-        raise TimeoutError("retrieval cancelled")
+        raise RetrievalStopped("retrieval cancelled", "cancelled_partial_result")
 
 
 # An optional stage may spend this share of what is left of the operation
@@ -2342,6 +2361,7 @@ def _run_graph_stage(
 
 
 def _run_backends(
+    run: _BackendRun,
     filters: Mapping[str, Any],
     *,
     analysis: QueryAnalysis,
@@ -2359,7 +2379,6 @@ def _run_backends(
     cancelled: Callable[[], bool] | None,
 ) -> _BackendRun:
     """Ask each wanted backend in turn; the graph one reads the earlier hits."""
-    run = _BackendRun()
     _run_lexical_stage(
         run,
         lexical_backend,
@@ -3090,6 +3109,200 @@ def _retrieval_trace(
     )
 
 
+@dataclass
+class _PlanProgress:
+    """What the plan has finished, carried so an expiry need not discard it.
+
+    `retrieve()` runs its legs in sequence and checks the caller's stop flag
+    between them. Before this existed, that check raised and every finished leg
+    went in the bin. Measured on this vault under load 13-17: 4.4-5.5 s of a
+    10 s budget went to optional stages that returned nothing, and then the
+    lexical answer that was already computed was discarded -- 18 of 36 calls
+    raised rather than answering. The fields below are filled as work
+    completes, so the stop path has something truthful to hand back.
+    """
+
+    analysis: QueryAnalysis
+    requested: str
+    wanted: Sequence[str]
+    limit: int
+    corpus_generation: str
+    graph_enabled: bool
+    backends: _BackendRun = dataclass_field(default_factory=_BackendRun)
+    rerank_trace: _RerankTrace = dataclass_field(default_factory=_RerankTrace)
+    candidates: tuple[RetrievalCandidate, ...] | None = None
+    display_meta: dict[str, dict[str, Any]] | None = None
+
+
+def _any_leg_finished(backends: _BackendRun) -> bool:
+    return backends.ran_lexical or backends.ran_dense or backends.ran_graph
+
+
+def _partial_candidates(
+    progress: _PlanProgress, signals: Sequence[str]
+) -> tuple[tuple[RetrievalCandidate, ...], dict[str, dict[str, Any]]]:
+    """Fusion already done is reused; otherwise the rows in hand are fused now."""
+    if progress.candidates is not None:
+        return progress.candidates, progress.display_meta or {}
+    return _fused_candidates(progress.backends, signals, progress.analysis.intents)
+
+
+def _assembled_partial(progress: _PlanProgress, reason: str) -> RetrievalResult:
+    """The legs that finished, ranked and labelled. No new work, no new budget.
+
+    Everything here is in-memory work over rows already paid for: fusion,
+    exact-filename promotion, page diversity, the cap. No backend is called, the
+    reranker is not run, and no stop check is made -- the stop already happened
+    and this is the unwinding, not more retrieval.
+
+    The stop reason leads `fallback_reason` because it is the dominant fact: the
+    answer is short because the clock ran out. Which legs are missing is not
+    lost with it -- `effective_mode` and `signals_used` name exactly the ones
+    that finished.
+    """
+    backends = progress.backends
+    effective, fallback, signals = _resolve_effective_mode(
+        progress.requested,
+        wanted=progress.wanted,
+        ran_lexical=backends.ran_lexical,
+        ran_dense=backends.ran_dense,
+        ran_graph=backends.ran_graph,
+        dense_available=backends.dense_available,
+        graph_available=backends.graph_available,
+        graph_enabled=progress.graph_enabled,
+    )
+    candidates, display_meta = _partial_candidates(progress, signals)
+    candidates = _promote_exact_filename(candidates, _exact_query(progress.analysis))
+    return RetrievalResult(
+        candidates=_capped(_page_diverse(candidates), progress.limit),
+        trace=_retrieval_trace(
+            requested=progress.requested,
+            effective=effective,
+            signals=signals,
+            fallback=_first_reason(reason, fallback),
+            corpus_generation=progress.corpus_generation,
+            partial=True,
+            rerank_trace=progress.rerank_trace,
+        ),
+        analysis=progress.analysis,
+        display_meta=display_meta,
+    )
+
+
+def _partial_or_reraise(
+    progress: _PlanProgress, stopped: RetrievalStopped
+) -> RetrievalResult:
+    """Hand back what finished; when nothing did, the stop is the only truth.
+
+    A result with no rows and no signals would be a refusal wearing the clothes
+    of an answer, and this vault has ruled against that shape before.
+    """
+    if not _any_leg_finished(progress.backends):
+        raise stopped
+    return _assembled_partial(progress, stopped.reason)
+
+
+def _executed_plan(
+    progress: _PlanProgress,
+    filters: Mapping[str, Any],
+    *,
+    lexical_backend: BackendFn | None,
+    dense_backend: BackendFn | None,
+    graph_backend: BackendFn | None,
+    graph_edge_families: Mapping[str, bool] | None,
+    graph_per_seed_limit: int,
+    graph_global_limit: int,
+    rerank_enabled: bool,
+    partial: bool,
+    max_candidates: int | None,
+    deadline_monotonic: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> RetrievalResult:
+    """The plan itself. Every stop inside it leaves `progress` truthful."""
+    backends = _run_backends(
+        progress.backends,
+        filters,
+        analysis=progress.analysis,
+        requested=progress.requested,
+        wanted=progress.wanted,
+        lexical_backend=lexical_backend,
+        dense_backend=dense_backend,
+        graph_backend=graph_backend,
+        graph_enabled=progress.graph_enabled,
+        graph_edge_families=graph_edge_families,
+        graph_per_seed_limit=graph_per_seed_limit,
+        graph_global_limit=graph_global_limit,
+        corpus_generation=progress.corpus_generation,
+        deadline_monotonic=deadline_monotonic,
+        cancelled=cancelled,
+    )
+    optional_failure = backends.optional_failure
+    partial = _any_true(partial, backends.partial)
+
+    effective, fallback, signals = _resolve_effective_mode(
+        progress.requested,
+        wanted=progress.wanted,
+        ran_lexical=backends.ran_lexical,
+        ran_dense=backends.ran_dense,
+        ran_graph=backends.ran_graph,
+        dense_available=backends.dense_available,
+        graph_available=backends.graph_available,
+        graph_enabled=progress.graph_enabled,
+    )
+    fallback = _first_reason(backends.graph_failure, fallback)
+
+    candidates, display_meta = _fused_candidates(
+        backends, signals, progress.analysis.intents
+    )
+    exact_query = _exact_query(progress.analysis)
+    candidates = _promote_exact_filename(candidates, exact_query)
+    # Capped before the check, not after, so that what `progress` holds is
+    # exactly what the plan holds: a salvage must not answer from a wider pool
+    # than the run itself was working with. `_capped` is a pure slice and makes
+    # no stop check, so moving it earlier changes nothing else.
+    candidates = _capped(candidates, max_candidates)
+    progress.candidates = candidates
+    progress.display_meta = display_meta
+    _check_stopped(deadline_monotonic, cancelled)
+
+    rerank_trace = progress.rerank_trace
+    candidates = _maybe_rerank(
+        candidates,
+        display_meta,
+        analysis=progress.analysis,
+        requested=progress.requested,
+        limit=progress.limit,
+        max_candidates=max_candidates,
+        rerank_enabled=rerank_enabled,
+        deadline_monotonic=deadline_monotonic,
+        cancelled=cancelled,
+        trace=rerank_trace,
+    )
+    signal_list = [*signals, *_rerank_signals(rerank_trace)]
+    optional_failure = _rerank_failure(rerank_trace, optional_failure)
+    partial = _any_true(partial, rerank_trace.optional_timeout)
+
+    candidates = _promote_exact_filename(candidates, exact_query)
+    progress.candidates = candidates
+    _check_stopped(deadline_monotonic, cancelled)
+    candidates = _capped(_page_diverse(candidates), progress.limit)
+
+    return RetrievalResult(
+        candidates=candidates,
+        trace=_retrieval_trace(
+            requested=progress.requested,
+            effective=effective,
+            signals=signal_list,
+            fallback=_first_reason(optional_failure, fallback),
+            corpus_generation=progress.corpus_generation,
+            partial=partial,
+            rerank_trace=rerank_trace,
+        ),
+        analysis=progress.analysis,
+        display_meta=display_meta,
+    )
+
+
 def retrieve(
     query: str,
     *,
@@ -3117,6 +3330,13 @@ def retrieve(
 
     Lexical and dense backends are invoked independently with identical hard
     filters. Fusion is rank-only RRF. Raw backend scores stay on candidates.
+
+    On expiry the finished legs are returned rather than discarded, labelled
+    `partial` with the stop as `fallback_reason`. No new work starts after the
+    deadline, so the deadline still binds every backend call; what changes is
+    only what happens to work already paid for. When nothing finished there is
+    nothing to hand back and the stop propagates as before. See
+    `docs/research/2026-08-29-what-an-expired-retrieval-still-owes.md`.
     """
     _check_stopped(deadline_monotonic, cancelled)
     analysis = analyze_query(query)
@@ -3135,78 +3355,32 @@ def retrieve(
     _require_bounded_int(graph_per_seed_limit, 1, 100, "graph_per_seed_limit")
     _require_bounded_int(graph_global_limit, 1, 1000, "graph_global_limit")
     _require_known_edge_families(graph_edge_families)
-    backends = _run_backends(
-        filters,
+    progress = _PlanProgress(
         analysis=analysis,
         requested=requested,
         wanted=wanted,
-        lexical_backend=lexical_backend,
-        dense_backend=dense_backend,
-        graph_backend=graph_backend,
-        graph_enabled=graph_enabled,
-        graph_edge_families=graph_edge_families,
-        graph_per_seed_limit=graph_per_seed_limit,
-        graph_global_limit=graph_global_limit,
-        corpus_generation=corpus_generation,
-        deadline_monotonic=deadline_monotonic,
-        cancelled=cancelled,
-    )
-    optional_failure = backends.optional_failure
-    partial = _any_true(partial, backends.partial)
-
-    effective, fallback, signals = _resolve_effective_mode(
-        requested,
-        wanted=wanted,
-        ran_lexical=backends.ran_lexical,
-        ran_dense=backends.ran_dense,
-        ran_graph=backends.ran_graph,
-        dense_available=backends.dense_available,
-        graph_available=backends.graph_available,
-        graph_enabled=graph_enabled,
-    )
-    fallback = _first_reason(backends.graph_failure, fallback)
-
-    candidates, display_meta = _fused_candidates(backends, signals, analysis.intents)
-    exact_query = _exact_query(analysis)
-    candidates = _promote_exact_filename(candidates, exact_query)
-    _check_stopped(deadline_monotonic, cancelled)
-    candidates = _capped(candidates, max_candidates)
-
-    rerank_trace = _RerankTrace()
-    candidates = _maybe_rerank(
-        candidates,
-        display_meta,
-        analysis=analysis,
-        requested=requested,
         limit=limit,
-        max_candidates=max_candidates,
-        rerank_enabled=rerank_enabled,
-        deadline_monotonic=deadline_monotonic,
-        cancelled=cancelled,
-        trace=rerank_trace,
+        corpus_generation=corpus_generation,
+        graph_enabled=graph_enabled,
     )
-    signal_list = [*signals, *_rerank_signals(rerank_trace)]
-    optional_failure = _rerank_failure(rerank_trace, optional_failure)
-    partial = _any_true(partial, rerank_trace.optional_timeout)
-
-    candidates = _promote_exact_filename(candidates, exact_query)
-    _check_stopped(deadline_monotonic, cancelled)
-    candidates = _capped(_page_diverse(candidates), limit)
-
-    return RetrievalResult(
-        candidates=candidates,
-        trace=_retrieval_trace(
-            requested=requested,
-            effective=effective,
-            signals=signal_list,
-            fallback=_first_reason(optional_failure, fallback),
-            corpus_generation=corpus_generation,
+    try:
+        return _executed_plan(
+            progress,
+            filters,
+            lexical_backend=lexical_backend,
+            dense_backend=dense_backend,
+            graph_backend=graph_backend,
+            graph_edge_families=graph_edge_families,
+            graph_per_seed_limit=graph_per_seed_limit,
+            graph_global_limit=graph_global_limit,
+            rerank_enabled=rerank_enabled,
             partial=partial,
-            rerank_trace=rerank_trace,
-        ),
-        analysis=analysis,
-        display_meta=display_meta,
-    )
+            max_candidates=max_candidates,
+            deadline_monotonic=deadline_monotonic,
+            cancelled=cancelled,
+        )
+    except RetrievalStopped as stopped:
+        return _partial_or_reraise(progress, stopped)
 
 
 def trace_to_dict(trace: RetrievalTrace) -> dict[str, object]:
