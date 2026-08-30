@@ -56,14 +56,22 @@ def _write_two(store: ProjectStore) -> None:
 
 
 def _drop_last_entry(vault: Path) -> None:
-    """Leave sequence 2 committed in the database and absent from the journal."""
+    """Leave sequence 2 committed in the database and absent from the journal.
+
+    Bytes, not text: the journal is parsed as bytes, and text mode translates
+    `\n` to `\r\n` on Windows, which turned the header into something the
+    reader refuses. All seven tests here failed that way on 2026-08-30.
+    """
     path = vault / "knowledge/projects/demo/journal.md"
-    lines = path.read_text(encoding="utf-8").splitlines()
-    path.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")
+    lines = path.read_bytes().split(b"\n")
+    while lines and not lines[-1]:
+        lines.pop()
+    path.write_bytes(b"\n".join(lines[:-1]) + b"\n")
 
 
 def _entries(vault: Path) -> list[dict]:
-    text = (vault / "knowledge/projects/demo/journal.md").read_text(encoding="utf-8")
+    raw = (vault / "knowledge/projects/demo/journal.md").read_bytes()
+    text = raw.decode("utf-8")
     return [json.loads(line) for line in text.splitlines() if line.startswith("{")]
 
 
@@ -139,8 +147,8 @@ def test_a_gap_that_is_not_at_the_head_stops_the_walk(vault: Path, state_root: P
     store = _store(vault, state_root)
     _write_two(store)
     path = vault / "knowledge/projects/demo/journal.md"
-    lines = path.read_text(encoding="utf-8").splitlines()
-    path.write_text(JOURNAL_HEADER, encoding="utf-8")
+    lines = path.read_bytes().split(b"\n")
+    path.write_bytes(JOURNAL_HEADER.encode("utf-8"))
     with sqlite3.connect(store.coordinator.database_path) as database:
         database.execute(
             "UPDATE project_checkpoints SET state = 'reserved' "
@@ -155,8 +163,8 @@ def test_a_gap_that_is_not_at_the_head_stops_the_walk(vault: Path, state_root: P
 def test_an_empty_journal_is_filled_from_the_head(vault: Path, state_root: Path):
     store = _store(vault, state_root)
     _write_two(store)
-    (vault / "knowledge/projects/demo/journal.md").write_text(
-        JOURNAL_HEADER, encoding="utf-8"
+    (vault / "knowledge/projects/demo/journal.md").write_bytes(
+        JOURNAL_HEADER.encode("utf-8")
     )
 
     assert repair.missing_sequences(_store(vault, state_root), "demo") == [1, 2]

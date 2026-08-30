@@ -2314,8 +2314,19 @@ def _observed_checksum(key: tuple) -> str | None:
         return _seal_observations.get(key)
 
 
+# The cache trusts `st_ctime_ns` to catch a rewrite that forged its mtime: on
+# POSIX no syscall can set it, because the kernel stamps it on every inode
+# change. Windows has no change-time at all — `st_ctime` there is the creation
+# time and survives a rewrite — so the same-size, forged-mtime rewrite would be
+# served from the cache unchecked. Measured 2026-08-30: eight Windows jobs, and
+# `test_a_rewrite_that_forges_mtime_is_still_caught_by_ctime` read `1 == 2`
+# because nothing re-hashed. Where the guard does not exist the cache does not
+# either; a seal that can be fooled is worth less than the hashing it saves.
+_CTIME_IS_A_CHANGE_TIME = sys.platform != "win32"
+
+
 def _record_observed_checksum(key: tuple, checksum: str, *, racy: bool) -> None:
-    if racy:
+    if racy or not _CTIME_IS_A_CHANGE_TIME:
         return
     with _seal_observation_lock:
         if len(_seal_observations) >= _SEAL_OBSERVATION_LIMIT:

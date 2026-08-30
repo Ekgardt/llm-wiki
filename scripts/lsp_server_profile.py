@@ -327,6 +327,7 @@ class LanguageServerProfile:
     degradation_prefix: str
     node_minor_floor: int = 0
     owner_argument_template: str | None = None
+    owner_argument_relative: Path | None = None
     runtime_option: RuntimeOption | None = None
     identity_notification: IdentityNotification | None = None
     package_launch: PackageLaunch | None = None
@@ -370,6 +371,8 @@ class LanguageServerProfile:
         _require_text(self.package_url, "package_url")
         _require_integrity(self.package_integrity)
         _require_relative(self.server_relative, "server_relative")
+        if self.owner_argument_relative is not None:
+            _require_relative(self.owner_argument_relative, "owner_argument_relative")
         _require_relative(self.managed_relative_root, "managed_relative_root")
         if not self.package_url.startswith("https://"):
             raise ProfileError("package_url must be https")
@@ -405,10 +408,21 @@ class LanguageServerProfile:
         return (str(node), str(server), *self.launch_flags, *tail)
 
     def _owner_arguments(self, owner: Path) -> tuple[str, ...]:
+        """The owner-scoped argument, joined as a path rather than as text.
+
+        The template used to carry its own `/cancellation` suffix, which on
+        Windows produced `D:\\a\\...\\owner/cancellation` — a separator the
+        session it replaced never emitted. Measured 2026-08-30: the
+        `pyright-windows` job failed on exactly that argument while every POSIX
+        job passed, because there the two spellings are the same string.
+        """
         template = self.owner_argument_template
         if template is None:
             return ()
-        return (template.format(owner=owner),)
+        target = owner if self.owner_argument_relative is None else (
+            owner / self.owner_argument_relative
+        )
+        return (template.format(owner=target),)
 
     def wire_initialization_options(self, state_root: Path) -> dict:
         """Initialization options as sent, with any runtime path filled in."""

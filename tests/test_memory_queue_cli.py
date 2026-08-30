@@ -932,6 +932,10 @@ def test_windows_tree_cleanup_verifies_direct_child_liveness(
     assert process.killed == 1
 
 
+@pytest.mark.skipif(
+    not hasattr(os, "killpg"),
+    reason="the POSIX group path needs process groups, which this host has not",
+)
 def test_posix_group_race_uses_direct_fallback_and_completes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

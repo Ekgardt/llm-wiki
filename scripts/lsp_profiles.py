@@ -76,7 +76,8 @@ PYRIGHT_PROFILE = LanguageServerProfile(
     # Pyright takes a cancellation directory under the owner scratch root. The
     # template is the exact string `pyright_session._start_configured_process`
     # has always built.
-    owner_argument_template="--cancellationReceive=file:{owner}/cancellation",
+    owner_argument_template="--cancellationReceive=file:{owner}",
+    owner_argument_relative=Path("cancellation"),
     server_notifications=PYRIGHT_NOTIFICATIONS,
     configuration=PYRIGHT_CONFIGURATION,
     initialization_options=PYRIGHT_INITIALIZATION_OPTIONS,

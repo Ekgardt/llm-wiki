@@ -29,7 +29,19 @@ from lsp_server_profile import (
     thaw_profile_value,
 )
 
-STATE_ROOT = Path("/srv/vault")
+# `Path("/srv/vault").is_absolute()` is False on Windows — a path needs a drive
+# there — so every root handed to a profile has to be anchored to one. Eight
+# Windows jobs failed on 2026-08-30 with "node must be an absolute path" and a
+# comparison of "D:\\srv\\vault…" against "\\srv\\vault…".
+ANCHOR = Path(Path.cwd().anchor)
+
+
+def _abs(*parts: str) -> Path:
+    """An absolute path on every platform these tests run on."""
+    return ANCHOR.joinpath(*parts)
+
+
+STATE_ROOT = _abs("srv", "vault")
 
 
 def _canonical(value: object) -> bytes:
@@ -43,9 +55,9 @@ def _canonical(value: object) -> bytes:
 
 def test_the_pyright_launch_command_matches_the_one_the_session_already_builds():
     """`_start_configured_process` builds this argv; the profile must reproduce it."""
-    node = Path("/usr/bin/node")
-    server = Path("/srv/vault/cache/code-tools/pyright/1.1.411/package/langserver.index.js")
-    owner = Path("/srv/vault/run/lsp/" + "a" * 32)
+    node = _abs("usr", "bin", "node")
+    server = STATE_ROOT / "cache/code-tools/pyright/1.1.411/package/langserver.index.js"
+    owner = STATE_ROOT / "run/lsp" / ("a" * 32)
 
     # The literal construction from scripts/pyright_session.py, kept verbatim so
     # that a change on either side shows up here as a difference.
@@ -191,8 +203,8 @@ def test_typescript_carries_a_node_minor_floor_that_pyright_never_needed():
 
 def test_typescript_takes_no_owner_argument():
     node = Path("/usr/bin/node")
-    server = Path("/srv/vault/cache/x/package/lib/cli.mjs")
-    owner = Path("/srv/vault/run/lsp/" + "b" * 32)
+    server = STATE_ROOT / "cache/x/package/lib/cli.mjs"
+    owner = STATE_ROOT / "run/lsp" / ("b" * 32)
     assert lsp_profiles.TYPESCRIPT_PROFILE.launch_command(node, server, owner) == (
         str(node),
         str(server),
@@ -301,7 +313,7 @@ def _profile(**overrides) -> LanguageServerProfile:
     [
         {"package_url": "http://example.invalid/a.tgz"},
         {"package_integrity": "sha256-AAAA"},
-        {"server_relative": Path("/absolute/main.js")},
+        {"server_relative": _abs("absolute", "main.js")},
         {"server_relative": Path("../escape/main.js")},
         {"managed_relative_root": Path("../../etc")},
         {"readiness": "whenever"},
@@ -318,19 +330,20 @@ def test_an_unhonourable_profile_is_refused_at_construction(overrides):
 
 def test_a_relative_launch_path_is_refused():
     with pytest.raises(ProfileError):
-        _profile().launch_command(Path("node"), Path("/a/b.js"), Path("/c"))
+        _profile().launch_command(Path("node"), _abs("a", "b.js"), _abs("c"))
 
 
 def test_a_runtime_option_will_not_overwrite_a_non_object():
     option = RuntimeOption(key_path=("a", "b"), sibling_relative=Path("t.js"))
     with pytest.raises(ProfileError):
-        option.applied({"a": "already a string"}, Path("/srv/vault/managed"))
+        option.applied({"a": "already a string"}, STATE_ROOT / "managed")
 
 
 def test_a_runtime_option_creates_the_branch_it_needs():
     option = RuntimeOption(key_path=("a", "b", "c"), sibling_relative=Path("t.js"))
-    result = option.applied({}, Path("/srv/managed"))
-    assert result == {"a": {"b": {"c": "/srv/managed/t.js"}}}
+    managed = _abs("srv", "managed")
+    result = option.applied({}, managed)
+    assert result == {"a": {"b": {"c": str(managed / "t.js")}}}
 
 
 def test_a_runtime_option_needs_an_absolute_managed_root():
