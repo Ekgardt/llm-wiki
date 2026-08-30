@@ -307,6 +307,31 @@ def answer_sessions_retrieved(question: Mapping[str, object], rows: list[dict]) 
     return sum(_names_a_labelled_session(row, labelled) for row in rows)
 
 
+# The session signal above says the right *session* reached the answerer. It
+# does not say the *span* carrying the fact did, and that is the difference
+# that matters.
+#
+# Measured 2026-08-30: of 21 refusals with an answer session retrieved, 3 were
+# abstention-type questions the system correctly refused, leaving 18 on
+# answerable ones — and the model's own stated reasons name what it saw. On a
+# question whose gold is `20` it reports "the only figure in evidence is ...
+# '30 dozen' eggs"; on one whose gold is `11` it reports evidence about an
+# Alex who is "a 21-year-old work intern". The session was there; the sentence
+# was not.
+#
+# `gold_in_candidates` is a weak signal on purpose and must be read as one: a
+# gold answer of `20` matches any candidate containing that substring, so it
+# over-counts. It is useful only against the session signal — session present
+# and gold absent is span-level loss, and both present is a genuine refusal
+# with the answer in hand.
+def gold_in_candidates(question: Mapping[str, object], rows: list[dict]) -> bool:
+    """Whether the gold answer's text appears at all in what retrieval handed over."""
+    gold = " ".join(str(question.get("answer", "")).split())
+    if not gold:
+        return False
+    return any(gold.casefold() in _row_text(row).casefold() for row in rows)
+
+
 def _instrumented_generator(metrics: dict):
     """The shared provider client, measuring what one retrieval hands it."""
     from llm_client import call_llm
@@ -413,6 +438,7 @@ def run_question(question: dict, work: Path) -> dict:
         "retrieved": len(rows),
         "answer_sessions_retrieved": answer_sessions_retrieved(question, rows),
         "answer_sessions_labelled": len(_labelled_sessions(question)),
+        "gold_in_candidates": gold_in_candidates(question, rows),
         **build_info,
         **outcome,
         **metrics,

@@ -195,3 +195,31 @@ def test_a_missing_workdir_is_created_rather_than_failing_every_question(
 def test_no_workdir_stays_no_workdir() -> None:
     """The default is the system temp directory; that must not change."""
     assert longmemeval_vault._prepared_workdir(None) is None
+
+
+def test_the_gold_text_is_found_in_a_candidate() -> None:
+    """The span signal, separate from the session one: was the answer text there?"""
+    question = {"answer": "Business Administration"}
+    rows = [_row(summary="...user said Business Administration was the major...")]
+
+    assert longmemeval_vault.gold_in_candidates(question, rows) is True
+
+
+def test_the_gold_text_absent_from_every_candidate_is_reported() -> None:
+    """Right session, wrong span: what 18 of today's evidenced refusals look like."""
+    question = {"answer": "Business Administration"}
+    rows = [_row(summary="...the user discussed autographed baseballs...")]
+
+    assert longmemeval_vault.gold_in_candidates(question, rows) is False
+
+
+def test_a_question_with_no_gold_answer_matches_nothing() -> None:
+    assert longmemeval_vault.gold_in_candidates({"answer": ""}, [_row()]) is False
+
+
+def test_the_gold_match_ignores_case_and_spacing() -> None:
+    """Gold answers carry the dataset's own formatting, not the transcript's."""
+    question = {"answer": "  Business   Administration "}
+    rows = [_row(summary="major: business administration")]
+
+    assert longmemeval_vault.gold_in_candidates(question, rows) is True
