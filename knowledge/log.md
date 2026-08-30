@@ -122,6 +122,8 @@
 - 2026-08-28 — Automated compile completed for snapshot a579bf9181f3d76c6bbed6c7bfea93e9fda64be1fe293e83cc6f252b5774b0dc. Touched: none.
 - 2026-08-28 — Manual compile completed for snapshot 364e16b9514d41a78c285be4daec7e6e81fab028fccf9d89e954a16d88c449dd, b532582f3cec31063e7f85efd6d5a426039a9a13da4dbdf45cc84fb1db2e7041, e372f13135861953c44915340cfee367634f5d0622639db1f254aec1e104bb6d. Touched: none.
 - 2026-08-29 — Automated compile completed for snapshot 27b4b40d920e0499c13f12d3b25474e39d70f8fa1f4398ee157c68e0b6b2c7ae, 539a208e52e20f15f60549698da4fe6a0850d7e636ca4ef5eb5c5c0d2f2a4e93. Touched: none.
+- 2026-08-30 — Automated compile completed for snapshot 0349bafda18976164d3465c75a1f9065b56a4fffe111b2823ed4e5a5b091cf63, 1753b553adb0d8d5458d205aa8c28f0706ef414f83595612fe5fa630fed7da74, 59171debf880009ac191728e7a6e7c2c94aab193ccc782129fc8145fd6ac95a9, f84b059e8d535999fff5335bdad2b74fee6742410efb813f434f12ee0ecdfd12. Touched: none.
+- 2026-08-30 — Automated compile completed for snapshot e78b4be5d217af4ac30591c990d61b3848791f6eac3b9d2ac9068e75ce45ab7e. Touched: none.
 
 ## Editorial note
 This log is vault metadata — an append-only editorial changelog of compile passes and hygiene actions over `knowledge/`, not content derived from `knowledge/raw/` or `knowledge/inbox/`. New entries are appended at the bottom by compile passes and by hand; entries are never rewritten or removed.
@@ -1393,4 +1395,15 @@ This log is vault metadata — an append-only editorial changelog of compile pas
   нужного предложения. Хуже всего там же, где и точность: межсессионные два из
   двенадцати, временные четыре из тринадцати. Прежние объяснения — калибровка,
   формулировка, отбрасывание по хвосту — опровергнуты замерами.
+
+- 2026-08-30 — Воронка наконец измерена по следу самого компилятора: из
+  двенадцати извлечённых кандидатов до него доходят в среднем два, разместить
+  он не смог ни одного лишнего — ноль пропущенных, — а всё сужение происходит
+  раньше, при подгонке под бюджет. Запись сессии около десяти килобайт, бюджет
+  двадцать восемь, помещаются две. Моё прежнее исключение этой причины было
+  верно наполовину: первый отрывок переживает обрезку, поэтому односессионные
+  вопросы отвечаются, а межсессионным и временным нужно больше двух — и это
+  ровно те разряды, где точность худшая. Заодно выяснилось, что и признак
+  вхождения золотого текста для них негоден: там ответ выводится, а не
+  цитируется.
 
