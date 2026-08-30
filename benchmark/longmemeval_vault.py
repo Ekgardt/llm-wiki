@@ -355,15 +355,25 @@ def answer_session_rank(question: Mapping[str, object], rows: list[dict]) -> int
     return 0
 
 
-def _instrumented_generator(metrics: dict):
-    """The shared provider client, measuring what one retrieval hands it."""
+def _instrumented_generator(metrics: dict, gold: str = ""):
+    """The shared provider client, measuring what one retrieval hands it.
+
+    `gold_in_prompt` is the measurement the earlier signals could not make.
+    `gold_in_candidates` read a candidate's summary and heading, which almost
+    never carry the answering sentence: measured 2026-08-30 it was true for 2
+    of 50 questions, including 0 of the 17 the system answered, so it measured
+    nothing. This reads the prompt the model actually received.
+    """
     from llm_client import call_llm
+
+    needle = " ".join(str(gold).split()).casefold()
 
     def generate(prompt: str, system_prompt: str, max_tokens: int) -> str | None:
         metrics["prompt_chars"] = len(prompt)
         metrics["prompt_bytes"] = len(prompt.encode("utf-8"))
         metrics["system_chars"] = len(system_prompt)
         metrics["est_prompt_tokens"] = round(len(prompt) / 4)
+        metrics["gold_in_prompt"] = bool(needle) and needle in prompt.casefold()
         started = time.monotonic()
         try:
             return call_llm(prompt, system_prompt, max_tokens)
@@ -394,7 +404,13 @@ def error_kind(exc: BaseException) -> str:
 
 
 def _answer_outcome(
-    question_text: str, root: Path, snapshot: object, rows: list[dict], metrics: dict, profile: str
+    question_text: str,
+    root: Path,
+    snapshot: object,
+    rows: list[dict],
+    metrics: dict,
+    profile: str,
+    gold: str = "",
 ) -> dict:
     from context_budget import ContextBudget
     from query_memory import QA_MAX_OUTPUT_TOKENS, grounded_qa
@@ -405,7 +421,7 @@ def _answer_outcome(
             vault=root,
             snapshot=snapshot,
             candidates=rows,
-            generator=_instrumented_generator(metrics),
+            generator=_instrumented_generator(metrics, gold),
             profile=profile,
             budget=ContextBudget(None, ANSWER_INPUT_BUDGET, QA_MAX_OUTPUT_TOKENS, 512),
             deadline=time.monotonic() + ANSWER_DEADLINE_SECONDS,
@@ -445,7 +461,10 @@ def run_question(question: dict, work: Path) -> dict:
     rows = _retrieved_rows(plain, profile)
     answer_started = time.monotonic()
     metrics: dict = {}
-    outcome = _answer_outcome(dated_question(question), root, snapshot, rows, metrics, profile)
+    outcome = _answer_outcome(
+        dated_question(question), root, snapshot, rows, metrics, profile,
+        str(question.get("answer", "")),
+    )
     finished = time.monotonic()
     return {
         "question_id": str(question["question_id"]),
