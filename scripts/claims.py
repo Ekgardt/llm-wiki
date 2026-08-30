@@ -175,10 +175,33 @@ def _canonical_date_text(text: str, *, label: str) -> str:
     return text
 
 
+# `datetime.fromisoformat` accepted exactly three or six fractional digits until
+# Python 3.11; this project supports 3.10, where `…:00.5Z` — a perfectly ordinary
+# half second — raises `Invalid isoformat string`. Verified on 3.10.20 against
+# 3.12.3 on 2026-08-30, and it is why `test_a_sub_second_validity_interval_is_
+# not_refused_as_inverted` failed on every 3.10 job in CI while passing locally.
+# Padding to six digits is exact: it changes no instant and no rendered output,
+# because `isoformat()` prints six digits on both versions either way.
+_FRACTIONAL_SECONDS_RE = re.compile(
+    r"^(?P<head>.*T\d{2}:\d{2}:\d{2})\.(?P<digits>\d+)(?P<tail>.*)$"
+)
+
+
+def _six_digit_fraction(text: str) -> str:
+    """The same instant with a fraction every supported Python can read."""
+    match = _FRACTIONAL_SECONDS_RE.match(text)
+    if match is None:
+        return text
+    digits = match.group("digits")
+    if len(digits) > 6:
+        return text
+    return f"{match.group('head')}.{digits.ljust(6, '0')}{match.group('tail')}"
+
+
 def _canonical_timestamp_text(text: str, *, label: str) -> str:
     try:
         parsed = datetime.fromisoformat(
-            text[:-1] + "+00:00" if text.endswith("Z") else text
+            _six_digit_fraction(text[:-1] + "+00:00" if text.endswith("Z") else text)
         )
         if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
             raise ValueError
@@ -191,7 +214,7 @@ def _strict_rfc3339_utc(value: object, *, label: str) -> str:
     if not isinstance(value, str) or _RFC3339_UTC_RE.fullmatch(value) is None:
         raise ValueError(f"{label} must be a strict UTC RFC3339 timestamp")
     try:
-        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+        parsed = datetime.fromisoformat(_six_digit_fraction(value[:-1] + "+00:00"))
     except ValueError as exc:
         raise ValueError(f"{label} is not a real RFC3339 date/time") from exc
     if parsed.utcoffset() != timezone.utc.utcoffset(parsed):

@@ -17,6 +17,7 @@ fails, which is why
 
 from __future__ import annotations
 
+import signal
 import sys
 from pathlib import Path
 
@@ -27,6 +28,18 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import memory_queue  # noqa: E402
+
+# Every test here passes `platform_name="posix"` to exercise the POSIX branch,
+# and that branch names `signal.SIGKILL` while building its call — before the
+# patched `_kill_process_group` is ever reached. Windows has no such signal, so
+# on 2026-08-30 all three failed the Windows job with `module 'signal' has no
+# attribute 'SIGKILL'` while passing everywhere else. The condition is the real
+# dependency rather than the platform name: a host without the signal cannot
+# reach the situation these tests describe.
+pytestmark = pytest.mark.skipif(
+    not hasattr(signal, "SIGKILL"),
+    reason="the POSIX hard-kill path needs SIGKILL, which this host does not have",
+)
 
 
 class _LiveProcess:
