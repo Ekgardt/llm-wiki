@@ -4979,6 +4979,66 @@ class MarkdownCoordinator:
         ).fetchone()
         return None if row is None else str(row["state"])
 
+    def retry_unsettled_sequence(
+        self,
+        project: str,
+        sequence: int,
+        lease: Mapping[str, object],
+        *,
+        include_committed: bool = False,
+    ) -> ProjectCheckpointReservation | None:
+        """Give one unsettled sequence a fresh attempt, or None if it moved on.
+
+        A quarantined or reserved sequence is normally cleared by the original
+        request arriving again: the same `occurrence_id` reaches
+        `_retry_spent_checkpoint`, the row becomes a new attempt, and both it
+        and everything queued behind it append in order.
+        `tests/test_project_journal.py` states that contract in seven tests and
+        it is not changed here.
+
+        This exposes the same step for the one case where that door is walled
+        up: a row whose name no request can produce any more. It is used by the
+        explicit one-time repair after the 2026-08-30 rename of batch
+        identities, and by nothing else. The caller must already hold the
+        project lease.
+
+        `include_committed` is for the one repair that needs it: a sequence
+        this database calls committed while the journal does not hold it. The
+        journal is the authority, so such a row is a false record and its write
+        is still owed. Nothing else may pass it — re-attempting a sequence the
+        journal already carries would append it twice.
+
+        See `docs/research/2026-08-30-a-sequence-nothing-can-settle.md`.
+        """
+        precondition = self._checkpoint_lease(project, lease)
+        states = ("committed",) if include_committed else ()
+        with self._connect() as database, begin_immediate(database):
+            self._check_project_lease(database, precondition)
+            existing = self._sequence_row(database, project, sequence, states)
+            if existing is None:
+                return None
+            return self._retry_spent_checkpoint(
+                database, project, existing, precondition
+            )
+
+    @staticmethod
+    def _sequence_row(
+        database: sqlite3.Connection,
+        project: str,
+        sequence: int,
+        also: Sequence[str],
+    ) -> sqlite3.Row | None:
+        if also:
+            return database.execute(
+                "SELECT * FROM project_checkpoints WHERE project = ? AND sequence = ?",
+                (project, sequence),
+            ).fetchone()
+        return database.execute(
+            "SELECT * FROM project_checkpoints WHERE project = ? "
+            "AND sequence = ? AND state != 'committed'",
+            (project, sequence),
+        ).fetchone()
+
     def _retry_spent_checkpoint(
         self,
         database: sqlite3.Connection,

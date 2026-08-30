@@ -73,12 +73,18 @@ The wedge class is unreachable going forward, and it is visible: `doctor`
 reports `degraded` when a project's checkpoint sequence has not moved for an
 hour, naming the sequence and the queue depth.
 
-It does not repair rows named under the old scheme. Two remain on this vault —
-`fix-pip` 320 and `llm-wiki` 1428 — and no new request can match their
-occurrence ids, so the sanctioned retry never fires for them. Clearing them means
-disposing of a quarantined row, which
-[[knowledge/notes/idempotent-retry-after-quarantine-decision]] reserves to the
-owner. They are left alone and reported.
+It orphaned the rows named under the old scheme. A quarantined or reserved
+sequence is normally cleared by the original request arriving again under the
+same name — `tests/test_project_journal.py` states that in seven tests — and
+after the rename no request can produce those names. Three such rows were
+holding 3 338 queued checkpoints.
+
+That is repaired by one explicit, self-limiting pass,
+`scripts/repair_orphaned_checkpoint_names.py`: an unsettled row whose
+`occurrence_id` was not produced by the batch naming gets a fresh attempt
+through the same step a returning request would have used. On a vault with no
+orphaned names it does nothing. Recovery itself is unchanged, and so is the
+rule that a quarantined head is the requester's to clear.
 
 Stale reservations still never expire. A reservation that is never committed and
 never abandoned blocks its name forever, and here that was indistinguishable
@@ -94,6 +100,20 @@ absence of a transaction alone risks a second writer on the same sequence. Age
 is the only thing that separates them, and `project_checkpoints` carries no
 timestamp of its own.
 
+## What it cost while it was being found
+
+Two general designs were written and reverted, and the second did damage. A
+rule that settled a reservation whose evidence looked already journaled rests
+on evidence ids being unique per event; that holds for drain batches but the
+schema does not promise it, and twelve tests caught the rule swallowing a real
+write. Before it was reverted, hooks running against this vault marked
+`llm-wiki` 1429 committed with nothing written, which left the journal ending
+at 1428 while the database claimed 1429 — the exact fault
+`ProjectJournalRebuildRequired` names, and for which no rebuild existed.
+`scripts/repair_journal_gap.py` is that rebuild: from the journal head forward,
+one sequence at a time, only where the database has a committed row the journal
+lacks. See `docs/research/2026-08-30-a-sequence-nothing-can-settle.md`.
+
 ## Source / Evidence
 
 - `docs/research/2026-08-30-a-batch-named-after-one-of-its-members.md`
@@ -103,9 +123,12 @@ timestamp of its own.
 - `scripts/markdown_transaction.py` — `_checkpoint_is_spent`,
   `_SPENT_TRANSACTION_STATES`
 - `scripts/reclaim_runtime_state.py`, `scripts/doctor.py` — `_checkpoint_check`
+- `scripts/repair_orphaned_checkpoint_names.py`, `scripts/repair_journal_gap.py`
 - `tests/test_a_batch_is_named_after_the_batch.py`,
   `tests/test_a_backlog_drains_in_windows.py`,
-  `tests/test_runtime_state_is_reclaimed.py`
+  `tests/test_runtime_state_is_reclaimed.py`,
+  `tests/test_orphaned_checkpoint_names_are_repaired.py`,
+  `tests/test_a_journal_gap_is_repairable.py`
 - `docs/DEVELOPER-AUDIT-STATUS-2026-08-18.md`, entry of 2026-08-30
 
 ## Links
