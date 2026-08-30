@@ -223,3 +223,29 @@ def test_the_gold_match_ignores_case_and_spacing() -> None:
     rows = [_row(summary="major: business administration")]
 
     assert longmemeval_vault.gold_in_candidates(question, rows) is True
+
+
+def test_the_answer_session_rank_is_one_based() -> None:
+    """Directly comparable with how many candidates the budget kept."""
+    rows = [
+        _row(summary="unrelated"),
+        _row(heading_ancestry=["[02:21] session_end | s-answer"]),
+    ]
+
+    assert longmemeval_vault.answer_session_rank(_question("s-answer"), rows) == 2
+
+
+def test_a_missing_answer_session_ranks_zero() -> None:
+    rows = [_row(summary="unrelated")]
+
+    assert longmemeval_vault.answer_session_rank(_question("s-answer"), rows) == 0
+
+
+def test_the_first_answer_session_wins_the_rank() -> None:
+    """Shedding starts from the tail, so only the earliest position matters."""
+    rows = [
+        _row(summary="session_end | s-answer first"),
+        _row(summary="session_end | s-answer again"),
+    ]
+
+    assert longmemeval_vault.answer_session_rank(_question("s-answer"), rows) == 1

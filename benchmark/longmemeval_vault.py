@@ -332,6 +332,29 @@ def gold_in_candidates(question: Mapping[str, object], rows: list[dict]) -> bool
     return any(gold.casefold() in _row_text(row).casefold() for row in rows)
 
 
+# Where the answer session stands in the ranking, because that is what decides
+# whether it survives.
+#
+# `query_memory._fitted_selection` sheds from the tail: it keeps the top-ranked
+# candidates and drops the lowest-ranked ones until the rest fit the answer
+# budget. A LongMemEval session entry is about 10 KB against a 28 KB budget, so
+# only a handful survive. A right session ranked below that line is retrieved
+# and never seen — which is exactly the shape of the 18 evidenced refusals on
+# answerable questions measured 2026-08-30.
+#
+# One-based, and 0 when no candidate comes from a labelled answer session, so
+# the value is directly comparable with how many candidates the budget kept.
+def answer_session_rank(question: Mapping[str, object], rows: list[dict]) -> int:
+    """The position of the first candidate drawn from a labelled answer session."""
+    labelled = _labelled_sessions(question)
+    if not labelled:
+        return 0
+    for position, row in enumerate(rows, start=1):
+        if _names_a_labelled_session(row, labelled):
+            return position
+    return 0
+
+
 def _instrumented_generator(metrics: dict):
     """The shared provider client, measuring what one retrieval hands it."""
     from llm_client import call_llm
@@ -439,6 +462,7 @@ def run_question(question: dict, work: Path) -> dict:
         "answer_sessions_retrieved": answer_sessions_retrieved(question, rows),
         "answer_sessions_labelled": len(_labelled_sessions(question)),
         "gold_in_candidates": gold_in_candidates(question, rows),
+        "answer_session_rank": answer_session_rank(question, rows),
         **build_info,
         **outcome,
         **metrics,
