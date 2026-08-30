@@ -38,7 +38,12 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from durability_child import PRODUCER_STAGES, STAGE_ENV, STAGE_TARGETS
+from durability_child import (
+    KILL_EXIT_CODE,
+    PRODUCER_STAGES,
+    STAGE_ENV,
+    STAGE_TARGETS,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = REPO_ROOT / "scripts"
@@ -392,6 +397,16 @@ class TrialSpec:
     point: str
 
 
+def _died(returncode: int) -> bool:
+    """Whether a child took the armed kill, in either host's spelling.
+
+    POSIX reports a SIGKILL as -9. Windows has no such signal, so the child
+    leaves through `os._exit(KILL_EXIT_CODE)` instead — weaker evidence, and
+    `durability_child._die` says why.
+    """
+    return returncode in {-9, KILL_EXIT_CODE}
+
+
 def _initial_runs(spec: TrialSpec, payload: dict, env: dict[str, str]) -> tuple[bool, int]:
     """Producer then worker, with the kill armed in the owning process.
 
@@ -403,7 +418,7 @@ def _initial_runs(spec: TrialSpec, payload: dict, env: dict[str, str]) -> tuple[
     worker_stage = spec.stage if producer_stage is None else None
     produced = run_child("produce", payload, env, stage=producer_stage, point=spec.point)
     worked = run_child("work", payload, env, stage=worker_stage, point=spec.point)
-    killed = -9 in (produced.returncode, worked.returncode)
+    killed = _died(produced.returncode) or _died(worked.returncode)
     return killed, int(producer_stage is not None)
 
 

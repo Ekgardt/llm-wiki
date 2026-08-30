@@ -94,7 +94,10 @@ def test_a_directory_inside_a_repository_is_refused_and_names_the_root(
         repository_index.admit_repository(repository / "scripts", state_root=state)
 
     assert refusal.value.reason == "repository_not_checkout_root"
-    assert refusal.value.details["checkout_root"] == str(repository)
+    # The details carry the canonical serialisation, which on Windows has an
+    # upper-case drive and forward slashes. Compare as a path, or this asserts
+    # the spelling rather than the root.
+    assert Path(refusal.value.details["checkout_root"]) == repository.resolve()
 
 
 def test_a_symlinked_path_is_refused_and_offers_the_real_path(vault, tmp_path):

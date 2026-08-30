@@ -202,7 +202,7 @@ def test_typescript_carries_a_node_minor_floor_that_pyright_never_needed():
 
 
 def test_typescript_takes_no_owner_argument():
-    node = Path("/usr/bin/node")
+    node = _abs("usr", "bin", "node")
     server = STATE_ROOT / "cache/x/package/lib/cli.mjs"
     owner = STATE_ROOT / "run/lsp" / ("b" * 32)
     assert lsp_profiles.TYPESCRIPT_PROFILE.launch_command(node, server, owner) == (

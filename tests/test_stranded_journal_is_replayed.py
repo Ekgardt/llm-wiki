@@ -37,15 +37,26 @@ def _database(tmp_path: Path) -> Path:
     connection.execute("INSERT INTO t VALUES (1)")
     connection.commit()
     connection.close()
-    path.chmod(0o600)
+    _harden(path)
     return path
+
+
+def _harden(path: Path) -> None:
+    """Owner-only the way the product does it, not the way POSIX spells it.
+
+    `chmod(0o600)` only toggles the read-only bit on Windows, where the check
+    reads an ACL instead — so three tests here refused with "runtime file must
+    be owner-only" on every Windows job on 2026-08-30. This is the same call
+    the runtime makes when it creates such a file.
+    """
+    reliable_memory._harden_runtime_owner_only(path, 0o600)
 
 
 def _strand_a_journal(path: Path) -> Path:
     """A journal with no live writer, the shape a crashed process leaves."""
     journal = Path(f"{path}-journal")
     journal.write_bytes(b"\xd9\xd5\x05\xf9\x20\xa1\x63\xd7" + b"\x00" * 512)
-    journal.chmod(0o600)
+    _harden(journal)
     return journal
 
 

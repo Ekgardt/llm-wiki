@@ -50,6 +50,30 @@ def hashes(monkeypatch):
     return counted
 
 
+# The cache exists only where `st_ctime_ns` is a change time. Windows stamps
+# creation time there, which survives an in-place rewrite, so a forged mtime at
+# the same size would be served unchecked — the cache is deliberately inert on
+# such a host. Measured 2026-08-30: this was found by the Windows jobs, and
+# `test_a_rewrite_that_forges_mtime_is_still_caught_by_ctime` is what found it.
+CACHE_IS_TRUSTWORTHY = search_memory._CTIME_IS_A_CHANGE_TIME
+
+
+def test_nothing_is_cached_where_ctime_is_not_a_change_time(tmp_path, hashes):
+    """The guard is the whole warrant for the cache; without it, no cache."""
+    if CACHE_IS_TRUSTWORTHY:
+        pytest.skip("this host stamps a change time, so the cache is warranted")
+    path = _settled_artifact(tmp_path)
+
+    search_memory._sealed_file(path)
+    search_memory._sealed_file(path)
+
+    assert hashes == ["search.sqlite3", "search.sqlite3"]
+
+
+@pytest.mark.skipif(
+    not CACHE_IS_TRUSTWORTHY,
+    reason="no change time on this host, so the cache is inert by design",
+)
 def test_an_unchanged_artifact_is_hashed_once_and_seals_the_same(tmp_path, hashes):
     path = _settled_artifact(tmp_path)
 

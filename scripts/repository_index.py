@@ -227,7 +227,13 @@ def _require_git_checkout_root(root: Path, scope) -> None:
             f"not a Git repository: {root}",
             directory=str(root),
         )
-    if str(root) != scope.checkout_root:
+    # Compare as paths, not as text. `repository_scope` serialises a Windows
+    # root with an upper-case drive and forward slashes, so `C:/Users/x` never
+    # equals the `C:\\Users\\x` a `Path` renders — and every repository on
+    # Windows was refused as "not the checkout root". Measured 2026-08-30: all
+    # fifteen Windows shards, every Python version. Path equality normalises
+    # separators and case on Windows and is exact on POSIX.
+    if root.resolve() != Path(scope.checkout_root):
         raise _refuse(
             "repository_not_checkout_root",
             "index the checkout root, not a directory inside it: "

@@ -59,8 +59,22 @@ STAGE_ENV = "LLMWIKI_DURABILITY_CRASH_STAGE"
 POINT_ENV = "LLMWIKI_DURABILITY_CRASH_POINT"
 
 
+# What the kill is on each host, stated rather than assumed. On POSIX it is
+# SIGKILL: uncatchable, no finalisers, no flush. Windows has no such signal —
+# `signal.SIGKILL` does not exist there, and `_die` used to raise
+# `AttributeError` and let the child carry on, so on 2026-08-30 every Windows
+# shard reported `kill_observed=False` while nothing had been killed at all.
+# `os._exit` is the nearest honest equivalent: no Python finaliser, no atexit,
+# no buffered flush. It is not the same thing — the OS still closes handles in
+# its own orderly way — so a Windows run of this stand is weaker evidence than a
+# POSIX one and must not be reported as equal to it.
+KILL_EXIT_CODE = 137  # 128 + 9, the shell's spelling of "killed by SIGKILL"
+
+
 def _die() -> None:
-    os.kill(os.getpid(), signal.SIGKILL)
+    if hasattr(signal, "SIGKILL"):
+        os.kill(os.getpid(), signal.SIGKILL)
+    os._exit(KILL_EXIT_CODE)
 
 
 def _holder(module_name: str, dotted: str) -> tuple[object, str]:
