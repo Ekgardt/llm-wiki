@@ -360,8 +360,49 @@ def _fitted_selection(
         try:
             return _compiled_for(snapshot, tuple(kept), budget)
         except BudgetExceededError:
-            kept.pop()
+            _shed_one(kept)
     raise GroundedQAError("no retrieved span fits the grounded answer budget")
+
+
+def _redundant_index(kept: list) -> int | None:
+    """The last chunk whose page is already represented earlier in the list."""
+    seen: set[str] = set()
+    redundant: int | None = None
+    for position, chunk in enumerate(kept):
+        if chunk.parent_page in seen:
+            redundant = position
+        seen.add(chunk.parent_page)
+    return redundant
+
+
+def _shed_one(kept: list) -> None:
+    """Drop a repeat of a page already present before dropping the last page.
+
+    Plain tail-shedding drops by rank alone, which is the baseline the 2026
+    budget-constrained multi-hop RAG work improves on: pack greedily in rank
+    order and let coverage fall out however it may. Their result is that
+    satisfying coverage first — the best span from each distinct source, then
+    the rest of the budget — is what recovers multi-hop answers, while plain
+    ranking and plain diversity each lose complementary evidence.
+
+    Measured here 2026-08-30 by the compiler's own trace: a median of two of
+    twelve retrieved spans survive this loop. A question answerable from one
+    session is fine, and those are the categories that work. A multi-session
+    question needs facts from two sessions and a temporal one a date from one
+    and a fact from another; with two slots, spending both on the same page
+    answers neither. Those are the two weakest categories — the answer text
+    reached the model for 2 of 12 multi-session and 4 of 13 temporal questions.
+
+    So the second span from a page already present goes before the only span
+    from another page. Within that rule the ranking still decides: the repeat
+    dropped is the last one, and where nothing is a repeat this is tail-shedding
+    exactly as before.
+    """
+    position = _redundant_index(kept)
+    if position is None:
+        kept.pop()
+        return
+    kept.pop(position)
 
 
 def _compiled_for(

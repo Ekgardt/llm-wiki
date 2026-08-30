@@ -493,9 +493,12 @@ def test_repeated_unidentified_lifecycle_occurrences_checkpoint_separately(
     uuid.UUID(first.payload["occurrence_id"])
     uuid.UUID(second.payload["occurrence_id"])
     assert [checkpoint["reason"] for checkpoint in checkpoints] == [reason, reason]
+    # A checkpoint is named after the batch it commits, not after one of its
+    # members — see `_batch_occurrence_id`. Each of these batches holds one
+    # event, and the two names must still differ.
     assert [checkpoint["occurrence_id"] for checkpoint in checkpoints] == [
-        first.event_id,
-        second.event_id,
+        integration_adapter._batch_occurrence_id([first.event_id]),
+        integration_adapter._batch_occurrence_id([second.event_id]),
     ]
 
 
@@ -534,7 +537,9 @@ def test_same_normalized_occurrence_is_checkpointed_once(monkeypatch):
     integration_adapter._observe_project_checkpoint(envelope)
 
     assert len(checkpoints) == 1
-    assert checkpoints[0]["occurrence_id"] == envelope.event_id
+    assert checkpoints[0]["occurrence_id"] == integration_adapter._batch_occurrence_id(
+        [envelope.event_id]
+    )
 
 
 def test_durable_capture_runs_when_checkpoint_observation_fails(monkeypatch, capsys):
@@ -808,7 +813,7 @@ def test_concurrent_distinct_events_are_each_journaled_exactly_once(monkeypatch,
     journal = ProjectStore(vault, state_root).read_journal("demo")
     records = _journal_records(journal, JOURNAL_HEADER)
     assert sorted(record["occurrence_id"] for record in records) == sorted(
-        event.event_id for event in events
+        integration_adapter._batch_occurrence_id([event.event_id]) for event in events
     )
     assert len(records) == 2
 
@@ -854,7 +859,13 @@ def test_project_lease_busy_event_remains_pending_until_next_observation(monkeyp
     assert [item["event_id"] for item in pending] == [first.event_id]
 
     integration_adapter._observe_project_checkpoint(second)
-    assert attempts == [first.event_id, first.event_id, second.event_id]
+    # The retry of a batch must reuse the batch's name; that is what makes the
+    # coordinator collapse it instead of refusing it.
+    assert attempts == [
+        integration_adapter._batch_occurrence_id([first.event_id]),
+        integration_adapter._batch_occurrence_id([first.event_id]),
+        integration_adapter._batch_occurrence_id([second.event_id]),
+    ]
     assert state["project_checkpoint_pending"]["demo"] == []
 
 
@@ -898,7 +909,10 @@ def test_reducer_commit_failure_releases_pending_claim_for_retry(monkeypatch):
     assert "claim_owner" not in pending
 
     integration_adapter._observe_project_checkpoint(event)
-    assert checkpoints == [event.event_id, event.event_id]
+    assert checkpoints == [
+        integration_adapter._batch_occurrence_id([event.event_id]),
+        integration_adapter._batch_occurrence_id([event.event_id]),
+    ]
     assert state["project_checkpoint_pending"]["demo"] == []
 
 
@@ -971,7 +985,9 @@ def test_session_start_maintenance_does_not_debounce_or_drop_following_delta(mon
     )
     assert state["project_checkpoint_pending"]["demo"] == []
     assert len(checkpoints) == 1
-    assert checkpoints[0]["occurrence_id"] == ordinary.event_id
+    assert checkpoints[0]["occurrence_id"] == integration_adapter._batch_occurrence_id(
+        [ordinary.event_id]
+    )
     assert checkpoints[0]["delta"]["current_task"] == delta["current_task"]
     assert checkpoints[0]["delta"]["current_task_operations"] == [delta["current_task"]]
 

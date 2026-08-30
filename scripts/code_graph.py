@@ -2506,8 +2506,10 @@ def _bounded_hotspots(hotspots: list[dict]) -> tuple[list[dict], bool]:
 def _hotspot_fields(hotspots: list[dict], truncated: bool, limit: int) -> dict:
     """The hotspot ranking with its bound stated in the answer, never implied.
 
-    The query fetches `HOTSPOT_LIMIT`; what the answer carries is what the
-    caller asked for. `truncated` stays true when either bound bit.
+    The query fetches `HOTSPOT_LIMIT` and the caller asks for `limit`, so the
+    bound that actually applied is the smaller of the two. Stating the caller's
+    number alone would have claimed a bound of 30 while returning two rows.
+    `truncated` stays true when either bound bit.
 
     No count here, deliberately, unlike the listings beside it. The ranking has
     10 607 members on this repository and the query never sees past the first
@@ -2515,10 +2517,11 @@ def _hotspot_fields(hotspots: list[dict], truncated: bool, limit: int) -> dict:
     the ranking. `hotspots_truncated` says there is more without claiming to
     know how much.
     """
+    applied = min(limit, HOTSPOT_LIMIT)
     return {
-        "hotspots": hotspots[:limit],
-        "hotspot_limit": limit,
-        "hotspots_truncated": truncated or len(hotspots) > limit,
+        "hotspots": hotspots[:applied],
+        "hotspot_limit": applied,
+        "hotspots_truncated": truncated or len(hotspots) > applied,
     }
 
 

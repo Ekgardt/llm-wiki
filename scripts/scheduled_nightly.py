@@ -173,6 +173,23 @@ def _capture_adoption_step() -> _Step:
     )
 
 
+def _reclaim_step() -> _Step:
+    """Finish what a hook is too impatient to finish, before anything else runs.
+
+    A hook drains the project-checkpoint queue with a 0.5 s state-lock budget
+    because a person is waiting on it; a backlog therefore outlives every hook
+    and grows `run/state.json`, which makes the next hook slower still. Nothing
+    else in this pass breaks that loop, and every later step reads the state
+    file this one shrinks.
+    """
+    return _Step(
+        "Step 0b: reclaiming runtime state...",
+        "reclaim",
+        _script("reclaim_runtime_state.py"),
+        180,
+    )
+
+
 def _queue_step() -> _Step:
     return _Step(
         "Step 1: working deferred memory queue...",
@@ -331,7 +348,9 @@ def _prune_reports(log) -> None:
 
 def _nightly_steps(run_step, log, ownership: OwnerLease | None) -> int:
     failures = _run_steps(
-        run_step, log, [_capture_adoption_step(), _queue_step(), _episode_step()]
+        run_step,
+        log,
+        [_capture_adoption_step(), _reclaim_step(), _queue_step(), _episode_step()],
     )
 
     # Step 2 must not skip compile just because a hook-triggered one runs.

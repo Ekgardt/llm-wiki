@@ -1,0 +1,505 @@
+{
+  "version": "code-parity-v1",
+  "directory": "/home/user/llm-wiki",
+  "budget_seconds": 60.0,
+  "tasks": [
+    {
+      "id": "T01",
+      "kind": "who-calls",
+      "question": "Which production functions call fuse_rrf?",
+      "llm_wiki": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 14.046,
+        "tokens": 866,
+        "answer_excerpt": "{\"directory\": \"/home/user/llm-wiki\", \"mode\": \"callers\", \"architecture\": {\"callers\": [{\"file\": \"/home/user/llm-wiki/scripts/retrieval.py\", \"line\": 2845, \"qualified_name\": \"scripts.retrieval._fused_candidates\"}, {\"file\": \"/home/user/llm-wiki/tests/test_intent_conditional_trust.py\", \"line\": 99, \"qualified_name\": \"tests.test_intent_conditional_trust._fused\"}, {\"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 141, \"qualified_name\": \"tests.test_retrieval.test_rrf_is_rank_only_and_keeps_raw_backend_fields_separate\"}, {\"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 159, \"qualified_name\": \"tests.test_retrieval.test_rrf_is_rank_only_and_keeps_raw_backend_fields_separate\"}, {\"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 172, \"qualified_name\": \"tests.test_retrieval.test_rrf_ties_are_broken_deterministically_by_candidate_id\"}, {\"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 183, \"qualified_name\": \"tests.test_retrieval.test_rrf_ties_are_broken_deterministically_by_candidate_id\"}, {\"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 544, \"qualified_name\": \"tests.test_retrieval.test_typed_provenance_weighs_on_every_path_from_one_table\"}, {\"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 562, \"qualified_name\": \"tests.test_retrieval.test_an_unweighted_candidate_keeps_its_fused_score_unchanged\"}, {\"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 669, \"qualified_name\": \"tests.test_retrieval.test_what_a_page_is_weighs_on_the_order_too\"}], \"callers_row_constants\": {\"confidence\": \"high\", \"function\": \"fuse_rrf\"}, \"source_generation\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"source_scope\": \"checkout\", \"source_root\": \"/home/user/llm-wiki\", \"graph_complete\": false, \"unresolved_count\": 80728, \"fallback\": false, \"unresolved_callers\": [], \"unresolved_caller_count\": 0, \"unresolved_callers_truncated\": false, \"trace_callers\": [{\"file\": \"/home/user/llm-wiki/scripts/retrieval.py\", \"line\": 2842, \"qualified_name\": \"scripts.retrieval._fused_candidates\", \"call_count\": 17}, {\"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 130, \"qualified_name\": \"tests.test_retrieval.test_rrf_is_rank_only_and_keeps_raw_backend_fields_separate\", \"call_count\": 2}, {\"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 164, \"qualified_name\": \"tests.test_retrieval.test_rrf_ties_are_broken_deterministically_by_candidate_id\", \"call_count\": 2}, {\"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 660, \"qualified_name\": \"tests.test_retrieval.test_what_a_page_is_weighs_on_the_order_too\", \"call_count\": 1}, {\"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 559, \"qualified_name\": \"tests.test_retrieval.test_an_unweighted_candidate_keeps_its_fused_score_unchanged\", \"call_count\": 1}, {\"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 526, \"qualified_name\": \"tests.test_retrieval.test_typed_provenance_weighs_on_every_path_from_one_table\", \"call_count\": 1}], \"trace_callers_row_constants\": {\"evidence\": \"execution-trace\", \"function\": \"fuse_rrf\", \"trace_count\": 1}, \"trace_caller_count\": 6, \"trace_callers_truncated\": false, \"trace_stale_edges\": 0, \"trace_generation\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"trace_evidence_is_dynamic\": true}, \"source_generation\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"graph_complete\": false, \"unresolved_count\": 80728, \"fallback\": false, \"answer_budget\": {\"omitted_fields\": [\"symbol_id\"]}}"
+      },
+      "llm_wiki_best": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 11.0,
+        "tokens": 322,
+        "answer_excerpt": "{\"status\": \"ok\", \"generation_id\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"hops_applied\": 1, \"limit\": 50, \"frontier_truncated\": false, \"refused_expansions\": [], \"nodes\": [{\"name\": \"_fused_candidates\", \"path\": \"scripts/retrieval.py\", \"owner\": \"scripts.retrieval\"}, {\"name\": \"_fused\", \"path\": \"tests/test_intent_conditional_trust.py\", \"owner\": \"tests.test_intent_conditional_trust\"}, {\"name\": \"test_an_unweighted_candidate_keeps_its_fused_score_unchanged\", \"path\": \"tests/test_retrieval.py\", \"owner\": \"tests.test_retrieval\"}, {\"name\": \"test_rrf_is_rank_only_and_keeps_raw_backend_fields_separate\", \"path\": \"tests/test_retrieval.py\", \"owner\": \"tests.test_retrieval\"}, {\"name\": \"test_rrf_ties_are_broken_deterministically_by_candidate_id\", \"path\": \"tests/test_retrieval.py\", \"owner\": \"tests.test_retrieval\"}, {\"name\": \"test_typed_provenance_weighs_on_every_path_from_one_table\", \"path\": \"tests/test_retrieval.py\", \"owner\": \"tests.test_retrieval\"}, {\"name\": \"test_what_a_page_is_weighs_on_the_order_too\", \"path\": \"tests/test_retrieval.py\", \"owner\": \"tests.test_retrieval\"}], \"nodes_row_constants\": {\"kind\": \"function\"}, \"note\": \"bounded structural reachability over the active generation; ceilings refuse by name, nothing is truncated silently\", \"answer_budget\": {\"omitted_fields\": [\"node_id\"]}}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 5.35,
+        "tokens": 44,
+        "answer_excerpt": "function: fuse_rrf\ndirection: inbound\ncallers_total: 1\ncallers: 1  (rows: name hop; qn = group prefix + \".\" + name)\nhome-user-llm-wiki.scripts.retrieval:\n  _fused_candidates 1\n"
+      }
+    },
+    {
+      "id": "T02",
+      "kind": "who-calls",
+      "question": "Which functions call write_session_evidence?",
+      "llm_wiki": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 17.647,
+        "tokens": 580,
+        "answer_excerpt": "{\"directory\": \"/home/user/llm-wiki\", \"mode\": \"callers\", \"architecture\": {\"callers\": [{\"file\": \"/home/user/llm-wiki/benchmark/longmemeval_vault.py\", \"line\": 153, \"qualified_name\": \"benchmark.longmemeval_vault._ingest_one\"}, {\"file\": \"/home/user/llm-wiki/scripts/backfill_sessions.py\", \"line\": 132, \"qualified_name\": \"scripts.backfill_sessions._write_one\"}, {\"file\": \"/home/user/llm-wiki/scripts/flush_memory.py\", \"line\": 1221, \"qualified_name\": \"scripts.flush_memory._keep_session_record\"}, {\"file\": \"/home/user/llm-wiki/scripts/flush_memory.py\", \"line\": 1257, \"qualified_name\": \"scripts.flush_memory._keep_transcript_record\"}, {\"file\": \"/home/user/llm-wiki/tests/test_session_evidence.py\", \"line\": 104, \"qualified_name\": \"tests.test_session_evidence.test_writing_the_record_goes_through_the_transaction\"}, {\"file\": \"/home/user/llm-wiki/tests/test_session_evidence.py\", \"line\": 121, \"qualified_name\": \"tests.test_session_evidence.test_a_session_with_nothing_in_it_writes_nothing\"}, {\"file\": \"/home/user/llm-wiki/tests/test_session_evidence.py\", \"line\": 133, \"qualified_name\": \"tests.test_session_evidence.test_a_failed_write_never_breaks_capture\"}, {\"file\": \"/home/user/llm-wiki/tests/test_session_evidence.py\", \"line\": 291, \"qualified_name\": \"tests.test_session_evidence.test_the_record_reaches_disk_through_the_real_transaction\"}, {\"file\": \"/home/user/llm-wiki/tests/test_session_record_uses_the_owned_gate.py\", \"line\": 58, \"qualified_name\": \"tests.test_session_record_uses_the_owned_gate.test_the_record_is_written_while_the_worker_holds_the_writer_gate\"}], \"callers_row_constants\": {\"confidence\": \"high\", \"function\": \"write_session_evidence\"}, \"source_generation\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"source_scope\": \"checkout\", \"source_root\": \"/home/user/llm-wiki\", \"graph_complete\": false, \"unresolved_count\": 80728, \"fallback\": false, \"unresolved_callers\": [], \"unresolved_caller_count\": 0, \"unresolved_callers_truncated\": false, \"trace_callers\": [], \"trace_caller_count\": 0, \"trace_callers_truncated\": false, \"trace_stale_edges\": 0, \"trace_generation\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"trace_evidence_is_dynamic\": true}, \"source_generation\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"graph_complete\": false, \"unresolved_count\": 80728, \"fallback\": false, \"answer_budget\": {\"omitted_fields\": [\"symbol_id\"]}}"
+      },
+      "llm_wiki_best": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 11.368,
+        "tokens": 396,
+        "answer_excerpt": "{\"status\": \"ok\", \"generation_id\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"hops_applied\": 1, \"limit\": 50, \"frontier_truncated\": false, \"refused_expansions\": [], \"nodes\": [{\"name\": \"_ingest_one\", \"path\": \"benchmark/longmemeval_vault.py\", \"owner\": \"benchmark.longmemeval_vault\"}, {\"name\": \"_write_one\", \"path\": \"scripts/backfill_sessions.py\", \"owner\": \"scripts.backfill_sessions\"}, {\"name\": \"_keep_session_record\", \"path\": \"scripts/flush_memory.py\", \"owner\": \"scripts.flush_memory\"}, {\"name\": \"_keep_transcript_record\", \"path\": \"scripts/flush_memory.py\", \"owner\": \"scripts.flush_memory\"}, {\"name\": \"test_a_failed_write_never_breaks_capture\", \"path\": \"tests/test_session_evidence.py\", \"owner\": \"tests.test_session_evidence\"}, {\"name\": \"test_a_session_with_nothing_in_it_writes_nothing\", \"path\": \"tests/test_session_evidence.py\", \"owner\": \"tests.test_session_evidence\"}, {\"name\": \"test_the_record_reaches_disk_through_the_real_transaction\", \"path\": \"tests/test_session_evidence.py\", \"owner\": \"tests.test_session_evidence\"}, {\"name\": \"test_writing_the_record_goes_through_the_transaction\", \"path\": \"tests/test_session_evidence.py\", \"owner\": \"tests.test_session_evidence\"}, {\"name\": \"test_the_record_is_written_while_the_worker_holds_the_writer_gate\", \"path\": \"tests/test_session_record_uses_the_owned_gate.py\", \"owner\": \"tests.test_session_record_uses_the_owned_gate\"}], \"nodes_row_constants\": {\"kind\": \"function\"}, \"note\": \"bounded structural reachability over the active generation; ceilings refuse by name, nothing is truncated silently\", \"answer_budget\": {\"omitted_fields\": [\"node_id\"]}}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 4.019,
+        "tokens": 87,
+        "answer_excerpt": "function: write_session_evidence\ndirection: inbound\ncallers_total: 4\ncallers: 4  (rows: name hop; qn = group prefix + \".\" + name)\nhome-user-llm-wiki.benchmark.longmemeval_vault:\n  _ingest_one 1\nhome-user-llm-wiki.scripts.backfill_sessions:\n  _write_one 1\nhome-user-llm-wiki.scripts.flush_memory:\n  _keep_session_record 1\n  _keep_transcript_record 1\n"
+      }
+    },
+    {
+      "id": "T03",
+      "kind": "what-does-x-call",
+      "question": "Which project functions does fuse_rrf call?",
+      "llm_wiki": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 9.687,
+        "tokens": 200,
+        "answer_excerpt": "{\"directory\": \"/home/user/llm-wiki\", \"mode\": \"callees\", \"architecture\": {\"callees\": [{\"line\": 1404, \"callee\": \"_accumulate_backend\"}, {\"line\": 1418, \"callee\": \"_fused_candidate\"}, {\"line\": 1400, \"callee\": \"_fusion_weights\"}, {\"line\": 1415, \"callee\": \"_weigh_by_trust\"}, {\"line\": 1414, \"callee\": \"curated_pages_first\"}], \"callees_row_constants\": {\"confidence\": \"high\", \"file\": \"/home/user/llm-wiki/scripts/retrieval.py\"}, \"source_generation\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"source_scope\": \"checkout\", \"source_root\": \"/home/user/llm-wiki\", \"graph_complete\": false, \"unresolved_count\": 80728, \"fallback\": false}, \"source_generation\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"graph_complete\": false, \"unresolved_count\": 80728, \"fallback\": false, \"answer_budget\": {\"omitted_fields\": [\"symbol_id\"]}}"
+      },
+      "llm_wiki_best": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 10.659,
+        "tokens": 214,
+        "answer_excerpt": "{\"status\": \"ok\", \"generation_id\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"hops_applied\": 1, \"limit\": 50, \"frontier_truncated\": false, \"refused_expansions\": [], \"nodes\": [{\"name\": \"curated_pages_first\", \"path\": \"scripts/provenance.py\", \"owner\": \"scripts.provenance\"}, {\"name\": \"_accumulate_backend\", \"path\": \"scripts/retrieval.py\", \"owner\": \"scripts.retrieval\"}, {\"name\": \"_fused_candidate\", \"path\": \"scripts/retrieval.py\", \"owner\": \"scripts.retrieval\"}, {\"name\": \"_fusion_weights\", \"path\": \"scripts/retrieval.py\", \"owner\": \"scripts.retrieval\"}, {\"name\": \"_weigh_by_trust\", \"path\": \"scripts/retrieval.py\", \"owner\": \"scripts.retrieval\"}], \"nodes_row_constants\": {\"kind\": \"function\"}, \"note\": \"bounded structural reachability over the active generation; ceilings refuse by name, nothing is truncated silently\", \"answer_budget\": {\"omitted_fields\": [\"node_id\"]}}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 4.67,
+        "tokens": 75,
+        "answer_excerpt": "function: fuse_rrf\ndirection: outbound\ncallees_total: 5\ncallees: 5  (rows: name hop; qn = group prefix + \".\" + name)\nhome-user-llm-wiki.scripts.provenance:\n  curated_pages_first 1\nhome-user-llm-wiki.scripts.retrieval:\n  _accumulate_backend 1\n  _fused_candidate 1\n  _fusion_weights 1\n  _weigh_by_trust 1\n"
+      }
+    },
+    {
+      "id": "T04",
+      "kind": "find-symbol-definition",
+      "question": "Where is _page_diverse defined?",
+      "llm_wiki": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "partial",
+        "seconds": 25.733,
+        "tokens": 927,
+        "answer_excerpt": "{\"directory\": \"/home/user/llm-wiki\", \"mode\": \"symbol\", \"architecture\": {\"symbol\": \"_page_diverse\", \"callers\": [{\"file\": \"/home/user/llm-wiki/scripts/retrieval.py\", \"line\": 3032, \"function\": \"_page_diverse\", \"qualified_name\": \"scripts.retrieval.retrieve\", \"confidence\": \"high\"}], \"callees\": [{\"line\": 2783, \"callee\": \"_diversity_groups\"}, {\"line\": 2784, \"callee\": \"_place_group\"}], \"callees_row_constants\": {\"confidence\": \"high\", \"file\": \"/home/user/llm-wiki/scripts/retrieval.py\"}, \"dependencies\": [{\"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fscripts/retrieval.py\\u001fscripts.retrieval\\u001f_diversity_groups\\u001f_diversity_groups(candidates:Sequence[RetrievalCandidate])\", \"metadata\": {\"name\": \"_diversity_groups\", \"owner\": \"scripts.retrieval\", \"path\": \"scripts/retrieval.py\", \"signature\": \"_diversity_groups(candidates:Sequence[RetrievalCandidate])\"}, \"depth\": 1}, {\"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fscripts/retrieval.py\\u001fscripts.retrieval\\u001f_place_group\\u001f_place_group(group:Sequence[RetrievalCandidate],seen:set[str],first:list[RetrievalCandidate],extras:list[RetrievalCandidate])\", \"metadata\": {\"name\": \"_place_group\", \"owner\": \"scripts.retrieval\", \"path\": \"scripts/retrieval.py\", \"signature\": \"_place_group(group:Sequence[RetrievalCandidate],seen:set[str],first:list[RetrievalCandidate],extras:list[RetrievalCandidate])\"}, \"depth\": 1}, {\"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fscripts/retrieval.py\\u001fscripts.retrieval\\u001f_by_kind\\u001f_by_kind(candidates:Sequence[RetrievalCandidate])\", \"metadata\": {\"name\": \"_by_kind\", \"owner\": \"scripts.retrieval\", \"path\": \"scripts/retrieval.py\", \"signature\": \"_by_kind(candidates:Sequence[RetrievalCandidate])\"}, \"depth\": 2}, {\"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fscripts/retrieval.py\\u001fscripts.retrieval\\u001f_place_by_page\\u001f_place_by_page(candidate:RetrievalCandidate,seen:set[str],first:list[RetrievalCandidate],extras:list[RetrievalCandidate])\", \"metadata\": {\"name\": \"_place_by_page\", \"owner\": \"scripts.retrieval\", \"path\": \"scripts/retrieval.py\", \"signature\": \"_place_by_page(candidate:RetrievalCandidate,seen:set[str],first:list[RetrievalCandidate],extras:list[RetrievalCandidate])\"}, \"depth\": 2}, {\"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fscripts/retrieval.py\\u001fscripts.retrieval\\u001f_scored_then_unseen\\u001f_scored_then_unseen(candidates:Sequence[RetrievalCandidate])\", \"metadata\": {\"name\": \"_scored_then_unseen\", \"owner\": \"scripts.retrieval\", \"path\": \"scripts/retrieval.py\", \"signature\": \"_scored_then_unseen(candidates:Sequence[RetrievalCandidate])\"}, \"depth\": 2}, {\"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fscripts/retrieval.py\\u001fscripts.retrieval\\u001f_supporting\\u001f_supporting(candidate:RetrievalCandidate)\", \"metadata\": {\"name\": \"_supporting\", \"owner\": \"scripts.retrieval\", \"path\": \"scripts/retrieval.py\", \"signature\": \"_supporting(candidate:RetrievalCandidate)\"}, \"depth\": 3}], \"dependencies_row_constants\": {\"identity_scheme\": \"code-symbol/v1\", \"kind\": \"function\"}, \"source_generation\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"graph_complete\": false, \"unresolved_count\": 80728, \"fallback\": false}, \"source_generation\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"graph_complete\": false, \"unresolved_count\": 80728, \"fallback\": false, \"answer_budget\": {\"omitted_fields\": [\"node_id\", \"symbol_id\"]}}"
+      },
+      "llm_wiki_best": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "partial",
+        "seconds": 12.991,
+        "tokens": 68,
+        "answer_excerpt": "{\"symbol\": \"_page_diverse\", \"snippets\": [{\"path\": \"scripts/retrieval.py\", \"start_line\": 2869, \"end_line\": 2870, \"source\": \"def _page_diverse(\\n    candidates: Sequence[RetrievalCandidate],\", \"truncated\": false, \"owner\": \"scripts.retrieval\"}], \"graph\": \"active_generation\"}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "partial",
+        "seconds": 6.428,
+        "tokens": 107,
+        "answer_excerpt": "total: 3\nsearch_mode: bm25\nresults: 3  (cols: qn label file lines rank)\n  home-user-llm-wiki.scripts.retrieval._page_diverse Function scripts/retrieval.py 2869-2889 -25.04\n  home-user-llm-wiki.scripts.search_memory._page_diverse_order Function scripts/search_memory.py 3952-3972 -24.38\n  home-user-llm-wiki.tests.test_retrieval.test_page_diverse_order_drops_nothing Function tests/test_retrieval.py 652-657 -23.34\nhas_more: false\n"
+      }
+    },
+    {
+      "id": "T05",
+      "kind": "find-symbol-definition",
+      "question": "Where is the constant EDITORIAL_NAMES defined?",
+      "llm_wiki": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "wrong",
+        "seconds": 26.382,
+        "tokens": 103,
+        "answer_excerpt": "{\"directory\": \"/home/user/llm-wiki\", \"mode\": \"symbol\", \"architecture\": {\"symbol\": \"EDITORIAL_NAMES\", \"callers\": [], \"callees\": [], \"dependencies\": [], \"source_generation\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"graph_complete\": false, \"unresolved_count\": 80728, \"fallback\": false}, \"source_generation\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"graph_complete\": false, \"unresolved_count\": 80728, \"fallback\": false}"
+      },
+      "llm_wiki_best": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "wrong",
+        "seconds": 17.068,
+        "tokens": 74,
+        "answer_excerpt": "{\"status\": \"ok\", \"generation_id\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"hops_applied\": 0, \"limit\": 10, \"frontier_truncated\": false, \"refused_expansions\": [], \"nodes\": [], \"note\": \"bounded structural reachability over the active generation; ceilings refuse by name, nothing is truncated silently\"}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered",
+          "answered"
+        ],
+        "grade": "wrong",
+        "seconds": 19.515,
+        "tokens": 219,
+        "answer_excerpt": "total: 0\nsearch_mode: bm25\nresults: 0  (cols: qn label file lines rank)\nhas_more: false\n\nresults: 5  (cols: qn label file lines matches in out)\n  home-user-llm-wiki.scripts.lint_memory._frontmatter_of Function scripts/lint_memory.py 532-543 \"534\" 4 0\n  home-user-llm-wiki.scripts.lookup_mode.count_wiki_pages Function scripts/lookup_mode.py 42-58 46;56 3 1\n  home-user-llm-wiki.scripts.corpus_snapshot._Discovery._eligible Method scripts/corpus_snapshot.py 1397-1402 \"1399\" 2 0\n  home-user-llm-wiki.scripts.lint_memory.check_missing_frontmatter Function scripts/lint_memory.py 517-529 \"521\" 2 2\n  home-user-llm-wiki.scripts.lint_memory._expects_an_index_entry Function scripts/lint_memory.py 331-340 \"332\" 1 2\ndirs: 5  (cols: dir hits)\n  scripts/ 21\n  tests/ 2\n  benchmark/ 14\n  docs/ 3\n  knowledge/ 4\ntotal_grep_matches: 60\ntotal_results: 44\nraw_match_count: 0\nelapsed_ms: 65\n"
+      }
+    },
+    {
+      "id": "T06",
+      "kind": "find-dead-code",
+      "question": "Is _flush_started (scripts/integration_adapter.py) dead code?",
+      "llm_wiki": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 41.452,
+        "tokens": 250,
+        "answer_excerpt": "{\"directory\": \"/home/user/llm-wiki\", \"source_generation\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"source_scope\": \"checkout\", \"source_root\": \"/home/user/llm-wiki\", \"graph_complete\": false, \"unresolved_count\": 80728, \"fallback\": false, \"candidate_count\": 846, \"candidates_by_reason\": {\"referenced_without_call\": 415, \"unresolved_receiver\": 405, \"zero_confirmed_incoming_calls\": 26}, \"excluded_count\": 2971, \"excluded_by_rule\": {\"conventionally_reachable\": 2843, \"framework_dispatched\": 53, \"protocol_invoked\": 75}, \"reference_value_names\": 28963, \"reference_dispatched_definitions\": 1269, \"reference_parsed_sources\": 429, \"reference_lexical_sources\": 1, \"symbol\": \"_flush_started\", \"verdict\": \"candidate\", \"candidates\": [{\"name\": \"_flush_started\", \"owner\": \"scripts.integration_adapter\", \"file\": \"/home/user/llm-wiki/scripts/integration_adapter.py\", \"line\": 1845, \"status\": \"candidate\", \"reason\": \"referenced_without_call\", \"graph_complete\": false}], \"answer_budget\": {\"omitted_fields\": [\"symbol_id\"]}}"
+      },
+      "llm_wiki_best": {
+        "status": "answered",
+        "call_statuses": [
+          "answered",
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 29.434,
+        "tokens": 194,
+        "answer_excerpt": "{\"status\": \"ok\", \"generation_id\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"hops_applied\": 0, \"limit\": 10, \"frontier_truncated\": false, \"refused_expansions\": [], \"nodes\": [{\"kind\": \"function\", \"name\": \"_flush_started\", \"path\": \"scripts/integration_adapter.py\", \"owner\": \"scripts.integration_adapter\"}], \"note\": \"bounded structural reachability over the active generation; ceilings refuse by name, nothing is truncated silently\", \"answer_budget\": {\"omitted_fields\": [\"node_id\"]}}\n{\"status\": \"ok\", \"generation_id\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"hops_applied\": 1, \"limit\": 10, \"frontier_truncated\": false, \"refused_expansions\": [], \"nodes\": [], \"note\": \"bounded structural reachability over the active generation; ceilings refuse by name, nothing is truncated silently\"}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 9.016,
+        "tokens": 30,
+        "answer_excerpt": "function: _flush_started\ndirection: inbound\ncallers_total: 0\ncallers: 0  (rows: name hop; qn = group prefix + \".\" + name)\n"
+      }
+    },
+    {
+      "id": "T07",
+      "kind": "find-dead-code",
+      "question": "Is _search_backends (scripts/search_memory.py) dead code?",
+      "llm_wiki": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 42.846,
+        "tokens": 248,
+        "answer_excerpt": "{\"directory\": \"/home/user/llm-wiki\", \"source_generation\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"source_scope\": \"checkout\", \"source_root\": \"/home/user/llm-wiki\", \"graph_complete\": false, \"unresolved_count\": 80728, \"fallback\": false, \"candidate_count\": 846, \"candidates_by_reason\": {\"referenced_without_call\": 415, \"unresolved_receiver\": 405, \"zero_confirmed_incoming_calls\": 26}, \"excluded_count\": 2971, \"excluded_by_rule\": {\"conventionally_reachable\": 2843, \"framework_dispatched\": 53, \"protocol_invoked\": 75}, \"reference_value_names\": 28963, \"reference_dispatched_definitions\": 1269, \"reference_parsed_sources\": 429, \"reference_lexical_sources\": 1, \"symbol\": \"_search_backends\", \"verdict\": \"candidate\", \"candidates\": [{\"name\": \"_search_backends\", \"owner\": \"scripts.search_memory\", \"file\": \"/home/user/llm-wiki/scripts/search_memory.py\", \"line\": 5073, \"status\": \"candidate\", \"reason\": \"referenced_without_call\", \"graph_complete\": false}], \"answer_budget\": {\"omitted_fields\": [\"symbol_id\"]}}"
+      },
+      "llm_wiki_best": {
+        "status": "answered",
+        "call_statuses": [
+          "answered",
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 24.128,
+        "tokens": 191,
+        "answer_excerpt": "{\"status\": \"ok\", \"generation_id\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"hops_applied\": 0, \"limit\": 10, \"frontier_truncated\": false, \"refused_expansions\": [], \"nodes\": [{\"kind\": \"function\", \"name\": \"_search_backends\", \"path\": \"scripts/search_memory.py\", \"owner\": \"scripts.search_memory\"}], \"note\": \"bounded structural reachability over the active generation; ceilings refuse by name, nothing is truncated silently\", \"answer_budget\": {\"omitted_fields\": [\"node_id\"]}}\n{\"status\": \"ok\", \"generation_id\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"hops_applied\": 1, \"limit\": 10, \"frontier_truncated\": false, \"refused_expansions\": [], \"nodes\": [], \"note\": \"bounded structural reachability over the active generation; ceilings refuse by name, nothing is truncated silently\"}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 8.097,
+        "tokens": 31,
+        "answer_excerpt": "function: _search_backends\ndirection: inbound\ncallers_total: 0\ncallers: 0  (rows: name hop; qn = group prefix + \".\" + name)\n"
+      }
+    },
+    {
+      "id": "T08",
+      "kind": "impact-of-changing-x",
+      "question": "Which modules import page_status (and are therefore touched by changing it)?",
+      "llm_wiki": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 19.229,
+        "tokens": 23849,
+        "answer_excerpt": "{\"directory\": \"/home/user/llm-wiki\", \"mode\": \"dependencies\", \"architecture\": {\"dependencies\": [{\"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fbenchmark.selective_forgetting_vault\\u001fbenchmark/selective_forgetting_vault.py\", \"metadata\": {\"name\": \"benchmark.selective_forgetting_vault\", \"path\": \"benchmark/selective_forgetting_vault.py\"}, \"depth\": 1}, {\"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fscripts.archive_stale\\u001fscripts/archive_stale.py\", \"metadata\": {\"name\": \"scripts.archive_stale\", \"path\": \"scripts/archive_stale.py\"}, \"depth\": 1}, {\"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fscripts.corpus_snapshot\\u001fscripts/corpus_snapshot.py\", \"metadata\": {\"name\": \"scripts.corpus_snapshot\", \"path\": \"scripts/corpus_snapshot.py\"}, \"depth\": 1}, {\"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fscripts.lint_memory\\u001fscripts/lint_memory.py\", \"metadata\": {\"name\": \"scripts.lint_memory\", \"path\": \"scripts/lint_memory.py\"}, \"depth\": 1}, {\"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fscripts.page_facts\\u001fscripts/page_facts.py\", \"metadata\": {\"name\": \"scripts.page_facts\", \"path\": \"scripts/page_facts.py\"}, \"depth\": 1}, {\"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fscripts.rebuild_memory_index\\u001fscripts/rebuild_memory_index.py\", \"metadata\": {\"name\": \"scripts.rebuild_memory_index\", \"path\": \"scripts/rebuild_memory_index.py\"}, \"depth\": 1}, {\"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fscripts.search_memory\\u001fscripts/search_memory.py\", \"metadata\": {\"name\": \"scripts.search_memory\", \"path\": \"scripts/search_memory.py\"}, \"depth\": 1}, {\"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001ftests.test_archive_recency_signal\\u001ftests/test_archive_recency_signal.py\", \"metadata\": {\"name\": \"tests.test_archive_recency_signal\", \"path\": \"tests/test_archive_recency_signal.py\"}, \"depth\": 1}, {\"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001ftests.test_page_status\\u001ftests/test_page_status.py\", \"metadata\": {\"name\": \"tests.test_page_status\", \"path\": \"tests/test_page_status.py\"}, \"depth\": 1}, {\"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fbenchmark.consolidation_vault\\u001fbenchmark/consolidation_vault.py\", \"metadata\": {\"name\": \"benchmark.consolidation_vault\", \"path\": \"benchmark/consolidation_vault.py\"}, \"depth\": 2}, {\"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fbenchmark.longmemeval_vault\\u001fbenchmark/longmemeval_vault.py\", \"metadata\": {\"name\": \"benchmark.longmemeval_vault\", \"path\": \"benchmark/longmemeval_vault.py\"}, \"depth\": 2}, {\"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fbenchmark.retrieval_paths\\u001fbenchmark/retrieval_paths.py\", \"metadata\": {\"name\": \"benchmark.retrieval_paths\", \"path\": \"benchmark/retrieval_paths.py\"}, \"depth\": 2}, {\"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fbenchmark.run_benchmark\\u001fbenchmark/run_benchmark.py\", \"metadata\": {\"name\": \"benchmark.run_benchmark\", \"path\": \"benchmark/run_benchmark.py\"}, \"depth\": 2}, {\"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fscripts.build_tiers\\u001fscripts/build_tiers.py\", \"metadata\": {\"name\": \"scripts.build_tiers\", \"path\": \"scripts/build_tiers.py\"}, \"depth\": 2}, {\"identity_key\": \"repository:d8c142988412f9d857dbb6"
+      },
+      "llm_wiki_best": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 18.897,
+        "tokens": 277,
+        "answer_excerpt": "{\"status\": \"ok\", \"generation_id\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"hops_applied\": 1, \"limit\": 50, \"frontier_truncated\": false, \"refused_expansions\": [], \"nodes\": [{\"name\": \"benchmark.selective_forgetting_vault\", \"path\": \"benchmark/selective_forgetting_vault.py\"}, {\"name\": \"scripts.archive_stale\", \"path\": \"scripts/archive_stale.py\"}, {\"name\": \"scripts.corpus_snapshot\", \"path\": \"scripts/corpus_snapshot.py\"}, {\"name\": \"scripts.lint_memory\", \"path\": \"scripts/lint_memory.py\"}, {\"name\": \"scripts.page_facts\", \"path\": \"scripts/page_facts.py\"}, {\"name\": \"scripts.rebuild_memory_index\", \"path\": \"scripts/rebuild_memory_index.py\"}, {\"name\": \"scripts.search_memory\", \"path\": \"scripts/search_memory.py\"}, {\"name\": \"tests.test_archive_recency_signal\", \"path\": \"tests/test_archive_recency_signal.py\"}, {\"name\": \"tests.test_page_status\", \"path\": \"tests/test_page_status.py\"}], \"nodes_row_constants\": {\"kind\": \"module\", \"owner\": null}, \"note\": \"bounded structural reachability over the active generation; ceilings refuse by name, nothing is truncated silently\", \"answer_budget\": {\"omitted_fields\": [\"node_id\"]}}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 9.136,
+        "tokens": 259,
+        "answer_excerpt": "rows: 10  (cols: a.qualified_name b.qualified_name)\n  home-user-llm-wiki.scripts.archive_stale.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.scripts.archive_stale.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.scripts.corpus_snapshot.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.scripts.lint_memory.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.scripts.page_facts.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.scripts.rebuild_memory_index.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.scripts.search_memory.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.scripts.search_memory.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.tests.test_page_status.py.__file__ home-user-llm-wiki.scripts.page_status.current_status_sql\n  home-user-llm-wiki.tests.test_page_status.py.__file__ home-user-llm-wiki.scripts.page_status.is_retired\ntotal: 10\n"
+      }
+    },
+    {
+      "id": "T09",
+      "kind": "architecture-of-module",
+      "question": "Which project modules does scripts/retrieval.py depend on?",
+      "llm_wiki": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 14.013,
+        "tokens": 24514,
+        "answer_excerpt": "{\"directory\": \"/home/user/llm-wiki\", \"mode\": \"dependencies\", \"architecture\": {\"dependencies\": [{\"kind\": \"module\", \"identity_scheme\": \"code-module/v1\", \"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fscripts.evidence_graph\\u001fscripts/evidence_graph.py\", \"metadata\": {\"name\": \"scripts.evidence_graph\", \"path\": \"scripts/evidence_graph.py\"}, \"depth\": 1}, {\"kind\": \"module\", \"identity_scheme\": \"code-module/v1\", \"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fscripts.graph_neighbors\\u001fscripts/graph_neighbors.py\", \"metadata\": {\"name\": \"scripts.graph_neighbors\", \"path\": \"scripts/graph_neighbors.py\"}, \"depth\": 1}, {\"kind\": \"module\", \"identity_scheme\": \"code-module/v1\", \"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fscripts.provenance\\u001fscripts/provenance.py\", \"metadata\": {\"name\": \"scripts.provenance\", \"path\": \"scripts/provenance.py\"}, \"depth\": 1}, {\"kind\": \"module\", \"identity_scheme\": \"code-module/v1\", \"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fscripts.repository_scope\\u001fscripts/repository_scope.py\", \"metadata\": {\"name\": \"scripts.repository_scope\", \"path\": \"scripts/repository_scope.py\"}, \"depth\": 1}, {\"kind\": \"module\", \"identity_scheme\": \"code-module/v1\", \"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fscripts.reranker\\u001fscripts/reranker.py\", \"metadata\": {\"name\": \"scripts.reranker\", \"path\": \"scripts/reranker.py\"}, \"depth\": 1}, {\"kind\": \"module\", \"identity_scheme\": \"code-module/v1\", \"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fscripts.retrieval_telemetry\\u001fscripts/retrieval_telemetry.py\", \"metadata\": {\"name\": \"scripts.retrieval_telemetry\", \"path\": \"scripts/retrieval_telemetry.py\"}, \"depth\": 1}, {\"kind\": \"module\", \"identity_scheme\": \"code-module/v1\", \"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fscripts.search_memory\\u001fscripts/search_memory.py\", \"metadata\": {\"name\": \"scripts.search_memory\", \"path\": \"scripts/search_memory.py\"}, \"depth\": 1}, {\"kind\": \"function\", \"identity_scheme\": \"code-symbol/v1\", \"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fscripts/graph_neighbors.py\\u001fscripts.graph_neighbors\\u001fget_link_graph\\u001fget_link_graph(catalog:object | None,deadline:float | None)\", \"metadata\": {\"name\": \"get_link_graph\", \"path\": \"scripts/graph_neighbors.py\", \"signature\": \"get_link_graph(catalog:object | None,deadline:float | None)\"}, \"depth\": 2}, {\"kind\": \"function\", \"identity_scheme\": \"code-symbol/v1\", \"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fscripts/graph_neighbors.py\\u001fscripts.graph_neighbors\\u001fget_neighbors\\u001fget_neighbors(page_path:str)\", \"metadata\": {\"name\": \"get_neighbors\", \"path\": \"scripts/graph_neighbors.py\", \"signature\": \"get_neighbors(page_path:str)\"}, \"depth\": 2}, {\"kind\": \"function\", \"identity_scheme\": \"code-symbol/v1\", \"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fscripts/graph_neighbors.py\\u001fscripts.graph_neighbors\\u001fget_reverse_neighbors\\u001fget_reverse_neighbors(page_path:str)\", \"metadata\": {\"name\": \"get_reverse_neighbors\", \"path\": \"scripts/graph_neighbors.py\", \"signature\": \"get_reverse_neighbors(page_path:str)\"}, \"depth\": 2}, {\"kind\": \"function\", \"identity_scheme\": \"code-symbol/v1\", \"identity_key\": \"repository:d8c142988412f9d857dbb61c5bd0ee14ddd9aa22ef34071cf585e847ed76a484\\u001fpython\\u001fscripts/reranker.py\\u001fscripts.reranker\\u001f_have_reranker_deps\\u001f_have_reranker_deps()\", \"metadata\": {\"name\": \"_have_reranker_deps\", \"path\": \"scripts/reranker.py\", "
+      },
+      "llm_wiki_best": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 11.13,
+        "tokens": 227,
+        "answer_excerpt": "{\"status\": \"ok\", \"generation_id\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"hops_applied\": 1, \"limit\": 50, \"frontier_truncated\": false, \"refused_expansions\": [], \"nodes\": [{\"name\": \"scripts.evidence_graph\", \"path\": \"scripts/evidence_graph.py\"}, {\"name\": \"scripts.graph_neighbors\", \"path\": \"scripts/graph_neighbors.py\"}, {\"name\": \"scripts.provenance\", \"path\": \"scripts/provenance.py\"}, {\"name\": \"scripts.repository_scope\", \"path\": \"scripts/repository_scope.py\"}, {\"name\": \"scripts.reranker\", \"path\": \"scripts/reranker.py\"}, {\"name\": \"scripts.retrieval_telemetry\", \"path\": \"scripts/retrieval_telemetry.py\"}, {\"name\": \"scripts.search_memory\", \"path\": \"scripts/search_memory.py\"}], \"nodes_row_constants\": {\"kind\": \"module\", \"owner\": null}, \"note\": \"bounded structural reachability over the active generation; ceilings refuse by name, nothing is truncated silently\", \"answer_budget\": {\"omitted_fields\": [\"node_id\"]}}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 5.576,
+        "tokens": 298,
+        "answer_excerpt": "rows: 20  (cols: b.qualified_name)\n  home-user-llm-wiki.scripts.corpus_snapshot\n  home-user-llm-wiki.scripts.memory_state\n  home-user-llm-wiki.tests.test_memory_queue.queue\n  home-user-llm-wiki.scripts.markdown_transaction.MarkdownChange.replace\n  home-user-llm-wiki.scripts.provenance\n  home-user-llm-wiki.benchmark.selective_forgetting_vault.field\n  home-user-llm-wiki.scripts.reliable_memory.validate_schema\n  home-user-llm-wiki.benchmark.retrieval_paths\n  home-user-llm-wiki.scripts.contextual_retrieval.generate_context\n  home-user-llm-wiki.scripts.contextual_retrieval.get_context\n  home-user-llm-wiki.scripts.corpus_snapshot.CapturedSource\n  home-user-llm-wiki.scripts.corpus_snapshot.CorpusSnapshot\n  home-user-llm-wiki.scripts.corpus_snapshot.SnapshotPolicy\n  home-user-llm-wiki.scripts.corpus_snapshot.SourceMetadata\n  home-user-llm-wiki.scripts.corpus_snapshot.SourceRecord\n  home-user-llm-wiki.scripts.context_compiler.compile_context\n  home-user-llm-wiki.scripts.retrieval.expand_evidence_graph\n  home-user-llm-wiki.scripts.retrieval.retrieve\n  home-user-llm-wiki.scripts.retrieval.candidates_to_legacy\n  home-user-llm-wiki.scripts.reliable_memory.SchemaValidationError\ntotal: 20\n"
+      }
+    },
+    {
+      "id": "T10",
+      "kind": "multi-hop",
+      "question": "Which functions reach fuse_rrf within two caller hops (callers, and callers of callers)?",
+      "llm_wiki": {
+        "status": "answered",
+        "call_statuses": [
+          "answered",
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 33.659,
+        "tokens": 1153,
+        "answer_excerpt": "{\"directory\": \"/home/user/llm-wiki\", \"mode\": \"callers\", \"architecture\": {\"callers\": [{\"file\": \"/home/user/llm-wiki/scripts/retrieval.py\", \"line\": 2845, \"qualified_name\": \"scripts.retrieval._fused_candidates\"}, {\"file\": \"/home/user/llm-wiki/tests/test_intent_conditional_trust.py\", \"line\": 99, \"qualified_name\": \"tests.test_intent_conditional_trust._fused\"}, {\"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 141, \"qualified_name\": \"tests.test_retrieval.test_rrf_is_rank_only_and_keeps_raw_backend_fields_separate\"}, {\"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 159, \"qualified_name\": \"tests.test_retrieval.test_rrf_is_rank_only_and_keeps_raw_backend_fields_separate\"}, {\"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 172, \"qualified_name\": \"tests.test_retrieval.test_rrf_ties_are_broken_deterministically_by_candidate_id\"}, {\"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 183, \"qualified_name\": \"tests.test_retrieval.test_rrf_ties_are_broken_deterministically_by_candidate_id\"}, {\"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 544, \"qualified_name\": \"tests.test_retrieval.test_typed_provenance_weighs_on_every_path_from_one_table\"}, {\"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 562, \"qualified_name\": \"tests.test_retrieval.test_an_unweighted_candidate_keeps_its_fused_score_unchanged\"}, {\"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 669, \"qualified_name\": \"tests.test_retrieval.test_what_a_page_is_weighs_on_the_order_too\"}], \"callers_row_constants\": {\"confidence\": \"high\", \"function\": \"fuse_rrf\"}, \"source_generation\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"source_scope\": \"checkout\", \"source_root\": \"/home/user/llm-wiki\", \"graph_complete\": false, \"unresolved_count\": 80728, \"fallback\": false, \"unresolved_callers\": [], \"unresolved_caller_count\": 0, \"unresolved_callers_truncated\": false, \"trace_callers\": [{\"file\": \"/home/user/llm-wiki/scripts/retrieval.py\", \"line\": 2842, \"qualified_name\": \"scripts.retrieval._fused_candidates\", \"call_count\": 17}, {\"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 130, \"qualified_name\": \"tests.test_retrieval.test_rrf_is_rank_only_and_keeps_raw_backend_fields_separate\", \"call_count\": 2}, {\"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 164, \"qualified_name\": \"tests.test_retrieval.test_rrf_ties_are_broken_deterministically_by_candidate_id\", \"call_count\": 2}, {\"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 660, \"qualified_name\": \"tests.test_retrieval.test_what_a_page_is_weighs_on_the_order_too\", \"call_count\": 1}, {\"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 559, \"qualified_name\": \"tests.test_retrieval.test_an_unweighted_candidate_keeps_its_fused_score_unchanged\", \"call_count\": 1}, {\"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 526, \"qualified_name\": \"tests.test_retrieval.test_typed_provenance_weighs_on_every_path_from_one_table\", \"call_count\": 1}], \"trace_callers_row_constants\": {\"evidence\": \"execution-trace\", \"function\": \"fuse_rrf\", \"trace_count\": 1}, \"trace_caller_count\": 6, \"trace_callers_truncated\": false, \"trace_stale_edges\": 0, \"trace_generation\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"trace_evidence_is_dynamic\": true}, \"source_generation\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"graph_complete\": false, \"unresolved_count\": 80728, \"fallback\": false, \"answer_budget\": {\"omitted_fields\": [\"symbol_id\"]}}\n{\"directory\": \"/home/user/llm-wiki\", \"mode\": \"callers\", \"architecture\": {\"callers\": [{\"file\": \"/home/user/llm-wiki/scripts/retrieval.py\", \"line\": 3007, \"function\": \"_fused_candidates\", \"qualified_name\": \"scripts.retrieval.retrieve\", \"confidence\": \"high\"}], \"source_generation\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"source_scope\": \"checkout\", \"source_root\": \"/home/user/llm-wiki\", \"graph_complete\": false, \"unresolved_count\": 80728, \"fallback\": false, \"unresolved_callers\": [], \"unresolved_caller_count\": 0, \"unresolved_callers_t"
+      },
+      "llm_wiki_best": {
+        "status": "answered",
+        "call_statuses": [
+          "answered",
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 33.97,
+        "tokens": 527,
+        "answer_excerpt": "{\"status\": \"ok\", \"generation_id\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"hops_applied\": 1, \"limit\": 50, \"frontier_truncated\": false, \"refused_expansions\": [], \"nodes\": [{\"name\": \"_fused_candidates\", \"path\": \"scripts/retrieval.py\", \"owner\": \"scripts.retrieval\"}, {\"name\": \"_fused\", \"path\": \"tests/test_intent_conditional_trust.py\", \"owner\": \"tests.test_intent_conditional_trust\"}, {\"name\": \"test_an_unweighted_candidate_keeps_its_fused_score_unchanged\", \"path\": \"tests/test_retrieval.py\", \"owner\": \"tests.test_retrieval\"}, {\"name\": \"test_rrf_is_rank_only_and_keeps_raw_backend_fields_separate\", \"path\": \"tests/test_retrieval.py\", \"owner\": \"tests.test_retrieval\"}, {\"name\": \"test_rrf_ties_are_broken_deterministically_by_candidate_id\", \"path\": \"tests/test_retrieval.py\", \"owner\": \"tests.test_retrieval\"}, {\"name\": \"test_typed_provenance_weighs_on_every_path_from_one_table\", \"path\": \"tests/test_retrieval.py\", \"owner\": \"tests.test_retrieval\"}, {\"name\": \"test_what_a_page_is_weighs_on_the_order_too\", \"path\": \"tests/test_retrieval.py\", \"owner\": \"tests.test_retrieval\"}], \"nodes_row_constants\": {\"kind\": \"function\"}, \"note\": \"bounded structural reachability over the active generation; ceilings refuse by name, nothing is truncated silently\", \"answer_budget\": {\"omitted_fields\": [\"node_id\"]}}\n{\"status\": \"ok\", \"generation_id\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"hops_applied\": 2, \"limit\": 50, \"frontier_truncated\": false, \"refused_expansions\": [], \"nodes\": [{\"name\": \"retrieve\", \"path\": \"scripts/retrieval.py\", \"owner\": \"scripts.retrieval\"}, {\"name\": \"test_fusion_for_a_code_question_records_todays_weights\", \"path\": \"tests/test_intent_conditional_trust.py\", \"owner\": \"tests.test_intent_conditional_trust\"}, {\"name\": \"test_fusion_records_the_conditional_weight_for_every_later_stage\", \"path\": \"tests/test_intent_conditional_trust.py\", \"owner\": \"tests.test_intent_conditional_trust\"}], \"nodes_row_constants\": {\"kind\": \"function\"}, \"note\": \"bounded structural reachability over the active generation; ceilings refuse by name, nothing is truncated silently\", \"answer_budget\": {\"omitted_fields\": [\"node_id\"]}}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 5.59,
+        "tokens": 47,
+        "answer_excerpt": "function: fuse_rrf\ndirection: inbound\ncallers_total: 2\ncallers: 2  (rows: name hop; qn = group prefix + \".\" + name)\nhome-user-llm-wiki.scripts.retrieval:\n  _fused_candidates 1\n  retrieve 2\n"
+      }
+    },
+    {
+      "id": "T11",
+      "kind": "who-calls",
+      "question": "Which retrieval-path function calls source_type_weight?",
+      "llm_wiki": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 14.181,
+        "tokens": 382,
+        "answer_excerpt": "{\"directory\": \"/home/user/llm-wiki\", \"mode\": \"callers\", \"architecture\": {\"callers\": [{\"file\": \"/home/user/llm-wiki/scripts/retrieval.py\", \"line\": 1137, \"qualified_name\": \"scripts.retrieval._weigh_by_trust\"}, {\"file\": \"/home/user/llm-wiki/tests/test_intent_conditional_trust.py\", \"line\": 28, \"qualified_name\": \"tests.test_intent_conditional_trust._weight\"}, {\"file\": \"/home/user/llm-wiki/tests/test_intent_conditional_trust.py\", \"line\": 74, \"qualified_name\": \"tests.test_intent_conditional_trust.test_living_under_a_code_root_never_lifts_a_page\"}], \"callers_row_constants\": {\"confidence\": \"high\", \"function\": \"source_type_weight\"}, \"source_generation\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"source_scope\": \"checkout\", \"source_root\": \"/home/user/llm-wiki\", \"graph_complete\": false, \"unresolved_count\": 80728, \"fallback\": false, \"unresolved_callers\": [], \"unresolved_caller_count\": 0, \"unresolved_callers_truncated\": false, \"trace_callers\": [{\"file\": \"/home/user/llm-wiki/scripts/retrieval.py\", \"line\": 1121, \"function\": \"source_type_weight\", \"qualified_name\": \"scripts.retrieval._weigh_by_trust\", \"call_count\": 41, \"trace_count\": 1, \"evidence\": \"execution-trace\"}], \"trace_caller_count\": 1, \"trace_callers_truncated\": false, \"trace_stale_edges\": 0, \"trace_generation\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"trace_evidence_is_dynamic\": true}, \"source_generation\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"graph_complete\": false, \"unresolved_count\": 80728, \"fallback\": false, \"answer_budget\": {\"omitted_fields\": [\"symbol_id\"]}}"
+      },
+      "llm_wiki_best": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 10.991,
+        "tokens": 190,
+        "answer_excerpt": "{\"status\": \"ok\", \"generation_id\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"hops_applied\": 1, \"limit\": 50, \"frontier_truncated\": false, \"refused_expansions\": [], \"nodes\": [{\"name\": \"_weigh_by_trust\", \"path\": \"scripts/retrieval.py\", \"owner\": \"scripts.retrieval\"}, {\"name\": \"_weight\", \"path\": \"tests/test_intent_conditional_trust.py\", \"owner\": \"tests.test_intent_conditional_trust\"}, {\"name\": \"test_living_under_a_code_root_never_lifts_a_page\", \"path\": \"tests/test_intent_conditional_trust.py\", \"owner\": \"tests.test_intent_conditional_trust\"}], \"nodes_row_constants\": {\"kind\": \"function\"}, \"note\": \"bounded structural reachability over the active generation; ceilings refuse by name, nothing is truncated silently\", \"answer_budget\": {\"omitted_fields\": [\"node_id\"]}}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 5.319,
+        "tokens": 46,
+        "answer_excerpt": "function: source_type_weight\ndirection: inbound\ncallers_total: 1\ncallers: 1  (rows: name hop; qn = group prefix + \".\" + name)\nhome-user-llm-wiki.scripts.retrieval:\n  _weigh_by_trust 1\n"
+      }
+    },
+    {
+      "id": "T12",
+      "kind": "architecture-summary",
+      "question": "Summarize the repository architecture: what are its main modules and entry points?",
+      "llm_wiki": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 13.823,
+        "tokens": 6107,
+        "answer_excerpt": "{\"directory\": \"/home/user/llm-wiki\", \"mode\": \"summary\", \"architecture\": {\"entry_points\": [{\"file\": \"/home/user/llm-wiki/benchmark/aggregate_code_parity.py\", \"line\": 106}, {\"file\": \"/home/user/llm-wiki/benchmark/build_conflict_fixture.py\", \"line\": 57}, {\"file\": \"/home/user/llm-wiki/benchmark/build_flush_corpus.py\", \"line\": 236}, {\"file\": \"/home/user/llm-wiki/benchmark/consolidation_vault.py\", \"line\": 408}, {\"file\": \"/home/user/llm-wiki/benchmark/durability_child.py\", \"line\": 114}, {\"file\": \"/home/user/llm-wiki/benchmark/fixtures/comparative_adapter_fixture.py\", \"line\": 34}, {\"file\": \"/home/user/llm-wiki/benchmark/generate_python_qualification.py\", \"line\": 664}, {\"file\": \"/home/user/llm-wiki/benchmark/longmemeval_judge.py\", \"line\": 182}, {\"file\": \"/home/user/llm-wiki/benchmark/longmemeval_vault.py\", \"line\": 408}, {\"file\": \"/home/user/llm-wiki/benchmark/run_benchmark.py\", \"line\": 447}, {\"file\": \"/home/user/llm-wiki/benchmark/run_code_navigation.py\", \"line\": 2794}, {\"file\": \"/home/user/llm-wiki/benchmark/run_code_parity.py\", \"line\": 337}, {\"file\": \"/home/user/llm-wiki/benchmark/run_comparative.py\", \"line\": 1122}, {\"file\": \"/home/user/llm-wiki/benchmark/run_conflict_resolution.py\", \"line\": 360}, {\"file\": \"/home/user/llm-wiki/benchmark/run_consolidation.py\", \"line\": 291}, {\"file\": \"/home/user/llm-wiki/benchmark/run_contradiction_benchmark.py\", \"line\": 231}, {\"file\": \"/home/user/llm-wiki/benchmark/run_durability.py\", \"line\": 192}, {\"file\": \"/home/user/llm-wiki/benchmark/run_flush_classification.py\", \"line\": 179}, {\"file\": \"/home/user/llm-wiki/benchmark/run_lift_attribution.py\", \"line\": 393}, {\"file\": \"/home/user/llm-wiki/benchmark/run_longmemeval.py\", \"line\": 225}, {\"file\": \"/home/user/llm-wiki/benchmark/run_retrieval_v2.py\", \"line\": 4991}, {\"file\": \"/home/user/llm-wiki/benchmark/run_scale_matrix.py\", \"line\": 1537}, {\"file\": \"/home/user/llm-wiki/benchmark/run_selective_forgetting.py\", \"line\": 352}, {\"file\": \"/home/user/llm-wiki/benchmark/run_vault_application.py\", \"line\": 166}, {\"file\": \"/home/user/llm-wiki/benchmark/run_vault_retrieval.py\", \"line\": 381}, {\"file\": \"/home/user/llm-wiki/benchmark/selective_forgetting_vault.py\", \"line\": 774}, {\"file\": \"/home/user/llm-wiki/docs/enforcement/apply-bash-write-precision.py\", \"line\": 340}, {\"file\": \"/home/user/llm-wiki/docs/enforcement/apply-guard-hardening.py\", \"line\": 512}, {\"file\": \"/home/user/llm-wiki/docs/enforcement/apply-rules-1-2-cover-bash.py\", \"line\": 217}, {\"file\": \"/home/user/llm-wiki/scripts/access_tracking.py\", \"line\": 374}, {\"file\": \"/home/user/llm-wiki/scripts/agent_timeline.py\", \"line\": 433}, {\"file\": \"/home/user/llm-wiki/scripts/archive_daily.py\", \"line\": 2044}, {\"file\": \"/home/user/llm-wiki/scripts/archive_sessions.py\", \"line\": 134}, {\"file\": \"/home/user/llm-wiki/scripts/archive_stale.py\", \"line\": 579}, {\"file\": \"/home/user/llm-wiki/scripts/backfill_sessions.py\", \"line\": 182}, {\"file\": \"/home/user/llm-wiki/scripts/blackboard.py\", \"line\": 1181}, {\"file\": \"/home/user/llm-wiki/scripts/bootstrap_project.py\", \"line\": 235}, {\"file\": \"/home/user/llm-wiki/scripts/build_advisory.py\", \"line\": 370}, {\"file\": \"/home/user/llm-wiki/scripts/build_context.py\", \"line\": 338}, {\"file\": \"/home/user/llm-wiki/scripts/build_guardrails.py\", \"line\": 197}, {\"file\": \"/home/user/llm-wiki/scripts/build_tiers.py\", \"line\": 732}, {\"file\": \"/home/user/llm-wiki/scripts/capture_adoption.py\", \"line\": 206}, {\"file\": \"/home/user/llm-wiki/scripts/capture_diagnostics.py\", \"line\": 267}, {\"file\": \"/home/user/llm-wiki/scripts/check_knowledge_writers.py\", \"line\": 633}, {\"file\": \"/home/user/llm-wiki/scripts/ci_timing_report.py\", \"line\": 315}, {\"file\": \"/home/user/llm-wiki/scripts/cleanup_worktrees.py\", \"line\": 229}, {\"file\": \"/home/user/llm-wiki/scripts/code_graph.py\", \"line\": 3287}, {\"file\": \"/home/user/llm-wiki/scripts/codex_memory.py\", \"line\": 910}, {\"file\": \"/home/user/llm-wiki/scripts/compile_memory.py\", \"line\": 3863}, {\"file\": \"/home/user/llm-wiki/scripts/contextual_retrieval.py\", \"line\": 747}, {\"file\": \"/home/u"
+      },
+      "llm_wiki_best": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 8.636,
+        "tokens": 6107,
+        "answer_excerpt": "{\"directory\": \"/home/user/llm-wiki\", \"mode\": \"summary\", \"architecture\": {\"entry_points\": [{\"file\": \"/home/user/llm-wiki/benchmark/aggregate_code_parity.py\", \"line\": 106}, {\"file\": \"/home/user/llm-wiki/benchmark/build_conflict_fixture.py\", \"line\": 57}, {\"file\": \"/home/user/llm-wiki/benchmark/build_flush_corpus.py\", \"line\": 236}, {\"file\": \"/home/user/llm-wiki/benchmark/consolidation_vault.py\", \"line\": 408}, {\"file\": \"/home/user/llm-wiki/benchmark/durability_child.py\", \"line\": 114}, {\"file\": \"/home/user/llm-wiki/benchmark/fixtures/comparative_adapter_fixture.py\", \"line\": 34}, {\"file\": \"/home/user/llm-wiki/benchmark/generate_python_qualification.py\", \"line\": 664}, {\"file\": \"/home/user/llm-wiki/benchmark/longmemeval_judge.py\", \"line\": 182}, {\"file\": \"/home/user/llm-wiki/benchmark/longmemeval_vault.py\", \"line\": 408}, {\"file\": \"/home/user/llm-wiki/benchmark/run_benchmark.py\", \"line\": 447}, {\"file\": \"/home/user/llm-wiki/benchmark/run_code_navigation.py\", \"line\": 2794}, {\"file\": \"/home/user/llm-wiki/benchmark/run_code_parity.py\", \"line\": 337}, {\"file\": \"/home/user/llm-wiki/benchmark/run_comparative.py\", \"line\": 1122}, {\"file\": \"/home/user/llm-wiki/benchmark/run_conflict_resolution.py\", \"line\": 360}, {\"file\": \"/home/user/llm-wiki/benchmark/run_consolidation.py\", \"line\": 291}, {\"file\": \"/home/user/llm-wiki/benchmark/run_contradiction_benchmark.py\", \"line\": 231}, {\"file\": \"/home/user/llm-wiki/benchmark/run_durability.py\", \"line\": 192}, {\"file\": \"/home/user/llm-wiki/benchmark/run_flush_classification.py\", \"line\": 179}, {\"file\": \"/home/user/llm-wiki/benchmark/run_lift_attribution.py\", \"line\": 393}, {\"file\": \"/home/user/llm-wiki/benchmark/run_longmemeval.py\", \"line\": 225}, {\"file\": \"/home/user/llm-wiki/benchmark/run_retrieval_v2.py\", \"line\": 4991}, {\"file\": \"/home/user/llm-wiki/benchmark/run_scale_matrix.py\", \"line\": 1537}, {\"file\": \"/home/user/llm-wiki/benchmark/run_selective_forgetting.py\", \"line\": 352}, {\"file\": \"/home/user/llm-wiki/benchmark/run_vault_application.py\", \"line\": 166}, {\"file\": \"/home/user/llm-wiki/benchmark/run_vault_retrieval.py\", \"line\": 381}, {\"file\": \"/home/user/llm-wiki/benchmark/selective_forgetting_vault.py\", \"line\": 774}, {\"file\": \"/home/user/llm-wiki/docs/enforcement/apply-bash-write-precision.py\", \"line\": 340}, {\"file\": \"/home/user/llm-wiki/docs/enforcement/apply-guard-hardening.py\", \"line\": 512}, {\"file\": \"/home/user/llm-wiki/docs/enforcement/apply-rules-1-2-cover-bash.py\", \"line\": 217}, {\"file\": \"/home/user/llm-wiki/scripts/access_tracking.py\", \"line\": 374}, {\"file\": \"/home/user/llm-wiki/scripts/agent_timeline.py\", \"line\": 433}, {\"file\": \"/home/user/llm-wiki/scripts/archive_daily.py\", \"line\": 2044}, {\"file\": \"/home/user/llm-wiki/scripts/archive_sessions.py\", \"line\": 134}, {\"file\": \"/home/user/llm-wiki/scripts/archive_stale.py\", \"line\": 579}, {\"file\": \"/home/user/llm-wiki/scripts/backfill_sessions.py\", \"line\": 182}, {\"file\": \"/home/user/llm-wiki/scripts/blackboard.py\", \"line\": 1181}, {\"file\": \"/home/user/llm-wiki/scripts/bootstrap_project.py\", \"line\": 235}, {\"file\": \"/home/user/llm-wiki/scripts/build_advisory.py\", \"line\": 370}, {\"file\": \"/home/user/llm-wiki/scripts/build_context.py\", \"line\": 338}, {\"file\": \"/home/user/llm-wiki/scripts/build_guardrails.py\", \"line\": 197}, {\"file\": \"/home/user/llm-wiki/scripts/build_tiers.py\", \"line\": 732}, {\"file\": \"/home/user/llm-wiki/scripts/capture_adoption.py\", \"line\": 206}, {\"file\": \"/home/user/llm-wiki/scripts/capture_diagnostics.py\", \"line\": 267}, {\"file\": \"/home/user/llm-wiki/scripts/check_knowledge_writers.py\", \"line\": 633}, {\"file\": \"/home/user/llm-wiki/scripts/ci_timing_report.py\", \"line\": 315}, {\"file\": \"/home/user/llm-wiki/scripts/cleanup_worktrees.py\", \"line\": 229}, {\"file\": \"/home/user/llm-wiki/scripts/code_graph.py\", \"line\": 3287}, {\"file\": \"/home/user/llm-wiki/scripts/codex_memory.py\", \"line\": 910}, {\"file\": \"/home/user/llm-wiki/scripts/compile_memory.py\", \"line\": 3863}, {\"file\": \"/home/user/llm-wiki/scripts/contextual_retrieval.py\", \"line\": 747}, {\"file\": \"/home/u"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 2.044,
+        "tokens": 819,
+        "answer_excerpt": "project: home-user-llm-wiki\naspects_hint: \"Summary view (default). More on request via aspects:[...] — structure, dependencies, routes, hotspots, boundaries, layers, clusters, file_tree — or [\\\"all\\\"] for everything.\"\ntotal_nodes: 29505\ntotal_edges: 156538\nnode_labels: 14  (cols: label count)\n  Function 16010\n  Variable 6056\n  Method 2842\n  Section 2235\n  File 776\n  Module 774\n  Class 705\n  Folder 44\n  EnvVar 38\n  Decorator 13\n  Route 9\n  Branch 1\n  Interface 1\n  Project 1\nedge_types: 22  (cols: type count)\n  CALLS 53195\n  DEFINES 33760\n  USAGE 28134\n  WRITES 17142\n  TESTS 13800\n  DEFINES_METHOD 2837\n  DECORATES 1632\n  IMPORTS 1620\n  CONFIGURES 891\n  RAISES 827\n  FILE_CHANGES_WITH 826\n  CONTAINS_FILE 776\n  CALL_REFERENCE 298\n  SEMANTICALLY_RELATED 295\n  THROWS 211\n  SIMILAR_TO 207\n  CONTAINS_FOLDER 40\n  INHERITS 28\n  HTTP_CALLS 10\n  OVERRIDE 7\n  HAS_BRANCH 1\n  TESTS_FILE 1\nlanguages: 6  (cols: language files)\n  Python 430\n  TOML 4\n  YAML 2\n  TypeScript 2\n  Bash 1\n  JavaScript 1\npackages: 15  (cols: name nodes fan_in fan_out)\n  markdown_transaction 601 0 0\n  doctor 597 0 0\n  mcp_server 374 0 0\n  search_memory 350 0 0\n  workspace_revision 321 0 0\n  compile_memory 302 0 0\n  install_pyright 284 0 0\n  generation_catalog 231 0 0\n  corpus_snapshot 220 0 0\n  test_doctor 194 0 0\n  project_journal 187 0 0\n  installed_memory_repair 145 0 0\n  archive_daily 142 0 0\n  run_retrieval_v2 140 0 0\n  test_lsp_protocol 133 0 0\nentry_points: 20  (cols: qn file)\n  home-user-llm-wiki.benchmark.aggregate_code_parity.main benchmark/aggregate_code_parity.py\n  home-user-llm-wiki.benchmark.build_conflict_fixture.main benchmark/build_conflict_fixture.py\n  home-user-llm-wiki.benchmark.build_flush_corpus.main benchmark/build_flush_corpus.py\n  home-user-llm-wiki.benchmark.consolidation_vault.main benchmark/consolidation_vault.py\n  home-user-llm-wiki.benchmark.durability_child.main benchmark/durability_child.py\n  home-user-llm-wiki.benchmark.fixtures.comparative_adapter_fixture.main benchmark/fixtures/comparative_adapter_fixture.py\n  home-user-llm-wiki.benchmark.generate_python_qualification.main benchmark/generate_python_qualification.py\n  home-user-llm-wiki.benchmark.longmemeval_judge.main benchmark/longmemeval_judge.py\n  home-user-llm-wiki.benchmark.longmemeval_vault.main benchmark/longmemeval_vault.py\n  home-user-llm-wiki.benchmark.run_benchmark.main benchmark/run_benchmark.py\n  home-user-llm-wiki.benchmark.run_code_navigation.main benchmark/run_code_navigation.py\n  home-user-llm-wiki.benchmark.run_code_parity.main benchmark/run_code_parity.py\n  home-user-llm-wiki.benchmark.run_comparative.main benchmark/run_comparative.py\n  home-user-llm-wiki.benchmark.run_conflict_resolution.main benchmark/run_conflict_resolution.py\n  home-user-llm-wiki.benchmark.run_consolidation.main benchmark/run_consolidation.py\n  home-user-llm-wiki.benchmark.run_contradiction_benchmark.main benchmark/run_contradiction_benchmark.py\n  home-user-llm-wiki.benchmark.run_durability.main benchmark/run_durability.py\n  home-user-llm-wiki.benchmark.run_flush_classification.main benchmark/run_flush_classification.py\n  home-user-llm-wiki.benchmark.run_lift_attribution.main benchmark/run_lift_attribution.py\n  home-user-llm-wiki.benchmark.run_longmemeval.main benchmark/run_longmemeval.py\n"
+      }
+    },
+    {
+      "id": "T13",
+      "kind": "community-naming",
+      "question": "Which module community does fuse_rrf belong to?",
+      "llm_wiki": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 4.728,
+        "tokens": 343,
+        "answer_excerpt": "{\"directory\": \"/home/user/llm-wiki\", \"mode\": \"community\", \"architecture\": {\"communities\": [{\"size\": 5, \"members\": [{\"qualified_name\": \"tests.test_retrieval.test_what_a_page_is_weighs_on_the_order_too\", \"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 660}, {\"qualified_name\": \"tests.test_retrieval.test_an_unweighted_candidate_keeps_its_fused_score_unchanged\", \"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 559}, {\"qualified_name\": \"scripts.retrieval._fusion_weights\", \"file\": \"/home/user/llm-wiki/scripts/retrieval.py\", \"line\": 1313}, {\"qualified_name\": \"tests.test_retrieval.test_typed_provenance_weighs_on_every_path_from_one_table\", \"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 526}, {\"qualified_name\": \"scripts.retrieval.fuse_rrf\", \"file\": \"/home/user/llm-wiki/scripts/retrieval.py\", \"line\": 1378}], \"members_truncated\": false, \"members_omitted\": 0}], \"source_generation\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"source_scope\": \"checkout\", \"source_root\": \"/home/user/llm-wiki\", \"graph_complete\": false, \"unresolved_count\": 80728, \"fallback\": false, \"community_count\": 1, \"community_member_count\": 5, \"community_limit\": 30, \"community_member_limit\": 10, \"communities_truncated\": false}, \"source_generation\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"graph_complete\": false, \"unresolved_count\": 80728, \"fallback\": false}"
+      },
+      "llm_wiki_best": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 8.583,
+        "tokens": 343,
+        "answer_excerpt": "{\"directory\": \"/home/user/llm-wiki\", \"mode\": \"community\", \"architecture\": {\"communities\": [{\"size\": 5, \"members\": [{\"qualified_name\": \"tests.test_retrieval.test_what_a_page_is_weighs_on_the_order_too\", \"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 660}, {\"qualified_name\": \"tests.test_retrieval.test_an_unweighted_candidate_keeps_its_fused_score_unchanged\", \"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 559}, {\"qualified_name\": \"scripts.retrieval._fusion_weights\", \"file\": \"/home/user/llm-wiki/scripts/retrieval.py\", \"line\": 1313}, {\"qualified_name\": \"tests.test_retrieval.test_typed_provenance_weighs_on_every_path_from_one_table\", \"file\": \"/home/user/llm-wiki/tests/test_retrieval.py\", \"line\": 526}, {\"qualified_name\": \"scripts.retrieval.fuse_rrf\", \"file\": \"/home/user/llm-wiki/scripts/retrieval.py\", \"line\": 1378}], \"members_truncated\": false, \"members_omitted\": 0}], \"source_generation\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"source_scope\": \"checkout\", \"source_root\": \"/home/user/llm-wiki\", \"graph_complete\": false, \"unresolved_count\": 80728, \"fallback\": false, \"community_count\": 1, \"community_member_count\": 5, \"community_limit\": 30, \"community_member_limit\": 10, \"communities_truncated\": false}, \"source_generation\": \"generation-18d0425dd6fa9f88-7c7e7a5f\", \"graph_complete\": false, \"unresolved_count\": 80728, \"fallback\": false}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 5.946,
+        "tokens": 45,
+        "answer_excerpt": "total: 1\nsearch_mode: bm25\nresults: 1  (cols: qn label file lines rank)\n  home-user-llm-wiki.scripts.retrieval.fuse_rrf Function scripts/retrieval.py 1446-1489 -26.04\nhas_more: false\n"
+      }
+    }
+  ],
+  "summary": {
+    "llm_wiki": {
+      "correct": 11,
+      "partial": 1,
+      "wrong": 1,
+      "statuses": {
+        "answered": 13
+      },
+      "total_seconds": 277.43,
+      "total_tokens": 59522,
+      "wrong_but_confident": 1,
+      "operator_attention_events": 0
+    },
+    "llm_wiki_best": {
+      "correct": 11,
+      "partial": 1,
+      "wrong": 1,
+      "statuses": {
+        "answered": 13
+      },
+      "total_seconds": 208.85,
+      "total_tokens": 9130,
+      "wrong_but_confident": 1,
+      "operator_attention_events": 0
+    },
+    "cbm": {
+      "correct": 11,
+      "partial": 1,
+      "wrong": 1,
+      "statuses": {
+        "answered": 13
+      },
+      "total_seconds": 90.71,
+      "total_tokens": 2107,
+      "wrong_but_confident": 1,
+      "operator_attention_events": 0
+    }
+  }
+}

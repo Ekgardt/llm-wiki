@@ -46,6 +46,22 @@ MAX_CHECKPOINT_ERROR_CHARS = 500
 MAX_STDIN_BYTES = 1024 * 1024
 TRANSIENT_CREATE_ATTEMPTS = 10
 PENDING_CLAIM_SECONDS = 30.0
+# How long a drain waits for the state lock. The hook path keeps 0.5 s: a
+# session hook must not block on a contended file, and everything on that path
+# is deliberately impatient (`SESSION_START_RECOVERY_SECONDS` is 0.25).
+#
+# That impatience is correct and it is also why a backlog cannot clear itself
+# from a hook. Measured on this vault 2026-08-30: with `run/state.json` at
+# 6.7 MB, hooks take and release the lock continuously and a 0.5 s drain loses
+# every time — eight consecutive forced drains, each refused in 0.6 s, with the
+# queue unmoved at 2 485. Recovery therefore belongs to the unattended nightly
+# pass, which is allowed to wait.
+PENDING_STATE_LOCK_SECONDS = 0.5
+BACKLOG_STATE_LOCK_SECONDS = 10.0
+
+# A bound on the recovery itself, so an unattended pass can never hang on it.
+BACKLOG_DRAIN_SECONDS = 120.0
+
 MAX_CAPTURE_INTENT_BYTES = 1024 * 1024
 MAX_CAPTURE_EVIDENCE_BYTES = 900 * 1024
 CAPTURE_EXCERPT_SIDE_BYTES = MAX_CAPTURE_EVIDENCE_BYTES // 2
@@ -872,11 +888,15 @@ def _release_claims(state: dict[str, Any], queue_key: str, owner: str) -> None:
             item.pop("claim_until", None)
 
 
-def _release_pending_claims(queue_key: str, owner: str) -> None:
+def _release_pending_claims(
+    queue_key: str,
+    owner: str,
+    state_lock_seconds: float = PENDING_STATE_LOCK_SECONDS,
+) -> None:
     def release(state: dict[str, Any]) -> None:
         _release_claims(state, queue_key, owner)
 
-    update_state(release, lock_timeout=0.5)
+    update_state(release, lock_timeout=state_lock_seconds)
 
 
 def _checkpoint_carries_delta(checkpoint: Mapping[str, object]) -> bool:
@@ -1065,6 +1085,27 @@ def _build_merged_delta(
     return merged
 
 
+def _batch_occurrence_id(evidence: Sequence[str]) -> str:
+    """Name a batch after the whole batch, never after one of its members.
+
+    It used to be `items[-1]["event_id"]`. The last member is not the batch:
+    two batches ending at the same event but carrying different earlier events
+    are two operations wearing one name, and a reservation refuses the second
+    one forever. Measured on this vault 2026-08-30 — an outage on 08-28 left a
+    reservation uncommitted, a later cycle formed a different batch ending at
+    the same event, and the drain then failed identically on every attempt with
+    2 464 checkpoints queued behind it.
+
+    Each element of `evidence` is an event identifier that appears in the queue
+    once and is deleted on commit, so identical membership means one operation
+    retried — the case the reservation exists to collapse.
+    See `docs/research/2026-08-30-a-batch-named-after-one-of-its-members.md`.
+    """
+    from reliable_memory import canonical_json_bytes, sha256_bytes
+
+    return f"batch:{sha256_bytes(canonical_json_bytes(list(evidence)))}"
+
+
 def _merge_pending_checkpoints(
     items: Sequence[Mapping[str, object]], decision: CheckpointDecision
 ) -> dict[str, object]:
@@ -1075,11 +1116,11 @@ def _merge_pending_checkpoints(
     for item in items:
         _merge_pending_item(item, scalar_operations, list_operations, evidence, contexts)
     checkpoint = dict(items[-1]["checkpoint_event"])
-    event_id = str(items[-1]["event_id"])
+    occurrence_id = _batch_occurrence_id(evidence)
     checkpoint.update(
         {
-            "occurrence_id": event_id,
-            "idempotency_key": f"{event_id}:{decision.reason}",
+            "occurrence_id": occurrence_id,
+            "idempotency_key": f"{occurrence_id}:{decision.reason}",
             "reason": decision.reason,
             "delta": _build_merged_delta(scalar_operations, list_operations, contexts),
             "evidence_event_ids": evidence,
@@ -1132,20 +1173,23 @@ def _claim_pending_state(
     queue = _pending_queue(state, queue_key)
     if not queue:
         return
-    if not _claim_queue(queue, owner, time.time()):
+    window = queue[:PENDING_CLAIM_WINDOW]
+    if not _claim_queue(window, owner, time.time()):
         return
-    claimed.append(([dict(item) for item in queue], _copy_reducer_states(state)))
+    claimed.append(([dict(item) for item in window], _copy_reducer_states(state)))
 
 
 def _claim_pending(
-    queue_key: str, owner: str
+    queue_key: str,
+    owner: str,
+    state_lock_seconds: float = PENDING_STATE_LOCK_SECONDS,
 ) -> tuple[list[dict[str, object]], dict[str, object]] | None:
     claimed: list[tuple[list[dict[str, object]], dict[str, object]]] = []
 
     def claim(state: dict[str, Any]) -> None:
         _claim_pending_state(state, queue_key, owner, claimed)
 
-    update_state(claim, lock_timeout=0.5)
+    update_state(claim, lock_timeout=state_lock_seconds)
     if claimed:
         return claimed[0]
     return None
@@ -1218,6 +1262,21 @@ def _delta_due(
 # checks reported nothing at all. Checkpointing early costs one extra journal
 # entry; waiting costs every finding those two checks would have made.
 MAX_PENDING_CHECKPOINT_ITEMS = 40
+
+# How much of the queue one drain cycle claims, replays and rewrites. It used
+# to be all of it, which made the cost of draining proportional to the backlog
+# while the time allowed to pay it stayed `lock_timeout=0.5`. Measured on this
+# vault 2026-08-30: a journal outage on 08-28 left 2 537 pending checkpoints,
+# 3.7 MB inside a 6.7 MB `run/state.json`; the outage was repaired on 08-29 and
+# the queue still did not move, because each cycle rewrote 4.8 MB three times
+# and lost the lock — 1 338 `Could not acquire state lock` in one day. A window
+# makes recovery linear in the backlog and never impossible. It is 100 because
+# `_bounded_pending_batch_count` never accepts more than 100 evidence ids into
+# one batch: a smaller window would change how many events a batch carries, and
+# a larger one would only claim items no cycle can select.
+# See `docs/research/2026-08-30-a-backlog-that-prevents-its-own-drain.md`.
+PENDING_CLAIM_WINDOW = 100
+
 
 
 def _debounce_due(
@@ -1391,11 +1450,12 @@ def _commit_pending(
     owner: str,
     selected: Sequence[Mapping[str, object]],
     committed_reducers: Mapping[str, object],
+    state_lock_seconds: float = PENDING_STATE_LOCK_SECONDS,
 ) -> None:
     def commit(state: dict[str, Any]) -> None:
         _commit_pending_state(state, queue_key, owner, selected, committed_reducers)
 
-    update_state(commit, lock_timeout=0.5)
+    update_state(commit, lock_timeout=state_lock_seconds)
 
 
 def _persist_or_release(
@@ -1407,6 +1467,7 @@ def _persist_or_release(
     reducers: Mapping[str, CheckpointReducer],
     checkpoint_decision: CheckpointDecision | None,
     writer_wait_seconds: float | None,
+    state_lock_seconds: float = PENDING_STATE_LOCK_SECONDS,
 ) -> dict[str, object]:
     try:
         return _persist_selected(
@@ -1418,7 +1479,7 @@ def _persist_or_release(
             writer_wait_seconds,
         )
     except Exception:
-        _release_pending_claims(queue_key, owner)
+        _release_pending_claims(queue_key, owner, state_lock_seconds)
         raise
 
 
@@ -1427,11 +1488,12 @@ def _commit_or_release(
     owner: str,
     selected: Sequence[Mapping[str, object]],
     committed_reducers: Mapping[str, object],
+    state_lock_seconds: float = PENDING_STATE_LOCK_SECONDS,
 ) -> None:
     try:
-        _commit_pending(queue_key, owner, selected, committed_reducers)
+        _commit_pending(queue_key, owner, selected, committed_reducers, state_lock_seconds)
     except Exception:
-        _release_pending_claims(queue_key, owner)
+        _release_pending_claims(queue_key, owner, state_lock_seconds)
         raise
 
 
@@ -1440,15 +1502,16 @@ def _drain_project_checkpoint_once(
     queue_key: str,
     owner: str,
     writer_wait_seconds: float | None,
+    state_lock_seconds: float = PENDING_STATE_LOCK_SECONDS,
 ) -> bool:
-    claimed = _claim_pending(queue_key, owner)
+    claimed = _claim_pending(queue_key, owner, state_lock_seconds)
     if claimed is None:
         return False
     items, reducer_states = claimed
     reducers, decisions, index, decision = _observe_until_checkpoint(items, reducer_states)
     index, decision, waiting = _resolve_debounce(items, reducers, index, decision)
     if waiting:
-        _release_pending_claims(queue_key, owner)
+        _release_pending_claims(queue_key, owner, state_lock_seconds)
         return False
     selected, reducers, decisions, decision = _batch_plan(
         items, reducer_states, reducers, decisions, index, decision
@@ -1462,8 +1525,9 @@ def _drain_project_checkpoint_once(
         reducers,
         decision,
         writer_wait_seconds,
+        state_lock_seconds,
     )
-    _commit_or_release(queue_key, owner, selected, committed)
+    _commit_or_release(queue_key, owner, selected, committed, state_lock_seconds)
     return True
 
 
@@ -1472,10 +1536,76 @@ def _drain_project_checkpoints(
     queue_key: str,
     *,
     writer_wait_seconds: float | None = None,
+    state_lock_seconds: float = PENDING_STATE_LOCK_SECONDS,
+    deadline: float | None = None,
 ) -> None:
     owner = f"{os.getpid()}:{secrets.token_hex(8)}"
-    while _drain_project_checkpoint_once(slug, queue_key, owner, writer_wait_seconds):
-        pass
+    while _drain_project_checkpoint_once(
+        slug, queue_key, owner, writer_wait_seconds, state_lock_seconds
+    ):
+        if deadline is not None and time.monotonic() >= deadline:
+            return
+
+
+def _pending_backlog_slugs() -> list[str]:
+    from memory_state import load_state
+
+    pending = load_state().get("project_checkpoint_pending")
+    if not isinstance(pending, dict):
+        return []
+    return sorted(slug for slug, queue in pending.items() if isinstance(queue, list) and queue)
+
+
+def _pending_backlog_depth(slug: str) -> int:
+    from memory_state import load_state
+
+    pending = load_state().get("project_checkpoint_pending")
+    if not isinstance(pending, dict):
+        return 0
+    queue = pending.get(slug)
+    return len(queue) if isinstance(queue, list) else 0
+
+
+def drain_pending_backlog(budget_seconds: float = BACKLOG_DRAIN_SECONDS) -> dict[str, object]:
+    """Clear whatever the impatient hook path could not, without a hook's clock.
+
+    A hook drains with `PENDING_STATE_LOCK_SECONDS` and must: it runs while a
+    person waits. That is exactly why a backlog survives it — measured on this
+    vault 2026-08-30, eight consecutive forced drains each lost the lock in
+    0.6 s and the queue stayed at 2 485. This runs unattended, waits properly,
+    and stops at `budget_seconds` so it can never hang the pass that calls it.
+
+    See `docs/research/2026-08-30-a-backlog-that-prevents-its-own-drain.md`.
+    """
+    deadline = time.monotonic() + budget_seconds
+    drained: dict[str, object] = {}
+    failed: dict[str, str] = {}
+    for slug in _pending_backlog_slugs():
+        drained[slug] = _drain_one_backlog(slug, deadline, failed)
+        if time.monotonic() >= deadline:
+            break
+    return {"drained": drained, "failed": failed, "remaining": _pending_backlog_slugs()}
+
+
+def _drain_one_backlog(slug: str, deadline: float, failed: dict[str, str]) -> int:
+    """One project's backlog, isolated: its failure is not the pass's failure.
+
+    Measured 2026-08-30: a single unrecoverable reservation in `fix-pip` raised
+    out of the drain and stopped every other project behind it, and the orphan
+    sweep after it never ran at all. A recovery pass that one bad row can halt
+    is not a recovery pass.
+    """
+    before = _pending_backlog_depth(slug)
+    try:
+        _drain_project_checkpoints(
+            slug,
+            slug,
+            state_lock_seconds=BACKLOG_STATE_LOCK_SECONDS,
+            deadline=deadline,
+        )
+    except Exception as error:  # noqa: BLE001
+        failed[slug] = _bounded_checkpoint_error(error)
+    return before - _pending_backlog_depth(slug)
 
 
 def _observe_project_checkpoint(

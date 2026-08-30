@@ -369,6 +369,12 @@ def atomic_write(path: Path, content: str, encoding: str = "utf-8") -> None:
         destination_size = path.lstat().st_size
     except FileNotFoundError:
         destination_size = 0
+    # A failed publication deliberately leaves the staged file: it is a
+    # complete, fsynced copy of what was to be written, and the test above this
+    # behaviour calls it recoverable staging. What was missing is that nothing
+    # ever collected one — 39 orphans weighing 272 MB by 2026-08-30, the oldest
+    # four days old. `reclaim_runtime_state.py` sweeps them once they are an
+    # hour old, which no live write can be.
     outcome = durable_publish_file(
         staged,
         path,

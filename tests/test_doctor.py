@@ -313,6 +313,7 @@ def test_report_schema_and_all_check_classes_are_json_safe(tmp_path, monkeypatch
         "scheduler",
         "capture",
         "hooks",
+        "checkpoints",
         "mcp",
         "integrations",
         "pyright",

@@ -69,6 +69,7 @@ knowledge/notes/*
 !knowledge/notes/single-directory-vault-decision.md
 !knowledge/notes/classification-measurement-stand-decision.md
 !knowledge/notes/idempotent-retry-after-quarantine-decision.md
+!knowledge/notes/identity-is-a-function-of-its-content-decision.md
 !knowledge/notes/self-resolving-health-findings-decision.md
 !knowledge/notes/bounded-read-is-not-corruption-decision.md
 !knowledge/notes/bounded-capture-excerpt-decision.md

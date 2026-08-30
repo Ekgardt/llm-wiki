@@ -4884,6 +4884,100 @@ def _hook_error_result(live: bool, count: int, details: dict) -> dict:
     return _result("hooks", "ok", "No hook failure is recorded.", details)
 
 
+# A project's checkpoints are ordered, so one sequence that cannot finish holds
+# every later one. Measured on this vault 2026-08-30: `fix-pip` sequence 320
+# stood `reserved` behind a `discarded` transaction from 08-28 and refused every
+# checkpoint for that project for two days, while 744 of them queued in
+# `run/state.json`. Nothing reported it. An hour is long enough that no live
+# drain is still working on the sequence.
+CHECKPOINT_STUCK_SECONDS = 3600.0
+
+
+def _checkpoint_head_rows(path: Path) -> list[dict[str, Any]]:
+    """The lowest unfinished sequence per project, or nothing we can read."""
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        rows = connection.execute(
+            "SELECT c.project AS project, c.sequence AS sequence, c.state AS state, "
+            "COALESCE(("
+            "  SELECT MAX(a.created_at) FROM project_checkpoint_attempts a"
+            "   WHERE a.project = c.project AND a.sequence = c.sequence"
+            "), ("
+            '  SELECT t.created_at FROM "transaction" t'
+            "   WHERE t.operation_id = c.operation_id"
+            ")) AS created_at "
+            "FROM project_checkpoints c WHERE c.state != 'committed' "
+            "AND c.sequence = ("
+            "  SELECT MIN(sequence) FROM project_checkpoints"
+            "   WHERE project = c.project AND state != 'committed'"
+            ")"
+        ).fetchall()
+    finally:
+        connection.close()
+    return [dict(row) for row in rows]
+
+
+def _checkpoint_stuck(row: Mapping[str, Any], now: datetime) -> bool:
+    created = _parse_utc(row.get("created_at"))
+    if created is None:
+        return True
+    return (now - created).total_seconds() > CHECKPOINT_STUCK_SECONDS
+
+
+def _checkpoint_queue_depths(state_root: Path) -> dict[str, int]:
+    pending = _checkpoint_pending_state(Path(state_root) / "run" / "state.json")
+    if not isinstance(pending, dict):
+        return {}
+    return {
+        slug: len(queue)
+        for slug, queue in pending.items()
+        if isinstance(queue, list) and queue
+    }
+
+
+def _checkpoint_pending_state(path: Path) -> object:
+    """The pending queues, or nothing — a depth is context, never the finding."""
+    try:
+        return json.loads(path.read_bytes().decode("utf-8")).get(
+            "project_checkpoint_pending"
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+        return None
+
+
+def _checkpoint_result(stuck: list[dict[str, Any]], details: dict) -> dict:
+    if not stuck:
+        return _result(
+            "checkpoints", "ok", "No project checkpoint is stuck.", details
+        )
+    projects = ", ".join(sorted(str(row["project"]) for row in stuck))
+    return _result(
+        "checkpoints",
+        "degraded",
+        f"{len(stuck)} project(s) cannot advance their checkpoints: {projects}.",
+        details,
+    )
+
+
+def _checkpoint_check(state_root: Path, now: datetime) -> dict:
+    """Report a project whose checkpoint sequence stopped moving."""
+    path = Path(state_root) / "run" / "markdown-transactions-v3.sqlite3"
+    details: dict[str, Any] = {"database": "run/markdown-transactions-v3.sqlite3"}
+    if not path.is_file():
+        return _result("checkpoints", "ok", "No checkpoint database exists.", details)
+    try:
+        rows = _checkpoint_head_rows(path)
+    except sqlite3.Error as error:
+        details["error"] = str(error)[:200]
+        return _result(
+            "checkpoints", "ok", "The checkpoint database could not be read.", details
+        )
+    stuck = [row for row in rows if _checkpoint_stuck(row, now)]
+    details.update({"unfinished": rows, "queued": _checkpoint_queue_depths(state_root)})
+    return _checkpoint_result(stuck, details)
+
+
 def _hook_error_check(state_root: Path, now: datetime) -> dict:
     """Report what the lifecycle hooks failed at, so a silent outage is visible."""
     path = Path(state_root) / "logs" / "hook-errors.log"
@@ -8135,6 +8229,7 @@ def _deferrable_checks(
         ),
         ("capture", lambda budget: _capture_check(state_path, budget)),
         ("hooks", lambda _budget: _hook_error_check(state_path, generated_at)),
+        ("checkpoints", lambda _budget: _checkpoint_check(state_path, generated_at)),
         ("mcp", lambda _budget: _mcp_check(root_path)),
         (
             "integrations",

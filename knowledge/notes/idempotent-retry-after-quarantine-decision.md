@@ -87,3 +87,4 @@ question is retention, not liveness.
   contracts this stays inside.
 - [[knowledge/notes/self-resolving-health-findings-decision]] — how a refused attempt stops being an open finding once its work happened.
 - [[knowledge/notes/bounded-read-is-not-corruption-decision]] — why the quarantine record this retry leaves behind is still an unresolved finding, and what was refused rather than relax it.
+- [[knowledge/notes/identity-is-a-function-of-its-content-decision]] — extends this rule from quarantined rows to every spent attempt, and to the batch identity that reaches them.

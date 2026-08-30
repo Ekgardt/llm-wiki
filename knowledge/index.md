@@ -21,6 +21,7 @@ This index catalogs durable memory distilled from AI agent sessions
 - [[knowledge/notes/baseline-environment-binding-decision]] — The frozen retrieval-v2 baseline is bound to the exact
 - [[knowledge/notes/blackboard-fenced-resource-claims-decision]] — Blackboard coordination uses two bounded tables in the existing coordinator-v3 database for atomic resource claims while immutable coordination history remains authoritative Markdown.
 - [[knowledge/notes/bounded-capture-excerpt-decision]] — when a capture transcript is larger than the durable
+- [[knowledge/notes/bounded-read-is-not-corruption-decision]] — a scan that hit its read ceiling refuses `run/` deletion
 - [[knowledge/notes/centralized-memory-subsystem]] — The memory subsystem (`run/state.json`, `knowledge/daily/`, `knowledge/notes/`) resolves to a single canonical location regardless of whether Claude Code runs from the main checkout or a git worktree.
 - [[knowledge/notes/citation-relevance-gate-decision]] — A citation that shares no content with the claim it is offered for is rejected; entailment itself is still not verified and is not claimed.
 - [[knowledge/notes/classification-measurement-stand-decision]] — Session classification is measured by a labelled corpus and three gates; the shipped corpus is public and small, and the real number needs real sessions.
@@ -28,13 +29,14 @@ This index catalogs durable memory distilled from AI agent sessions
 - [[knowledge/notes/daily-entry-quote-anchor-decision]] — A daily entry starts at a timestamp heading or an operation marker, and evidence binds to the entry that contains its quote — the timestamp narrows the search, the quote settles it.
 - [[knowledge/notes/daily-heading-tolerant-reader-decision]] — the claim reader accepts both the bare `# YYYY-MM-DD`
 - [[knowledge/notes/dead-task-retirement-and-restore-decision]] — A task whose attempts are exhausted is retired only when asked for by name, through the same verified export, and one command brings its work back.
-- [[knowledge/notes/dependency-answers-one-hop-decision]] — `mode=dependencies` answers the direct dependencies and says how far it walked, instead of returning the whole reachable set nobody asked for.
+- [[knowledge/notes/dependency-answers-one-hop-decision]] — `mode=dependencies` answers the direct dependencies and
 - [[knowledge/notes/derived-evidence-generation-decision]] — Evidence retrieval uses disposable immutable cache generations while Markdown, Git, and project journals remain authoritative.
 - [[knowledge/notes/durable-capture-producer-activation-decision]] — SessionEnd and PreCompact capture publish durable Reliability V3 intent evidence before returning; detached work only wakes recovery and deletion requires terminal proof.
 - [[knowledge/notes/finding-level-dlp-allowlist-decision]] — the DLP unlock names each refused finding by the hash of
 - [[knowledge/notes/flag-inferred-content-as-preliminary]] — When writing a wiki page about a topic that has no corresponding `knowledge/raw/` or `knowledge/inbox/` source, mark the inferred sections as **preliminary** rather than omitting them or presenting them as settled.
 - [[knowledge/notes/hook-scripts-defense-in-depth]] — Two hardening decisions made 2026-04-19 to prevent silent failures in session hook scripts: a `_resolve_state_root()` fallback when `LLM_WIKI_STATE_ROOT` is unset, and an explicit guard mapping `.`, `..`, or empty slugs to `"root"`.
 - [[knowledge/notes/idempotent-retry-after-quarantine-decision]] — a refused write keeps its idempotency key and its evidence,
+- [[knowledge/notes/identity-is-a-function-of-its-content-decision]] — a batch is named after the whole batch and a reservation
 - [[knowledge/notes/install-ownership-control-plane-decision]] — Profile, user environment, and native scheduler mutations use one bounded `run/install` manifest and resumable transaction that fail closed on ambiguous ownership or external drift.
 - [[knowledge/notes/integration-config-backup-retention-decision]] — Claude and Codex configuration merges create verified byte-exact sibling preimages and retain only bounded LLM-Wiki-owned backups without claiming filesystem metadata preservation.
 - [[knowledge/notes/lsp-live-lease-decision]] — Live LSP lifecycle ownership is represented by one bounded mutable lease anchored inside the immutable owner directory.
@@ -60,7 +62,7 @@ This index catalogs durable memory distilled from AI agent sessions
 - [[knowledge/notes/solo-operator-superset-product-decision]] — LLM Wiki is the single local-first memory, code-intelligence, and agent-control product for one operator managing many agents and sessions.
 - [[knowledge/notes/state-md-exempt-from-lint]] — `state.md` files under `knowledge/projects/<slug>/` are added to `EDITORIAL_NAMES` in `lint_memory.py` and exempted from backlink-obligation and sparse-floor checks, for the same reason that `index.md` and `log.md` are exempt.
 - [[knowledge/notes/system-symlink-ancestor-decision]] — A bounded read accepts a symlinked ancestor only when
-- [[knowledge/notes/the-changelog-is-not-preamble-decision]] — `knowledge/log.md` is no longer imported into every session,
+- [[knowledge/notes/the-changelog-is-not-preamble-decision]] — `knowledge/log.md` is no longer imported into every
 - [[knowledge/notes/v4-reliability-contracts-decision]] — The approved, not-yet-implemented V4 reliability target would add path-bound compile receipts, truthful queue serialization, durable capture intents, unified fenced ownership, and bounded execution while preserving Markdown authority and the 12-tool local runtime.
 - [[knowledge/notes/warm-navigation-overhead-threshold-decision]] — The warm navigation overhead gate is 30 ms p95, measured on the slowest supported machine class rather than on a quiet one.
 

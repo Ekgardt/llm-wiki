@@ -605,6 +605,14 @@ def _coordinator_v3_statements() -> tuple[MigrationStatement, ...]:
 # operator's problem rather than something to keep numbering.
 MAX_ATTEMPT_ORDINAL = 100
 
+# Transaction states a reserved checkpoint can never recover from: the write it
+# stood for did not happen and no longer can. `preparing`, `prepared`,
+# `applying` and `aborting` are absent on purpose — those may still commit, and
+# retrying one would put a second writer on the same sequence.
+_SPENT_TRANSACTION_STATES = frozenset(
+    {"discarded", "aborted", "conflicted", "quarantined"}
+)
+
 LIKE_ESCAPE = "\\"
 
 
@@ -4922,20 +4930,63 @@ class MarkdownCoordinator:
         existing: sqlite3.Row,
         precondition: Mapping[str, object],
     ) -> ProjectCheckpointReservation:
-        if existing["state"] != "quarantined":
+        if not self._checkpoint_is_spent(database, existing):
             return self._project_reservation(existing, duplicate=True)
-        return self._retry_quarantined_checkpoint(
+        return self._retry_spent_checkpoint(
             database, project, existing, precondition
         )
 
-    def _retry_quarantined_checkpoint(
+    def _checkpoint_is_spent(
+        self, database: sqlite3.Connection, existing: sqlite3.Row
+    ) -> bool:
+        """True when this sequence's write did not happen and never will.
+
+        A quarantined row has always been retried here. A `reserved` row whose
+        transaction reached a terminal state other than `committed` is the same
+        situation wearing a different label, and it used to be answered with
+        `duplicate=True` — a claim that the checkpoint was already written when
+        nothing had been. The caller then re-derived the same operation id, the
+        transaction table found the recorded plan no longer matched the current
+        one, and refused: `operation_id is already bound to a different
+        request`, permanently.
+
+        Measured on this vault 2026-08-30: `fix-pip` sequence 320 sat
+        `reserved` with a NULL transaction while a `discarded` transaction held
+        its operation id. That single row had been refusing every checkpoint for
+        that project since 08-28 — 366 log lines — and it also stopped the
+        backlog drain for every other project behind it.
+
+        In-flight states are deliberately absent: a transaction still preparing
+        or applying may yet commit, and retrying it would be a second writer.
+        See `docs/research/2026-08-30-a-batch-named-after-one-of-its-members.md`.
+        """
+        if existing["state"] == "quarantined":
+            return True
+        if existing["state"] != "reserved":
+            return False
+        state = self._transaction_state_for_operation(
+            database, str(existing["operation_id"])
+        )
+        return state in _SPENT_TRANSACTION_STATES
+
+    @staticmethod
+    def _transaction_state_for_operation(
+        database: sqlite3.Connection, operation_id: str
+    ) -> str | None:
+        row = database.execute(
+            'SELECT state FROM "transaction" WHERE operation_id = ?',
+            (operation_id,),
+        ).fetchone()
+        return None if row is None else str(row["state"])
+
+    def _retry_spent_checkpoint(
         self,
         database: sqlite3.Connection,
         project: str,
         existing: sqlite3.Row,
         precondition: Mapping[str, object],
     ) -> ProjectCheckpointReservation:
-        """A quarantined sequence is retried as a new attempt, not a new row."""
+        """A spent sequence is retried as a new attempt, not a new row."""
         attempt_number = int(existing["attempt_number"]) + 1
         parent_operation_id = str(existing["operation_id"])
         operation_id = self._project_attempt_operation_id(
@@ -4949,7 +5000,7 @@ class MarkdownCoordinator:
             "UPDATE project_checkpoints SET lease_token = ?, "
             "fencing_epoch = ?, operation_id = ?, attempt_number = ?, "
             "parent_operation_id = ?, transaction_id = NULL, state = 'reserved' "
-            "WHERE project = ? AND sequence = ? AND state = 'quarantined'",
+            "WHERE project = ? AND sequence = ? AND state = ?",
             (
                 precondition["lease_token"],
                 precondition["fencing_epoch"],
@@ -4958,6 +5009,7 @@ class MarkdownCoordinator:
                 parent_operation_id,
                 project,
                 existing["sequence"],
+                existing["state"],
             ),
         )
         database.execute(
