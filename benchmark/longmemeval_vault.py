@@ -403,6 +403,50 @@ def error_kind(exc: BaseException) -> str:
     return "verification_or_gate"
 
 
+# What the compiler decided, read straight from its own trace instead of
+# inferred from the answer.
+#
+# Measured 2026-08-30: the answer session ranked first for 37 of 50 questions
+# and the gold text reached the model in 14 of them. Reading the code says the
+# compiler places a broad whole-file item for every parent page before the
+# narrow evidence spans, and a LongMemEval daily file holds dozens of sessions
+# against a 28 KB budget — but that is a reading, not a measurement. These
+# three numbers settle it: `evidence_missed` counts requested evidence chunks
+# the compiler could not place at all, `dropped` counts items the packer threw
+# out for budget, and the level counts say what the budget was spent on.
+def _compile_trace_metrics(context: object) -> dict[str, object]:
+    trace = getattr(context, "compile_trace", None)
+    if trace is None:
+        return {}
+    return {
+        "compile_l0": trace.l0_count,
+        "compile_l1": trace.l1_count,
+        "compile_l2": trace.l2_count,
+        "evidence_missed": len(trace.retrieval.missed_evidence_chunk_ids),
+        "evidence_requested": len(trace.retrieval.evidence_chunk_ids),
+        "packer_dropped": len(trace.packing.dropped),
+        "packed_tokens": trace.packing.packed_tokens,
+    }
+
+
+def _measured_compile(root: Path, snapshot: object, rows: list[dict], profile: str) -> dict:
+    """One extra compile, for its trace only. No provider call, no effect on the answer."""
+    from context_budget import ContextBudget
+    from query_memory import QA_MAX_OUTPUT_TOKENS, build_grounded_context
+
+    try:
+        context = build_grounded_context(
+            snapshot,
+            rows,
+            vault=root,
+            profile=profile,
+            budget=ContextBudget(None, ANSWER_INPUT_BUDGET, QA_MAX_OUTPUT_TOKENS, 512),
+        )
+    except Exception:  # noqa: BLE001 - a measurement never fails the question
+        return {}
+    return _compile_trace_metrics(context)
+
+
 def _answer_outcome(
     question_text: str,
     root: Path,
@@ -482,6 +526,7 @@ def run_question(question: dict, work: Path) -> dict:
         "answer_sessions_labelled": len(_labelled_sessions(question)),
         "gold_in_candidates": gold_in_candidates(question, rows),
         "answer_session_rank": answer_session_rank(question, rows),
+        **_measured_compile(root, snapshot, rows, profile),
         **build_info,
         **outcome,
         **metrics,

@@ -70,6 +70,19 @@ class GroundedContext:
     evidence: tuple[GroundedEvidence, ...]
     parent_paths: tuple[str, ...]
     packed_tokens: int
+    # What the compiler decided and the caller used to throw away. It already
+    # records which requested evidence chunks it could not place and which
+    # items the packer dropped, and that is the only account of why an answer
+    # was given evidence that does not contain the answer.
+    #
+    # Measured 2026-08-30, LongMemEval n=50: the answer session ranked first
+    # for 37 questions and the gold text reached the model in 14 of them, so
+    # something between selection and packing loses it. Nothing outside the
+    # compiler can say what, and the compiler was already saying it.
+    #
+    # Optional so no existing caller changes, and diagnostic only: nothing
+    # reads it to make a decision.
+    compile_trace: object | None = None
 
     @classmethod
     def empty(cls, *, profile: str) -> GroundedContext:
@@ -284,6 +297,7 @@ def build_grounded_context(
         tuple(evidence),
         parent_paths,
         packed_tokens,
+        getattr(compiled, "trace", None),
     )
 
 
