@@ -124,6 +124,7 @@
 - 2026-08-29 — Automated compile completed for snapshot 27b4b40d920e0499c13f12d3b25474e39d70f8fa1f4398ee157c68e0b6b2c7ae, 539a208e52e20f15f60549698da4fe6a0850d7e636ca4ef5eb5c5c0d2f2a4e93. Touched: none.
 - 2026-08-30 — Automated compile completed for snapshot 0349bafda18976164d3465c75a1f9065b56a4fffe111b2823ed4e5a5b091cf63, 1753b553adb0d8d5458d205aa8c28f0706ef414f83595612fe5fa630fed7da74, 59171debf880009ac191728e7a6e7c2c94aab193ccc782129fc8145fd6ac95a9, f84b059e8d535999fff5335bdad2b74fee6742410efb813f434f12ee0ecdfd12. Touched: none.
 - 2026-08-30 — Automated compile completed for snapshot e78b4be5d217af4ac30591c990d61b3848791f6eac3b9d2ac9068e75ce45ab7e. Touched: none.
+- 2026-08-31 — Automated compile completed for snapshot 1b4526b82350b5b2527f7933934d29143dd6497fe68306ceadc33c0f5558d122, 4e7e2445a418399b24fa1fbd011b645b533d535c1cbcb96ce0e9147ca714b694, b3bca256856d780512572dc6ee9c014d6cc5d61ed0cb4797636f98c28ba67aac, cffa8604819b75981e70198d43fe1578c707a1d0db199b68f2db97815b685b9a. Touched: none.
 
 ## Editorial note
 This log is vault metadata — an append-only editorial changelog of compile passes and hygiene actions over `knowledge/`, not content derived from `knowledge/raw/` or `knowledge/inbox/`. New entries are appended at the bottom by compile passes and by hand; entries are never rewritten or removed.
@@ -1523,3 +1524,13 @@ This log is vault metadata — an append-only editorial changelog of compile pas
   дешевле сильнейшей публичной системы, а по точности отстаём втрое. Это
   уточняет цель: экономить токены дальше сейчас незачем, вся дистанция в
   качестве.
+
+- 2026-08-31 — Появился стенд, который отличает улучшение от шума, и правило к
+  нему записано до прогона, а не после. Рука выигрывает разряд только если
+  превосходит базовую больше, чем на собственный разброс базовой; падение
+  больше того же разброса — проигрыш, и он блокирует изменение, что бы ни
+  делало общее среднее; всё прочее — «разницы не измерено», а это не «разницы
+  нет». Проверил на настоящих отчётах: вчерашний прирост общей точности
+  оказался ровно внутри разброса базовой, то есть не доказан, — как я и
+  говорил вчера. Заодно стенд сам сообщает, когда руку прогнали слишком мало
+  раз, чтобы вердикт считался измерением.
