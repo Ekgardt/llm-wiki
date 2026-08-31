@@ -125,6 +125,7 @@
 - 2026-08-30 — Automated compile completed for snapshot 0349bafda18976164d3465c75a1f9065b56a4fffe111b2823ed4e5a5b091cf63, 1753b553adb0d8d5458d205aa8c28f0706ef414f83595612fe5fa630fed7da74, 59171debf880009ac191728e7a6e7c2c94aab193ccc782129fc8145fd6ac95a9, f84b059e8d535999fff5335bdad2b74fee6742410efb813f434f12ee0ecdfd12. Touched: none.
 - 2026-08-30 — Automated compile completed for snapshot e78b4be5d217af4ac30591c990d61b3848791f6eac3b9d2ac9068e75ce45ab7e. Touched: none.
 - 2026-08-31 — Automated compile completed for snapshot 1b4526b82350b5b2527f7933934d29143dd6497fe68306ceadc33c0f5558d122, 4e7e2445a418399b24fa1fbd011b645b533d535c1cbcb96ce0e9147ca714b694, b3bca256856d780512572dc6ee9c014d6cc5d61ed0cb4797636f98c28ba67aac, cffa8604819b75981e70198d43fe1578c707a1d0db199b68f2db97815b685b9a. Touched: none.
+- 2026-08-31 — Automated compile completed for snapshot 51f5f9b786284c9821a1de060fd0a5bbcf5ceb1bac86a5e8bf617c769673fe7b, 6fea2bb98150ea254962399e862374523a4187f05d180162b5197fcb1e8fc222, 7bef495b640ae993f00749d9472858b3845bce71390867fe4049fede864461f9, a397cd9ade6c45f7f84732dbe98b3957d4d39d1cef802a24528c21e708e0e56b. Touched: none.
 
 ## Editorial note
 This log is vault metadata — an append-only editorial changelog of compile passes and hygiene actions over `knowledge/`, not content derived from `knowledge/raw/` or `knowledge/inbox/`. New entries are appended at the bottom by compile passes and by hand; entries are never rewritten or removed.
@@ -1534,3 +1535,13 @@ This log is vault metadata — an append-only editorial changelog of compile pas
   оказался ровно внутри разброса базовой, то есть не доказан, — как я и
   говорил вчера. Заодно стенд сам сообщает, когда руку прогнали слишком мало
   раз, чтобы вердикт считался измерением.
+
+- 2026-08-31 — Базовая рука наконец измерена как следует: три прогона по
+  двести вопросов. Разброс общей точности упал с семи сотых при пятидесяти
+  вопросах до полутора сотых при двухстах — теперь изменение в две сотых
+  доказуемо. Сама точность оказалась ниже прежних чисел, и это не ухудшение:
+  в большой выборке больше тяжёлых разрядов, а прежние цифры были оптимистичны
+  из-за состава выборки. Заодно вылезло то, чего не было видно: разряд
+  предпочтений в одной сессии даёт ноль во всех трёх прогонах на двенадцати
+  вопросах. Это не шум, это разряд, который не работает совсем, и в бэклоге он
+  не назван.
