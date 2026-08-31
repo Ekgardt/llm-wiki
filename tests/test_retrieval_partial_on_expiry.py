@@ -53,11 +53,22 @@ def _hit(cid: str, path: str, score: float) -> dict:
 
 
 def _expire_after_lexical(hits):
-    """A lexical backend that finishes and leaves no budget behind it."""
+    """A lexical backend that finishes and leaves no budget behind it.
+
+    It waits on the clock rather than on `sleep`. `time.sleep(0.06)` against a
+    50 ms deadline assumes the sleep never returns early, and on Windows under
+    Python 3.10 the timer granularity is coarse enough that it does: measured
+    2026-08-31, `py3.10-s3` was the last failing shard, with the dense leg
+    running because the budget had not actually expired. Every other version
+    and platform passed the same test.
+    """
     deadline = time.monotonic() + 0.05
 
     def lexical(**_kwargs):
-        time.sleep(0.06)
+        for _ in range(10_000):
+            if time.monotonic() > deadline:
+                break
+            time.sleep(0.001)
         return hits
 
     return deadline, lexical
