@@ -133,6 +133,7 @@ def _aggregated_report() -> dict:
             "hypothesis": "You paid 85 dollars for the sneakers",
             "status": "answered",
             "est_prompt_tokens": 1500,
+            "est_total_prompt_tokens": 1720,
             "retrieve_seconds": 2.0,
             "answer_seconds": 50.0,
         },
@@ -213,6 +214,10 @@ def test_aggregate_carries_cost_columns_and_an_overall_row() -> None:
 
     assert report["overall"]["n"] == 2
     assert report["multi-session"]["mean_est_prompt_tokens"] == 1500
+    # The user prompt alone is not what the model is charged for. Every token
+    # figure this stand produced before 2026-08-31 was short by the system
+    # prompt, while the numbers the field publishes are whole-context.
+    assert report["multi-session"]["mean_est_total_prompt_tokens"] == 1720
 
 
 def test_haystack_dates_become_day_and_time() -> None:

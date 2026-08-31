@@ -178,12 +178,16 @@ def _worker_result(out_file: Path, returncode: int) -> dict:
 
 
 def _print_summary(report: dict) -> None:
-    columns = "category n scored accuracy em f1 prov_fail est_tokens retrieve_s answer_s"
+    columns = (
+        "category n scored accuracy em f1 prov_fail est_tokens total_tokens "
+        "retrieve_s answer_s"
+    )
     print(columns)
     for name, row in report.items():
         print(
             f"{name} {row['n']} {row['scored']} {row['accuracy']} {row['em']} "
             f"{row['f1']} {row['provider_failures']} {row['mean_est_prompt_tokens']} "
+            f"{row.get('mean_est_total_prompt_tokens')} "
             f"{row['mean_retrieve_seconds']} {row['mean_answer_seconds']}"
         )
 
