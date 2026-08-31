@@ -112,7 +112,7 @@ def test_a_symlinked_path_is_refused_and_offers_the_real_path(vault, tmp_path):
         repository_index.admit_repository(link, state_root=state)
 
     assert refusal.value.reason == "repository_path_is_symlinked"
-    assert refusal.value.details["real_path"] == str(repository)
+    assert Path(refusal.value.details["real_path"]) == repository.resolve()
 
 
 def test_a_submodule_is_refused_and_names_its_superproject(vault, tmp_path):
@@ -133,7 +133,10 @@ def test_a_submodule_is_refused_and_names_its_superproject(vault, tmp_path):
         repository_index.admit_repository(outer / "vendor", state_root=state)
 
     assert refusal.value.reason == "repository_is_submodule"
-    assert refusal.value.details["superproject"] == str(outer)
+    # Git prints a Windows working tree with forward slashes, which is also the
+    # canonical form `repository_scope` stores. Comparing the text asserts the
+    # spelling; comparing the path asserts the directory.
+    assert Path(refusal.value.details["superproject"]) == outer.resolve()
 
 
 def test_the_vault_itself_is_refused(vault, tmp_path):
@@ -360,7 +363,7 @@ def _assert_listing(state, repository) -> None:
     import repository_index
 
     rows = repository_index.list_repositories(state_root=state)["repositories"]
-    assert [row["checkout_root"] for row in rows] == [str(repository)]
+    assert [Path(row["checkout_root"]) for row in rows] == [repository.resolve()]
     assert rows[0]["code_roots"] == ["scripts"]
     assert rows[0]["active"] is False
 
