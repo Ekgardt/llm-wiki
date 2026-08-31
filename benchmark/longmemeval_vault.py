@@ -373,6 +373,16 @@ def _instrumented_generator(metrics: dict, gold: str = ""):
         metrics["prompt_bytes"] = len(prompt.encode("utf-8"))
         metrics["system_chars"] = len(system_prompt)
         metrics["est_prompt_tokens"] = round(len(prompt) / 4)
+        # What the model is actually charged for. `est_prompt_tokens` counts the
+        # user prompt only, so every token-cost figure this stand has produced
+        # was short by the system prompt — and the comparison points the field
+        # publishes (~6 900 for Mem0, ~720 added for Supermemory) are whole-
+        # context numbers. The old field stays so earlier reports remain
+        # readable next to new ones. Both are `chars / 4`, not a tokenizer:
+        # a real count needs a network round trip, which this path will not make.
+        metrics["est_total_prompt_tokens"] = round(
+            (len(prompt) + len(system_prompt)) / 4
+        )
         metrics["gold_in_prompt"] = bool(needle) and needle in prompt.casefold()
         started = time.monotonic()
         try:

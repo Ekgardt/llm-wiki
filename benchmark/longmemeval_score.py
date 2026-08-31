@@ -181,6 +181,9 @@ def _cost_metrics(rows: list[dict]) -> dict:
     return {
         "mean_prompt_chars": _mean(_metric_values(rows, "prompt_chars")),
         "mean_est_prompt_tokens": _mean(_metric_values(rows, "est_prompt_tokens")),
+        "mean_est_total_prompt_tokens": _mean(
+            _metric_values(rows, "est_total_prompt_tokens")
+        ),
         "mean_retrieve_seconds": _mean(_metric_values(rows, "retrieve_seconds")),
         "mean_answer_seconds": _mean(_metric_values(rows, "answer_seconds")),
         "mean_total_seconds": _mean(_metric_values(rows, "total_seconds")),
