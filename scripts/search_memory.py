@@ -60,6 +60,7 @@ from reliable_memory import (  # noqa: E402
     fsync_file,
     validate_runtime_file,
 )
+from secret_redact import redact_secrets  # noqa: E402
 
 INDEX_DIR = STATE_ROOT / "cache"
 INDEX_FILE = INDEX_DIR / "index.sqlite"
@@ -157,13 +158,61 @@ from embedding_model import (  # noqa: E402
     prefixed_texts,
 )
 
+# Why there is no dense signal, in three words a reader can act on:
+# `import_failed` (the optional package is not installed — a worker launched
+# under the system interpreter instead of `uv run`), `model_unavailable` (the
+# package is there, the weights are not) and `load_failed` (both are there and
+# the model still would not load). The reason is bounded and redacted because
+# a load error quotes paths and occasionally a token.
+EMBEDDER_REASON_MAX_CHARS = 200
+
+_embedder_unavailable_reason: str | None = None
+_embedder_announced: set[str] = set()
+
+
+def embedder_unavailable_reason() -> str | None:
+    """Why the embedding model is unavailable, or None when it loaded.
+
+    `_get_embedder` was `except Exception: return None`, so a missing package,
+    a missing model and a corrupt one were the same answer as a vault that
+    simply has no vectors yet. A LongMemEval worker run under the system
+    `python3` retrieved zero rows and looked exactly like a retrieval
+    regression; the generation carried `vector_state: absent`, which was true
+    and said nothing.
+    """
+    return _embedder_unavailable_reason
+
+
+def _embedder_failure_kind(exc: BaseException) -> str:
+    if isinstance(exc, ImportError):
+        return "import_failed"
+    if isinstance(exc, OSError) or "NotFound" in type(exc).__name__:
+        return "model_unavailable"
+    return "load_failed"
+
+
+def _note_embedder_unavailable(kind: str, detail: str) -> None:
+    """Record why there is no dense signal, and say it once, not per call."""
+    global _embedder_unavailable_reason
+    text = " ".join(redact_secrets(detail).split())[:EMBEDDER_REASON_MAX_CHARS]
+    _embedder_unavailable_reason = f"{kind}: {text}" if text else kind
+    if kind in _embedder_announced:
+        return
+    _embedder_announced.add(kind)
+    print(
+        f"search_memory: no dense signal — embedding model {EMBEDDING_MODEL} "
+        f"is unavailable ({_embedder_unavailable_reason})",
+        file=sys.stderr,
+    )
+
 
 def _have_sentence_transformers() -> bool:
     """Check if sentence-transformers is importable."""
     try:
         import sentence_transformers  # noqa: F401
         return True
-    except ImportError:
+    except ImportError as exc:
+        _note_embedder_unavailable("import_failed", str(exc))
         return False
 
 
@@ -172,8 +221,13 @@ def _get_embedder():
 
     The model is cached at module level — loading ~90MB model once,
     not per-query. This is critical for benchmark latency.
+
+    Unavailable still means None, never an exception: the generation reader
+    treats an unusable query vector as "no dense signal" by contract and that
+    is exactly what an unavailable model means. What changed is that the
+    reason is recorded and named — see `embedder_unavailable_reason`.
     """
-    global _embedder_cache
+    global _embedder_cache, _embedder_unavailable_reason
     if _embedder_cache is not None:
         return _embedder_cache
     try:
@@ -181,9 +235,13 @@ def _get_embedder():
         _embedder_cache = SentenceTransformer(
             EMBEDDING_MODEL, revision=EMBEDDING_MODEL_REVISION
         )
-        return _embedder_cache
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - no dense signal is not an error
+        _note_embedder_unavailable(
+            _embedder_failure_kind(exc), f"{type(exc).__name__}: {exc}"
+        )
         return None
+    _embedder_unavailable_reason = None
+    return _embedder_cache
 
 
 _embedder_cache = None
@@ -488,6 +546,15 @@ def _chunk_texts(snapshot: CorpusSnapshot) -> list[str]:
     return [chunk.text for chunk in snapshot.chunks]
 
 
+def _require_embedded_shape(matrix, rows: int, dimensions: int) -> None:
+    import numpy as np
+
+    if matrix.ndim != 2 or matrix.shape != (rows, dimensions):
+        raise ValueError("embedder returned a matrix with incompatible shape")
+    if matrix.dtype.kind not in "fiu" or not np.isfinite(matrix).all():
+        raise ValueError("embedder returned a non-finite numeric matrix")
+
+
 def _embedded_matrix(
     snapshot: CorpusSnapshot, embedder: object, dimensions: int
 ) -> object:
@@ -497,11 +564,59 @@ def _embedded_matrix(
     matrix = np.asarray(
         _call_generation_embedder(embedder, _chunk_texts(snapshot))
     )
-    if matrix.ndim != 2 or matrix.shape != (len(snapshot.chunks), dimensions):
-        raise ValueError("embedder returned a matrix with incompatible shape")
-    if matrix.dtype.kind not in "fiu" or not np.isfinite(matrix).all():
-        raise ValueError("embedder returned a non-finite numeric matrix")
+    _require_embedded_shape(matrix, len(snapshot.chunks), dimensions)
     return np.ascontiguousarray(matrix, dtype=np.float32)
+
+
+def _embedded_rows(texts: list[str], embedder: object, dimensions: int):
+    """Encode exactly the texts asked for, or return an empty (0, d) block."""
+    import numpy as np
+
+    if not texts:
+        return np.zeros((0, dimensions), dtype=np.float32)
+    matrix = np.asarray(_call_generation_embedder(embedder, texts))
+    _require_embedded_shape(matrix, len(texts), dimensions)
+    return np.ascontiguousarray(matrix, dtype=np.float32)
+
+
+def _reused_matrix(
+    snapshot: CorpusSnapshot, embedder: object, dimensions: int, cache: Mapping[str, object]
+) -> tuple[object, int]:
+    """One row per chunk, taken from the cache where the chunk digest matches.
+
+    A chunk ID is `sha256({extractor, parent, path, range, sha256})` where the
+    last field is the digest of the chunk's own bytes and `chunk.text` is those
+    bytes decoded — so an equal ID means equal text, and the model has already
+    been checked to be the same model at the same revision. The reused row is
+    therefore the row that model produced for that exact text.
+
+    What this does *not* claim: that the row equals what a fresh full build
+    would emit here. It does not, and neither does another full build — measured
+    on 400 real chunks, re-batching the same texts moves float32 results by up
+    to 8.6e-08, because sentence-transformers pads and sorts by length. See
+    `docs/research/2026-08-28-what-a-rebuild-may-reuse.md`.
+    """
+    import numpy as np
+
+    fresh_positions = [
+        index for index, chunk in enumerate(snapshot.chunks) if chunk.id not in cache
+    ]
+    fresh = _embedded_rows(
+        [snapshot.chunks[index].text for index in fresh_positions], embedder, dimensions
+    )
+    matrix = np.zeros((len(snapshot.chunks), dimensions), dtype=np.float32)
+    for row, index in enumerate(fresh_positions):
+        matrix[index] = fresh[row]
+    _fill_cached_rows(matrix, snapshot, cache)
+    return matrix, len(snapshot.chunks) - len(fresh_positions)
+
+
+def _fill_cached_rows(matrix, snapshot: CorpusSnapshot, cache: Mapping[str, object]) -> None:
+    for index, chunk in enumerate(snapshot.chunks):
+        cached = cache.get(chunk.id)
+        if cached is None:
+            continue
+        matrix[index] = cached
 
 
 def _vector_metadata(
@@ -562,6 +677,104 @@ def _publish_vector_artifacts(
         _remove_quietly((temporary_json, temporary_npy))
 
 
+#: The identity a cached vector is namespaced by. A row is reusable only when
+#: every one of these matches, on top of the chunk digest itself.
+VECTOR_CACHE_IDENTITY_KEYS = ("schema_version", "model_id", "model_revision", "dimensions")
+#: Bounds the read of a parent generation's vector metadata. It holds four
+#: parallel ID lists, so it grows with the number of chunks, not with history.
+MAX_PARENT_VECTOR_METADATA_BYTES = 256 * 1024 * 1024
+
+
+def _parent_vector_metadata(reuse_from: Path) -> Mapping[str, object] | None:
+    metadata_path = reuse_from / "vectors.json"
+    matrix_path = reuse_from / "vectors.npy"
+    if not metadata_path.is_file() or not matrix_path.is_file():
+        return None
+    if metadata_path.stat().st_size > MAX_PARENT_VECTOR_METADATA_BYTES:
+        return None
+    return _loaded_json_mapping(metadata_path)
+
+
+def _loaded_json_mapping(path: Path) -> Mapping[str, object] | None:
+    try:
+        value = json.loads(path.read_bytes())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, Mapping):
+        return None
+    return value
+
+
+def _vector_identity_matches(
+    metadata: Mapping[str, object], model_id: str, model_revision: str, dimensions: int
+) -> bool:
+    expected = {
+        "schema_version": "corpus-vectors/v1",
+        "model_id": model_id,
+        "model_revision": model_revision,
+        "dimensions": dimensions,
+    }
+    return all(metadata.get(key) == expected[key] for key in VECTOR_CACHE_IDENTITY_KEYS)
+
+
+def _loaded_parent_matrix(reuse_from: Path, rows: int, dimensions: int):
+    import numpy as np
+
+    try:
+        matrix = np.load(reuse_from / "vectors.npy", allow_pickle=False)
+    except (OSError, ValueError):
+        return None
+    if matrix.shape != (rows, dimensions) or matrix.dtype != np.float32:
+        return None
+    return matrix
+
+
+def _reusable_vector_rows(
+    reuse_from: Path | None, model_id: str, model_revision: str, dimensions: int
+) -> dict[str, object]:
+    """The parent generation's vectors, keyed by chunk digest.
+
+    The parent generation *is* the cache — it is already immutable, already
+    carries one digest per chunk beside its matrix, and is already pruned by the
+    catalog's own retention. Nothing new is stored, so nothing new can grow
+    without bound.
+
+    Every refusal here is silent and total: an unusable parent means this build
+    embeds everything, which is exactly what every build did before.
+    """
+    if reuse_from is None:
+        return {}
+    metadata = _parent_vector_metadata(reuse_from)
+    if metadata is None or not _vector_identity_matches(
+        metadata, model_id, model_revision, dimensions
+    ):
+        return {}
+    return _rows_by_chunk_id(reuse_from, metadata, dimensions)
+
+
+def _rows_by_chunk_id(
+    reuse_from: Path, metadata: Mapping[str, object], dimensions: int
+) -> dict[str, object]:
+    chunk_ids = metadata.get("chunk_ids")
+    if not _usable_chunk_ids(chunk_ids):
+        return {}
+    matrix = _loaded_parent_matrix(reuse_from, len(chunk_ids), dimensions)
+    if matrix is None:
+        return {}
+    return {
+        chunk_id: matrix[index]
+        for index, chunk_id in enumerate(chunk_ids)
+        if isinstance(chunk_id, str)
+    }
+
+
+def _usable_chunk_ids(chunk_ids: object) -> bool:
+    """Duplicate IDs would make a row ambiguous, so the whole cache is refused."""
+    if not isinstance(chunk_ids, list):
+        return False
+    return len(set(chunk_ids)) == len(chunk_ids)
+
+
 def build_generation_numpy_vectors(
     snapshot: CorpusSnapshot,
     generation_directory: Path,
@@ -570,12 +783,37 @@ def build_generation_numpy_vectors(
     model_id: str,
     model_revision: str,
     dimensions: int,
+    reuse_from: Path | None = None,
 ) -> list[dict[str, object]]:
     """Build an exact NumPy matrix and closed metadata from one chunk sequence."""
+    return _built_generation_vectors(
+        snapshot,
+        generation_directory,
+        embedder=embedder,
+        model_id=model_id,
+        model_revision=model_revision,
+        dimensions=dimensions,
+        reuse_from=reuse_from,
+    )[0]
+
+
+def _built_generation_vectors(
+    snapshot: CorpusSnapshot,
+    generation_directory: Path,
+    *,
+    embedder: object,
+    model_id: str,
+    model_revision: str,
+    dimensions: int,
+    reuse_from: Path | None = None,
+) -> tuple[list[dict[str, object]], int]:
+    """The same build, plus how many rows came from the parent rather than the model."""
     _require_vector_build_inputs(snapshot, model_id, model_revision, dimensions)
     directory = _generation_directory(generation_directory)
     destinations = [directory / name for name in GENERATION_VECTOR_ARTIFACTS]
     _require_absent_artifacts(destinations)
+    cache = _reusable_vector_rows(reuse_from, model_id, model_revision, dimensions)
+    matrix, reused = _reused_matrix(snapshot, embedder, dimensions, cache)
     _publish_vector_artifacts(
         directory,
         destinations,
@@ -585,12 +823,12 @@ def build_generation_numpy_vectors(
             model_revision=model_revision,
             dimensions=dimensions,
         ),
-        _embedded_matrix(snapshot, embedder, dimensions),
+        matrix,
     )
     return [
         _artifact_descriptor(directory / name, name)
         for name in GENERATION_VECTOR_ARTIFACTS
-    ]
+    ], reused
 
 
 def _generation_embedder(embedder, *, is_query: bool):
@@ -670,6 +908,7 @@ def build_generation_vectors_if_available(
     *,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
+    reuse_from: Path | None = None,
 ) -> dict[str, object] | None:
     """Build this generation's vectors, or say plainly that they cannot be built.
 
@@ -689,13 +928,14 @@ def build_generation_vectors_if_available(
     if embedder is None:
         return None
     try:
-        artifacts = build_generation_numpy_vectors(
+        artifacts, reused = _built_generation_vectors(
             snapshot,
             generation_directory,
             embedder=_generation_embedder(embedder, is_query=False),
             model_id=EMBEDDING_MODEL,
             model_revision=EMBEDDING_MODEL_REVISION,
             dimensions=EMBEDDING_DIM,
+            reuse_from=reuse_from,
         )
     except TimeoutError:
         raise
@@ -710,6 +950,8 @@ def build_generation_vectors_if_available(
         "model_id": EMBEDDING_MODEL,
         "model_revision": EMBEDDING_MODEL_REVISION,
         "dimensions": EMBEDDING_DIM,
+        "reused_chunks": reused,
+        "embedded_chunks": len(snapshot.chunks) - reused,
     }
 
 
@@ -2021,6 +2263,109 @@ def _require_expected_seal(
         raise ValueError("generation artifact does not match active manifest")
 
 
+# A generation is immutable after activation, so one query seals the same bytes
+# four or five times: once when it adopts the generation, and again before and
+# after every read. Each seal re-hashes every sealed artifact. Measured on the
+# live vault (38 MiB sealed set), that is 0.04-2.06 s per seal and 0.34-2.77 s
+# of a 10 s MCP budget, for a verdict that cannot differ between the first call
+# and the fifth.
+#
+# NEW-69 closed the same shape by memoising a verdict keyed by the digests the
+# caller had already paid for. That key is not available here: the digest *is*
+# the work, so it cannot key its own cache. The key that is free is the one the
+# seal tuple already carries — the artifact's stat identity.
+#
+# A write that keeps dev, ino, mode, size and mtime_ns still moves ctime_ns,
+# which no syscall can set: the kernel stamps it on every inode change,
+# including the utimensat that would forge mtime. What stat identity cannot
+# rule out is a second same-size write landing in the same clock tick as the
+# one that was hashed, which would carry the same stamp. Linux stamps inodes
+# from the coarse clock, one jiffy wide — 10 ms at the lowest supported
+# CONFIG_HZ — so an observation is kept only once the artifact's stamps are
+# older than that. This is git's racily-clean rule with the tick made explicit
+# instead of inferred from the index's own write time.
+_SEAL_STAMP_SETTLE_NS = 20_000_000
+_SEAL_OBSERVATION_LIMIT = 32
+_seal_observations: dict[tuple, str] = {}
+_seal_observation_lock = threading.Lock()
+
+
+def _stat_identity(status) -> tuple:
+    return (
+        status.st_dev,
+        status.st_ino,
+        status.st_mode,
+        status.st_size,
+        status.st_mtime_ns,
+        status.st_ctime_ns,
+    )
+
+
+def _seal_observation_key(
+    path: Path, identity: tuple, expected: dict[str, object] | None
+) -> tuple:
+    """Same file, same bytes on disk, same thing the manifest expected of it."""
+    wanted = expected or {}
+    return (str(path), identity, wanted.get("size"), wanted.get("sha256"))
+
+
+def _observed_checksum(key: tuple) -> str | None:
+    with _seal_observation_lock:
+        return _seal_observations.get(key)
+
+
+# The cache trusts `st_ctime_ns` to catch a rewrite that forged its mtime: on
+# POSIX no syscall can set it, because the kernel stamps it on every inode
+# change. Windows has no change-time at all — `st_ctime` there is the creation
+# time and survives a rewrite — so the same-size, forged-mtime rewrite would be
+# served from the cache unchecked. Measured 2026-08-30: eight Windows jobs, and
+# `test_a_rewrite_that_forges_mtime_is_still_caught_by_ctime` read `1 == 2`
+# because nothing re-hashed. Where the guard does not exist the cache does not
+# either; a seal that can be fooled is worth less than the hashing it saves.
+_CTIME_IS_A_CHANGE_TIME = sys.platform != "win32"
+
+
+def _record_observed_checksum(key: tuple, checksum: str, *, racy: bool) -> None:
+    if racy or not _CTIME_IS_A_CHANGE_TIME:
+        return
+    with _seal_observation_lock:
+        if len(_seal_observations) >= _SEAL_OBSERVATION_LIMIT:
+            _seal_observations.clear()
+        _seal_observations[key] = checksum
+
+
+def _reset_seal_observations() -> None:
+    """Tests that rewrite an artifact in place need the next seal to re-hash."""
+    with _seal_observation_lock:
+        _seal_observations.clear()
+
+
+def _hashed_seal(
+    path: Path,
+    before,
+    expected: dict[str, object] | None,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> tuple:
+    began_ns = time.time_ns()
+    with path.open("rb") as source:
+        size, checksum, opened, after_open = _hashed_open_file(
+            source, before, deadline, cancelled
+        )
+    after = path.lstat()
+    _require_stable_identity(opened, after_open, after)
+    _require_expected_seal(expected, size, checksum)
+    identity = _stat_identity(after)
+    _record_observed_checksum(
+        _seal_observation_key(path, identity, expected),
+        checksum,
+        racy=max(after.st_mtime_ns, after.st_ctime_ns)
+        > began_ns - _SEAL_STAMP_SETTLE_NS,
+    )
+    return (*identity, checksum)
+
+
 def _sealed_file(
     path: Path,
     expected: dict[str, object] | None = None,
@@ -2030,21 +2375,12 @@ def _sealed_file(
 ) -> tuple:
     _check_generation_stop(deadline, cancelled)
     before = _require_regular_file(path)
-    with path.open("rb") as source:
-        size, checksum, opened, after_open = _hashed_open_file(
-            source, before, deadline, cancelled
-        )
-    after = path.lstat()
-    _require_stable_identity(opened, after_open, after)
-    _require_expected_seal(expected, size, checksum)
-    return (
-        after.st_dev,
-        after.st_ino,
-        after.st_mode,
-        after.st_size,
-        after.st_mtime_ns,
-        after.st_ctime_ns,
-        checksum,
+    identity = _stat_identity(before)
+    observed = _observed_checksum(_seal_observation_key(path, identity, expected))
+    if observed is not None:
+        return (*identity, observed)
+    return _hashed_seal(
+        path, before, expected, deadline=deadline, cancelled=cancelled
     )
 
 
@@ -3549,6 +3885,24 @@ def _vector_scored_rows(
     deadline,
     cancelled,
 ) -> list[dict[str, object]]:
+    """Cosine rows, ordered by the same trust-weighted score the lexical leg uses.
+
+    `_generation_result` already multiplies the lexical rank by `trust_weight`,
+    so the lexical leg decides *admission* by who said it and what the page is.
+    The dense leg used to overwrite that score with raw cosine, which left the
+    vault's own rule -- answer from the compiled pages, read the commentary
+    after -- governing only the order of candidates that were already in the
+    pool, never which candidates got into it.
+
+    That gap stayed harmless while the commentary was small. Measured on this
+    vault on 2026-08-29, `docs/` carried 1,409 chunks against `knowledge/notes`'
+    620, and 49 of the 87 research notes had been written in the preceding two
+    days. Because the questions are Russian and the decision pages are English,
+    same-language commentary took every high cosine: the gold page for eight of
+    ten stand questions ranked 117-310 by raw cosine and never entered the
+    120-row over-fetch, so no downstream weight could reach it. Weighting here
+    puts those same pages at 1-14.
+    """
     filters, values = _generation_filters(scope=scope, since=since, as_of=as_of)
     with _generation_sqlite_guard(connection, deadline, cancelled):
         rows = connection.execute(
@@ -3566,6 +3920,9 @@ def _vector_scored_rows(
         # The vector path boosts a project match by 1.5, not by the lexical 2.0.
         if project and str(result["project"]).casefold() == project.casefold():
             score *= 1.5
+        # Absent provenance weighs 1.0 by `trust_weight`'s own contract, so a row
+        # that carries none is admitted on its cosine alone rather than refused.
+        score *= trust_weight(result.get("authority"), result.get("type"))
         result["score"] = round(score, 4)
         result["requested_mode"] = "hybrid"
         result["effective_mode"] = "hybrid"

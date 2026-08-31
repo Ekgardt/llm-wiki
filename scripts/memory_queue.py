@@ -64,6 +64,9 @@ _MAX_RUNTIME_ATTEMPTS = 100
 _MAX_MARKER_BYTES = 64
 _MAX_QUEUE_PAYLOAD_BYTES = 1024 * 1024
 _MAX_QUEUE_DEPTH = 32
+# One trail line per failed processor. The trail is read by a person at
+# session start, so the reason has to fit a line, not carry a stack.
+MAX_PROCESSOR_REASON_CHARS = 300
 _MAX_CLI_DETAIL_CHARS = 240
 _MAX_QUEUE_STRING_BYTES = 256 * 1024
 _MAX_QUEUE_CONTAINER_MEMBERS = 1024
@@ -4826,6 +4829,81 @@ _QUEUE_OWNER_PARENT_ROLES = {
 }
 
 
+def _reclaim_dead_queue_projections(
+    database: sqlite3.Connection, registry: Any, lease: OwnerLease
+) -> None:
+    """Take over the projections a dead owner left in this database.
+
+    The projection lives here, not in the coordinator, so no reclaim on that
+    side can ever reach it: it needs the same consultation, on the same proof
+    — expired lease plus a process the OS says is gone — which is why the
+    answer comes from the registry rather than from a second rule written
+    here. A live or unprovable owner still refuses by name. The registry is
+    resolved by the caller, before this database's write transaction opens, so
+    the two databases are never locked in the reverse of the usual order.
+    """
+    rows = database.execute(
+        """SELECT * FROM queue_ownership
+           WHERE actor_id=? OR owner_token=?
+              OR (canonical_role=? AND canonical_scope=?)""",
+        (lease.actor_id, lease.token, lease.role, lease.scope),
+    ).fetchall()
+    for row in rows:
+        _require_dead_queue_owner(registry, row)
+        _delete_queue_projection_row(database, row)
+
+
+def _require_dead_queue_owner(registry: Any, row: sqlite3.Row) -> None:
+    """A projection is reclaimable exactly when its canonical owner is."""
+    if registry.reclaimable_dead_owner(row):
+        return
+    raise QueueOperationError(
+        "queue_owner_busy",
+        f"{row['canonical_role']} {row['canonical_scope']} is already projected",
+    )
+
+
+# A task fence exists only while its canonical owner does, and it names that
+# owner by the same tuple, so it is reclaimed by the same proof, in the same
+# transaction. Without this the ownership reclaim succeeds and the very next
+# step still refuses `task_fenced` for ever.
+_DEAD_OWNER_TASK_FENCES = """DELETE FROM task_fences
+   WHERE canonical_role=? AND canonical_scope=? AND canonical_actor_id=?
+     AND canonical_owner_token=? AND canonical_fencing_epoch=?"""
+
+
+def _delete_queue_projection_row(
+    database: sqlite3.Connection, row: sqlite3.Row
+) -> None:
+    database.execute(
+        _DEAD_OWNER_TASK_FENCES,
+        (
+            row["canonical_role"],
+            row["canonical_scope"],
+            row["actor_id"],
+            row["owner_token"],
+            row["fencing_epoch"],
+        ),
+    )
+    deleted = database.execute(
+        """DELETE FROM queue_ownership
+           WHERE actor_id=? AND canonical_role=? AND canonical_scope=?
+             AND owner_token=? AND fencing_epoch=? AND process_id=?
+             AND process_start_identity=?""",
+        (
+            row["actor_id"],
+            row["canonical_role"],
+            row["canonical_scope"],
+            row["owner_token"],
+            row["fencing_epoch"],
+            row["process_id"],
+            row["process_start_identity"],
+        ),
+    ).rowcount
+    if deleted != 1:
+        raise QueueOperationError("queue_owner_fence_lost")
+
+
 def _require_projectable_parent(registry: Any, parent: object, role: str) -> None:
     """Refuse a parent lease that cannot project the requested queue role."""
     from operational_ownership import OwnerLease
@@ -7327,6 +7405,33 @@ class _QueueV3CandidateReader:
             )
             self._insert_source_links(database, task_id, normalized_links)
         return task_id
+
+    def ready_capture_intents_without_task(
+        self, limit: int
+    ) -> list[dict[str, object]]:
+        """Ready intents that no task was ever created for, oldest first.
+
+        This is the outbox query: a row that committed but was never
+        dispatched. `recover_expired_leases` cannot see these because it
+        recovers a task whose lease expired, and these have no task at all.
+        Read-only by design — adoption decides what to do with the answer.
+        """
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        with closing(self._connect()) as database:
+            rows = database.execute(
+                """SELECT intent.intent_id,intent.relative_path,
+                          intent.intent_sha256,intent.byte_size,intent.updated_at
+                   FROM capture_intents AS intent
+                   LEFT JOIN capture_task_links AS link
+                     ON link.intent_id=intent.intent_id
+                   WHERE intent.publication_state='ready'
+                     AND link.intent_id IS NULL
+                   ORDER BY intent.updated_at ASC, intent.intent_id ASC
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def publish_capture_intent(
         self,
@@ -10498,7 +10603,9 @@ class _QueueV3CandidateReader:
         nested = parent is not None
         lease = self._queue_owner_lease(registry, role, scope, parent)
         try:
-            self._insert_queue_projection(lease, role=role, scope=scope)
+            self._insert_queue_projection(
+                lease, role=role, scope=scope, registry=registry
+            )
         except BaseException:
             self._release_unless_nested(registry, lease, nested=nested)
             raise
@@ -10514,12 +10621,14 @@ class _QueueV3CandidateReader:
         *,
         role: Literal["queue-worker", "queue-operator"],
         scope: str,
+        registry: Any | None = None,
     ) -> None:
         from operational_ownership import OwnerLease
 
         if not isinstance(lease, OwnerLease):
             raise TypeError("lease must be an OwnerLease")
         domain_role = "worker" if role == "queue-worker" else "operator"
+        owners = self.ownership_registry() if registry is None else registry
         with closing(
             open_operational_db(
                 self.db_path,
@@ -10527,6 +10636,7 @@ class _QueueV3CandidateReader:
                 contract=_QUEUE_V3_CONTRACT,
             )
         ) as database, begin_immediate(database):
+            _reclaim_dead_queue_projections(database, owners, lease)
             database.execute(
                 """INSERT INTO queue_ownership(
                        actor_id,domain_role,canonical_role,canonical_scope,
@@ -13887,13 +13997,38 @@ def _encode_processor_outcome(outcome: object) -> bytes:
     return b"?"
 
 
+def _record_processor_failure(task: dict[str, Any], error: BaseException) -> None:
+    """Leave the reason on disk before the wire flattens it to one letter.
+
+    The frame deliberately carries a stable code and no traceback, so the
+    parent can only ever record `processor_failed`. Measured 2026-08-28 on the
+    live vault: 72 such attempts and eleven `flush` tasks stuck at eight
+    attempts each, with no reason anywhere — not in `attempt_history`, not in
+    the step's stderr. Eleven sessions had failed to become memory and the
+    trail could not say why. Recording here keeps the wire contract and still
+    answers the question.
+    """
+    try:
+        from capture_diagnostics import record_capture_failure
+
+        kind = str(task.get("kind", "unknown"))
+        reason = f"{kind}: {type(error).__name__}: {redact_secrets(str(error))}"
+        record_capture_failure(
+            "queue_processor", reason[:MAX_PROCESSOR_REASON_CHARS],
+            session_id=str(task.get("id", ""))[:32] or None,
+        )
+    except Exception:  # noqa: BLE001 - diagnostics never change the outcome
+        pass
+
+
 def _processor_result_frame(
     processor: Callable[[dict], bool | DeferredResult], task: dict[str, Any]
 ) -> bytes:
     """Run the task; a failure is reported as a stable code, never a traceback."""
     try:
         return _encode_processor_outcome(processor(task))
-    except Exception:  # noqa: BLE001 - parent receives a stable code only
+    except Exception as error:  # noqa: BLE001 - parent receives a stable code only
+        _record_processor_failure(task, error)
         return b"E"
 
 
@@ -14160,14 +14295,40 @@ def _kill_process_tree(
 def _hard_kill_group(
     process: multiprocessing.Process, platform_name: str, tree_verified: bool
 ) -> bool:
+    """Follow the group's SIGTERM with SIGKILL, and judge what came back.
+
+    A `ProcessLookupError` here is the outcome this call was asking for: the
+    group is already gone, killed by the SIGTERM that preceded it. Recording
+    that as an unverified tree is what turned a clean timeout into
+    `process_cleanup_failed`, because `_cleanup_failed` refuses on POSIX
+    whenever the tree is unverified — even when `_await_cleanup` has already
+    confirmed the child and every descendant are gone.
+
+    Traced on the live machine 2026-08-29 at load 9-11: the first attempt
+    reported `kill_group=True`, `await_cleanup=True` and still
+    `cleanup_failed=True` with `tree_verified=False`, which is only reachable
+    through this branch. On a quiet machine the group is still there when the
+    SIGKILL lands, the exception never fires, and the test passes — which is
+    exactly how `test_worker_timeout_kills_spawned_grandchild_tree` behaved.
+
+    Any other `OSError` — `EPERM` and its kin — still fails closed.
+    """
     if not process.is_alive() or platform_name == "nt" or not tree_verified:
         return tree_verified
-    try:
-        _kill_process_group(process.pid, signal.SIGKILL)
-    except OSError:
-        tree_verified = False
+    verified = _sigkill_group_verified(process.pid)
     process.join(0.2)
-    return tree_verified
+    return verified
+
+
+def _sigkill_group_verified(pid: int) -> bool:
+    """Whether the group is gone after SIGKILL. Already gone counts as gone."""
+    try:
+        _kill_process_group(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def _stop_quietly(process: multiprocessing.Process, action) -> None:

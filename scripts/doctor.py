@@ -871,7 +871,12 @@ def _operation_positions(
 
 
 def _valid_plan_hash(row: sqlite3.Row, state: str) -> bool:
-    if state == "preparing" and row["plan_hash"] == "":
+    """A plan hash is absent exactly while no plan was ever computed.
+
+    `_promoted_for_recovery` discards straight out of `preparing`, so a
+    discarded row may still carry the empty string the insert wrote.
+    """
+    if row["plan_hash"] == "" and state in {"preparing", "discarded"}:
         return True
     return _is_digest(row["plan_hash"])
 
@@ -918,15 +923,31 @@ def _valid_transaction_row(row: sqlite3.Row, state: str) -> bool:
     )
 
 
-def _transaction_row_corrupt(
+def _operation_shape_corrupt(
     row: sqlite3.Row, state: str, operation_positions: dict[str, list[int]]
 ) -> bool:
-    if not _valid_transaction_row(row, state):
-        return True
+    """Whether a complete operation read contradicts this transaction's record."""
     positions = operation_positions.get(row["id"], [])
     if positions != list(range(len(positions))):
         return True
     return state not in {"preparing", "discarded"} and not positions
+
+
+def _transaction_row_corrupt(
+    row: sqlite3.Row, state: str, operation_positions: dict[str, list[int]] | None
+) -> bool:
+    """Corrupt on evidence only.
+
+    `operation_positions` is None when the operation scan hit the read
+    ceiling. The rows past the ceiling were never read, so a transaction that
+    appears to own no operations may simply own operations nobody looked at.
+    An incomplete read abstains instead of accusing.
+    """
+    if not _valid_transaction_row(row, state):
+        return True
+    if operation_positions is None:
+        return False
+    return _operation_shape_corrupt(row, state, operation_positions)
 
 
 def _committed_within_undo_window(
@@ -975,7 +996,7 @@ def _scan_one_transaction_row(
     states: dict[str, int],
     details: dict,
     codes: set[str],
-    operation_positions: dict[str, list[int]],
+    operation_positions: dict[str, list[int]] | None,
     transaction_columns: set[str],
     cutoff: datetime,
     state_root: Path,
@@ -984,6 +1005,7 @@ def _scan_one_transaction_row(
     state = row["state"]
     if not isinstance(state, str) or state not in TRANSACTION_STATES:
         details["deletion_codes"].append("transaction_state_unknown")
+        details["state_invalid"] = True
         return False
     states[state] += 1
     _collect_error_code(database, row, state, transaction_columns, codes)
@@ -995,7 +1017,7 @@ def _scan_one_transaction_row(
 def _scan_transaction_rows(
     database: sqlite3.Connection,
     transaction_rows: list[sqlite3.Row],
-    operation_positions: dict[str, list[int]],
+    operation_positions: dict[str, list[int]] | None,
     transaction_columns: set[str],
     *,
     state_root: Path,
@@ -1027,13 +1049,19 @@ def _scan_transaction_rows(
 def _bounded_operational_rows(
     database: sqlite3.Connection, query: str, details: dict, truncation_code: str
 ) -> list[sqlite3.Row]:
+    """Rows up to the read ceiling, recording a truncation as a read limit.
+
+    A truncated read refuses `run/` deletion — it cannot prove the table is
+    safe to lose — but it alleges nothing about the rows it never saw.
+    """
     rows = database.execute(
         query + " LIMIT ?", (MAX_OPERATIONAL_ROWS + 1,)
     ).fetchall()
     if len(rows) <= MAX_OPERATIONAL_ROWS:
         return rows
     details["codes"].append(truncation_code)
-    details["deletion_codes"].append("transaction_state_unknown")
+    details["truncated_scans"].append(truncation_code)
+    details["deletion_codes"].append("transaction_scan_incomplete")
     return rows[:MAX_OPERATIONAL_ROWS]
 
 
@@ -1186,10 +1214,13 @@ def _scan_transaction_tables(
     )
     known_ids = _known_transaction_ids(transaction_rows)
     operation_positions, corrupt = _operation_positions(operation_rows, known_ids)
+    complete = (
+        "transaction_operation_scan_truncated" not in details["truncated_scans"]
+    )
     codes, rows_corrupt = _scan_transaction_rows(
         database,
         transaction_rows,
-        operation_positions,
+        operation_positions if complete else None,
         transaction_columns,
         state_root=state_root,
         now=now,
@@ -1205,6 +1236,7 @@ def _scan_transaction_tables(
     if corrupt or rows_corrupt or inconsistent:
         details["codes"].append("transaction_metadata_corrupt")
         details["deletion_codes"].append("transaction_state_corrupt")
+        details["state_invalid"] = True
 
 
 def _operation_columns(
@@ -1515,10 +1547,7 @@ def _transaction_result(details: dict, states: dict[str, int]) -> dict:
         + states["conflicted"]
         + details["quarantined_unresolved"]
     )
-    invalid_state = any(
-        code in details["deletion_codes"]
-        for code in ("transaction_state_unknown", "transaction_state_corrupt")
-    )
+    invalid_state = bool(details["state_invalid"])
     _append_state_deletion_codes(details, states)
     _append_live_deletion_codes(details)
     message = "Transaction state is healthy."
@@ -1545,6 +1574,8 @@ def _empty_transaction_details() -> tuple[dict, dict[str, int]]:
         "live_maintenance_owners": 0,
         "quarantined_unresolved": 0,
         "read_error": False,
+        "state_invalid": False,
+        "truncated_scans": [],
         "deletion_codes": [],
     }
     return details, states
@@ -4023,21 +4054,6 @@ def _validated_generation_manifest(
     )
 
 
-# Which fields say *which* repository this is. The commit says *when*, and a
-# generation built one commit ago belongs to this repository just as much.
-_SCOPE_IDENTITY_FIELDS = (
-    "schema_version",
-    "repository_id",
-    "checkout_id",
-    "checkout_root",
-    "git_common_dir",
-)
-
-
-def _scope_identity(scope: dict) -> tuple:
-    return tuple(scope.get(field) for field in _SCOPE_IDENTITY_FIELDS)
-
-
 def _scope_state(manifest: dict, repository_scope: object) -> str:
     """Whether the active generation belongs here, and whether it is current.
 
@@ -4047,14 +4063,15 @@ def _scope_state(manifest: dict, repository_scope: object) -> str:
     signals. `superseded` is treated exactly like a mismatch by every caller —
     it only stops the report from saying something untrue.
     """
+    from repository_scope import same_repository_record
+
     recorded = manifest.get("repository_scope")
     if recorded is None:
         return "missing"
     current = repository_scope.as_dict()
     if recorded == current:
         return "current"
-    same_identity = _scope_identity(recorded) == _scope_identity(current)
-    return "superseded" if same_identity else "mismatched"
+    return "superseded" if same_repository_record(recorded, current) else "mismatched"
 
 
 def _corpus_extraction_state(
@@ -4794,6 +4811,193 @@ def _capture_check(state_root: Path, deadline: float) -> dict:
             details,
         )
     return _capture_loss_result(lost, live, details)
+
+
+# The hook error trail nothing ever read. Measured 2026-08-29: 5 682 failures
+# between 2026-08-25T09:32 and 2026-08-29T21:04 — project checkpointing failing
+# every ten seconds for five days — and health reported nothing at all, because
+# no check opened this file. In the meantime the queue those checkpoints feed
+# grew to 4 643 undrained events and `run/state.json` to 10 MB.
+#
+# A trail that only a person grepping can see is not a health signal. What made
+# the outage long was not the defect; it was that nothing said so.
+HOOK_ERROR_TAIL_BYTES = 64 * 1024
+
+# Newer than this and the failure is happening now, not once upon a time. An
+# hour, because these hooks fire on session lifecycle events: quieter than a
+# heartbeat, far busier than a nightly pass.
+HOOK_ERROR_LIVE_SECONDS = 3600.0
+
+_HOOK_ERROR_LINE = re.compile(r"^\[(?P<at>[^\]]+)\]\s+(?P<kind>[^:]+):")
+
+
+def _hook_error_lines(path: Path) -> list[str]:
+    """The end of the trail, bounded, so an unbounded log cannot stall health.
+
+    The first line is dropped only when the window actually began mid-file: a
+    seek lands mid-line and half a record is not a record, but a file smaller
+    than the window starts at byte zero and its first line is whole.
+    """
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        start = max(0, handle.tell() - HOOK_ERROR_TAIL_BYTES)
+        handle.seek(start)
+        window = handle.read(HOOK_ERROR_TAIL_BYTES)
+    lines = window.decode("utf-8", errors="replace").splitlines()
+    return [line for line in lines[1 if start else 0 :] if line.startswith("[")]
+
+
+def _hook_error_records(lines: list[str]) -> list[tuple[str, str]]:
+    matches = (_HOOK_ERROR_LINE.match(line) for line in lines)
+    return [(match["at"], match["kind"].strip()) for match in matches if match]
+
+
+def _hook_error_kinds(records: list[tuple[str, str]]) -> dict[str, int]:
+    kinds: dict[str, int] = {}
+    for _at, kind in records:
+        kinds[kind] = kinds.get(kind, 0) + 1
+    return kinds
+
+
+def _hook_error_is_live(last_at: str, now: datetime) -> bool:
+    try:
+        seen = datetime.fromisoformat(last_at)
+    except ValueError:
+        return False
+    if seen.tzinfo is None:
+        seen = seen.replace(tzinfo=now.tzinfo)
+    return (now - seen).total_seconds() <= HOOK_ERROR_LIVE_SECONDS
+
+
+def _hook_error_result(live: bool, count: int, details: dict) -> dict:
+    if live:
+        return _result(
+            "hooks",
+            "degraded",
+            f"{count} hook failure(s) in the recent trail, still happening.",
+            details,
+        )
+    if count:
+        return _result(
+            "hooks", "ok", f"{count} hook failure(s) recorded, none recently.", details
+        )
+    return _result("hooks", "ok", "No hook failure is recorded.", details)
+
+
+# A project's checkpoints are ordered, so one sequence that cannot finish holds
+# every later one. Measured on this vault 2026-08-30: `fix-pip` sequence 320
+# stood `reserved` behind a `discarded` transaction from 08-28 and refused every
+# checkpoint for that project for two days, while 744 of them queued in
+# `run/state.json`. Nothing reported it. An hour is long enough that no live
+# drain is still working on the sequence.
+CHECKPOINT_STUCK_SECONDS = 3600.0
+
+
+def _checkpoint_head_rows(path: Path) -> list[dict[str, Any]]:
+    """The lowest unfinished sequence per project, or nothing we can read."""
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        rows = connection.execute(
+            "SELECT c.project AS project, c.sequence AS sequence, c.state AS state, "
+            "COALESCE(("
+            "  SELECT MAX(a.created_at) FROM project_checkpoint_attempts a"
+            "   WHERE a.project = c.project AND a.sequence = c.sequence"
+            "), ("
+            '  SELECT t.created_at FROM "transaction" t'
+            "   WHERE t.operation_id = c.operation_id"
+            ")) AS created_at "
+            "FROM project_checkpoints c WHERE c.state != 'committed' "
+            "AND c.sequence = ("
+            "  SELECT MIN(sequence) FROM project_checkpoints"
+            "   WHERE project = c.project AND state != 'committed'"
+            ")"
+        ).fetchall()
+    finally:
+        connection.close()
+    return [dict(row) for row in rows]
+
+
+def _checkpoint_stuck(row: Mapping[str, Any], now: datetime) -> bool:
+    created = _parse_utc(row.get("created_at"))
+    if created is None:
+        return True
+    return (now - created).total_seconds() > CHECKPOINT_STUCK_SECONDS
+
+
+def _checkpoint_queue_depths(state_root: Path) -> dict[str, int]:
+    pending = _checkpoint_pending_state(Path(state_root) / "run" / "state.json")
+    if not isinstance(pending, dict):
+        return {}
+    return {
+        slug: len(queue)
+        for slug, queue in pending.items()
+        if isinstance(queue, list) and queue
+    }
+
+
+def _checkpoint_pending_state(path: Path) -> object:
+    """The pending queues, or nothing — a depth is context, never the finding."""
+    try:
+        return json.loads(path.read_bytes().decode("utf-8")).get(
+            "project_checkpoint_pending"
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+        return None
+
+
+def _checkpoint_result(stuck: list[dict[str, Any]], details: dict) -> dict:
+    if not stuck:
+        return _result(
+            "checkpoints", "ok", "No project checkpoint is stuck.", details
+        )
+    projects = ", ".join(sorted(str(row["project"]) for row in stuck))
+    return _result(
+        "checkpoints",
+        "degraded",
+        f"{len(stuck)} project(s) cannot advance their checkpoints: {projects}.",
+        details,
+    )
+
+
+def _checkpoint_check(state_root: Path, now: datetime) -> dict:
+    """Report a project whose checkpoint sequence stopped moving."""
+    path = Path(state_root) / "run" / "markdown-transactions-v3.sqlite3"
+    details: dict[str, Any] = {"database": "run/markdown-transactions-v3.sqlite3"}
+    if not path.is_file():
+        return _result("checkpoints", "ok", "No checkpoint database exists.", details)
+    try:
+        rows = _checkpoint_head_rows(path)
+    except sqlite3.Error as error:
+        details["error"] = str(error)[:200]
+        return _result(
+            "checkpoints", "ok", "The checkpoint database could not be read.", details
+        )
+    stuck = [row for row in rows if _checkpoint_stuck(row, now)]
+    details.update({"unfinished": rows, "queued": _checkpoint_queue_depths(state_root)})
+    return _checkpoint_result(stuck, details)
+
+
+def _hook_error_check(state_root: Path, now: datetime) -> dict:
+    """Report what the lifecycle hooks failed at, so a silent outage is visible."""
+    path = Path(state_root) / "logs" / "hook-errors.log"
+    details: dict[str, Any] = {"trail": "logs/hook-errors.log", "window_bytes": 0}
+    if _safe_kind(path, state_root)[0] == "missing":
+        return _result("hooks", "ok", "No hook failure trail exists.", details)
+    records = _hook_error_records(_hook_error_lines(path))
+    if not records:
+        return _result("hooks", "ok", "No hook failure is recorded.", details)
+    last_at = max(at for at, _kind in records)
+    details.update(
+        {
+            "recent": len(records),
+            "kinds": _hook_error_kinds(records),
+            "last_at": last_at,
+            "window_bytes": HOOK_ERROR_TAIL_BYTES,
+        }
+    )
+    live = _hook_error_is_live(last_at, now)
+    return _hook_error_result(live, len(records), details)
 
 
 def _scheduler_check(root: Path, state_root: Path, now: datetime, deadline: float) -> dict:
@@ -6823,6 +7027,35 @@ class _SourceExtractionAdapter:
 
     A class rather than a closure so each branch of the decision is its own
     named step and the two memoized partitions are ordinary attributes.
+
+    `_code_result` batches `extract_code` over every code source in the
+    snapshot rather than over the rebuild set, and that is deliberate rather
+    than an oversight. `_Collector.extract` is two passes: the definitions pass
+    writes every shared resolution index, so it must see the whole universe,
+    and the edges pass only reads them, so it is safely per-source. Splitting
+    them was built and measured. It is correct -- a whole incremental
+    generation built that way is identical to a full build across all seven
+    tables of `evidence.sqlite3`, an added source included -- and it does not
+    pay: the definitions pass is 43% of the extractor and cannot be narrowed,
+    so the split is worth 3.0 CPU s of a ~150 s pass when the rebuild set is
+    today's 427 of 678, and 9.8 s only when it is 1. End to end that measured
+    +0.98 s and -4.30 s respectively, and the sibling note measured narrow
+    rebuild sets arriving on 6.2% of code-touching commits, so the expectation
+    is a net loss of about 0.65 s a pass.
+
+    One construction makes a partial batch answer differently, and it is the
+    reason any revival needs the note rather than this paragraph:
+    `_partition_nodes` sends a node with no occurrence and no reference to
+    `min(source_ids)`, and "referenced by nobody" is global knowledge a partial
+    run does not have. A zero-byte source contributes exactly such a node.
+
+    The knowledge half has no such defect to fix: a knowledge-page edit puts no
+    code source in the rebuild set, so `extract_code` is never called at all,
+    and `extract_knowledge` costs 0.07 CPU s for 107 sources.
+
+    `tests/test_extraction_universe.py` pins the structural facts this rests
+    on. See
+    `docs/research/2026-08-29-what-a-partial-extraction-can-get-wrong.md`.
     """
 
     def __init__(self, snapshot, repository_id: str) -> None:
@@ -6919,6 +7152,26 @@ def _code_partitions(code_sources, repository_id, source_bytes, deadline, cancel
 
 
 def _source_extraction(source_extraction_class, result, content: bytes):
+    """One source's records, plus the metadata `_semantic_changes` reads.
+
+    All five fingerprints are one value under five names -- the content digest --
+    so every byte-level change counts as a semantic one. That is deliberate,
+    not an accident of five suggestive key names: it over-invalidates and can
+    never under-invalidate, which is the safe direction.
+
+    Only `exports` could carry a real definition. A source is legible to another
+    source solely through the definitions it contributes to `code_extractor`'s
+    shared `definitions`/`python_scopes`/`modules` indexes; `imports` and
+    `aliases` are a per-source local table that enters no shared index,
+    `signatures` already sit inside the export identity key, and a project
+    journal is extracted alone. Building it was measured and does not pay: the
+    rebuild set for a code edit falls from 423 sources to 1 and the pass gets no
+    faster, because `_SourceExtractionAdapter._code_result` batches
+    `extract_code` over every code source as soon as one is rebuilt -- and the
+    edited source is always one. See
+    `docs/research/2026-08-29-what-an-invalidation-fingerprint-can-mean.md`
+    and `tests/test_invalidation_fingerprints.py`.
+    """
     digest = hashlib.sha256(content).hexdigest()
     fingerprints = {
         key: hashlib.sha256(f"{key}:{digest}".encode("ascii")).hexdigest()
@@ -7000,9 +7253,23 @@ def _parent_matches_versions(
 def _parent_matches_identity(
     parent: dict, repository_scope: object, snapshot: object, extractor_version: str
 ) -> bool:
+    """Whether the active generation belongs to this checkout and this toolchain.
+
+    Identity, not equality -- the same distinction `_scope_state` already draws
+    above. A scope record carries `git_commit`, so comparing the whole record
+    made this gate false after every commit on a vault that commits its own
+    runtime, and the idle maintenance pass rebuilt the whole generation instead
+    of returning `current`. Whether the generation is *stale* is a different
+    question, asked by the source manifest and workspace digests in
+    `_parent_describes_snapshot`. See NEW-138.
+    """
+    from repository_scope import same_repository_record
+
     return (
         parent.get("schema_version") == "corpus-generation/v2"
-        and parent.get("repository_scope") == repository_scope.as_dict()
+        and same_repository_record(
+            parent.get("repository_scope"), repository_scope.as_dict()
+        )
         and _parent_matches_versions(parent, snapshot, extractor_version)
     )
 
@@ -7961,6 +8228,8 @@ def _deferrable_checks(
             ),
         ),
         ("capture", lambda budget: _capture_check(state_path, budget)),
+        ("hooks", lambda _budget: _hook_error_check(state_path, generated_at)),
+        ("checkpoints", lambda _budget: _checkpoint_check(state_path, generated_at)),
         ("mcp", lambda _budget: _mcp_check(root_path)),
         (
             "integrations",

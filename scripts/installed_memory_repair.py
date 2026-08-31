@@ -1328,7 +1328,7 @@ def validate_reliability_v3_runtime(
     return sorted(blockers)
 
 
-def _validate_legacy_database(path: Path, state_root: Path) -> None:
+def _read_legacy_schema(path: Path) -> None:
     with contextlib.closing(
         sqlite3.connect(
             f"{path.resolve(strict=True).as_uri()}?mode=ro",
@@ -1339,6 +1339,34 @@ def _validate_legacy_database(path: Path, state_root: Path) -> None:
     ) as database:
         database.execute("PRAGMA query_only=ON")
         database.execute("SELECT name FROM sqlite_schema LIMIT 1").fetchall()
+
+
+def _validate_legacy_database(path: Path, state_root: Path) -> None:
+    """Read a legacy database's schema, surviving a crashed writer's journal.
+
+    This open is deliberately minimal — no contract, no owner check — so it
+    cannot go through `open_readonly_operational_db`, which is where the
+    stranded-journal recovery already lives. Without the same recovery here a
+    legacy database left with a rollback journal fails the adoption gate with
+    `reliability_v3_record_invalid`, which names neither the file nor the
+    cause and fences every write in the vault. That happened twice on the live
+    vault on 2026-08-29 through the shared opener; this is the same class,
+    reached by the six callers of this function on the upgrade path.
+
+    The recovery is imported under its private name on purpose. Exporting it
+    means editing `reliable_memory.py`, which both complexity gates already
+    refuse wholesale over 25 pre-existing findings, and every command after
+    such an edit repeats that whole refusal. One first-party module borrowing
+    another's helper is a smaller debt than that, and it is named here rather
+    than hidden.
+    """
+    from reliable_memory import _require_replayed_journal
+
+    try:
+        _read_legacy_schema(path)
+    except sqlite3.OperationalError as error:
+        _require_replayed_journal(Path(path), error)
+        _read_legacy_schema(path)
     if not path.resolve(strict=True).is_relative_to(state_root.resolve(strict=True)):
         raise PermissionError("legacy database is outside the state root")
 

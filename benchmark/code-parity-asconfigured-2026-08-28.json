@@ -1,0 +1,361 @@
+{
+  "version": "code-parity-v1",
+  "directory": "/home/user/llm-wiki",
+  "budget_seconds": 60.0,
+  "tasks": [
+    {
+      "id": "T01",
+      "kind": "who-calls",
+      "question": "Which production functions call fuse_rrf?",
+      "llm_wiki": {
+        "status": "tool_error",
+        "call_statuses": [
+          "tool_error"
+        ],
+        "grade": "wrong",
+        "seconds": 6.603,
+        "tokens": 23,
+        "answer_excerpt": "{\"status\": \"error\", \"mode\": \"callers\", \"error\": \"Evidence Graph query row ceiling exceeded\"}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 3.764,
+        "tokens": 44,
+        "answer_excerpt": "function: fuse_rrf\ndirection: inbound\ncallers_total: 1\ncallers: 1  (rows: name hop; qn = group prefix + \".\" + name)\nhome-user-llm-wiki.scripts.retrieval:\n  _fused_candidates 1\n"
+      }
+    },
+    {
+      "id": "T02",
+      "kind": "who-calls",
+      "question": "Which functions call write_session_evidence?",
+      "llm_wiki": {
+        "status": "tool_error",
+        "call_statuses": [
+          "tool_error"
+        ],
+        "grade": "wrong",
+        "seconds": 4.187,
+        "tokens": 23,
+        "answer_excerpt": "{\"status\": \"error\", \"mode\": \"callers\", \"error\": \"Evidence Graph query row ceiling exceeded\"}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 2.59,
+        "tokens": 87,
+        "answer_excerpt": "function: write_session_evidence\ndirection: inbound\ncallers_total: 4\ncallers: 4  (rows: name hop; qn = group prefix + \".\" + name)\nhome-user-llm-wiki.benchmark.longmemeval_vault:\n  _ingest_one 1\nhome-user-llm-wiki.scripts.backfill_sessions:\n  _write_one 1\nhome-user-llm-wiki.scripts.flush_memory:\n  _keep_session_record 1\n  _keep_transcript_record 1\n"
+      }
+    },
+    {
+      "id": "T03",
+      "kind": "what-does-x-call",
+      "question": "Which project functions does fuse_rrf call?",
+      "llm_wiki": {
+        "status": "tool_error",
+        "call_statuses": [
+          "tool_error"
+        ],
+        "grade": "wrong",
+        "seconds": 3.841,
+        "tokens": 23,
+        "answer_excerpt": "{\"status\": \"error\", \"mode\": \"callees\", \"error\": \"Evidence Graph query row ceiling exceeded\"}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 2.281,
+        "tokens": 75,
+        "answer_excerpt": "function: fuse_rrf\ndirection: outbound\ncallees_total: 5\ncallees: 5  (rows: name hop; qn = group prefix + \".\" + name)\nhome-user-llm-wiki.scripts.provenance:\n  curated_pages_first 1\nhome-user-llm-wiki.scripts.retrieval:\n  _accumulate_backend 1\n  _fused_candidate 1\n  _fusion_weights 1\n  _weigh_by_trust 1\n"
+      }
+    },
+    {
+      "id": "T04",
+      "kind": "find-symbol-definition",
+      "question": "Where is _page_diverse defined?",
+      "llm_wiki": {
+        "status": "tool_error",
+        "call_statuses": [
+          "tool_error"
+        ],
+        "grade": "wrong",
+        "seconds": 3.519,
+        "tokens": 22,
+        "answer_excerpt": "{\"status\": \"error\", \"mode\": \"symbol\", \"error\": \"Evidence Graph query row ceiling exceeded\"}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 2.109,
+        "tokens": 107,
+        "answer_excerpt": "total: 3\nsearch_mode: bm25\nresults: 3  (cols: qn label file lines rank)\n  home-user-llm-wiki.scripts.retrieval._page_diverse Function scripts/retrieval.py 2765-2785 -25.18\n  home-user-llm-wiki.scripts.search_memory._page_diverse_order Function scripts/search_memory.py 3710-3730 -24.51\n  home-user-llm-wiki.tests.test_retrieval.test_page_diverse_order_drops_nothing Function tests/test_retrieval.py 652-657 -23.44\nhas_more: false\n"
+      }
+    },
+    {
+      "id": "T05",
+      "kind": "find-symbol-definition",
+      "question": "Where is the constant EDITORIAL_NAMES defined?",
+      "llm_wiki": {
+        "status": "tool_error",
+        "call_statuses": [
+          "tool_error"
+        ],
+        "grade": "wrong",
+        "seconds": 3.803,
+        "tokens": 22,
+        "answer_excerpt": "{\"status\": \"error\", \"mode\": \"symbol\", \"error\": \"Evidence Graph query row ceiling exceeded\"}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered",
+          "answered"
+        ],
+        "grade": "wrong",
+        "seconds": 4.576,
+        "tokens": 219,
+        "answer_excerpt": "total: 0\nsearch_mode: bm25\nresults: 0  (cols: qn label file lines rank)\nhas_more: false\n\nresults: 5  (cols: qn label file lines matches in out)\n  home-user-llm-wiki.scripts.lint_memory._frontmatter_of Function scripts/lint_memory.py 532-543 \"534\" 4 0\n  home-user-llm-wiki.scripts.lookup_mode.count_wiki_pages Function scripts/lookup_mode.py 42-58 46;56 3 1\n  home-user-llm-wiki.scripts.corpus_snapshot._Discovery._eligible Method scripts/corpus_snapshot.py 1294-1299 \"1296\" 2 0\n  home-user-llm-wiki.scripts.lint_memory.check_missing_frontmatter Function scripts/lint_memory.py 517-529 \"521\" 2 2\n  home-user-llm-wiki.scripts.lint_memory._expects_an_index_entry Function scripts/lint_memory.py 331-340 \"332\" 1 2\ndirs: 5  (cols: dir hits)\n  scripts/ 21\n  tests/ 2\n  benchmark/ 2\n  docs/ 1\n  knowledge/ 4\ntotal_grep_matches: 39\ntotal_results: 30\nraw_match_count: 0\nelapsed_ms: 33\n"
+      }
+    },
+    {
+      "id": "T06",
+      "kind": "find-dead-code",
+      "question": "Is _flush_started (scripts/integration_adapter.py) dead code?",
+      "llm_wiki": {
+        "status": "tool_error",
+        "call_statuses": [
+          "tool_error"
+        ],
+        "grade": "wrong",
+        "seconds": 6.165,
+        "tokens": 7,
+        "answer_excerpt": "{\"error\": \"operation_failed\"}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 2.743,
+        "tokens": 30,
+        "answer_excerpt": "function: _flush_started\ndirection: inbound\ncallers_total: 0\ncallers: 0  (rows: name hop; qn = group prefix + \".\" + name)\n"
+      }
+    },
+    {
+      "id": "T07",
+      "kind": "find-dead-code",
+      "question": "Is _search_backends (scripts/search_memory.py) dead code?",
+      "llm_wiki": {
+        "status": "tool_error",
+        "call_statuses": [
+          "tool_error"
+        ],
+        "grade": "wrong",
+        "seconds": 6.154,
+        "tokens": 7,
+        "answer_excerpt": "{\"error\": \"operation_failed\"}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 2.941,
+        "tokens": 31,
+        "answer_excerpt": "function: _search_backends\ndirection: inbound\ncallers_total: 0\ncallers: 0  (rows: name hop; qn = group prefix + \".\" + name)\n"
+      }
+    },
+    {
+      "id": "T08",
+      "kind": "impact-of-changing-x",
+      "question": "Which modules import page_status (and are therefore touched by changing it)?",
+      "llm_wiki": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "wrong",
+        "seconds": 8.083,
+        "tokens": 107,
+        "answer_excerpt": "{\"directory\": \"/home/user/llm-wiki\", \"mode\": \"dependencies\", \"architecture\": {\"dependencies\": [], \"source_generation\": \"generation-18cfd903a7a4e112-3ce112cb\", \"source_scope\": \"checkout\", \"source_root\": \"/home/user/llm-wiki\", \"graph_complete\": false, \"unresolved_count\": 76044, \"fallback\": false}, \"source_generation\": \"generation-18cfd903a7a4e112-3ce112cb\", \"graph_complete\": false, \"unresolved_count\": 76044, \"fallback\": false}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 4.439,
+        "tokens": 235,
+        "answer_excerpt": "rows: 9  (cols: a.qualified_name b.qualified_name)\n  home-user-llm-wiki.scripts.archive_stale.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.scripts.corpus_snapshot.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.scripts.lint_memory.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.scripts.page_facts.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.scripts.rebuild_memory_index.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.scripts.search_memory.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.scripts.search_memory.py.__file__ home-user-llm-wiki.scripts.page_status\n  home-user-llm-wiki.tests.test_page_status.py.__file__ home-user-llm-wiki.scripts.page_status.current_status_sql\n  home-user-llm-wiki.tests.test_page_status.py.__file__ home-user-llm-wiki.scripts.page_status.is_retired\ntotal: 9\n"
+      }
+    },
+    {
+      "id": "T09",
+      "kind": "architecture-of-module",
+      "question": "Which project modules does scripts/retrieval.py depend on?",
+      "llm_wiki": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "wrong",
+        "seconds": 6.031,
+        "tokens": 107,
+        "answer_excerpt": "{\"directory\": \"/home/user/llm-wiki\", \"mode\": \"dependencies\", \"architecture\": {\"dependencies\": [], \"source_generation\": \"generation-18cfd903a7a4e112-3ce112cb\", \"source_scope\": \"checkout\", \"source_root\": \"/home/user/llm-wiki\", \"graph_complete\": false, \"unresolved_count\": 76044, \"fallback\": false}, \"source_generation\": \"generation-18cfd903a7a4e112-3ce112cb\", \"graph_complete\": false, \"unresolved_count\": 76044, \"fallback\": false}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 2.973,
+        "tokens": 282,
+        "answer_excerpt": "rows: 19  (cols: b.qualified_name)\n  home-user-llm-wiki.scripts.corpus_snapshot\n  home-user-llm-wiki.scripts.memory_state\n  home-user-llm-wiki.tests.test_memory_queue.queue\n  home-user-llm-wiki.scripts.markdown_transaction.MarkdownChange.replace\n  home-user-llm-wiki.scripts.provenance\n  home-user-llm-wiki.scripts.reliable_memory.validate_schema\n  home-user-llm-wiki.benchmark.retrieval_paths\n  home-user-llm-wiki.scripts.contextual_retrieval.generate_context\n  home-user-llm-wiki.scripts.contextual_retrieval.get_context\n  home-user-llm-wiki.scripts.corpus_snapshot.CapturedSource\n  home-user-llm-wiki.scripts.corpus_snapshot.CorpusSnapshot\n  home-user-llm-wiki.scripts.corpus_snapshot.SnapshotPolicy\n  home-user-llm-wiki.scripts.corpus_snapshot.SourceMetadata\n  home-user-llm-wiki.scripts.corpus_snapshot.SourceRecord\n  home-user-llm-wiki.scripts.context_compiler.compile_context\n  home-user-llm-wiki.scripts.retrieval.candidates_to_legacy\n  home-user-llm-wiki.scripts.retrieval.expand_evidence_graph\n  home-user-llm-wiki.scripts.retrieval.retrieve\n  home-user-llm-wiki.scripts.reliable_memory.SchemaValidationError\ntotal: 19\n"
+      }
+    },
+    {
+      "id": "T10",
+      "kind": "multi-hop",
+      "question": "Which functions reach fuse_rrf within two caller hops (callers, and callers of callers)?",
+      "llm_wiki": {
+        "status": "tool_error",
+        "call_statuses": [
+          "tool_error",
+          "tool_error"
+        ],
+        "grade": "wrong",
+        "seconds": 7.274,
+        "tokens": 46,
+        "answer_excerpt": "{\"status\": \"error\", \"mode\": \"callers\", \"error\": \"Evidence Graph query row ceiling exceeded\"}\n{\"status\": \"error\", \"mode\": \"callers\", \"error\": \"Evidence Graph query row ceiling exceeded\"}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 2.906,
+        "tokens": 47,
+        "answer_excerpt": "function: fuse_rrf\ndirection: inbound\ncallers_total: 2\ncallers: 2  (rows: name hop; qn = group prefix + \".\" + name)\nhome-user-llm-wiki.scripts.retrieval:\n  _fused_candidates 1\n  retrieve 2\n"
+      }
+    },
+    {
+      "id": "T11",
+      "kind": "who-calls",
+      "question": "Which retrieval-path function calls source_type_weight?",
+      "llm_wiki": {
+        "status": "tool_error",
+        "call_statuses": [
+          "tool_error"
+        ],
+        "grade": "wrong",
+        "seconds": 5.433,
+        "tokens": 23,
+        "answer_excerpt": "{\"status\": \"error\", \"mode\": \"callers\", \"error\": \"Evidence Graph query row ceiling exceeded\"}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 2.666,
+        "tokens": 46,
+        "answer_excerpt": "function: source_type_weight\ndirection: inbound\ncallers_total: 1\ncallers: 1  (rows: name hop; qn = group prefix + \".\" + name)\nhome-user-llm-wiki.scripts.retrieval:\n  _weigh_by_trust 1\n"
+      }
+    },
+    {
+      "id": "T12",
+      "kind": "architecture-summary",
+      "question": "Summarize the repository architecture: what are its main modules and entry points?",
+      "llm_wiki": {
+        "status": "tool_error",
+        "call_statuses": [
+          "tool_error"
+        ],
+        "grade": "wrong",
+        "seconds": 4.146,
+        "tokens": 23,
+        "answer_excerpt": "{\"status\": \"error\", \"mode\": \"summary\", \"error\": \"Evidence Graph query row ceiling exceeded\"}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 2.475,
+        "tokens": 819,
+        "answer_excerpt": "project: home-user-llm-wiki\naspects_hint: \"Summary view (default). More on request via aspects:[...] — structure, dependencies, routes, hotspots, boundaries, layers, clusters, file_tree — or [\\\"all\\\"] for everything.\"\ntotal_nodes: 25636\ntotal_edges: 140727\nnode_labels: 13  (cols: label count)\n  Function 13964\n  Variable 5239\n  Method 2649\n  Section 1757\n  Class 657\n  File 638\n  Module 636\n  Folder 42\n  EnvVar 36\n  Decorator 12\n  Route 4\n  Branch 1\n  Project 1\nedge_types: 22  (cols: type count)\n  CALLS 48041\n  DEFINES 29163\n  USAGE 25494\n  WRITES 15373\n  TESTS 12991\n  DEFINES_METHOD 2644\n  DECORATES 1546\n  IMPORTS 1471\n  FILE_CHANGES_WITH 827\n  CONFIGURES 805\n  RAISES 777\n  CONTAINS_FILE 638\n  CALL_REFERENCE 276\n  SEMANTICALLY_RELATED 234\n  SIMILAR_TO 191\n  THROWS 176\n  CONTAINS_FOLDER 38\n  INHERITS 28\n  OVERRIDE 7\n  HTTP_CALLS 5\n  HAS_BRANCH 1\n  TESTS_FILE 1\nlanguages: 5  (cols: language files)\n  Python 357\n  TOML 4\n  YAML 2\n  Bash 1\n  JavaScript 1\npackages: 15  (cols: name nodes fan_in fan_out)\n  memory_queue 869 0 0\n  doctor 597 0 0\n  lsp_process 492 0 0\n  pyright_session 387 0 0\n  mcp_server 349 0 0\n  search_memory 335 0 0\n  compile_memory 290 0 0\n  retrieval 212 0 0\n  generation_catalog 188 0 0\n  project_journal 187 0 0\n  test_retrieval_v2_benchmark 182 0 0\n  lsp_security 150 0 0\n  installed_memory_repair 145 0 0\n  contradiction_pipeline 136 0 0\n  test_generation_catalog 121 0 0\nentry_points: 20  (cols: qn file)\n  home-user-llm-wiki.benchmark.build_flush_corpus.main benchmark/build_flush_corpus.py\n  home-user-llm-wiki.benchmark.durability_child.main benchmark/durability_child.py\n  home-user-llm-wiki.benchmark.fixtures.comparative_adapter_fixture.main benchmark/fixtures/comparative_adapter_fixture.py\n  home-user-llm-wiki.benchmark.generate_python_qualification.main benchmark/generate_python_qualification.py\n  home-user-llm-wiki.benchmark.longmemeval_judge.main benchmark/longmemeval_judge.py\n  home-user-llm-wiki.benchmark.longmemeval_vault.main benchmark/longmemeval_vault.py\n  home-user-llm-wiki.benchmark.run_benchmark.main benchmark/run_benchmark.py\n  home-user-llm-wiki.benchmark.run_code_navigation.main benchmark/run_code_navigation.py\n  home-user-llm-wiki.benchmark.run_code_parity.main benchmark/run_code_parity.py\n  home-user-llm-wiki.benchmark.run_comparative.main benchmark/run_comparative.py\n  home-user-llm-wiki.benchmark.run_contradiction_benchmark.main benchmark/run_contradiction_benchmark.py\n  home-user-llm-wiki.benchmark.run_durability.main benchmark/run_durability.py\n  home-user-llm-wiki.benchmark.run_flush_classification.main benchmark/run_flush_classification.py\n  home-user-llm-wiki.benchmark.run_longmemeval.main benchmark/run_longmemeval.py\n  home-user-llm-wiki.benchmark.run_retrieval_v2.main benchmark/run_retrieval_v2.py\n  home-user-llm-wiki.benchmark.run_scale_matrix.main benchmark/run_scale_matrix.py\n  home-user-llm-wiki.benchmark.run_vault_application.main benchmark/run_vault_application.py\n  home-user-llm-wiki.benchmark.run_vault_retrieval.main benchmark/run_vault_retrieval.py\n  home-user-llm-wiki.docs.enforcement.apply-bash-write-precision.main docs/enforcement/apply-bash-write-precision.py\n  home-user-llm-wiki.docs.enforcement.apply-guard-hardening.main docs/enforcement/apply-guard-hardening.py\n"
+      }
+    },
+    {
+      "id": "T13",
+      "kind": "community-naming",
+      "question": "Which module community does fuse_rrf belong to?",
+      "llm_wiki": {
+        "status": "tool_error",
+        "call_statuses": [
+          "tool_error"
+        ],
+        "grade": "wrong",
+        "seconds": 5.788,
+        "tokens": 23,
+        "answer_excerpt": "{\"status\": \"error\", \"mode\": \"community\", \"error\": \"Evidence Graph query row ceiling exceeded\"}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "wrong",
+        "seconds": 3.525,
+        "tokens": 371,
+        "answer_excerpt": "project: home-user-llm-wiki\ntotal_nodes: 25636\ntotal_edges: 140727\nclusters: 12  (cols: id label members cohesion top_nodes packages edge_types)\n  5 scripts 636 0.6857 get;_check_deadline;_check_navigation_stop;_call_with_deadline;_precise_architecture_result scripts;tests;benchmark CALLS\n  4 scripts 611 0.5111 len;list;range;_archiver;_runner scripts;len;list;range;tests CALLS\n  3 scripts 499 0.6829 QueueOperationError;int;_timestamp;_connect;_utc_now scripts;int;tests CALLS\n  1 tests 489 0.5435 str;run;_run_capture_with_stdin;_vault;_partition_code_extraction scripts;str;tests;benchmark CALLS\n  9 scripts 437 0.828 register;_catalog;GenerationCatalog;_publish;resolve_repository_scope scripts;tests CALLS\n  0 scripts 433 0.7211 add;_result;_safe_kind;_deadline_reached;_run_deletion_check scripts;tests CALLS\n  20 scripts 389 0.7866 pop;_validated_deadline;synchronize;_provider_request;run list;scripts;tests;benchmark CALLS\n  22 scripts 363 0.9066 _acquire_lifecycle;_release_lifecycle;_notify_lifecycle_locked;_start_lsp_process_impl;failed scripts CALLS\n  16 scripts 354 0.7263 get;enqueue;claim;MemoryQueue;fail scripts;tests CALLS\n  6 scripts 315 0.5239 append;close;open;_require_lsp_deadline;PathContainmentError scripts;list;tests CALLS\n  19 scripts 223 0.674 lower;_check_legacy_stop;_collect_pages;_needs_rebuild;_legacy_lexical_hits str;scripts;tests CALLS\n  51 scripts 220 0.8059 checkpoint;ProjectStore;checkpoint_event;acquire_lease;recover tests;scripts CALLS\n"
+      }
+    }
+  ],
+  "summary": {
+    "llm_wiki": {
+      "correct": 0,
+      "partial": 0,
+      "wrong": 13,
+      "statuses": {
+        "tool_error": 11,
+        "answered": 2
+      },
+      "total_seconds": 71.03,
+      "total_tokens": 456,
+      "wrong_but_confident": 2,
+      "operator_attention_events": 11
+    },
+    "cbm": {
+      "correct": 11,
+      "partial": 0,
+      "wrong": 2,
+      "statuses": {
+        "answered": 13
+      },
+      "total_seconds": 39.99,
+      "total_tokens": 2393,
+      "wrong_but_confident": 2,
+      "operator_attention_events": 0
+    }
+  }
+}

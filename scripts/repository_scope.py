@@ -26,6 +26,20 @@ _SCOPE_KEYS = {
     "git_common_dir",
     "git_commit",
 }
+# Which fields say *which* repository and checkout this is. `git_commit` is
+# deliberately absent: it is provenance -- what a generation was built from --
+# and a commit does not move a checkout. Four audit items (NEW-65, NEW-90,
+# NEW-111, NEW-138) were the same mistake of reading it as identity, so this
+# tuple is the one place the answer lives, for both the object form
+# (`RepositoryScope.identity`) and the serialized form (`record_identity`).
+IDENTITY_FIELDS = (
+    "schema_version",
+    "repository_id",
+    "checkout_id",
+    "checkout_root",
+    "git_common_dir",
+)
+
 _REPOSITORY_ID_RE = re.compile(r"repository:[0-9a-f]{64}")
 _CHECKOUT_ID_RE = re.compile(r"checkout:[0-9a-f]{64}")
 _COMMIT_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
@@ -207,14 +221,11 @@ class RepositoryScope:
         generation ineligible after the next commit, which on a vault that commits
         its own runtime meant semantic retrieval fell back to the legacy index
         almost always. See NEW-65.
+
+        `IDENTITY_FIELDS` is the single list: `record_identity` reads the same
+        names off the serialized form, so a field added here is added there too.
         """
-        return (
-            self.schema_version,
-            self.repository_id,
-            self.checkout_id,
-            self.checkout_root,
-            self.git_common_dir,
-        )
+        return tuple(getattr(self, field) for field in IDENTITY_FIELDS)
 
     def same_repository(self, other: object) -> bool:
         """True when both scopes name the same repository checkout."""
@@ -246,6 +257,42 @@ class RepositoryScope:
             git_common_dir=value["git_common_dir"],
             git_commit=value["git_commit"],
         )
+
+
+def record_identity(value: object) -> tuple | None:
+    """The repository identity carried by a scope in *either* form, or None.
+
+    Deliberately tolerant: callers such as `doctor` ask this of a manifest they
+    are diagnosing, which may be corrupt, and a diagnostic must answer rather
+    than raise. A record naming no repository or no checkout has no identity,
+    so two unusable records never compare equal to each other.
+    """
+    if isinstance(value, RepositoryScope):
+        return value.identity()
+    if not isinstance(value, Mapping):
+        return None
+    identity = tuple(value.get(field) for field in IDENTITY_FIELDS)
+    return None if _incomplete_identity(identity) else identity
+
+
+def _incomplete_identity(identity: tuple) -> bool:
+    """A record with no repository or no checkout names nothing."""
+    return identity[1] is None or identity[2] is None
+
+
+def same_repository_record(left: object, right: object) -> bool:
+    """Whether two scopes in serialized form name the same repository checkout.
+
+    The serialized form is where this comparison keeps being written by hand:
+    NEW-65, NEW-90 and NEW-111 compared `RepositoryScope` objects, NEW-138
+    compared their `as_dict()` records at two more sites, and no change to the
+    class could have caught the second shape. Both sides absent is agreement --
+    neither claims a repository; one absent is not.
+    """
+    if left is None or right is None:
+        return left is None and right is None
+    identity = record_identity(left)
+    return identity is not None and identity == record_identity(right)
 
 
 def _finite_deadline(deadline: object) -> bool:
@@ -344,15 +391,41 @@ def _close_probe(process: subprocess.Popen) -> None:
         close()
 
 
-def _require_probe_success(
+def _require_probe_not_stopped(
     watch: _GitWatch, process: subprocess.Popen, command: list[str], output: bytes
 ) -> None:
     if watch.reason:
         raise TimeoutError(f"repository scope {watch.reason[0]} reached during Git probe")
+
+
+def _require_probe_bounded(
+    watch: _GitWatch, process: subprocess.Popen, command: list[str], output: bytes
+) -> None:
     if len(output) > MAX_GIT_OUTPUT_BYTES:
         raise ValueError("Git command output exceeds the byte ceiling")
+
+
+def _require_probe_exit(
+    watch: _GitWatch, process: subprocess.Popen, command: list[str], output: bytes
+) -> None:
     if process.returncode != 0:
         raise subprocess.CalledProcessError(process.returncode, command)
+
+
+# Order is load-bearing: a stopped probe explains a short read and a nonzero
+# exit, so it must be the first thing said about the failure.
+_PROBE_CHECKS = (
+    _require_probe_not_stopped,
+    _require_probe_bounded,
+    _require_probe_exit,
+)
+
+
+def _require_probe_success(
+    watch: _GitWatch, process: subprocess.Popen, command: list[str], output: bytes
+) -> None:
+    for check in _PROBE_CHECKS:
+        check(watch, process, command, output)
 
 
 def _clean_probe_text(value: str) -> bool:

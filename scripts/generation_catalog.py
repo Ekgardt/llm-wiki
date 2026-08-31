@@ -172,6 +172,24 @@ BUSY_MS = 5000
 UNBOUNDED_BUSY_MS = 30_000
 CLEANUP_CATALOG_FENCE_SECONDS = 1.0
 
+# How many superseded generations retention keeps behind the active one.
+#
+# One, and the number is reachability plus one fallback step, not a guess.
+# Nothing reads a generation except through the active pointer: retrieval
+# resolves it, and the incremental rebuild names the *active* generation as its
+# reuse parent and reads `incremental-manifest.json` and the vectors out of that
+# one tree. The single retained ancestor buys exactly one thing — it is the
+# first alternative `_fallback_order` offers `_select_fallback` when the active
+# tree stops validating, and it covers a reader that resolved the pointer just
+# before the last activation. A generation two steps back buys nothing: it sits
+# behind a younger candidate that is already ahead of it in the same order.
+#
+# This is rpm-ostree's two-deployment rule (current plus one rollback), not
+# Kubernetes' ten revisions. Ten is affordable when a revision is metadata; a
+# generation here is a ~180 MB tree, and 35 of them were 6.3 GB on a disk at
+# 94%. See `docs/research/2026-08-29-how-many-superseded-generations-to-keep.md`.
+RETAINED_ANCESTOR_GENERATIONS = 1
+
 _GENERATION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _WINDOWS_RESERVED = {
@@ -562,6 +580,146 @@ def _pointer_is(database: sqlite3.Connection, expected_active: str | None) -> bo
     return row is not None and row["active_generation_id"] == expected_active
 
 
+def _pointer_matches(database: sqlite3.Connection, active: str | None) -> bool:
+    """Like `_pointer_is`, but a missing pointer row is corruption, not a mismatch."""
+    current = database.execute(
+        "SELECT active_generation_id FROM catalog_state WHERE singleton = 1"
+    ).fetchone()
+    if current is None:
+        raise ValueError("catalog active pointer is missing")
+    return current["active_generation_id"] == active
+
+
+def _record_activation(
+    database: sqlite3.Connection, selected_id: str | None, timestamp: str
+) -> None:
+    """Clearing the pointer records nothing; pointing it somewhere records that."""
+    if selected_id is None:
+        return
+    database.execute(
+        "INSERT INTO activation_history(generation_id, activated_at) VALUES (?, ?)",
+        (selected_id, timestamp),
+    )
+
+
+def _generation_in_use(database: sqlite3.Connection, identifier: str) -> bool:
+    """Active now, or ever activated: either way the registration must be kept."""
+    if _pointer_matches(database, identifier):
+        return True
+    historical = database.execute(
+        "SELECT 1 FROM activation_history WHERE generation_id = ? LIMIT 1",
+        (identifier,),
+    ).fetchone()
+    return historical is not None
+
+
+def _active_generation(database: sqlite3.Connection) -> str | None:
+    """The generation the pointer names; a missing pointer row is corruption."""
+    row = database.execute(
+        "SELECT active_generation_id FROM catalog_state WHERE singleton = 1"
+    ).fetchone()
+    if row is None:
+        raise ValueError("catalog active pointer is missing")
+    return row["active_generation_id"]
+
+
+def _parent_generation(database: sqlite3.Connection, identifier: str) -> str | None:
+    row = database.execute(
+        "SELECT parent_generation_id FROM generations WHERE generation_id = ?",
+        (identifier,),
+    ).fetchone()
+    if row is None:
+        return None
+    return row["parent_generation_id"]
+
+
+def _retained_generations(database: sqlite3.Connection, ancestors: int) -> tuple[str, ...]:
+    """The live set: the active generation plus the ancestors retention keeps.
+
+    Reachability from the active pointer along `parent_generation_id`, bounded
+    by depth. A cycle or a dangling parent ends the walk rather than extending
+    it, so a damaged chain shrinks the live set to what it can still prove.
+    """
+    active = _active_generation(database)
+    if active is None:
+        return ()
+    retained = [active]
+    identifier: str | None = active
+    for _ in range(ancestors):
+        identifier = _parent_generation(database, identifier)
+        if identifier is None or identifier in retained:
+            break
+        retained.append(identifier)
+    return tuple(retained)
+
+
+def _require_active_root(retained: tuple[str, ...]) -> None:
+    """No active pointer is no root, and without a root nothing is provably
+    unreachable. `_repair_active_pointer` clears the pointer when no candidate
+    validates; collecting then would destroy the very material a repair reads.
+    That state is for a person to look at, not for a collector to act on."""
+    if not retained:
+        raise ValueError("catalog has no active generation")
+
+
+def _require_activated(database: sqlite3.Connection, identifier: str) -> None:
+    """Only a superseded generation is prunable.
+
+    A registration that has never been activated is either an abandoned
+    publication or one happening right now, and nothing readable here tells the
+    two apart: `register` returns before `activate` is called, so a build in
+    flight looks exactly like an abort. `discard_unactivated` is the path for
+    that case, and it runs under the publication fence.
+    """
+    activated = database.execute(
+        "SELECT 1 FROM activation_history WHERE generation_id = ? LIMIT 1",
+        (identifier,),
+    ).fetchone()
+    if activated is None:
+        raise ValueError("generation was never activated")
+
+
+def _require_retained_ancestors(value: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("retained_ancestors must be a non-negative integer")
+    if value < 0:
+        raise ValueError("retained_ancestors must be a non-negative integer")
+
+
+def _decoded_manifest(encoded: bytes) -> dict[str, object] | None:
+    """The manifest object these bytes canonically encode, or None."""
+    try:
+        manifest = json.loads(encoded)
+    except (TypeError, ValueError, UnicodeError):
+        return None
+    if not isinstance(manifest, dict) or canonical_json_bytes(manifest) != encoded:
+        return None
+    return manifest
+
+
+def _verified_manifest(row: sqlite3.Row) -> dict[str, object] | None:
+    """A registration row's manifest when its bytes still prove themselves."""
+    encoded = bytes(row["manifest_json"])
+    if sha256_bytes(encoded) != row["manifest_sha256"]:
+        return None
+    return _decoded_manifest(encoded)
+
+
+def _manifest_belongs_to(
+    manifest: dict[str, object], repository_scope: RepositoryScope
+) -> bool:
+    """Whether this manifest's own scope names the same repository checkout.
+
+    Identity only: a generation built at another commit of the same checkout
+    still belongs to it. See `RepositoryScope.identity` and NEW-65.
+    """
+    try:
+        registered = RepositoryScope.from_dict(manifest.get("repository_scope"))
+    except (TypeError, ValueError):
+        return False
+    return registered.same_repository(repository_scope)
+
+
 def _record_scanned_entry(seal, path: Path, relative: str, pending: list, files: set) -> None:
     if seal.kind == "directory":
         pending.append(path)
@@ -638,12 +796,17 @@ def _candidate_manifest(candidate) -> dict[str, object]:
     return manifest
 
 
+def _canonical_candidate(manifest: object, candidate) -> bool:
+    """Order matters: the byte comparison is only meaningful for a dict."""
+    return (
+        isinstance(manifest, dict)
+        and canonical_json_bytes(manifest) == candidate.manifest_bytes
+        and manifest.get("generation_id") == candidate.generation_id
+    )
+
+
 def _require_canonical_candidate(manifest: object, candidate) -> None:
-    if not isinstance(manifest, dict):
-        raise ValueError("validated candidate manifest is not canonical")
-    if canonical_json_bytes(manifest) != candidate.manifest_bytes:
-        raise ValueError("validated candidate manifest is not canonical")
-    if manifest.get("generation_id") != candidate.generation_id:
+    if not _canonical_candidate(manifest, candidate):
         raise ValueError("validated candidate manifest is not canonical")
 
 
@@ -690,12 +853,17 @@ def _valid_page_metric(value: object, minimum: int) -> bool:
     return value >= minimum
 
 
+def _finite_number(value: object) -> bool:
+    """A real finite number; a bool is not a number here."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value)
+
+
 def _require_absolute_deadline(deadline: object) -> None:
     if deadline is None:
         return
-    if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
-        raise ValueError("deadline must be an absolute monotonic timestamp or None")
-    if not math.isfinite(deadline):
+    if not _finite_number(deadline):
         raise ValueError("deadline must be an absolute monotonic timestamp or None")
 
 
@@ -725,34 +893,57 @@ def _stable_file_stat(metadata: os.stat_result) -> tuple[int, ...]:
     )
 
 
+def _require_win32(succeeded: object) -> None:
+    """Raise the last Win32 error when an API reports failure."""
+    if not succeeded:
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+def _windows_basic_information(handle: int) -> _FileBasicInfo:
+    information = _FileBasicInfo()
+    _require_win32(
+        _get_file_information_by_handle_ex(
+            handle,
+            0,  # FileBasicInfo
+            ctypes.byref(information),
+            ctypes.sizeof(information),
+        )
+    )
+    return information
+
+
+def _windows_file_id_information(handle: int) -> _FileIdInfo:
+    information = _FileIdInfo()
+    _require_win32(
+        _get_file_information_by_handle_ex(
+            handle,
+            18,  # FileIdInfo
+            ctypes.byref(information),
+            ctypes.sizeof(information),
+        )
+    )
+    return information
+
+
+def _windows_by_handle_information(handle: int) -> _ByHandleFileInformation:
+    information = _ByHandleFileInformation()
+    _require_win32(_get_file_information_by_handle(handle, ctypes.byref(information)))
+    return information
+
+
 def _windows_change_time(descriptor: int) -> int | None:
     if os.name != "nt":
         return None
     handle = msvcrt.get_osfhandle(descriptor)
     if handle == -1:
         raise OSError("invalid Windows file handle")
-    information = _FileBasicInfo()
-    if not _get_file_information_by_handle_ex(
-        handle,
-        0,  # FileBasicInfo
-        ctypes.byref(information),
-        ctypes.sizeof(information),
-    ):
-        raise ctypes.WinError(ctypes.get_last_error())
-    return int(information.change_time)
+    return int(_windows_basic_information(handle).change_time)
 
 
 def _windows_handle_file_identity(handle: int) -> tuple[str, int, bytes]:
     if os.name != "nt":
         raise OSError("Windows handle identity is unavailable")
-    information = _FileIdInfo()
-    if not _get_file_information_by_handle_ex(
-        handle,
-        18,  # FileIdInfo
-        ctypes.byref(information),
-        ctypes.sizeof(information),
-    ):
-        raise ctypes.WinError(ctypes.get_last_error())
+    information = _windows_file_id_information(handle)
     file_id = bytes(information.file_id.identifier)
     volume = int(information.volume_serial_number)
     if volume <= 0 or not any(file_id):
@@ -814,9 +1005,7 @@ def _windows_stat_matches_any_identity(
 def _windows_handle_stat_identity(handle: int) -> tuple[int, int]:
     if os.name != "nt":
         raise OSError("Windows handle stat identity is unavailable")
-    information = _ByHandleFileInformation()
-    if not _get_file_information_by_handle(handle, ctypes.byref(information)):
-        raise ctypes.WinError(ctypes.get_last_error())
+    information = _windows_by_handle_information(handle)
     volume = int(information.volume_serial_number)
     file_index = (int(information.file_index_high) << 32) | int(
         information.file_index_low
@@ -858,9 +1047,7 @@ def _windows_open_options(directory: bool) -> int:
 
 
 def _require_windows_component_kind(value: int, directory: bool) -> None:
-    information = _ByHandleFileInformation()
-    if not _get_file_information_by_handle(value, ctypes.byref(information)):
-        raise ctypes.WinError(ctypes.get_last_error())
+    information = _windows_by_handle_information(value)
     if information.file_attributes & 0x00000400:
         raise PermissionError("Windows relative path component is a reparse point")
     if bool(information.file_attributes & 0x00000010) != directory:
@@ -1176,10 +1363,14 @@ def _manifest_object(raw: bytes) -> dict[str, object]:
     return value
 
 
-def _require_manifest_shape(value: dict[str, object], raw: bytes, expected_id: str) -> None:
+def _require_manifest_keys(value: dict[str, object]) -> None:
     keys = set(value)
     if not _REQUIRED_MANIFEST_KEYS <= keys or not keys <= _MANIFEST_KEYS:
         raise ValueError("generation manifest has missing or unknown properties")
+
+
+def _require_manifest_shape(value: dict[str, object], raw: bytes, expected_id: str) -> None:
+    _require_manifest_keys(value)
     if canonical_json_bytes(value) != raw:
         raise ValueError("generation manifest must use canonical JSON")
     if _generation_id(str(value["generation_id"])) != expected_id:
@@ -1212,12 +1403,16 @@ def _required_sha256(value: object, label: str) -> str:
     return value
 
 
+def _bounded_dimension(dimensions: object) -> bool:
+    if isinstance(dimensions, bool) or not isinstance(dimensions, int):
+        return False
+    return 1 <= dimensions <= 65536
+
+
 def _validated_dimensions(dimensions: object) -> int | None:
     if dimensions is None:
         return None
-    if isinstance(dimensions, bool) or not isinstance(dimensions, int):
-        raise ValueError("vector_dimensions must be null or a positive bounded integer")
-    if not 1 <= dimensions <= 65536:
+    if not _bounded_dimension(dimensions):
         raise ValueError("vector_dimensions must be null or a positive bounded integer")
     return dimensions
 
@@ -1252,19 +1447,35 @@ def _graph_fields(value: dict[str, object]) -> tuple[str | None, str | None]:
     return graph_schema, graph_extractor
 
 
+def _normalized_parent_section(_value: dict[str, object], parent: str | None) -> object:
+    return parent
+
+
+def _normalized_scope_section(value: dict[str, object], _parent: str | None) -> object:
+    return RepositoryScope.from_dict(value["repository_scope"]).as_dict()
+
+
+def _normalized_capture_section(value: dict[str, object], _parent: str | None) -> object:
+    from code_workspace import validate_code_capture
+
+    return validate_code_capture(value["code_capture"])
+
+
+# Insertion order is the manifest's own section order and is load-bearing only
+# for readability; canonical JSON sorts keys before anything is hashed.
+_OPTIONAL_MANIFEST_SECTIONS = {
+    "parent_generation_id": _normalized_parent_section,
+    "repository_scope": _normalized_scope_section,
+    "code_capture": _normalized_capture_section,
+}
+
+
 def _apply_optional_sections(
     normalized: dict[str, object], value: dict[str, object], parent: str | None
 ) -> None:
-    if "parent_generation_id" in value:
-        normalized["parent_generation_id"] = parent
-    if "repository_scope" in value:
-        normalized["repository_scope"] = RepositoryScope.from_dict(
-            value["repository_scope"]
-        ).as_dict()
-    if "code_capture" in value:
-        from code_workspace import validate_code_capture
-
-        normalized["code_capture"] = validate_code_capture(value["code_capture"])
+    for key, normalize in _OPTIONAL_MANIFEST_SECTIONS.items():
+        if key in value:
+            normalized[key] = normalize(value, parent)
 
 
 def _artifact_relative_path(artifact: dict[str, object], seen: set[str]) -> str:
@@ -1330,10 +1541,7 @@ class _ArtifactScan:
 def _scan_artifacts(
     artifacts: object, generation_path: Path, state_root: Path, **stop: object
 ) -> _ArtifactScan:
-    if not isinstance(artifacts, list):
-        raise TypeError("artifacts must be an array")
-    if not 1 <= len(artifacts) <= MAX_ARTIFACTS:
-        raise ValueError("artifact count is outside the supported bounds")
+    _require_artifact_list(artifacts)
     scan = _ArtifactScan(generation_path, state_root)
     for artifact in artifacts:
         _check_deadline(stop.get("deadline"), stop.get("monotonic", time.monotonic))
@@ -1344,15 +1552,37 @@ def _scan_artifacts(
     return scan
 
 
+def _require_artifact_list(artifacts: object) -> None:
+    if not isinstance(artifacts, list):
+        raise TypeError("artifacts must be an array")
+    if not 1 <= len(artifacts) <= MAX_ARTIFACTS:
+        raise ValueError("artifact count is outside the supported bounds")
+
+
+def _require_vector_set(
+    present_vectors: set[str],
+    embedding_present: tuple[bool, bool, bool],
+    incomplete: str,
+    metadata: str,
+) -> None:
+    """Both vector files, or neither, and never files without their metadata."""
+    if present_vectors != _VECTOR_FILES:
+        raise ValueError(incomplete)
+    if not all(embedding_present):
+        raise ValueError(metadata)
+
+
 def _require_present_vectors(
     present_vectors: set[str], embedding_present: tuple[bool, bool, bool]
 ) -> None:
     if not present_vectors:
         return
-    if present_vectors != _VECTOR_FILES:
-        raise ValueError("partial vector artifacts are forbidden")
-    if not all(embedding_present):
-        raise ValueError("vector artifacts require embedding metadata")
+    _require_vector_set(
+        present_vectors,
+        embedding_present,
+        "partial vector artifacts are forbidden",
+        "vector artifacts require embedding metadata",
+    )
 
 
 def _require_vector_contract(
@@ -1373,10 +1603,12 @@ def _require_complete_vectors(
 ) -> None:
     if vector_state != "complete":
         return
-    if present_vectors != _VECTOR_FILES:
-        raise ValueError("complete vectors require vectors.npy and vectors.json")
-    if not all(embedding_present):
-        raise ValueError("complete vectors require embedding metadata")
+    _require_vector_set(
+        present_vectors,
+        embedding_present,
+        "complete vectors require vectors.npy and vectors.json",
+        "complete vectors require embedding metadata",
+    )
 
 
 def _require_graph_v3_contract(
@@ -1384,6 +1616,10 @@ def _require_graph_v3_contract(
 ) -> None:
     if graph_schema != "evidence-graph/v3":
         return
+    _require_v3_manifest(normalized)
+
+
+def _require_v3_manifest(normalized: dict[str, object]) -> None:
     if normalized["schema_version"] == "corpus-generation/v1":
         raise ValueError("evidence-graph/v3 requires corpus-generation/v2")
     if "code_capture" not in normalized:
@@ -1399,12 +1635,16 @@ def _require_schema_contract(
     _require_v2_contract(normalized, graph_schema, seen)
 
 
-def _require_v2_contract(
-    normalized: dict[str, object], graph_schema: str | None, seen: set[str]
-) -> None:
+def _require_v2_artifacts(seen: set[str]) -> None:
     allowed = _V2_REQUIRED_ARTIFACTS | _V2_OPTIONAL_ARTIFACTS
     if not _V2_REQUIRED_ARTIFACTS <= seen or not seen <= allowed:
         raise ValueError("corpus-generation/v2 has an invalid artifact contract")
+
+
+def _require_v2_contract(
+    normalized: dict[str, object], graph_schema: str | None, seen: set[str]
+) -> None:
+    _require_v2_artifacts(seen)
     if graph_schema not in {"evidence-graph/v2", "evidence-graph/v3"}:
         raise ValueError("corpus-generation/v2 requires the Evidence Graph schema")
     if "repository_scope" not in normalized:
@@ -1958,19 +2198,45 @@ class GenerationCatalog:
             (generation_id,),
         ).fetchone()
         _require_registration_match(row, encoded, digest)
-        if row is None:
-            self._require_capacity(database, "generations", MAX_GENERATIONS, "generation")
+        self._require_registration_capacity(database, row)
         if not capability.revalidate():
             raise ValueError("generation changed before registration")
-        if row is None:
-            database.execute(
-                "INSERT INTO generations "
-                "(generation_id, parent_generation_id, manifest_json, "
-                "manifest_sha256, registered_at) VALUES (?, ?, ?, ?, ?)",
-                (generation_id, parent_generation_id, encoded, digest, timestamp),
-            )
-            self._require_catalog_bytes(database)
+        self._insert_registration(
+            database,
+            row,
+            generation_id=generation_id,
+            parent_generation_id=parent_generation_id,
+            encoded=encoded,
+            digest=digest,
+            timestamp=timestamp,
+        )
         self._check_deadline(deadline)
+
+    def _require_registration_capacity(self, database: sqlite3.Connection, row) -> None:
+        if row is None:
+            self._require_capacity(database, "generations", MAX_GENERATIONS, "generation")
+
+    def _insert_registration(
+        self,
+        database: sqlite3.Connection,
+        row,
+        *,
+        generation_id: str,
+        parent_generation_id: object,
+        encoded: bytes,
+        digest: str,
+        timestamp: str,
+    ) -> None:
+        """An existing row is the idempotent retry; it is never rewritten."""
+        if row is not None:
+            return
+        database.execute(
+            "INSERT INTO generations "
+            "(generation_id, parent_generation_id, manifest_json, "
+            "manifest_sha256, registered_at) VALUES (?, ?, ?, ?, ?)",
+            (generation_id, parent_generation_id, encoded, digest, timestamp),
+        )
+        self._require_catalog_bytes(database)
 
     def _register_validated(
         self,
@@ -2074,15 +2340,12 @@ class GenerationCatalog:
         *,
         cancelled: Callable[[], bool] | None = None,
     ) -> bool:
-        if deadline is None and cancelled is None:
-            return self._seal_unchanged(generation_path, expected)
-        if deadline is None:
-            return self._seal_unchanged(generation_path, expected, cancelled=cancelled)
-        if cancelled is None:
-            return self._seal_unchanged(generation_path, expected, deadline=deadline)
-        return self._seal_unchanged(
-            generation_path, expected, deadline=deadline, cancelled=cancelled
-        )
+        options: dict[str, object] = {}
+        if deadline is not None:
+            options["deadline"] = deadline
+        if cancelled is not None:
+            options["cancelled"] = cancelled
+        return self._seal_unchanged(generation_path, expected, **options)
 
     def _require_expected_tree(
         self,
@@ -2379,18 +2642,7 @@ class GenerationCatalog:
         """Remove the row; None means the generation is in use and must be kept."""
         cleanup_deadline = self._monotonic() + CLEANUP_CATALOG_FENCE_SECONDS
         with self._write_transaction(cleanup_deadline) as database:
-            active = database.execute(
-                "SELECT active_generation_id FROM catalog_state WHERE singleton = 1"
-            ).fetchone()
-            if active is None:
-                raise ValueError("catalog active pointer is missing")
-            if active["active_generation_id"] == identifier:
-                return None
-            historical = database.execute(
-                "SELECT 1 FROM activation_history WHERE generation_id = ? LIMIT 1",
-                (identifier,),
-            ).fetchone()
-            if historical is not None:
+            if _generation_in_use(database, identifier):
                 return None
             return self._delete_registration(database, identifier)
 
@@ -2458,6 +2710,120 @@ class GenerationCatalog:
             self._check_deadline(deadline)
         return removed_registration or removed_directory
 
+    def retained_generations(
+        self,
+        *,
+        retained_ancestors: int = RETAINED_ANCESTOR_GENERATIONS,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> tuple[str, ...]:
+        """The generations retention protects: the active one and its ancestors."""
+        _require_retained_ancestors(retained_ancestors)
+        self._check_deadline(deadline)
+        _check_cancelled(cancelled)
+        with closing(self._readonly(deadline=deadline)) as database:
+            return _retained_generations(database, retained_ancestors)
+
+    def registered_generation_ids(
+        self,
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> tuple[str, ...]:
+        """Every registered generation id, without validating a single tree."""
+        self._check_deadline(deadline)
+        _check_cancelled(cancelled)
+        with closing(self._readonly(deadline=deadline)) as database:
+            rows = self._bounded_rows(
+                database,
+                "SELECT generation_id FROM generations LIMIT ?",
+                MAX_GENERATIONS,
+                "generation",
+            )
+        return tuple(row["generation_id"] for row in rows)
+
+    def activated_generation_ids(
+        self,
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> frozenset[str]:
+        """Every generation that has ever been active — the superseded set."""
+        self._check_deadline(deadline)
+        _check_cancelled(cancelled)
+        with closing(self._readonly(deadline=deadline)) as database:
+            rows = self._bounded_rows(
+                database,
+                "SELECT DISTINCT generation_id FROM activation_history LIMIT ?",
+                MAX_ACTIVATION_HISTORY,
+                "history",
+            )
+        return frozenset(row["generation_id"] for row in rows)
+
+    def _require_paired_generation(
+        self, database: sqlite3.Connection, identifier: str
+    ) -> None:
+        """A row with no tree, or a tree with no row, is a half-finished
+        operation. Report it; never guess which half was meant."""
+        registered = database.execute(
+            "SELECT 1 FROM generations WHERE generation_id = ?", (identifier,)
+        ).fetchone()
+        if registered is None:
+            raise ValueError("generation is not registered")
+        if not (self.generations_path / identifier).is_dir():
+            raise ValueError("generation tree is missing")
+
+    def _require_prunable(
+        self, database: sqlite3.Connection, identifier: str, retained: tuple[str, ...]
+    ) -> None:
+        if identifier in retained:
+            raise ValueError("retained generation cannot be discarded")
+        self._require_paired_generation(database, identifier)
+        _require_activated(database, identifier)
+
+    @staticmethod
+    def _delete_generation_rows(database: sqlite3.Connection, identifier: str) -> None:
+        """Registration and activation history leave together: a surviving
+        history row keeps `_generation_in_use` refusing a tree that is gone."""
+        database.execute("DELETE FROM generations WHERE generation_id = ?", (identifier,))
+        database.execute(
+            "DELETE FROM activation_history WHERE generation_id = ?", (identifier,)
+        )
+
+    def discard_superseded(
+        self,
+        generation_id: str,
+        *,
+        retained_ancestors: int = RETAINED_ANCESTOR_GENERATIONS,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> bool:
+        """Drop one generation retention no longer keeps: row, history and tree.
+
+        `discard_unactivated` refuses anything that was ever activated, which is
+        every generation but one on a vault that has been building nightly. This
+        removes a superseded one, and it removes all three parts inside a single
+        write transaction: a filesystem failure rolls the registration back
+        rather than stranding a row whose tree is gone. The live set is
+        recomputed from that same transaction, so an activation racing this call
+        cannot make it delete what has just become live.
+        """
+        identifier = _generation_id(generation_id)
+        _require_absolute_deadline(deadline)
+        _require_retained_ancestors(retained_ancestors)
+        with self._write_transaction(deadline) as database:
+            _check_cancelled(cancelled)
+            retained = _retained_generations(database, retained_ancestors)
+            _require_active_root(retained)
+            self._require_prunable(database, identifier, retained)
+            self._delete_generation_rows(database, identifier)
+            removed = self._remove_generation_tree(
+                identifier, deadline=deadline, cancelled=cancelled
+            )
+            _check_cancelled(cancelled)
+            self._check_deadline(deadline)
+        return removed
+
     def _snapshot_catalog(
         self,
         *,
@@ -2511,6 +2877,87 @@ class GenerationCatalog:
             _check_deadline(deadline, time.monotonic)
             _append_ancestors(ordered, seen, parents, identifier, deadline, cancelled)
         return ordered
+
+    def registered_manifests(
+        self,
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> list[tuple[str, str, dict[str, object]]]:
+        """Every registered generation as (id, registered_at, manifest), newest first.
+
+        Only manifests whose stored bytes still hash to the recorded digest and
+        still round-trip through canonical JSON are returned; a row that fails
+        either is skipped rather than raised, because one damaged registration
+        must not hide every healthy one from a listing.
+        """
+        rows = self._registered_rows(deadline)
+        manifests: list[tuple[str, str, dict[str, object]]] = []
+        for row in rows:
+            _check_cancelled(cancelled)
+            self._check_deadline(deadline)
+            manifest = _verified_manifest(row)
+            if manifest is not None:
+                manifests.append((row["generation_id"], row["registered_at"], manifest))
+        return manifests
+
+    def _registered_rows(self, deadline: float | None) -> list[sqlite3.Row]:
+        self._check_deadline(deadline)
+        with closing(self._readonly(deadline=deadline)) as database:
+            return self._bounded_rows(
+                database,
+                "SELECT generation_id, registered_at, manifest_json, manifest_sha256 "
+                "FROM generations ORDER BY registered_at DESC, generation_id DESC "
+                "LIMIT ?",
+                MAX_GENERATIONS,
+                "generation",
+            )
+
+    def _scoped_generation(
+        self,
+        repository_scope: RepositoryScope | None,
+        *,
+        deadline: float | None,
+        cancelled: Callable[[], bool] | None,
+    ) -> dict[str, object] | None:
+        """The newest registered generation of a repository the pointer does not name.
+
+        This is the whole of CODE-03's read side, and it is deliberately
+        asymmetric to `_select_fallback`: it never moves the active pointer,
+        never writes activation history and never repairs anything. The single
+        pointer belongs to the vault. Were a foreign repository allowed to
+        activate, indexing one would make the vault's own scope unresolvable and
+        every knowledge query would fall back to the legacy index -- NEW-65,
+        recreated deliberately.
+        """
+        if repository_scope is None:
+            return None
+        for identifier, _registered_at, manifest in self.registered_manifests(
+            deadline=deadline, cancelled=cancelled
+        ):
+            if not _manifest_belongs_to(manifest, repository_scope):
+                continue
+            selected = self._validated_scoped_generation(
+                identifier, deadline, cancelled
+            )
+            if selected is not None:
+                return selected
+        return None
+
+    def _validated_scoped_generation(
+        self,
+        identifier: str,
+        deadline: float | None,
+        cancelled: Callable[[], bool] | None,
+    ) -> dict[str, object] | None:
+        """Re-validate artifacts before handing a generation out; None when unusable."""
+        try:
+            selected, _seal = self._registered_generation_shaped(
+                identifier, deadline, cancelled
+            )
+        except (FileNotFoundError, PermissionError, TypeError, ValueError):
+            return None
+        return selected
 
     def _registered_repository_scope(
         self,
@@ -2640,33 +3087,34 @@ class GenerationCatalog:
         timestamp: str,
     ) -> bool:
         """False when the pointer moved under us and the attempt must restart."""
-        current = database.execute(
-            "SELECT active_generation_id FROM catalog_state WHERE singleton = 1"
-        ).fetchone()
-        if current is None:
-            raise ValueError("catalog active pointer is missing")
-        if current["active_generation_id"] != active:
+        if not _pointer_matches(database, active):
             return False
-        if selected_id is not None:
-            self._require_capacity(
-                database, "activation_history", MAX_ACTIVATION_HISTORY, "history"
-            )
-            registered = database.execute(
-                "SELECT manifest_json, manifest_sha256 FROM generations WHERE generation_id = ?",
-                (selected_id,),
-            ).fetchone()
-            _require_fallback_registration(registered, selected_token)
+        self._require_repair_target(database, selected_id, selected_token)
         database.execute(
             "UPDATE catalog_state SET active_generation_id = ? WHERE singleton = 1",
             (selected_id,),
         )
-        if selected_id is not None:
-            database.execute(
-                "INSERT INTO activation_history(generation_id, activated_at) VALUES (?, ?)",
-                (selected_id, timestamp),
-            )
+        _record_activation(database, selected_id, timestamp)
         self._require_catalog_bytes(database)
         return True
+
+    def _require_repair_target(
+        self,
+        database: sqlite3.Connection,
+        selected_id: str | None,
+        selected_token: tuple[bytes, str] | None,
+    ) -> None:
+        """Clearing the pointer has no target to check; repointing it does."""
+        if selected_id is None:
+            return
+        self._require_capacity(
+            database, "activation_history", MAX_ACTIVATION_HISTORY, "history"
+        )
+        registered = database.execute(
+            "SELECT manifest_json, manifest_sha256 FROM generations WHERE generation_id = ?",
+            (selected_id,),
+        ).fetchone()
+        _require_fallback_registration(registered, selected_token)
 
     def _repair_active_pointer(
         self,
@@ -2707,15 +3155,64 @@ class GenerationCatalog:
         if not self._scope_admits(
             active, repository_scope, deadline=deadline, cancelled=cancelled
         ):
-            return True, None
+            # CODE-03: the pointer names another repository. Answer from this
+            # repository's own registered generations, without moving it.
+            return True, self._scoped_generation(
+                repository_scope, deadline=deadline, cancelled=cancelled
+            )
         selected, selected_id, selected_seal = self._select_fallback(
             active, history, parents, repository_scope,
             deadline=deadline, cancelled=cancelled,
         )
+        return self._settled_selection(
+            active,
+            selected,
+            selected_id,
+            selected_seal,
+            repository_scope,
+            deadline,
+            cancelled,
+        )
+
+    def _or_scoped(
+        self,
+        selected: dict[str, object] | None,
+        repository_scope: RepositoryScope | None,
+        deadline: float | None,
+        cancelled: Callable[[], bool] | None,
+    ) -> dict[str, object] | None:
+        """Fall through to this repository's own generations when nothing was found.
+
+        `_select_fallback` walks the active pointer, the activation history and
+        their parents, so a generation that was registered and never activated
+        is invisible to it. That is every CODE-03 generation, by design, and it
+        is also every generation of a young vault whose pointer is still empty.
+        Reached only when the walk found nothing; the vault's normal case
+        (pointer set, its own generation selected) never gets here.
+        """
+        if selected is not None:
+            return selected
+        return self._scoped_generation(
+            repository_scope, deadline=deadline, cancelled=cancelled
+        )
+
+    def _settled_selection(
+        self,
+        active: str | None,
+        selected: dict[str, object] | None,
+        selected_id: str | None,
+        selected_seal: tuple[_EntrySeal, ...] | None,
+        repository_scope: RepositoryScope | None,
+        deadline: float | None,
+        cancelled: Callable[[], bool] | None,
+    ) -> tuple[bool, dict[str, object] | None]:
+        """Settle a fallback selection, repairing the pointer when it may."""
         if selected_id == active:
             _check_cancelled(cancelled)
             self._check_deadline(deadline)
-            return True, selected
+            return True, self._or_scoped(
+                selected, repository_scope, deadline, cancelled
+            )
         self._require_fallback_seal(selected_id, selected_seal, deadline, cancelled)
         if self._read_only:
             return True, selected

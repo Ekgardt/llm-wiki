@@ -1,7 +1,7 @@
 {
   "corpus_id": "vault-retrieval-v1",
   "schema_version": "vault-retrieval/v1",
-  "note": "Questions in Russian about published English decision pages: the vault's own cross-language case. The gold page is fixed by construction, so scoring needs no judge.",
+  "note": "Questions in Russian about published English decision pages: the vault's own cross-language case. The gold page is fixed by construction, so scoring needs no judge. The daily-entry gold moved to the quote-anchor page on 2026-08-29: the original was marked status: superseded on 2026-08-24 and the corpus excludes superseded pages, so that case could never pass.",
   "thresholds": {
     "min_hit_at_5": 0.6,
     "min_gain_over_grep_at_5": 0.1
@@ -50,7 +50,7 @@
     {
       "case_id": "daily-entry-boundary",
       "question": "где начинается и где заканчивается одна запись в дневнике",
-      "gold_path": "knowledge/notes/daily-entry-boundary-decision.md"
+      "gold_path": "knowledge/notes/daily-entry-quote-anchor-decision.md"
     },
     {
       "case_id": "warm-navigation-gate",

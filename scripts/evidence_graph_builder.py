@@ -41,7 +41,7 @@ import evidence_graph
 import generation_catalog
 from code_intelligence import VerifiedAnalysisBatch
 from reliable_memory import canonical_json_bytes, fsync_directory, fsync_file, read_runtime_bytes
-from repository_scope import RepositoryScope
+from repository_scope import RepositoryScope, same_repository_record
 
 GRAPH_SCHEMA_VERSION = evidence_graph.GRAPH_SCHEMA_VERSION
 DEFAULT_GRAPH_EXTRACTOR_VERSION = "graph-extractor/v1"
@@ -49,19 +49,39 @@ DEFAULT_TOKENIZER_VERSION = "tokenizer/v1"
 DEFAULT_TOKENIZER_CONFIG_SHA256 = "0" * 64
 CORPUS_GENERATION_SCHEMA_VERSION = "corpus-generation/v1"
 COMPLETE_CORPUS_GENERATION_SCHEMA_VERSION = "corpus-generation/v2"
-INCREMENTAL_MANIFEST_VERSION = "evidence-graph-incremental/v4"
+INCREMENTAL_MANIFEST_VERSION = "evidence-graph-incremental/v5"
 _LEGACY_INCREMENTAL_MANIFEST_VERSIONS = frozenset(
     {
         "evidence-graph-incremental/v1",
         "evidence-graph-incremental/v2",
         "evidence-graph-incremental/v3",
+        "evidence-graph-incremental/v4",
     }
 )
-MAX_INCREMENTAL_MANIFEST_BYTES = 64 * 1024 * 1024
-# What this build is willing to store. The same size, but a different decision:
-# a parent manifest larger than the read bound cannot be trusted, while one
-# larger than this only costs the next pass its reuse.
+#: Versions whose source entries carry `workspace_sensitive` per entry.
+_WORKSPACE_SENSITIVE_VERSIONS = frozenset(
+    {"evidence-graph-incremental/v4", "evidence-graph-incremental/v5"}
+)
+# Up to v4 a 64 MiB constant stood here in both roles, and it was the whole
+# defect. The manifest carried one `record_dependencies` row per record, so on
+# this vault's corpus it reached 158,075,010 bytes against 349,306 records, was
+# silently dropped, and no generation on disk ever carried one — reuse could not
+# happen for anybody. A bound on a quantity that grows with the corpus can only
+# ever be outgrown, so neither of these is that bound any more.
+#
+# Reading is bounded by the size the sealed `manifest.json` declares for this
+# artifact, which `generation_catalog._validate_generation` has already verified
+# by hashing it — see `_declared_manifest_bytes`. What is left here is the
+# absurdity ceiling the catalog itself applies to any one artifact: a manifest
+# past it could not be registered as a generation artifact at all.
+MAX_INCREMENTAL_MANIFEST_BYTES = generation_catalog.MAX_ARTIFACT_BYTES
 MAX_STORED_INCREMENTAL_MANIFEST_BYTES = MAX_INCREMENTAL_MANIFEST_BYTES
+#: `record_dependencies` is audit provenance that no reader in `scripts/`
+#: consumes and that is fully derivable from `sources` plus the membership
+#: sidecar. It stays in the manifest for a human and for the tests that read it,
+#: but materialising all 349,306 rows is what made the manifest unstorable, so
+#: it is a deterministic prefix and the manifest states the true total.
+MAX_INLINE_RECORD_DEPENDENCY_ROWS = 10_000
 MAX_LEGACY_WORKSPACE_SENSITIVE_SOURCES = 10_000
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _INVALIDATION_KEYS = frozenset(
@@ -358,9 +378,9 @@ def _require_snapshot_agreement(
 ) -> None:
     if snapshot is None:
         return
-    if sources_list != _snapshot_source_rows(snapshot):
-        raise ValueError("builder sources must be the exact supplied CorpusSnapshot")
-    if source_bytes_snapshot != _snapshot_content_bytes(snapshot):
+    if sources_list != _snapshot_source_rows(
+        snapshot
+    ) or source_bytes_snapshot != _snapshot_content_bytes(snapshot):
         raise ValueError("builder sources must be the exact supplied CorpusSnapshot")
     _require_snapshot_provenance(snapshot, collector_version, extractor_version)
 
@@ -422,13 +442,17 @@ def _require_analysis_batch(
     graph_schema: object,
     repository_scope: RepositoryScope | None,
 ) -> None:
+    _require_analysis_identity(batch, count)
+    if batch.source_manifest_sha256 != source_manifest_sha256:
+        raise ValueError("verified analysis source manifest must match generation manifest")
+    _require_analysis_scope(batch, graph_schema, repository_scope)
+
+
+def _require_analysis_identity(batch: object, count: int) -> None:
     if count >= evidence_graph.MAX_VALIDATION_ROWS:
         raise ValueError("verified analysis row ceiling exceeded")
     if type(batch) is not VerifiedAnalysisBatch:
         raise TypeError("verified_analyses must contain VerifiedAnalysisBatch values")
-    if batch.source_manifest_sha256 != source_manifest_sha256:
-        raise ValueError("verified analysis source manifest must match generation manifest")
-    _require_analysis_scope(batch, graph_schema, repository_scope)
 
 
 def _require_analysis_scope(
@@ -613,20 +637,39 @@ def _manifest_artifacts(
             "sha256": hashlib.sha256(source_manifest_bytes).hexdigest(),
         },
     ]
-    if incremental_manifest_bytes is not None:
-        artifacts.append(
-            {
-                "path": "incremental-manifest.json",
-                "size": len(incremental_manifest_bytes),
-                "sha256": hashlib.sha256(incremental_manifest_bytes).hexdigest(),
-            }
-        )
-    if search_artifact is not None:
-        artifacts.append(dict(search_artifact))
-    if vectors is not None:
-        artifacts.extend(dict(item) for item in vectors["artifacts"])
+    artifacts.extend(
+        _optional_artifacts(incremental_manifest_bytes, search_artifact, vectors)
+    )
     artifacts.sort(key=lambda item: str(item["path"]))
     return artifacts
+
+
+def _incremental_manifest_artifacts(
+    incremental_manifest_bytes: bytes | None,
+) -> list[dict[str, object]]:
+    if incremental_manifest_bytes is None:
+        return []
+    return [
+        {
+            "path": "incremental-manifest.json",
+            "size": len(incremental_manifest_bytes),
+            "sha256": hashlib.sha256(incremental_manifest_bytes).hexdigest(),
+        }
+    ]
+
+
+def _optional_artifacts(
+    incremental_manifest_bytes: bytes | None,
+    search_artifact: Mapping[str, object] | None,
+    vectors: Mapping[str, object] | None,
+) -> list[dict[str, object]]:
+    """Everything a generation carries only when the build produced it."""
+    optional = _incremental_manifest_artifacts(incremental_manifest_bytes)
+    if search_artifact is not None:
+        optional.append(dict(search_artifact))
+    if vectors is not None:
+        optional.extend(dict(item) for item in vectors["artifacts"])
+    return optional
 
 
 def _optional_manifest_fields(
@@ -640,11 +683,18 @@ def _optional_manifest_fields(
         fields["parent_generation_id"] = parent_generation_id
     if repository_scope:
         fields["repository_scope"] = repository_scope.as_dict()
-    if code_capture is not None:
-        from code_workspace import code_capture_as_dict
-
-        fields["code_capture"] = code_capture_as_dict(code_capture)
+    fields.update(_code_capture_field(code_capture))
     return fields
+
+
+def _code_capture_field(
+    code_capture: corpus_snapshot.CodeCaptureContract | None,
+) -> dict[str, object]:
+    if code_capture is None:
+        return {}
+    from code_workspace import code_capture_as_dict
+
+    return {"code_capture": code_capture_as_dict(code_capture)}
 
 
 def _invalid_deadline(deadline: float | None) -> bool:
@@ -662,6 +712,13 @@ def _deadline_reached(deadline: float | None) -> bool:
 def _check_stop(deadline: float | None, cancelled: Callable[[], bool] | None) -> None:
     if _invalid_deadline(deadline):
         raise ValueError("deadline must be a finite monotonic timestamp")
+    _raise_if_stopped(deadline, cancelled)
+
+
+def _raise_if_stopped(
+    deadline: float | None, cancelled: Callable[[], bool] | None
+) -> None:
+    """Cancellation is asked first: it is the answer the caller already knows."""
     if bool(cancelled and cancelled()):
         raise TimeoutError("Evidence Graph build cancelled")
     if _deadline_reached(deadline):
@@ -734,10 +791,11 @@ def _require_captured_content(
 ) -> None:
     if not isinstance(content, bytes):
         raise TypeError("captured source content must be bytes")
-    if source.get("size") != len(content):
-        raise ValueError("captured source size or hash does not match source bytes")
-    digest = _hash_bytes(content, deadline=deadline, cancelled=cancelled)
-    if source.get("sha256") != digest:
+    # Short-circuit keeps the old order and skips hashing a source whose size
+    # already disagrees; both halves raise the same refusal, as they always did.
+    if source.get("size") != len(content) or source.get("sha256") != _hash_bytes(
+        content, deadline=deadline, cancelled=cancelled
+    ):
         raise ValueError("captured source size or hash does not match source bytes")
 
 
@@ -941,7 +999,11 @@ def build_full_generation(
             snapshot, generation_path, deadline=deadline, cancelled=cancelled
         )
         vectors = _generation_vector_artifacts(
-            snapshot, generation_path, deadline=deadline, cancelled=cancelled
+            snapshot,
+            generation_path,
+            deadline=deadline,
+            cancelled=cancelled,
+            reuse_from=_vector_reuse_source(catalog, parent_generation_id),
         )
         _kill_if(kill_point, "after_database_commit")
         manifest = _write_generation_manifests(
@@ -1078,20 +1140,43 @@ def _generation_search_artifact(
     )
 
 
+def _vector_reuse_source(
+    catalog: generation_catalog.GenerationCatalog, parent_generation_id: str | None
+) -> Path | None:
+    """The parent generation, when there is one on disk to read vectors from."""
+    if not parent_generation_id:
+        return None
+    candidate = catalog.generations_path / parent_generation_id
+    if not candidate.is_dir():
+        return None
+    return candidate
+
+
 def _generation_vector_artifacts(
     snapshot: corpus_snapshot.CorpusSnapshot | None,
     generation_path: Path,
     *,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
+    reuse_from: Path | None = None,
 ):
-    """Vectors are what let a question reach a page written in another language."""
+    """Vectors are what let a question reach a page written in another language.
+
+    Re-encoding every chunk of every build was 595.1 of one 721.2-second pass —
+    82.5% — on a corpus where almost nothing had changed. The parent generation
+    already stores one chunk digest per row beside its matrix, so it is the
+    cache, and an unchanged chunk keeps the vector the same model gave it.
+    """
     if snapshot is None:
         return None
     import search_memory
 
     return search_memory.build_generation_vectors_if_available(
-        snapshot, generation_path, deadline=deadline, cancelled=cancelled
+        snapshot,
+        generation_path,
+        deadline=deadline,
+        cancelled=cancelled,
+        reuse_from=reuse_from,
     )
 
 
@@ -1304,12 +1389,32 @@ def _validated_extraction(value: object) -> SourceExtraction:
     if not isinstance(value, SourceExtraction):
         raise TypeError("extractor must return SourceExtraction")
     _require_invalidation_fingerprints(value.invalidation_fingerprints)
+    _require_extraction_shape(value)
+    _require_record_collections(value)
+    return value
+
+
+def _require_extraction_shape(value: SourceExtraction) -> None:
     if not _is_sorted_unique_ids(value.source_dependencies):
         raise ValueError("source_dependencies must be a sorted unique tuple of source IDs")
     if not isinstance(value.workspace_sensitive, bool):
         raise TypeError("workspace_sensitive must be a boolean")
-    _require_record_collections(value)
-    return value
+
+
+def _declared_manifest_bytes(generation_manifest: Mapping[str, object]) -> int:
+    """How many bytes to read: the number the sealed generation manifest names.
+
+    `generation_catalog._validate_generation` has already hashed every artifact
+    against `manifest.json` and refused a wrong size or digest, so by the time
+    this is asked the declared size is verified fact, not a hint. Reading
+    exactly that is a bound the corpus cannot outgrow — which a constant is not,
+    and that is the whole defect: the old 64 MiB constant was passed by a
+    158,075,010-byte manifest and the manifest was thrown away instead.
+    """
+    for artifact in generation_manifest.get("artifacts", ()):
+        if artifact.get("path") == "incremental-manifest.json":
+            return int(artifact["size"])
+    raise ValueError("the sealed manifest does not declare its incremental manifest")
 
 
 def _load_incremental_manifest(
@@ -1332,7 +1437,7 @@ def _load_incremental_manifest(
     raw = read_runtime_bytes(
         generation_path / "incremental-manifest.json",
         catalog.state_root,
-        max_bytes=MAX_INCREMENTAL_MANIFEST_BYTES,
+        max_bytes=_declared_manifest_bytes(generation_manifest),
     )
     _check_stop(deadline, cancelled)
     try:
@@ -1348,6 +1453,7 @@ _LANGUAGE_MANIFEST_VERSIONS = {
     INCREMENTAL_MANIFEST_VERSION,
     "evidence-graph-incremental/v2",
     "evidence-graph-incremental/v3",
+    "evidence-graph-incremental/v4",
 }
 
 _BASE_ENTRY_KEYS = {
@@ -1364,7 +1470,7 @@ def _entry_keys_for(version: str) -> set[str]:
     keys = set(_BASE_ENTRY_KEYS)
     if version in _LANGUAGE_MANIFEST_VERSIONS:
         keys.add("language")
-    if version == INCREMENTAL_MANIFEST_VERSION:
+    if version in _WORKSPACE_SENSITIVE_VERSIONS:
         keys.add("workspace_sensitive")
     elif version == "evidence-graph-incremental/v3":
         keys.add("workspace_sensitive_sources")
@@ -1433,13 +1539,17 @@ def _require_legacy_sensitive_sources(sensitive_sources: object) -> None:
 
 
 def _require_entry_workspace(entry: Mapping[str, object], version: str) -> None:
-    if version == INCREMENTAL_MANIFEST_VERSION:
-        if not isinstance(entry["workspace_sensitive"], bool):
-            raise TypeError("incremental workspace_sensitive must be a boolean")
+    if version in _WORKSPACE_SENSITIVE_VERSIONS:
+        _require_workspace_flag(entry)
         return
     if version != "evidence-graph-incremental/v3":
         return
     _require_legacy_sensitive_sources(entry["workspace_sensitive_sources"])
+
+
+def _require_workspace_flag(entry: Mapping[str, object]) -> None:
+    if not isinstance(entry["workspace_sensitive"], bool):
+        raise TypeError("incremental workspace_sensitive must be a boolean")
 
 
 def _require_entry_fingerprints(fingerprints: object) -> None:
@@ -1476,20 +1586,55 @@ def _require_source_entry(
     _require_entry_records(entry["records"])
 
 
-def _validated_incremental_manifest(value: Mapping[str, object]) -> Mapping[str, object]:
-    if set(value) != {"version", "reuse_config", "sources", "record_dependencies"}:
+_REQUIRED_MANIFEST_KEYS = frozenset(
+    {"version", "reuse_config", "sources", "record_dependencies"}
+)
+#: `record_dependencies` is a bounded sample from v5 on, so a manifest that
+#: carries one may also state how many rows there really are. Optional rather
+#: than required so that a manifest written before the bound existed, or built
+#: by hand, still validates.
+_OPTIONAL_MANIFEST_KEYS = frozenset({"record_dependencies_total"})
+
+
+def _require_manifest_keys(value: Mapping[str, object]) -> None:
+    keys = set(value)
+    if not _REQUIRED_MANIFEST_KEYS <= keys:
         raise ValueError("incremental manifest must be a closed object")
-    version = value["version"]
-    _require_manifest_version(version)
-    _require_reuse_config(value["reuse_config"])
-    sources = value["sources"]
+    if not keys <= _REQUIRED_MANIFEST_KEYS | _OPTIONAL_MANIFEST_KEYS:
+        raise ValueError("incremental manifest must be a closed object")
+
+
+def _require_manifest_sources(sources: object, version: str) -> None:
     if not isinstance(sources, list):
         raise TypeError("incremental manifest sources must be an array")
     seen_sources: set[str] = set()
     for entry in sources:
         _require_source_entry(entry, version, seen_sources)
+
+
+def _require_manifest_dependencies(value: Mapping[str, object]) -> None:
     if not isinstance(value["record_dependencies"], list):
         raise TypeError("incremental record dependencies must be an array")
+    if "record_dependencies_total" not in value:
+        return
+    _require_dependency_total(value)
+
+
+def _require_dependency_total(value: Mapping[str, object]) -> None:
+    total = value["record_dependencies_total"]
+    if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+        raise ValueError("incremental record dependency total must be a whole number")
+    if total < len(value["record_dependencies"]):
+        raise ValueError("incremental record dependency total is smaller than its sample")
+
+
+def _validated_incremental_manifest(value: Mapping[str, object]) -> Mapping[str, object]:
+    version = value.get("version")
+    _require_manifest_version(version)
+    _require_manifest_keys(value)
+    _require_reuse_config(value["reuse_config"])
+    _require_manifest_sources(value["sources"], version)
+    _require_manifest_dependencies(value)
     return value
 
 
@@ -1825,10 +1970,14 @@ def build_incremental_generation(
         current_ids, current, runner.extracted, parent_entries, records_by_owner
     )
     entry_by_id = {str(entry["source_id"]): entry for entry in source_entries}
+    dependency_rows, dependency_total = _record_dependency_rows(
+        ownership, entry_by_id, rebuild
+    )
     incremental_manifest = _stored_incremental_manifest(
         reuse_config,
         source_entries,
-        _record_dependency_rows(ownership, entry_by_id, rebuild),
+        dependency_rows,
+        dependency_total,
     )
     _check_stop(deadline, cancelled)
     built = build_full_generation(
@@ -1919,19 +2068,35 @@ def _reuse_config_matches(
     reuse_config: IncrementalReuseConfig,
     repository_scope_object: Mapping[str, object] | None,
 ) -> bool:
-    """Records may be reused only when the parent was built the same way."""
+    """Records may be reused only when the parent was built the same way.
+
+    Identity, not equality. A `RepositoryScope` record carries `git_commit`,
+    and this vault commits its own runtime, so comparing the whole record meant
+    that one commit was enough to reuse nothing -- the fourth site of the same
+    mistake, after NEW-65, NEW-90 and NEW-111. The commit stays in the manifest
+    as provenance; what the parent was *built the same way* from is decided by
+    `reuse_config` above and by each source's own digest below. See NEW-138.
+    """
+    if not _parent_reuse_config_matches(parent_manifest, reuse_config):
+        return False
+    if parent_generation_manifest is None:
+        return False
+    return same_repository_record(
+        parent_generation_manifest.get("repository_scope"), repository_scope_object
+    )
+
+
+def _parent_reuse_config_matches(
+    parent_manifest: Mapping[str, object], reuse_config: IncrementalReuseConfig
+) -> bool:
     if parent_manifest.get("version") != INCREMENTAL_MANIFEST_VERSION:
         return False
     parent_config = parent_manifest.get("reuse_config")
     if not isinstance(parent_config, Mapping):
         return False
-    if _comparable_reuse_config(parent_config) != _comparable_reuse_config(
+    return _comparable_reuse_config(parent_config) == _comparable_reuse_config(
         asdict(reuse_config)
-    ):
-        return False
-    if parent_generation_manifest is None:
-        return False
-    return parent_generation_manifest.get("repository_scope") == repository_scope_object
+    )
 
 
 def _incremental_parent_state(
@@ -2054,7 +2219,26 @@ def _incremental_delta(
         "membership_changed": membership_changed,
         "parent_entries": parent_entries,
         "current_ids": current_ids,
+        "universes": _universe_ids(current, parent_entries),
     }
+
+
+def _universe_ids(
+    current: Mapping[str, Mapping[str, object]],
+    parent_entries: Mapping[str, Mapping[str, object]],
+) -> tuple[set[str], set[str]]:
+    """The two extraction universes, each naming every id that has been in it.
+
+    Read from both sides: a deleted source's universe is named only by its
+    parent entry, and a source moved across the boundary belongs to both until
+    the move has been accounted for.
+    """
+    current_workspace = _workspace_source_ids(current)
+    parent_workspace = _workspace_source_ids(parent_entries)
+    return (
+        current_workspace | parent_workspace,
+        (set(current) - current_workspace) | (set(parent_entries) - parent_workspace),
+    )
 
 
 def _initial_rebuild(
@@ -2128,16 +2312,46 @@ def _semantic_changes(
     }
 
 
+def _sensitive_in_moved_universes(
+    sensitive: set[str], universes: tuple[set[str], set[str]], moved: set[str]
+) -> set[str]:
+    invalidated: set[str] = set()
+    for universe in universes:
+        if moved & universe:
+            invalidated |= sensitive & universe
+    return invalidated
+
+
 def _workspace_invalidated(
-    semantic_changes: set[str],
-    membership_changed: bool,
+    moved: set[str],
     parent_entries: Mapping[str, Mapping[str, object]],
     current_ids: set[str],
     rebuild: set[str],
+    universes: tuple[set[str], set[str]],
 ) -> set[str]:
-    if not semantic_changes or membership_changed:
-        return set()
-    return (_workspace_sensitive_source_ids(parent_entries) & current_ids) - rebuild
+    """Re-extract a workspace-sensitive source when *its own* universe moved.
+
+    `workspace_sensitive` marks a source that left an unresolved reference it
+    could not attribute to named candidates, so the only honest answer is to
+    re-run it whenever something it might resolve against changed. What it
+    might resolve against is its extraction universe and nothing else:
+    `doctor._SourceExtractionAdapter` hands `extract_code` only non-`knowledge/`
+    sources and `extract_knowledge` only `knowledge/` ones, so a knowledge page
+    can no more answer a code reference than the standard library can depend on
+    user code. Asking "did anything at all change" instead re-extracted 400 code
+    sources of 860 for a one-line edit to one wiki page.
+
+    `moved` is content changes *plus* additions and deletions, because a source
+    appearing or vanishing is exactly what turns an unresolved reference into a
+    resolved one. `membership_changed` is not consulted: when it is true every
+    current workspace source is already in `rebuild`, so the workspace half is
+    empty by construction — while the old short-circuit on it also suppressed
+    the knowledge half, which that rebuild never covered.
+
+    See `docs/research/2026-08-29-what-a-changed-source-may-invalidate.md`.
+    """
+    sensitive = _workspace_sensitive_source_ids(parent_entries) & current_ids
+    return _sensitive_in_moved_universes(sensitive, universes, moved) - rebuild
 
 
 def _newly_invalidated(
@@ -2166,11 +2380,11 @@ def _expanded_rebuild(
         runner.extracted, delta["changed"], parent_entries
     )
     workspace_invalidated = _workspace_invalidated(
-        semantic_changes,
-        bool(delta["membership_changed"]),
+        semantic_changes | delta["added"] | delta["deleted"],
         parent_entries,
         current_ids,
         rebuild,
+        delta["universes"],
     )
     runner.run_all(workspace_invalidated)
     rebuild.update(workspace_invalidated)
@@ -2273,6 +2487,7 @@ _LANGUAGE_ENTRY_VERSIONS = {
     "evidence-graph-incremental/v2",
     "evidence-graph-incremental/v3",
     "evidence-graph-incremental/v4",
+    "evidence-graph-incremental/v5",
 }
 
 
@@ -2303,7 +2518,7 @@ def _entry_language_field(source: Mapping[str, object]) -> dict[str, object]:
 
 
 def _entry_workspace_field(workspace_sensitive: bool) -> dict[str, object]:
-    if INCREMENTAL_MANIFEST_VERSION == "evidence-graph-incremental/v4":
+    if INCREMENTAL_MANIFEST_VERSION in _WORKSPACE_SENSITIVE_VERSIONS:
         return {"workspace_sensitive": workspace_sensitive}
     if INCREMENTAL_MANIFEST_VERSION == "evidence-graph-incremental/v3":
         return {"workspace_sensitive_sources": []}
@@ -2357,35 +2572,51 @@ def _record_dependency_rows(
     ownership: Mapping[tuple[str, str], set[str]],
     entry_by_id: Mapping[str, Mapping[str, object]],
     rebuild: set[str],
-) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    for (collection, record_id), owners in sorted(ownership.items()):
-        rows.append(
-            {
-                "collection": collection,
-                "record_id": record_id,
-                "source_ids": _record_source_ids(owners, entry_by_id),
-                "status": _record_status(owners, rebuild),
-            }
-        )
-    return rows
+) -> tuple[list[dict[str, object]], int]:
+    """A bounded, deterministic prefix of the audit rows, and their true total.
+
+    Materialising one row per record is what made the manifest unstorable —
+    158,075,010 bytes for 349,306 records on this vault — and no reader in
+    `scripts/` consumes these rows: their `source_ids` is the owners plus their
+    `source_dependencies`, and their `status` is whether any owner was rebuilt,
+    both of which stay derivable from `sources` and the membership sidecar.
+    """
+    ordered = sorted(ownership.items())
+    rows = [
+        {
+            "collection": collection,
+            "record_id": record_id,
+            "source_ids": _record_source_ids(owners, entry_by_id),
+            "status": _record_status(owners, rebuild),
+        }
+        for (collection, record_id), owners in ordered[
+            :MAX_INLINE_RECORD_DEPENDENCY_ROWS
+        ]
+    ]
+    return rows, len(ordered)
 
 
 def _stored_incremental_manifest(
     reuse_config: IncrementalReuseConfig,
     source_entries: list[dict[str, object]],
     record_dependencies: list[dict[str, object]],
+    record_dependencies_total: int,
 ) -> dict[str, object] | None:
     """A manifest too large to store is not a reason to refuse the generation.
 
     It only buys the next pass its reuse, so the generation is built without one
-    and the pass after this starts from a full build instead.
+    and the pass after this starts from a full build instead. Up to v4 that was
+    not a rare branch but the only branch, because the ceiling was a constant
+    the corpus had already passed. The ceiling is now the largest artifact the
+    catalog will register at all, so this returns None only for a generation
+    that could not have been published anyway.
     """
     manifest = {
         "version": INCREMENTAL_MANIFEST_VERSION,
         "reuse_config": asdict(reuse_config),
         "sources": source_entries,
         "record_dependencies": record_dependencies,
+        "record_dependencies_total": record_dependencies_total,
     }
     if len(canonical_json_bytes(manifest)) > MAX_STORED_INCREMENTAL_MANIFEST_BYTES:
         return None

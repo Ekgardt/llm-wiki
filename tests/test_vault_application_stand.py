@@ -25,12 +25,18 @@ def test_every_expected_token_appears_verbatim_in_its_gold_page():
 
 
 def test_the_task_sheet_never_counts_as_its_own_answer():
-    """The sheet carries every token; reading it would pass every case."""
-    from run_vault_application import _SELF, _text_of
+    """The sheet carries every token; reading it would pass every case.
 
-    text = _text_of(ROOT, [_SELF])
+    The path used to be a module constant, `_SELF`. It is now derived from what
+    the files say — see `benchmark/answer_key.py` — so the test asks the derived
+    set for it rather than naming it a second time.
+    """
+    from run_vault_application import _text_of, dropped_paths
 
-    assert text.strip() == ""
+    sheet = "benchmark/vault-application-v1.json"
+
+    assert sheet in dropped_paths(ROOT)
+    assert _text_of(ROOT, [sheet]).strip() == ""
 
 
 def test_a_missing_token_fails_the_case():

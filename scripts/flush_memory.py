@@ -596,6 +596,25 @@ def _read_capture_intent(
     return record
 
 
+def _bounded_classifier_evidence(evidence: str) -> str:
+    """The tail the classifier reads; the durable record still keeps every byte.
+
+    Measured 2026-08-28 on the 13 live capture intents: the unbounded prompt
+    reached a median of 723 288 characters per session — the 60 000-character
+    classifier window of `session-promotion-policy-decision` was bypassed by
+    the intent path, which carries up to 1 MiB. A tail, not head+tail: the
+    same decision measured head+tail on forty real sessions and rejected it.
+    """
+    if len(evidence) <= MAX_TRANSCRIPT_CHARS:
+        return evidence
+    dropped = len(evidence) - MAX_TRANSCRIPT_CHARS
+    return (
+        f"[…{dropped} characters of earlier evidence omitted for "
+        f"classification; the stored record is complete]"
+        + evidence[-MAX_TRANSCRIPT_CHARS:]
+    )
+
+
 def _capture_prompt(record: Mapping[str, object]) -> str:
     from reliable_memory import canonical_json_bytes
 
@@ -603,7 +622,7 @@ def _capture_prompt(record: Mapping[str, object]) -> str:
     return (
         "Classify this role-preserved session evidence using the closed flush grammar.\n"
         f"Event: {record['event']}\n"
-        f"Evidence: {evidence}"
+        f"Evidence: {_bounded_classifier_evidence(evidence)}"
     )
 
 
@@ -1324,12 +1343,35 @@ def process_capture_lease(
         return process_missing(lease, binding, task_fence, intent_fence, owner)
 
 
+def _adopt_orphaned_intents(queue: object, coordinator: object) -> None:
+    """Give a task to any intent that was published but never dispatched.
+
+    This runs before the owner below is taken, because adoption needs its own
+    capture owner per intent, and it runs before `claim_capture` so an adopted
+    intent is claimable in this same pass. It is best effort by contract: the
+    worker's job is to drain the queue, and a sweeper that cannot run must never
+    be the reason the queue is not drained.
+    """
+    from capture_adoption import adopt_orphaned_capture_intents
+
+    try:
+        adopt_orphaned_capture_intents(
+            queue, coordinator, state_root=Path(STATE_ROOT)
+        )
+    except Exception:  # noqa: BLE001 - recovery must not break the worker
+        return
+
+
 def run_capture_worker_once(
     queue: object,
     coordinator: object,
     *,
     process_missing: Callable[[object, object, object, object, object], object],
 ) -> object | None:
+    # An intent with no task is invisible to `recover_expired_leases`, which
+    # recovers a task whose lease expired and so presupposes a task. See
+    # `docs/research/2026-08-28-adopting-an-orphaned-intent.md`.
+    _adopt_orphaned_intents(queue, coordinator)
     registry = queue.ownership_registry()
     scope = "worker:capture-recovery"
     owner = registry.acquire("queue-worker", scope=scope)

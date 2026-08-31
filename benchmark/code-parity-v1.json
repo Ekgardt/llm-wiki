@@ -1,0 +1,681 @@
+{
+  "version": "code-parity-v1",
+  "date": "2026-08-28",
+  "repository": "/home/user/llm-wiki",
+  "notes": [
+    "Every gold answer was established by hand from the source on 2026-08-28,",
+    "by grep plus reading the cited lines — not by trusting either tool.",
+    "Citations are file:line in this repository at working-tree state",
+    "(branch work, after commit 406ec41; the tree also carried uncommitted",
+    "additions by concurrent agents, none of which touch the cited lines).",
+    "Grading terms match on word boundaries ([A-Za-z0-9_] is a word char),",
+    "so 'retrieve' does not match 'retrieval'.",
+    "A must entry may be a list of alternates: any one of them counts. Used",
+    "where a tool legitimately answers with the call-site line instead of the",
+    "enclosing function name (llm-wiki's caller edges carry file:line only);",
+    "the alternate line numbers are the cited call-site lines. A bare number",
+    "can in principle collide with an unrelated number in the answer; the",
+    "per-task answer text is stored so any such collision is auditable.",
+    "A side-level 'must' override exists only where the two tools express",
+    "the same fact in incompatible vocabularies (dead = empty candidate list",
+    "on one side, 'callers_total: 0' on the other); the fact graded is the",
+    "same and is named in the gold citations.",
+    "llm_wiki_best is the same product answered through the surface that serves each question (mostly the 2026-08-28 query mode). The gold is unchanged; only the call list differs. T05 and T12 carry no better surface and repeat the configured call so the refusal is measured, not hidden. For T06/T07 the second call carries a side-level must of '\"nodes\": []' so an empty caller frontier — not the mere echo of the symbol name — is what earns the grade.",
+    "2026-08-29, anchors added to T06, T07 and T13. No question and no gold moved; only three calls that were failing to ask the question their task states. T13 was graded 'wrong' on all three sides by the 2026-08-29 run because it asked which community holds fuse_rrf without naming fuse_rrf, and scripts/code_graph.py::_communities_holding records why no whole-graph listing can answer that here. T06/T07 asked whether one function is dead by requesting every dead-code candidate in the repository, of which 307 of 846 were cut from the answer to fit the client ceiling — so a name's absence meant nothing. Each side is anchored through its own best surface for the question: get_architecture mode=community symbol=... and find_dead_code symbol=... on the llm_wiki side, search_graph on the cbm side for T13, and cbm's already-anchored trace_path unchanged for T06/T07. Both sides are rerun and reported together; see docs/research/2026-08-29-what-the-caller-asked.md."
+  ],
+  "tasks": [
+    {
+      "id": "T01",
+      "kind": "who-calls",
+      "question": "Which production functions call fuse_rrf?",
+      "gold": {
+        "citations": [
+          "scripts/retrieval.py:1378 (def fuse_rrf)",
+          "scripts/retrieval.py:2842 (def _fused_candidates), call at scripts/retrieval.py:2845 — the only call site in scripts/ (grep 'fuse_rrf' scripts/)"
+        ],
+        "must": [
+          [
+            "_fused_candidates",
+            "2845"
+          ]
+        ],
+        "must_not": []
+      },
+      "llm_wiki": [
+        {
+          "tool": "get_architecture",
+          "arguments": {
+            "mode": "callers",
+            "symbol": "fuse_rrf"
+          }
+        }
+      ],
+      "llm_wiki_best": [
+        {
+          "tool": "get_architecture",
+          "arguments": {
+            "mode": "query",
+            "query": "{\"start\": {\"kind\": \"function\", \"name\": \"fuse_rrf\"}, \"hops\": [{\"edge\": \"calls\", \"direction\": \"in\"}], \"limit\": 50}"
+          }
+        }
+      ],
+      "cbm": [
+        {
+          "tool": "trace_path",
+          "arguments": {
+            "function_name": "fuse_rrf",
+            "direction": "inbound",
+            "depth": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "T02",
+      "kind": "who-calls",
+      "question": "Which functions call write_session_evidence?",
+      "gold": {
+        "citations": [
+          "scripts/session_evidence.py:220 (def write_session_evidence)",
+          "scripts/flush_memory.py:1202 (def _keep_session_record), call at :1221",
+          "scripts/flush_memory.py:1237 (def _keep_transcript_record), call at :1257",
+          "scripts/backfill_sessions.py:131 (def _write_one), call at :132"
+        ],
+        "must": [
+          [
+            "_keep_session_record",
+            "1221"
+          ],
+          [
+            "_keep_transcript_record",
+            "1257"
+          ],
+          [
+            "_write_one",
+            "132"
+          ]
+        ],
+        "must_not": []
+      },
+      "llm_wiki": [
+        {
+          "tool": "get_architecture",
+          "arguments": {
+            "mode": "callers",
+            "symbol": "write_session_evidence"
+          }
+        }
+      ],
+      "llm_wiki_best": [
+        {
+          "tool": "get_architecture",
+          "arguments": {
+            "mode": "query",
+            "query": "{\"start\": {\"kind\": \"function\", \"name\": \"write_session_evidence\"}, \"hops\": [{\"edge\": \"calls\", \"direction\": \"in\"}], \"limit\": 50}"
+          }
+        }
+      ],
+      "cbm": [
+        {
+          "tool": "trace_path",
+          "arguments": {
+            "function_name": "write_session_evidence",
+            "direction": "inbound",
+            "depth": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "T03",
+      "kind": "what-does-x-call",
+      "question": "Which project functions does fuse_rrf call?",
+      "gold": {
+        "citations": [
+          "scripts/retrieval.py:1400 (_fusion_weights)",
+          "scripts/retrieval.py:1404 (_accumulate_backend)",
+          "scripts/retrieval.py:1414 (curated_pages_first, imported from provenance at :16)",
+          "scripts/retrieval.py:1415 (_weigh_by_trust)",
+          "scripts/retrieval.py:1418 (_fused_candidate)"
+        ],
+        "must": [
+          "_fusion_weights",
+          "_accumulate_backend",
+          "curated_pages_first",
+          "_weigh_by_trust",
+          "_fused_candidate"
+        ],
+        "must_not": []
+      },
+      "llm_wiki": [
+        {
+          "tool": "get_architecture",
+          "arguments": {
+            "mode": "callees",
+            "symbol": "fuse_rrf"
+          }
+        }
+      ],
+      "llm_wiki_best": [
+        {
+          "tool": "get_architecture",
+          "arguments": {
+            "mode": "query",
+            "query": "{\"start\": {\"kind\": \"function\", \"name\": \"fuse_rrf\"}, \"hops\": [{\"edge\": \"calls\", \"direction\": \"out\"}], \"limit\": 50}"
+          }
+        }
+      ],
+      "cbm": [
+        {
+          "tool": "trace_path",
+          "arguments": {
+            "function_name": "fuse_rrf",
+            "direction": "outbound",
+            "depth": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "T04",
+      "kind": "find-symbol-definition",
+      "question": "Where is _page_diverse defined?",
+      "gold": {
+        "citations": [
+          "scripts/retrieval.py:2765 (def _page_diverse)",
+          "graded on file and line together; a ranked search may also list the similarly named _page_diverse_order (scripts/search_memory.py:3710) below the true hit without being wrong"
+        ],
+        "must": [
+          "retrieval.py",
+          "2765"
+        ],
+        "must_not": []
+      },
+      "llm_wiki": [
+        {
+          "tool": "get_architecture",
+          "arguments": {
+            "mode": "symbol",
+            "symbol": "_page_diverse"
+          }
+        }
+      ],
+      "llm_wiki_best": [
+        {
+          "tool": "get_architecture",
+          "arguments": {
+            "mode": "snippet",
+            "symbol": "_page_diverse"
+          }
+        }
+      ],
+      "cbm": [
+        {
+          "tool": "search_graph",
+          "arguments": {
+            "query": "_page_diverse",
+            "limit": 5
+          }
+        }
+      ]
+    },
+    {
+      "id": "T05",
+      "kind": "find-symbol-definition",
+      "question": "Where is the constant EDITORIAL_NAMES defined?",
+      "gold": {
+        "citations": [
+          "scripts/vault_editorial.py:43 (EDITORIAL_NAMES: frozenset[str] = frozenset({...}))"
+        ],
+        "must": [
+          "vault_editorial"
+        ],
+        "must_not": []
+      },
+      "llm_wiki": [
+        {
+          "tool": "get_architecture",
+          "arguments": {
+            "mode": "symbol",
+            "symbol": "EDITORIAL_NAMES"
+          }
+        }
+      ],
+      "llm_wiki_best": [
+        {
+          "tool": "get_architecture",
+          "arguments": {
+            "mode": "query",
+            "query": "{\"start\": {\"name\": \"EDITORIAL_NAMES\"}, \"hops\": [], \"limit\": 10}"
+          },
+          "note": "no better surface exists: the generation indexes no module-level constant node"
+        }
+      ],
+      "cbm": [
+        {
+          "tool": "search_graph",
+          "arguments": {
+            "query": "EDITORIAL_NAMES",
+            "limit": 5
+          }
+        },
+        {
+          "tool": "search_code",
+          "arguments": {
+            "pattern": "EDITORIAL_NAMES",
+            "limit": 5
+          }
+        }
+      ]
+    },
+    {
+      "id": "T06",
+      "kind": "find-dead-code",
+      "question": "Is _flush_started (scripts/integration_adapter.py) dead code?",
+      "gold": {
+        "citations": [
+          "scripts/integration_adapter.py:1845 (def _flush_started)",
+          "zero references outside its def: grep -rn _flush_started scripts/ tests/ integrations/ benchmark/ on 2026-08-28 returns only the definition"
+        ],
+        "must": [
+          "_flush_started"
+        ],
+        "must_not": [
+          "fuse_rrf"
+        ]
+      },
+      "llm_wiki": [
+        {
+          "tool": "find_dead_code",
+          "arguments": {
+            "symbol": "_flush_started"
+          },
+          "note": "2026-08-29: the anchor was added because the unanchored listing cannot answer this question honestly. Measured the same day: the analysis nominates 846 candidates, the answer carried 532 of them at the 25 000-token ceiling, and 307 named candidates were cut — so a name's absence from the delivered list is indistinguishable from a name with living callers. find_dead_code now takes `symbol` and returns a verdict. Gold and question are unchanged; cbm was already anchored on the symbol via trace_path and is untouched."
+        }
+      ],
+      "llm_wiki_best": [
+        {
+          "tool": "get_architecture",
+          "arguments": {
+            "mode": "query",
+            "query": "{\"start\": {\"name\": \"_flush_started\"}, \"hops\": [], \"limit\": 10}"
+          },
+          "must": [
+            "_flush_started",
+            "\"nodes\": []"
+          ],
+          "must_not": [
+            "fuse_rrf"
+          ]
+        },
+        {
+          "tool": "get_architecture",
+          "arguments": {
+            "mode": "query",
+            "query": "{\"start\": {\"name\": \"_flush_started\"}, \"hops\": [{\"edge\": \"calls\", \"direction\": \"in\"}], \"limit\": 10}"
+          },
+          "note": "the empty node list is the deadness evidence"
+        }
+      ],
+      "cbm": [
+        {
+          "tool": "trace_path",
+          "arguments": {
+            "function_name": "_flush_started",
+            "direction": "inbound",
+            "depth": 1
+          },
+          "must": [
+            "callers_total: 0"
+          ],
+          "must_not": []
+        }
+      ]
+    },
+    {
+      "id": "T07",
+      "kind": "find-dead-code",
+      "question": "Is _search_backends (scripts/search_memory.py) dead code?",
+      "gold": {
+        "citations": [
+          "scripts/search_memory.py:4831 (def _search_backends)",
+          "zero references outside its def: grep -rn _search_backends scripts/ tests/ integrations/ benchmark/ on 2026-08-28 returns only the definition"
+        ],
+        "must": [
+          "_search_backends"
+        ],
+        "must_not": [
+          "fuse_rrf"
+        ]
+      },
+      "llm_wiki": [
+        {
+          "tool": "find_dead_code",
+          "arguments": {
+            "symbol": "_search_backends"
+          },
+          "note": "2026-08-29: same anchor and same reason as T06 — 307 of 846 named candidates were cut from the delivered listing, so absence from it proved nothing. cbm is untouched; trace_path was already anchored on the symbol."
+        }
+      ],
+      "llm_wiki_best": [
+        {
+          "tool": "get_architecture",
+          "arguments": {
+            "mode": "query",
+            "query": "{\"start\": {\"name\": \"_search_backends\"}, \"hops\": [], \"limit\": 10}"
+          },
+          "must": [
+            "_search_backends",
+            "\"nodes\": []"
+          ],
+          "must_not": [
+            "fuse_rrf"
+          ]
+        },
+        {
+          "tool": "get_architecture",
+          "arguments": {
+            "mode": "query",
+            "query": "{\"start\": {\"name\": \"_search_backends\"}, \"hops\": [{\"edge\": \"calls\", \"direction\": \"in\"}], \"limit\": 10}"
+          },
+          "note": "the empty node list is the deadness evidence"
+        }
+      ],
+      "cbm": [
+        {
+          "tool": "trace_path",
+          "arguments": {
+            "function_name": "_search_backends",
+            "direction": "inbound",
+            "depth": 1
+          },
+          "must": [
+            "callers_total: 0"
+          ],
+          "must_not": []
+        }
+      ]
+    },
+    {
+      "id": "T08",
+      "kind": "impact-of-changing-x",
+      "question": "Which modules import page_status (and are therefore touched by changing it)?",
+      "gold": {
+        "citations": [
+          "scripts/corpus_snapshot.py:22",
+          "scripts/search_memory.py:55",
+          "scripts/rebuild_memory_index.py:24",
+          "scripts/archive_stale.py:36",
+          "scripts/page_facts.py:22",
+          "scripts/lint_memory.py:61"
+        ],
+        "must": [
+          "corpus_snapshot",
+          "search_memory",
+          "rebuild_memory_index",
+          "archive_stale",
+          "page_facts",
+          "lint_memory"
+        ],
+        "must_not": []
+      },
+      "llm_wiki": [
+        {
+          "tool": "get_architecture",
+          "arguments": {
+            "mode": "dependencies",
+            "symbol": "scripts/page_status.py",
+            "reverse": true
+          }
+        }
+      ],
+      "llm_wiki_best": [
+        {
+          "tool": "get_architecture",
+          "arguments": {
+            "mode": "query",
+            "query": "{\"start\": {\"path\": \"scripts/page_status.py\"}, \"hops\": [{\"edge\": \"imports\", \"direction\": \"in\"}], \"limit\": 50}"
+          }
+        }
+      ],
+      "cbm": [
+        {
+          "tool": "query_graph",
+          "arguments": {
+            "query": "MATCH (a)-[:IMPORTS]->(b) WHERE b.qualified_name CONTAINS \"page_status\" RETURN a.qualified_name, b.qualified_name LIMIT 20"
+          }
+        }
+      ]
+    },
+    {
+      "id": "T09",
+      "kind": "architecture-of-module",
+      "question": "Which project modules does scripts/retrieval.py depend on?",
+      "gold": {
+        "citations": [
+          "scripts/retrieval.py:16 (from provenance import ... — the only module-level project import)",
+          "function-local imports the static module graph may legitimately miss: reranker (:1882), search_memory (:2249), graph_neighbors (:2356), retrieval_telemetry (:2531)"
+        ],
+        "must": [
+          "provenance"
+        ],
+        "must_not": []
+      },
+      "llm_wiki": [
+        {
+          "tool": "get_architecture",
+          "arguments": {
+            "mode": "dependencies",
+            "symbol": "scripts/retrieval.py"
+          }
+        }
+      ],
+      "llm_wiki_best": [
+        {
+          "tool": "get_architecture",
+          "arguments": {
+            "mode": "query",
+            "query": "{\"start\": {\"kind\": \"module\", \"path\": \"scripts/retrieval.py\"}, \"hops\": [{\"edge\": \"imports\", \"direction\": \"out\"}], \"limit\": 50}"
+          }
+        }
+      ],
+      "cbm": [
+        {
+          "tool": "query_graph",
+          "arguments": {
+            "query": "MATCH (a)-[:IMPORTS]->(b) WHERE a.qualified_name CONTAINS \"retrieval.py\" RETURN DISTINCT b.qualified_name LIMIT 30"
+          }
+        }
+      ]
+    },
+    {
+      "id": "T10",
+      "kind": "multi-hop",
+      "question": "Which functions reach fuse_rrf within two caller hops (callers, and callers of callers)?",
+      "gold": {
+        "citations": [
+          "hop 1: _fused_candidates — scripts/retrieval.py:2842, call at :2845",
+          "hop 2: retrieve — scripts/retrieval.py:2931, calls _fused_candidates at :3007; grep shows no other caller of _fused_candidates"
+        ],
+        "must": [
+          [
+            "_fused_candidates",
+            "2845"
+          ],
+          [
+            "retrieve",
+            "3007"
+          ]
+        ],
+        "must_not": []
+      },
+      "llm_wiki": [
+        {
+          "tool": "get_architecture",
+          "arguments": {
+            "mode": "callers",
+            "symbol": "fuse_rrf"
+          }
+        },
+        {
+          "tool": "get_architecture",
+          "arguments": {
+            "mode": "callers",
+            "symbol": "_fused_candidates"
+          }
+        }
+      ],
+      "llm_wiki_best": [
+        {
+          "tool": "get_architecture",
+          "arguments": {
+            "mode": "query",
+            "query": "{\"start\": {\"kind\": \"function\", \"name\": \"fuse_rrf\"}, \"hops\": [{\"edge\": \"calls\", \"direction\": \"in\"}], \"limit\": 50}"
+          }
+        },
+        {
+          "tool": "get_architecture",
+          "arguments": {
+            "mode": "query",
+            "query": "{\"start\": {\"kind\": \"function\", \"name\": \"fuse_rrf\"}, \"hops\": [{\"edge\": \"calls\", \"direction\": \"in\"}, {\"edge\": \"calls\", \"direction\": \"in\"}], \"limit\": 50}"
+          },
+          "note": "hops return only the final frontier, so reaching two hops takes two calls"
+        }
+      ],
+      "cbm": [
+        {
+          "tool": "trace_path",
+          "arguments": {
+            "function_name": "fuse_rrf",
+            "direction": "inbound",
+            "depth": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "T11",
+      "kind": "who-calls",
+      "question": "Which retrieval-path function calls source_type_weight?",
+      "gold": {
+        "citations": [
+          "scripts/provenance.py:106 (def source_type_weight)",
+          "scripts/retrieval.py:1121 (def _weigh_by_trust), call at scripts/retrieval.py:1137 — the only call site in scripts/ outside the import at :16"
+        ],
+        "must": [
+          [
+            "_weigh_by_trust",
+            "1137"
+          ]
+        ],
+        "must_not": []
+      },
+      "llm_wiki": [
+        {
+          "tool": "get_architecture",
+          "arguments": {
+            "mode": "callers",
+            "symbol": "source_type_weight"
+          }
+        }
+      ],
+      "llm_wiki_best": [
+        {
+          "tool": "get_architecture",
+          "arguments": {
+            "mode": "query",
+            "query": "{\"start\": {\"kind\": \"function\", \"name\": \"source_type_weight\"}, \"hops\": [{\"edge\": \"calls\", \"direction\": \"in\"}], \"limit\": 50}"
+          }
+        }
+      ],
+      "cbm": [
+        {
+          "tool": "trace_path",
+          "arguments": {
+            "function_name": "source_type_weight",
+            "direction": "inbound",
+            "depth": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "T12",
+      "kind": "architecture-summary",
+      "question": "Summarize the repository architecture: what are its main modules and entry points?",
+      "gold": {
+        "citations": [
+          "scripts/mcp_server.py exists and is the documented agent surface (CLAUDE.md section 1); any credible summary of this repository names it"
+        ],
+        "must": [
+          "mcp_server"
+        ],
+        "must_not": []
+      },
+      "llm_wiki": [
+        {
+          "tool": "get_architecture",
+          "arguments": {}
+        }
+      ],
+      "llm_wiki_best": [
+        {
+          "tool": "get_architecture",
+          "arguments": {
+            "mode": "summary"
+          },
+          "note": "no better surface exists; recorded so the refusal is measured"
+        }
+      ],
+      "cbm": [
+        {
+          "tool": "get_architecture",
+          "arguments": {}
+        }
+      ]
+    },
+    {
+      "id": "T13",
+      "kind": "community-naming",
+      "question": "Which module community does fuse_rrf belong to?",
+      "gold": {
+        "citations": [
+          "scripts/retrieval.py:1378 (def fuse_rrf) — a correct community answer names the retrieval cluster"
+        ],
+        "must": [
+          "retrieval"
+        ],
+        "must_not": []
+      },
+      "llm_wiki": [
+        {
+          "tool": "get_architecture",
+          "arguments": {
+            "mode": "community",
+            "symbol": "fuse_rrf"
+          },
+          "note": "2026-08-29: the anchor was added because the unanchored call could not answer this question on any side. scripts/code_graph.py::_communities_holding records the measurement — fuse_rrf's community is 729th by size, so no honest bound on a whole-graph listing reaches it — and the 2026-08-29 run graded all three sides 'wrong' here. The question names a symbol; the call did not pass it. Gold and question are unchanged."
+        }
+      ],
+      "llm_wiki_best": [
+        {
+          "tool": "get_architecture",
+          "arguments": {
+            "mode": "community",
+            "symbol": "fuse_rrf"
+          }
+        }
+      ],
+      "cbm": [
+        {
+          "tool": "search_graph",
+          "arguments": {
+            "query": "fuse_rrf",
+            "limit": 5
+          },
+          "note": "cbm's get_architecture takes no symbol or focus argument (checked against `cli get_architecture --help` on 2026-08-29), so its clusters aspect cannot be anchored. search_graph is its best available surface for 'which module does this symbol belong to', and it is given the same anchor the llm_wiki side gets."
+        }
+      ]
+    }
+  ]
+}

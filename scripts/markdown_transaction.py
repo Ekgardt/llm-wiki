@@ -605,6 +605,14 @@ def _coordinator_v3_statements() -> tuple[MigrationStatement, ...]:
 # operator's problem rather than something to keep numbering.
 MAX_ATTEMPT_ORDINAL = 100
 
+# Transaction states a reserved checkpoint can never recover from: the write it
+# stood for did not happen and no longer can. `preparing`, `prepared`,
+# `applying` and `aborting` are absent on purpose — those may still commit, and
+# retrying one would put a second writer on the same sequence.
+_SPENT_TRANSACTION_STATES = frozenset(
+    {"discarded", "aborted", "conflicted", "quarantined"}
+)
+
 LIKE_ESCAPE = "\\"
 
 
@@ -3013,6 +3021,13 @@ def _require_wait_seconds(wait_seconds: object) -> None:
         raise ValueError("writer gate wait_seconds must be non-negative or None")
 
 
+def _writer_gate_busy() -> Exception:
+    """The refusal the writer gate's wait window already knows how to treat."""
+    from operational_ownership import OperationalOwnershipError
+
+    return OperationalOwnershipError("owner_busy")
+
+
 def _writer_wait_window(wait_seconds: float | None) -> float:
     if wait_seconds is None:
         return _WRITER_WAIT_SECONDS
@@ -4671,10 +4686,7 @@ class MarkdownCoordinator:
         token = uuid.uuid4().hex
         with self._connect() as database, begin_immediate(database):
             registry.require(database, owner)
-            if database.execute(
-                "SELECT 1 FROM intent_fences WHERE intent_id=?", (intent_id,)
-            ).fetchone() is not None:
-                raise RuntimeError("intent_fenced")
+            self._reclaim_dead_intent_fence(database, registry, intent_id)
             epoch = int(
                 database.execute(
                     """INSERT INTO intent_fence_epochs(intent_id,last_epoch)
@@ -4711,6 +4723,55 @@ class MarkdownCoordinator:
             if inserted != 1:
                 raise RuntimeError("intent_fence_failed")
         return IntentFence(intent_id, mode, token, epoch, owner, expires_at)
+
+    @staticmethod
+    def _reclaim_dead_intent_fence(
+        database: sqlite3.Connection, registry: object, intent_id: str
+    ) -> None:
+        """Take over one intent's fence row when its holder is provably dead.
+
+        `intent_fences.intent_id` is the primary key, so exactly one row can
+        exist per intent, and this refused on the mere presence of that row —
+        it had no expiry check at all. The row is keyed by `intent_id`, by
+        neither `role` nor `scope`, so the registry, which reclaims a dead
+        owner by `(role, scope)`, cannot reach it from a caller holding a
+        different owner. `capture_task_fences` hands the *worker's* own owner
+        to a fence keyed by the intent, so a worker killed mid-capture-task
+        left a row that adoption — which takes `(capture, intent:<id>)` — could
+        never reach, and the intent was wedged for good.
+
+        Measured on unmodified code 2026-08-29: a dead worker holding a
+        worker-mode fence answered `RuntimeError: intent_fenced` and the row
+        was still there after the pass. A dead *capture publisher* holding its
+        own fence was already adopted 1 of 1, because publisher and adopter
+        take the same owner and the registry deletes the fence as one of that
+        owner's projections — so the wedge is the cross-owner case, not the
+        publisher case named when `NEW-136` closed.
+
+        The proof is the registry's own `reclaimable_dead_owner`, not a second
+        answer to the same question. Doubt refuses closed under the name
+        callers already report: a row that cannot be proved dead — a live
+        holder, or a probe that cannot settle — leaves `intent_fenced`
+        standing. The binding projection goes with the fence and only with the
+        fence, exactly the pairing `release_intent_fence` performs, because a
+        binding without its fence is a shape violation the coordinator counts.
+        """
+        row = database.execute(
+            "SELECT * FROM intent_fences WHERE intent_id=?", (intent_id,)
+        ).fetchone()
+        if row is None:
+            return
+        if not registry.reclaimable_dead_owner(row):
+            raise RuntimeError("intent_fenced")
+        database.execute(
+            """DELETE FROM capture_binding_projections
+               WHERE intent_id=? AND intent_fence_token=? AND intent_fence_epoch=?""",
+            (intent_id, row["token"], row["fencing_epoch"]),
+        )
+        database.execute(
+            "DELETE FROM intent_fences WHERE intent_id=? AND token=?",
+            (intent_id, row["token"]),
+        )
 
     def release_intent_fence(self, fence: IntentFence) -> None:
         if not isinstance(fence, IntentFence):
@@ -4869,20 +4930,123 @@ class MarkdownCoordinator:
         existing: sqlite3.Row,
         precondition: Mapping[str, object],
     ) -> ProjectCheckpointReservation:
-        if existing["state"] != "quarantined":
+        if not self._checkpoint_is_spent(database, existing):
             return self._project_reservation(existing, duplicate=True)
-        return self._retry_quarantined_checkpoint(
+        return self._retry_spent_checkpoint(
             database, project, existing, precondition
         )
 
-    def _retry_quarantined_checkpoint(
+    def _checkpoint_is_spent(
+        self, database: sqlite3.Connection, existing: sqlite3.Row
+    ) -> bool:
+        """True when this sequence's write did not happen and never will.
+
+        A quarantined row has always been retried here. A `reserved` row whose
+        transaction reached a terminal state other than `committed` is the same
+        situation wearing a different label, and it used to be answered with
+        `duplicate=True` — a claim that the checkpoint was already written when
+        nothing had been. The caller then re-derived the same operation id, the
+        transaction table found the recorded plan no longer matched the current
+        one, and refused: `operation_id is already bound to a different
+        request`, permanently.
+
+        Measured on this vault 2026-08-30: `fix-pip` sequence 320 sat
+        `reserved` with a NULL transaction while a `discarded` transaction held
+        its operation id. That single row had been refusing every checkpoint for
+        that project since 08-28 — 366 log lines — and it also stopped the
+        backlog drain for every other project behind it.
+
+        In-flight states are deliberately absent: a transaction still preparing
+        or applying may yet commit, and retrying it would be a second writer.
+        See `docs/research/2026-08-30-a-batch-named-after-one-of-its-members.md`.
+        """
+        if existing["state"] == "quarantined":
+            return True
+        if existing["state"] != "reserved":
+            return False
+        state = self._transaction_state_for_operation(
+            database, str(existing["operation_id"])
+        )
+        return state in _SPENT_TRANSACTION_STATES
+
+    @staticmethod
+    def _transaction_state_for_operation(
+        database: sqlite3.Connection, operation_id: str
+    ) -> str | None:
+        row = database.execute(
+            'SELECT state FROM "transaction" WHERE operation_id = ?',
+            (operation_id,),
+        ).fetchone()
+        return None if row is None else str(row["state"])
+
+    def retry_unsettled_sequence(
+        self,
+        project: str,
+        sequence: int,
+        lease: Mapping[str, object],
+        *,
+        include_committed: bool = False,
+    ) -> ProjectCheckpointReservation | None:
+        """Give one unsettled sequence a fresh attempt, or None if it moved on.
+
+        A quarantined or reserved sequence is normally cleared by the original
+        request arriving again: the same `occurrence_id` reaches
+        `_retry_spent_checkpoint`, the row becomes a new attempt, and both it
+        and everything queued behind it append in order.
+        `tests/test_project_journal.py` states that contract in seven tests and
+        it is not changed here.
+
+        This exposes the same step for the one case where that door is walled
+        up: a row whose name no request can produce any more. It is used by the
+        explicit one-time repair after the 2026-08-30 rename of batch
+        identities, and by nothing else. The caller must already hold the
+        project lease.
+
+        `include_committed` is for the one repair that needs it: a sequence
+        this database calls committed while the journal does not hold it. The
+        journal is the authority, so such a row is a false record and its write
+        is still owed. Nothing else may pass it — re-attempting a sequence the
+        journal already carries would append it twice.
+
+        See `docs/research/2026-08-30-a-sequence-nothing-can-settle.md`.
+        """
+        precondition = self._checkpoint_lease(project, lease)
+        states = ("committed",) if include_committed else ()
+        with self._connect() as database, begin_immediate(database):
+            self._check_project_lease(database, precondition)
+            existing = self._sequence_row(database, project, sequence, states)
+            if existing is None:
+                return None
+            return self._retry_spent_checkpoint(
+                database, project, existing, precondition
+            )
+
+    @staticmethod
+    def _sequence_row(
+        database: sqlite3.Connection,
+        project: str,
+        sequence: int,
+        also: Sequence[str],
+    ) -> sqlite3.Row | None:
+        if also:
+            return database.execute(
+                "SELECT * FROM project_checkpoints WHERE project = ? AND sequence = ?",
+                (project, sequence),
+            ).fetchone()
+        return database.execute(
+            "SELECT * FROM project_checkpoints WHERE project = ? "
+            "AND sequence = ? AND state != 'committed'",
+            (project, sequence),
+        ).fetchone()
+
+    def _retry_spent_checkpoint(
         self,
         database: sqlite3.Connection,
         project: str,
         existing: sqlite3.Row,
         precondition: Mapping[str, object],
     ) -> ProjectCheckpointReservation:
-        """A quarantined sequence is retried as a new attempt, not a new row."""
+        """A spent sequence is retried as a new attempt, not a new row."""
         attempt_number = int(existing["attempt_number"]) + 1
         parent_operation_id = str(existing["operation_id"])
         operation_id = self._project_attempt_operation_id(
@@ -4896,7 +5060,7 @@ class MarkdownCoordinator:
             "UPDATE project_checkpoints SET lease_token = ?, "
             "fencing_epoch = ?, operation_id = ?, attempt_number = ?, "
             "parent_operation_id = ?, transaction_id = NULL, state = 'reserved' "
-            "WHERE project = ? AND sequence = ? AND state = 'quarantined'",
+            "WHERE project = ? AND sequence = ? AND state = ?",
             (
                 precondition["lease_token"],
                 precondition["fencing_epoch"],
@@ -4905,6 +5069,7 @@ class MarkdownCoordinator:
                 parent_operation_id,
                 project,
                 existing["sequence"],
+                existing["state"],
             ),
         )
         database.execute(
@@ -7276,11 +7441,49 @@ class MarkdownCoordinator:
 
     def _claim_canonical_lease(self, registry: object) -> OwnerLease:
         with self._connect() as database, begin_immediate(database):
+            self._reclaim_dead_writer_projection(database, registry)
             lease = registry._acquire_in_transaction(
                 database, "markdown-writer", scope="global"
             )
             self._insert_writer_projection(database, lease)
         return lease
+
+    @staticmethod
+    def _reclaim_dead_writer_projection(
+        database: sqlite3.Connection, registry: object
+    ) -> None:
+        """Take over the one gate row when its owner is provably dead.
+
+        `writer_owners.gate_name` is the primary key, so exactly one row can
+        exist and a row left behind by an abrupt death blocks every later
+        writer. The registry reclaims a dead *owner* by `(role, scope)`, and
+        this row is keyed by neither: a nested gate records the project lease
+        that entered it, so a dead project writer wedged the global gate for
+        everybody, including the generation publication.
+
+        Measured on the live vault 2026-08-28: one row for `gate_name`
+        `global`, canonical owner `project:fix-pip`, lease expired at
+        20:50:21Z, pid 2095087 gone — and every generation pass since answered
+        `sqlite3.IntegrityError: UNIQUE constraint failed:
+        writer_owners.gate_name`, twice in a row on an otherwise idle machine.
+
+        The proof is the registry's own `reclaimable_dead_owner`, not a second
+        answer to the same question, and doubt refuses: a row that cannot be
+        proved dead raises `owner_busy`, which the caller's wait window
+        already knows how to treat. That also turns a live nested writer from
+        an unhandled IntegrityError into the refusal it always meant.
+        """
+        row = database.execute(
+            "SELECT * FROM writer_owners WHERE gate_name='global'"
+        ).fetchone()
+        if row is None:
+            return
+        if not registry.reclaimable_dead_owner(row):
+            raise _writer_gate_busy()
+        database.execute(
+            "DELETE FROM writer_owners WHERE gate_name='global' AND owner_token=?",
+            (row["owner_token"],),
+        )
 
     def _enter_gate(self, lease: OwnerLease) -> None:
         self._local.gate_depth = 1
@@ -7423,6 +7626,7 @@ class MarkdownCoordinator:
         registry = self._ownership_registry()
         with self._connect() as database, begin_immediate(database):
             registry.require(database, owner)
+            self._reclaim_dead_writer_projection(database, registry)
             self._insert_writer_projection(database, owner)
         self._enter_gate(owner)
         try:

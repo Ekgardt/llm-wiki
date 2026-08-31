@@ -101,3 +101,7 @@ without ever proving the capture path works again.
 - [[knowledge/notes/adoption-digest-is-provenance-decision]] — the same rule
   under the adoption record: a precondition no legitimate update can satisfy is
   not a safety property.
+- [[knowledge/notes/bounded-read-is-not-corruption-decision]] — the same rule
+  under the transaction check: a read ceiling the vault outgrows is not a
+  corruption finding, and it was reporting one permanently.
+- [[knowledge/notes/identity-is-a-function-of-its-content-decision]] — links to this page.

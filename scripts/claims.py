@@ -38,6 +38,7 @@ CANDIDATE_SCHEMA = SCHEMA_DIR / "claim-candidate-v1.json"
 RELATION_SCHEMA = SCHEMA_DIR / "claim-relations-v1.json"
 MAX_CLAIM_PAGE_BYTES = 4 * 1024 * 1024
 MAX_CANDIDATES = 50
+MAX_ACTIVE_RECORDS = 10_000
 MAX_DECIMAL_CHARS = 128
 MAX_DECIMAL_DIGITS = 128
 MAX_DECIMAL_EXPONENT = 128
@@ -58,7 +59,15 @@ RELATIONS = frozenset(
 _NON_SUBSTANTIVE_RELATIONS = frozenset(
     {"title", "summary", "link", "links", "provenance", "mention", "mentions"}
 )
-_DATE_RE = re.compile(r"^# (\d{4}-\d{2}-\d{2})(?:\r?\n|$)")
+# Two anchored heading forms, and only these. The bare form was the original
+# contract; the titled form is what `daily_log_append` has always written, so
+# every daily log this vault holds — back to 2026-04-13 — is titled. The reader
+# was written against a shape that never existed here (NEW-120), and widening
+# the writer instead would leave the whole append-only history unreadable. Both
+# forms anchor on the start of the line and end it with the date, so nothing
+# ambiguous is admitted; anything else still refuses by name. See
+# `docs/research/2026-08-28-which-daily-header-is-canonical.md`.
+_DATE_RE = re.compile(r"^# (?:[^\r\n]*?[ \t]\u2014[ \t])?(\d{4}-\d{2}-\d{2})(?:\r?\n|$)")
 _BLOCK_RE = re.compile(rb"(?m)^## \[(\d{2}:\d{2}:\d{2})\][^\r\n]*(?:\r?\n|$)")
 _CLAIMS_RE = re.compile(
     r"(?ms)^## Claims[ \t]*\r?\n```json[ \t]*\r?\n([^\r\n]+)\r?\n```[ \t]*(?=\r?\n(?:## |\Z)|\Z)"
@@ -136,12 +145,16 @@ def _nfc(value: str) -> str:
 def _trim(value: object, *, label: str, fold: bool = False) -> str:
     if not isinstance(value, str):
         raise ValueError(f"{label} must be a string")
-    result = _nfc(" ".join(value.split()))
-    if fold:
-        result = result.casefold()
+    result = _folded(_nfc(" ".join(value.split())), fold)
     if not result:
         raise ValueError(f"{label} must not be empty")
     return result
+
+
+def _folded(text: str, fold: bool) -> str:
+    if fold:
+        return text.casefold()
+    return text
 
 
 def _canonical_time(value: object, *, nullable: bool, label: str) -> str | None:
@@ -162,10 +175,33 @@ def _canonical_date_text(text: str, *, label: str) -> str:
     return text
 
 
+# `datetime.fromisoformat` accepted exactly three or six fractional digits until
+# Python 3.11; this project supports 3.10, where `…:00.5Z` — a perfectly ordinary
+# half second — raises `Invalid isoformat string`. Verified on 3.10.20 against
+# 3.12.3 on 2026-08-30, and it is why `test_a_sub_second_validity_interval_is_
+# not_refused_as_inverted` failed on every 3.10 job in CI while passing locally.
+# Padding to six digits is exact: it changes no instant and no rendered output,
+# because `isoformat()` prints six digits on both versions either way.
+_FRACTIONAL_SECONDS_RE = re.compile(
+    r"^(?P<head>.*T\d{2}:\d{2}:\d{2})\.(?P<digits>\d+)(?P<tail>.*)$"
+)
+
+
+def _six_digit_fraction(text: str) -> str:
+    """The same instant with a fraction every supported Python can read."""
+    match = _FRACTIONAL_SECONDS_RE.match(text)
+    if match is None:
+        return text
+    digits = match.group("digits")
+    if len(digits) > 6:
+        return text
+    return f"{match.group('head')}.{digits.ljust(6, '0')}{match.group('tail')}"
+
+
 def _canonical_timestamp_text(text: str, *, label: str) -> str:
     try:
         parsed = datetime.fromisoformat(
-            text[:-1] + "+00:00" if text.endswith("Z") else text
+            _six_digit_fraction(text[:-1] + "+00:00" if text.endswith("Z") else text)
         )
         if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
             raise ValueError
@@ -178,7 +214,7 @@ def _strict_rfc3339_utc(value: object, *, label: str) -> str:
     if not isinstance(value, str) or _RFC3339_UTC_RE.fullmatch(value) is None:
         raise ValueError(f"{label} must be a strict UTC RFC3339 timestamp")
     try:
-        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+        parsed = datetime.fromisoformat(_six_digit_fraction(value[:-1] + "+00:00"))
     except ValueError as exc:
         raise ValueError(f"{label} is not a real RFC3339 date/time") from exc
     if parsed.utcoffset() != timezone.utc.utcoffset(parsed):
@@ -251,10 +287,14 @@ def _expanded_digits(decimal_position: int, coefficient_digits: int) -> int:
     return coefficient_digits
 
 
-def _canonical_decimal_text(source: str) -> str:
-    result = format(_finite_decimal(source), "f")
+def _trimmed_decimal(result: str) -> str:
     if "." in result:
-        result = result.rstrip("0").rstrip(".")
+        return result.rstrip("0").rstrip(".")
+    return result
+
+
+def _canonical_decimal_text(source: str) -> str:
+    result = _trimmed_decimal(format(_finite_decimal(source), "f"))
     if len(result) > MAX_DECIMAL_CHARS:
         raise ValueError("number value exceeds the canonical length limit")
     if Decimal(result).is_zero():
@@ -351,15 +391,19 @@ def _validate_interval(validity: object) -> dict[str, str | None]:
 def _require_ordered_interval(start: str | None, end: str | None) -> None:
     if start is None or end is None:
         return
-    if _comparable_time(start) >= _comparable_time(end):
+    if _instant_of(start) >= _instant_of(end):
         raise ValueError("claim validity must be a non-empty half-open interval")
 
 
-def _comparable_time(value: str) -> str:
-    """A bare date compares as its first instant."""
+def _instant_of(value: str) -> datetime:
+    """A bare date is its first instant; canonical times order by instant, not text.
+
+    Text ordering is wrong here because canonical form keeps fractional seconds
+    and `.` sorts before `Z`, so `…:00.5Z` compares as earlier than `…:00Z`.
+    """
     if "T" in value:
-        return value
-    return f"{value}T00:00:00Z"
+        return datetime.fromisoformat(value[:-1] + "+00:00")
+    return datetime.fromisoformat(f"{value}T00:00:00+00:00")
 
 
 def _semantic_payload(record: Mapping[str, object]) -> dict[str, object]:
@@ -515,11 +559,7 @@ class ClaimPipeline:
         evidence = claim.record["evidence"]
         assert isinstance(evidence, dict)
         resolved = self._resolved_evidence(claim, evidence, reference)
-        if resolved.sha256 != evidence["sha256"]:
-            raise EvidenceMismatch("evidence span hash does not match")
-        literal = _evidence_literal(resolved.bytes)
-        if literal != evidence["text"] or literal != claim.record["text"]:
-            raise EvidenceMismatch("evidence literal text does not match")
+        _require_verified_literal(claim, evidence, resolved)
         return VerifiedClaim(claim, resolved.bytes)
 
     def _resolved_evidence(
@@ -609,6 +649,17 @@ def _require_matching_reference(
         or embedded.block_id != claim.block.block_id
     ):
         raise EvidenceMismatch("evidence reference does not match the immutable block")
+
+
+def _require_verified_literal(
+    claim: Claim, evidence: Mapping[str, object], resolved: object
+) -> None:
+    """The resolved span must be the exact bytes, and the exact text, of the claim."""
+    if resolved.sha256 != evidence["sha256"]:
+        raise EvidenceMismatch("evidence span hash does not match")
+    literal = _evidence_literal(resolved.bytes)
+    if literal != evidence["text"] or literal != claim.record["text"]:
+        raise EvidenceMismatch("evidence literal text does not match")
 
 
 def _evidence_literal(span: bytes) -> str:
@@ -883,6 +934,19 @@ def _require_candidate_limit(limit: object) -> None:
         raise ValueError(f"candidate limit must be between 0 and {MAX_CANDIDATES}")
 
 
+def _require_normalized_candidate(claim: object) -> None:
+    if not isinstance(claim, NormalizedClaim):
+        raise TypeError("candidate claim must be normalized")
+
+
+def _require_active_bound(rows: Sequence[object]) -> None:
+    """A derived reading must see whole groups, so it refuses instead of truncating."""
+    if len(rows) > MAX_ACTIVE_RECORDS:
+        raise ValueError(
+            f"claim index holds more than {MAX_ACTIVE_RECORDS} active claims"
+        )
+
+
 class ClaimIndex:
     """A local owner-only SQLite projection; Markdown ledgers remain canonical."""
 
@@ -1130,14 +1194,44 @@ class ClaimIndex:
         _require_candidate_limit(limit)
         if limit == 0:
             return []
-        if not isinstance(claim, NormalizedClaim):
-            raise TypeError("candidate claim must be normalized")
+        _require_normalized_candidate(claim)
         if not self.path.exists():
             return []
         return [
             IndexedClaim(row["page"], NormalizedClaim(json.loads(row["record_json"])))
             for row in self._candidate_rows(claim, limit)
         ]
+
+    def active_records(self, *, subject: str | None = None) -> list[IndexedClaim]:
+        """Every active claim, for readings that must see a whole fact's history.
+
+        `candidates` answers "what might this new claim collide with" and is
+        bounded for that. A bitemporal reading cannot be truncated the same way:
+        a missing successor would silently turn a superseded claim into a
+        current one, so this refuses past its bound rather than return a prefix.
+        """
+        if not self.path.exists():
+            return []
+        return [
+            IndexedClaim(row["page"], NormalizedClaim(json.loads(row["record_json"])))
+            for row in self._active_rows(subject)
+        ]
+
+    def _active_rows(self, subject: str | None) -> list[object]:
+        with closing(self._connect()) as database:
+            if not self._schema_compatible(database):
+                return []
+            rows = database.execute(
+                """
+                SELECT page, record_json FROM claim
+                WHERE lifecycle='active' AND (:subject IS NULL OR subject=:subject)
+                ORDER BY page, id
+                LIMIT :limit
+                """,
+                {"subject": subject, "limit": MAX_ACTIVE_RECORDS + 1},
+            ).fetchall()
+        _require_active_bound(rows)
+        return rows
 
     def _candidate_rows(self, claim: NormalizedClaim, limit: int) -> list[object]:
         with closing(self._connect()) as database:

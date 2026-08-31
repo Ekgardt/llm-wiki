@@ -50,6 +50,11 @@ except ImportError:
         resolve_python_imports_and_calls,
     )
 
+try:
+    from . import value_references
+except ImportError:
+    import value_references
+
 # Lazy-loaded tree-sitter parsers.
 _ts: dict = {}  # language_name -> Parser
 
@@ -71,6 +76,18 @@ GRAMMAR_LOADERS = {
 LANGUAGE_MAP = CODE_LANGUAGE_BY_SUFFIX
 
 MAX_DERIVED_COMMUNITY_CACHE = 4
+# The hotspot list is a ranking, not a dump. This repository has 10,607 nodes
+# with at least one incoming call; a caller reads the head of that ranking. The
+# bound is stated in the answer as `hotspot_limit` / `hotspots_truncated`, so a
+# reader is never left to mistake the top of the list for the whole of it.
+HOTSPOT_LIMIT = 100
+# Bound for the folded call-pair aggregate that feeds community detection.
+# 200,000 against this repository's measured 29,868 pairs — 6.7x headroom.
+MAX_CALL_PAIR_ROWS = 200_000
+# Names `code_graph` treats as conventionally reached, pushed into the store's
+# anti-join as caller data. Measured: it takes this repository's dead-code
+# candidate set from 8,546 of 10,000 rows (17% headroom) to 3,621 (2.8x).
+DEAD_CODE_NAME_PREFIXES = ("test_",)
 
 CO_CHANGE_EDGE = "CO_CHANGED_WITH"
 CODE_TOOLS_SCHEMA_VERSION = 1
@@ -147,42 +164,47 @@ def _command_tool(provider: str, path: str | None, args: list[str], semantic: bo
     }
 
 
-def detect_code_tools(directory: Path, cache_path: Path | None = None) -> dict:
-    """Detect optional semantic tools and atomically refresh their manifest."""
-    from datetime import datetime, timezone
-
+def _jedi_tool() -> dict:
+    """Jedi's availability, reported as one tool record either way."""
     try:
-        from . import memory_state
-    except ImportError:
-        import memory_state
-
-    directory = directory.resolve()
-    try:
-        jedi_version = metadata.version("jedi")
+        version = metadata.version("jedi")
         importlib.import_module("jedi")
-        python = {
-            "provider": "jedi", "available": True, "version": jedi_version,
-            "path": None, "capabilities": {"semantic": True}, "failure": None,
-        }
     except (ImportError, metadata.PackageNotFoundError) as exc:
-        python = {
+        return {
             "provider": "jedi", "available": False, "version": None, "path": None,
-            "capabilities": {"semantic": False}, "failure": str(exc) or "package not found",
+            "capabilities": {"semantic": False},
+            "failure": str(exc) or "package not found",
         }
+    return {
+        "provider": "jedi", "available": True, "version": version,
+        "path": None, "capabilities": {"semantic": True}, "failure": None,
+    }
 
-    tsc_names = ("tsc.cmd", "tsc") if sys.platform == "win32" else ("tsc", "tsc.cmd")
-    local_tsc = next(
-        (
-            candidate
-            for name in tsc_names
-            for candidate in (directory / "node_modules" / ".bin" / name,)
-            if candidate.is_file()
-        ),
-        None,
-    )
-    tsc = str(local_tsc) if local_tsc else shutil.which("tsc")
+
+def _tsc_names() -> tuple[str, ...]:
+    if sys.platform == "win32":
+        return ("tsc.cmd", "tsc")
+    return ("tsc", "tsc.cmd")
+
+
+def _local_tsc(directory: Path) -> Path | None:
+    binaries = directory / "node_modules" / ".bin"
+    candidates = (binaries / name for name in _tsc_names())
+    return next((candidate for candidate in candidates if candidate.is_file()), None)
+
+
+def _tsc_command(directory: Path) -> str | None:
+    """A workspace-local tsc outranks one on PATH."""
+    local = _local_tsc(directory)
+    if local is None:
+        return shutil.which("tsc")
+    return str(local)
+
+
+def _command_tools(directory: Path) -> dict:
+    """Probe the optional command-line servers in parallel."""
     specifications = {
-        "typescript": ("typescript", tsc, ["--version"], False),
+        "typescript": ("typescript", _tsc_command(directory), ["--version"], False),
         "rust": ("rust-analyzer", shutil.which("rust-analyzer"), ["--version"], False),
         "go": ("gopls", shutil.which("gopls"), ["version"], False),
     }
@@ -191,80 +213,138 @@ def detect_code_tools(directory: Path, cache_path: Path | None = None) -> dict:
             name: pool.submit(_command_tool, *specification)
             for name, specification in specifications.items()
         }
-        tools = {"python": python}
-        tools.update({name: futures[name].result() for name in specifications})
+        return {name: futures[name].result() for name in specifications}
+
+
+def _manifest_destination(cache_path: Path | None) -> Path:
+    if cache_path is not None:
+        return cache_path
+    try:
+        from . import memory_state
+    except ImportError:
+        import memory_state
+    return memory_state.STATE_ROOT / "cache" / "code_tools.json"
+
+
+def detect_code_tools(directory: Path, cache_path: Path | None = None) -> dict:
+    """Detect optional semantic tools and atomically refresh their manifest."""
+    from datetime import datetime, timezone
+
+    directory = directory.resolve()
     manifest = {
         "schema_version": CODE_TOOLS_SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "tools": tools,
+        "tools": {"python": _jedi_tool(), **_command_tools(directory)},
     }
-    destination = cache_path or memory_state.STATE_ROOT / "cache" / "code_tools.json"
-    _write_tool_manifest(destination, manifest)
+    _write_tool_manifest(_manifest_destination(cache_path), manifest)
     return manifest
+
+
+_MANIFEST_REPLACE_ATTEMPTS = 20
+
+
+def _staged_manifest(path: Path, manifest: dict) -> Path:
+    """Write the manifest to a sibling temp file, removing it if the write fails.
+
+    The caller owns the returned path, so a failed write must not leave behind a
+    file whose name nobody holds: clean up here and re-raise.
+    """
+    handle = tempfile.NamedTemporaryFile(  # noqa: SIM115
+        mode="w", encoding="utf-8", dir=path.parent,
+        prefix=f"{path.name}.", suffix=".tmp", delete=False,
+    )
+    temporary = Path(handle.name)
+    try:
+        with handle:
+            json.dump(manifest, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return temporary
+
+
+def _sleep_before_retry(attempt: int) -> None:
+    if attempt < _MANIFEST_REPLACE_ATTEMPTS - 1:
+        time.sleep(0.01)
+
+
+def _replace_with_retry(temporary: Path, path: Path) -> None:
+    """Windows refuses os.replace while another writer still holds the target."""
+    for attempt in range(_MANIFEST_REPLACE_ATTEMPTS):
+        try:
+            os.replace(temporary, path)
+            return
+        except PermissionError:
+            _sleep_before_retry(attempt)
 
 
 def _write_tool_manifest(path: Path, manifest: dict) -> None:
     """Atomically replace a manifest using a writer-unique sibling temp file."""
     with _MANIFEST_WRITE_LOCK:
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = None
+        temporary = _staged_manifest(path, manifest)
         try:
-            with tempfile.NamedTemporaryFile(
-                mode="w", encoding="utf-8", dir=path.parent,
-                prefix=f"{path.name}.", suffix=".tmp", delete=False,
-            ) as handle:
-                temporary = Path(handle.name)
-                json.dump(manifest, handle, indent=2, sort_keys=True)
-                handle.write("\n")
-            for attempt in range(20):
-                try:
-                    os.replace(temporary, path)
-                    return
-                except PermissionError:
-                    if attempt < 19:
-                        time.sleep(0.01)
+            _replace_with_retry(temporary, path)
         finally:
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
+            temporary.unlink(missing_ok=True)
+
+
+def _jedi_script(file_path: Path, workspace_root: Path):
+    """The Jedi script for this file, or None when Jedi cannot be used at all."""
+    try:
+        jedi = importlib.import_module("jedi")
+        project = jedi.Project(path=str(workspace_root.resolve()))
+        return jedi.Script(path=str(file_path.resolve()), project=project)
+    except Exception:
+        return None
+
+
+def _workspace_definition(definition, workspace: Path) -> tuple | None:
+    """One inferred definition as a (full_name, path) pair inside the workspace."""
+    module_path = getattr(definition, "module_path", None)
+    full_name = getattr(definition, "full_name", None)
+    if not module_path or not full_name:
+        return None
+    resolved_path = Path(module_path).resolve()
+    resolved_path.relative_to(workspace)
+    return (full_name, resolved_path)
+
+
+def _inferred_targets(script, call: dict, workspace: Path) -> set:
+    """The distinct workspace targets Jedi infers for one call site."""
+    try:
+        definitions = script.infer(line=call["line"], column=call.get("column", 0))
+        pairs = (_workspace_definition(item, workspace) for item in definitions)
+        return {pair for pair in pairs if pair is not None}
+    except Exception:
+        return set()
+
+
+def _semantically_resolvable(call: dict) -> bool:
+    return call.get("confidence") == "unknown" and call.get("semantic_eligible", False)
+
+
+def _enriched_call(script, call: dict, workspace: Path) -> dict:
+    """A call resolved to its one workspace target, or the call unchanged."""
+    if not _semantically_resolvable(call):
+        return call
+    unique = _inferred_targets(script, call, workspace)
+    if len(unique) != 1:
+        return call
+    full_name, _ = unique.pop()
+    updated = dict(call)
+    updated.update(qualified_name=full_name, confidence="confirmed", evidence="jedi")
+    return updated
 
 
 def enrich_python_semantics(file_path: Path, calls: list[dict], workspace_root: Path) -> list[dict]:
     """Resolve unknown Python calls with Jedi when it yields one workspace target."""
-    try:
-        jedi = importlib.import_module("jedi")
-        project = jedi.Project(path=str(workspace_root.resolve()))
-        script = jedi.Script(path=str(file_path.resolve()), project=project)
-    except Exception:
+    script = _jedi_script(file_path, workspace_root)
+    if script is None:
         return calls
-
-    enriched = []
     workspace = workspace_root.resolve()
-    for call in calls:
-        if call.get("confidence") != "unknown" or not call.get("semantic_eligible", False):
-            enriched.append(call)
-            continue
-        try:
-            definitions = script.infer(line=call["line"], column=call.get("column", 0))
-            candidates = []
-            for definition in definitions:
-                module_path = getattr(definition, "module_path", None)
-                full_name = getattr(definition, "full_name", None)
-                if not module_path or not full_name:
-                    continue
-                resolved_path = Path(module_path).resolve()
-                resolved_path.relative_to(workspace)
-                candidates.append((full_name, resolved_path))
-            unique = set(candidates)
-        except Exception:
-            unique = set()
-        if len(unique) == 1:
-            updated = dict(call)
-            full_name, _ = unique.pop()
-            updated.update(qualified_name=full_name, confidence="confirmed", evidence="jedi")
-            enriched.append(updated)
-        else:
-            enriched.append(call)
-    return enriched
+    return [_enriched_call(script, call, workspace) for call in calls]
 
 
 def _co_change_pathspec(directory: Path, repo_root: Path) -> str | None:
@@ -297,13 +377,19 @@ def _git_name_status_output(
     return result.stdout
 
 
+def _pairs_in_commit(files) -> list[tuple]:
+    ordered = sorted(files)
+    return [
+        (source, target)
+        for index, source in enumerate(ordered)
+        for target in ordered[index + 1:]
+    ]
+
+
 def _shared_commit_counts(normalized: list) -> Counter:
     shared: Counter = Counter()
     for files in normalized:
-        ordered = sorted(files)
-        for index, source in enumerate(ordered):
-            for target in ordered[index + 1:]:
-                shared[(source, target)] += 1
+        shared.update(_pairs_in_commit(files))
     return shared
 
 
@@ -350,6 +436,53 @@ def _co_change_edge(
     }
 
 
+def _bounded_commits(commits: list, max_commit_files: int) -> list:
+    return [
+        identities
+        for identities in commits
+        if 1 <= len(identities) <= max_commit_files
+    ]
+
+
+def _co_change_history(directory: Path, timeout: float):
+    """Rename-aware git history for this directory, or None when unavailable."""
+    repo_root = _git_repo_root(directory, timeout) or directory.resolve()
+    pathspec = _co_change_pathspec(directory, repo_root)
+    if pathspec is None:
+        return None
+    stdout = _git_name_status_output(repo_root, pathspec, timeout)
+    if stdout is None:
+        return None
+    return _parse_git_name_status(stdout)
+
+
+def _admitted_co_change_edge(
+    pair, together, file_commits, total, preferred, min_shared_commits, min_ochiai
+):
+    if together < min_shared_commits:
+        return None
+    source, target = pair
+    return _co_change_edge(
+        source, target, together, file_commits, total, preferred, min_ochiai
+    )
+
+
+def _co_change_edges(
+    normalized: list, preferred: dict, min_shared_commits: int, min_ochiai: float
+) -> list[dict]:
+    file_commits = Counter(identity for files in normalized for identity in files)
+    total = len(normalized)
+    edges = []
+    for pair, together in _shared_commit_counts(normalized).items():
+        edge = _admitted_co_change_edge(
+            pair, together, file_commits, total, preferred,
+            min_shared_commits, min_ochiai,
+        )
+        if edge is not None:
+            edges.append(edge)
+    return edges
+
+
 def analyze_co_changes(
     directory: Path,
     *,
@@ -359,40 +492,33 @@ def analyze_co_changes(
     timeout: float = 10,
 ) -> list[dict]:
     """Find statistically meaningful file-level logical coupling in git history."""
-    repo_root = _git_repo_root(directory, timeout) or directory.resolve()
-    pathspec = _co_change_pathspec(directory, repo_root)
-    if pathspec is None:
+    history = _co_change_history(directory, timeout)
+    if history is None:
         return []
-    stdout = _git_name_status_output(repo_root, pathspec, timeout)
-    if stdout is None:
-        return []
-    commits, preferred = _parse_git_name_status(stdout)
-    normalized = [
-        identities
-        for identities in commits
-        if 1 <= len(identities) <= max_commit_files
-    ]
-    if not normalized:
-        return []
-    file_commits = Counter(identity for files in normalized for identity in files)
-    total = len(normalized)
-    edges = []
-    for (source, target), together in _shared_commit_counts(normalized).items():
-        if together < min_shared_commits:
-            continue
-        edge = _co_change_edge(
-            source, target, together, file_commits, total, preferred, min_ochiai
-        )
-        if edge is not None:
-            edges.append(edge)
+    commits, preferred = history
+    normalized = _bounded_commits(commits, max_commit_files)
+    edges = _co_change_edges(normalized, preferred, min_shared_commits, min_ochiai)
     return sorted(
         edges, key=lambda edge: (-edge["weight"], edge["source"], edge["target"])
     )
 
 
+def _usable_git_output(result) -> bool:
+    return result.returncode == 0 and bool(result.stdout) and b"\0" not in result.stdout
+
+
+def _repo_root_from_output(result) -> Path | None:
+    if not _usable_git_output(result):
+        return None
+    root = Path(result.stdout.decode("utf-8", errors="surrogateescape").strip())
+    if not root.is_absolute():
+        return None
+    return root.resolve()
+
+
 def _git_repo_root(directory: Path, timeout: float) -> Path | None:
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # noqa: S603, S607
             ["git", "rev-parse", "--show-toplevel"],
             cwd=str(directory),
             capture_output=True,
@@ -400,116 +526,163 @@ def _git_repo_root(directory: Path, timeout: float) -> Path | None:
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    if result.returncode != 0 or not result.stdout or b"\0" in result.stdout:
-        return None
-    root = Path(result.stdout.decode("utf-8", errors="surrogateescape").strip())
-    return root.resolve() if root.is_absolute() else None
+    return _repo_root_from_output(result)
 
 
-def _parse_git_name_status(data: bytes) -> tuple[list[set[int]], dict[int, str]]:
-    fields = [field.decode("utf-8", errors="surrogateescape") for field in data.split(b"\0")]
+class _GitIdentities:
+    """Path-to-identity allocation that follows renames across commits."""
+
+    def __init__(self) -> None:
+        self.active: dict[str, int] = {}
+        self.preferred: dict[int, str] = {}
+        self._next = 0
+
+    def new(self, path: str) -> int:
+        identity = self._next
+        self._next += 1
+        self.active[path] = identity
+        self.preferred[identity] = path
+        return identity
+
+    def rename(self, old_path: str, new_path: str) -> int:
+        identity = self.active.pop(old_path, None)
+        if identity is None:
+            return self.new(new_path)
+        self.active[new_path] = identity
+        self.preferred[identity] = new_path
+        return identity
+
+    def existing(self, path: str) -> int:
+        identity = self.active.get(path)
+        if identity is None:
+            return self.new(path)
+        return identity
+
+
+def _starts_commit(fields: list[str], index: int, record: str) -> bool:
+    return record == "COMMIT" and index + 1 < len(fields)
+
+
+def _outside_commit(fields: list[str], index: int, current) -> bool:
+    return not fields[index] or current is None
+
+
+def _append_git_change(fields: list[str], index: int, status: str, current) -> int:
+    if status.startswith(("R", "C")) and index + 2 < len(fields):
+        old_path, new_path = fields[index + 1:index + 3]
+        current.append(
+            (status, _normalize_git_path(old_path), _normalize_git_path(new_path))
+        )
+        return index + 3
+    if index + 1 < len(fields):
+        current.append((status, _normalize_git_path(fields[index + 1])))
+        return index + 2
+    return index + 1
+
+
+def _scan_git_field(fields: list[str], index: int, records: list, current):
+    record = fields[index].lstrip("\r\n")
+    if _starts_commit(fields, index, record):
+        started: list[tuple[str, ...]] = []
+        records.append(started)
+        return started, index + 2
+    if _outside_commit(fields, index, current):
+        return current, index + 1
+    return current, _append_git_change(fields, index, record, current)
+
+
+def _git_status_records(fields: list[str]) -> list:
+    """Group the -z name-status stream into one change list per commit."""
     records: list[list[tuple[str, ...]]] = []
     current: list[tuple[str, ...]] | None = None
     index = 0
     while index < len(fields):
-        field = fields[index]
-        record = field.lstrip("\r\n")
-        if record == "COMMIT" and index + 1 < len(fields):
-            current = []
-            records.append(current)
-            index += 2
-            continue
-        if not field or current is None:
-            index += 1
-            continue
-        status = record
-        if status.startswith(("R", "C")) and index + 2 < len(fields):
-            old_path, new_path = fields[index + 1:index + 3]
-            current.append((status, _normalize_git_path(old_path), _normalize_git_path(new_path)))
-            index += 3
-            continue
-        if index + 1 < len(fields):
-            path = fields[index + 1]
-            current.append((status, _normalize_git_path(path)))
-            index += 2
-            continue
-        index += 1
+        current, index = _scan_git_field(fields, index, records, current)
+    return records
 
-    commits: list[set[int]] = []
-    active: dict[str, int] = {}
-    preferred: dict[int, str] = {}
-    next_identity = 0
 
-    def new_identity(path: str) -> int:
-        nonlocal next_identity
-        identity = next_identity
-        next_identity += 1
-        active[path] = identity
-        preferred[identity] = path
-        return identity
+def _folded_plain_change(change: tuple[str, ...], identities) -> int:
+    path = change[1]
+    identity = identities.existing(path)
+    if change[0].startswith("D"):
+        identities.active.pop(path, None)
+    return identity
 
-    for changes in records:
-        identities = set()
-        for change in changes:
-            status = change[0]
-            if status.startswith("R"):
-                old_path, new_path = change[1:]
-                identity = active.pop(old_path, None)
-                if identity is None:
-                    identity = new_identity(new_path)
-                else:
-                    active[new_path] = identity
-                    preferred[identity] = new_path
-                identities.add(identity)
-            elif status.startswith("C"):
-                new_path = change[2]
-                identities.add(new_identity(new_path))
-            else:
-                path = change[1]
-                identity = active.get(path)
-                if identity is None:
-                    identity = new_identity(path)
-                identities.add(identity)
-                if status.startswith("D"):
-                    active.pop(path, None)
-        commits.append(identities)
-    return commits, preferred
+
+def _folded_change(change: tuple[str, ...], identities) -> int:
+    status = change[0]
+    if status.startswith("R"):
+        return identities.rename(change[1], change[2])
+    if status.startswith("C"):
+        return identities.new(change[2])
+    return _folded_plain_change(change, identities)
+
+
+def _parse_git_name_status(data: bytes) -> tuple[list[set[int]], dict[int, str]]:
+    fields = [
+        field.decode("utf-8", errors="surrogateescape") for field in data.split(b"\0")
+    ]
+    records = _git_status_records(fields)
+    identities = _GitIdentities()
+    commits = [
+        {_folded_change(change, identities) for change in changes}
+        for changes in records
+    ]
+    return commits, identities.preferred
 
 
 def _normalize_git_path(path: str) -> str:
     return path.replace("\\", "/")
 
 
+def _co_change_root(directory: Path | None) -> Path | None:
+    if directory is None:
+        return None
+    return _git_repo_root(directory, 10) or directory.resolve()
+
+
+def _coupling_key(source: object, target: object, root: Path | None) -> frozenset:
+    return frozenset((
+        _normalize_edge_path(source, root), _normalize_edge_path(target, root)
+    ))
+
+
+def _coupling_index(co_change_edges: list[dict], root: Path | None) -> dict:
+    return {
+        _coupling_key(edge["source"], edge["target"], root): edge
+        for edge in co_change_edges
+        if edge.get("type") == CO_CHANGE_EDGE
+    }
+
+
+def _carries_co_change(edge: dict, match: dict | None) -> bool:
+    return (
+        edge.get("type") == "CALLS"
+        and edge.get("confidence") == "confirmed"
+        and bool(match)
+    )
+
+
+def _refined_call_edge(edge: dict, coupling: dict, root: Path | None) -> dict:
+    updated = dict(edge)
+    match = coupling.get(
+        _coupling_key(edge.get("source", ""), edge.get("target", ""), root)
+    )
+    if not _carries_co_change(edge, match):
+        return updated
+    evidence = dict(edge.get("evidence", {}))
+    evidence["co_change_weight"] = match["weight"]
+    updated["evidence"] = evidence
+    return updated
+
+
 def refine_call_edges_with_co_changes(
     call_edges: list[dict], co_change_edges: list[dict], directory: Path | None = None
 ) -> list[dict]:
     """Add co-change evidence to confirmed calls without changing edge semantics."""
-    root = (_git_repo_root(directory, 10) or directory.resolve()) if directory else None
-    coupling = {
-        frozenset((
-            _normalize_edge_path(edge["source"], root),
-            _normalize_edge_path(edge["target"], root),
-        )): edge
-        for edge in co_change_edges
-        if edge.get("type") == CO_CHANGE_EDGE
-    }
-    refined = []
-    for edge in call_edges:
-        updated = dict(edge)
-        match = coupling.get(frozenset((
-            _normalize_edge_path(edge.get("source", ""), root),
-            _normalize_edge_path(edge.get("target", ""), root),
-        )))
-        if (
-            edge.get("type") == "CALLS"
-            and edge.get("confidence") == "confirmed"
-            and match
-        ):
-            evidence = dict(edge.get("evidence", {}))
-            evidence["co_change_weight"] = match["weight"]
-            updated["evidence"] = evidence
-        refined.append(updated)
-    return refined
+    root = _co_change_root(directory)
+    coupling = _coupling_index(co_change_edges, root)
+    return [_refined_call_edge(edge, coupling, root) for edge in call_edges]
 
 
 def _normalize_edge_path(path: str, root: Path | None) -> str:
@@ -523,29 +696,37 @@ def _normalize_edge_path(path: str, root: Path | None) -> str:
     return _normalize_git_path(normalized)
 
 
+def _git_log_line(file_path: Path) -> str:
+    """The one-line git record for this file, or empty when git cannot answer."""
+    parent = file_path.parent
+    cwd = str(parent) if parent.exists() else None
+    try:
+        result = subprocess.run(  # noqa: S603, S607
+            ["git", "log", "-1", "--format=%H|%cI|%an", "--", str(file_path)],
+            capture_output=True, text=True, timeout=5, cwd=cwd,
+        )
+    except Exception:
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
 def _get_git_info(file_path: Path) -> dict:
     """Get git commit info for a file (bi-temporal tracking).
 
     Returns dict with commit_hash, commit_date, author.
     Falls back to empty strings if not in a git repo.
     """
-    import subprocess
-    try:
-        result = subprocess.run(
-            ["git", "log", "-1", "--format=%H|%cI|%an", "--", str(file_path)],
-            capture_output=True, text=True, timeout=5,
-            cwd=str(file_path.parent) if file_path.parent.exists() else None,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            parts = result.stdout.strip().split("|")
-            return {
-                "commit_hash": parts[0] if len(parts) > 0 else "",
-                "commit_date": parts[1] if len(parts) > 1 else "",
-                "author": parts[2] if len(parts) > 2 else "",
-            }
-    except Exception:
-        pass
-    return {"commit_hash": "", "commit_date": "", "author": ""}
+    line = _git_log_line(file_path)
+    if not line:
+        return {"commit_hash": "", "commit_date": "", "author": ""}
+    padded = (*line.split("|"), "", "")
+    return {
+        "commit_hash": padded[0],
+        "commit_date": padded[1],
+        "author": padded[2],
+    }
 
 
 def parse_file(file_path: Path) -> dict:
@@ -567,31 +748,48 @@ def parse_file(file_path: Path) -> dict:
     return _parse_file(file_path, registry, file_path.parent)
 
 
+def _empty_parse_result(file_path: Path) -> dict:
+    return {
+        "file": str(file_path), "language": None, "functions": [],
+        "classes": [], "calls": [], "imports": [],
+    }
+
+
+def _language_symbols(file_path, lang, registry, workspace_root, extracted):
+    """Python calls/imports come from the resolver, not the tree-sitter query."""
+    functions, classes, calls, imports = extracted
+    if lang != "python":
+        return functions, classes, calls, imports
+    imports, calls = resolve_python_imports_and_calls(
+        file_path, registry, workspace_root
+    )
+    calls = enrich_python_semantics(file_path, calls, workspace_root)
+    return functions, classes, calls, imports
+
+
+def _tree_sitter_symbols(file_path: Path, lang: str, registry, workspace_root):
+    """Extracted symbols, or None when the caller must fall back to regex."""
+    parser = _get_parser(lang)
+    if parser is None:
+        return None
+    source = file_path.read_bytes()
+    extracted = _extract_symbols(parser.parse(source), parser.language, lang, source)
+    if extracted is None:
+        return None
+    return _language_symbols(file_path, lang, registry, workspace_root, extracted)
+
+
 def _parse_file(file_path: Path, registry: SymbolRegistry, workspace_root: Path) -> dict:
     lang = detect_language(file_path)
     if not lang:
-        return {"file": str(file_path), "language": None, "functions": [],
-                "classes": [], "calls": [], "imports": []}
-
-    parser = _get_parser(lang)
-    if parser is None:
+        return _empty_parse_result(file_path)
+    symbols = _tree_sitter_symbols(file_path, lang, registry, workspace_root)
+    if symbols is None:
         # Fallback: regex-based extraction (less accurate but no deps).
         return _regex_parse(file_path, lang, registry, workspace_root)
-
-    source = file_path.read_bytes()
-    tree = parser.parse(source)
-
-    extracted = _extract_symbols(tree, parser.language, lang, source)
-    if extracted is None:
-        return _regex_parse(file_path, lang, registry, workspace_root)
-    functions, classes, calls, imports = extracted
-    if lang == "python":
-        imports, calls = resolve_python_imports_and_calls(file_path, registry, workspace_root)
-        calls = enrich_python_semantics(file_path, calls, workspace_root)
-
+    functions, classes, calls, imports = symbols
     # Bi-temporal: attach git commit info (valid_from = commit date).
     git_info = _get_git_info(file_path)
-
     return {
         "file": str(file_path),
         "language": lang,
@@ -622,14 +820,16 @@ def _as_node_list(value) -> list:
     return [value]
 
 
+_IMPORT_WRAPPERS = (("'", "'"), ('"', '"'), ("<", ">"))
+
+
 def _unquoted_import(text: str) -> str:
     """An import path may arrive quoted or angle-bracketed; the name is inside."""
     if len(text) < 2:
         return text
-    if text[0] == text[-1] and text[0] in {"'", '"'}:
-        return text[1:-1]
-    if text[0] == "<" and text[-1] == ">":
-        return text[1:-1]
+    for opener, closer in _IMPORT_WRAPPERS:
+        if text[0] == opener and text[-1] == closer:
+            return text[1:-1]
     return text
 
 
@@ -675,26 +875,33 @@ def _collect_symbol_kind(
         group.append(_symbol_record(kind, node, owner, source))
 
 
+_SYMBOL_KINDS = ("function", "class", "call", "import")
+
+
+def _collect_all_symbol_kinds(matches, source: bytes) -> dict:
+    groups = {name: [] for name in _SYMBOL_KINDS}
+    seen = {name: set() for name in _SYMBOL_KINDS}
+    for _, captures in matches:
+        for kind in _SYMBOL_KINDS:
+            _collect_symbol_kind(kind, captures, source, groups[kind], seen[kind])
+    return groups
+
+
 def _extract_symbols(tree, language, lang: str, source: bytes) -> tuple | None:
     """Execute the language query and return functions, classes, calls, imports."""
     matches = _query_matches(tree, language, lang)
     if matches is None:
         return None
-    kinds = ("function", "class", "call", "import")
-    groups = {name: [] for name in kinds}
-    seen = {name: set() for name in kinds}
-    for _, captures in matches:
-        for kind in kinds:
-            _collect_symbol_kind(kind, captures, source, groups[kind], seen[kind])
-    return tuple(groups[name] for name in kinds)
+    groups = _collect_all_symbol_kinds(matches, source)
+    return tuple(groups[name] for name in _SYMBOL_KINDS)
 
 
 _PYTHON_CALL_KEYWORDS = {"if", "for", "while", "def", "class", "print"}
 _SCRIPT_CALL_KEYWORDS = {"if", "for", "while", "switch", "catch"}
 
 
-def _regex_parse_python_line(
-    line: str, number: int, functions: list, classes: list, calls: list, imports: list
+def _regex_python_definitions(
+    line: str, number: int, functions: list, classes: list
 ) -> None:
     match = re.match(r"\s*def\s+(\w+)", line)
     if match:
@@ -702,12 +909,26 @@ def _regex_parse_python_line(
     match = re.match(r"\s*class\s+(\w+)", line)
     if match:
         classes.append({"name": match.group(1), "line": number, "end_line": number})
+
+
+def _regex_python_call(line: str, number: int, calls: list) -> None:
     match = re.match(r"\s*(\w+)\s*\(", line)
     if match and match.group(1) not in _PYTHON_CALL_KEYWORDS:
         calls.append({"name": match.group(1), "line": number})
+
+
+def _regex_python_import(line: str, number: int, imports: list) -> None:
     match = re.match(r"\s*(?:from\s+\S+\s+)?import\s+(\w+)", line)
     if match:
         imports.append({"name": match.group(1), "line": number})
+
+
+def _regex_parse_python_line(
+    line: str, number: int, functions: list, classes: list, calls: list, imports: list
+) -> None:
+    _regex_python_definitions(line, number, functions, classes)
+    _regex_python_call(line, number, calls)
+    _regex_python_import(line, number, imports)
 
 
 def _regex_parse_python(
@@ -742,8 +963,8 @@ def _script_declared_names(line: str) -> set[str]:
     }
 
 
-def _regex_parse_script_line(
-    line: str, number: int, functions: list, classes: list, calls: list
+def _regex_script_definitions(
+    line: str, number: int, functions: list, classes: list
 ) -> None:
     match = re.match(r"\s*(?:export\s+)?function\s+(\w+)", line)
     if match:
@@ -751,14 +972,28 @@ def _regex_parse_script_line(
     match = re.match(r"\s*(?:export\s+)?class\s+(\w+)", line)
     if match:
         classes.append({"name": match.group(1), "line": number, "end_line": number})
+
+
+def _regex_script_arrow(line: str, number: int, functions: list) -> None:
     match = re.match(r"\s*(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?\(", line)
     if match:
         functions.append(_regex_function(match.group(1), line, number))
+
+
+def _regex_script_calls(line: str, number: int, calls: list) -> None:
     declared = _script_declared_names(line)
     for call in re.finditer(r"\b(\w+)\s*\(", line):
         name = call.group(1)
         if name not in declared and name not in _SCRIPT_CALL_KEYWORDS:
             calls.append({"name": name, "line": number})
+
+
+def _regex_parse_script_line(
+    line: str, number: int, functions: list, classes: list, calls: list
+) -> None:
+    _regex_script_definitions(line, number, functions, classes)
+    _regex_script_arrow(line, number, functions)
+    _regex_script_calls(line, number, calls)
 
 
 def _regex_parse_script(
@@ -826,6 +1061,93 @@ def _regex_parse(
     }
 
 
+_ADDITIONAL_LANGUAGE_PATTERNS = {
+    "go": (r"\bfunc\s+(?:\([^)]*\)\s*)?(\w+)\s*\(", r"\btype\s+(\w+)\s+(?:struct|interface)\b"),
+    "rust": (r"\bfn\s+(\w+)\s*\(", r"\b(?:struct|enum|union|trait)\s+(\w+)\b"),
+    "java": (r"\b(?:void|[A-Z]\w*|\w+(?:<[^>]+>)?)\s+(\w+)\s*\([^;]*\)\s*\{", r"\b(?:class|interface|enum)\s+(\w+)\b"),
+    "c": (r"\b(?:void|int|char|float|double|\w+\s*\*)\s+(\w+)\s*\([^;]*\)\s*\{", r"\b(?:struct|union)\s+(\w+)\b"),
+    "cpp": (r"\b(?:void|int|char|float|double|auto|\w+(?:::\w+)*\s*\*?)\s+(\w+)\s*\([^;]*\)\s*\{", r"\b(?:class|struct|union)\s+(\w+)\b"),
+    "ruby": (r"^\s*def\s+(?:self\.)?(\w+[!?=]?)", r"^\s*(?:class|module)\s+([A-Z]\w*)"),
+    "php": (r"\bfunction\s+(\w+)\s*\(", r"\b(?:class|interface|trait)\s+(\w+)\b"),
+    "c_sharp": (r"\b(?:void|[A-Z]\w*|\w+(?:<[^>]+>)?)\s+(\w+)\s*\([^;]*\)\s*\{", r"\b(?:class|interface|struct|enum)\s+(\w+)\b"),
+    "bash": (r"^\s*(?:function\s+)?([A-Za-z_]\w*)\s*\(\)\s*\{", None),
+}
+_ADDITIONAL_CALL_KEYWORDS = frozenset({
+    "if", "for", "while", "switch", "catch", "class", "struct", "interface",
+})
+_ADDITIONAL_COMMAND_KEYWORDS = frozenset({
+    "class", "def", "do", "else", "elsif", "end", "fi", "function",
+    "if", "load", "module", "require", "source", "then",
+})
+
+
+def _regex_additional_function(
+    line: str, number: int, pattern: str, functions: list[dict], declared: set
+) -> None:
+    match = re.search(pattern, line)
+    if not match:
+        return
+    name = match.group(1)
+    declared.add(name)
+    functions.append(_regex_function(name, line, number))
+
+
+def _regex_additional_class(
+    line: str, number: int, pattern: str | None, classes: list[dict]
+) -> None:
+    if pattern is None:
+        return
+    match = re.search(pattern, line)
+    if match is None:
+        return
+    classes.append({"name": match.group(1), "line": number, "end_line": number})
+
+
+def _append_additional_call(
+    name: str, number: int, declared: set, keywords: frozenset, calls: list[dict]
+) -> None:
+    if name in declared or name in keywords:
+        return
+    calls.append({"name": name, "line": number})
+
+
+def _additional_call_name(name: str, lang: str) -> str:
+    if lang == "rust":
+        return name.removesuffix("!")
+    return name
+
+
+def _regex_additional_calls(
+    line: str, number: int, lang: str, declared: set, calls: list[dict]
+) -> None:
+    for call in re.finditer(r"\b(?:\w+(?:::|\.|->))?(\w+[!?]?)\s*[!(]", line):
+        name = _additional_call_name(call.group(1), lang)
+        _append_additional_call(
+            name, number, declared, _ADDITIONAL_CALL_KEYWORDS, calls
+        )
+
+
+def _regex_additional_commands(
+    line: str, number: int, lang: str, declared: set, calls: list[dict]
+) -> None:
+    if lang not in {"ruby", "bash"}:
+        return
+    for command in re.finditer(r"(?:^|[;{])\s*([A-Za-z_]\w*[!?]?)\s+", line):
+        _append_additional_call(
+            command.group(1), number, declared, _ADDITIONAL_COMMAND_KEYWORDS, calls
+        )
+
+
+def _regex_additional_line(
+    line: str, number: int, lang: str, patterns: tuple, declared: set, sinks: dict
+) -> None:
+    _regex_additional_function(line, number, patterns[0], sinks["functions"], declared)
+    _regex_additional_class(line, number, patterns[1], sinks["classes"])
+    _regex_add_import(line, number, lang, sinks["imports"])
+    _regex_additional_calls(line, number, lang, declared, sinks["calls"])
+    _regex_additional_commands(line, number, lang, declared, sinks["calls"])
+
+
 def _regex_parse_additional_languages(
     content: str,
     lang: str,
@@ -835,46 +1157,14 @@ def _regex_parse_additional_languages(
     imports: list[dict],
 ) -> None:
     """Extract basic symbols for optional grammars when tree-sitter is absent."""
-    patterns = {
-        "go": (r"\bfunc\s+(?:\([^)]*\)\s*)?(\w+)\s*\(", r"\btype\s+(\w+)\s+(?:struct|interface)\b"),
-        "rust": (r"\bfn\s+(\w+)\s*\(", r"\b(?:struct|enum|union|trait)\s+(\w+)\b"),
-        "java": (r"\b(?:void|[A-Z]\w*|\w+(?:<[^>]+>)?)\s+(\w+)\s*\([^;]*\)\s*\{", r"\b(?:class|interface|enum)\s+(\w+)\b"),
-        "c": (r"\b(?:void|int|char|float|double|\w+\s*\*)\s+(\w+)\s*\([^;]*\)\s*\{", r"\b(?:struct|union)\s+(\w+)\b"),
-        "cpp": (r"\b(?:void|int|char|float|double|auto|\w+(?:::\w+)*\s*\*?)\s+(\w+)\s*\([^;]*\)\s*\{", r"\b(?:class|struct|union)\s+(\w+)\b"),
-        "ruby": (r"^\s*def\s+(?:self\.)?(\w+[!?=]?)", r"^\s*(?:class|module)\s+([A-Z]\w*)"),
-        "php": (r"\bfunction\s+(\w+)\s*\(", r"\b(?:class|interface|trait)\s+(\w+)\b"),
-        "c_sharp": (r"\b(?:void|[A-Z]\w*|\w+(?:<[^>]+>)?)\s+(\w+)\s*\([^;]*\)\s*\{", r"\b(?:class|interface|struct|enum)\s+(\w+)\b"),
-        "bash": (r"^\s*(?:function\s+)?([A-Za-z_]\w*)\s*\(\)\s*\{", None),
+    patterns = _ADDITIONAL_LANGUAGE_PATTERNS[lang]
+    declared: set = set()
+    sinks = {
+        "functions": functions, "classes": classes,
+        "calls": calls, "imports": imports,
     }
-    function_pattern, class_pattern = patterns[lang]
-    declared = set()
-    for line_number, line in enumerate(content.splitlines(), 1):
-        function_match = re.search(function_pattern, line)
-        if function_match:
-            name = function_match.group(1)
-            declared.add(name)
-            functions.append(_regex_function(name, line, line_number))
-        if class_pattern and (class_match := re.search(class_pattern, line)):
-            classes.append({
-                "name": class_match.group(1), "line": line_number, "end_line": line_number,
-            })
-        _regex_add_import(line, line_number, lang, imports)
-        for call in re.finditer(r"\b(?:\w+(?:::|\.|->))?(\w+[!?]?)\s*[!(]", line):
-            name = call.group(1)
-            if lang == "rust":
-                name = name.removesuffix("!")
-            if name not in declared and name not in {
-                "if", "for", "while", "switch", "catch", "class", "struct", "interface",
-            }:
-                calls.append({"name": name, "line": line_number})
-        if lang in {"ruby", "bash"}:
-            for command in re.finditer(r"(?:^|[;{])\s*([A-Za-z_]\w*[!?]?)\s+", line):
-                name = command.group(1)
-                if name not in declared and name not in {
-                    "class", "def", "do", "else", "elsif", "end", "fi", "function",
-                    "if", "load", "module", "require", "source", "then",
-                }:
-                    calls.append({"name": name, "line": line_number})
+    for number, line in enumerate(content.splitlines(), 1):
+        _regex_additional_line(line, number, lang, patterns, declared, sinks)
 
 
 def _regex_function(name: str, declaration: str, line: int) -> dict:
@@ -885,24 +1175,35 @@ def _regex_function(name: str, declaration: str, line: int) -> dict:
     return function
 
 
+def _paren_delta(char: str) -> int:
+    if char == "(":
+        return 1
+    if char == ")":
+        return -1
+    return 0
+
+
+def _closing_paren_index(declaration: str, start: int) -> int | None:
+    depth = 0
+    for index in range(start, len(declaration)):
+        depth += _paren_delta(declaration[index])
+        if depth == 0:
+            return index
+    return None
+
+
 def _declaration_signature(declaration: str, name: str) -> str | None:
     """Return a compact name-and-parameters signature when it is explicit."""
     match = re.search(rf"\b{re.escape(name)}\s*\(", declaration)
     if not match:
         return None
     start = declaration.find("(", match.start())
-    depth = 0
-    for index in range(start, len(declaration)):
-        char = declaration[index]
-        if char == "(":
-            depth += 1
-        elif char == ")":
-            depth -= 1
-            if depth == 0:
-                parameters = re.sub(r"\s+", " ", declaration[start:index + 1]).strip()
-                parameters = re.sub(r"\s*,\s*", ", ", parameters)
-                return f"{name}{parameters}"
-    return None
+    end = _closing_paren_index(declaration, start)
+    if end is None:
+        return None
+    parameters = re.sub(r"\s+", " ", declaration[start:end + 1]).strip()
+    parameters = re.sub(r"\s*,\s*", ", ", parameters)
+    return f"{name}{parameters}"
 
 
 def _regex_add_import(line: str, line_number: int, lang: str, imports: list[dict]) -> None:
@@ -922,57 +1223,104 @@ def _regex_add_import(line: str, line_number: int, lang: str, imports: list[dict
         imports.append({"name": name.strip(), "line": line_number})
 
 
+_INDEX_SKIP_DIRS = frozenset({".git", "node_modules", "__pycache__", ".venv", "venv"})
+
+
+def _indexable_source(path: Path, extensions: set) -> bool:
+    if not path.is_file():
+        return False
+    if path.suffix.lower() not in extensions:
+        return False
+    return not any(skip in path.parts for skip in _INDEX_SKIP_DIRS)
+
+
+def _accumulate_index_stats(stats: dict, result: dict) -> None:
+    if not result["language"]:
+        return
+    stats["files"] += 1
+    for key in ("functions", "classes", "calls", "imports"):
+        stats[key] += len(result[key])
+
+
+def _print_index_stats(stats: dict) -> None:
+    ts_status = "tree-sitter" if _have_tree_sitter() else "regex fallback"
+    print(f"Indexed {stats['files']} files ({ts_status}):")
+    print(f"  Functions: {stats['functions']}")
+    print(f"  Classes:   {stats['classes']}")
+    print(f"  Calls:     {stats['calls']}")
+    print(f"  Imports:   {stats['imports']}")
+
+
 def index_directory(directory: Path, verbose: bool = True) -> dict:
     """Index all source files in a directory.
 
     Returns stats: {files, functions, classes, calls, imports}
     """
     detect_code_tools(directory)
-    if not directory.exists():
-        return {"files": 0, "functions": 0, "classes": 0, "calls": 0, "imports": 0}
-
     stats = {"files": 0, "functions": 0, "classes": 0, "calls": 0, "imports": 0}
+    if not directory.exists():
+        return stats
     extensions = set(LANGUAGE_MAP.keys())
     registry = build_python_symbol_registry(directory)
-
     for path in sorted(directory.rglob("*")):
-        if not path.is_file():
-            continue
-        if path.suffix.lower() not in extensions:
-            continue
-        if any(skip in path.parts for skip in {".git", "node_modules", "__pycache__", ".venv", "venv"}):
-            continue
-
-        result = _parse_file(path, registry, directory)
-        if result["language"]:
-            stats["files"] += 1
-            stats["functions"] += len(result["functions"])
-            stats["classes"] += len(result["classes"])
-            stats["calls"] += len(result["calls"])
-            stats["imports"] += len(result["imports"])
-
+        if _indexable_source(path, extensions):
+            _accumulate_index_stats(stats, _parse_file(path, registry, directory))
     if verbose:
-        ts_status = "tree-sitter" if _have_tree_sitter() else "regex fallback"
-        print(f"Indexed {stats['files']} files ({ts_status}):")
-        print(f"  Functions: {stats['functions']}")
-        print(f"  Classes:   {stats['classes']}")
-        print(f"  Calls:     {stats['calls']}")
-        print(f"  Imports:   {stats['imports']}")
-
+        _print_index_stats(stats)
     return stats
 
 
-def _check_generation_stop(deadline: float | None, cancelled) -> None:
-    if deadline is not None and (
-        isinstance(deadline, bool)
-        or not isinstance(deadline, (int, float))
-        or not math.isfinite(deadline)
-    ):
+def _valid_monotonic_deadline(deadline: object) -> bool:
+    if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
+        return False
+    return math.isfinite(deadline)
+
+
+def _require_valid_deadline(deadline: object) -> None:
+    if not _valid_monotonic_deadline(deadline):
         raise ValueError("deadline must be an absolute monotonic timestamp or None")
-    if deadline is not None and time.monotonic() >= deadline:
+
+
+def _require_generation_deadline(deadline: float | None) -> None:
+    if deadline is None:
+        return
+    _require_valid_deadline(deadline)
+    if time.monotonic() >= deadline:
         raise TimeoutError("generation catalog deadline reached")
+
+
+def _check_generation_stop(deadline: float | None, cancelled) -> None:
+    _require_generation_deadline(deadline)
     if cancelled is not None and cancelled():
         raise TimeoutError("generation catalog operation cancelled")
+
+
+def _generation_state_root(memory_state) -> Path:
+    configured = os.environ.get("LLM_WIKI_STATE_ROOT")
+    if configured:
+        return Path(configured).resolve()
+    return memory_state.STATE_ROOT
+
+
+def _bounded_call(factory, *args, deadline, cancelled):
+    """Pass deadline/cancelled through only when the caller supplied either."""
+    if deadline is None and cancelled is None:
+        return factory(*args)
+    return factory(*args, deadline=deadline, cancelled=cancelled)
+
+
+def _new_generation_catalog(
+    catalog_class, read_only, state_root, catalog_path, deadline, cancelled
+):
+    if not read_only:
+        return catalog_class(state_root, catalog_path=catalog_path)
+    if deadline is None and cancelled is None:
+        return catalog_class.open_existing_read_only(
+            state_root, catalog_path=catalog_path
+        )
+    return catalog_class.open_existing_read_only(
+        state_root, catalog_path=catalog_path, deadline=deadline, cancelled=cancelled
+    )
 
 
 def _generation_catalog(
@@ -994,34 +1342,43 @@ def _generation_catalog(
         import memory_state
         from generation_catalog import GenerationCatalog
 
-    configured_state_root = os.environ.get("LLM_WIKI_STATE_ROOT")
-    state_root = (
-        Path(configured_state_root).resolve()
-        if configured_state_root
-        else memory_state.STATE_ROOT
-    )
+    state_root = _generation_state_root(memory_state)
     catalog_path = state_root / "cache" / "evidence-graph" / "catalog.sqlite3"
     _check_generation_stop(deadline, cancelled)
     if not catalog_path.is_file():
         return None
     _check_generation_stop(deadline, cancelled)
-    if read_only:
-        if deadline is not None or cancelled is not None:
-            catalog = GenerationCatalog.open_existing_read_only(
-                state_root,
-                catalog_path=catalog_path,
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-        else:
-            catalog = GenerationCatalog.open_existing_read_only(
-                state_root,
-                catalog_path=catalog_path,
-            )
-    else:
-        catalog = GenerationCatalog(state_root, catalog_path=catalog_path)
+    catalog = _new_generation_catalog(
+        GenerationCatalog, read_only, state_root, catalog_path, deadline, cancelled
+    )
     _check_generation_stop(deadline, cancelled)
     return catalog
+
+
+def _generation_catalog_for(directory, read_only, deadline, cancelled):
+    """Keep the plain one-argument call, which callers and tests substitute for."""
+    if read_only or deadline is not None or cancelled is not None:
+        return _generation_catalog(
+            directory, read_only=read_only, deadline=deadline, cancelled=cancelled
+        )
+    return _generation_catalog(directory)
+
+
+def _active_graph_or_none(
+    directory, read_only, deadline, cancelled, graph_class, resolve_scope
+):
+    _check_generation_stop(deadline, cancelled)
+    catalog = _generation_catalog_for(directory, read_only, deadline, cancelled)
+    if catalog is None:
+        return None
+    scope = _bounded_call(
+        resolve_scope, directory, deadline=deadline, cancelled=cancelled
+    )
+    _check_generation_stop(deadline, cancelled)
+    return _bounded_call(
+        graph_class.open_active_for_repository, catalog, scope,
+        deadline=deadline, cancelled=cancelled,
+    )
 
 
 def _active_evidence_graph(
@@ -1039,35 +1396,10 @@ def _active_evidence_graph(
         from repository_scope import resolve_repository_scope
 
     try:
-        _check_generation_stop(deadline, cancelled)
-        if read_only or deadline is not None or cancelled is not None:
-            catalog = _generation_catalog(
-                directory,
-                read_only=read_only,
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-        else:
-            catalog = _generation_catalog(directory)
-        if catalog is None:
-            return None
-        if deadline is not None or cancelled is not None:
-            scope = resolve_repository_scope(
-                directory,
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-        else:
-            scope = resolve_repository_scope(directory)
-        _check_generation_stop(deadline, cancelled)
-        if deadline is not None or cancelled is not None:
-            return EvidenceGraph.open_active_for_repository(
-                catalog,
-                scope,
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-        return EvidenceGraph.open_active_for_repository(catalog, scope)
+        return _active_graph_or_none(
+            directory, read_only, deadline, cancelled,
+            EvidenceGraph, resolve_repository_scope,
+        )
     except TimeoutError:
         raise
     except (OSError, TypeError, ValueError, PermissionError, sqlite3.Error):
@@ -1110,27 +1442,195 @@ def _stored_architecture_node(graph, node: dict[str, object], directory: Path) -
     }
 
 
-def _stored_communities(graph_reader, edges: list[dict[str, object]]) -> list[list[str]]:
+def _add_undirected_edge(graph: dict, source: str, target: str, weight: float) -> None:
+    if source == target:
+        return
+    graph.setdefault(source, {})[target] = graph.setdefault(source, {}).get(target, 0) + weight
+    graph.setdefault(target, {})[source] = graph.setdefault(target, {}).get(source, 0) + weight
+
+
+def _undirected_call_graph(edges: list[dict[str, object]]) -> dict:
+    """Fold resolved call edges into one weighted undirected graph.
+
+    Accepts either a row of record from `EvidenceGraph.edges()`, which carries
+    no weight and counts as one, or a pair already folded in SQL by
+    `EvidenceGraph.edge_weights()`, which carries how many assertions joined it.
+    """
+    graph: dict[str, dict[str, float]] = {}
+    for edge in edges:
+        _add_undirected_edge(
+            graph,
+            str(edge["source_node_id"]),
+            str(edge["target_node_id"]),
+            float(edge.get("weight", 1)),
+        )
+    return graph
+
+
+def _stored_call_pairs(graph_reader) -> list[dict[str, object]]:
+    """The whole call graph as distinct weighted undirected pairs, folded in SQL.
+
+    Measured on this repository: 35,313 resolved CALLS assertions fold into
+    29,868 pairs, 0.30 s, 4.07 MB as a Python adjacency, 1.93 s of Louvain.
+    The bound is `MAX_CALL_PAIR_ROWS`; above it the reader refuses by name.
+    """
+    return graph_reader.edge_weights(
+        edge_types=("CALLS",), max_rows=MAX_CALL_PAIR_ROWS
+    )
+
+
+def _derived_cache(graph_reader) -> dict:
     cache = getattr(graph_reader, "_derived_code_graph_cache", None)
     if cache is None:
         cache = {}
         graph_reader._derived_code_graph_cache = cache
+    return cache
+
+
+def _stored_communities(graph_reader, edges: list[dict[str, object]]) -> list[list[str]]:
+    cache = _derived_cache(graph_reader)
     cache_key = "communities/calls/v1"
     if cache_key in cache:
         return cache[cache_key]
-    graph: dict[str, dict[str, float]] = {}
-    for edge in edges:
-        source = str(edge["source_node_id"])
-        target = str(edge["target_node_id"])
-        if source == target:
-            continue
-        graph.setdefault(source, {})[target] = graph.setdefault(source, {}).get(target, 0) + 1
-        graph.setdefault(target, {})[source] = graph.setdefault(target, {}).get(source, 0) + 1
-    communities = _louvain_communities(graph)
+    communities = _louvain_communities(_undirected_call_graph(edges))
     if len(cache) >= MAX_DERIVED_COMMUNITY_CACHE:
         cache.pop(next(iter(cache)))
     cache[cache_key] = communities
     return communities
+
+
+# NEW-125. Communities used to answer as bare `code:node:<md5>` lists, naming no
+# symbol, no file and no line, so `answer_budget` classified the whole field as
+# an opaque collection and dropped it - `mode=community` returned nothing at
+# all. Naming the members costs bytes, so the listing is bounded here rather
+# than left to be cut somewhere downstream.
+#
+# The bounds are measured on this repository, not chosen: the call graph folds
+# into 4 078 communities over 17 194 members, and naming every one of them costs
+# 899 071 estimated tokens - 36x the 25 000-token client ceiling `answer_budget`
+# documents. 30 communities at 10 members each cost 11 836, which leaves room
+# for the entry points, routes and hotspots that share the `summary` answer
+# (~9 000 tokens measured). The counts below state everything the bound left
+# out, so the answer is short, never quietly partial.
+COMMUNITY_LIMIT = 30
+COMMUNITY_MEMBER_LIMIT = 10
+
+
+def _community_order_key(community: list[str]) -> tuple[int, str]:
+    """Largest first - the bound has to keep the communities that carry most."""
+    return (-len(community), str(community[0]))
+
+
+def _named_community(community: list[str], member_row) -> dict[str, object]:
+    members = [member_row(node_id) for node_id in community[:COMMUNITY_MEMBER_LIMIT]]
+    return {
+        "size": len(community),
+        "members": members,
+        "members_truncated": len(community) > len(members),
+        "members_omitted": len(community) - len(members),
+    }
+
+
+def _communities_holding(communities: list[list[str]], node_ids) -> list[list[str]]:
+    """Only the communities a named symbol belongs to, or all of them.
+
+    A whole-graph listing cannot answer "which community does X belong to" at
+    this repository's scale: naming all 17 194 members costs 899 071 estimated
+    tokens, 36x the client ceiling, and `fuse_rrf`'s community is 729th by size,
+    so no honest bound reaches it. Anchoring on the symbol turns a listing that
+    must be cut into an answer that fits.
+    """
+    if node_ids is None:
+        return communities
+    return [item for item in communities if node_ids.intersection(item)]
+
+
+def _community_answer(
+    communities: list[list[str]], member_row, node_ids=None
+) -> tuple[list, dict]:
+    """Named communities, plus the counts that state what the bound left out."""
+    selected = _communities_holding(communities, node_ids)
+    shown = sorted(selected, key=_community_order_key)[:COMMUNITY_LIMIT]
+    counts = {
+        "community_count": len(selected),
+        "community_member_count": sum(len(item) for item in selected),
+        "community_limit": COMMUNITY_LIMIT,
+        "community_member_limit": COMMUNITY_MEMBER_LIMIT,
+        "communities_truncated": len(selected) > len(shown),
+    }
+    return [_named_community(item, member_row) for item in shown], counts
+
+
+def _stored_community_member(graph, node_id: str, locations: dict) -> dict:
+    node = graph.node(node_id)
+    location = locations.get(node_id, {})
+    source_root = Path(graph.repository_scope.checkout_root)
+    relative = str(location.get("relative_path", ""))
+    return {
+        "qualified_name": "" if node is None else _stored_qualified_name(node),
+        "file": str(source_root / relative) if relative else "",
+        "line": location.get("line", 0),
+    }
+
+
+def _shown_community_members(communities: list[list[str]]) -> list[str]:
+    """Exactly the members the bound will name, so nothing else is looked up."""
+    shown = sorted(communities, key=_community_order_key)[:COMMUNITY_LIMIT]
+    return [node_id for item in shown for node_id in item[:COMMUNITY_MEMBER_LIMIT]]
+
+
+def _stored_symbol_node_ids(graph, symbol: str | None):
+    if symbol is None:
+        return None
+    found = graph.find_nodes(kinds=("function", "method"), name=symbol, max_rows=512)
+    return {item["node_id"] for item in found}
+
+
+def _stored_community_answer(graph, symbol: str | None = None) -> tuple[list, dict]:
+    communities = _stored_communities(graph, _stored_call_pairs(graph))
+    node_ids = _stored_symbol_node_ids(graph, symbol)
+    selected = _communities_holding(communities, node_ids)
+    locations = graph.node_locations(_shown_community_members(selected))
+    return _community_answer(
+        communities,
+        lambda node_id: _stored_community_member(graph, node_id, locations),
+        node_ids,
+    )
+
+
+def _live_qualified_name(definition: dict) -> str:
+    owner = str(definition.get("owner", ""))
+    name = str(definition.get("name", ""))
+    return name if owner in {"", "<module>"} else f"{owner}.{name}"
+
+
+def _live_community_member(definitions: dict, symbol_id: str) -> dict:
+    definition = definitions.get(symbol_id, {})
+    return {
+        "qualified_name": _live_qualified_name(definition),
+        "file": definition.get("file", ""),
+        "line": definition.get("line", 0),
+    }
+
+
+def _live_symbol_ids(definitions: dict, symbol: str | None):
+    if symbol is None:
+        return None
+    return {
+        symbol_id
+        for symbol_id, definition in definitions.items()
+        if definition.get("name") == symbol
+    }
+
+
+def _live_community_answer(
+    definitions: dict, edges: list[dict], symbol: str | None = None
+) -> tuple[list, dict]:
+    return _community_answer(
+        _communities_from_edges(edges),
+        lambda symbol_id: _live_community_member(definitions, symbol_id),
+        _live_symbol_ids(definitions, symbol),
+    )
 
 
 def _store_report(graph) -> dict[str, object]:
@@ -1209,6 +1709,51 @@ def _callees_in_function(path: Path, result: dict, func_def: dict) -> list[dict]
     return callees
 
 
+# NEW-124. The bound on the *sample* of unresolved call sites one answer names.
+# `unresolved_caller_count` stays exact above it, so a cut list still states how
+# much it is missing rather than implying it is whole.
+UNRESOLVED_CALLER_LIMIT = 200
+
+
+def _unresolved_caller_row(graph, row: dict, function_name: str) -> dict:
+    caller = graph.node(row["source_node_id"])
+    source_root = Path(graph.repository_scope.checkout_root)
+    return {
+        "file": str(source_root / row["relative_path"]),
+        "line": row["line"],
+        "function": function_name,
+        "qualified_name": "" if caller is None else _stored_qualified_name(caller),
+        "call_text": row["target_text"],
+        "reason": row["reason"],
+    }
+
+
+def _unresolved_caller_fields(graph, function_name: str) -> dict[str, object]:
+    """The calls this answer could not bind, so a zero never reads as an absence.
+
+    NEW-124. `queue.recover_expired_leases()` reaches a method through a
+    variable the extractor cannot type, so it leaves an *observation* rather
+    than a CALLS assertion. An answer built only from assertions said
+    `0 callers` for `recover_expired_leases`, which has two - a silently wrong
+    answer, and a worse failure than the ceiling refusal it replaced, because a
+    refusal says "I cannot" and this said "nobody does".
+
+    These rows are candidates matched by the attribute the call names. The
+    receiver's type is exactly what could not be established, so they are never
+    counted as callers and never merged into `callers`.
+    """
+    found = graph.unresolved_calls_naming(
+        function_name, max_rows=UNRESOLVED_CALLER_LIMIT
+    )
+    return {
+        "unresolved_callers": [
+            _unresolved_caller_row(graph, row, function_name) for row in found["calls"]
+        ],
+        "unresolved_caller_count": found["count"],
+        "unresolved_callers_truncated": found["truncated"],
+    }
+
+
 def _caller_edge(path: Path, call: dict, function_name: str) -> dict:
     return {
         "file": str(path),
@@ -1227,6 +1772,68 @@ def _call_names_target(call: dict, function_name: str, language: str) -> bool:
     return call.get("confidence") == "confirmed" or language != "python"
 
 
+def _live_callers_in_file(path: Path, result: dict, function_name: str) -> list[dict]:
+    return [
+        _caller_edge(path, call, function_name)
+        for call in result["calls"]
+        if _call_names_target(call, function_name, result["language"])
+    ]
+
+
+def _call_names_unbound_target(call: dict, function_name: str, language: str) -> bool:
+    """A name match the live pass refuses to confirm: the receiver stayed open."""
+    resolved = (call.get("qualified_name") or call["name"]).rsplit(".", 1)[-1]
+    return (
+        resolved == function_name
+        and language == "python"
+        and call.get("confidence") != "confirmed"
+    )
+
+
+def _live_unresolved_caller(path: Path, call: dict, function_name: str) -> dict:
+    return {
+        "file": str(path),
+        "line": call["line"],
+        "function": function_name,
+        "qualified_name": call.get("qualified_name"),
+        "call_text": call.get("name", function_name),
+        "reason": "unconfirmed_receiver",
+    }
+
+
+def _live_unresolved_in_file(path: Path, result: dict, function_name: str) -> list[dict]:
+    return [
+        _live_unresolved_caller(path, call, function_name)
+        for call in result["calls"]
+        if _call_names_unbound_target(call, function_name, result["language"])
+    ]
+
+
+def _live_unresolved_fields(unresolved: list[dict]) -> dict[str, object]:
+    """The live pass owes the same distinction the stored pass now makes."""
+    sample = unresolved[:UNRESOLVED_CALLER_LIMIT]
+    return {
+        "unresolved_callers": sample,
+        "unresolved_caller_count": len(unresolved),
+        "unresolved_callers_truncated": len(unresolved) > len(sample),
+    }
+
+
+def _live_caller_scan(
+    directory: Path, function_name: str
+) -> tuple[list[dict], list[dict]]:
+    callers: list[dict] = []
+    unresolved: list[dict] = []
+    registry = build_python_symbol_registry(directory)
+    for path in sorted(directory.rglob("*")):
+        if not _searchable_source(path):
+            continue
+        result = _parse_file(path, registry, directory)
+        callers.extend(_live_callers_in_file(path, result, function_name))
+        unresolved.extend(_live_unresolved_in_file(path, result, function_name))
+    return callers, unresolved
+
+
 def find_callers(
     function_name: str,
     directory: Path,
@@ -1236,22 +1843,42 @@ def find_callers(
 ) -> list[dict] | dict:
     """Find callers using strict Python evidence or non-Python name heuristics.
 
-    Unknown Python calls are excluded. Returns caller edge dictionaries.
+    Unknown Python calls are excluded from `callers`, and named separately in
+    `unresolved_callers` with an exact `unresolved_caller_count` (NEW-124), so
+    an empty `callers` list distinguishes "nobody calls it" from "the receiver
+    could not be resolved". Both fields need `with_report=True`; the bare list
+    form is kept for callers that only want confirmed edges.
     """
     if not live:
         stored = _stored_callers(function_name, directory, with_report)
         if stored is not None:
             return stored
-    callers: list[dict] = []
-    registry = build_python_symbol_registry(directory)
-    for path in sorted(directory.rglob("*")):
-        if not _searchable_source(path):
-            continue
-        result = _parse_file(path, registry, directory)
-        for call in result["calls"]:
-            if _call_names_target(call, function_name, result["language"]):
-                callers.append(_caller_edge(path, call, function_name))
-    return _with_report("callers", callers, _live_report(directory), with_report)
+    callers, unresolved = _live_caller_scan(directory, function_name)
+    report = {**_live_report(directory), **_live_unresolved_fields(unresolved)}
+    return _with_report("callers", callers, report, with_report)
+
+
+def _stored_caller_row(graph, edge, function_name: str, directory: Path) -> dict | None:
+    caller = graph.node(edge["source_node_id"])
+    if caller is None:
+        return None
+    location = _stored_edge_location(graph, edge["assertion_id"], directory)
+    return {
+        "file": location[0],
+        "line": location[1],
+        "function": function_name,
+        "qualified_name": _stored_qualified_name(caller),
+        "confidence": edge["confidence"],
+        "symbol_id": caller["node_id"],
+    }
+
+
+def _sorted_stored_rows(rows: list, key) -> list[dict]:
+    return sorted([row for row in rows if row is not None], key=key)
+
+
+def _caller_sort_key(item: dict):
+    return (item["file"], item["line"], item["symbol_id"])
 
 
 def _store_find_callers(
@@ -1264,26 +1891,19 @@ def _store_find_callers(
         targets = graph.find_nodes(
             kinds=("function", "method"), name=function_name, max_rows=10_000
         )
-        target_ids = {item["node_id"] for item in targets}
-        edges = graph.edges(edge_types=("CALLS",), max_rows=10_000)
-        results = []
-        for edge in edges:
-            if edge["target_node_id"] not in target_ids:
-                continue
-            caller = graph.node(edge["source_node_id"])
-            if caller is None:
-                continue
-            location = _stored_edge_location(graph, edge["assertion_id"], directory)
-            results.append({
-                "file": location[0],
-                "line": location[1],
-                "function": function_name,
-                "qualified_name": _stored_qualified_name(caller),
-                "confidence": edge["confidence"],
-                "symbol_id": caller["node_id"],
-            })
-        results = sorted(results, key=lambda item: (item["file"], item["line"], item["symbol_id"]))
-        return _with_report("callers", results, _store_report(graph), with_report)
+        target_ids = sorted({item["node_id"] for item in targets})
+        edges = graph.edges(
+            edge_types=("CALLS",), target_node_ids=target_ids, max_rows=10_000
+        )
+        rows = [
+            _stored_caller_row(graph, edge, function_name, directory) for edge in edges
+        ]
+        results = _sorted_stored_rows(rows, _caller_sort_key)
+        report = {
+            **_store_report(graph),
+            **_unresolved_caller_fields(graph, function_name),
+        }
+        return _with_report("callers", results, report, with_report)
     finally:
         graph.close()
 
@@ -1294,6 +1914,18 @@ def _stored_callees(
     if with_report:
         return _store_find_callees(function_name, directory, with_report=True)
     return _store_find_callees(function_name, directory)
+
+
+def _live_callees_in_file(
+    path: Path, registry, directory: Path, function_name: str
+) -> list[dict]:
+    if not _searchable_source(path):
+        return []
+    result = _parse_file(path, registry, directory)
+    func_def = _named_function(result, function_name)
+    if func_def is None:
+        return []
+    return _callees_in_function(path, result, func_def)
 
 
 def find_callees(
@@ -1314,14 +1946,26 @@ def find_callees(
     callees: list[dict] = []
     registry = build_python_symbol_registry(directory)
     for path in sorted(directory.rglob("*")):
-        if not _searchable_source(path):
-            continue
-        result = _parse_file(path, registry, directory)
-        func_def = _named_function(result, function_name)
-        if func_def is None:
-            continue
-        callees.extend(_callees_in_function(path, result, func_def))
+        callees.extend(_live_callees_in_file(path, registry, directory, function_name))
     return _with_report("callees", callees, _live_report(directory), with_report)
+
+
+def _stored_callee_row(graph, edge, directory: Path) -> dict | None:
+    callee = graph.node(edge["target_node_id"])
+    if callee is None:
+        return None
+    location = _stored_edge_location(graph, edge["assertion_id"], directory)
+    return {
+        "file": location[0],
+        "line": location[1],
+        "callee": callee["metadata"].get("name", callee["identity_key"]),
+        "symbol_id": callee["node_id"],
+        "confidence": edge["confidence"],
+    }
+
+
+def _callee_sort_key(item: dict):
+    return (str(item["callee"]), item["symbol_id"])
 
 
 def _store_find_callees(
@@ -1334,26 +1978,62 @@ def _store_find_callees(
         sources = graph.find_nodes(
             kinds=("function", "method"), name=function_name, max_rows=10_000
         )
-        source_ids = {item["node_id"] for item in sources}
-        results = []
-        for edge in graph.edges(edge_types=("CALLS",), max_rows=10_000):
-            if edge["source_node_id"] not in source_ids:
-                continue
-            callee = graph.node(edge["target_node_id"])
-            if callee is None:
-                continue
-            location = _stored_edge_location(graph, edge["assertion_id"], directory)
-            results.append({
-                "file": location[0],
-                "line": location[1],
-                "callee": callee["metadata"].get("name", callee["identity_key"]),
-                "symbol_id": callee["node_id"],
-                "confidence": edge["confidence"],
-            })
-        results = sorted(results, key=lambda item: (str(item["callee"]), item["symbol_id"]))
+        source_ids = sorted({item["node_id"] for item in sources})
+        edges = graph.edges(
+            edge_types=("CALLS",), source_node_ids=source_ids, max_rows=10_000
+        )
+        rows = [_stored_callee_row(graph, edge, directory) for edge in edges]
+        results = _sorted_stored_rows(rows, _callee_sort_key)
         return _with_report("callees", results, _store_report(graph), with_report)
     finally:
         graph.close()
+
+
+def _reachable_or_conventional(function, name, path, incoming, exports) -> bool:
+    return (
+        function["symbol_id"] in incoming
+        or name in {"main", "__init__"}
+        or name.startswith("test_")
+        or path.name.startswith("test_")
+        or name in exports
+    )
+
+
+def _live_dead_candidate(
+    function: dict, path: Path, incoming, exports, lines
+) -> dict | None:
+    name = function["name"]
+    if _reachable_or_conventional(function, name, path, incoming, exports):
+        return None
+    if _is_framework_route(lines, function["line"]):
+        return None
+    return {
+        "name": name,
+        "symbol_id": function["symbol_id"],
+        "owner": function["owner"],
+        "file": str(path),
+        "line": function["line"],
+        "status": "candidate",
+        "reason": "zero_confirmed_incoming_calls",
+        "graph_complete": False,
+    }
+
+
+def _live_dead_candidates_in_file(path: Path, result: dict, incoming) -> list[dict]:
+    source = path.read_text(encoding="utf-8", errors="ignore")
+    exports = _declared_exports(path, source, result["language"])
+    lines = source.splitlines()
+    found = [
+        _live_dead_candidate(function, path, incoming, exports, lines)
+        for function in result["functions"]
+    ]
+    return [item for item in found if item is not None]
+
+
+def _stored_dead_code_result(directory: Path, with_report: bool):
+    if with_report:
+        return _store_find_dead_code(directory, with_report=True)
+    return _store_find_dead_code(directory)
 
 
 def find_dead_code(
@@ -1361,46 +2041,284 @@ def find_dead_code(
 ) -> list[dict] | dict:
     """Return conservative dead-code candidates from the incomplete static graph."""
     if not live:
-        stored = (
-            _store_find_dead_code(directory, with_report=True)
-            if with_report
-            else _store_find_dead_code(directory)
-        )
+        stored = _stored_dead_code_result(directory, with_report)
         if stored is not None:
             return stored
     parsed, definitions, edges = _workspace_call_graph(directory)
     incoming = {edge["target"] for edge in edges}
-
-    candidates = []
+    candidates: list[dict] = []
     for path, result in parsed:
-        source = path.read_text(encoding="utf-8", errors="ignore")
-        exports = _declared_exports(path, source, result["language"])
-        lines = source.splitlines()
-        for function in result["functions"]:
-            name = function["name"]
-            if (
-                function["symbol_id"] in incoming
-                or name in {"main", "__init__"}
-                or name.startswith("test_")
-                or path.name.startswith("test_")
-                or name in exports
-                or _is_framework_route(lines, function["line"])
-            ):
-                continue
-            candidates.append({
-                "name": name,
-                "symbol_id": function["symbol_id"],
-                "owner": function["owner"],
-                "file": str(path),
-                "line": function["line"],
-                "status": "candidate",
-                "reason": "zero_confirmed_incoming_calls",
-                "graph_complete": False,
-            })
-    candidates = sorted(candidates, key=lambda item: (item["name"], item["file"], item["line"]))
-    return _with_report(
-        "candidates", candidates, _live_report(directory, parsed), with_report
+        candidates.extend(_live_dead_candidates_in_file(path, result, incoming))
+    candidates = _ordered_dead_candidates(candidates)
+    report = {**_live_report(directory, parsed), **_dead_code_counts(candidates)}
+    return _with_report("candidates", candidates, report, with_report)
+
+
+# The order a cut obeys. `answer_budget` drops rows from the tail, so this is
+# the rule that decides what a reader loses when the answer does not fit.
+#
+# Measured 2026-08-29 on this repository at the 25 000-token default: sorted by
+# name, the cut threw away 97 `zero_confirmed_incoming_calls` rows and kept 162
+# `unresolved_receiver` ones; sorted by reason first, it dropped 354 rows and
+# not one defensible candidate. `unresolved_receiver` states doubt - a call site
+# names the symbol and the receiver did not resolve - and doubt is what a cut
+# should reach first. This orders, it never filters: a large enough budget still
+# returns every row, and `candidates_by_reason` states the totals either way.
+#
+# The order is by how strong a claim of death the verdict makes, so the cut
+# always reaches the weakest first. `referenced_without_call` sits between the
+# other two: nothing calls the name, which `unresolved_receiver` cannot say, but
+# something names it, which `zero_confirmed_incoming_calls` denies. Appending it
+# after `unresolved_receiver` instead cost a graded case - the CODE-07 stand's
+# `T07` lost `_search_backends` to the budget cut on 2026-08-29 while keeping
+# rows that state weaker evidence.
+DEAD_CODE_REASON_ORDER = (
+    "zero_confirmed_incoming_calls",
+    "referenced_without_call",
+    "unresolved_receiver",
+)
+
+
+def _dead_code_reason_rank(reason: str) -> int:
+    """An unknown reason sorts last, so a new one is never cut before a known."""
+    if reason not in DEAD_CODE_REASON_ORDER:
+        return len(DEAD_CODE_REASON_ORDER)
+    return DEAD_CODE_REASON_ORDER.index(reason)
+
+
+def _dead_code_order_key(candidate: dict) -> tuple:
+    """Defensible candidates first, then the vault's usual name/file/line."""
+    rank = _dead_code_reason_rank(str(candidate.get("reason", "")))
+    return (rank, candidate["name"], candidate["file"], candidate["line"])
+
+
+def _ordered_dead_candidates(candidates: list[dict]) -> list[dict]:
+    return sorted(candidates, key=_dead_code_order_key)
+
+
+def _dead_code_counts(candidates: list[dict]) -> dict[str, object]:
+    """Totals that survive a cut, because the report block is never trimmed.
+
+    A budget may drop rows; it must not leave the reader with a wrong picture of
+    how many candidates there are or how defensible they are.
+    """
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        reason = str(candidate.get("reason", "unknown"))
+        counts[reason] = counts.get(reason, 0) + 1
+    return {
+        "candidate_count": len(candidates),
+        "candidates_by_reason": dict(sorted(counts.items())),
+    }
+
+
+def _conventionally_reachable(name: str, path: str) -> bool:
+    """Names this project treats as reached even with no confirmed caller.
+
+    The `test_` name prefix is also pushed into the store's anti-join; the
+    basename rule stays here, where `PurePath(path).name` means exactly what it
+    says and the nearest SQL spelling would mean something wider.
+    """
+    return (
+        name in {"main", "__init__"}
+        or name.startswith("test_")
+        or PurePath(path).name.startswith("test_")
     )
+
+
+def _protocol_invoked(name: str) -> bool:
+    """A dunder the language calls itself, never by name at a call site.
+
+    Measured 2026-08-28: 69 of 868 candidates were these — `__post_init__` 47,
+    `__reduce__` 8, `__enter__` and `__exit__` 5 each, `__call__` and `__str__`
+    2 each. Name-based analysis cannot see their callers by construction, so
+    "no confirmed caller" says nothing about them at all. `__init__` is already
+    excluded by `_conventionally_reachable`.
+    """
+    return len(name) > 4 and name.startswith("__") and name.endswith("__")
+
+
+def _unnamed_reason(name: str, index) -> str:
+    """The verdict for a name no call site writes.
+
+    NEW-135 stopped here and called every such name dead. It is not: a symbol
+    named without being called — a thread target, a registry entry,
+    `set_defaults(handler=…)`, a name spelled in a `getattr` table — is never
+    written at a call site, so it looked uncalled while being called every
+    run. Measured 2026-08-29 against the active generation: 402 of the 461
+    names this verdict called dead are named somewhere in the same corpus, so
+    87% of the strongest verdict was false. It refuted itself inside one run —
+    `_architecture_dependencies` sat in `_ARCHITECTURE_MODE_QUERIES` while
+    being listed dead.
+    """
+    if index.names_a_value(name):
+        return "referenced_without_call"
+    return "zero_confirmed_incoming_calls"
+
+
+def _dead_code_reason(name: str, called_names: frozenset[str] | None, index) -> str:
+    """`zero_confirmed_incoming_calls` only when nothing names it anywhere.
+
+    Measured 2026-08-28 on this repository: of 868 candidates, 384 were named
+    by some call text — a dynamic call may reach them — so calling them all
+    dead made 52% of the answer indefensible once the protocol methods are
+    counted too. `None` on either reader means that set could not be read, and
+    then nothing can be claimed dead: doubt is reported instead.
+    """
+    if called_names is None or index is None:
+        return "unresolved_receiver"
+    if name in called_names:
+        return "unresolved_receiver"
+    return _unnamed_reason(name, index)
+
+
+def _dispatched_definition(index, path: str, name: str, line: int) -> bool:
+    """True when the definition itself is handed to whatever will call it.
+
+    The same argument `_protocol_invoked` already makes for dunders: a
+    decorated definition goes to its decorator at import time, and a method of
+    a class that declares a base is reached through that base — `visit_Call`
+    by `ast.NodeVisitor.visit`, `readinto` by `io.RawIOBase`. Name analysis
+    cannot see either caller by construction, so "no confirmed caller" says
+    nothing about them and they are not candidates at all.
+    """
+    if index is None:
+        return False
+    return index.is_dispatched(path, name, line)
+
+
+def _exclusion_rule(name: str, path: str) -> str | None:
+    """Why this symbol is not a candidate at all, or None when it is one."""
+    if _conventionally_reachable(name, path):
+        return "conventionally_reachable"
+    if _protocol_invoked(name):
+        return "protocol_invoked"
+    return None
+
+
+def _dead_candidate_row(
+    node: dict, location: tuple[str, int], called_names, index
+) -> dict:
+    name = str(node["metadata"].get("name", ""))
+    return {
+        "name": name,
+        "symbol_id": node["node_id"],
+        "owner": node["metadata"].get("owner", ""),
+        "file": location[0],
+        "line": location[1],
+        "status": "candidate",
+        "reason": _dead_code_reason(name, called_names, index),
+        "graph_complete": False,
+    }
+
+
+def _dead_code_verdict(
+    graph, node: dict, directory: Path, called_names, index
+) -> tuple[dict | None, str | None]:
+    """One candidate, or the named rule that dropped it. Never both."""
+    name = str(node["metadata"].get("name", ""))
+    path = str(node["metadata"].get("path", ""))
+    rule = _exclusion_rule(name, path)
+    if rule is not None:
+        return (None, rule)
+    location = _stored_location(graph, node["node_id"], directory)
+    if _dispatched_definition(index, path, name, location[1]):
+        return (None, "framework_dispatched")
+    return (_dead_candidate_row(node, location, called_names, index), None)
+
+
+def _stored_dead_candidate(
+    graph, node: dict, directory: Path, called_names: frozenset[str] | None, index=None
+) -> dict | None:
+    return _dead_code_verdict(graph, node, directory, called_names, index)[0]
+
+
+def _called_names(graph) -> frozenset[str] | None:
+    """Every name any call site mentions, or None when the read refused."""
+    try:
+        return graph.call_target_names()
+    except (ValueError, sqlite3.Error):
+        return None
+
+
+def _reference_index(graph):
+    """What the corpus names as a value, or None when the read refused.
+
+    A store that cannot serve sources has none, and for such a store "nothing
+    names it" is true, so `EMPTY_INDEX` is the honest answer there rather than
+    a refusal. A real read that fails returns None and every verdict falls
+    back to doubt, exactly like a refused `call_target_names`.
+    """
+    reader = getattr(graph, "python_sources", None)
+    if reader is None:
+        return value_references.EMPTY_INDEX
+    try:
+        return value_references.build_reference_index(reader())
+    except (ValueError, sqlite3.Error):
+        return None
+
+
+def _stored_dead_candidates(graph, nodes, directory) -> list[dict]:
+    candidates, _counts = _classified_dead_nodes(graph, nodes, directory)
+    return candidates
+
+
+def _classified_dead_nodes(graph, nodes, directory) -> tuple[list[dict], dict]:
+    """Split the nodes into candidates and the reasons the rest were dropped.
+
+    The dropped count is reported, never silent: this pass removes more than
+    NEW-135 did, and a reader who is not told how many were removed cannot
+    tell a smaller answer from a better one.
+    """
+    called_names = _called_names(graph)
+    index = _reference_index(graph)
+    verdicts = [
+        _dead_code_verdict(graph, node, directory, called_names, index)
+        for node in nodes
+    ]
+    return _split_verdicts(verdicts, index)
+
+
+def _split_verdicts(verdicts: list[tuple], index) -> tuple[list[dict], dict]:
+    candidates = [row for row, _rule in verdicts if row is not None]
+    rules = [rule for _row, rule in verdicts if rule is not None]
+    return candidates, _dropped_counts(rules, index)
+
+
+def _rule_counts(rules: list[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for rule in rules:
+        counts[rule] = counts.get(rule, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _dropped_counts(rules: list[str], index) -> dict[str, object]:
+    report = {"excluded_count": len(rules), "excluded_by_rule": _rule_counts(rules)}
+    if index is None:
+        return {**report, "reference_index": "unreadable"}
+    return {**report, **index.as_report()}
+
+
+def _stored_dead_nodes(graph) -> list[dict]:
+    """Function and method nodes no resolved CALLS reaches and no EXPOSES names.
+
+    The anti-join runs in SQL, so this reads its own answer — measured 3,621
+    rows in 0.17 s — instead of the 19,153 nodes and 35,313 edges the old shape
+    materialised before refusing at the row ceiling.
+    """
+    return graph.nodes_without_edges(
+        kinds=("function", "method"),
+        incoming_edge_types=("CALLS",),
+        outgoing_edge_types=("EXPOSES",),
+        exclude_name_prefixes=DEAD_CODE_NAME_PREFIXES,
+        max_rows=10_000,
+    )
+
+
+def _marked_complete(candidates: list[dict], report: dict) -> list[dict]:
+    for candidate in candidates:
+        candidate["graph_complete"] = report["graph_complete"]
+    return _ordered_dead_candidates(candidates)
 
 
 def _store_find_dead_code(
@@ -1410,64 +2328,57 @@ def _store_find_dead_code(
     if graph is None:
         return None
     try:
-        nodes = graph.find_nodes(kinds=("function", "method"), max_rows=10_000)
-        call_edges = graph.edges(edge_types=("CALLS",), max_rows=10_000)
-        exposed = {
-            edge["source_node_id"]
-            for edge in graph.edges(edge_types=("EXPOSES",), max_rows=10_000)
-        }
-        incoming = {edge["target_node_id"] for edge in call_edges}
-        candidates = []
-        for node in nodes:
-            name = str(node["metadata"].get("name", ""))
-            path = str(node["metadata"].get("path", ""))
-            if (
-                node["node_id"] in incoming
-                or node["node_id"] in exposed
-                or name in {"main", "__init__"}
-                or name.startswith("test_")
-                or PurePath(path).name.startswith("test_")
-            ):
-                continue
-            location = _stored_location(graph, node["node_id"], directory)
-            candidates.append({
-                "name": name,
-                "symbol_id": node["node_id"],
-                "owner": node["metadata"].get("owner", ""),
-                "file": location[0],
-                "line": location[1],
-                "status": "candidate",
-                "reason": "zero_confirmed_incoming_calls",
-                "graph_complete": False,
-            })
+        candidates, dropped = _classified_dead_nodes(
+            graph, _stored_dead_nodes(graph), directory
+        )
         report = _store_report(graph)
-        for candidate in candidates:
-            candidate["graph_complete"] = report["graph_complete"]
-        candidates = sorted(candidates, key=lambda item: (item["name"], item["file"], item["line"]))
-        return _with_report("candidates", candidates, report, with_report)
+        ordered = _marked_complete(candidates, report)
+        counts = {**_dead_code_counts(ordered), **dropped}
+        return _with_report("candidates", ordered, {**report, **counts}, with_report)
     finally:
         graph.close()
 
 
+def _all_assignment(node) -> bool:
+    return isinstance(node, ast.Assign) and any(
+        isinstance(target, ast.Name) and target.id == "__all__"
+        for target in node.targets
+    )
+
+
+def _all_names(node) -> set[str]:
+    try:
+        value = ast.literal_eval(node.value)
+    except (ValueError, TypeError):
+        return set()
+    return {item for item in value if isinstance(item, str)}
+
+
+def _python_exports(source: str) -> set[str]:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return set()
+    for node in tree.body:
+        if _all_assignment(node):
+            return _all_names(node)
+    return set()
+
+
+def _script_exports(source: str) -> set[str]:
+    return set(
+        re.findall(
+            r"\bexport\s+(?:default\s+)?(?:async\s+)?(?:function|class)\s+(\w+)",
+            source,
+        )
+    )
+
+
 def _declared_exports(path: Path, source: str, language: str) -> set[str]:
     if language == "python":
-        try:
-            tree = ast.parse(source)
-        except SyntaxError:
-            return set()
-        for node in tree.body:
-            if isinstance(node, ast.Assign) and any(
-                isinstance(target, ast.Name) and target.id == "__all__"
-                for target in node.targets
-            ):
-                try:
-                    value = ast.literal_eval(node.value)
-                except (ValueError, TypeError):
-                    return set()
-                return {item for item in value if isinstance(item, str)}
-        return set()
+        return _python_exports(source)
     if language in {"javascript", "typescript"}:
-        return set(re.findall(r"\bexport\s+(?:default\s+)?(?:async\s+)?(?:function|class)\s+(\w+)", source))
+        return _script_exports(source)
     return set()
 
 
@@ -1476,31 +2387,26 @@ def _is_framework_route(lines: list[str], definition_line: int) -> bool:
     return bool(re.search(r"(?:@\w*\.route\s*\(|@(?:GetMapping|RequestMapping)\b)", prefix))
 
 
-def get_architecture(
-    directory: Path, *, live: bool = False, with_report: bool = False
-) -> dict:
-    """Summarize statically visible entry points, routes, hotspots, and modules."""
-    if not live:
-        stored = _store_get_architecture(directory)
-        if stored is not None:
-            return stored
-    parsed, definitions, edges = _workspace_call_graph(directory)
-    entry_points = []
-    routes = []
-    incoming: dict[str, set[str]] = {}
-    for edge in edges:
-        incoming.setdefault(edge["target"], set()).add(edge["source"])
+def _main_entry_points(path: Path, result: dict) -> list[dict]:
+    return [
+        {"kind": "main", "name": "main", "file": str(path), "line": function["line"]}
+        for function in result["functions"]
+        if function["name"] == "main"
+    ]
+
+
+def _live_architecture_points(parsed) -> tuple[list, list]:
+    entry_points: list[dict] = []
+    routes: list[dict] = []
     for path, result in parsed:
         source = path.read_text(encoding="utf-8", errors="ignore")
-        for function in result["functions"]:
-            if function["name"] == "main":
-                entry_points.append({
-                    "kind": "main", "name": "main", "file": str(path),
-                    "line": function["line"],
-                })
+        entry_points.extend(_main_entry_points(path, result))
         entry_points.extend(_listen_entry_points(path, source))
         routes.extend(_framework_routes(path, source))
+    return entry_points, routes
 
+
+def _live_hotspots(incoming: dict, definitions: dict) -> list[dict]:
     hotspots = [
         {
             "name": definitions[symbol_id]["name"],
@@ -1513,55 +2419,213 @@ def get_architecture(
         for symbol_id, callers in incoming.items()
         if symbol_id in definitions
     ]
-    hotspots.sort(key=lambda item: (-item["incoming_callers"], item["name"], item["file"]))
+    hotspots.sort(
+        key=lambda item: (-item["incoming_callers"], item["name"], item["file"])
+    )
+    return hotspots
+
+
+def _live_incoming(edges: list[dict]) -> dict:
+    incoming: dict[str, set[str]] = {}
+    for edge in edges:
+        incoming.setdefault(edge["target"], set()).add(edge["source"])
+    return incoming
+
+
+def get_architecture(
+    directory: Path,
+    *,
+    live: bool = False,
+    with_report: bool = False,
+    limit: int | None = None,
+) -> dict:
+    """Summarize statically visible entry points, routes, hotspots, and modules."""
+    bound = summary_listing_limit(limit)
+    if not live:
+        stored = _store_get_architecture(directory, bound)
+        if stored is not None:
+            return stored
+    parsed, definitions, edges = _workspace_call_graph(directory)
+    entry_points, routes = _live_architecture_points(parsed)
+    communities, counts = _live_community_answer(definitions, edges)
     architecture = {
-        "entry_points": entry_points,
-        "routes": routes,
-        "hotspots": hotspots,
-        "communities": _communities_from_edges(edges),
+        **_listing_fields(entry_points, "entry_points", bound),
+        **_listing_fields(routes, "routes", bound),
+        **_hotspot_fields(*_bounded_hotspots(
+            _live_hotspots(_live_incoming(edges), definitions)
+        ), bound),
+        "communities": communities,
+        **counts,
         "graph_complete": False,
     }
     return {**architecture, **_live_report(directory, parsed)}
 
 
-def _store_get_architecture(directory: Path) -> dict | None:
+# Entry points and routes are listed the way hotspots already are: with the
+# bound stated in the answer rather than implied. Both were fetched at
+# `max_rows=10_000` and returned whole, with no count and no truncation flag,
+# so a reader could not tell a complete listing from a clipped one.
+#
+# 30 is `COMMUNITY_LIMIT`, this summary's existing answer to "how much of a
+# list belongs in a summary", rather than a fourth number invented here.
+#
+# Measured on this repository 2026-08-29: 97 entry points, every one of them a
+# script's `main`, cost 7 367 of the summary's 24 430 characters — 30% — while
+# the summary stated no count at all. The count says 97 in two characters.
+SUMMARY_LISTING_LIMIT = COMMUNITY_LIMIT
+
+
+def summary_listing_limit(limit: int | None) -> int:
+    """How many rows of each summary listing to return.
+
+    `None` is the summary's own number. A caller who wants the whole ranking
+    asks for it, up to the ceiling the store query already fetches — the same
+    shape the dependency walk's `depth` takes, and the answer to the objection
+    that a ranking cannot be cut because nothing restores it. Now something
+    does.
+    """
+    if limit is None:
+        return SUMMARY_LISTING_LIMIT
+    return max(1, min(int(limit), HOTSPOT_LIMIT))
+
+
+def _listing_fields(rows: list[dict], key: str, limit: int) -> dict:
+    """One bounded listing, with what was cut said out loud."""
+    return {
+        key: rows[:limit],
+        f"{key}_count": len(rows),
+        f"{key}_limit": limit,
+        f"{key}_truncated": len(rows) > limit,
+    }
+
+
+def _bounded_hotspots(hotspots: list[dict]) -> tuple[list[dict], bool]:
+    return hotspots[:HOTSPOT_LIMIT], len(hotspots) > HOTSPOT_LIMIT
+
+
+def _hotspot_fields(hotspots: list[dict], truncated: bool, limit: int) -> dict:
+    """The hotspot ranking with its bound stated in the answer, never implied.
+
+    The query fetches `HOTSPOT_LIMIT` and the caller asks for `limit`, so the
+    bound that actually applied is the smaller of the two. Stating the caller's
+    number alone would have claimed a bound of 30 while returning two rows.
+    `truncated` stays true when either bound bit.
+
+    No count here, deliberately, unlike the listings beside it. The ranking has
+    10 607 members on this repository and the query never sees past the first
+    hundred, so any number stated would be the size of the fetch rather than of
+    the ranking. `hotspots_truncated` says there is more without claiming to
+    know how much.
+    """
+    applied = min(limit, HOTSPOT_LIMIT)
+    return {
+        "hotspots": hotspots[:applied],
+        "hotspot_limit": applied,
+        "hotspots_truncated": truncated or len(hotspots) > applied,
+    }
+
+
+# The summary's answer to the first half of "what are its main modules and
+# entry points", which it did not answer at all. Measured 2026-08-29: the only
+# reason the summary named `scripts/mcp_server.py` — the documented agent
+# surface — was that one of its functions ranked between 31st and 100th in the
+# call hotspots. No entry point names it, because it has no `main`. Bounding
+# the ranking to thirty therefore lost it, and the loss was luck either way.
+#
+# Ranked by how many distinct modules import each one, which is the same
+# GROUP BY the hotspot ranking already uses, over IMPORTS instead of CALLS.
+def _stored_modules(graph, limit: int) -> tuple[list[dict], bool]:
+    counts, truncated = graph.top_incoming_edge_counts(
+        edge_types=("IMPORTS",), kinds=("module",), max_rows=limit
+    )
+    return [_stored_module_row(graph, row) for row in counts if row], truncated
+
+
+def _stored_module_row(graph, row: dict) -> dict | None:
+    node = graph.node(str(row["node_id"]))
+    if node is None:
+        return None
+    metadata = node["metadata"]
+    return {
+        "name": metadata.get("name", ""),
+        "path": metadata.get("path", ""),
+        "importing_modules": int(row["incoming"]),
+    }
+
+
+def _module_fields(modules: list[dict], truncated: bool, limit: int) -> dict:
+    """The module ranking, bounded and saying so, like every listing beside it."""
+    return {
+        "modules": [row for row in modules if row is not None],
+        "modules_limit": limit,
+        "modules_truncated": truncated,
+    }
+
+
+def _stored_hotspot(graph, node_id: str, node, incoming: int, directory: Path) -> dict:
+    location = _stored_location(graph, node_id, directory)
+    return {
+        "name": node["metadata"].get("name", node["identity_key"]),
+        "symbol_id": node_id,
+        "owner": node["metadata"].get("owner", ""),
+        "file": location[0],
+        "line": location[1],
+        "incoming_callers": incoming,
+    }
+
+
+def _stored_hotspot_row(graph, row: dict, directory: Path) -> dict | None:
+    node_id = str(row["node_id"])
+    node = graph.node(node_id)
+    if node is None:
+        return None
+    return _stored_hotspot(graph, node_id, node, int(row["incoming"]), directory)
+
+
+def _stored_hotspots(graph, directory: Path) -> tuple[list[dict], bool]:
+    """The top of the caller ranking, counted by a GROUP BY rather than in Python.
+
+    Measured on this repository: the ranking has 10,607 members and the top 100
+    of it costs 0.10 s, against a refusal for the old shape, which pulled every
+    function node and every call edge to count in Python.
+    """
+    counts, truncated = graph.top_incoming_edge_counts(
+        edge_types=("CALLS",), kinds=("function", "method"), max_rows=HOTSPOT_LIMIT
+    )
+    found = [_stored_hotspot_row(graph, row, directory) for row in counts]
+    hotspots = [item for item in found if item is not None]
+    hotspots.sort(
+        key=lambda item: (-item["incoming_callers"], str(item["name"]), item["file"])
+    )
+    return hotspots, truncated
+
+
+def _stored_architecture_nodes(graph, nodes, directory: Path) -> list[dict]:
+    return [_stored_architecture_node(graph, node, directory) for node in nodes]
+
+
+def _store_get_architecture(directory: Path, limit: int) -> dict | None:
     graph = _active_evidence_graph(directory)
     if graph is None:
         return None
     try:
         entries = graph.find_nodes(kinds=("entry-point",), max_rows=10_000)
         routes = graph.find_nodes(kinds=("route",), max_rows=10_000)
-        functions = {
-            node["node_id"]: node
-            for node in graph.find_nodes(kinds=("function", "method"), max_rows=10_000)
-        }
-        calls = graph.edges(edge_types=("CALLS",), max_rows=10_000)
-        incoming: dict[str, set[str]] = {}
-        for edge in calls:
-            incoming.setdefault(edge["target_node_id"], set()).add(
-                edge["source_node_id"]
-            )
-        hotspots = []
-        for node_id, callers in incoming.items():
-            node = functions.get(node_id)
-            if node is None:
-                continue
-            location = _stored_location(graph, node_id, directory)
-            hotspots.append({
-                "name": node["metadata"].get("name", node["identity_key"]),
-                "symbol_id": node_id,
-                "owner": node["metadata"].get("owner", ""),
-                "file": location[0],
-                "line": location[1],
-                "incoming_callers": len(callers),
-            })
-        hotspots.sort(key=lambda item: (-item["incoming_callers"], str(item["name"]), item["file"]))
         report = _store_report(graph)
+        communities, counts = _stored_community_answer(graph)
         return {
-            "entry_points": [_stored_architecture_node(graph, node, directory) for node in entries],
-            "routes": [_stored_architecture_node(graph, node, directory) for node in routes],
-            "hotspots": hotspots,
-            "communities": _stored_communities(graph, calls),
+            **_listing_fields(
+                _stored_architecture_nodes(graph, entries, directory),
+                "entry_points",
+                limit,
+            ),
+            **_listing_fields(
+                _stored_architecture_nodes(graph, routes, directory), "routes", limit
+            ),
+            **_module_fields(*_stored_modules(graph, limit), limit),
+            **_hotspot_fields(*_stored_hotspots(graph, directory), limit),
+            "communities": communities,
+            **counts,
             **report,
         }
     finally:
@@ -1597,24 +2661,33 @@ def _framework_routes(path: Path, source: str) -> list[dict]:
 
 
 def detect_communities(
-    directory: Path, *, live: bool = False, with_report: bool = False
+    directory: Path,
+    *,
+    symbol: str | None = None,
+    live: bool = False,
+    with_report: bool = False,
 ) -> list[list[str]] | dict:
-    """Detect functional modules with deterministic weighted Louvain."""
+    """Detect functional modules with deterministic weighted Louvain.
+
+    `symbol` narrows the answer to the communities that symbol belongs to. It
+    exists because the whole-graph listing cannot be both complete and bounded
+    here — see `_communities_holding` for the measurement — so "which module
+    does X belong to" needs an anchor, exactly as who-calls does.
+    """
     if not live:
-        stored = (
-            _store_detect_communities(directory, with_report=True)
-            if with_report
-            else _store_detect_communities(directory)
-        )
+        stored = _stored_detect_communities(directory, symbol, with_report)
         if stored is not None:
             return stored
-    communities = _detect_live_communities(directory)
-    return _with_report("communities", communities, _live_report(directory), with_report)
+    communities, counts = _detect_live_communities(directory, symbol)
+    report = {**_live_report(directory), **counts}
+    return _with_report("communities", communities, report, with_report)
 
 
-def _detect_live_communities(directory: Path) -> list[list[str]]:
-    _, _, edges = _workspace_call_graph(directory)
-    return _communities_from_edges(edges)
+def _detect_live_communities(
+    directory: Path, symbol: str | None = None
+) -> tuple[list, dict]:
+    _parsed, definitions, edges = _workspace_call_graph(directory)
+    return _live_community_answer(definitions, edges, symbol)
 
 
 def _communities_from_edges(edges: list[dict]) -> list[list[str]]:
@@ -1628,19 +2701,189 @@ def _communities_from_edges(edges: list[dict]) -> list[list[str]]:
     return _louvain_communities(graph)
 
 
+def _stored_detect_communities(directory: Path, symbol: str | None, with_report: bool):
+    """Preserve the historical one-argument call form, which tests substitute."""
+    if symbol is None and not with_report:
+        return _store_detect_communities(directory)
+    return _store_detect_communities(directory, symbol=symbol, with_report=with_report)
+
+
 def _store_detect_communities(
-    directory: Path, *, with_report: bool = False
+    directory: Path, *, symbol: str | None = None, with_report: bool = False
 ) -> list[list[str]] | dict | None:
     graph = _active_evidence_graph(directory)
     if graph is None:
         return None
     try:
-        communities = _stored_communities(
-            graph, graph.edges(edge_types=("CALLS",), max_rows=10_000)
-        )
-        return _with_report("communities", communities, _store_report(graph), with_report)
+        communities, counts = _stored_community_answer(graph, symbol)
+        report = {**_store_report(graph), **counts}
+        return _with_report("communities", communities, report, with_report)
     finally:
         graph.close()
+
+
+#: What a dependency is, in edges the extractor actually writes. `IMPORTS` is
+#: what a module depends on; `CALLS` is what a symbol depends on.
+DEPENDENCY_EDGE_TYPES = ("CALLS", "IMPORTS")
+DEPENDENCY_SEED_KINDS = ("class", "function", "method", "module")
+DEPENDENCY_SEED_LIMIT = 20
+DEPENDENCY_MAX_DEPTH = 8
+DEPENDENCY_MAX_ROWS = 1000
+DEPENDENCY_MAX_WORK = 100_000
+
+
+def _dependency_seed_by_id(graph, symbol: str) -> list[str]:
+    try:
+        node = graph.node(symbol)
+    except (ValueError, sqlite3.Error):
+        return []
+    return [] if node is None else [str(node["node_id"])]
+
+
+def _dependency_seed_by_path(graph, symbol: str) -> list[str]:
+    """A repository-relative file path names the module the file defines."""
+    by_path = graph.find_nodes(
+        kinds=("module",), path=symbol, max_rows=DEPENDENCY_SEED_LIMIT
+    )
+    if by_path:
+        return [str(item["node_id"]) for item in by_path]
+    return _dependency_seed_by_id(graph, symbol)
+
+
+def _dependency_seed_nodes(graph, symbol: str) -> list[str]:
+    """The nodes a dependency question is about: a name, a path, or a node id.
+
+    CODE-07, loud face: `get_architecture` forwards `request["symbol"]` — a
+    *name* — where a node id was expected, and the node-id syntax starts with
+    `[A-Za-z0-9]`, so every private name raised rather than answered. Names are
+    resolved the way `find_callers` and `find_callees` already resolve them.
+    A path is accepted too, because "what does this file depend on" is the
+    question this mode is asked with — `scripts/retrieval.py`, not
+    `scripts.retrieval` — and a module node carries both.
+    """
+    by_name = graph.find_nodes(
+        kinds=DEPENDENCY_SEED_KINDS, name=symbol, max_rows=DEPENDENCY_SEED_LIMIT
+    )
+    if by_name:
+        return [str(item["node_id"]) for item in by_name]
+    return _dependency_seed_by_path(graph, symbol)
+
+
+def _dependency_sort_key(item: dict) -> tuple:
+    return (
+        item["depth"],
+        str(item["kind"]),
+        str(item["identity_key"]),
+        str(item["node_id"]),
+    )
+
+
+def _stored_dependency_rows(
+    graph, seeds: list[str], reverse: bool, max_depth: int | None = None
+) -> list[dict]:
+    depth = _dependency_depth(max_depth)
+    merged: dict[str, dict] = {}
+    for seed in seeds:
+        _merge_dependency_rows(merged, graph, seed, reverse, depth)
+    return sorted(merged.values(), key=_dependency_sort_key)
+
+
+# One hop, because that is the question and because it is already this
+# product's answer to the same question elsewhere: `graph_neighbors.neighbors`
+# takes `max_hops: int = 1` over the same range. The convention outside is the
+# same shape — codebase-memory's `trace_path` defaults to a bounded 3, and an
+# IDE call hierarchy (JetBrains Rider, LSP `callHierarchy/incomingCalls`) shows
+# one level and expands a node when asked. Returning the whole reachable set by
+# default was the outlier, and it arrived by omission rather than by decision.
+#
+# Measured on the active generation for `scripts/retrieval.py`: one hop is 7
+# modules and ~338 tokens; the whole set is 346 rows and 20 735 tokens after
+# shaping, 287 of them individual functions and classes nobody asked about.
+#
+# Nothing is silently lost: `depth_applied` says how far this answer walked and
+# `depth_frontier_open` says whether the walk stopped at that edge with more
+# beyond it, so a caller who wants the closure knows to ask for it.
+DEPENDENCY_DEFAULT_DEPTH = 1
+
+
+def _dependency_depth(max_depth: int | None) -> int:
+    """How far to walk: what the caller asked, bounded by what the store allows.
+
+    A depth below one would ask for nothing and is read as one hop rather than
+    refused, because "no hops" is not a question anyone means to ask.
+    """
+    if max_depth is None:
+        return DEPENDENCY_DEFAULT_DEPTH
+    return max(1, min(int(max_depth), DEPENDENCY_MAX_DEPTH))
+
+
+def _merge_dependency_rows(
+    merged: dict, graph, seed: str, reverse: bool, max_depth: int
+) -> None:
+    rows = graph.reachable(
+        seed,
+        edge_types=DEPENDENCY_EDGE_TYPES,
+        reverse=reverse,
+        max_depth=max_depth,
+        max_rows=DEPENDENCY_MAX_ROWS,
+        max_work=DEPENDENCY_MAX_WORK,
+    )
+    for item in rows:
+        merged.setdefault(str(item["node_id"]), item)
+
+
+def _dependency_resolution(symbol: str, seeds: list[str]) -> dict[str, object]:
+    """An empty answer must say whether the symbol was found at all.
+
+    CODE-07, silent face: a name that passed the node-id syntax matched no
+    node and produced `[]` with no error, byte-identical to a real answer of
+    "this depends on nothing". These fields are what tells the two apart.
+    """
+    return {
+        "symbol": symbol,
+        "symbol_resolved": bool(seeds),
+        "resolved_symbol_nodes": len(seeds),
+        "dependency_edge_types": list(DEPENDENCY_EDGE_TYPES),
+        "dependency_max_depth": DEPENDENCY_MAX_DEPTH,
+    }
+
+
+def _store_find_dependencies(
+    symbol: str,
+    directory: Path,
+    *,
+    reverse: bool,
+    with_report: bool,
+    max_depth: int | None = None,
+) -> list[dict] | dict | None:
+    graph = _active_evidence_graph(directory)
+    if graph is None:
+        return None
+    try:
+        seeds = _dependency_seed_nodes(graph, symbol)
+        depth = _dependency_depth(max_depth)
+        rows = _stored_dependency_rows(graph, seeds, reverse, depth)
+        report = {
+            **_store_report(graph),
+            **_dependency_resolution(symbol, seeds),
+            **_dependency_reach(rows, depth),
+        }
+        return _with_report("dependencies", rows, report, with_report)
+    finally:
+        graph.close()
+
+
+def _dependency_reach(rows: list[dict], depth: int) -> dict[str, object]:
+    """How far this answer walked, and whether anything lies past that edge.
+
+    A row sitting exactly at the depth the walk stopped at may have neighbours
+    the walk never looked at. That is not a claim there are more — it is the
+    difference between "this is all of it" and "this is as far as you asked".
+    """
+    return {
+        "depth_applied": depth,
+        "depth_frontier_open": any(row.get("depth") == depth for row in rows),
+    }
 
 
 def find_dependencies(
@@ -1650,20 +2893,26 @@ def find_dependencies(
     reverse: bool = False,
     live: bool = False,
     with_report: bool = False,
+    max_depth: int | None = None,
 ) -> list[dict] | dict:
-    """Find bounded canonical dependencies, preferring the active generation."""
+    """Find bounded canonical dependencies, preferring the active generation.
+
+    The stored answer walks `CALLS` and `IMPORTS` assertions. It used to walk
+    the `dependency` table, which holds 0 rows in the active generation and in
+    every generation on this disk, is written by no producer in `scripts/`,
+    and therefore answered `[]` for every symbol ever asked — silently, with
+    the same `graph_complete: false` caveat a correct answer carries.
+    """
     if not live:
-        graph = _active_evidence_graph(directory)
-        if graph is not None:
-            try:
-                dependencies = graph.dependencies(
-                    node_id, reverse=reverse, max_depth=8, max_rows=10_000
-                )
-                return _with_report(
-                    "dependencies", dependencies, _store_report(graph), with_report
-                )
-            finally:
-                graph.close()
+        stored = _store_find_dependencies(
+            node_id,
+            directory,
+            reverse=reverse,
+            with_report=with_report,
+            max_depth=max_depth,
+        )
+        if stored is not None:
+            return stored
     parsed, definitions, edges = _workspace_call_graph(directory)
     dependencies = _find_live_dependencies(
         node_id, definitions, edges, reverse=reverse
@@ -1712,6 +2961,57 @@ def _live_node_ids(value: str, definitions: dict[str, dict]) -> list[str]:
     return sorted(by_name.get(value, []))
 
 
+def _dependency_direction(reverse: bool) -> tuple[str, str]:
+    if reverse:
+        return ("target", "source")
+    return ("source", "target")
+
+
+def _dependency_adjacency(edges, start_key: str, target_key: str) -> dict:
+    adjacency: dict[str, list[str]] = {}
+    for edge in edges:
+        adjacency.setdefault(edge[start_key], []).append(edge[target_key])
+    return adjacency
+
+
+def _dependency_record(target: str, definition: dict, depth: int) -> dict:
+    return {
+        "node_id": target,
+        "kind": "function",
+        "identity_scheme": "live-code/v1",
+        "identity_key": target,
+        "metadata": {
+            "name": definition["name"],
+            "owner": definition.get("owner", ""),
+            "path": definition.get("file", ""),
+        },
+        "depth": depth,
+    }
+
+
+def _visit_dependency(target, depth, definitions, seen, results, pending) -> None:
+    if target in seen:
+        return
+    seen.add(target)
+    definition = definitions.get(target)
+    if definition is not None:
+        results.append(_dependency_record(target, definition, depth))
+    pending.append((target, depth))
+
+
+def _expand_dependency(
+    current, depth, adjacency, definitions, seen, results, pending
+) -> None:
+    if depth >= 8:
+        return
+    for target in sorted(adjacency.get(current, [])):
+        _visit_dependency(target, depth + 1, definitions, seen, results, pending)
+
+
+def _dependency_budget_left(results: list, work: int) -> bool:
+    return len(results) < 10_000 and work < 10_000
+
+
 def _find_live_dependencies(
     node_id: str,
     definitions: dict[str, dict],
@@ -1719,44 +3019,47 @@ def _find_live_dependencies(
     *,
     reverse: bool,
 ) -> list[dict]:
-    start_key, target_key = (
-        ("target", "source") if reverse else ("source", "target")
-    )
-    adjacency: dict[str, list[str]] = {}
-    for edge in edges:
-        adjacency.setdefault(edge[start_key], []).append(edge[target_key])
+    start_key, target_key = _dependency_direction(reverse)
+    adjacency = _dependency_adjacency(edges, start_key, target_key)
     pending = [(identifier, 0) for identifier in _live_node_ids(node_id, definitions)]
     seen = {identifier for identifier, _depth in pending}
-    results = []
+    results: list[dict] = []
     work = 0
-    while pending and len(results) < 10_000 and work < 10_000:
+    while pending and _dependency_budget_left(results, work):
         current, depth = pending.pop(0)
         work += 1
-        if depth >= 8:
-            continue
-        for target in sorted(adjacency.get(current, [])):
-            if target in seen:
-                continue
-            seen.add(target)
-            target_depth = depth + 1
-            definition = definitions.get(target)
-            if definition is not None:
-                results.append(
-                    {
-                        "node_id": target,
-                        "kind": "function",
-                        "identity_scheme": "live-code/v1",
-                        "identity_key": target,
-                        "metadata": {
-                            "name": definition["name"],
-                            "owner": definition.get("owner", ""),
-                            "path": definition.get("file", ""),
-                        },
-                        "depth": target_depth,
-                    }
-                )
-            pending.append((target, target_depth))
+        _expand_dependency(
+            current, depth, adjacency, definitions, seen, results, pending
+        )
     return results
+
+
+def _path_outgoing(edges) -> dict:
+    outgoing: dict[str, list[str]] = {}
+    for edge in edges:
+        outgoing.setdefault(edge["source"], []).append(edge["target"])
+    return outgoing
+
+
+def _reached_target(node, path, targets) -> bool:
+    return node in targets and len(path) > 1
+
+
+def _queue_path(target, path, pending) -> None:
+    if target in path:
+        return
+    pending.append((target, [*path, target]))
+
+
+def _extend_paths(node, path, outgoing, pending) -> None:
+    if len(path) > 8:
+        return
+    for target in sorted(outgoing.get(node, [])):
+        _queue_path(target, path, pending)
+
+
+def _path_budget_left(paths: list, work: int) -> bool:
+    return len(paths) < 10 and work < 10_000
 
 
 def _find_live_paths(
@@ -1767,31 +3070,48 @@ def _find_live_paths(
 ) -> list[dict]:
     sources = _live_node_ids(source_node_id, definitions)
     targets = set(_live_node_ids(target_node_id, definitions))
-    outgoing: dict[str, list[str]] = {}
-    for edge in edges:
-        outgoing.setdefault(edge["source"], []).append(edge["target"])
+    outgoing = _path_outgoing(edges)
     pending = [(source, [source]) for source in sorted(sources)]
-    paths = []
+    paths: list[dict] = []
     work = 0
-    while pending and len(paths) < 10 and work < 10_000:
+    while pending and _path_budget_left(paths, work):
         node, path = pending.pop(0)
         work += 1
-        if node in targets and len(path) > 1:
-            paths.append({"node_ids": path, "assertion_ids": [], "depth": len(path) - 1})
+        if _reached_target(node, path, targets):
+            paths.append(
+                {"node_ids": path, "assertion_ids": [], "depth": len(path) - 1}
+            )
             continue
-        if len(path) > 8:
-            continue
-        for target in sorted(outgoing.get(node, [])):
-            if target not in path:
-                pending.append((target, [*path, target]))
+        _extend_paths(node, path, outgoing, pending)
     return paths
 
 
 _WORKSPACE_SKIP_PARTS = {".git", "node_modules", "__pycache__", ".venv", "venv"}
 
 
-def _parsable_workspace_file(path: Path) -> bool:
+def _inside_hidden_directory(path: Path, directory: Path) -> bool:
+    """A hidden directory under the workspace root, the file itself aside.
+
+    The one directory rule the vault's other walkers already agree on:
+    `corpus_snapshot._directory_excluded` and
+    `import_resolver._directory_skipped` both prune every hidden directory,
+    which is why the corpus and the symbol registry never see `.claude` agent
+    worktrees. This walk did not, and it was the whole of NEW-110: measured on
+    the live vault, 7,686 parsable files of which 7,261 — 94% — sit under
+    `.claude/`, throwaway checkouts belonging to other agents. A hidden name
+    on the file itself is not a directory and stays admissible.
+    """
+    try:
+        relative = path.relative_to(directory)
+    except ValueError:
+        return False
+    return any(part.startswith(".") for part in relative.parts[:-1])
+
+
+def _parsable_workspace_file(path: Path, directory: Path) -> bool:
     if not path.is_file() or path.suffix.lower() not in LANGUAGE_MAP:
+        return False
+    if _inside_hidden_directory(path, directory):
         return False
     return not any(skip in path.parts for skip in _WORKSPACE_SKIP_PARTS)
 
@@ -1813,6 +3133,25 @@ def _index_workspace_definitions(
             by_qualified[qualified] = definition
 
 
+def _unambiguous_candidate(candidates: list[dict], path: Path) -> dict | None:
+    same_file = [item for item in candidates if item["file"] == str(path)]
+    if len(same_file) == 1:
+        return same_file[0]
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
+def _resolved_python_target(call, by_qualified, by_name, path):
+    """An unconfirmed Python call stays unresolved; it never falls back to a name."""
+    if call.get("confidence") != "confirmed":
+        return None
+    confirmed = by_qualified.get(call.get("qualified_name"))
+    if confirmed is not None:
+        return confirmed
+    return _unambiguous_candidate(by_name.get(call["name"], []), path)
+
+
 def _resolved_call_target(
     call: dict,
     path: Path,
@@ -1822,18 +3161,20 @@ def _resolved_call_target(
 ) -> dict | None:
     """The one definition this call can name, or None when it stays ambiguous."""
     if language == "python":
-        if call.get("confidence") != "confirmed":
-            return None
-        confirmed = by_qualified.get(call.get("qualified_name"))
-        if confirmed is not None:
-            return confirmed
-    candidates = by_name.get(call["name"], [])
-    same_file = [item for item in candidates if item["file"] == str(path)]
-    if len(same_file) == 1:
-        return same_file[0]
-    if len(candidates) == 1:
-        return candidates[0]
-    return None
+        return _resolved_python_target(call, by_qualified, by_name, path)
+    return _unambiguous_candidate(by_name.get(call["name"], []), path)
+
+
+def _call_edge(path: Path, result: dict, call: dict, by_name, by_qualified) -> dict | None:
+    caller = _containing_function(result["functions"], call)
+    if caller is None:
+        return None
+    target = _resolved_call_target(
+        call, path, result["language"], by_name, by_qualified
+    )
+    if target is None:
+        return None
+    return {"source": caller["symbol_id"], "target": target["symbol_id"]}
 
 
 def _workspace_call_edges(
@@ -1843,17 +3184,11 @@ def _workspace_call_edges(
 ) -> list[dict]:
     edges = []
     for path, result in parsed:
-        for call in result["calls"]:
-            caller = _containing_function(result["functions"], call)
-            if caller is None:
-                continue
-            target = _resolved_call_target(
-                call, path, result["language"], by_name, by_qualified
-            )
-            if target is not None:
-                edges.append(
-                    {"source": caller["symbol_id"], "target": target["symbol_id"]}
-                )
+        found = [
+            _call_edge(path, result, call, by_name, by_qualified)
+            for call in result["calls"]
+        ]
+        edges.extend(item for item in found if item is not None)
     return edges
 
 
@@ -1868,7 +3203,7 @@ def _workspace_call_graph(
     by_name: dict[str, list[dict]] = {}
     by_qualified: dict[str, dict] = {}
     for path in sorted(directory.rglob("*")):
-        if not _parsable_workspace_file(path):
+        if not _parsable_workspace_file(path, directory):
             continue
         result = _parse_file(path, registry, directory)
         _annotate_function_ids(path, result, directory)
@@ -1879,26 +3214,40 @@ def _workspace_call_graph(
     return parsed, definitions, _workspace_call_edges(parsed, by_name, by_qualified)
 
 
+def _function_owner(function: dict, containers: list[dict]) -> str:
+    enclosing = [
+        item for item in containers
+        if item is not function and _symbol_contains(item, function)
+    ]
+    if not enclosing:
+        return "<module>"
+    return min(enclosing, key=_symbol_span)["name"]
+
+
+def _annotated_identity(function: dict, containers: list[dict], relative: str) -> str:
+    owner = _function_owner(function, containers)
+    function["owner"] = owner
+    identity = function.get("signature") or f"{function['name']}@L{function['line']}"
+    return f"{relative}::{owner}::{identity}"
+
+
+def _assign_symbol_id(function: dict, identity: str, duplicated: bool) -> None:
+    if duplicated:
+        function["symbol_id"] = f"{identity}@L{function['line']}"
+        return
+    function["symbol_id"] = identity
+
+
 def _annotate_function_ids(path: Path, result: dict, root: Path) -> None:
     containers = [*result["classes"], *result["functions"]]
     relative = path.resolve().relative_to(root).as_posix()
-    annotated = []
-    for function in result["functions"]:
-        enclosing = [
-            item for item in containers
-            if item is not function and _symbol_contains(item, function)
-        ]
-        owner = min(enclosing, key=_symbol_span)["name"] if enclosing else "<module>"
-        function["owner"] = owner
-        identity = function.get("signature") or f"{function['name']}@L{function['line']}"
-        annotated.append((function, f"{relative}::{owner}::{identity}"))
-    counts: dict[str, int] = {}
-    for _, identity in annotated:
-        counts[identity] = counts.get(identity, 0) + 1
+    annotated = [
+        (function, _annotated_identity(function, containers, relative))
+        for function in result["functions"]
+    ]
+    counts = Counter(identity for _function, identity in annotated)
     for function, identity in annotated:
-        function["symbol_id"] = (
-            f"{identity}@L{function['line']}" if counts[identity] > 1 else identity
-        )
+        _assign_symbol_id(function, identity, counts[identity] > 1)
 
 
 def _python_qualified_name(path: Path, function: dict, root: Path) -> str:
@@ -2001,32 +3350,74 @@ def _grouped_communities(nodes: list, community: dict[object, object]) -> list[l
     )
 
 
-def _louvain_communities(graph: dict[str, dict[str, float]]) -> list[list[str]]:
-    """Optimize modularity on a weighted undirected graph without dependencies."""
+def _aggregated_round(current: dict, members: dict, ordered_groups: list):
+    group_of = {
+        node: index for index, group in enumerate(ordered_groups) for node in group
+    }
+    grouped_members = {
+        index: set().union(*(members[node] for node in group))
+        for index, group in enumerate(ordered_groups)
+    }
+    return _aggregate_louvain_graph(current, group_of), grouped_members
+
+
+def _louvain_round(current: dict, members: dict):
+    """One aggregation round, or None when the partition has settled."""
+    nodes = sorted(current, key=str)
+    degree = {node: sum(current[node].values()) for node in nodes}
+    m2 = sum(degree.values())
+    if not m2:
+        return None
+    community = {node: node for node in nodes}
+    _local_louvain_pass(nodes, current, community, dict(degree), degree, m2)
+    ordered_groups = _grouped_communities(nodes, community)
+    if len(ordered_groups) == len(nodes):
+        return None
+    return _aggregated_round(current, members, ordered_groups)
+
+
+def _louvain_seed(graph: dict) -> tuple[dict, dict]:
     current = {node: dict(neighbors) for node, neighbors in graph.items()}
-    members = {node: {node} for node in current}
-    while current:
-        nodes = sorted(current, key=str)
-        community = {node: node for node in nodes}
-        degree = {node: sum(current[node].values()) for node in nodes}
-        totals = dict(degree)
-        m2 = sum(degree.values())
-        if not m2:
-            break
-        _local_louvain_pass(nodes, current, community, totals, degree, m2)
-        ordered_groups = _grouped_communities(nodes, community)
-        if len(ordered_groups) == len(nodes):
-            break
-        group_of = {
-            node: index for index, group in enumerate(ordered_groups) for node in group
-        }
-        members = {
-            index: set().union(*(members[node] for node in group))
-            for index, group in enumerate(ordered_groups)
-        }
-        current = _aggregate_louvain_graph(current, group_of)
+    return current, {node: {node} for node in current}
+
+
+def _louvain_result(members: dict) -> list[list[str]]:
     communities = [sorted(group) for group in members.values() if len(group) >= 2]
     return sorted(communities, key=lambda group: group[0])
+
+
+def _louvain_communities(graph: dict[str, dict[str, float]]) -> list[list[str]]:
+    """Optimize modularity on a weighted undirected graph without dependencies."""
+    current, members = _louvain_seed(graph)
+    while current:
+        advanced = _louvain_round(current, members)
+        if advanced is None:
+            break
+        current, members = advanced
+    return _louvain_result(members)
+
+
+def _add_self_weight(reduced: dict, group: int, weight: float) -> None:
+    reduced[group][group] = reduced[group].get(group, 0.0) + weight
+
+
+def _add_group_weight(reduced: dict, left: int, right: int, weight: float) -> None:
+    if left == right:
+        _add_self_weight(reduced, left, 2 * weight)
+        return
+    reduced[left][right] = reduced[left].get(right, 0.0) + weight
+    reduced[right][left] = reduced[right].get(left, 0.0) + weight
+
+
+def _fold_louvain_pair(
+    reduced: dict, group_of: dict, source, target, weight: float
+) -> None:
+    if source == target:
+        _add_self_weight(reduced, group_of[source], weight)
+        return
+    if str(source) > str(target):
+        return
+    _add_group_weight(reduced, group_of[source], group_of[target], weight)
 
 
 def _aggregate_louvain_graph(
@@ -2038,16 +3429,21 @@ def _aggregate_louvain_graph(
     }
     for source in sorted(graph, key=str):
         for target, weight in graph[source].items():
-            left, right = group_of[source], group_of[target]
-            if source == target:
-                reduced[left][left] = reduced[left].get(left, 0.0) + weight
-            elif str(source) <= str(target):
-                if left == right:
-                    reduced[left][left] = reduced[left].get(left, 0.0) + 2 * weight
-                else:
-                    reduced[left][right] = reduced[left].get(right, 0.0) + weight
-                    reduced[right][left] = reduced[right].get(left, 0.0) + weight
+            _fold_louvain_pair(reduced, group_of, source, target, weight)
     return reduced
+
+
+def _print_unresolved_callers(function_name: str, answer: dict) -> None:
+    """A zero that means "could not resolve" has to say so on the CLI too."""
+    count = answer.get("unresolved_caller_count", 0)
+    if not count:
+        return
+    print(
+        f"  plus {count} call site(s) naming '{function_name}' whose receiver "
+        "could not be resolved - candidates, not confirmed callers:"
+    )
+    for row in answer.get("unresolved_callers", [])[:20]:
+        print(f"    {row['file']}:{row['line']}  {row['call_text']} ({row['reason']})")
 
 
 def main() -> int:
@@ -2060,10 +3456,12 @@ def main() -> int:
     directory = Path(args.directory)
 
     if args.callers:
-        callers = find_callers(args.callers, directory)
+        answer = find_callers(args.callers, directory, with_report=True)
+        callers = answer["callers"]
         print(f"Callers of '{args.callers}': {len(callers)} found.")
         for c in callers[:20]:
             print(f"  {c['file']}:{c['line']}")
+        _print_unresolved_callers(args.callers, answer)
         return 0
 
     index_directory(directory)

@@ -46,6 +46,22 @@ MAX_CHECKPOINT_ERROR_CHARS = 500
 MAX_STDIN_BYTES = 1024 * 1024
 TRANSIENT_CREATE_ATTEMPTS = 10
 PENDING_CLAIM_SECONDS = 30.0
+# How long a drain waits for the state lock. The hook path keeps 0.5 s: a
+# session hook must not block on a contended file, and everything on that path
+# is deliberately impatient (`SESSION_START_RECOVERY_SECONDS` is 0.25).
+#
+# That impatience is correct and it is also why a backlog cannot clear itself
+# from a hook. Measured on this vault 2026-08-30: with `run/state.json` at
+# 6.7 MB, hooks take and release the lock continuously and a 0.5 s drain loses
+# every time — eight consecutive forced drains, each refused in 0.6 s, with the
+# queue unmoved at 2 485. Recovery therefore belongs to the unattended nightly
+# pass, which is allowed to wait.
+PENDING_STATE_LOCK_SECONDS = 0.5
+BACKLOG_STATE_LOCK_SECONDS = 10.0
+
+# A bound on the recovery itself, so an unattended pass can never hang on it.
+BACKLOG_DRAIN_SECONDS = 120.0
+
 MAX_CAPTURE_INTENT_BYTES = 1024 * 1024
 MAX_CAPTURE_EVIDENCE_BYTES = 900 * 1024
 CAPTURE_EXCERPT_SIDE_BYTES = MAX_CAPTURE_EVIDENCE_BYTES // 2
@@ -649,11 +665,110 @@ def _known(value: str | None, fallback: str = "unknown") -> str:
     return fallback
 
 
+# What a checkpoint records when nobody stated anything, which until now was
+# nothing at all: 1 000 events in this vault's own journal, every one of them
+# `checkpoint-none` closes and empty lists, so `state.md` read `Goal: None`
+# and always had. `project_delta` is read here and written by no producer
+# anywhere in `scripts/`, `integrations/`, `skills/` or `rules/` — only by two
+# tests.
+#
+# What to derive, and from what, is settled by measurement rather than taste.
+# The cold-start ablation separates the contribution of the agentic tasks in
+# history from the agent's own response content and finds the tasks are the
+# primary driver while the response content has little effect: what was done
+# carries the signal, what was said about it does not. So the delta is derived
+# from the observation, never narrated. An agent may still state a goal
+# explicitly by sending `project_delta`, and that path is unchanged.
+#
+# Every derived value is dated, because the dominant failure of carried state
+# is staleness rather than absence — a resuming agent treats the last session
+# as current instead of re-validating it. A blocker that cannot say when it was
+# opened is worse than an absent one.
+#
+# Research: `docs/research/2026-08-29-what-a-project-checkpoint-should-record.md`
+_MAX_DERIVED_VALUE_CHARS = 200
+
+
+def _derived_stamp(occurred_at: object) -> str:
+    """Seconds are enough to judge staleness; microseconds are noise."""
+    if isinstance(occurred_at, datetime):
+        return occurred_at.isoformat(timespec="seconds")
+    return str(occurred_at or "")
+
+
+def _derived_value(text: str, occurred_at: object) -> str:
+    """One item's value, dated, so a reader can see how old the claim is."""
+    body = " ".join(str(text).split())[:_MAX_DERIVED_VALUE_CHARS]
+    stamp = _derived_stamp(occurred_at)
+    return f"{body} — {stamp}" if stamp else body
+
+
+def _upsert(item_id: str, text: str, occurred_at: object) -> dict[str, str]:
+    return {
+        "id": item_id[:256],
+        "action": "upsert",
+        "value": _derived_value(text, occurred_at),
+    }
+
+
+def _derived_target(payload: Mapping[str, Any]) -> tuple[str, str]:
+    tool = str(payload.get("tool_name") or "")
+    return tool, str(payload.get("target") or "")
+
+
+def _derived_changed_file(payload: Mapping[str, Any], at: object) -> list[dict[str, str]]:
+    """A file this tool changed, keyed by its path so re-editing replaces it."""
+    tool, target = _derived_target(payload)
+    if payload.get("changed") is not True or not target or not tool:
+        return []
+    return [_upsert(f"file:{target}", target, at)]
+
+
+def _derived_command(payload: Mapping[str, Any], at: object) -> list[dict[str, str]]:
+    """A shell command, keyed by its own text so a repeat is one item."""
+    tool, target = _derived_target(payload)
+    if tool != "Bash" or not target:
+        return []
+    return [_upsert(f"cmd:{target[:120]}", target, at)]
+
+
+def _derived_blocker(
+    envelope: EventEnvelope, payload: Mapping[str, Any], at: object
+) -> list[dict[str, str]]:
+    """A failure the run actually hit, keyed by what failed rather than by when."""
+    if envelope.severity not in {"error", "fatal"}:
+        return []
+    tool, target = _derived_target(payload)
+    if not tool:
+        return []
+    return [_upsert(f"failed:{tool}:{target[:80]}", f"{tool} failed: {target}", at)]
+
+
+def _derived_current_task(payload: Mapping[str, Any], at: object) -> dict[str, str]:
+    """One id, always replaced: the newest thing the session was seen doing."""
+    tool, target = _derived_target(payload)
+    if not tool:
+        return {"id": "checkpoint-none", "action": "close", "value": ""}
+    return _upsert("observed", f"{tool} {target}".strip(), at)
+
+
+def _derived_delta(envelope: EventEnvelope) -> dict[str, object]:
+    """The delta an observation supports on its own, with nothing narrated."""
+    payload = envelope.payload
+    at = getattr(envelope, "occurred_at", None)
+    delta = _empty_delta()
+    delta["current_task"] = _derived_current_task(payload, at)
+    delta["changed_files"] = _derived_changed_file(payload, at)
+    delta["commands"] = _derived_command(payload, at)
+    delta["blockers"] = _derived_blocker(envelope, payload, at)
+    return delta
+
+
 def _checkpoint_delta(envelope: EventEnvelope) -> dict[str, object]:
     raw_delta = envelope.to_dict()["payload"].get("project_delta")
     if isinstance(raw_delta, Mapping):
         return dict(raw_delta)
-    return _empty_delta()
+    return _derived_delta(envelope)
 
 
 def _pending_checkpoint(envelope: EventEnvelope, slug: str, state_key: str) -> dict[str, object]:
@@ -773,11 +888,15 @@ def _release_claims(state: dict[str, Any], queue_key: str, owner: str) -> None:
             item.pop("claim_until", None)
 
 
-def _release_pending_claims(queue_key: str, owner: str) -> None:
+def _release_pending_claims(
+    queue_key: str,
+    owner: str,
+    state_lock_seconds: float = PENDING_STATE_LOCK_SECONDS,
+) -> None:
     def release(state: dict[str, Any]) -> None:
         _release_claims(state, queue_key, owner)
 
-    update_state(release, lock_timeout=0.5)
+    update_state(release, lock_timeout=state_lock_seconds)
 
 
 def _checkpoint_carries_delta(checkpoint: Mapping[str, object]) -> bool:
@@ -966,6 +1085,27 @@ def _build_merged_delta(
     return merged
 
 
+def _batch_occurrence_id(evidence: Sequence[str]) -> str:
+    """Name a batch after the whole batch, never after one of its members.
+
+    It used to be `items[-1]["event_id"]`. The last member is not the batch:
+    two batches ending at the same event but carrying different earlier events
+    are two operations wearing one name, and a reservation refuses the second
+    one forever. Measured on this vault 2026-08-30 — an outage on 08-28 left a
+    reservation uncommitted, a later cycle formed a different batch ending at
+    the same event, and the drain then failed identically on every attempt with
+    2 464 checkpoints queued behind it.
+
+    Each element of `evidence` is an event identifier that appears in the queue
+    once and is deleted on commit, so identical membership means one operation
+    retried — the case the reservation exists to collapse.
+    See `docs/research/2026-08-30-a-batch-named-after-one-of-its-members.md`.
+    """
+    from reliable_memory import canonical_json_bytes, sha256_bytes
+
+    return f"batch:{sha256_bytes(canonical_json_bytes(list(evidence)))}"
+
+
 def _merge_pending_checkpoints(
     items: Sequence[Mapping[str, object]], decision: CheckpointDecision
 ) -> dict[str, object]:
@@ -976,11 +1116,11 @@ def _merge_pending_checkpoints(
     for item in items:
         _merge_pending_item(item, scalar_operations, list_operations, evidence, contexts)
     checkpoint = dict(items[-1]["checkpoint_event"])
-    event_id = str(items[-1]["event_id"])
+    occurrence_id = _batch_occurrence_id(evidence)
     checkpoint.update(
         {
-            "occurrence_id": event_id,
-            "idempotency_key": f"{event_id}:{decision.reason}",
+            "occurrence_id": occurrence_id,
+            "idempotency_key": f"{occurrence_id}:{decision.reason}",
             "reason": decision.reason,
             "delta": _build_merged_delta(scalar_operations, list_operations, contexts),
             "evidence_event_ids": evidence,
@@ -1033,20 +1173,23 @@ def _claim_pending_state(
     queue = _pending_queue(state, queue_key)
     if not queue:
         return
-    if not _claim_queue(queue, owner, time.time()):
+    window = queue[:PENDING_CLAIM_WINDOW]
+    if not _claim_queue(window, owner, time.time()):
         return
-    claimed.append(([dict(item) for item in queue], _copy_reducer_states(state)))
+    claimed.append(([dict(item) for item in window], _copy_reducer_states(state)))
 
 
 def _claim_pending(
-    queue_key: str, owner: str
+    queue_key: str,
+    owner: str,
+    state_lock_seconds: float = PENDING_STATE_LOCK_SECONDS,
 ) -> tuple[list[dict[str, object]], dict[str, object]] | None:
     claimed: list[tuple[list[dict[str, object]], dict[str, object]]] = []
 
     def claim(state: dict[str, Any]) -> None:
         _claim_pending_state(state, queue_key, owner, claimed)
 
-    update_state(claim, lock_timeout=0.5)
+    update_state(claim, lock_timeout=state_lock_seconds)
     if claimed:
         return claimed[0]
     return None
@@ -1119,6 +1262,21 @@ def _delta_due(
 # checks reported nothing at all. Checkpointing early costs one extra journal
 # entry; waiting costs every finding those two checks would have made.
 MAX_PENDING_CHECKPOINT_ITEMS = 40
+
+# How much of the queue one drain cycle claims, replays and rewrites. It used
+# to be all of it, which made the cost of draining proportional to the backlog
+# while the time allowed to pay it stayed `lock_timeout=0.5`. Measured on this
+# vault 2026-08-30: a journal outage on 08-28 left 2 537 pending checkpoints,
+# 3.7 MB inside a 6.7 MB `run/state.json`; the outage was repaired on 08-29 and
+# the queue still did not move, because each cycle rewrote 4.8 MB three times
+# and lost the lock — 1 338 `Could not acquire state lock` in one day. A window
+# makes recovery linear in the backlog and never impossible. It is 100 because
+# `_bounded_pending_batch_count` never accepts more than 100 evidence ids into
+# one batch: a smaller window would change how many events a batch carries, and
+# a larger one would only claim items no cycle can select.
+# See `docs/research/2026-08-30-a-backlog-that-prevents-its-own-drain.md`.
+PENDING_CLAIM_WINDOW = 100
+
 
 
 def _debounce_due(
@@ -1292,11 +1450,12 @@ def _commit_pending(
     owner: str,
     selected: Sequence[Mapping[str, object]],
     committed_reducers: Mapping[str, object],
+    state_lock_seconds: float = PENDING_STATE_LOCK_SECONDS,
 ) -> None:
     def commit(state: dict[str, Any]) -> None:
         _commit_pending_state(state, queue_key, owner, selected, committed_reducers)
 
-    update_state(commit, lock_timeout=0.5)
+    update_state(commit, lock_timeout=state_lock_seconds)
 
 
 def _persist_or_release(
@@ -1308,6 +1467,7 @@ def _persist_or_release(
     reducers: Mapping[str, CheckpointReducer],
     checkpoint_decision: CheckpointDecision | None,
     writer_wait_seconds: float | None,
+    state_lock_seconds: float = PENDING_STATE_LOCK_SECONDS,
 ) -> dict[str, object]:
     try:
         return _persist_selected(
@@ -1319,7 +1479,7 @@ def _persist_or_release(
             writer_wait_seconds,
         )
     except Exception:
-        _release_pending_claims(queue_key, owner)
+        _release_pending_claims(queue_key, owner, state_lock_seconds)
         raise
 
 
@@ -1328,11 +1488,12 @@ def _commit_or_release(
     owner: str,
     selected: Sequence[Mapping[str, object]],
     committed_reducers: Mapping[str, object],
+    state_lock_seconds: float = PENDING_STATE_LOCK_SECONDS,
 ) -> None:
     try:
-        _commit_pending(queue_key, owner, selected, committed_reducers)
+        _commit_pending(queue_key, owner, selected, committed_reducers, state_lock_seconds)
     except Exception:
-        _release_pending_claims(queue_key, owner)
+        _release_pending_claims(queue_key, owner, state_lock_seconds)
         raise
 
 
@@ -1341,15 +1502,16 @@ def _drain_project_checkpoint_once(
     queue_key: str,
     owner: str,
     writer_wait_seconds: float | None,
+    state_lock_seconds: float = PENDING_STATE_LOCK_SECONDS,
 ) -> bool:
-    claimed = _claim_pending(queue_key, owner)
+    claimed = _claim_pending(queue_key, owner, state_lock_seconds)
     if claimed is None:
         return False
     items, reducer_states = claimed
     reducers, decisions, index, decision = _observe_until_checkpoint(items, reducer_states)
     index, decision, waiting = _resolve_debounce(items, reducers, index, decision)
     if waiting:
-        _release_pending_claims(queue_key, owner)
+        _release_pending_claims(queue_key, owner, state_lock_seconds)
         return False
     selected, reducers, decisions, decision = _batch_plan(
         items, reducer_states, reducers, decisions, index, decision
@@ -1363,8 +1525,9 @@ def _drain_project_checkpoint_once(
         reducers,
         decision,
         writer_wait_seconds,
+        state_lock_seconds,
     )
-    _commit_or_release(queue_key, owner, selected, committed)
+    _commit_or_release(queue_key, owner, selected, committed, state_lock_seconds)
     return True
 
 
@@ -1373,10 +1536,76 @@ def _drain_project_checkpoints(
     queue_key: str,
     *,
     writer_wait_seconds: float | None = None,
+    state_lock_seconds: float = PENDING_STATE_LOCK_SECONDS,
+    deadline: float | None = None,
 ) -> None:
     owner = f"{os.getpid()}:{secrets.token_hex(8)}"
-    while _drain_project_checkpoint_once(slug, queue_key, owner, writer_wait_seconds):
-        pass
+    while _drain_project_checkpoint_once(
+        slug, queue_key, owner, writer_wait_seconds, state_lock_seconds
+    ):
+        if deadline is not None and time.monotonic() >= deadline:
+            return
+
+
+def _pending_backlog_slugs() -> list[str]:
+    from memory_state import load_state
+
+    pending = load_state().get("project_checkpoint_pending")
+    if not isinstance(pending, dict):
+        return []
+    return sorted(slug for slug, queue in pending.items() if isinstance(queue, list) and queue)
+
+
+def _pending_backlog_depth(slug: str) -> int:
+    from memory_state import load_state
+
+    pending = load_state().get("project_checkpoint_pending")
+    if not isinstance(pending, dict):
+        return 0
+    queue = pending.get(slug)
+    return len(queue) if isinstance(queue, list) else 0
+
+
+def drain_pending_backlog(budget_seconds: float = BACKLOG_DRAIN_SECONDS) -> dict[str, object]:
+    """Clear whatever the impatient hook path could not, without a hook's clock.
+
+    A hook drains with `PENDING_STATE_LOCK_SECONDS` and must: it runs while a
+    person waits. That is exactly why a backlog survives it — measured on this
+    vault 2026-08-30, eight consecutive forced drains each lost the lock in
+    0.6 s and the queue stayed at 2 485. This runs unattended, waits properly,
+    and stops at `budget_seconds` so it can never hang the pass that calls it.
+
+    See `docs/research/2026-08-30-a-backlog-that-prevents-its-own-drain.md`.
+    """
+    deadline = time.monotonic() + budget_seconds
+    drained: dict[str, object] = {}
+    failed: dict[str, str] = {}
+    for slug in _pending_backlog_slugs():
+        drained[slug] = _drain_one_backlog(slug, deadline, failed)
+        if time.monotonic() >= deadline:
+            break
+    return {"drained": drained, "failed": failed, "remaining": _pending_backlog_slugs()}
+
+
+def _drain_one_backlog(slug: str, deadline: float, failed: dict[str, str]) -> int:
+    """One project's backlog, isolated: its failure is not the pass's failure.
+
+    Measured 2026-08-30: a single unrecoverable reservation in `fix-pip` raised
+    out of the drain and stopped every other project behind it, and the orphan
+    sweep after it never ran at all. A recovery pass that one bad row can halt
+    is not a recovery pass.
+    """
+    before = _pending_backlog_depth(slug)
+    try:
+        _drain_project_checkpoints(
+            slug,
+            slug,
+            state_lock_seconds=BACKLOG_STATE_LOCK_SECONDS,
+            deadline=deadline,
+        )
+    except Exception as error:  # noqa: BLE001
+        failed[slug] = _bounded_checkpoint_error(error)
+    return before - _pending_backlog_depth(slug)
 
 
 def _observe_project_checkpoint(
@@ -2764,6 +2993,22 @@ def _run_cli_event(args: argparse.Namespace) -> dict[str, object] | None:
     return _dispatch_cli_event(args, envelope)
 
 
+def _failed_operation(args: argparse.Namespace | None) -> str:
+    """Name the invocation that failed, not the absence of an event.
+
+    `--capture-worker` and `--maintenance` carry no `--event`, so the old
+    `args.event or "unknown"` filed every failure of both under
+    `adapter_unknown`. Twenty-two `intent_fence_lost` rows on this vault were
+    read as publisher failures because of it, when only a worker can raise that
+    string with no event attached. The process knows which of the three it is.
+    """
+    if args is None:
+        return "unparsed"
+    modes = (("capture_worker", "capture_worker"), ("maintenance", "maintenance"))
+    named = [label for flag, label in modes if getattr(args, flag, False)]
+    return next(iter(named), getattr(args, "event", None) or "unknown")
+
+
 def _record_cli_capture_failure(
     args: argparse.Namespace | None, error: BaseException
 ) -> None:
@@ -2783,9 +3028,8 @@ def _record_cli_capture_failure(
     try:
         from capture_diagnostics import record_capture_failure
 
-        event = getattr(args, "event", None) or "unknown"
         record_capture_failure(
-            f"adapter_{event}",
+            f"adapter_{_failed_operation(args)}",
             f"{type(error).__name__}: {error}",
         )
     except Exception:  # noqa: BLE001 - a lost trace must not lose the session

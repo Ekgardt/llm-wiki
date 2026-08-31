@@ -1,0 +1,170 @@
+{
+  "trials": 110,
+  "killed_trials": 108,
+  "kills_observed": 108,
+  "outcomes": {
+    "landed": 12,
+    "duplicated": 0,
+    "content-partial": 40,
+    "named-failure": 53,
+    "pending-visible": 0,
+    "source-only": 5,
+    "silent-loss": 0
+  },
+  "silent_losses": 0,
+  "mean_recovery_runs_when_landed": 0.5,
+  "named_failure_reasons": [
+    "IntegrityError: FOREIGN KEY constraint failed",
+    "IntegrityError: UNIQUE constraint failed: queue_ownership.canonical_role, queue_ownership.canonical_scope",
+    "OperationalOwnershipError: owner_identity_conflict"
+  ],
+  "per_point": {
+    "claim:after": {
+      "trials": 6,
+      "outcomes": {
+        "named-failure": 6
+      },
+      "mean_recovery_runs": 4.0
+    },
+    "claim:before": {
+      "trials": 6,
+      "outcomes": {
+        "named-failure": 6
+      },
+      "mean_recovery_runs": 4.0
+    },
+    "classifier:after": {
+      "trials": 5,
+      "outcomes": {
+        "content-partial": 5
+      },
+      "mean_recovery_runs": 4.0
+    },
+    "classifier:before": {
+      "trials": 5,
+      "outcomes": {
+        "content-partial": 5
+      },
+      "mean_recovery_runs": 4.0
+    },
+    "clean": {
+      "trials": 2,
+      "outcomes": {
+        "landed": 2
+      },
+      "mean_recovery_runs": 0.0
+    },
+    "decision-publish:after": {
+      "trials": 5,
+      "outcomes": {
+        "content-partial": 5
+      },
+      "mean_recovery_runs": 4.0
+    },
+    "decision-publish:before": {
+      "trials": 5,
+      "outcomes": {
+        "content-partial": 5
+      },
+      "mean_recovery_runs": 4.0
+    },
+    "enqueue:after": {
+      "trials": 6,
+      "outcomes": {
+        "named-failure": 6
+      },
+      "mean_recovery_runs": 5.0
+    },
+    "enqueue:before": {
+      "trials": 6,
+      "outcomes": {
+        "named-failure": 6
+      },
+      "mean_recovery_runs": 5.0
+    },
+    "intent-ready:after": {
+      "trials": 6,
+      "outcomes": {
+        "named-failure": 6
+      },
+      "mean_recovery_runs": 5.0
+    },
+    "intent-ready:before": {
+      "trials": 6,
+      "outcomes": {
+        "named-failure": 6
+      },
+      "mean_recovery_runs": 5.0
+    },
+    "markdown-commit:after": {
+      "trials": 5,
+      "outcomes": {
+        "content-partial": 5
+      },
+      "mean_recovery_runs": 4.0
+    },
+    "markdown-commit:before": {
+      "trials": 5,
+      "outcomes": {
+        "content-partial": 5
+      },
+      "mean_recovery_runs": 4.0
+    },
+    "publish-intent:after": {
+      "trials": 6,
+      "outcomes": {
+        "named-failure": 6
+      },
+      "mean_recovery_runs": 5.0
+    },
+    "publish-intent:before": {
+      "trials": 6,
+      "outcomes": {
+        "named-failure": 6
+      },
+      "mean_recovery_runs": 5.0
+    },
+    "publish-return:after": {
+      "trials": 5,
+      "outcomes": {
+        "landed": 5
+      },
+      "mean_recovery_runs": 1.0
+    },
+    "publish-return:before": {
+      "trials": 5,
+      "outcomes": {
+        "source-only": 5
+      },
+      "mean_recovery_runs": 5.0
+    },
+    "record-write:after": {
+      "trials": 5,
+      "outcomes": {
+        "content-partial": 5
+      },
+      "mean_recovery_runs": 4.0
+    },
+    "record-write:before": {
+      "trials": 5,
+      "outcomes": {
+        "named-failure": 5
+      },
+      "mean_recovery_runs": 4.0
+    },
+    "terminal-publish:after": {
+      "trials": 5,
+      "outcomes": {
+        "landed": 5
+      },
+      "mean_recovery_runs": 0.0
+    },
+    "terminal-publish:before": {
+      "trials": 5,
+      "outcomes": {
+        "content-partial": 5
+      },
+      "mean_recovery_runs": 4.0
+    }
+  }
+}

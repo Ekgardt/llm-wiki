@@ -88,3 +88,4 @@ valid; the one-shot consent/SCIP/publication direction in Tasks 6-16 does not.
 - [[solo-operator-superset-product-decision]]
 - [[derived-evidence-generation-decision]]
 - [[warm-navigation-overhead-threshold-decision]]
+- [[knowledge/notes/dependency-answers-one-hop-decision]] — links to this page.

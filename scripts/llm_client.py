@@ -34,6 +34,7 @@ Design:
 """
 from __future__ import annotations
 
+import contextlib
 import functools
 import hashlib
 import json
@@ -64,6 +65,7 @@ from model_dlp import (
     require_safe_model_output,
 )
 from reliable_memory import canonical_json_bytes
+from secret_redact import redact_secrets
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -373,6 +375,66 @@ class ProviderTimeout(RuntimeError):
     """
 
 
+class ProviderExited(RuntimeError):
+    """The provider process failed before it could answer.
+
+    `_call_claude` ran the CLI with `check=False` and returned
+    `result.stdout or ""`, dropping `returncode` and `stderr` on the floor. A
+    crashed CLI, a CLI that refused the request and a CLI that genuinely
+    answered with nothing all reached `_outcome_of` as the same empty string,
+    and all three were reported as `empty_response`.
+
+    In the first LongMemEval run of 2026-08-27 all 26 failures surfaced as the
+    single opaque string `provider_no_response`. The cause — the worker
+    inherited this repository as its working directory, so `claude -p` loaded
+    `CLAUDE.md` with its ~300 KB of imports and answered as an agent turn,
+    175 s against 12 s from a neutral directory — stayed invisible until
+    someone ran a paired control by hand. The exit status and the first thing
+    the CLI printed were on the table the whole time.
+
+    This does not guess a cause. It carries the two facts the process itself
+    reported: the status it died with, and a bounded, redacted tail of what it
+    printed.
+    """
+
+    def __init__(self, provider: str, exit_code: int, stderr_excerpt: str) -> None:
+        detail = f": {stderr_excerpt}" if stderr_excerpt else ""
+        super().__init__(f"{provider} exited with status {exit_code}{detail}")
+        self.provider = provider
+        self.exit_code = exit_code
+        self.stderr_excerpt = stderr_excerpt
+
+
+# What a dying provider printed is a diagnostic, not a transcript: it is kept
+# short enough to read in a log line and is redacted, because a CLI that fails
+# on authentication is exactly the one that prints a credential.
+PROVIDER_STDERR_EXCERPT_CHARS = 500
+
+
+def _stderr_excerpt(stderr: object) -> str:
+    """A bounded, redacted tail of what the provider printed before it died."""
+    if not isinstance(stderr, str) or not stderr.strip():
+        return ""
+    text = " ".join(redact_secrets(stderr).split())
+    if len(text) <= PROVIDER_STDERR_EXCERPT_CHARS:
+        return text
+    dropped = len(text) - PROVIDER_STDERR_EXCERPT_CHARS
+    return f"[{dropped} earlier chars omitted] {text[-PROVIDER_STDERR_EXCERPT_CHARS:]}"
+
+
+def _exited_result(
+    descriptor: ProviderDescriptor,
+    exc: ProviderExited,
+    mode: str,
+    pre_call_count: TokenCount,
+) -> LLMResult:
+    """A process that died has a name of its own, distinct from silence."""
+    print(f"llm_client: {exc}", file=sys.stderr)
+    return LLMResult(
+        descriptor, None, True, "provider_exited", mode, TokenUsage(), pre_call_count
+    )
+
+
 def _completed_call(
     descriptor: ProviderDescriptor,
     caller,
@@ -382,6 +444,8 @@ def _completed_call(
 ) -> LLMResult:
     try:
         response = _invoked_backend(caller, descriptor, transport, mode)
+    except ProviderExited as exc:
+        return _exited_result(descriptor, exc, mode, pre_call_count)
     except ProviderTimeout:
         print(
             f"llm_client: {descriptor.provider} backend exceeded "
@@ -840,8 +904,55 @@ _PROBES = {
 }
 
 
+# The ceiling one caller has set for its own calls, or None for the default.
+# A module-level value, not a parameter, because it has to reach every backend
+# without threading a number through five call shapes that do not otherwise
+# differ.
+_CALL_CEILING_S: int | None = None
+
+DEFAULT_TIMEOUT_S = 90
+
+
+@contextlib.contextmanager
+def call_ceiling(seconds: int):
+    """Give the calls made inside this block their own ceiling, in seconds.
+
+    The default fits a short call and does not fit a compile draft, which asks
+    for a whole plan in one answer. Measured 2026-08-28 on the live vault: the
+    compile failed with `draft:claude:provider_timeout` at 90s and the same
+    daily compiled at 600s, the whole pass — a rejected draft, its retry and
+    the critique batches — taking 225s of wall time. So one call is over 90s
+    and under 225s, and a per-call ceiling says that where a global default
+    cannot: raising the default would also make a stuck capture flush wait
+    three times longer before anyone heard about it.
+    """
+    global _CALL_CEILING_S
+    _require_positive_seconds(seconds)
+    previous = _CALL_CEILING_S
+    _CALL_CEILING_S = seconds
+    try:
+        yield
+    finally:
+        _CALL_CEILING_S = previous
+
+
+def _require_positive_seconds(seconds: object) -> None:
+    if isinstance(seconds, bool) or not isinstance(seconds, int) or seconds <= 0:
+        raise ValueError("call ceiling must be a positive whole number of seconds")
+
+
 def _timeout_s() -> int:
-    return int(os.environ.get("MEMORY_LLM_TIMEOUT_S", "90"))
+    """The environment, else the caller's own ceiling, else the short default.
+
+    The environment wins so an operator debugging a hang can widen every call
+    from outside without editing code.
+    """
+    override = os.environ.get("MEMORY_LLM_TIMEOUT_S")
+    if override is not None:
+        return int(override)
+    if _CALL_CEILING_S is not None:
+        return _CALL_CEILING_S
+    return DEFAULT_TIMEOUT_S
 
 
 def _reported_count(value: object) -> int | None:
@@ -1156,14 +1267,39 @@ def _remove_quietly(paths: tuple[str, ...]) -> None:
             pass
 
 
+def provider_cwd() -> tempfile.TemporaryDirectory:
+    """An empty directory outside the vault, for the duration of one call.
+
+    A memory call is an internal service call, not an agent's turn in the
+    operator's project: the material is already in the prompt and the answer's
+    shape is fixed by a schema. Left to inherit the caller's directory, the
+    child was starting inside the vault, and a CLI that discovers project
+    memory from its working directory upwards then loads this repository's
+    `CLAUDE.md` with the index and log it imports — before it ever sees the
+    prompt.
+
+    Measured 2026-08-28, paired, trivial prompt: 62.15s and 64.60s from the
+    vault against 27.24s and 33.90s from `/tmp` — about 33 seconds of fixed
+    overhead against a 90s ceiling, which is the whole distance between an
+    answer and the `draft:claude:provider_timeout` the live compile was
+    failing with. See `docs/research/2026-08-28-where-the-provider-runs.md`.
+
+    The directory must be outside the vault: project-memory discovery walks
+    upwards, so an empty directory under `cache/` would find the same file one
+    level up.
+    """
+    return tempfile.TemporaryDirectory(prefix="llm-wiki-provider-")
+
+
 def _codex_last_message(command: list[str], prompt_path: str, out_path: str) -> str:
-    with open(prompt_path, "rb") as stdin_handle:
+    with open(prompt_path, "rb") as stdin_handle, provider_cwd() as neutral:
         subprocess.run(
             command,
             stdin=stdin_handle,
             capture_output=True,
             timeout=_timeout_s(),
             check=False,
+            cwd=neutral,
         )
     try:
         return Path(out_path).read_text(encoding="utf-8", errors="ignore")
@@ -1210,15 +1346,17 @@ def _claude_cli_flags() -> frozenset[str]:
     if not claude_bin:
         return frozenset()
     try:
-        result = subprocess.run(
-            [claude_bin, "--help"],
-            capture_output=True,
-            timeout=30,
-            check=False,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-        )
+        with provider_cwd() as neutral:
+            result = subprocess.run(
+                [claude_bin, "--help"],
+                capture_output=True,
+                timeout=30,
+                check=False,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                cwd=neutral,
+            )
     except (subprocess.TimeoutExpired, OSError):
         return frozenset()
     return frozenset(re.findall(r"--[a-z][a-z-]+", result.stdout or ""))
@@ -1258,6 +1396,23 @@ def _claude_stdin(system_prompt: str, prompt: str) -> str:
     return f"<system>{system_prompt}</system>\n\n{prompt}"
 
 
+def _claude_answer(
+    descriptor: ProviderDescriptor, result: subprocess.CompletedProcess
+) -> str:
+    """What the finished process said, or the reason it never said anything.
+
+    A usable answer is still an answer, whatever the exit status: nothing that
+    worked before is withdrawn here. Only a death with nothing to show for it
+    becomes a named failure instead of an anonymous empty string.
+    """
+    answer = result.stdout or ""
+    if result.returncode == 0 or answer.strip():
+        return answer
+    raise ProviderExited(
+        descriptor.provider, result.returncode, _stderr_excerpt(result.stderr)
+    )
+
+
 def _call_claude(
     descriptor: ProviderDescriptor,
     prompt: str,
@@ -1275,17 +1430,19 @@ def _call_claude(
     if not claude_bin:
         return ""
     try:
-        result = subprocess.run(
-            _claude_command(claude_bin, descriptor.model, system_prompt),
-            input=_claude_stdin(system_prompt, prompt),
-            capture_output=True,
-            timeout=_timeout_s(),
-            check=False,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-        )
-        return result.stdout or ""
+        with provider_cwd() as neutral:
+            result = subprocess.run(
+                _claude_command(claude_bin, descriptor.model, system_prompt),
+                input=_claude_stdin(system_prompt, prompt),
+                capture_output=True,
+                timeout=_timeout_s(),
+                check=False,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                cwd=neutral,
+            )
+        return _claude_answer(descriptor, result)
     except subprocess.TimeoutExpired as exc:
         raise ProviderTimeout(
             f"claude did not answer within {_timeout_s()}s"

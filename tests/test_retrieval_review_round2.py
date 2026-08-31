@@ -939,21 +939,84 @@ def test_upsert_vectors_refuses_destructive_live_drop():
         )
 
 
+def _paths_of(result) -> list[str]:
+    return [candidate.relative_path for candidate in result.candidates]
+
+
+def _label_of(result) -> tuple:
+    """The four fields a caller reads together to know an answer is short."""
+    return (
+        result.trace.partial,
+        result.trace.fallback_reason,
+        result.trace.signals_used,
+        result.trace.effective_mode,
+    )
+
+
+def _noting_leg(calls: list[str], name: str, cid: str, path: str):
+    def leg(**_kwargs):
+        calls.append(name)
+        return [_hit(cid, path, 1.0)]
+
+    return leg
+
+
+def _slow_lexical_leg(calls: list[str]):
+    """Finishes, and leaves no budget behind it."""
+    inner = _noting_leg(calls, "lexical", "a", "a.md")
+
+    def leg(**kwargs):
+        time.sleep(0.05)
+        return inner(**kwargs)
+
+    return leg
+
+
 def test_retrieve_respects_deadline(monkeypatch):
+    """The deadline still binds -- and the finished leg is handed back, labelled.
+
+    This used to assert `TimeoutError`. The deadline is enforced in exactly the
+    same place: the check after the lexical leg fires, and nothing further is
+    started. What changed is what happens to the leg that already finished --
+    it is returned as a partial answer instead of being discarded. Measured on
+    this vault, discarding it was the whole reason a loaded MCP call returned
+    nothing at all.
+    """
     import retrieval
 
-    def slow_lexical(**_k):
-        time.sleep(0.05)
-        return [_hit("a", "a.md", 1.0)]
+    calls: list[str] = []
+    result = retrieval.retrieve(
+        "x",
+        requested_profile="HYBRID",
+        lexical_backend=_slow_lexical_leg(calls),
+        dense_backend=_noting_leg(calls, "dense", "b", "b.md"),
+        rerank_enabled=False,
+        corpus_generation="g",
+        deadline_monotonic=time.monotonic() + 0.001,
+    )
 
-    with pytest.raises(TimeoutError):
+    assert calls == ["lexical"]
+    assert _paths_of(result) == ["a.md"]
+    assert _label_of(result) == (
+        True,
+        "deadline_expired_partial_result",
+        ("lexical",),
+        "BASE",
+    )
+
+
+def test_retrieve_raises_when_the_deadline_leaves_nothing_in_hand():
+    """Nothing finished is a refusal, and it must keep looking like one."""
+    import retrieval
+
+    with pytest.raises(TimeoutError, match="deadline exceeded"):
         retrieval.retrieve(
             "x",
             requested_profile="BASE",
-            lexical_backend=slow_lexical,
+            lexical_backend=lambda **_k: [_hit("a", "a.md", 1.0)],
             rerank_enabled=False,
             corpus_generation="g",
-            deadline_monotonic=time.monotonic() + 0.001,
+            deadline_monotonic=time.monotonic() - 1,
         )
 
 
@@ -1130,15 +1193,27 @@ def test_cancellation_is_checked_after_fusion_before_rerank(monkeypatch):
         stopped = True
         return result
 
+    reranked = []
+
     monkeypatch.setattr(retrieval, "fuse_rrf", fuse_then_cancel)
-    with pytest.raises(TimeoutError, match="cancelled"):
-        retrieval.retrieve(
-            "needle",
-            requested_profile="BASE",
-            lexical_backend=lambda **_kwargs: [_hit("a", "a.md", 1.0)],
-            rerank_enabled=True,
-            cancelled=lambda: stopped,
-        )
+    monkeypatch.setattr(
+        retrieval, "_maybe_rerank", lambda *a, **k: reranked.append(True)
+    )
+    result = retrieval.retrieve(
+        "needle",
+        requested_profile="BASE",
+        lexical_backend=lambda **_kwargs: [_hit("a", "a.md", 1.0)],
+        rerank_enabled=True,
+        cancelled=lambda: stopped,
+    )
+
+    # The cancel is still checked between fusion and rerank -- the reranker
+    # never runs. What changed is that the fused set is returned rather than
+    # thrown away, labelled with the cancel that stopped the plan.
+    assert reranked == []
+    assert [candidate.relative_path for candidate in result.candidates] == ["a.md"]
+    assert result.trace.partial is True
+    assert result.trace.fallback_reason == "cancelled_partial_result"
 
 
 @pytest.mark.parametrize("vectors_returned", [True, False])

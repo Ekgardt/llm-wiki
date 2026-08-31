@@ -3,8 +3,10 @@
 What it does:
 1. Everything the nightly pass does (queue work + compile + lint).
 2. OKF conformance sweep — backfills frontmatter on any new pages.
-3. LLM-judged contradiction check (optional, opt-in via env var).
-4. Report queue status without deleting retained tasks.
+3. Retention — stale pages, session records, and the superseded evidence-graph
+   generations nothing reads any more (`prune_generations.py`).
+4. LLM-judged contradiction check (optional, opt-in via env var).
+5. Report queue status without deleting retained tasks.
 
 Designed to run unattended. Logs to $LLM_WIKI_STATE_ROOT/logs/weekly-YYYY-MM-DD.md.
 """
@@ -53,6 +55,12 @@ def _script_steps() -> list[tuple[str, str, list[str], int]]:
             "sessions",
             [sys.executable, str(script / "archive_sessions.py"), "--apply"],
             300,
+        ),
+        (
+            "Step 3d: pruning superseded evidence-graph generations...",
+            "generations",
+            [sys.executable, str(script / "prune_generations.py"), "--apply"],
+            1200,
         ),
     ]
 

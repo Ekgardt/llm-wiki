@@ -14,7 +14,7 @@ Safety rules:
   .opencode/worktrees under the main worktree are candidates.
 - A worktree is eligible for deletion only if ALL hold:
     * working tree is clean (no modified, staged, or untracked files)
-    * branch is fully merged into main
+    * branch is fully merged into main or into the integration branch
 - Anything that doesn't meet those criteria is kept and flagged in the report.
 - With `--interactive`, unmerged/dirty worktrees trigger a per-item prompt
   (requires --apply too). Default flow is non-interactive, safe, and boring.
@@ -36,6 +36,14 @@ from pathlib import Path
 
 MAIN_BRANCH = os.environ.get("LLM_WIKI_MAIN_BRANCH", "main")
 
+# Where an agent's work actually lands. Asking only about `main` kept 13
+# worktrees on 2026-08-29 whose every commit was already in `work` — the owner
+# merges `work` into `main` in batches, so nothing had reached `main` since
+# PR 12 and the question the tool asked could not become true for weeks. A
+# branch is merged when either branch already contains it; measured, that
+# turned 743 MB of kept worktrees into 4 KB without losing a commit.
+INTEGRATION_BRANCH = os.environ.get("LLM_WIKI_INTEGRATION_BRANCH", "work")
+
 
 @dataclass
 class WorktreeInfo:
@@ -49,14 +57,12 @@ class WorktreeInfo:
     reason_kept: str | None = None
 
     @property
+    def _git_permits_removal(self) -> bool:
+        return not (self.is_main or self.is_locked or self.is_prunable)
+
+    @property
     def can_auto_delete(self) -> bool:
-        return (
-            not self.is_main
-            and not self.is_locked
-            and not self.is_prunable
-            and self.is_clean
-            and self.is_merged
-        )
+        return self._git_permits_removal and self.is_clean and self.is_merged
 
 
 def _run(cmd: list[str], cwd: Path | None = None) -> str:
@@ -95,20 +101,28 @@ def _try_run(cmd: list[str], cwd: Path | None = None) -> str | None:
         return None
 
 
+def _porcelain_field(current: dict[str, str | bool], field: bytes) -> None:
+    text = field.decode("utf-8", errors="surrogateescape")
+    key, separator, value = text.partition(" ")
+    current[key] = value if separator else True
+
+
+def _flushed(records: list[dict[str, str | bool]], current: dict) -> dict:
+    """A blank field ends one record; an empty one is not a record."""
+    if current:
+        records.append(current)
+    return {}
+
+
 def parse_worktree_porcelain(raw: bytes) -> list[dict[str, str | bool]]:
     records: list[dict[str, str | bool]] = []
     current: dict[str, str | bool] = {}
     for field in raw.split(b"\0"):
         if not field:
-            if current:
-                records.append(current)
-                current = {}
+            current = _flushed(records, current)
             continue
-        text = field.decode("utf-8", errors="surrogateescape")
-        key, separator, value = text.partition(" ")
-        current[key] = value if separator else True
-    if current:
-        records.append(current)
+        _porcelain_field(current, field)
+    _flushed(records, current)
     return records
 
 
@@ -124,31 +138,38 @@ def in_approved_root(path: Path, roots: tuple[Path, ...]) -> bool:
     return any(resolved != root and resolved.is_relative_to(root) for root in roots)
 
 
+def _record_branch(record: dict[str, str | bool]) -> str | None:
+    value = record.get("branch")
+    if not isinstance(value, str):
+        return None
+    prefix = "refs/heads/"
+    return value[len(prefix):] if value.startswith(prefix) else value
+
+
+def _worktree_of(record: dict[str, str | bool], index: int) -> WorktreeInfo | None:
+    path_value = record.get("worktree")
+    if not isinstance(path_value, str):
+        return None
+    return WorktreeInfo(
+        path=Path(path_value),
+        branch=_record_branch(record),
+        is_main=index == 0,
+        is_clean=True,
+        is_merged=False,
+        is_locked="locked" in record,
+        is_prunable="prunable" in record,
+    )
+
+
 def list_worktrees(repo_root: Path) -> list[WorktreeInfo]:
     raw = _run_bytes(
         ["git", "worktree", "list", "--porcelain", "-z"], cwd=repo_root
     )
-    worktrees: list[WorktreeInfo] = []
-    for index, record in enumerate(parse_worktree_porcelain(raw)):
-        path_value = record.get("worktree")
-        if not isinstance(path_value, str):
-            continue
-        branch_value = record.get("branch")
-        branch = branch_value if isinstance(branch_value, str) else None
-        if branch and branch.startswith("refs/heads/"):
-            branch = branch[len("refs/heads/") :]
-        worktrees.append(
-            WorktreeInfo(
-                path=Path(path_value),
-                branch=branch,
-                is_main=index == 0,
-                is_clean=True,
-                is_merged=False,
-                is_locked="locked" in record,
-                is_prunable="prunable" in record,
-            )
-        )
-    return worktrees
+    found = [
+        _worktree_of(record, index)
+        for index, record in enumerate(parse_worktree_porcelain(raw))
+    ]
+    return [worktree for worktree in found if worktree is not None]
 
 
 def check_clean(wt: WorktreeInfo) -> bool:
@@ -158,52 +179,85 @@ def check_clean(wt: WorktreeInfo) -> bool:
     return status == ""
 
 
+def _contained_by(branch: str, target: str, repo_root: Path) -> bool:
+    """Whether `target` already holds every commit of `branch`."""
+    return (
+        _try_run(
+            ["git", "merge-base", "--is-ancestor", branch, target], cwd=repo_root
+        )
+        is not None
+    )
+
+
 def check_merged(wt: WorktreeInfo, repo_root: Path) -> bool:
+    """Merged into whichever branch integrates work here — `main` or `work`.
+
+    A worktree is safe to remove once its commits live somewhere else, and on
+    this machine that somewhere is usually the integration branch, not `main`.
+    Both are consulted so the answer does not depend on when the owner last
+    merged a batch.
+    """
     if not wt.branch:
         return False
-    merge_base = _try_run(
-        ["git", "merge-base", "--is-ancestor", wt.branch, MAIN_BRANCH],
-        cwd=repo_root,
+    return any(
+        _contained_by(wt.branch, target, repo_root)
+        for target in (MAIN_BRANCH, INTEGRATION_BRANCH)
     )
-    return merge_base is not None
+
+
+def _removal_lines(to_delete: list[WorktreeInfo]) -> list[str]:
+    if not to_delete:
+        return []
+    rows = [f"  - {w.path}  [{w.branch}]" for w in to_delete]
+    return [f"Would remove ({len(to_delete)}):", *rows, ""]
+
+
+def _kept_lines(kept_other: list[WorktreeInfo]) -> list[str]:
+    if not kept_other:
+        return []
+    rows: list[str] = []
+    for worktree in kept_other:
+        rows.append(f"  - {worktree.path}  [{worktree.branch}]")
+        rows.append(f"    reason: {worktree.reason_kept}")
+    return [f"Kept ({len(kept_other)}):", *rows, ""]
+
+
+def _main_lines(kept_main: list[WorktreeInfo]) -> list[str]:
+    if not kept_main:
+        return []
+    return [f"Main (always kept): {w.path}" for w in kept_main] + [""]
+
+
+def _action_lines(actions: list[str]) -> list[str]:
+    if not actions:
+        return []
+    return ["Actions:", *(f"  {action}" for action in actions), ""]
+
+
+def _grouped(worktrees: list[WorktreeInfo]) -> dict[str, list[WorktreeInfo]]:
+    groups: dict[str, list[WorktreeInfo]] = {"remove": [], "keep": [], "main": []}
+    for worktree in worktrees:
+        groups[_report_group(worktree)].append(worktree)
+    return groups
+
+
+def _report_group(worktree: WorktreeInfo) -> str:
+    if worktree.is_main:
+        return "main"
+    return "remove" if worktree.can_auto_delete else "keep"
 
 
 def format_report(worktrees: list[WorktreeInfo], actions: list[str]) -> str:
-    lines: list[str] = []
-    lines.append("=== Worktree cleanup report ===")
-    lines.append("")
-    to_delete = [w for w in worktrees if w.can_auto_delete]
-    kept_main = [w for w in worktrees if w.is_main]
-    kept_other = [
-        w for w in worktrees if not w.is_main and not w.can_auto_delete
+    groups = _grouped(worktrees)
+    lines = [
+        "=== Worktree cleanup report ===",
+        "",
+        *_removal_lines(groups["remove"]),
+        *_kept_lines(groups["keep"]),
+        *_main_lines(groups["main"]),
+        *_action_lines(actions),
     ]
-
-    if to_delete:
-        lines.append(f"Would remove ({len(to_delete)}):")
-        for w in to_delete:
-            lines.append(f"  - {w.path}  [{w.branch}]")
-        lines.append("")
-
-    if kept_other:
-        lines.append(f"Kept ({len(kept_other)}):")
-        for w in kept_other:
-            lines.append(f"  - {w.path}  [{w.branch}]")
-            lines.append(f"    reason: {w.reason_kept}")
-        lines.append("")
-
-    if kept_main:
-        for w in kept_main:
-            lines.append(f"Main (always kept): {w.path}")
-        lines.append("")
-
-    if actions:
-        lines.append("Actions:")
-        for a in actions:
-            lines.append(f"  {a}")
-        lines.append("")
-
     return "\n".join(lines)
-
 
 def remove_worktree(wt: WorktreeInfo, repo_root: Path) -> str:
     _run(["git", "worktree", "remove", "--", str(wt.path)], cwd=repo_root)
@@ -226,14 +280,12 @@ def prompt_yes_no(question: str) -> bool:
         print("please answer 'y' or 'n'")
 
 
-def main(argv: list[str] | None = None) -> int:
+def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Hygiene for git worktrees under .claude/worktrees/",
     )
     parser.add_argument(
-        "--apply",
-        action="store_true",
-        help="actually delete (default is dry-run)",
+        "--apply", action="store_true", help="actually delete (default is dry-run)"
     )
     parser.add_argument(
         "--interactive",
@@ -245,85 +297,149 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="report stale Git worktree metadata; requires --apply to prune",
     )
-    args = parser.parse_args(argv)
+    return parser
 
-    repo_root_str = _try_run(["git", "rev-parse", "--show-toplevel"])
-    if repo_root_str is None:
-        print("error: not inside a git repository", file=sys.stderr)
-        return 2
-    caller_root = Path(repo_root_str).resolve()
+
+def _blocked_reason(worktree: WorktreeInfo) -> str | None:
+    """Why Git itself forbids touching this one, before any branch question."""
+    if worktree.is_locked:
+        return "worktree is locked"
+    if worktree.is_prunable:
+        return "worktree path is missing; use --prune-stale-metadata"
+    return None
+
+
+def _keep_reason(worktree: WorktreeInfo) -> str:
+    if not worktree.is_clean and not worktree.is_merged:
+        return "dirty working tree + branch not merged"
+    if not worktree.is_clean:
+        return "dirty working tree (untracked or modified files)"
+    return f"branch not merged into {MAIN_BRANCH} or {INTEGRATION_BRANCH}"
+
+
+def _classify(worktree: WorktreeInfo, repo_root: Path) -> None:
+    blocked = _blocked_reason(worktree)
+    if blocked is not None:
+        worktree.reason_kept = blocked
+        return
+    worktree.is_clean = check_clean(worktree)
+    worktree.is_merged = check_merged(worktree, repo_root)
+    if worktree.can_auto_delete:
+        return
+    worktree.reason_kept = _keep_reason(worktree)
+
+
+def _force_remove(worktree: WorktreeInfo, repo_root: Path) -> str:
+    _run(
+        ["git", "worktree", "remove", "--force", "--", str(worktree.path)],
+        cwd=repo_root,
+    )
+    if not worktree.branch:
+        return f"force-removed {worktree.path}"
+    _run(["git", "branch", "-D", "--", worktree.branch], cwd=repo_root)
+    return f"force-removed {worktree.path} and branch {worktree.branch}"
+
+
+def _offered(worktree: WorktreeInfo) -> bool:
+    """Only a worktree the automatic rule kept is worth asking about."""
+    return not (
+        worktree.is_main
+        or worktree.can_auto_delete
+        or worktree.is_locked
+        or worktree.is_prunable
+    )
+
+
+def _asked_removals(worktrees: list[WorktreeInfo], repo_root: Path) -> list[str]:
+    actions: list[str] = []
+    for worktree in filter(_offered, worktrees):
+        print(f"\nWorktree: {worktree.path}")
+        print(f"  branch: {worktree.branch}")
+        print(f"  reason kept: {worktree.reason_kept}")
+        if prompt_yes_no("  delete anyway (destroys unmerged work)?"):
+            actions.append(_force_remove(worktree, repo_root))
+    return actions
+
+
+def _prune_metadata(repo_root: Path, apply: bool) -> str:
+    command = ["git", "worktree", "prune", "--verbose"]
+    action = "pruned stale worktree metadata"
+    if not apply:
+        command.insert(3, "--dry-run")
+        action = "reported stale worktree metadata"
+    output = _run(command, cwd=repo_root)
+    return f"{action}: {output}" if output else action
+
+
+def _applied(worktrees: list[WorktreeInfo], repo_root: Path, args) -> list[str]:
+    if not args.apply:
+        return []
+    actions = [
+        remove_worktree(worktree, repo_root)
+        for worktree in worktrees
+        if worktree.can_auto_delete
+    ]
+    if args.interactive:
+        actions.extend(_asked_removals(worktrees, repo_root))
+    return actions
+
+
+def _discovered_worktrees(caller_root: Path) -> list[WorktreeInfo] | None:
     discovered = list_worktrees(caller_root)
     if not discovered or not discovered[0].is_main:
-        print("error: Git did not report a primary worktree", file=sys.stderr)
-        return 2
-    repo_root = discovered[0].path.resolve(strict=False)
+        return None
+    return discovered
+
+
+def _in_scope(discovered: list[WorktreeInfo], repo_root: Path) -> list[WorktreeInfo]:
     roots = approved_roots(repo_root)
-    worktrees = [
+    return [
         worktree
         for worktree in discovered
         if worktree.is_main or in_approved_root(worktree.path, roots)
     ]
 
-    for w in worktrees:
-        if w.is_main:
-            continue
-        if w.is_locked:
-            w.reason_kept = "worktree is locked"
-            continue
-        if w.is_prunable:
-            w.reason_kept = "worktree path is missing; use --prune-stale-metadata"
-            continue
-        w.is_clean = check_clean(w)
-        w.is_merged = check_merged(w, repo_root)
-        if not w.is_clean and not w.is_merged:
-            w.reason_kept = "dirty working tree + branch not merged"
-        elif not w.is_clean:
-            w.reason_kept = "dirty working tree (untracked or modified files)"
-        elif not w.is_merged:
-            w.reason_kept = "branch not merged into " + MAIN_BRANCH
 
-    actions: list[str] = []
+def _classified(discovered: list[WorktreeInfo], repo_root: Path) -> list[WorktreeInfo]:
+    worktrees = _in_scope(discovered, repo_root)
+    for worktree in filter(lambda item: not item.is_main, worktrees):
+        _classify(worktree, repo_root)
+    return worktrees
 
-    if args.apply:
-        for w in worktrees:
-            if w.can_auto_delete:
-                actions.append(remove_worktree(w, repo_root))
 
-        if args.interactive:
-            for w in worktrees:
-                if w.is_main or w.can_auto_delete or w.is_locked or w.is_prunable:
-                    continue
-                print(f"\nWorktree: {w.path}")
-                print(f"  branch: {w.branch}")
-                print(f"  reason kept: {w.reason_kept}")
-                if prompt_yes_no("  delete anyway (destroys unmerged work)?"):
-                    _run(
-                        ["git", "worktree", "remove", "--force", "--", str(w.path)],
-                        cwd=repo_root,
-                    )
-                    if w.branch:
-                        _run(["git", "branch", "-D", "--", w.branch], cwd=repo_root)
-                        actions.append(
-                            f"force-removed {w.path} and branch {w.branch}"
-                        )
-                    else:
-                        actions.append(f"force-removed {w.path}")
-
+def _collected_actions(worktrees, repo_root: Path, args) -> list[str]:
+    actions = _applied(worktrees, repo_root, args)
     if args.prune_stale_metadata:
-        command = ["git", "worktree", "prune"]
-        if not args.apply:
-            command.extend(("--dry-run", "--verbose"))
-            action = "reported stale worktree metadata"
-        else:
-            command.append("--verbose")
-            action = "pruned stale worktree metadata"
-        output = _run(command, cwd=repo_root)
-        actions.append(f"{action}: {output}" if output else action)
+        actions.append(_prune_metadata(repo_root, args.apply))
+    return actions
 
+
+def _reported(worktrees: list[WorktreeInfo], actions: list[str], apply: bool) -> int:
     print(format_report(worktrees, actions))
-    if not args.apply and any(w.can_auto_delete for w in worktrees):
+    if not apply and any(worktree.can_auto_delete for worktree in worktrees):
         print("(dry-run — pass --apply to actually delete)")
     return 0
+
+
+def _repository_root() -> Path | None:
+    value = _try_run(["git", "rev-parse", "--show-toplevel"])
+    return None if value is None else Path(value).resolve()
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    caller_root = _repository_root()
+    if caller_root is None:
+        print("error: not inside a git repository", file=sys.stderr)
+        return 2
+    discovered = _discovered_worktrees(caller_root)
+    if discovered is None:
+        print("error: Git did not report a primary worktree", file=sys.stderr)
+        return 2
+    repo_root = discovered[0].path.resolve(strict=False)
+    worktrees = _classified(discovered, repo_root)
+    actions = _collected_actions(worktrees, repo_root, args)
+    return _reported(worktrees, actions, args.apply)
 
 
 if __name__ == "__main__":

@@ -69,6 +69,14 @@ MAX_MCP_CONTEXT_TOKENS = 32_768
 MAX_MCP_ERROR_CHARS = 256
 MCP_OPERATION_SECONDS = 10.0
 MCP_LSP_STARTUP_SECONDS = 60.0
+# CODE-03: indexing a repository builds a whole generation, so its budget is a
+# measurement, not a choice. The real second repository on this machine --
+# /home/user/agenticos/checkout-claude/main, 436 sources, 1,235 chunks -- took
+# 118.9 s end to end, most of it embedding. 600 s leaves room for a repository
+# several times that size; anything larger is refused by name on the deadline
+# rather than half-built, because the build registers only after every artifact
+# is written, fsynced and validated.
+MCP_REPOSITORY_INDEX_SECONDS = 600.0
 MAX_NAVIGATION_SOURCE_BYTES = 16 * 1024 * 1024
 MAX_NAVIGATION_GRAPH_FACTS = 10_000
 MAX_NAVIGATION_SOURCE_CACHE_BYTES = 64 * 1024 * 1024
@@ -137,6 +145,10 @@ if MCP_AVAILABLE:
     except ImportError:
         pass
 
+from answer_budget import MAX_BUDGET_TOKENS as ANSWER_BUDGET_MAX_TOKENS  # noqa: E402
+from answer_budget import MIN_BUDGET_TOKENS as ANSWER_BUDGET_MIN_TOKENS  # noqa: E402
+from answer_budget import shape_code_answer  # noqa: E402
+from answer_cost import attach_answer_cost  # noqa: E402
 from mcp_contract import build_envelope, envelope_schema  # noqa: E402
 from retrieval import PROFILES as QA_PROFILES  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
@@ -163,6 +175,9 @@ def _positioned_architecture_call(arguments: dict, mode: str) -> bool:
     return all(key in arguments for key in ("path", "line", "character"))
 
 
+_LONG_ARCHITECTURE_BUDGETS = {"index": MCP_REPOSITORY_INDEX_SECONDS}
+
+
 def _tool_operation_seconds(name: str, arguments: object) -> float:
     if name != "get_architecture" or not isinstance(arguments, dict):
         return MCP_OPERATION_SECONDS
@@ -171,7 +186,7 @@ def _tool_operation_seconds(name: str, arguments: object) -> float:
         arguments, mode
     ):
         return MCP_LSP_STARTUP_SECONDS
-    return MCP_OPERATION_SECONDS
+    return _LONG_ARCHITECTURE_BUDGETS.get(mode, MCP_OPERATION_SECONDS)
 
 
 def _operation_cancelled():
@@ -467,6 +482,39 @@ DOCTOR_INPUT_SCHEMA = {
     ],
 }
 
+# CODE-06: the two arguments that let a caller pay less for a code answer.
+# The ceiling `code_graph.DEPENDENCY_MAX_DEPTH` enforces, stated here so the
+# tool schema does not import `code_graph` at module load — that import pulls
+# the whole graph stack in before the server can answer anything.
+# `test_architecture_depth_argument.py` pins the two to the same number.
+ARCHITECTURE_MAX_DEPTH = 8
+
+# Bounds come from `answer_budget`; 25 000 is the client-side tool-result
+# ceiling Anthropic documents for Claude Code, and the low bound sits below any
+# real answer frame so the named refusal stays reachable and testable.
+ANSWER_BUDGET_SCHEMA_FIELDS = {
+    "budget_tokens": {
+        "type": "integer",
+        "minimum": ANSWER_BUDGET_MIN_TOKENS,
+        "maximum": ANSWER_BUDGET_MAX_TOKENS,
+        "description": (
+            "Approximate token ceiling for this answer (len/4, not a "
+            "tokenizer). Drops opaque identifiers, then derivable fields, "
+            "then rows from the tail, and names everything it dropped; a "
+            "budget too small for the answer frame is refused by name, never "
+            "silently shortened"
+        ),
+    },
+    "include_node_ids": {
+        "type": "boolean",
+        "default": False,
+        "description": (
+            "Emit the opaque code:node:<hash> graph identifiers. Off by "
+            "default: no surface in this product accepts one as input"
+        ),
+    },
+}
+
 TOOL_INPUT_SCHEMAS = {
     "recall": {
         "type": "object",
@@ -585,11 +633,20 @@ TOOL_INPUT_SCHEMAS = {
                 "type": "string",
                 "description": "Project directory to analyze",
             },
+            "symbol": {
+                "type": "string",
+                "maxLength": 256,
+                "description": (
+                    "Answer about one function by name: a verdict plus only its "
+                    "rows, instead of the whole-repository candidate listing"
+                ),
+            },
             "live": {
                 "type": "boolean",
                 "default": False,
                 "description": "Bypass the active generation and run live extraction",
             },
+            **ANSWER_BUDGET_SCHEMA_FIELDS,
         },
         "required": ["directory"],
     },
@@ -617,11 +674,50 @@ TOOL_INPUT_SCHEMAS = {
                     "implementations",
                     "type",
                     "diagnostics",
+                    "query",
+                    "provenance",
+                    "snippet",
+                    "coverage",
+                    "index",
+                    "repositories",
+                    "changes",
                 ],
                 "description": "Bounded architecture query mode",
             },
-            "symbol": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "roots": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1, "maxLength": 255},
+                "minItems": 1,
+                "maxItems": 128,
+                "description": (
+                    "CODE-03 index mode: top-level directories of the "
+                    "repository to cover. Omit to use every Git-tracked "
+                    "top-level directory, which refuses by name if any of them "
+                    "is one the corpus collector will not accept"
+                ),
+            },
+            "symbol": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024,
+                "description": "Symbol for symbol, callers, callees, dependencies, path, provenance, and snippet modes",
+            },
+            "query": {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": 4096,
+                "description": "Bounded JSON hop pipeline for mode=query",
+            },
             "reverse": {"type": "boolean", "default": False},
+            "depth": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": ARCHITECTURE_MAX_DEPTH,
+                "description": (
+                    "dependencies mode: how many hops to walk. "
+                    "Omitted means the whole reachable set."
+                ),
+            },
             "comparison": {
                 "type": "string",
                 "maxLength": 32,
@@ -635,11 +731,17 @@ TOOL_INPUT_SCHEMAS = {
                 "default": False,
                 "description": "Bypass the active generation and run live extraction",
             },
-            "path": {"type": "string", "minLength": 1, "maxLength": 4096},
+            "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": "Repository-relative path for coverage mode and for precise or positioned calls",
+            },
             "line": {"type": "integer", "minimum": 1},
             "character": {"type": "integer", "minimum": 0},
             "offset": {"type": "integer", "minimum": 0, "default": 0},
             "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 10},
+            **ANSWER_BUDGET_SCHEMA_FIELDS,
         },
         "required": ["directory"],
     },
@@ -1321,8 +1423,57 @@ def _trigger_compile(*, deadline: float | None = None) -> dict:
     return {"status": status, "returncode": returncode}
 
 
+def _dead_code_symbol_view(answer: dict, symbol: str) -> dict:
+    """Whether one named function is a dead-code candidate, and why.
+
+    The whole-repository listing cannot answer this question truthfully at this
+    repository's scale. Measured 2026-08-29: the analysis produces 846
+    candidates, the answer carried 532 of them at 24 982 tokens, and 307 named
+    rows were cut to fit the client ceiling. A name missing from a cut list is
+    indistinguishable from a name with living callers, so the listing answers
+    "is X dead?" with silence that reads as "no". The anchor turns a listing
+    that must be trimmed into a verdict that fits whole.
+
+    `not_a_candidate` is the honest phrasing: it says this analysis did not
+    nominate the name, which is not the same as proving the name is reachable -
+    `graph_complete` in the same answer says how far that claim carries.
+    """
+    rows = _dead_code_rows_named(answer, symbol)
+    kept = _without_key(answer, "candidates")
+    return {
+        **kept,
+        "symbol": symbol,
+        "verdict": _dead_code_verdict_word(rows),
+        "candidates": rows,
+    }
+
+
+def _dead_code_rows_named(answer: dict, symbol: str) -> list:
+    return [row for row in answer.get("candidates", []) if row.get("name") == symbol]
+
+
+def _without_key(mapping: dict, dropped: str) -> dict:
+    return {key: value for key, value in mapping.items() if key != dropped}
+
+
+def _dead_code_verdict_word(rows: list) -> str:
+    if rows:
+        return "candidate"
+    return "not_a_candidate"
+
+
+def _narrowed_dead_code(answer: dict, symbol: str | None) -> dict:
+    if symbol is None:
+        return answer
+    return _dead_code_symbol_view(answer, symbol)
+
+
 def _find_dead_code(
-    directory: str, *, live: bool = False, deadline: float | None = None
+    directory: str,
+    *,
+    symbol: str | None = None,
+    live: bool = False,
+    deadline: float | None = None,
 ) -> dict:
     """Find conservative dead-code candidates in a project directory."""
     from code_graph import find_dead_code
@@ -1345,7 +1496,7 @@ def _find_dead_code(
         return _code_graph_timeout_data(
             str(resolved), reason, completed=("directory_validation",)
         )
-    return _dead_code_result_data(resolved, result)
+    return _narrowed_dead_code(_dead_code_result_data(resolved, result), symbol)
 
 
 def _dead_code_result_data(resolved: Path, result) -> dict:
@@ -1362,7 +1513,11 @@ def _dead_code_result_data(resolved: Path, result) -> dict:
 
 
 def _get_architecture(
-    directory: str, *, live: bool = False, deadline: float | None = None
+    directory: str,
+    *,
+    live: bool = False,
+    deadline: float | None = None,
+    limit: int | None = None,
 ) -> dict:
     """Summarize the statically visible architecture of a project directory."""
     from code_graph import get_architecture
@@ -1379,6 +1534,7 @@ def _get_architecture(
             resolved,
             live=live,
             with_report=True,
+            limit=limit,
             deadline=operation_deadline,
         )
     except TimeoutError as reason:
@@ -1386,6 +1542,31 @@ def _get_architecture(
             str(resolved), reason, completed=("directory_validation",)
         )
     return _architecture_summary_data(resolved, architecture)
+
+
+# What the summary says instead of naming 300 community members. The counts
+# stay; only the member dump goes, and the caller is told which mode serves it.
+#
+# Measured 2026-08-29: `communities` was 13 313 of the summary's 20 076
+# architecture tokens - 66.3% - and every one of those bytes is exactly what
+# `mode=community` already returns, so two of the thirteen parity tasks were
+# paying for the same payload. Worse, `code_graph._communities_holding` records
+# that an unanchored listing cannot answer the question callers actually ask of
+# it: `fuse_rrf`'s community is 729th by size, so no honest bound reaches it.
+# The summary was carrying the expensive half of an answer that could not be
+# given without an anchor.
+COMMUNITY_MEMBERS_HINT = (
+    "omitted from the summary; get_architecture mode=community lists them, and "
+    "mode=community with symbol=<name> answers which community a symbol is in"
+)
+
+
+def _summary_architecture(architecture: dict) -> dict:
+    """The summary keeps the community counts and drops the member listing."""
+    if "communities" not in architecture:
+        return architecture
+    kept = {key: value for key, value in architecture.items() if key != "communities"}
+    return {**kept, "communities": COMMUNITY_MEMBERS_HINT}
 
 
 def _architecture_summary_data(resolved: Path, architecture: dict) -> dict:
@@ -1398,7 +1579,7 @@ def _architecture_summary_data(resolved: Path, architecture: dict) -> dict:
     return {
         "directory": str(resolved),
         "mode": "summary",
-        "architecture": architecture,
+        "architecture": _summary_architecture(architecture),
         **report,
     }
 
@@ -1411,6 +1592,14 @@ _ARCHITECTURE_REPORT_KEYS = (
     "unresolved_count",
     "fallback",
 )
+
+# How far the dependency walk went and whether anything sits past that edge.
+# Without these a bounded answer is indistinguishable from a complete one,
+# which is the only thing that made the default unsafe to change. Kept apart
+# from the rest because only the walk that has a reach may report one.
+_ARCHITECTURE_REACH_KEYS = ("depth_applied", "depth_frontier_open")
+
+_ARCHITECTURE_REPORT_KEYS = _ARCHITECTURE_REPORT_KEYS + _ARCHITECTURE_REACH_KEYS
 
 
 def _architecture_path_mode_error(mode: str, symbol, target) -> str | None:
@@ -1428,11 +1617,21 @@ def _architecture_argument_error(mode: str, symbol, target) -> str | None:
 
 
 def _architecture_callers(request: dict):
-    from code_graph import find_callers
+    """Proved static callers, and separately what a trace observed (CODE-09).
 
-    return find_callers(
+    `trace_callers` is a distinct field and never merged into `callers`: a
+    trace proves that this call happened in one run, which is a different
+    claim from a resolved static edge, and an edge must say how it was
+    learned. Measured 2026-08-28 on this repository — 578 of the 757 edges a
+    single trace adds land on a method, against 2,477 static ones.
+    """
+    from code_graph import find_callers
+    from trace_ingest import with_trace_callers
+
+    answer = find_callers(
         request["symbol"], request["resolved"], live=request["live"], with_report=True
     )
+    return with_trace_callers(answer, request["symbol"], request["resolved"])
 
 
 def _architecture_callees(request: dict):
@@ -1444,6 +1643,18 @@ def _architecture_callees(request: dict):
 
 
 def _architecture_dependencies(request: dict):
+    """Bounded dependency walk; `depth` names how far, and it pays.
+
+    Measured 2026-08-29 for `scripts/retrieval.py` against the active
+    generation: depth 1 answers with 7 modules for ~656 tokens, depth 2
+    with 24 rows for ~2 475, and the whole reachable set with 346 rows
+    for ~45 817 raw — 20 735 after shaping. The question "which modules
+    does this file depend on" is the depth-1 one, and it was costing the
+    transitive closure because there was no way to ask for less.
+
+    Additive on purpose: omitting `depth` walks exactly as far as it
+    always has.
+    """
     from code_graph import find_dependencies
 
     return find_dependencies(
@@ -1452,6 +1663,7 @@ def _architecture_dependencies(request: dict):
         reverse=request["reverse"],
         live=request["live"],
         with_report=True,
+        max_depth=request.get("depth"),
     )
 
 
@@ -1471,7 +1683,10 @@ def _architecture_community(request: dict):
     from code_graph import detect_communities
 
     return detect_communities(
-        request["resolved"], live=request["live"], with_report=True
+        request["resolved"],
+        symbol=request.get("symbol"),
+        live=request["live"],
+        with_report=True,
     )
 
 
@@ -1496,8 +1711,18 @@ def _architecture_symbol(request: dict) -> dict:
         "callers": callers.get("callers", []),
         "callees": callees.get("callees", []),
         "dependencies": dependencies.get("dependencies", []),
-        **{key: callers.get(key) for key in _ARCHITECTURE_REPORT_KEYS},
+        # Only keys the source actually carries. Copying the whole list
+        # unconditionally spelled every absent one as an explicit `null`,
+        # which costs tokens to say nothing and reads as a measured value.
+        **_present_keys(callers, _ARCHITECTURE_REPORT_KEYS),
+        # The reach belongs to the walk that has one, and that is the
+        # dependency walk, not the caller lookup beside it.
+        **_present_keys(dependencies, _ARCHITECTURE_REACH_KEYS),
     }
+
+
+def _present_keys(source: dict, keys) -> dict:
+    return {key: source[key] for key in keys if key in source}
 
 
 _ARCHITECTURE_MODE_QUERIES = {
@@ -1526,6 +1751,7 @@ def _get_architecture_mode(
     symbol: str | None = None,
     target: str | None = None,
     reverse: bool = False,
+    depth: int | None = None,
     live: bool = False,
     deadline: float | None = None,
 ) -> dict:
@@ -1544,6 +1770,7 @@ def _get_architecture_mode(
             "symbol": symbol,
             "target": target,
             "reverse": reverse,
+            "depth": depth,
             "live": live,
             "deadline": deadline,
         }
@@ -2561,7 +2788,12 @@ def _get_precise_architecture(
 ) -> dict:
     """Route precise modes through the owned CodeNavigation facade."""
     effective_deadline = _navigation_effective_deadline(deadline)
-    progress = {"stage": "directory", "scope": None, "resolved": None}
+    progress = {
+        "stage": "directory",
+        "scope": None,
+        "resolved": None,
+        "provider": None,
+    }
     try:
         return _precise_architecture_result(
             progress,
@@ -2614,9 +2846,9 @@ def _navigation_stage_status(stage: str) -> str:
     return "error"
 
 
-def _navigation_stage_provider(stage: str) -> str | None:
+def _navigation_stage_provider(stage: str, progress: dict) -> str | None:
     if stage in _NAVIGATION_PROVIDER_STAGES:
-        return "pyright"
+        return progress.get("provider")
     return None
 
 
@@ -2630,7 +2862,7 @@ def _navigation_stage_failure(progress: dict, mode, offset, limit) -> dict:
         offset=offset,
         limit=limit,
         scope=progress["scope"],
-        provider=_navigation_stage_provider(stage),
+        provider=_navigation_stage_provider(stage, progress),
     )
 
 
@@ -2669,10 +2901,29 @@ def _validated_navigation_source(scope, path: str, deadline: float) -> str:
     return normalized_path
 
 
-def _navigation_session(scope, deadline: float, manager_epoch: int, cancelled):
+def _navigation_profile(normalized_path: str):
+    """The managed language server that owns this file.
+
+    Routing is by file suffix through the profile registry -- the shape every
+    multi-language LSP client uses, and the registry refuses a suffix claimed by
+    two profiles, so the table is a function by construction. See
+    `docs/research/2026-08-28-wiring-a-second-language-server.md`, question 1.
+
+    A suffix no profile claims falls back to Pyright, which is exactly what this
+    path did before profiles existed: the session opens the file, answers
+    nothing, and the caller degrades to structural evidence. Routing such a file
+    straight to the structural tier is the better shape and is deliberately not
+    done here, because `CodeNavigation` requires a session.
+    """
+    from lsp_profiles import PYRIGHT_PROFILE, profile_for_path
+
+    return profile_for_path(Path(normalized_path)) or PYRIGHT_PROFILE
+
+
+def _navigation_session(scope, deadline: float, manager_epoch: int, cancelled, profile):
     manager = _navigation_session_manager(deadline, manager_epoch, cancelled)
     _check_deadline(deadline)
-    session = manager.get(scope, deadline=deadline)
+    session = manager.get(scope, deadline=deadline, profile=profile)
     _check_deadline(deadline)
     return session
 
@@ -2710,13 +2961,90 @@ def _navigation_query_result(
     return result
 
 
-def _rendered_navigation_result(resolved: Path, mode, result, deadline: float) -> dict:
+def _navigation_provider_view(rendered: dict, session) -> dict:
+    """Name the server that actually answered, not the one the facade is typed for.
+
+    `CodeNavigation.provider` returns the literal `"pyright"`. Correcting it here
+    rather than there is a named residue: the complexity gate refuses
+    `scripts/code_navigation.py` wholesale over 39 pre-existing findings, and
+    the envelope the agent reads is built here anyway.
+    """
+    provider = dict(rendered.get("provider") or {})
+    if provider.get("name") is None:
+        return provider
+    provider["name"] = session.profile.name
+    return provider
+
+
+def _navigation_limit_warnings(rendered: dict, session) -> tuple[str, ...]:
+    """Carry the session's capability limits into the answer, by name.
+
+    The contract asks the precise tier to report readiness and capability limits
+    and fall back. Readiness was always in the envelope; the limits were not, so
+    an uninstalled server degraded without saying why. A qualified session
+    reports none, so an installed Pyright answer is unchanged.
+    """
+    warnings = tuple(rendered.get("warnings") or ())
+    limits = tuple(session.degradation_codes)
+    return (*warnings, *(limit for limit in limits if limit not in warnings))
+
+
+def _navigation_provenance_named(data: dict, session) -> dict:
+    """Rename in place, and leave the key absent when the answer carried none.
+
+    A structural or refused answer has no provenance at all; adding an empty one
+    would change the envelope's shape for every Python answer that never had it.
+    """
+    rows = data.get("provenance")
+    if not rows:
+        return data
+    data["provenance"] = _navigation_provenance_view(data, session)
+    return data
+
+
+def _navigation_provenance_view(rendered: dict, session) -> tuple:
+    """Name the server in the provenance too, not only in the provider block.
+
+    The same literal `"pyright"` reaches the envelope twice, and correcting one
+    of them left a TypeScript answer carrying `provenance[].provider: "pyright"`
+    -- a false statement about where the answer came from, in the field whose
+    whole job is to say. Corrected at the same seam and for the same named
+    reason as `_navigation_provider_view`: `scripts/code_navigation.py` is
+    refused wholesale by the complexity gate over 39 pre-existing findings.
+
+    Only `source: "lsp"` rows are touched. Structural rows are produced by this
+    build's own graph and already name themselves correctly.
+    """
+    rows = tuple(rendered.get("provenance") or ())
+    return tuple(_provenance_row_named(row, session) for row in rows)
+
+
+def _provenance_row_named(row: object, session) -> object:
+    if not isinstance(row, dict) or row.get("source") != "lsp":
+        return row
+    named = dict(row)
+    named["provider"] = session.profile.name
+    return named
+
+
+def _navigation_named_by_session(data: dict, session) -> dict:
+    if session is None:
+        return data
+    data["provider"] = _navigation_provider_view(data, session)
+    data["warnings"] = _navigation_limit_warnings(data, session)
+    return _navigation_provenance_named(data, session)
+
+
+def _rendered_navigation_result(
+    resolved: Path, mode, result, deadline: float, session=None
+) -> dict:
     from code_navigation_renderer import render_navigation
 
     rendered = render_navigation(result)
     _check_deadline(deadline)
     data = {"directory": str(resolved), "mode": mode, **rendered}
     _check_deadline(deadline)
+    data = _navigation_named_by_session(data, session)
     data = _sanitize_navigation_data(data)
     _check_deadline(deadline)
     return data
@@ -2756,14 +3084,16 @@ def _precise_architecture_result(
         )
     progress["stage"] = "source"
     normalized_path = _validated_navigation_source(scope, anchor["path"], deadline)
+    profile = _navigation_profile(normalized_path)
+    progress["provider"] = profile.name
     progress["stage"] = "manager"
-    session = _navigation_session(scope, deadline, manager_epoch, cancelled)
+    session = _navigation_session(scope, deadline, manager_epoch, cancelled, profile)
     progress["stage"] = "facade"
     result = _navigation_query_result(
         scope, session, mode, normalized_path, anchor, offset, limit, deadline
     )
     progress["stage"] = "renderer"
-    return _rendered_navigation_result(resolved, mode, result, deadline)
+    return _rendered_navigation_result(resolved, mode, result, deadline, session)
 
 
 def _operator_result(
@@ -3273,7 +3603,7 @@ def _validate_tool_specific_arguments(name: str, arguments: dict) -> str | None:
 _ARCHITECTURE_POSITION_KEYS = ("path", "line", "character")
 
 _ARCHITECTURE_CONTRACTS = {
-    "summary": ({"directory"}, {"directory", "mode", "live"}),
+    "summary": ({"directory"}, {"directory", "mode", "live", "limit"}),
     "symbol": (
         {"directory", "mode", "symbol"},
         {"directory", "mode", "symbol", "live"},
@@ -3288,7 +3618,7 @@ _ARCHITECTURE_CONTRACTS = {
     ),
     "dependencies": (
         {"directory", "mode", "symbol"},
-        {"directory", "mode", "symbol", "reverse", "live"},
+        {"directory", "mode", "symbol", "reverse", "live", "depth"},
     ),
     "path": (
         {"directory", "mode", "symbol", "target"},
@@ -3296,12 +3626,41 @@ _ARCHITECTURE_CONTRACTS = {
     ),
     "community": (
         {"directory", "mode"},
-        {"directory", "mode", "live"},
+        # `symbol` is optional and narrows the answer to the communities that
+        # symbol belongs to. Measured 2026-08-28: the whole-graph listing
+        # cannot be both complete and bounded here — naming all 4,078
+        # communities costs 899,071 tokens against a 25,000 ceiling — so
+        # "which module does X belong to" needs an anchor, exactly as
+        # who-calls does. Anchored, the same question costs 291 tokens.
+        {"directory", "mode", "symbol", "live"},
+    ),
+    "provenance": (
+        {"directory", "mode", "symbol"},
+        {"directory", "mode", "symbol"},
+    ),
+    "snippet": (
+        {"directory", "mode", "symbol"},
+        {"directory", "mode", "symbol"},
+    ),
+    "coverage": (
+        {"directory", "mode", "path"},
+        {"directory", "mode", "path"},
+    ),
+    "query": (
+        {"directory", "mode", "query"},
+        {"directory", "mode", "query"},
     ),
     "impact": (
         {"directory", "mode"},
         {"directory", "mode", "comparison", "base", "target", "branch"},
     ),
+    # CODE-03. `index` is the one mode that writes, and what it writes is a
+    # generation under `cache/evidence-graph/` -- disposable derived cache in
+    # this vault. It never writes into the repository it is pointed at, and it
+    # never activates: the single active pointer belongs to the vault.
+    "index": ({"directory", "mode"}, {"directory", "mode", "roots"}),
+    "repositories": ({"directory", "mode"}, {"directory", "mode"}),
+    "changes": ({"directory", "mode"}, {"directory", "mode"}),
 }
 
 
@@ -3347,7 +3706,10 @@ def _validate_architecture_arguments(arguments: dict) -> str | None:
     missing = sorted(required.difference(arguments))
     if missing:
         return _missing_architecture_message(mode, missing, positioned)
-    forbidden = sorted(set(arguments).difference(allowed))
+    # CODE-06: shaping the answer is orthogonal to what a mode asks the graph,
+    # so the two budget arguments are allowed on every mode rather than being
+    # copied into thirteen closed key sets that would drift apart.
+    forbidden = sorted(set(arguments).difference(allowed, ANSWER_BUDGET_SCHEMA_FIELDS))
     if forbidden:
         return f"arguments are not valid for {mode}: {', '.join(forbidden)}"
     return _positioned_architecture_path_error(arguments, mode, positioned)
@@ -4076,9 +4438,42 @@ def _active_graph_quality(data: dict) -> dict:
     }
 
 
+def _repository_index_quality(data: dict) -> dict | None:
+    """CODE-03 answers are exact: they did the thing, or refused by name.
+
+    Without this they fell through the graph-completeness branch below and were
+    labelled "Live static extraction fallback is incomplete", which is not just
+    imprecise but false -- a listing of what is indexed extracts nothing.
+    """
+    if not isinstance(data, dict) or data.get("schema_version") != "repository-index/v1":
+        return None
+    if data.get("status") == "refused":
+        return {
+            "coverage": 0.0,
+            "confidence": 1.0,
+            "fallback": False,
+            "partial": True,
+            "warnings": [f"Refused: {data.get('reason')}"],
+        }
+    return {
+        "coverage": 1.0,
+        "confidence": 0.95,
+        "fallback": False,
+        "partial": bool(data.get("truncated") or data.get("paths_truncated")),
+        "warnings": [],
+    }
+
+
 def _quality_of_code_graph(name, data, arguments, limit_clamped) -> dict | None:
     if name not in {"find_dead_code", "get_architecture"}:
         return None
+    index_quality = _repository_index_quality(data)
+    if index_quality is not None:
+        return index_quality
+    return _graph_completeness_quality(data)
+
+
+def _graph_completeness_quality(data) -> dict:
     if not isinstance(data, dict) or data.get("fallback") is not False:
         return {
             "coverage": 0.6,
@@ -4476,11 +4871,26 @@ def _tool_compile(arguments: dict, deadline: float):
     return _call_with_deadline(_trigger_compile, deadline=deadline), False
 
 
+def _shaped_code_answer(data, arguments: dict):
+    """CODE-06: one place where every code answer is measured and reduced.
+
+    Applied here rather than inside `code_graph` or `graph_query` because this
+    is the only layer that sees every mode's answer in one shape - and because
+    those two modules belong to another agent's task in this session.
+    """
+    return shape_code_answer(
+        data,
+        budget_tokens=arguments.get("budget_tokens"),
+        include_node_ids=bool(arguments.get("include_node_ids", False)),
+    )
+
+
 def _tool_find_dead_code(arguments: dict, deadline: float):
     try:
         data = _call_with_deadline(
             _find_dead_code,
             arguments.get("directory"),
+            symbol=arguments.get("symbol"),
             live=arguments.get("live", False),
             deadline=deadline,
         )
@@ -4488,7 +4898,7 @@ def _tool_find_dead_code(arguments: dict, deadline: float):
         return _code_graph_timeout_data(
             arguments.get("directory"), error, completed=()
         ), False
-    return data, False
+    return _shaped_code_answer(data, arguments), False
 
 
 def _precise_architecture_call(arguments: dict, deadline: float):
@@ -4527,6 +4937,7 @@ def _summary_architecture_call(arguments: dict, deadline: float):
         _get_architecture,
         arguments.get("directory"),
         live=arguments.get("live", False),
+        limit=arguments.get("limit"),
         deadline=deadline,
     )
 
@@ -4538,16 +4949,114 @@ def _architecture_mode_call(arguments: dict, deadline: float):
         symbol=arguments.get("symbol"),
         target=arguments.get("target"),
         reverse=arguments.get("reverse", False),
+        depth=arguments.get("depth"),
         live=arguments.get("live", False),
         deadline=deadline,
     )
 
 
+def _provenance_architecture_call(arguments: dict, deadline: float):
+    """MEM-16: symbol -> decision pages naming it -> their cited sources."""
+    from memory_state import ROOT
+    from provenance_join import join_symbol_provenance
+
+    directory = Path(arguments["directory"]).resolve()
+    return join_symbol_provenance(
+        Path(ROOT), directory, str(arguments["symbol"]), deadline
+    )
+
+
+def _snippet_architecture_call(arguments: dict, deadline: float):
+    """CODE-02: bounded source blocks for a symbol, via the active generation."""
+    from symbol_snippet import snippet_for_symbol
+
+    directory = Path(arguments["directory"]).resolve()
+    return snippet_for_symbol(directory, str(arguments["symbol"]), deadline)
+
+
+def _coverage_architecture_call(arguments: dict, deadline: float):
+    """CODE-05: is this path indexed, fresh, and how many nodes — honestly."""
+    from path_coverage import coverage_for_path
+
+    directory = Path(arguments["directory"]).resolve()
+    return coverage_for_path(directory, str(arguments["path"]), deadline)
+
+
+def _query_architecture_call(arguments: dict, deadline: float):
+    """CODE-01: bounded multi-hop JSON pipeline over the active generation."""
+    from graph_query import run_graph_query
+
+    directory = Path(arguments["directory"]).resolve()
+    return run_graph_query(directory, str(arguments["query"]), deadline)
+
+
+def _repository_index_call(call, arguments: dict, deadline: float):
+    """Turn a named CODE-03 refusal into an answer instead of an exception."""
+    from repository_index import RepositoryIndexRefused
+
+    try:
+        return call(arguments, deadline)
+    except RepositoryIndexRefused as refusal:
+        return refusal.as_dict()
+
+
+def _index_architecture_call(arguments: dict, deadline: float):
+    """CODE-03: build and register a generation for another local repository."""
+    return _repository_index_call(_index_repository_now, arguments, deadline)
+
+
+def _index_repository_now(arguments: dict, deadline: float):
+    from repository_index import index_repository
+
+    return index_repository(
+        arguments["directory"],
+        roots=arguments.get("roots"),
+        deadline=deadline,
+        cancelled=_operation_cancelled(),
+    )
+
+
+def _repositories_architecture_call(arguments: dict, deadline: float):
+    """CODE-03: which repositories have a registered generation, and what it covers."""
+    return _repository_index_call(_list_repositories_now, arguments, deadline)
+
+
+def _list_repositories_now(_arguments: dict, deadline: float):
+    from repository_index import list_repositories
+
+    return list_repositories(deadline=deadline)
+
+
+def _changes_architecture_call(arguments: dict, deadline: float):
+    """CODE-03: what changed in a repository since its newest generation."""
+    return _repository_index_call(_detect_changes_now, arguments, deadline)
+
+
+def _detect_changes_now(arguments: dict, deadline: float):
+    from repository_index import detect_repository_changes
+
+    return detect_repository_changes(
+        arguments["directory"],
+        deadline=deadline,
+        cancelled=_operation_cancelled(),
+    )
+
+
 def _tool_get_architecture(arguments: dict, deadline: float):
     try:
-        return _architecture_tool_call(arguments, deadline), False
+        data = _architecture_tool_call(arguments, deadline)
+        return _shaped_code_answer(data, arguments), False
     except TimeoutError as error:
         return _architecture_timeout_data(arguments, error), False
+    except ValueError as error:
+        # Measured 2026-08-28: symbol mode on a common name raised a bare
+        # "query row ceiling exceeded" through the dispatcher. A tool answers
+        # with a named refusal, never an exception.
+        return {
+            "status": "error",
+            "mode": arguments.get("mode", "summary"),
+            "error": str(error)[:200],
+        }, False
 
 
 def _architecture_tool_call(arguments: dict, deadline: float):
@@ -4557,6 +5066,13 @@ def _architecture_tool_call(arguments: dict, deadline: float):
     calls = {
         "impact": _impact_architecture_call,
         "summary": _summary_architecture_call,
+        "provenance": _provenance_architecture_call,
+        "snippet": _snippet_architecture_call,
+        "coverage": _coverage_architecture_call,
+        "query": _query_architecture_call,
+        "index": _index_architecture_call,
+        "repositories": _repositories_architecture_call,
+        "changes": _changes_architecture_call,
     }
     call = calls.get(mode, _architecture_mode_call)
     return call(arguments, deadline)
@@ -4662,10 +5178,30 @@ def _tool_call_envelope(
     return _build_operation_envelope(data, quality, components=components)
 
 
+def _record_answer_cost(envelope: dict, started: float, operation_deadline: float) -> None:
+    """OPS-02: the answer states what it cost, and never fails for saying so.
+
+    Attached here because this is the one funnel every tool call passes, and
+    the last point before the answer is serialised - so the estimate covers
+    the finished envelope rather than a payload that later grew. A telemetry
+    failure leaves the key absent, which by the module's contract reads as
+    "not measured" and never as "free".
+    """
+    try:
+        attach_answer_cost(
+            envelope,
+            elapsed_seconds=time.monotonic() - started,
+            budget_seconds=operation_deadline - started,
+        )
+    except Exception:  # noqa: BLE001 - an answer outranks its own cost line
+        return
+
+
 def _execute_tool_call(name: str, arguments, operation_deadline: float) -> str:
     """Execute one tool under the absolute deadline created by its async handler."""
     import json
 
+    started = time.monotonic()
     deadline_token = _OPERATION_DEADLINE.set(operation_deadline)
     try:
         data, limit_clamped = _tool_call_data(name, arguments, operation_deadline)
@@ -4674,6 +5210,7 @@ def _execute_tool_call(name: str, arguments, operation_deadline: float) -> str:
             name, data, arguments, limit_clamped, operation_deadline
         )
         _check_deadline(operation_deadline)
+        _record_answer_cost(envelope, started, operation_deadline)
         return json.dumps(envelope, indent=2, ensure_ascii=False, allow_nan=False)
     finally:
         _OPERATION_DEADLINE.reset(deadline_token)
@@ -4874,8 +5411,66 @@ def _register_tools(server, tools):
     return call_tool
 
 
+# How long one warm-up question may run. It is not a budget the warm-up is
+# expected to spend: a cold pass costs about 12 s here and a warm one about
+# 1.3 s. Three minutes is "something is wrong", not "this is slow".
+WARMUP_LIMIT_SECONDS = 180.0
+
+# Two passes, and the second one is the whole point — see
+# `warmup_retrieval_path`.
+WARMUP_PASSES = 2
+
+
+def _warmup_pass(deadline_seconds: float) -> None:
+    """One throwaway question down the real path, so nothing is warmed by proxy."""
+    from search_memory import search
+
+    search(
+        "warm the retrieval path",
+        limit=3,
+        semantic=True,
+        graph=True,
+        rerank=True,
+        source_tool="warmup",
+        emit_telemetry=False,
+        deadline_monotonic=time.monotonic() + deadline_seconds,
+    )
+
+
+def warmup_retrieval_path(deadline_seconds: float = WARMUP_LIMIT_SECONDS) -> None:
+    """Load the retrieval path and record what a *warm* optional stage costs.
+
+    Loading the encoder is necessary and was not sufficient. `retrieval`
+    admits an optional stage by comparing the last cost a finished run of that
+    kind recorded against the window the caller can offer, and only a stage
+    that actually ran records anything. So a warm-up that merely loaded the
+    model left the cost unknown, the MCP budget's ~3.5 s window is below the
+    ceiling `_unknown_cost_stage_fits` requires, and the dense leg stayed
+    refused until some later call happened to record a cost.
+
+    Measured on this vault 2026-08-29, five `recall` calls in one process
+    against the live generation: calls 1-3 answered `signals_used=['lexical']`,
+    call 3 reading a recorded cost of 12.0 s — the cold load, clamped at the
+    ceiling, standing in for a model that was resident by then. The dense leg
+    first appeared on call 4.
+
+    Hence two passes. The first pays the one-time load and records it; the
+    second runs warm and replaces that figure with the steady-state cost, which
+    is the only one an admission decision can use. That split — setup time as
+    its own term rather than folded into service time — is what the queueing
+    literature on cold starts does, and the arithmetic here is the same.
+
+    It runs where the caller puts it: on a daemon thread for stdio, so serving
+    starts immediately. A failure is never fatal — warming is an optimisation,
+    and an unwarmed path serves exactly as it does today.
+    """
+    for _ in range(WARMUP_PASSES):
+        with contextlib.suppress(BaseException):
+            _warmup_pass(deadline_seconds)
+
+
 def _start_encoder_warmup() -> None:
-    """Load the semantic encoder before the first question needs it.
+    """Warm the retrieval path before the first question needs it.
 
     Measured on this vault (2026-08-24/26): a cold encoder costs 7.99 s and
     ~1.1 GiB resident, so the first semantic question of a session always fell
@@ -4885,17 +5480,34 @@ def _start_encoder_warmup() -> None:
     immediately, and it shares `search_memory._get_embedder`'s module cache
     with the dense leg — a straggler racing it wastes one load, never a vector.
     Set LLMWIKI_NO_ENCODER_WARMUP=1 to keep the old lazy behaviour.
+
+    What it loads is now the whole path rather than the encoder alone, because
+    loading was never the part that was missing; `warmup_retrieval_path` says
+    what was.
     """
     if os.environ.get("LLMWIKI_NO_ENCODER_WARMUP") == "1":
         return
 
     def warm() -> None:
         with contextlib.suppress(Exception):
-            import search_memory
-
-            search_memory._get_embedder()
+            warmup_retrieval_path()
 
     threading.Thread(target=warm, name="encoder-warmup", daemon=True).start()
+
+
+def build_server():
+    """Build the one MCP server every transport serves.
+
+    OPS-01 added a second transport. Both call this, so the HTTP path reaches
+    tools through the same `_register_tools` callback as stdio - the same
+    `_validate_tool_arguments`, the same `_execute_tool_call` deadline, the
+    same envelope. A transport that built its own dispatch would be a second
+    validation boundary, which is the defect `4494d8c` already cost us once.
+    """
+    server = Server("llm-wiki")
+    _register_resources(server)
+    _register_tools(server, _build_tool_definitions())
+    return server
 
 
 def run_server() -> int:
@@ -4907,10 +5519,7 @@ def run_server() -> int:
         )
         return 1
 
-    server = Server("llm-wiki")
-    tools = _build_tool_definitions()
-    _register_resources(server)
-    _register_tools(server, tools)
+    server = build_server()
     _start_encoder_warmup()
 
     async def main():

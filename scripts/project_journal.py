@@ -1396,6 +1396,117 @@ def _appended_journal(current_journal: bytes, event: object, records: list) -> b
     return journal + canonical_json_bytes(event) + b"\n"
 
 
+# A full journal used to be the end of the project's record. Appending the next
+# event was refused by `_require_journal_bounds` and nothing rotated, so the
+# refusal was permanent.
+#
+# Measured 2026-08-29 on the live vault: `knowledge/projects/llm-wiki/journal.md`
+# held exactly MAX_JOURNAL_EVENTS events — reading it still worked, appending
+# was refused — and 4 698 checkpoint events waited behind that refusal while
+# `run/state.json` grew to 10 MB and the same failure repeated every ten seconds
+# into a log no health check read.
+#
+# It cannot be trimmed: the projection is folded from the first event, so
+# dropping an event drops the state it carried. It is sealed instead, which is
+# the move every append-only store makes — the sealed segment is immutable and
+# stays on disk, and the fresh journal opens with one event restating the fold
+# of everything sealed, so the same projection comes back from the live segment
+# alone.
+_ROTATION_ID = "journal-rotation"
+
+
+def _sealed_segment_path(slug: str, records: list) -> str:
+    """Named by the range it holds, so history is findable without an index."""
+    first = int(records[0]["sequence"])
+    last = int(records[-1]["sequence"])
+    return f"knowledge/projects/{slug}/journal.{first:06d}-{last:06d}.md"
+
+
+def _snapshot_operations(items: Mapping[str, str], limit: int) -> list[dict[str, str]]:
+    """The tail the projection would show, and no more.
+
+    The event schema caps a list field at ten operations, so a projection that
+    accumulated more ids than that could not be snapshotted at all and rotation
+    would fail on a full journal — the wedge again, one level up. The tail is
+    the honest cut: `_state_section_lines` already renders only the last
+    `_MAX_LIST_ITEMS[name]` of each field, so nothing a reader could see is
+    lost, and everything older stays verbatim in the sealed segment.
+    """
+    kept = list(items.items())[-limit:]
+    return [
+        {"id": item_id, "action": "upsert", "value": value} for item_id, value in kept
+    ]
+
+
+def _snapshot_delta(active: Mapping[str, dict[str, str]], context: str) -> dict:
+    """One delta that reproduces the fold of every sealed event.
+
+    The scalar slot carries a close of an id nothing holds, so it removes
+    nothing, and the surviving ids follow in `<name>_operations`. That is the
+    only shape the schema offers for a scalar that holds more than one id.
+    """
+    delta: dict[str, object] = {"legacy_context": context}
+    for name in _SCALAR_FIELDS:
+        delta[name] = {"id": _ROTATION_ID, "action": "close", "value": ""}
+        delta[f"{name}_operations"] = _snapshot_operations(active[name], 1)
+    for name, limit in _MAX_LIST_ITEMS.items():
+        delta[name] = _snapshot_operations(active[name], limit)
+    return delta
+
+
+def _sealed_worktree(records: list) -> str:
+    """The project root the sealed events last reported."""
+    provenance = records[-1]["provenance"]
+    assert isinstance(provenance, Mapping)
+    return str(provenance["worktree"])
+
+
+def _snapshot_event(slug: str, records: list, segment: str) -> dict[str, object]:
+    """The sealed journal's fold, restated as the fresh journal's first event.
+
+    It carries the sealed head's own sequence rather than a new one: the
+    coordinator allocates sequences and a synthetic one would desynchronise the
+    head. Restating that sequence is also the honest reading — this is the state
+    as of that event, not an event after it.
+    """
+    active, _project, _root, context, last = _reduce_events(records, validated=True)
+    return {
+        "schema_version": "project-checkpoint/v1",
+        "occurrence_id": f"{_ROTATION_ID}:{slug}:{last}",
+        "idempotency_key": f"{_ROTATION_ID}:{slug}:{last}",
+        "project": slug,
+        "sequence": last,
+        # The worktree is the project root the projection reports, so it is
+        # carried from the sealed head rather than invented: a snapshot that
+        # named itself as the root rewrote the project's own location. Caught
+        # by `test_rotation_does_not_change_the_projection` before it shipped.
+        "provenance": {
+            "agent": _ROTATION_ID,
+            "session": _ROTATION_ID,
+            "worktree": _sealed_worktree(records),
+            "branch": _ROTATION_ID,
+            "source_event": f"{_ROTATION_ID}:{last}",
+        },
+        "trigger": "journal_rotation",
+        "reason": f"sealed {len(records)} events into {segment}",
+        "delta": _snapshot_delta(active, context),
+        "evidence_event_ids": [],
+        "last_applied_sequence": last,
+    }
+
+
+def _rotated_journal(slug: str, records: list, current_journal: bytes):
+    """Seal a full journal and open a fresh one. None when it is not full."""
+    if len(records) < MAX_JOURNAL_EVENTS:
+        return None
+    segment = _sealed_segment_path(slug, records)
+    snapshot = _snapshot_event(slug, records, segment)
+    journal = (
+        JOURNAL_HEADER.encode("utf-8") + canonical_json_bytes(snapshot) + b"\n"
+    )
+    return segment, current_journal, journal, [snapshot]
+
+
 def _require_journal_head(slug: str, sequence: int, records: list) -> None:
     journal_head = int(records[-1]["sequence"]) if records else 0
     if journal_head != sequence - 1:
@@ -1404,17 +1515,27 @@ def _require_journal_head(slug: str, sequence: int, records: list) -> None:
 
 def _extended_journal(
     slug: str, sequence: int, event: object, records: list, current_journal: bytes
-) -> bytes:
-    """The journal bytes this checkpoint must write, appending a new event once."""
+):
+    """The journal bytes to write, and the segment to seal when one is due.
+
+    Returns `(journal, sealed)`, where `sealed` is `None` or the path and bytes
+    of the segment the caller must create in the same transaction.
+    """
     matching = [item for item in records if item["sequence"] == sequence]
     if matching:
         _require_bound_event(matching[0], event)
         _require_journal_bounds(records, current_journal)
-        return current_journal
+        return current_journal, None
     _require_journal_head(slug, sequence, records)
+    rotation = _rotated_journal(slug, records, current_journal)
+    if rotation is not None:
+        segment, sealed_bytes, current_journal, records[:] = rotation
+        journal = _appended_journal(current_journal, event, records)
+        _require_journal_bounds(records, journal)
+        return journal, (segment, sealed_bytes)
     journal = _appended_journal(current_journal, event, records)
     _require_journal_bounds(records, journal)
-    return journal
+    return journal, None
 
 
 def _markdown_change(
@@ -1425,14 +1546,29 @@ def _markdown_change(
     return MarkdownChange.create(path, content, max_before_bytes=max_before)
 
 
+def _sealed_change(sealed) -> list[MarkdownChange]:
+    """The immutable segment, created in the same transaction as the fresh journal.
+
+    Create, never replace: a sealed segment that could be overwritten would not
+    be sealed, and the transaction's absent-precondition proves nothing already
+    holds that range.
+    """
+    if sealed is None:
+        return []
+    path, content = sealed
+    return [MarkdownChange.create(path, content, max_before_bytes=MAX_JOURNAL_BYTES)]
+
+
 def _checkpoint_changes(
     slug: str,
     journal: bytes,
     state: bytes,
     current_journal: bytes,
     current_state: bytes | None,
+    sealed=None,
 ) -> list[MarkdownChange]:
     return [
+        *_sealed_change(sealed),
         _markdown_change(
             f"knowledge/projects/{slug}/journal.md",
             journal,
@@ -1452,14 +1588,24 @@ def _hash_or_absent(content: bytes | None, present: bool) -> object:
     return sha256_bytes(content) if present else ABSENT
 
 
+def _sealed_precondition(sealed) -> dict[str, object]:
+    """Nothing may already hold this range, or the seal would overwrite history."""
+    if sealed is None:
+        return {}
+    path, _content = sealed
+    return {path: ABSENT}
+
+
 def _checkpoint_preconditions(
     slug: str,
     lease: ProjectLease,
     *,
     current_journal: bytes,
     current_state: bytes | None,
+    sealed=None,
 ) -> dict[str, object]:
     return {
+        **_sealed_precondition(sealed),
         "project_lease": _project_lease_precondition(slug, lease),
         f"knowledge/projects/{slug}/journal.md": _hash_or_absent(
             current_journal, bool(current_journal)
@@ -2342,7 +2488,7 @@ class ProjectStore:
         current_journal = self._read_journal_bytes(slug)
         records = self._journal_events(slug, current_journal)
         lease = self.heartbeat(lease)
-        journal = _extended_journal(
+        journal, sealed = _extended_journal(
             slug, row.sequence, event, records, current_journal
         )
         lease = self.heartbeat(lease)
@@ -2354,12 +2500,15 @@ class ProjectStore:
         return self._committed_checkpoint(
             row,
             lease,
-            _checkpoint_changes(slug, journal, state, current_journal, current_state),
+            _checkpoint_changes(
+                slug, journal, state, current_journal, current_state, sealed
+            ),
             _checkpoint_preconditions(
                 slug,
                 lease,
                 current_journal=current_journal,
                 current_state=current_state,
+                sealed=sealed,
             ),
             writer_wait_seconds,
         )

@@ -82,3 +82,6 @@ coordinator/ownership/runtime-deletion regressions.
 - [[knowledge/notes/audit-closure-security-recovery-control-plane-decision]]
 - [[knowledge/notes/reliability-v3-runtime-adoption-implementation-decision]]
 - [[knowledge/notes/v4-reliability-contracts-decision]]
+- [[knowledge/notes/ownership-actor-is-the-agent-decision]] — what an actor is
+  one layer down: the lease of a runtime role, keyed on the agent rather than
+  the machine account.
