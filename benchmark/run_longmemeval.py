@@ -177,15 +177,48 @@ def _worker_result(out_file: Path, returncode: int) -> dict:
     return row
 
 
+def _with_judgements(rows: list[dict], results_path: Path) -> list[dict]:
+    """Fold in any judged rows sitting beside the results, keyed by question id.
+
+    The report's `accuracy` is `contains_answer`, a substring test that cannot
+    match a free-text answer and never matches a preference gold — measured
+    2026-09-01, `single-session-preference` read 0.0000 by containment and 0.25
+    by the judge on the same rows. Every figure the backlog compares against is
+    a judge score, so the report has to carry one when it exists.
+    """
+    judged_path = results_path.with_suffix(".judged.jsonl")
+    if not judged_path.is_file():
+        return rows
+    verdicts = _judged_verdicts(judged_path)
+    return [
+        {**row, "judge_correct": verdicts.get(str(row.get("question_id")))}
+        if str(row.get("question_id")) in verdicts
+        else row
+        for row in rows
+    ]
+
+
+def _judged_verdicts(path: Path) -> dict[str, object]:
+    verdicts: dict[str, object] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if isinstance(row.get("judge_correct"), bool):
+            verdicts[str(row.get("question_id"))] = row["judge_correct"]
+    return verdicts
+
+
 def _print_summary(report: dict) -> None:
     columns = (
-        "category n scored accuracy em f1 prov_fail est_tokens total_tokens "
+        "category n scored accuracy judge em f1 prov_fail est_tokens total_tokens "
         "retrieve_s answer_s"
     )
     print(columns)
     for name, row in report.items():
         print(
             f"{name} {row['n']} {row['scored']} {row['accuracy']} {row['em']} "
+            f"{row.get('judge_accuracy')} "
             f"{row['f1']} {row['provider_failures']} {row['mean_est_prompt_tokens']} "
             f"{row.get('mean_est_total_prompt_tokens')} "
             f"{row['mean_retrieve_seconds']} {row['mean_answer_seconds']}"
@@ -244,6 +277,7 @@ def main() -> int:
     rows = list(_existing_results(results_path).values())
     sample_ids = {str(question["question_id"]) for question in sample}
     scoped = [row for row in rows if str(row.get("question_id")) in sample_ids]
+    scoped = _with_judgements(scoped, results_path)
     report = longmemeval_score.aggregate(scoped)
     _report_path(args).write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"

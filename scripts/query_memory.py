@@ -861,6 +861,16 @@ def _qa_system_prompt() -> str:
     The abstention path itself is unchanged: an abstention that carries claims
     is still refused outright, because a refusal that smuggles an answer past
     the citation gates is worse than either error.
+
+    An advice clause was tried here on 2026-09-01 and removed the same day.
+    The reasoning was sound — an advice question has no span that "states" the
+    answer, so the old wording made abstaining the only correct move — but the
+    measurement refused it: three baseline runs of 200 against one candidate run
+    gave 0.2750 ±0.0074 against 0.2667 by judge accuracy, a loss under the rule
+    stated before the run, and the count of answered preference questions did not
+    move at all, three either way. Whatever keeps those questions unanswered, it
+    is not this wording.
+    See `docs/research/2026-09-01-a-category-graded-by-the-wrong-question.md`.
     """
     schema = json.loads(ANSWER_SCHEMA.read_text(encoding="utf-8"))
     schema_json = json.dumps(schema, sort_keys=True, separators=(",", ":"))
