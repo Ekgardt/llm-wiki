@@ -1023,23 +1023,31 @@ def _provider_response(
     return raw
 
 
-_FENCED_JSON_RE = re.compile(
-    r"\A\s*```[^\n]*\n(?P<body>.*?)\n?\s*```\s*\Z", re.DOTALL
-)
+_FENCED_JSON_RE = re.compile(r"```[^\n]*\n(?P<body>.*?)\n?\s*```", re.DOTALL)
 
 
 def _unfenced(raw: str) -> str:
-    """The JSON inside a Markdown code fence, or the text unchanged.
+    """The first fenced block in the reply, or the text unchanged.
 
     Providers answer a "reply with JSON" instruction either bare or wrapped in
     a ```json fence, and which one they pick varies with the answer. Measured
     on this vault: the abstention came back bare and parsed, and the first real
     answer this path ever produced came back fenced and was thrown away as
-    invalid JSON — a correct answer lost to three backticks. Only a whole
-    response that is exactly one fence is unwrapped; anything else still has to
-    be JSON on its own, so prose around a fence is refused as before.
+    invalid JSON — a correct answer lost to three backticks.
+
+    Unwrapping only a response that was *exactly* one fence turned out to cost
+    the same way. Measured over 200 questions on 2026-09-02, fifteen replies
+    were discarded as invalid JSON; every one of them carried a complete
+    document inside a fence, and what disqualified it was a sentence of
+    commentary before or after the backticks. Thirteen parse once the first
+    fence is taken wherever it sits.
+
+    Taking the fence is not taking the provider's word for anything. The
+    document still has to validate against the closed schema, and every claim
+    still has to survive its citation gates. The prose around it is discarded,
+    never shown.
     """
-    match = _FENCED_JSON_RE.match(raw)
+    match = _FENCED_JSON_RE.search(raw)
     if not match:
         return raw
     return match.group("body")
