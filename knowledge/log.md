@@ -128,6 +128,7 @@
 - 2026-08-31 — Automated compile completed for snapshot 51f5f9b786284c9821a1de060fd0a5bbcf5ceb1bac86a5e8bf617c769673fe7b, 6fea2bb98150ea254962399e862374523a4187f05d180162b5197fcb1e8fc222, 7bef495b640ae993f00749d9472858b3845bce71390867fe4049fede864461f9, a397cd9ade6c45f7f84732dbe98b3957d4d39d1cef802a24528c21e708e0e56b. Touched: none.
 - 2026-09-02 — Automated compile completed for snapshot 45e4be1a30f18cb0e2871bf126f660bd37fba1e307ef42c27f12495caf6440eb, 5dbbb36b987e187201026464c3a6026c1612be7d51ac2271b6531d83d13cb627, a39c3edce32d6abb98bca587858138bfcfdd95e7a07a82d52ac78e7390e8fc48. Touched: none.
 - 2026-09-02 — Automated compile completed for snapshot 195d095900ec4a4b62bc5b07eaec6be0c9d827e00887cc93343b64c0301037e3, 21e3cb15c647b9ff57b6422eb67ed1d26d1a45bc7bf7283dba5a61063db65be6, 612384fadbd45829efec4ae56bf28a5c9318917f7ed42b2292a0ddeb9302df1b, d67abead0123afc465647b30afd07fddc6b998a5f287851f8d0f8e6241a76741. Touched: 2 unpublished page(s).
+- 2026-09-02 — Automated compile completed for snapshot 22cd1efdce564348c376257f05431a58bb5d9030de9114c0f447f6a72a0047e4, 66fbd33f4cf6eb2742c9c1ca1c503c223d6e451e3930300358346c9e620df14e, 97108e48b62a5a5dbaeb414f6303af024664395b7e9c8fa477833ead08a01549, a3c47bd1f7b81dbec89b17320fae11592f7acaf3f089c52a2356a057a777f511, c4dbfe67b6343a47eaaf7010c14455831c3486b1efe8fd02bd0148cab342c2f8, e75eb97149871c7b3e0efd28dcef65f3476244d3d232e76a26f11a33bc9b2771, f62122574841b56ac1ffda577c1487954f9d3fde7822a46d66929d48b4ea5f49. Touched: none.
 
 ## Editorial note
 This log is vault metadata — an append-only editorial changelog of compile passes and hygiene actions over `knowledge/`, not content derived from `knowledge/raw/` or `knowledge/inbox/`. New entries are appended at the bottom by compile passes and by hand; entries are never rewritten or removed.
@@ -1601,3 +1602,14 @@ This log is vault metadata — an append-only editorial changelog of compile pas
   выбрасывается сама, а не уводит с собой соседей. Если не уцелела ни одна, это
   отказ, а не ошибка. Два вида отказа остались ответными и намеренно: ссылка на
   то, чего системе не давали, и отказ, к которому пристёгнуты утверждения.
+
+## 2026-09-02 — a failing claim no longer destroys the answer
+
+The grounding gates were applied per claim and enforced per answer: one claim
+whose citation failed took every other claim with it, and one unresolvable entry
+in the citation list took the whole document. Measured over 200 questions, seven
+of eleven destroyed answers had been correct, and 18 more died at the document
+level. Both gates now drop instead of raising; when nothing survives the result
+is an abstention rather than an error. The guarantee is unchanged — every
+published claim still cites a span that resolves, touches it, and agrees on
+figures. See `knowledge/notes/a-failing-claim-does-not-destroy-the-answer-decision.md`.
