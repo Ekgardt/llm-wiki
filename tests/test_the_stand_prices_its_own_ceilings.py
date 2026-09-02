@@ -83,3 +83,30 @@ def test_the_window_never_drops_below_a_single_span(monkeypatch):
     monkeypatch.setenv("LLMWIKI_BENCH_ANSWER_BUDGET", "10")
 
     assert longmemeval_vault._answer_budget() == 4096
+
+
+def test_the_stock_candidate_count_is_unchanged_when_nothing_is_set(monkeypatch):
+    monkeypatch.delenv("LLMWIKI_BENCH_QA_CANDIDATES", raising=False)
+
+    assert longmemeval_vault._qa_candidates() == longmemeval_vault.QA_CANDIDATES
+
+
+def test_retrieval_depth_can_be_set_per_arm(monkeypatch):
+    """Widening the window changed nothing; all twelve candidates already fit."""
+    monkeypatch.setenv("LLMWIKI_BENCH_QA_CANDIDATES", "40")
+
+    assert longmemeval_vault._qa_candidates() == 40
+
+
+def test_a_nonsense_depth_falls_back_to_the_stock_one(monkeypatch):
+    monkeypatch.setenv("LLMWIKI_BENCH_QA_CANDIDATES", "deep")
+
+    assert longmemeval_vault._qa_candidates() == longmemeval_vault.QA_CANDIDATES
+
+
+def test_the_depth_is_bounded_at_both_ends(monkeypatch):
+    monkeypatch.setenv("LLMWIKI_BENCH_QA_CANDIDATES", "0")
+    assert longmemeval_vault._qa_candidates() == 1
+
+    monkeypatch.setenv("LLMWIKI_BENCH_QA_CANDIDATES", "100000")
+    assert longmemeval_vault._qa_candidates() == 200

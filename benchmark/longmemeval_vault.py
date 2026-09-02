@@ -39,6 +39,22 @@ BUILD_DEADLINE_SECONDS = 900.0
 RETRIEVE_DEADLINE_SECONDS = 180.0
 ANSWER_DEADLINE_SECONDS = 420.0
 QA_CANDIDATES = 12
+
+
+def _qa_candidates() -> int:
+    """How many candidates the answer sees, so retrieval depth is an arm too.
+
+    Measured 2026-09-02: widening the answer window four-fold left the prompt at
+    4 727 estimated tokens against 4 500 — unchanged, because after the chunking
+    fix all twelve candidates already fit. The window had stopped being the
+    binding constraint and nobody had noticed; the count is. Retrieval depth is
+    also the largest single lever in MemMachine's published ablation, at +4.2%
+    against +0.8% for chunking.
+    """
+    raw = os.environ.get("LLMWIKI_BENCH_QA_CANDIDATES", "").strip()
+    if not raw.isdigit():
+        return QA_CANDIDATES
+    return max(1, min(200, int(raw)))
 # The product's stock grounded-answer budget is 8192 byte-counted tokens; one
 # LongMemEval session entry is ~10 KB, so under the stock budget every span is
 # shed and the answer refuses itself (measured on question 25e5aa4f). The
@@ -274,7 +290,7 @@ def _retrieved_rows(question_text: str, profile: str) -> list[dict]:
     return list(
         retrieve_via_search_memory(
             question_text,
-            limit=QA_CANDIDATES,
+            limit=_qa_candidates(),
             semantic=True,
             profile=profile,
             deadline_monotonic=time.monotonic() + RETRIEVE_DEADLINE_SECONDS,
