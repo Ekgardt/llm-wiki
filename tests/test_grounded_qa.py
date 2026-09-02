@@ -413,8 +413,40 @@ def test_a_citation_about_something_else_is_rejected(vault: Path) -> None:
         }
     ]
 
-    with pytest.raises(GroundedQAError, match="shares no content"):
-        verify_grounded_answer(answer, context, vault=vault)
+    # The claim does not reach the reader, which is the property OPEN-017 asked
+    # for. Since 2026-09-02 a failing claim is dropped rather than made to
+    # destroy the answer around it, so an answer whose only claim fails becomes
+    # an abstention instead of an exception.
+    verdict = verify_grounded_answer(answer, context, vault=vault)
+
+    assert verdict["status"] == "insufficient_evidence"
+    assert verdict["claims"] == []
+    assert verdict["citations"] == []
+
+
+def test_a_good_claim_survives_a_bad_one_beside_it(vault: Path) -> None:
+    """Seven of eleven answers the gates destroyed carried the right answer.
+
+    Measured 2026-09-02, once the discarded replies were recorded. One claim
+    citing a span too far used to take its neighbours with it.
+    """
+    page = _write_page(vault, "alpha.md", "Alpha is enabled.")
+    snapshot = collect_corpus(vault)
+    chunk = next(
+        item for item in snapshot.chunks if item.source_path == page.relative_to(vault).as_posix()
+    )
+    context = build_grounded_context(snapshot, (chunk,), vault=vault, profile="BASE")
+    answer = json.loads(_answer_for_prompt(context.prompt_context))
+    citation_ids = answer["claims"][0]["citation_ids"]
+    answer["claims"] = [
+        {"text": "Alpha is enabled.", "citation_ids": citation_ids},
+        {"text": "Restic снимки шифруются перед отправкой.", "citation_ids": citation_ids},
+    ]
+
+    verdict = verify_grounded_answer(answer, context, vault=vault)
+
+    assert verdict["status"] == "answered"
+    assert [claim["text"] for claim in verdict["claims"]] == ["Alpha is enabled."]
 
 
 def test_a_claim_that_shares_a_term_with_its_citation_is_kept(vault: Path) -> None:

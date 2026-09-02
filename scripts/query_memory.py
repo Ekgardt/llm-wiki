@@ -707,23 +707,95 @@ def _cited_ids_of_claim(
     return {str(item) for item in ids}
 
 
+def _claim_survives(
+    claim: Mapping[str, object],
+    cited: Mapping[str, Mapping[str, object]],
+    supplied: Mapping[str, Mapping[str, object]],
+) -> set[str] | None:
+    """The claim's citations when every gate passes, else None."""
+    from evidence_resolver import EvidenceResolutionError
+
+    try:
+        return _cited_ids_of_claim(claim, cited, supplied)
+    except (GroundedQAError, EvidenceResolutionError):
+        return None
+
+
+def _kept_claims(
+    claims: Sequence[Mapping[str, object]],
+    cited: Mapping[str, Mapping[str, object]],
+    supplied: Mapping[str, Mapping[str, object]],
+) -> tuple[list[Mapping[str, object]], set[str]]:
+    kept: list[Mapping[str, object]] = []
+    used: set[str] = set()
+    for claim in claims:
+        ids = _claim_survives(claim, cited, supplied)
+        if ids is None:
+            continue
+        kept.append(claim)
+        used |= ids
+    return kept, used
+
+
+def _nothing_survived(document: dict[str, object]) -> dict[str, object]:
+    """No claim held up: an abstention, which is what the evidence supports."""
+    return {
+        **document,
+        "status": "insufficient_evidence",
+        "claims": [],
+        "citations": [],
+        "reason": "no claim survived its citation gates",
+    }
+
+
 def verify_grounded_answer(
     document: object,
     context: GroundedContext,
     *,
     vault: Path,
 ) -> dict[str, object]:
-    """Apply citation, abstention, relevance, and supplied-span hard gates."""
+    """Apply the gates per claim, and keep the claims that pass them.
+
+    They used to be applied per claim and enforced per answer: one claim whose
+    citation pointed a span too far destroyed the whole answer, the good claims
+    with it. Measured on this vault 2026-09-02, with the discarded replies
+    recorded for the first time: of eleven answers the gates destroyed, **seven
+    carried the correct answer**. The rule was not mostly catching fabrication,
+    it was mostly destroying correct work.
+
+    This is not a loosening, and that is the point. Every claim that reaches the
+    reader still carries a citation that resolves, touches the claim, and agrees
+    with it on figures; the citation set still matches exactly what the kept
+    claims use. What changes is that a claim which fails is dropped instead of
+    taking its neighbours with it — the claim-level verdict the 2026 attribution
+    work uses, rather than answer-level rejection, which no source proposes.
+
+    When nothing survives, the result is an abstention rather than an error:
+    that is what "no cited span supports the answer" means.
+    See `docs/research/2026-09-02-throwing-away-right-answers-and-whether-the-shape-is-wrong.md`.
+    """
     validated = _validated_answer_document(document)
     _require_status_shape(validated)
     supplied = {item.citation_id: asdict(item) for item in context.evidence}
     cited = _verified_citations(validated["citations"], supplied, vault=vault)
-    claim_ids: set[str] = set()
-    for claim in validated["claims"]:
-        claim_ids |= _cited_ids_of_claim(claim, cited, supplied)
-    if claim_ids != set(cited):
-        raise GroundedQAError("citation precision and recall gates require exact citation use")
-    return validated
+    if validated["status"] != "answered":
+        return validated
+    return _answer_of_surviving_claims(validated, cited, supplied)
+
+
+def _answer_of_surviving_claims(
+    validated: dict[str, object],
+    cited: Mapping[str, Mapping[str, object]],
+    supplied: Mapping[str, Mapping[str, object]],
+) -> dict[str, object]:
+    kept, used = _kept_claims(validated["claims"], cited, supplied)
+    if not kept:
+        return _nothing_survived(validated)
+    return {
+        **validated,
+        "claims": kept,
+        "citations": [cited[name] for name in cited if name in used],
+    }
 
 
 def _answer_corpus(vault: Path, deadline: float) -> object:
