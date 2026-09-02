@@ -1852,6 +1852,60 @@ def _append_heading_span(
     spans.append((heading.start(), end, tuple(item[1] for item in ancestry)))
 
 
+# A retrieval unit above this many bytes is cut at a paragraph boundary. About
+# 1 024 tokens — the top of the 512–1 024 band 2026 benchmarking reports for
+# analytical and multi-hop queries, taken at the top rather than the middle
+# because conversational text holds a topic longer than prose does.
+#
+# Measured on this vault: a captured session arrives as one heading span of
+# about 10 KB, roughly 2 500 tokens, against a 28 672-byte answer budget — so a
+# median of two units reach the answer model, and the categories that need facts
+# from more than one session score 0.0216 and 0.0988 by judge. Two and a half
+# times the recommended band is not merely coarser than the reference designs;
+# it is outside the range anyone reports good results in.
+#
+# Turn-level was the other candidate and the sources argue against it: too
+# fine-grained is fragmentary, and session-level beats turn-level on its own.
+# A paragraph boundary in a rendered transcript falls between speaker turns and
+# between topics inside a long one, which is the closest thing to a topically
+# coherent unit that costs no model call.
+# See `docs/research/2026-09-02-the-unit-of-retrieval.md`.
+MAX_SPAN_BYTES = 4096
+
+
+def _paragraph_cut(content: bytes, start: int, ceiling: int) -> int:
+    """The last paragraph break at or before the ceiling, then the last line."""
+    window = content[start:ceiling]
+    for marker in (b"\n\n", b"\n"):
+        cut = window.rfind(marker)
+        if cut > 0:
+            return start + cut + len(marker)
+    return ceiling
+
+
+def _split_span(content: bytes, span: tuple) -> list[tuple[int, int, tuple[str, ...]]]:
+    """One span as bounded pieces, each keeping the heading ancestry it had."""
+    start, end, ancestry = span
+    pieces: list[tuple[int, int, tuple[str, ...]]] = []
+    while end - start > MAX_SPAN_BYTES:
+        cut = _paragraph_cut(content, start, start + MAX_SPAN_BYTES)
+        if cut <= start:
+            break
+        pieces.append((start, cut, ancestry))
+        start = cut
+    pieces.append((start, end, ancestry))
+    return pieces
+
+
+def _bounded_spans(content: bytes, spans: list) -> list:
+    bounded: list[tuple[int, int, tuple[str, ...]]] = []
+    for span in spans:
+        bounded.extend(_split_span(content, span))
+    if len(bounded) > MAX_CORPUS_CHUNKS:
+        raise ValueError("corpus chunk row ceiling exceeded")
+    return bounded
+
+
 def _retrieval_spans(
     content: bytes,
     searchable_start: int,
@@ -1874,7 +1928,7 @@ def _retrieval_spans(
         _append_heading_span(
             spans, content, heading, _heading_end(headings, index, content), ancestry
         )
-    return tuple(spans)
+    return tuple(_bounded_spans(content, spans))
 
 
 def _markdown_head(
