@@ -115,3 +115,4 @@ redacted error reach the trail.
 - [[knowledge/notes/bounded-capture-excerpt-decision]] — a transcript larger than
   the evidence bound is excerpted at both ends rather than refused.
 - [[knowledge/notes/identity-is-a-function-of-its-content-decision]] — links to this page.
+- [[knowledge/notes/memory-keeps-a-second-copy-decision]] — links to this page.

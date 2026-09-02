@@ -152,3 +152,4 @@ Research: `docs/research/2026-08-23-memory-architectures-second-pass.md`.
   capture path this writes from.
 - [[knowledge/notes/bounded-capture-excerpt-decision]] — what the capture
   path does when the transcript is larger than the evidence bound.
+- [[knowledge/notes/memory-keeps-a-second-copy-decision]] — links to this page.

@@ -603,6 +603,27 @@ def _coordinator_v3_statements() -> tuple[MigrationStatement, ...]:
 
 # A quarantined attempt may be followed by another, but a hundred of them is an
 # operator's problem rather than something to keep numbering.
+# How long a settled transaction keeps its before and after images.
+#
+# It was thirty days in four separate places, and nothing called `prune`, so on
+# this vault it had never run: 11 369 transactions, 4.9 GB, half of it exact
+# duplicates, for a journal that grows one line at a time. Measured 2026-09-02.
+#
+# Databases keep undo data only until the write settles — Oracle's
+# `UNDO_RETENTION` is a minimum in seconds and its segments are reusable, and
+# PostgreSQL's autovacuum drops old row versions as soon as no transaction needs
+# them. Thirty days of images was not crash safety, it was an ad-hoc backup, and
+# a backup is what replaces it: the owner accepted that trade on 2026-09-02,
+# exchanging point-undo of any committed write within a month for a daily
+# snapshot plus a copy off this machine.
+#
+# Two days rather than zero, for two reasons. A crash that spans midnight can
+# still be unwound before the first snapshot exists; and a floor of one makes
+# "shorter than the window" indistinguishable from "not a valid number of days",
+# which collapses two different refusals into one message.
+# See `docs/research/2026-09-02-where-undo-belongs-and-for-how-long.md`.
+UNDO_RETENTION_DAYS = 2
+
 MAX_ATTEMPT_ORDINAL = 100
 
 # Transaction states a reserved checkpoint can never recover from: the write it
@@ -3184,8 +3205,15 @@ def _promotion_plan(
 
 
 def _prune_cutoff(retention_days: int, now: datetime | None) -> datetime:
-    if retention_days < 30:
-        raise ValueError("retention_days must be at least 30")
+    # The floor is the undo window itself, not a literal. It was 30 because the
+    # contract promised point-undo of any committed write for a month; the owner
+    # exchanged that on 2026-09-02 for a daily snapshot and a copy off this
+    # machine, which is what every database does with undo data and what no
+    # database does is keep it for a month.
+    if retention_days < UNDO_RETENTION_DAYS:
+        raise ValueError(
+            f"retention_days must be at least {UNDO_RETENTION_DAYS}"
+        )
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
         raise ValueError("now must be timezone-aware")
@@ -7170,7 +7198,7 @@ class MarkdownCoordinator:
     def prune(
         self,
         *,
-        retention_days: int = 30,
+        retention_days: int = UNDO_RETENTION_DAYS,
         now: datetime | None = None,
         deadline: float = float("inf"),
         cancelled: Callable[[], bool] | None = None,
@@ -8945,7 +8973,10 @@ def _relax_legacy_state_constraint(database: sqlite3.Connection) -> None:
 
 
 _CLI_MESSAGE_CODES = (
-    ("at least 30", "retention_too_short"),
+    # Keyed on the window, not on the literal 30 it used to be: when the window
+    # changed, this table silently stopped matching and a too-short retention
+    # started reporting itself as an invalid argument instead.
+    (f"at least {UNDO_RETENTION_DAYS}", "retention_too_short"),
     ("undo precondition", "undo_precondition_failed"),
     ("undo window", "undo_window_expired"),
     ("only a committed transaction", "transaction_not_committed"),
@@ -9022,7 +9053,9 @@ def _parse_cli_args() -> argparse.Namespace:
     prune_parser = subparsers.add_parser(
         "prune", help="prune expired transaction images"
     )
-    prune_parser.add_argument("--retention-days", type=int, default=30)
+    prune_parser.add_argument(
+        "--retention-days", type=int, default=UNDO_RETENTION_DAYS
+    )
     return parser.parse_args()
 
 
