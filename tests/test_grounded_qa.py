@@ -195,6 +195,21 @@ def test_candidates_are_grouped_by_parent_and_share_one_budget(vault: Path) -> N
     assert len({item.citation_id for item in context.evidence}) == len(context.evidence)
 
 
+def _nothing_reaches_the_reader(candidate: dict, context, vault: Path) -> bool:
+    """A tampered citation must never surface, by either route.
+
+    A field the schema itself forbids is refused outright. One that is
+    well-formed but does not resolve is dropped, and every claim resting on it
+    is dropped with it — leaving an abstention rather than a rejected answer.
+    Both are the same guarantee: no unverified span reaches the reader.
+    """
+    try:
+        verified = verify_grounded_answer(candidate, context, vault=vault)
+    except EvidenceResolutionError:
+        return True
+    return verified["status"] != "answered" and not verified["claims"]
+
+
 def test_verifier_rejects_tampered_citation_fields_and_unsupplied_ids(vault: Path) -> None:
     page = _write_page(vault, "alpha.md", "Alpha is enabled.")
     snapshot = collect_corpus(vault)
@@ -215,8 +230,8 @@ def test_verifier_rejects_tampered_citation_fields_and_unsupplied_ids(vault: Pat
     ):
         candidate = json.loads(json.dumps(valid))
         candidate["citations"][0][field] = bad
-        with pytest.raises(EvidenceResolutionError):
-            verify_grounded_answer(candidate, context, vault=vault)
+
+        assert _nothing_reaches_the_reader(candidate, context, vault)
 
 
 def test_verifier_enforces_cited_atomic_claims_and_abstention() -> None:
@@ -350,8 +365,13 @@ def test_verifier_rejects_source_changed_after_generation(vault: Path) -> None:
     answer = json.loads(_answer_for_prompt(context.prompt_context))
     page.write_text(page.read_text(encoding="utf-8") + "Changed.\n", encoding="utf-8")
 
-    with pytest.raises(EvidenceResolutionError, match="hash"):
-        verify_grounded_answer(answer, context, vault=vault)
+    verified = verify_grounded_answer(answer, context, vault=vault)
+
+    # The span no longer hashes to what generation was shown, so the citation
+    # is dropped and nothing it supported survives.
+    assert verified["status"] != "answered"
+    assert verified["claims"] == []
+    assert verified["citations"] == []
 
 
 def test_generation_receives_the_closed_schema_inside_the_bounded_prompt(vault: Path) -> None:

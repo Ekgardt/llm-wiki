@@ -211,7 +211,7 @@ def _judged_verdicts(path: Path) -> dict[str, object]:
 
 def _print_summary(report: dict) -> None:
     columns = (
-        "category n scored accuracy judge em f1 prov_fail est_tokens total_tokens "
+        "category n scored accuracy em judge f1 prov_fail est_tokens total_tokens "
         "retrieve_s answer_s"
     )
     print(columns)
