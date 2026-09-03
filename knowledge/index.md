@@ -15,6 +15,7 @@ This index catalogs durable memory distilled from AI agent sessions
 
 ## Decisions
 - [[knowledge/notes/a-failing-claim-does-not-destroy-the-answer-decision]] — the grounding gates are applied per claim and enforced
+- [[knowledge/notes/a-question-is-not-a-conjunction-decision]] — the words of a query are joined with OR and function words
 - [[knowledge/notes/adoption-digest-is-provenance-decision]] — the Reliability V3 adoption record keeps naming the
 - [[knowledge/notes/agent-native-mcp-foundation]] — LLM Wiki uses MCP as the common read/action interface for every agent while host-specific hooks remain thin lifecycle-event adapters.
 - [[knowledge/notes/audit-closure-security-recovery-control-plane-decision]] — Audit closure retires the unsupported Cognee bridge and adds one fail-closed DLP, recovery, install, scheduling, coordination, and evidence contract without another daemon, database, or MCP tool.
@@ -65,6 +66,7 @@ This index catalogs durable memory distilled from AI agent sessions
 - [[knowledge/notes/state-md-exempt-from-lint]] — `state.md` files under `knowledge/projects/<slug>/` are added to `EDITORIAL_NAMES` in `lint_memory.py` and exempted from backlink-obligation and sparse-floor checks, for the same reason that `index.md` and `log.md` are exempt.
 - [[knowledge/notes/system-symlink-ancestor-decision]] — A bounded read accepts a symlinked ancestor only when
 - [[knowledge/notes/the-changelog-is-not-preamble-decision]] — `knowledge/log.md` is no longer imported into every
+- [[knowledge/notes/the-model-names-the-evidence-we-locate-it-decision]] — a grounded reply supplies the citation identifier and
 - [[knowledge/notes/v4-reliability-contracts-decision]] — The approved, not-yet-implemented V4 reliability target would add path-bound compile receipts, truthful queue serialization, durable capture intents, unified fenced ownership, and bounded execution while preserving Markdown authority and the 12-tool local runtime.
 - [[knowledge/notes/warm-navigation-overhead-threshold-decision]] — The warm navigation overhead gate is 30 ms p95, measured on the slowest supported machine class rather than on a quiet one.
 

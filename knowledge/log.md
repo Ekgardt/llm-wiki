@@ -129,6 +129,9 @@
 - 2026-09-02 — Automated compile completed for snapshot 45e4be1a30f18cb0e2871bf126f660bd37fba1e307ef42c27f12495caf6440eb, 5dbbb36b987e187201026464c3a6026c1612be7d51ac2271b6531d83d13cb627, a39c3edce32d6abb98bca587858138bfcfdd95e7a07a82d52ac78e7390e8fc48. Touched: none.
 - 2026-09-02 — Automated compile completed for snapshot 195d095900ec4a4b62bc5b07eaec6be0c9d827e00887cc93343b64c0301037e3, 21e3cb15c647b9ff57b6422eb67ed1d26d1a45bc7bf7283dba5a61063db65be6, 612384fadbd45829efec4ae56bf28a5c9318917f7ed42b2292a0ddeb9302df1b, d67abead0123afc465647b30afd07fddc6b998a5f287851f8d0f8e6241a76741. Touched: 2 unpublished page(s).
 - 2026-09-02 — Automated compile completed for snapshot 22cd1efdce564348c376257f05431a58bb5d9030de9114c0f447f6a72a0047e4, 66fbd33f4cf6eb2742c9c1ca1c503c223d6e451e3930300358346c9e620df14e, 97108e48b62a5a5dbaeb414f6303af024664395b7e9c8fa477833ead08a01549, a3c47bd1f7b81dbec89b17320fae11592f7acaf3f089c52a2356a057a777f511, c4dbfe67b6343a47eaaf7010c14455831c3486b1efe8fd02bd0148cab342c2f8, e75eb97149871c7b3e0efd28dcef65f3476244d3d232e76a26f11a33bc9b2771, f62122574841b56ac1ffda577c1487954f9d3fde7822a46d66929d48b4ea5f49. Touched: none.
+- 2026-09-03 — Automated compile completed for snapshot 33f909816016399610280a7bc4204e6a67d03e813a7a1100583fb543a212bfbf. Touched: none.
+- 2026-09-03 — Automated compile completed for snapshot 0598760b3beff7689f83d03f40729f2a8946da2f0a893394b14eafd3082eb594, b2b2f8be924f7173f45b35f99db284a1d88607d5a22a539051bedcf6b495f56d. Touched: 4 unpublished page(s).
+- 2026-09-03 — Automated compile completed for snapshot 06bc0cdd3d4b8abb5214edc3a422372cafb7abcecd3b0633065f2491a4028b02, 77b5dd1882b8d8f73ee306bd524f668bb531c7cea5d17c1fa094953eceac26c2. Touched: none.
 
 ## Editorial note
 This log is vault metadata — an append-only editorial changelog of compile passes and hygiene actions over `knowledge/`, not content derived from `knowledge/raw/` or `knowledge/inbox/`. New entries are appended at the bottom by compile passes and by hand; entries are never rewritten or removed.
@@ -1613,3 +1616,19 @@ level. Both gates now drop instead of raising; when nothing survives the result
 is an abstention rather than an error. The guarantee is unchanged — every
 published claim still cites a span that resolves, touches it, and agrees on
 figures. See `knowledge/notes/a-failing-claim-does-not-destroy-the-answer-decision.md`.
+
+## 2026-09-03 — the search required every word of the question
+
+FTS5 puts an implicit AND between bare terms, so a chunk had to contain every
+word of a query. "What day of the week do I take a cocktail-making class?"
+retrieved zero candidates from a vault where "cocktail class" retrieved three,
+and three of fifty stand questions reached the model with an empty evidence
+manifest. Terms are now joined with OR and function words dropped; the same
+question retrieves forty. See
+`knowledge/notes/a-question-is-not-a-conjunction-decision.md`.
+
+Separately, a grounded reply no longer has to transcribe nine fields of the
+evidence manifest byte for byte — it names the citation and we supply the
+locator, which is stronger because the model's word about a locator is never
+read. That transcription requirement had destroyed 18 answers in 200. See
+`knowledge/notes/the-model-names-the-evidence-we-locate-it-decision.md`.
