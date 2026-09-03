@@ -372,11 +372,37 @@ def summarize_with_llm(
     return text.strip()
 
 
+def _anchor_date(day: str):
+    from datetime import date
+
+    try:
+        return date.fromisoformat(day)
+    except (TypeError, ValueError):
+        return None
+
+
+def _dated_block(day: str, block: str) -> str:
+    """The entry, followed by the dates it mentions, resolved against its day.
+
+    A session says "last Thursday" and the entry records the day it was
+    captured; nothing joined the two, so a question about that Thursday found
+    both halves and no sentence stating the answer. Measured 2026-09-03, four of
+    nine substantive refusals on the stand were exactly this. Resolving here
+    makes the date ordinary citable text, and every gate downstream is unchanged.
+    """
+    from temporal_anchor import annotation
+
+    anchor = _anchor_date(day)
+    if anchor is None:
+        return block
+    return block + annotation(block, anchor)
+
+
 def append_daily(day: str, block: str, operation_id: str | None = None) -> Path:
     from daily_log_append import locked_append
 
     out = DAILY_DIR / f"{day}.md"
-    locked_append(out, block, operation_id=operation_id)
+    locked_append(out, _dated_block(day, block), operation_id=operation_id)
     return out
 
 
