@@ -103,3 +103,42 @@ def test_the_footer_is_bounded() -> None:
     text = " ".join(f"{n} days ago" for n in range(1, 30))
 
     assert len(temporal_anchor.resolutions(text, ANCHOR)) == temporal_anchor.MAX_RESOLUTIONS
+
+
+CONVERSATION = """## [09:00:00] session_end | s1
+
+_captured: 2023-05-31 09:00:00_
+
+**user:** I met a tourist from Australia last Thursday on the subway.
+
+**assistant:** That sounds lovely. You also mentioned last Monday that you
+had started a new book.
+"""
+
+
+def test_only_what_the_user_said_is_resolved() -> None:
+    """A model writes "last night" for an hour ago; its remarks are not dated."""
+    found = temporal_anchor.resolutions(CONVERSATION, ANCHOR)
+
+    assert found == {"last thursday": "2023-05-25"}
+
+
+def test_a_multi_line_user_turn_keeps_its_speaker() -> None:
+    text = "**user:** I was away.\nI got back three days ago.\n\n**assistant:** yesterday"
+
+    found = temporal_anchor.resolutions(text, ANCHOR)
+
+    assert found == {"three days ago": "2023-05-28"}
+
+
+def test_text_that_is_not_a_conversation_is_read_whole() -> None:
+    found = temporal_anchor.resolutions("A note written yesterday.", ANCHOR)
+
+    assert found == {"yesterday": "2023-05-30"}
+
+
+def test_nothing_below_a_day_is_resolved() -> None:
+    """Elapsed-time estimates are exactly where a model is unreliable."""
+    text = "**user:** last night I read, and a few hours ago I slept, this morning I woke"
+
+    assert temporal_anchor.resolutions(text, ANCHOR) == {}

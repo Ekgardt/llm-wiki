@@ -18,11 +18,22 @@ sentence, and every existing gate keeps working unchanged. This is the
 what-where-when shape: an episode is stored with its time already bound to it,
 rather than reconstructed on demand from a context that may be gone.
 
-Deliberately narrow. Only expressions whose resolution is unambiguous given the
-day are resolved: today, yesterday, the day before yesterday, tomorrow, a named
-weekday with last/next, and a count of days or weeks ago. Months and years are
-left alone — "two months ago" has no single correct answer, and a confident
-wrong date is worse than no date at all.
+Deliberately narrow, in three ways.
+
+**Only day granularity.** Today, yesterday, the day before yesterday, tomorrow,
+a named weekday with last or next, and a count of days or weeks ago. Months and
+years are left alone — "two months ago" has no single correct answer — and so is
+everything below a day. "Last night", "this morning", "a few hours ago" are
+exactly where a model's sense of elapsed time fails, and they are not resolved.
+
+**Only the user's turns.** A model will write "last night" for an hour ago. The
+arithmetic here is ours and the anchor is certain, so nothing depends on a
+model's estimate — but a phrase the assistant wrote can be wrong at the source,
+and resolving it would turn a loose remark into a dated fact. The user's account
+of their own week is the authority the vault already ranks highest.
+
+**Only what is stated.** No date is inferred, defaulted, or guessed; a phrase
+that does not match a rule is left as it was written.
 
 See `knowledge/notes/a-fact-is-stored-with-its-date-decision.md`.
 """
@@ -139,14 +150,51 @@ def _last_week_hits(text: str, anchor: date) -> list[tuple[str, date]]:
 _FINDERS = (_day_before_hits, _plain_hits, _weekday_hits, _ago_hits, _last_week_hits)
 
 
+_TURN_RE = re.compile(r"^\*\*(user|assistant):\*\*")
+
+
+def _turn_role(line: str, current: str) -> str:
+    match = _TURN_RE.match(line)
+    if not match:
+        return current
+    return match.group(1)
+
+
+def spoken_by_the_user(text: str) -> str:
+    """The user's own turns, when the text is a rendered conversation.
+
+    A model's sense of elapsed time is unreliable in a way its arithmetic is
+    not: it will write "last night" for an hour ago and "a few hours" for a few
+    minutes. Nothing here computes a date from a model's estimate — the
+    arithmetic is ours and the anchor is the entry's own day — but a phrase the
+    assistant wrote can still be wrong at the source, and resolving it would
+    turn a loose remark into a dated fact in the memory.
+
+    So only the user's turns are read. The user's statement about their own week
+    is the authority the vault already ranks highest, and a wrong date the user
+    themselves gave is their record, not our invention.
+
+    Text with no turn markers is not a conversation and is read whole.
+    """
+    if not _TURN_RE.search(text) and "**user:**" not in text:
+        return text
+    kept: list[str] = []
+    role = ""
+    for line in text.splitlines():
+        role = _turn_role(line, role)
+        kept.append(line if role == "user" else "")
+    return "\n".join(kept)
+
+
 def resolutions(text: str, anchor: date) -> dict[str, str]:
-    """Every unambiguous relative date in the text, as phrase to ISO date.
+    """Every unambiguous relative date the user stated, as phrase to ISO date.
 
     First writing wins, so a phrase repeated in one entry resolves once.
     """
+    spoken = spoken_by_the_user(text)
     found: dict[str, str] = {}
     for finder in _FINDERS:
-        for phrase, resolved in finder(text, anchor):
+        for phrase, resolved in finder(spoken, anchor):
             found.setdefault(phrase, resolved.isoformat())
     return dict(list(found.items())[:MAX_RESOLUTIONS])
 
