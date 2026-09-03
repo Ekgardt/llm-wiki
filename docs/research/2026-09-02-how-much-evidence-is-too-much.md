@@ -154,8 +154,14 @@ Stated as inference, not fact. Two differences look sufficient:
   one given above. It is not compensation for an overlong context — the context
   is not overlong. It is a possible answer to the 22 questions that refuse with
   the evidence in hand.
-- **A new question, open:** the curve is still rising at 122 880. Whether it
-  keeps rising is being measured at 262 144 and 524 288.
+- **Above 122 880 the curve stops.** At 262 144 the same 50 questions score
+  0.4600 per question against 0.5400, on 32 answers against 33 — and the prompt
+  only grows from 26 429 to 29 995 tokens, because at that point the candidate
+  cap of 40 binds and not the budget. A four-correct gap on n=50 is inside
+  run-to-run noise, so the honest reading is **flat, not better**, and the
+  measurement was stopped rather than spent on a third point that could not move
+  the prompt either. 122 880 stays the default: it is the last setting where
+  raising the budget still buys anything.
 
 ### Two corrections to my own numbers, above
 
