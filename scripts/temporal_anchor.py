@@ -41,6 +41,7 @@ See `knowledge/notes/a-fact-is-stored-with-its-date-decision.md`.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from datetime import date, timedelta
 
 WEEKDAYS = (
@@ -199,14 +200,72 @@ def resolutions(text: str, anchor: date) -> dict[str, str]:
     return dict(list(found.items())[:MAX_RESOLUTIONS])
 
 
-def annotation(text: str, anchor: date) -> str:
-    """The footer to append to an entry, or an empty string when there is none.
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
-    The phrasing is deliberately plain so that the lexical leg matches it and a
-    citation quoting it reads as a sentence rather than as machine output.
+# A sentence is quoted whole where it fits and cut where it does not, because a
+# calendar line is a pointer to the entry, not a second copy of it.
+MAX_EVENT_CHARS = 220
+
+
+def _sentences(text: str) -> list[str]:
+    parts = [part.strip() for line in text.splitlines() for part in _SENTENCE_SPLIT.split(line)]
+    return [part for part in parts if part]
+
+
+def _clipped(sentence: str) -> str:
+    if len(sentence) <= MAX_EVENT_CHARS:
+        return sentence
+    return sentence[:MAX_EVENT_CHARS].rstrip() + "…"
+
+
+def _sentence_for(phrase: str, sentences: Sequence[str]) -> str:
+    for sentence in sentences:
+        if phrase in sentence.casefold():
+            return _clipped(sentence.removeprefix("**user:** ").strip())
+    return ""
+
+
+def events(text: str, anchor: date) -> list[tuple[str, str]]:
+    """What the user said happened, keyed by the date it happened on.
+
+    The date comes from our own arithmetic and the sentence comes from the
+    user's own words, so the line is a pointer into the entry rather than a
+    paraphrase of it. Sorted by date, because a calendar is read that way.
     """
-    found = resolutions(text, anchor)
-    if not found:
+    spoken = spoken_by_the_user(text)
+    sentences = _sentences(spoken)
+    dated = [
+        (resolved, _sentence_for(phrase, sentences))
+        for phrase, resolved in resolutions(text, anchor).items()
+    ]
+    return sorted((day, said) for day, said in dated if said)
+
+
+def annotation(text: str, anchor: date) -> str:
+    """The calendar footer for an entry, or an empty string when it has none.
+
+    Every claim this system publishes has to cite bytes inside a Markdown file,
+    so the calendar is written into the entry rather than kept only as rows. The
+    phrasing is plain on purpose: the lexical leg matches it, and a citation
+    quoting it reads as a sentence rather than as machine output.
+    """
+    dated = events(text, anchor)
+    if not dated:
         return ""
-    lines = [f"- {phrase} = {resolved}" for phrase, resolved in found.items()]
-    return "\n**Dates mentioned above, resolved against this entry's day:**\n" + "\n".join(lines) + "\n"
+    lines = [f"- {day} — {said}" for day, said in dated]
+    header = "\n**What happened, by date (resolved against this entry's day):**\n"
+    return header + "\n".join(lines) + "\n"
+
+
+def query_with_dates(query: str, anchor: date) -> str:
+    """The query, plus the dates its own relative expressions resolve to.
+
+    "Which book did I finish a week ago" contains no date, so nothing in it can
+    match a dated line however well that line is written. The same arithmetic
+    that dates an entry dates the question, and the resolved dates join the
+    query as ordinary terms — which is what makes the calendar reachable.
+    """
+    found = resolutions(query, anchor)
+    if not found:
+        return query
+    return query + " " + " ".join(dict.fromkeys(found.values()))

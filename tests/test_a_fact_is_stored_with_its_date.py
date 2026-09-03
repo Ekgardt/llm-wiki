@@ -86,10 +86,48 @@ def test_text_with_no_relative_date_gets_no_footer() -> None:
 
 
 def test_the_footer_reads_as_a_sentence_a_citation_can_quote() -> None:
-    footer = temporal_anchor.annotation("I met her last Thursday", ANCHOR)
+    footer = temporal_anchor.annotation("I met her last Thursday.", ANCHOR)
 
     assert "resolved against this entry's day" in footer
-    assert "last thursday = 2023-05-25" in footer
+    assert "- 2023-05-25 — I met her last Thursday." in footer
+
+
+def test_a_calendar_line_quotes_the_user_not_a_paraphrase() -> None:
+    dated = temporal_anchor.events(CONVERSATION, ANCHOR)
+
+    assert dated == [
+        ("2023-05-25", "I met a tourist from Australia last Thursday on the subway.")
+    ]
+
+
+def test_calendar_lines_are_sorted_by_date() -> None:
+    text = "**user:** Two weeks ago I started. Three days ago I finished."
+
+    days = [day for day, _ in temporal_anchor.events(text, ANCHOR)]
+
+    assert days == sorted(days)
+
+
+def test_a_very_long_sentence_is_cut_rather_than_copied_whole() -> None:
+    """A calendar line points into the entry; it is not a second copy of it."""
+    text = "**user:** yesterday " + "x" * 500 + "."
+
+    (_, said), = temporal_anchor.events(text, ANCHOR)
+
+    assert len(said) <= temporal_anchor.MAX_EVENT_CHARS + 1
+
+
+def test_a_question_carries_the_dates_it_only_implies() -> None:
+    """"A week ago" contains no date, so nothing dated can match it."""
+    expanded = temporal_anchor.query_with_dates("Which book did I finish a week ago?", ANCHOR)
+
+    assert expanded == "Which book did I finish a week ago? 2023-05-24"
+
+
+def test_a_question_with_no_relative_date_is_left_alone() -> None:
+    assert temporal_anchor.query_with_dates("How many bikes do I own?", ANCHOR) == (
+        "How many bikes do I own?"
+    )
 
 
 def test_one_phrase_repeated_resolves_once() -> None:

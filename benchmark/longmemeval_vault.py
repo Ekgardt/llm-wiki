@@ -284,6 +284,21 @@ def profile_for(question_text: str) -> str:
     return analyze_query(question_text).recommended_profile.upper()
 
 
+def _searchable(question_text: str, question_date: str) -> str:
+    """The question, plus the dates it only implies, anchored on the day asked.
+
+    "Which book did I finish a week ago" carries no date, so nothing the vault
+    dates can match it. The product resolves the question's own expressions
+    against today; here the day the question is asked is part of the dataset,
+    so it is the anchor and today is irrelevant.
+    """
+    from datetime import date
+
+    from query_memory import searchable_question
+
+    return searchable_question(question_text, date.fromisoformat(day_of(question_date)))
+
+
 def _retrieved_rows(question_text: str, profile: str) -> list[dict]:
     from retrieval import retrieve_via_search_memory
 
@@ -553,7 +568,7 @@ def run_question(question: dict, work: Path) -> dict:
     plain = str(question["question"])
     profile = profile_for(plain)
     retrieve_started = time.monotonic()
-    rows = _retrieved_rows(plain, profile)
+    rows = _retrieved_rows(_searchable(plain, str(question["question_date"])), profile)
     answer_started = time.monotonic()
     metrics: dict = {}
     outcome = _answer_outcome(

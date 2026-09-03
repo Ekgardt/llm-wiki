@@ -881,13 +881,43 @@ def _default_candidates(question: str, *, profile: str, deadline: float) -> tupl
     # were chunks of one status document and none was the decision page;
     # without the cap the decision page is first.
     rows = retrieve_via_search_memory(
-        question,
+        searchable_question(question),
         limit=QA_MAX_CANDIDATES,
         semantic=True,
         profile=profile,
         deadline_monotonic=deadline,
     )
     return tuple(rows)
+
+
+def _asked_on(question: str):
+    """The date the question is asked from, stated in it or else today."""
+    from datetime import date
+
+    match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", question)
+    if not match:
+        return date.today()
+    try:
+        return date.fromisoformat(match.group(1))
+    except ValueError:
+        return date.today()
+
+
+def searchable_question(question: str, anchor=None) -> str:
+    """The question, plus the dates its own relative expressions resolve to.
+
+    "Which book did I finish a week ago" carries no date, so nothing dated can
+    match it however well the memory is dated. Resolving the question's own
+    expressions against the day it is asked is what makes the calendar written
+    into each entry reachable at all.
+
+    A date written in the question itself is the anchor when there is one —
+    which is how a question about a past moment stays answerable — and today
+    otherwise.
+    """
+    from temporal_anchor import query_with_dates
+
+    return query_with_dates(question, anchor or _asked_on(question))
 
 
 def grounded_qa(
