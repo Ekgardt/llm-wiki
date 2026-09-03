@@ -210,28 +210,56 @@ def _nothing_reaches_the_reader(candidate: dict, context, vault: Path) -> bool:
     return verified["status"] != "answered" and not verified["claims"]
 
 
-def test_verifier_rejects_tampered_citation_fields_and_unsupplied_ids(vault: Path) -> None:
+def test_a_citation_naming_evidence_that_was_never_supplied_is_dropped(vault: Path) -> None:
     page = _write_page(vault, "alpha.md", "Alpha is enabled.")
     snapshot = collect_corpus(vault)
     chunk = next(
         item for item in snapshot.chunks if item.source_path == page.relative_to(vault).as_posix()
     )
     context = build_grounded_context(snapshot, (chunk,), vault=vault, profile="BASE")
-    valid = json.loads(_answer_for_prompt(context.prompt_context))
+    candidate = json.loads(_answer_for_prompt(context.prompt_context))
+    candidate["citations"][0]["citation_id"] = "E999"
 
-    for field, bad in (
-        ("citation_id", "E999"),
+    assert _nothing_reaches_the_reader(candidate, context, vault)
+
+
+@pytest.mark.parametrize(
+    "field,bad",
+    (
         ("relative_path", "../outside.md"),
         ("source_sha256", "0" * 64),
         ("revision", "wrong"),
-        ("byte_start", -1),
-        ("byte_end", 999999),
         ("span_sha256", "f" * 64),
-    ):
-        candidate = json.loads(json.dumps(valid))
-        candidate["citations"][0][field] = bad
+        ("byte_end", 999999),
+    ),
+    ids=("path", "source-hash", "revision", "span-hash", "byte-end"),
+)
+def test_a_tampered_locator_cannot_be_believed_because_it_is_not_read(
+    vault: Path, field: str, bad: object
+) -> None:
+    """The published citation comes from our manifest, never from the reply.
 
-        assert _nothing_reaches_the_reader(candidate, context, vault)
+    Until 2026-09-03 the reply had to reproduce nine fields of the manifest
+    byte for byte, and a mistyped one destroyed the answer — the largest single
+    failure this stand has measured, eighteen answers in 200. The model now
+    supplies the identifier and nothing else, so writing a lie into a locator
+    field changes neither what is verified nor what is published.
+    """
+    page = _write_page(vault, "alpha.md", "Alpha is enabled.")
+    snapshot = collect_corpus(vault)
+    chunk = next(
+        item for item in snapshot.chunks if item.source_path == page.relative_to(vault).as_posix()
+    )
+    context = build_grounded_context(snapshot, (chunk,), vault=vault, profile="BASE")
+    candidate = json.loads(_answer_for_prompt(context.prompt_context))
+    candidate["citations"][0][field] = bad
+
+    verified = verify_grounded_answer(candidate, context, vault=vault)
+
+    published = verified["citations"][0]
+    supplied = next(item for item in context.evidence if item.citation_id == published["citation_id"])
+    assert published[field] == getattr(supplied, field)
+    assert published[field] != bad
 
 
 def test_verifier_enforces_cited_atomic_claims_and_abstention() -> None:

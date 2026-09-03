@@ -670,23 +670,19 @@ def _require_status_shape(document: Mapping[str, object]) -> None:
     _require_abstention_shape(document)
 
 
-def _citation_verifies(
-    citation: Mapping[str, object],
-    cited: Mapping[str, Mapping[str, object]],
-    supplied: Mapping[str, Mapping[str, object]],
-    *,
-    vault: Path,
-) -> bool:
-    from evidence_resolver import EvidenceResolutionError, verify_supplied_citation
+def _span_still_holds(supplied: Mapping[str, object], *, vault: Path) -> bool:
+    from evidence_resolver import EvidenceResolutionError, verify_evidence_span
 
-    citation_id = citation["citation_id"]
-    if citation_id in cited or citation_id not in supplied:
-        return False
     try:
-        verify_supplied_citation(citation, supplied[citation_id], vault=vault)
+        verify_evidence_span(supplied, vault=vault)
     except EvidenceResolutionError:
         return False
     return True
+
+
+def _published_citation(supplied: Mapping[str, object]) -> dict[str, object]:
+    """The manifest entry as a citation: everything but the span text itself."""
+    return {key: value for key, value in supplied.items() if key != "text"}
 
 
 def _verified_citations(
@@ -695,19 +691,35 @@ def _verified_citations(
     *,
     vault: Path,
 ) -> dict[str, Mapping[str, object]]:
-    """The citations that resolve. One that does not is dropped, not fatal.
+    """The cited spans that still hold, named by the identifiers generation used.
 
-    Measured 2026-09-02 over 200 questions: eighteen answers died here because a
-    single entry in the citation list failed to resolve, including entries no
-    surviving claim used. Dropping it costs nothing — a claim that cites it then
-    fails its own gate in `_cited_ids_of_claim` and is dropped in turn, so every
-    claim that reaches the reader still cites evidence that verified.
+    **The model is trusted for the identifier and nothing else.** The path,
+    revision, byte range and both hashes are taken from the manifest this
+    process built and handed to generation; what the reply says about them is
+    not read. That is strictly stronger than comparing the two, because a
+    citation can no longer be believed on the model's word — and it removes the
+    largest single failure this stand has measured. Over 200 questions on
+    2026-09-02, "citation does not match supplied evidence" destroyed eighteen
+    answers: the model had found the right span and mistyped a hash or an offset
+    while transcribing nine fields of it.
+
+    It also matches the current guidance for grounded generation, which is that
+    the model emits the source identifier and the system resolves the locator,
+    because mixing the two increases formatting errors rather than catching them.
+
+    Verification did not move. Every published citation is still checked against
+    the vault — the path resolves inside it, the file still hashes to what
+    generation was shown, and the byte range still holds the recorded span — and
+    a span that fails is dropped, taking with it every claim that cites it.
     """
     cited: dict[str, Mapping[str, object]] = {}
     for citation in citations:
-        if not _citation_verifies(citation, cited, supplied, vault=vault):
+        name = str(citation.get("citation_id"))
+        if name in cited or name not in supplied:
             continue
-        cited[str(citation["citation_id"])] = citation
+        if not _span_still_holds(supplied[name], vault=vault):
+            continue
+        cited[name] = _published_citation(supplied[name])
     return cited
 
 
@@ -735,39 +747,55 @@ def _claim_survives(
     cited: Mapping[str, Mapping[str, object]],
     supplied: Mapping[str, Mapping[str, object]],
 ) -> set[str] | None:
-    """The claim's citations when every gate passes, else None."""
+    """The claim's citations when every gate passes, else the gate that refused it."""
     from evidence_resolver import EvidenceResolutionError
 
     try:
         return _cited_ids_of_claim(claim, cited, supplied)
-    except (GroundedQAError, EvidenceResolutionError):
-        return None
+    except (GroundedQAError, EvidenceResolutionError) as exc:
+        return str(exc)
 
 
 def _kept_claims(
     claims: Sequence[Mapping[str, object]],
     cited: Mapping[str, Mapping[str, object]],
     supplied: Mapping[str, Mapping[str, object]],
-) -> tuple[list[Mapping[str, object]], set[str]]:
+) -> tuple[list[Mapping[str, object]], set[str], list[str]]:
     kept: list[Mapping[str, object]] = []
     used: set[str] = set()
+    refused: list[str] = []
     for claim in claims:
         ids = _claim_survives(claim, cited, supplied)
-        if ids is None:
+        if isinstance(ids, str):
+            refused.append(ids)
             continue
         kept.append(claim)
         used |= ids
-    return kept, used
+    return kept, used, refused
 
 
-def _nothing_survived(document: dict[str, object]) -> dict[str, object]:
+def _refusal_reason(refused: Sequence[str]) -> str:
+    """Name the gates that refused, not merely that something did.
+
+    Measured 2026-09-03: four of eight refusals that held the answer session
+    read "no claim survived its citation gates", which says nothing about which
+    gate fired. Without the name there is nothing to fix but a guess.
+    """
+    if not refused:
+        return "the answer carried no claim"
+    return "no claim survived its citation gates: " + "; ".join(dict.fromkeys(refused))
+
+
+def _nothing_survived(
+    document: dict[str, object], refused: Sequence[str] = ()
+) -> dict[str, object]:
     """No claim held up: an abstention, which is what the evidence supports."""
     return {
         **document,
         "status": "insufficient_evidence",
         "claims": [],
         "citations": [],
-        "reason": "no claim survived its citation gates",
+        "reason": _refusal_reason(refused),
     }
 
 
@@ -811,9 +839,9 @@ def _answer_of_surviving_claims(
     cited: Mapping[str, Mapping[str, object]],
     supplied: Mapping[str, Mapping[str, object]],
 ) -> dict[str, object]:
-    kept, used = _kept_claims(validated["claims"], cited, supplied)
+    kept, used, refused = _kept_claims(validated["claims"], cited, supplied)
     if not kept:
-        return _nothing_survived(validated)
+        return _nothing_survived(validated, refused)
     return {
         **validated,
         "claims": kept,

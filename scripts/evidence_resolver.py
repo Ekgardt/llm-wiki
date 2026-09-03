@@ -1213,11 +1213,22 @@ def verify_supplied_citation(
 ) -> None:
     """Bind one generated citation to the exact span supplied for generation."""
     _require_citation_fields(citation, supplied)
-    source_path = _citation_source_path(citation.get("relative_path"), vault)
+    verify_evidence_span(supplied, vault=vault)
+
+
+def verify_evidence_span(supplied: Mapping[str, object], *, vault: Path) -> None:
+    """Bind one supplied evidence span to the source it was cut from.
+
+    This is the half of the check that reads the vault: the path resolves inside
+    it, the file still hashes to what generation was shown, and the recorded byte
+    range still holds the recorded span. It takes no generated text, so it says
+    nothing about who cited it — only that the span is still what it was.
+    """
+    source_path = _citation_source_path(supplied.get("relative_path"), vault)
     text = supplied.get("text")
-    _require_citation_span(citation, text)
+    _require_citation_span(supplied, text)
     source = _citation_source_bytes(source_path)
-    _require_citation_binding(citation, source, str(text))
+    _require_citation_binding(supplied, source, str(text))
 
 
 _CITATION_FIELDS = frozenset(
