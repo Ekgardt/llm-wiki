@@ -14,6 +14,7 @@ This index catalogs durable memory distilled from AI agent sessions
 - [[knowledge/notes/provenance-rule-6]] — CLAUDE.md rule 6 — "mark uncertainty explicitly" — is the root constraint that justifies preliminary flagging, editorial notes, and every "inferred from…" caveat in this vault.
 
 ## Decisions
+- [[knowledge/notes/a-fact-is-stored-with-its-date-decision]] — relative dates the user states are resolved at write time
 - [[knowledge/notes/a-failing-claim-does-not-destroy-the-answer-decision]] — the grounding gates are applied per claim and enforced
 - [[knowledge/notes/a-question-is-not-a-conjunction-decision]] — the words of a query are joined with OR and function words
 - [[knowledge/notes/adoption-digest-is-provenance-decision]] — the Reliability V3 adoption record keeps naming the

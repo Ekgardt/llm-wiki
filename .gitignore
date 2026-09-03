@@ -62,6 +62,7 @@ knowledge/notes/*
 !knowledge/notes/one-trust-weight-across-retrieval-paths-decision.md
 !knowledge/notes/rerank-tier-ordering-decision.md
 !knowledge/notes/dead-task-retirement-and-restore-decision.md
+!knowledge/notes/a-fact-is-stored-with-its-date-decision.md
 !knowledge/notes/the-model-names-the-evidence-we-locate-it-decision.md
 !knowledge/notes/a-question-is-not-a-conjunction-decision.md
 !knowledge/notes/a-failing-claim-does-not-destroy-the-answer-decision.md

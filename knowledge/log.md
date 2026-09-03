@@ -1632,3 +1632,13 @@ evidence manifest byte for byte — it names the citation and we supply the
 locator, which is stronger because the model's word about a locator is never
 read. That transcription requirement had destroyed 18 answers in 200. See
 `knowledge/notes/the-model-names-the-evidence-we-locate-it-decision.md`.
+
+## 2026-09-03 — a fact is stored with its date
+
+Relative dates the user states are now resolved at write time against the
+entry's own day and written into the entry as a dated calendar; a question is
+expanded with the dates it only implies, anchored on the day it is asked. Four
+of nine substantive refusals on the stand were this. Nothing below a day is
+resolved, nor months or years, and only the user's own turns are read — a model
+writes "last night" for an hour ago. See
+`knowledge/notes/a-fact-is-stored-with-its-date-decision.md`.
