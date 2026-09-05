@@ -74,3 +74,61 @@ that *warns*, not one that dies. The defect is the missing warning.
   trust frameworks
 - https://qaskills.sh/blog/rag-testing-index-freshness-staleness — testing that
   superseded content stops influencing answers
+
+---
+
+## The second cause, found after the first was fixed
+
+The byte-boundary cut was real and is fixed, but it dates from 2026-09-02 and the
+last successful build was 2026-08-30. Something else was already wrong.
+
+`corpus_snapshot._capture` reads every source, then re-discovers and re-hashes
+every source, and raises `CorpusChanged` if anything moved. Measured today: the
+collection itself is quick and reliable — six consecutive runs, 3.5 to 3.6
+seconds each, no failures — but under `doctor` it fails, because a session
+writing to the vault appends to today's daily log while the build runs, and a
+capture hook fires on every tool call.
+
+Nothing about the fence changed. **The vault outgrew it.** 1047 sources now, 228
+daily logs, and one or more agents writing continuously; the window between the
+first read and the verification pass is no longer small compared to the interval
+between writes. Since 2026-08-30 that window has apparently always caught
+something.
+
+### What the field does
+
+Snapshot isolation, as every MVCC engine implements it — PostgreSQL, InnoDB,
+WiredTiger, Oracle, SQL Server and the rest — guarantees that a transaction sees
+a consistent view **from the point it started**. It does not require the database
+to hold still until the transaction commits; that would make concurrency
+impossible, which is the whole reason MVCC exists. Lucene's `IndexWriter` takes
+the same position from the other end: commits are explicit point-in-time
+snapshots, and an index reader refreshes to a newer commit rather than the writer
+refusing to commit because the corpus moved.
+
+Our fence asks for something stronger than either: that the world stand still for
+the duration of the build.
+
+### What we will do, and what we will not
+
+**Not** weaken the fence. Every captured record already carries the hash of the
+bytes that were actually read, so a snapshot is internally consistent by
+construction; the second pass is what proves the snapshot describes a moment the
+vault really passed through, and that is worth keeping.
+
+**Retry instead of surrender.** A pass costs 3.6 seconds. When a pass loses the
+race, take another one, bounded; fail only if the vault never holds still long
+enough for a single pass. The invariant is unchanged — a published generation
+still matches a real instant — and the build stops being impossible on a vault
+that is in use.
+
+### Sources
+
+- https://notes.eatonphil.com/2024-05-16-mvcc.html — snapshot isolation as a
+  consistent view from transaction start, not a frozen world
+- https://www.vldb.org/pvldb/vol16/p1426-alhomssi.pdf — snapshot isolation for
+  high-performance storage engines
+- https://lucene.apache.org/core/2_9_4/api/all/org/apache/lucene/index/IndexWriter.html
+  — explicit point-in-time commits, readers refresh to a newer one
+- https://datalakehousehub.com/blog/2026-04-29-query-engine-optimization-10-concurrency-control/
+  — MVCC and contention in current query engines
