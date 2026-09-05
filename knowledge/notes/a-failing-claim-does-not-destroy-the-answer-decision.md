@@ -78,3 +78,4 @@ not as an arm.
   keeps, and now applies without collateral.
 - [[knowledge/notes/cross-lingual-citation-relevance-decision]]
 - [[knowledge/notes/part-scoped-evidence-decision]]
+- [[knowledge/notes/the-model-names-the-evidence-we-locate-it-decision]] — links to this page.

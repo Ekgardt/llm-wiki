@@ -79,3 +79,4 @@ missed. Measured on this vault's 231 KB day: under 20 ms. The scan is bounded by
 - [[knowledge/notes/citation-relevance-gate-decision]] — the other half of a
   citation: it must also share content with the claim.
 - [[knowledge/notes/a-failing-claim-does-not-destroy-the-answer-decision]] — links to this page.
+- [[knowledge/notes/the-model-names-the-evidence-we-locate-it-decision]] — links to this page.

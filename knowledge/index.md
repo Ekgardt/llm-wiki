@@ -19,6 +19,7 @@ This index catalogs durable memory distilled from AI agent sessions
 - [[knowledge/notes/a-question-is-not-a-conjunction-decision]] — the words of a query are joined with OR and function words
 - [[knowledge/notes/adoption-digest-is-provenance-decision]] — the Reliability V3 adoption record keeps naming the
 - [[knowledge/notes/agent-native-mcp-foundation]] — LLM Wiki uses MCP as the common read/action interface for every agent while host-specific hooks remain thin lifecycle-event adapters.
+- [[knowledge/notes/an-index-may-lag-decision]] — a generation is published from the snapshot it captured
 - [[knowledge/notes/audit-closure-security-recovery-control-plane-decision]] — Audit closure retires the unsupported Cognee bridge and adds one fail-closed DLP, recovery, install, scheduling, coordination, and evidence contract without another daemon, database, or MCP tool.
 - [[knowledge/notes/automatic-code-update-decision]] — the nightly pass may advance the checkout to the remote
 - [[knowledge/notes/baseline-environment-binding-decision]] — The frozen retrieval-v2 baseline is bound to the exact
