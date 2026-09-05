@@ -228,72 +228,95 @@ def test_build_manifest_emits_exact_closed_code_capture_contract(tmp_path: Path)
     }
 
 
+def _extra_file_capture(contract, original):
+    """One file the sources never named, added to the membership."""
+    from code_workspace import CodeCaptureFile
+
+    extra = CodeCaptureFile("source:extra", "extra.py", "e" * 64, original.stat)
+    files = tuple(sorted((*contract.files, extra), key=lambda item: item.relative_path))
+    policy = replace(
+        contract.policy, roots=tuple(sorted((*contract.policy.roots, "extra.py")))
+    )
+    return policy, files
+
+
+def _policy_for_moved_path(contract):
+    roots = {"other.py", *(item.relative_path for item in contract.directories)}
+    return replace(contract.policy, roots=tuple(sorted(roots)))
+
+
+_FIELD_DAMAGE = {
+    "source_id": ("source_id", "source:other"),
+    "relative_path": ("relative_path", "other.py"),
+    "sha256": ("sha256", "f" * 64),
+}
+
+
+def _damaged_values(original, damage: str) -> dict:
+    values = {
+        name: getattr(original, name)
+        for name in ("source_id", "relative_path", "sha256", "stat")
+    }
+    if damage not in _FIELD_DAMAGE:
+        values["stat"] = replace(original.stat, size=original.stat.size + 1)
+        return values
+    name, value = _FIELD_DAMAGE[damage]
+    values[name] = value
+    return values
+
+
+def _forged_capture_file(values: dict):
+    """Built field by field because the real constructor would refuse this."""
+    from code_workspace import CodeCaptureFile
+
+    forged = object.__new__(CodeCaptureFile)
+    for name, value in values.items():
+        object.__setattr__(forged, name, value)
+    return forged
+
+
+def _field_damaged_capture(contract, original, damage: str):
+    policy = _policy_for_moved_path(contract) if damage == "relative_path" else contract.policy
+    return policy, (_forged_capture_file(_damaged_values(original, damage)),)
+
+
+def _damaged_capture(contract, original, damage: str):
+    if damage == "missing":
+        return contract.policy, ()
+    if damage == "extra":
+        return _extra_file_capture(contract, original)
+    return _field_damaged_capture(contract, original, damage)
+
+
+def _resealed(damaged):
+    """The membership digest the builder will check, recomputed over the damage."""
+    from code_workspace import code_capture_as_dict
+    from reliable_memory import canonical_json_bytes
+
+    serialized = code_capture_as_dict(damaged)
+    digest = hashlib.sha256(
+        canonical_json_bytes(
+            {"files": serialized["files"], "directories": serialized["directories"]}
+        )
+    ).hexdigest()
+    return replace(damaged, membership_sha256=digest)
+
+
 @pytest.mark.parametrize(
     "damage", ["missing", "extra", "source_id", "relative_path", "sha256", "size"]
 )
 def test_builder_binds_present_capture_to_exact_sources_before_construction(
     tmp_path: Path, damage: str
 ) -> None:
-    from code_workspace import CodeCaptureFile, code_capture_as_dict
     from evidence_graph import GraphSchema
     from evidence_graph_builder import build_full_generation
     from generation_catalog import GenerationCatalog
-    from reliable_memory import canonical_json_bytes
 
     records = basic_graph_records()
     snapshot = captured_snapshot_for_records(records)
     contract = snapshot.code_capture
-    original = contract.files[0]
-    damaged_policy = contract.policy
-    if damage == "missing":
-        files = ()
-    elif damage == "extra":
-        extra = CodeCaptureFile("source:extra", "extra.py", "e" * 64, original.stat)
-        files = tuple(sorted((*contract.files, extra), key=lambda item: item.relative_path))
-        damaged_policy = replace(
-            contract.policy, roots=tuple(sorted((*contract.policy.roots, "extra.py")))
-        )
-    else:
-        values = {
-            name: getattr(original, name)
-            for name in ("source_id", "relative_path", "sha256", "stat")
-        }
-        if damage == "source_id":
-            values["source_id"] = "source:other"
-        elif damage == "relative_path":
-            values["relative_path"] = "other.py"
-            damaged_policy = replace(
-                contract.policy,
-                roots=tuple(
-                    sorted(
-                        {
-                            "other.py",
-                            *(item.relative_path for item in contract.directories),
-                        }
-                    )
-                ),
-            )
-        elif damage == "sha256":
-            values["sha256"] = "f" * 64
-        else:
-            values["stat"] = replace(original.stat, size=original.stat.size + 1)
-        damaged_file = object.__new__(CodeCaptureFile)
-        for name, value in values.items():
-            object.__setattr__(damaged_file, name, value)
-        files = (damaged_file,)
-    damaged = replace(contract, policy=damaged_policy, files=files)
-    serialized = code_capture_as_dict(damaged)
-    damaged = replace(
-        damaged,
-        membership_sha256=hashlib.sha256(
-            canonical_json_bytes(
-                {
-                    "files": serialized["files"],
-                    "directories": serialized["directories"],
-                }
-            )
-        ).hexdigest(),
-    )
+    policy, files = _damaged_capture(contract, contract.files[0], damage)
+    damaged = _resealed(replace(contract, policy=policy, files=files))
     catalog = GenerationCatalog(tmp_path / "state")
 
     with pytest.raises(ValueError, match="source membership"):
@@ -731,27 +754,30 @@ def test_complete_publication_rechecks_live_sources_after_semantic_validation(
         search_memory, "_publish_validated_generation", mutate_then_publish
     )
 
-    with pytest.raises(corpus_snapshot.CorpusChanged):
-        build_full_generation(
-            catalog,
-            sources=sources,
-            source_bytes={
-                source.record.logical_id: source.content for source in snapshot.sources
-            },
-            nodes=(),
-            occurrences=(),
-            assertions=(),
-            evidence=(),
-            observations=(),
-            dependencies=(),
-            generation_id="live-source-drift",
-            snapshot=snapshot,
-            publication_root=vault,
-            repository_scope=resolve_repository_scope(vault),
-        )
+    built = build_full_generation(
+        catalog,
+        sources=sources,
+        source_bytes={
+            source.record.logical_id: source.content for source in snapshot.sources
+        },
+        nodes=(),
+        occurrences=(),
+        assertions=(),
+        evidence=(),
+        observations=(),
+        dependencies=(),
+        generation_id="live-source-drift",
+        snapshot=snapshot,
+        publication_root=vault,
+        repository_scope=resolve_repository_scope(vault),
+    )
 
-    assert catalog.get_active() is None
-    assert not (catalog.generations_path / "live-source-drift").exists()
+    # Until 2026-09-05 a page edited while the build ran refused the whole
+    # publication. On the live vault that meant no generation was activated from
+    # 2026-08-30 onward. The generation is published; the page that moved is
+    # dropped at query time before its text can reach the model.
+    assert built is not None
+    assert catalog.get_active() is not None
 
 
 def test_build_manifest_emits_exact_canonical_repository_scope(tmp_path):

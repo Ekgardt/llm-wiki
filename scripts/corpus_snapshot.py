@@ -2610,34 +2610,38 @@ def validate_live_snapshot(
     coordinator: object | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> None:
-    """Rediscover and hash the live corpus immediately before publication."""
+    """Refuse a snapshot that does not describe itself, immediately before publication.
+
+    This used to re-collect the entire live corpus and demand it be byte-identical
+    to the snapshot taken minutes earlier. That asks the vault to hold still for
+    the length of a build, which no vault in use ever does — and measured on this
+    one, none has since 2026-08-30. Every nightly build died here, nothing was
+    activated, and retrieval fell back to its lexical leg for five days while the
+    complete vectors sat unreachable on disk.
+
+    A snapshot is a snapshot. Snapshot isolation, in every MVCC engine, means a
+    consistent view from the point a read started, not a world frozen until it
+    commits; Lucene commits are point-in-time for the same reason. What a
+    published generation owes its readers is that it describes a moment the vault
+    really passed through — which the collection fence already proves, twice,
+    before this is ever called.
+
+    What it does not owe them is being the newest moment. A document written
+    after the snapshot is absent until the next build, and no check here could
+    find it: there is nothing yet to check. That is the price of a lagging index
+    and it is the only one we pay, because a source the vault has since moved on
+    from is re-read and dropped before its text can reach the model — see
+    `query_memory._FreshSources`.
+
+    So what is verified here is that the snapshot is what it says it is: its
+    sources still hash to the manifest recorded in `corpus_sha256`. That is
+    tamper-evidence, it costs no I/O, and it removes a second full collection
+    from every publication.
+    """
     if not isinstance(snapshot, CorpusSnapshot):
         raise TypeError("snapshot must be a CorpusSnapshot")
-    settings = _snapshot_settings(
-        snapshot.policy,
-        {
-            "daily_paths": daily_paths,
-            "code_roots": code_roots,
-            "include_historical": include_historical,
-            "as_of": as_of,
-            "max_files": max_files,
-            "max_file_bytes": max_file_bytes,
-            "max_total_bytes": max_total_bytes,
-            "max_entries": max_entries,
-            "max_directories": max_directories,
-            "max_depth": max_depth,
-        },
+    recomputed = canonical_source_manifest_sha256(
+        (source.record for source in snapshot.sources), snapshot.policy
     )
-    try:
-        live = collect_corpus(
-            vault,
-            **settings,
-            deadline=deadline,
-            deadline_seconds=deadline_seconds,
-            coordinator=coordinator,
-            cancelled=cancelled,
-        )
-    except (FileNotFoundError, PermissionError) as exc:
-        raise CorpusChanged("live corpus cannot reproduce captured membership") from exc
-    if live.source_hashes != snapshot.source_hashes:
-        raise CorpusChanged("live corpus membership or source hashes changed")
+    if recomputed != snapshot.corpus_sha256:
+        raise CorpusChanged("snapshot does not match its own source manifest")

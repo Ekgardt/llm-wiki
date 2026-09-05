@@ -526,9 +526,19 @@ def test_cancellation_is_checked_inside_markdown_line_scan(vault: Path):
 
 
 @pytest.mark.parametrize("mutation", ["edit", "add", "delete", "replace"])
-def test_live_validation_detects_membership_and_hash_changes_with_preserved_mtime(
-    vault: Path, mutation: str
-):
+def test_a_vault_that_moved_on_no_longer_blocks_publication(vault: Path, mutation: str):
+    """The fence used to demand the vault hold still for the length of a build.
+
+    No vault in use ever does. Measured on the live one: every nightly build died
+    here from 2026-08-30, nothing was activated, and retrieval fell back to its
+    lexical leg for five days while complete vectors sat unreachable on disk.
+
+    A snapshot is a snapshot. What it owes its readers is that it describes a
+    moment the vault really passed through — which the collection fence proves,
+    twice, before this is called — not that it is the newest moment. A source
+    that has since moved on is re-read and dropped before its text can reach the
+    model; see `tests/test_a_lagging_index_never_quotes_stale_text.py`.
+    """
     target = vault / "knowledge/notes/page.md"
     write(target, "# Page\nBefore.\n")
     snapshot = collect_corpus(vault)
@@ -545,8 +555,19 @@ def test_live_validation_detects_membership_and_hash_changes_with_preserved_mtim
         target.unlink()
         target.write_bytes(b"# Page\nReplaced.\n")
 
-    with pytest.raises(CorpusChanged):
-        validate_live_snapshot(snapshot, vault)
+    validate_live_snapshot(snapshot, vault)
+
+
+def test_a_snapshot_that_does_not_describe_itself_is_still_refused(vault: Path):
+    """Tamper-evidence is what the fence keeps, and it costs no I/O."""
+    import dataclasses
+
+    write(vault / "knowledge/notes/page.md", "# Page\nBefore.\n")
+    snapshot = collect_corpus(vault)
+    forged = dataclasses.replace(snapshot, corpus_sha256="0" * 64)
+
+    with pytest.raises(CorpusChanged, match="own source manifest"):
+        validate_live_snapshot(forged, vault)
 
 
 @pytest.mark.skipif(os.name == "posix", reason="Windows pathname fallback only")
