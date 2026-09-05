@@ -2281,6 +2281,42 @@ def _preparing_owner_alive(selected_state: str, owner_pid: object) -> bool:
     return _pid_alive(owner_pid)
 
 
+# Every write stores a full copy of the target before and a full copy after, and
+# the targets are append-only journals — so appending 1 KB to a 500 KB journal
+# costs 1 MB. Measured 2026-09-05: `run/transactions` had reached **5.3 GB** in
+# 6904 records of median 700 KB, none of it prunable, because retention was
+# already narrowed to two days and the size of a record had never been touched.
+#
+# Sampling 1412 images: 95% distinct, so deduplication no longer pays; the bytes
+# compress to 9.7% with `lzma` at preset 1, 0.21 s for 7.7 MB. `compression.zstd`
+# would be the modern default but arrives in Python 3.14 and this project
+# supports 3.10 upward.
+#
+# The recorded `sha256` is always the hash of the **plaintext**, so every
+# verification, rollback and abort path checks exactly what it checked before.
+# Images written by an older build stay readable: only a file that begins with
+# the lzma magic is decompressed, so nothing has to be migrated.
+# See `docs/research/2026-09-05-an-undo-trail-that-outgrew-its-purpose.md`.
+_LZMA_MAGIC = b"\xfd7zXZ\x00"
+IMAGE_COMPRESSION_PRESET = 1
+
+
+def _compressed_image(content: bytes) -> bytes:
+    import lzma
+
+    return lzma.compress(content, preset=IMAGE_COMPRESSION_PRESET)
+
+
+def _image_bytes(path: Path) -> bytes:
+    """One staged image as the bytes it stands for, compressed or not."""
+    import lzma
+
+    raw = path.read_bytes()
+    if not raw.startswith(_LZMA_MAGIC):
+        return raw
+    return lzma.decompress(raw)
+
+
 class _ArtifactRoots(NamedTuple):
     artifact: Path
     before: Path
@@ -2554,7 +2590,7 @@ def _before_state(root: Path, transaction_id: str, row: sqlite3.Row) -> object:
     """The undo image for one operation; ABSENT when there was nothing there."""
     if row["before_hash"] == ABSENT:
         return ABSENT
-    content = _before_artifact(root, transaction_id, row["position"]).read_bytes()
+    content = _image_bytes(_before_artifact(root, transaction_id, row["position"]))
     if sha256_bytes(content) != row["before_hash"]:
         raise RuntimeError(
             f"transaction before-image is corrupt for {row['path']}"
@@ -3906,7 +3942,7 @@ def _append_after_bytes(
     after = plan["operations"][0]["after"]
     if not isinstance(after, dict):
         return None
-    return (coordinator.transaction_root / record.id / after["artifact"]).read_bytes()
+    return _image_bytes(coordinator.transaction_root / record.id / after["artifact"])
 
 
 def _append_before_hash(record: TransactionRecord, prefix: bytes) -> str:
@@ -6252,7 +6288,7 @@ class MarkdownCoordinator:
         artifact = (
             self.transaction_root / transaction_id / "before" / f"{position:06d}.bin"
         )
-        content = artifact.read_bytes()
+        content = _image_bytes(artifact)
         if sha256_bytes(content) != operation["before_hash"]:
             raise TransactionFailure(
                 "abort before-image is corrupt",
@@ -7911,7 +7947,7 @@ class MarkdownCoordinator:
         if content is None:
             return ABSENT
         name = f"{position:06d}.bin"
-        self._write_new_file(root / name, content)
+        self._write_new_file(root / name, _compressed_image(content))
         return {"sha256": sha256_bytes(content), "artifact": f"{root.name}/{name}"}
 
     def _verify_plan_artifacts(self, plan: Mapping[str, object], artifact_root: Path) -> None:
@@ -7938,7 +7974,7 @@ class MarkdownCoordinator:
         assert isinstance(state, dict)
         relative = restricted_relative_path(str(state["artifact"]), (state_name,))
         artifact = artifact_root.joinpath(*relative.parts)
-        if sha256_bytes(artifact.read_bytes()) != state["sha256"]:
+        if sha256_bytes(_image_bytes(artifact)) != state["sha256"]:
             raise RuntimeError(f"transaction artifact hash mismatch: {relative}")
 
     def _write_new_file(self, path: Path, content: bytes, *, owner_only: bool = True) -> None:
@@ -8281,7 +8317,8 @@ class MarkdownCoordinator:
             / transaction_id
             / "before"
             / f"{row['position']:06d}.bin"
-        ).read_bytes()
+        )
+        before = _image_bytes(before)
         if sha256_bytes(before) != row["before_hash"]:
             raise RuntimeError("transaction before-image is corrupt")
         return (
@@ -8729,7 +8766,7 @@ class MarkdownCoordinator:
         artifact = (
             self.transaction_root / row["transaction_id"] / str(after["artifact"])
         )
-        content = artifact.read_bytes()
+        content = _image_bytes(artifact)
         if sha256_bytes(content) != row["after_hash"]:
             raise RuntimeError(
                 f"transaction after-image is corrupt for {row['path']}"
