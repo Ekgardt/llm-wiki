@@ -593,7 +593,6 @@ def test_source_drift_before_publication_preserves_prior_and_removes_candidate(
 ):
     import doctor
     import search_memory
-    from corpus_snapshot import CorpusChanged
     from generation_catalog import GenerationCatalog
 
     root, state = _vault(tmp_path)

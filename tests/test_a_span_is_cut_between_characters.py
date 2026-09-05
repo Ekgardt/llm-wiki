@@ -56,7 +56,7 @@ def test_the_pieces_still_cover_the_whole_span_without_overlap() -> None:
 
 
 def test_a_cut_inside_a_character_walks_back_to_its_start() -> None:
-    content = "аб".encode("utf-8")  # two bytes each
+    content = "аб".encode()  # two bytes each
 
     assert corpus_snapshot._character_boundary(content, 1) == 0
     assert corpus_snapshot._character_boundary(content, 2) == 2
@@ -76,7 +76,7 @@ def test_ascii_is_never_moved() -> None:
 
 
 def test_a_four_byte_character_is_not_split_either() -> None:
-    content = "🙂".encode("utf-8")
+    content = "🙂".encode()
 
     for index in (1, 2, 3):
         assert corpus_snapshot._character_boundary(content, index) == 0

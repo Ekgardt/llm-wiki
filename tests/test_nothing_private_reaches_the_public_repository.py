@@ -24,6 +24,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 
 # Slugs that belong to this product and appear in published pages on purpose,
@@ -112,16 +114,37 @@ def test_the_check_reads_git_rather_than_the_ignore_file() -> None:
 
 
 def test_the_vault_knows_which_projects_are_not_its_own() -> None:
-    """Without that list the first check would be vacuous and pass silently."""
+    """Without that list the first check is vacuous, so say when it is.
+
+    A clean checkout has no private project directories — they are gitignored,
+    which is the whole point — so this can only be asserted where they exist.
+    On CI it skips and says so rather than failing; on the owner's vault it is
+    the guard against a silent pass. It failed on every platform in CI until
+    2026-09-05 for exactly that reason, which is a test that did not know where
+    it was.
+    """
+    if not _other_project_slugs():
+        pytest.skip("clean checkout: no private projects to name")
+
     assert _other_project_slugs()
 
 
 def test_a_planted_slug_would_be_caught() -> None:
-    """The guard must fail on the thing it exists to catch."""
-    slugs = _other_project_slugs()
-    planted = sorted(slugs)[0]
+    """The guard must fail on the thing it exists to catch.
 
-    assert _named_slugs(f"the queue for {planted} had jammed", slugs) == {planted}
+    Planted rather than real, so this runs in a clean checkout too: what is
+    under test is the matcher, not the contents of one machine.
+    """
+    slugs = {"someone-elses-project", "another-private-thing"}
+
+    found = _named_slugs("the queue for someone-elses-project had jammed", slugs)
+
+    assert found == {"someone-elses-project"}
+
+
+def test_a_slug_inside_a_longer_word_is_not_a_match() -> None:
+    """Word boundaries, or every page mentioning `api` names a project."""
+    assert _named_slugs("the rapid queue", {"api"}) == set()
 
 
 def test_a_planted_home_path_would_be_caught() -> None:
