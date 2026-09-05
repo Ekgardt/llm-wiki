@@ -7963,7 +7963,7 @@ def _migrated_legacy_queue(
 
 def _repair_queue_action(guard: Any, context: _RepairContext) -> bool:
     """Repair the legacy queue and report whether the v2 queue is usable."""
-    from memory_queue import MemoryQueue, migrate_legacy_queue
+    from memory_queue import active_or_legacy_memory_queue, migrate_legacy_queue
 
     legacy_available = guard.run(
         _repair_leases, context.state_path, context.generated_at, context.repaired
@@ -7979,7 +7979,14 @@ def _repair_queue_action(guard: Any, context: _RepairContext) -> bool:
     marker_valid = _safe_kind(marker, context.state_path)[0] == "regular"
     if migration is None and not marker_valid:
         return False
-    guard.run(MemoryQueue, context.state_path)
+    # Not `MemoryQueue(state_path)`. Adoption replaces the pre-adoption
+    # `run/queue.sqlite3` with a JSON tombstone, so constructing the legacy queue
+    # directly raises `queue_tombstoned_by_adoption` — and because this is the
+    # first action in the repair chain, the whole runtime repair aborted on it.
+    # Found in an audit 2026-09-05: `doctor --repair` had been reporting
+    # "Runtime repair failed" with nothing repaired, on a vault where adoption
+    # is in force, and the message named the fix.
+    guard.run(active_or_legacy_memory_queue, context.root_path, context.state_path)
     return True
 
 
