@@ -909,11 +909,26 @@ def _checkpoint_carries_delta(checkpoint: Mapping[str, object]) -> bool:
 
 
 def _has_pending_delta(item: Mapping[str, object]) -> bool:
-    if "has_project_delta" in item:
-        return item.get("has_project_delta") is True
+    """Whether this pending item carries anything worth journalling.
+
+    `has_project_delta` answers a narrower question than its name suggests: it
+    records whether the *agent* supplied a `project_delta` in the payload. No
+    hook ever does, so it is False on every event this system has ever seen —
+    and asking it first threw away the delta `_checkpoint_delta` had already
+    derived from the observation itself.
+
+    Measured 2026-09-05 on this vault: **3713 journal events across 71 projects,
+    every one of them with an empty delta.** The tool, the file it changed, the
+    command it ran and the failure it hit were all computed and then discarded
+    here, which is why the layer meant to hand work between agents held nothing
+    but timestamps. An outside reviewer found it before we did.
+
+    The content decides. The flag is consulted only when there is no checkpoint
+    event to look at.
+    """
     checkpoint = item.get("checkpoint_event")
     if not isinstance(checkpoint, Mapping):
-        return False
+        return item.get("has_project_delta") is True
     return _checkpoint_carries_delta(checkpoint)
 
 

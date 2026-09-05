@@ -1102,7 +1102,15 @@ def test_debounced_deltas_flush_in_order_on_later_observation_exactly_once(monke
     integration_adapter._observe_project_checkpoint(timer)
     assert len(checkpoints) == 1
     merged = checkpoints[0]
-    assert merged["delta"]["current_task"]["value"] == "Latest"
+    # The timer is a later observation of a real tool, and since 2026-09-05 an
+    # observation reaches the journal without the agent narrating a delta for
+    # it. So the newest current task is what the timer saw, not the last
+    # narrated value — while the order of everything narrated before it, and
+    # the exactly-once flush this test exists for, are unchanged.
+    assert merged["delta"]["current_task"]["value"].startswith("Read src/app.py")
+    assert [
+        operation["value"] for operation in merged["delta"]["current_task_operations"]
+    ][:2] == ["First", "Latest"]
     assert merged["delta"]["blockers"] == [
         {"id": "blocker-1", "action": "close", "value": "Resolved"}
     ]
