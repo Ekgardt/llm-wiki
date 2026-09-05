@@ -170,3 +170,50 @@ def test_the_retry_reports_nothing_when_the_row_already_settled(
     repair.repair(_store(vault, state_root))
 
     assert repair.repair_one(_store(vault, state_root), "demo", 1) == "already settled"
+
+
+def test_a_batch_name_that_will_never_return_is_repaired_once_it_is_old(monkeypatch) -> None:
+    """A batch name was assumed re-requestable. On 2026-09-05 that failed.
+
+    A batch checkpoint hit `precondition_failed` — the journal had moved between
+    planning and applying — and its `occurrence_id` is a digest of exactly the
+    events in that batch, which were consumed and will never be assembled again.
+    One project sat quarantined with 335 events queued behind it, and every
+    later attempt logged `ProjectPendingPriorError` instead of making progress.
+
+    Age is the only readable signal: a request that was going to return has
+    returned within the window.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    import repair_orphaned_checkpoint_names as repair
+
+    now = datetime.now(timezone.utc)
+    old = (now - timedelta(seconds=repair.STALE_CHECKPOINT_SECONDS + 60)).isoformat()
+    fresh = (now - timedelta(seconds=60)).isoformat()
+
+    assert repair._is_orphaned(
+        {"occurrence_id": "batch:abc", "created_at": old}, now.timestamp()
+    )
+    assert not repair._is_orphaned(
+        {"occurrence_id": "batch:abc", "created_at": fresh}, now.timestamp()
+    )
+
+
+def test_a_name_from_before_the_batch_scheme_is_repaired_at_any_age() -> None:
+    from datetime import datetime, timezone
+
+    import repair_orphaned_checkpoint_names as repair
+
+    now = datetime.now(timezone.utc)
+
+    assert repair._is_orphaned(
+        {"occurrence_id": "event-1", "created_at": now.isoformat()}, now.timestamp()
+    )
+
+
+def test_a_row_with_no_transaction_time_is_treated_as_walled_up() -> None:
+    """No timestamp is not evidence that a request is still coming."""
+    import repair_orphaned_checkpoint_names as repair
+
+    assert repair._is_orphaned({"occurrence_id": "batch:abc", "created_at": None}, 0.0)
