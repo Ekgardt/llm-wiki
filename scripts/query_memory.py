@@ -83,6 +83,11 @@ class GroundedContext:
     # Optional so no existing caller changes, and diagnostic only: nothing
     # reads it to make a decision.
     compile_trace: object | None = None
+    # Sources the index still held but the vault has moved on from, dropped
+    # before their text could reach the model. Diagnostic: it is what makes the
+    # difference between "the index lags" and "the answer quoted stale text"
+    # visible to whoever is reading the run.
+    stale_sources: tuple[str, ...] = ()
 
     @classmethod
     def empty(cls, *, profile: str) -> GroundedContext:
@@ -286,7 +291,9 @@ def build_grounded_context(
     parent_paths, sources, compiled = _fitted_selection(
         snapshot, selected, active_budget
     )
-    evidence = _authoritative_evidence(compiled, sources, snapshot.corpus_sha256)
+    evidence, stale = _authoritative_evidence(
+        compiled, sources, snapshot.corpus_sha256, vault
+    )
     prompt_context = _packed_context(evidence, index_text, active_budget)
     packed_tokens = len(prompt_context.encode("utf-8"))
     if packed_tokens > active_budget.available_input_tokens:
@@ -298,6 +305,7 @@ def build_grounded_context(
         parent_paths,
         packed_tokens,
         getattr(compiled, "trace", None),
+        stale,
     )
 
 
@@ -469,20 +477,59 @@ def _evidence_for(item: object, source: object, index: int, revision: str) -> Gr
     )
 
 
+def _source_is_unchanged(source: object, vault: Path) -> bool:
+    """Whether the file still holds the bytes the snapshot captured."""
+    try:
+        live = (Path(vault) / source.record.relative_path).read_bytes()
+    except OSError:
+        return False
+    return hashlib.sha256(live).hexdigest() == source.record.sha256
+
+
+class _FreshSources:
+    """Remembers, per path, whether the file still matches the snapshot.
+
+    An index is allowed to lag — a document written a minute ago is simply not
+    in it yet, and no amount of checking finds what was never captured. What is
+    not allowed is quoting a span whose file has moved on: that reaches the
+    model as current text, and verifying the citation afterwards is too late to
+    stop it being read.
+
+    So the sources actually about to be quoted are re-read here, and only here.
+    That is a handful of files rather than the whole corpus, which is what makes
+    it affordable at query time.
+    """
+
+    def __init__(self, vault: Path) -> None:
+        self.vault = vault
+        self.verdicts: dict[str, bool] = {}
+
+    def holds(self, source: object) -> bool:
+        path = source.record.relative_path
+        if path not in self.verdicts:
+            self.verdicts[path] = _source_is_unchanged(source, self.vault)
+        return self.verdicts[path]
+
+    @property
+    def stale_paths(self) -> tuple[str, ...]:
+        return tuple(sorted(path for path, ok in self.verdicts.items() if not ok))
+
+
 def _authoritative_evidence(
-    compiled: object, sources: tuple, revision: str
-) -> list[GroundedEvidence]:
-    """One entry per distinct authoritative span, in the order compile chose."""
+    compiled: object, sources: tuple, revision: str, vault: Path
+) -> tuple[list[GroundedEvidence], tuple[str, ...]]:
+    """One entry per distinct authoritative span whose file still says the same."""
     source_by_path = {source.record.relative_path: source for source in sources}
+    fresh = _FreshSources(vault)
     found: list[GroundedEvidence] = []
     seen: set[tuple[str, int, int]] = set()
     for item in compiled.items:
         source = source_by_path[item.source]
-        if not _is_quotable(item, source, seen):
+        if not _is_quotable(item, source, seen) or not fresh.holds(source):
             continue
         seen.add((item.source, item.byte_start, item.byte_end))
         found.append(_evidence_for(item, source, len(found) + 1, revision))
-    return found
+    return found, fresh.stale_paths
 
 
 def _rendered_context(evidence: list[GroundedEvidence], index_text: str) -> str:
