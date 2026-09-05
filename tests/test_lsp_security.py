@@ -1313,8 +1313,15 @@ def test_posix_scanner_retries_and_scales_near_linearly() -> None:
         min(measure(count) for _attempt in range(5))
         for count in (200, 400, 800)
     )
-    assert timings[1] <= max(0.05, timings[0] * 3.25)
-    assert timings[2] <= max(0.05, timings[1] * 3.25)
+    # A ratio cannot be measured with a clock coarser than the quantity. Windows
+    # gives `process_time` a 15.625 ms tick, so these timings arrive quantised to
+    # whole ticks: on 2026-08-31 the run that turned `main` red compared 4 ticks
+    # against 1 and called 4x a scaling failure, when the difference between them
+    # is one clock edge. The floor has to be several ticks of whatever clock this
+    # machine actually has, or the assertion is measuring the clock.
+    floor = max(0.05, 8 * time.get_clock_info("process_time").resolution)
+    assert timings[1] <= max(floor, timings[0] * 3.25)
+    assert timings[2] <= max(floor, timings[1] * 3.25)
     assert sum(timings) < 5.0
 
 
