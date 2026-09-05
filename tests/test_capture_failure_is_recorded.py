@@ -75,3 +75,44 @@ def test_asking_for_help_is_not_recorded_as_a_lost_capture(monkeypatch):
         integration_adapter.main(["--help"])
 
     assert recorder.calls == []
+
+
+def test_a_vanished_transcript_is_not_a_failed_capture(tmp_path):
+    """27 of 452 recorded losses were this, and it was the only kind still live.
+
+    Measured 2026-09-02: sessions started outside any project keep their
+    transcript under `-home-user` or `-tmp`, and by the time SessionEnd runs the
+    file can already be gone. The branch turned on the path being set, so the
+    reading route ran and died on `resolve(strict=True)`. Nothing is recovered
+    by crashing there — if the file is gone its contents are gone — so the
+    session takes the route written for having no transcript.
+    """
+    import integration_adapter
+
+    missing = tmp_path / "gone.jsonl"
+
+    assert not integration_adapter._transcript_present({"transcript_path": str(missing)})
+
+
+def test_a_transcript_that_exists_is_still_read(tmp_path):
+    import integration_adapter
+
+    present = tmp_path / "there.jsonl"
+    present.write_text("{}\n", encoding="utf-8")
+
+    assert integration_adapter._transcript_present({"transcript_path": str(present)})
+
+
+def test_no_path_at_all_is_still_no_transcript():
+    import integration_adapter
+
+    assert not integration_adapter._transcript_present({})
+    assert not integration_adapter._transcript_present({"transcript_path": ""})
+    assert not integration_adapter._transcript_present({"transcript_path": 7})
+
+
+def test_a_directory_is_not_a_transcript(tmp_path):
+    """`is_file` rather than `exists`: a directory would read as a transcript."""
+    import integration_adapter
+
+    assert not integration_adapter._transcript_present({"transcript_path": str(tmp_path)})

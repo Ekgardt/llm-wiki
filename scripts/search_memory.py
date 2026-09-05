@@ -3348,8 +3348,60 @@ def _fts_counts_and_chunks_match(
     )
 
 
+# Words that carry no evidence and, under an implicit AND, single-handedly
+# reduce a natural question to no matches at all.
+_QUERY_STOPWORDS = frozenset(
+    {
+        "a", "об", "об", "am", "an", "and", "are", "as", "at", "be", "been",
+        "but", "by", "did", "do", "does", "for", "from", "had", "has", "have",
+        "how", "i", "in", "is", "it", "many", "me", "much", "my", "of", "on",
+        "or", "the", "их", "that", "their", "them", "there", "these", "they",
+        "this", "to", "was", "we", "were", "what", "when", "where", "which",
+        "who", "why", "will", "with", "you", "your",
+        "в", "во", "для", "до", "за", "и", "из", "или", "как", "какой", "когда",
+        "мне", "мой", "моя", "на", "не", "о", "от", "по", "при", "с", "у",
+        "что", "чтобы", "это", "я",
+    }
+)
+
+
+def _carries_evidence(word: str) -> bool:
+    return word.casefold() not in _QUERY_STOPWORDS
+
+
+def _query_terms(query: str) -> list[str]:
+    """The words worth matching on, and every word when none of them is.
+
+    A question is mostly function words. Dropping them is what makes an OR
+    query rank on evidence rather than on how often "the" occurs.
+    """
+    words = query.split()
+    content = list(filter(_carries_evidence, words))
+    return content or words
+
+
 def _fts_query(query: str) -> str:
-    return " ".join(f'"{word.replace(chr(34), chr(34) * 2)}"' for word in query.split() if word)
+    """One FTS5 expression for a natural-language question.
+
+    FTS5 puts an implicit **AND** between bare terms: `MATCH 'one two three'`
+    is `one AND two AND three`, and the documentation says so in as many words.
+    So a ten-word question only matched a chunk that contained all ten words,
+    and questions phrased as questions matched nothing at all.
+
+    Measured on this stand 2026-09-03: "What day of the week do I take a
+    cocktail-making class?" retrieved **zero** candidates, while "cocktail
+    class" against the same vault retrieved three. Three of fifty questions
+    reached the model with an empty evidence manifest for exactly this reason,
+    and the model duly said it had nothing to work with.
+
+    Joining with OR is not a loosening of relevance, because bm25 separates a
+    query into its component phrases and scores a row by how many it carries:
+    a chunk holding every term still outranks one holding a single term. What
+    changes is that the one-term chunk is now reachable instead of discarded.
+    """
+    words = _query_terms(query)
+    quoted = [f'"{word.replace(chr(34), chr(34) * 2)}"' for word in words]
+    return " OR ".join(quoted)
 
 
 def _normalized_filename_stem(value: str) -> str:
@@ -5262,8 +5314,8 @@ def _legacy_bm25_rows(
     conn: sqlite3.Connection, query: str, limit: int
 ) -> list[tuple[object, ...]]:
     """Adaptive fetch: short queries match more pages, so ask for more."""
-    words = [word for word in query.split() if word]
-    fts_query = " ".join(f'"{word.replace(chr(34), chr(34) * 2)}"' for word in words)
+    words = _query_terms(query)
+    fts_query = _fts_query(query)
     multiplier = 5 if len(words) <= 3 else 3
     return conn.execute(
         """

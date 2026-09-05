@@ -101,6 +101,22 @@ def declined_to_answer(result: dict) -> bool:
     return result.get("status") not in {"answered", None} and not result.get("error")
 
 
+def _judge_verdicts(rows: list[dict]) -> list[float]:
+    return [
+        float(row["judge_correct"])
+        for row in rows
+        if isinstance(row.get("judge_correct"), bool)
+    ]
+
+
+def _judge_accuracy_of(rows: list[dict]) -> float | None:
+    """The judge's mean where it spoke, or None where it never ran."""
+    verdicts = _judge_verdicts(rows)
+    if not verdicts:
+        return None
+    return round(sum(verdicts) / len(verdicts), 4)
+
+
 def score_question(result: dict) -> dict:
     """Attach deterministic metrics to one per-question result record."""
     if result.get("is_abstention"):
@@ -180,6 +196,13 @@ def _quality_metrics(scored: list[dict]) -> dict:
 def _cost_metrics(rows: list[dict]) -> dict:
     return {
         "mean_prompt_chars": _mean(_metric_values(rows, "prompt_chars")),
+        # The number the published figures are: an LLM judge's verdict, not a
+        # substring test. `accuracy` here is `contains_answer`, which cannot
+        # match a free-text answer and can never match a preference gold at all
+        # — measured 2026-09-01, `single-session-preference` read 0.0000 by
+        # containment and 0.25 by the judge on the same rows. Present when the
+        # judged rows were folded back in, `None` when they were not.
+        "judge_accuracy": _judge_accuracy_of(rows),
         "mean_est_prompt_tokens": _mean(_metric_values(rows, "est_prompt_tokens")),
         "mean_est_total_prompt_tokens": _mean(
             _metric_values(rows, "est_total_prompt_tokens")

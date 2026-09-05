@@ -89,7 +89,10 @@ TRANSACTION_STATES = (
     "quarantined",
 )
 QUEUE_STATES = ("ready", "leased", "blocked", "succeeded", "dead", "cancelled")
-UNDO_RETENTION_DAYS = 30
+# One source of truth for the window; it was 30 in four files. See
+# `docs/research/2026-09-02-where-undo-belongs-and-for-how-long.md`.
+from markdown_transaction import UNDO_RETENTION_DAYS  # noqa: E402
+
 MAINTENANCE_LEASE_SECONDS = 120
 MAINTENANCE_HEARTBEAT_SECONDS = 40.0
 # Two missed beats still leave the 120-second lease alive; the third would not.

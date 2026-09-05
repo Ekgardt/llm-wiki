@@ -39,6 +39,22 @@ BUILD_DEADLINE_SECONDS = 900.0
 RETRIEVE_DEADLINE_SECONDS = 180.0
 ANSWER_DEADLINE_SECONDS = 420.0
 QA_CANDIDATES = 12
+
+
+def _qa_candidates() -> int:
+    """How many candidates the answer sees, so retrieval depth is an arm too.
+
+    Measured 2026-09-02: widening the answer window four-fold left the prompt at
+    4 727 estimated tokens against 4 500 — unchanged, because after the chunking
+    fix all twelve candidates already fit. The window had stopped being the
+    binding constraint and nobody had noticed; the count is. Retrieval depth is
+    also the largest single lever in MemMachine's published ablation, at +4.2%
+    against +0.8% for chunking.
+    """
+    raw = os.environ.get("LLMWIKI_BENCH_QA_CANDIDATES", "").strip()
+    if not raw.isdigit():
+        return QA_CANDIDATES
+    return max(1, min(200, int(raw)))
 # The product's stock grounded-answer budget is 8192 byte-counted tokens; one
 # LongMemEval session entry is ~10 KB, so under the stock budget every span is
 # shed and the answer refuses itself (measured on question 25e5aa4f). The
@@ -46,6 +62,22 @@ QA_CANDIDATES = 12
 # prompt under ~28 KB ≈ ~7k estimated tokens — the same retrieval envelope
 # Mem0's "<7000 tokens" claim describes, so the cost comparison stays fair.
 ANSWER_INPUT_BUDGET = 28_672
+
+
+def _answer_budget() -> int:
+    """The answer window for this arm, so a sweep needs no code edit.
+
+    The stock value keeps the whole prompt near 7 000 estimated tokens to match
+    the envelope Mem0's cost claim describes. Whether that ceiling is costing
+    accuracy has never been measured — the reader accepts two hundred thousand,
+    and 2026 work reports that a fixed compression budget applied regardless of
+    context breaks the scaling a stronger reader should give. This makes the
+    ceiling an arm of the stand instead of a constant.
+    """
+    raw = os.environ.get("LLMWIKI_BENCH_ANSWER_BUDGET", "").strip()
+    if not raw.isdigit():
+        return ANSWER_INPUT_BUDGET
+    return max(4096, int(raw))
 
 _ERROR_KINDS = (
     ("provider returned no response", "provider_no_response"),
@@ -252,13 +284,28 @@ def profile_for(question_text: str) -> str:
     return analyze_query(question_text).recommended_profile.upper()
 
 
+def _searchable(question_text: str, question_date: str) -> str:
+    """The question, plus the dates it only implies, anchored on the day asked.
+
+    "Which book did I finish a week ago" carries no date, so nothing the vault
+    dates can match it. The product resolves the question's own expressions
+    against today; here the day the question is asked is part of the dataset,
+    so it is the anchor and today is irrelevant.
+    """
+    from datetime import date
+
+    from query_memory import searchable_question
+
+    return searchable_question(question_text, date.fromisoformat(day_of(question_date)))
+
+
 def _retrieved_rows(question_text: str, profile: str) -> list[dict]:
     from retrieval import retrieve_via_search_memory
 
     return list(
         retrieve_via_search_memory(
             question_text,
-            limit=QA_CANDIDATES,
+            limit=_qa_candidates(),
             semantic=True,
             profile=profile,
             deadline_monotonic=time.monotonic() + RETRIEVE_DEADLINE_SECONDS,
@@ -386,7 +433,16 @@ def _instrumented_generator(metrics: dict, gold: str = ""):
         metrics["gold_in_prompt"] = bool(needle) and needle in prompt.casefold()
         started = time.monotonic()
         try:
-            return call_llm(prompt, system_prompt, max_tokens)
+            reply = call_llm(prompt, system_prompt, max_tokens)
+            # What the citation gates may be about to destroy. Measured
+            # 2026-09-01: 28 of 200 answers were produced and then thrown away
+            # by `verify_grounded_answer`, and the row kept only the gate's
+            # message — so the accuracy of what the strictest rule discards
+            # could only be bounded, 0 to +0.14, never priced. Recording the
+            # reply changes no answer and no verdict; it lets the discarded
+            # ones be judged on their own.
+            metrics["raw_reply"] = (reply or "")[:8000]
+            return reply
         finally:
             metrics["provider_seconds"] = round(time.monotonic() - started, 2)
 
@@ -450,7 +506,7 @@ def _measured_compile(root: Path, snapshot: object, rows: list[dict], profile: s
             rows,
             vault=root,
             profile=profile,
-            budget=ContextBudget(None, ANSWER_INPUT_BUDGET, QA_MAX_OUTPUT_TOKENS, 512),
+            budget=ContextBudget(None, _answer_budget(), QA_MAX_OUTPUT_TOKENS, 512),
         )
     except Exception:  # noqa: BLE001 - a measurement never fails the question
         return {}
@@ -477,7 +533,7 @@ def _answer_outcome(
             candidates=rows,
             generator=_instrumented_generator(metrics, gold),
             profile=profile,
-            budget=ContextBudget(None, ANSWER_INPUT_BUDGET, QA_MAX_OUTPUT_TOKENS, 512),
+            budget=ContextBudget(None, _answer_budget(), QA_MAX_OUTPUT_TOKENS, 512),
             deadline=time.monotonic() + ANSWER_DEADLINE_SECONDS,
         )
     except Exception as exc:  # noqa: BLE001 - every failure is a scored outcome
@@ -512,7 +568,7 @@ def run_question(question: dict, work: Path) -> dict:
     plain = str(question["question"])
     profile = profile_for(plain)
     retrieve_started = time.monotonic()
-    rows = _retrieved_rows(plain, profile)
+    rows = _retrieved_rows(_searchable(plain, str(question["question_date"])), profile)
     answer_started = time.monotonic()
     metrics: dict = {}
     outcome = _answer_outcome(

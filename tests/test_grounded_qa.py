@@ -195,28 +195,71 @@ def test_candidates_are_grouped_by_parent_and_share_one_budget(vault: Path) -> N
     assert len({item.citation_id for item in context.evidence}) == len(context.evidence)
 
 
-def test_verifier_rejects_tampered_citation_fields_and_unsupplied_ids(vault: Path) -> None:
+def _nothing_reaches_the_reader(candidate: dict, context, vault: Path) -> bool:
+    """A tampered citation must never surface, by either route.
+
+    A field the schema itself forbids is refused outright. One that is
+    well-formed but does not resolve is dropped, and every claim resting on it
+    is dropped with it — leaving an abstention rather than a rejected answer.
+    Both are the same guarantee: no unverified span reaches the reader.
+    """
+    try:
+        verified = verify_grounded_answer(candidate, context, vault=vault)
+    except EvidenceResolutionError:
+        return True
+    return verified["status"] != "answered" and not verified["claims"]
+
+
+def test_a_citation_naming_evidence_that_was_never_supplied_is_dropped(vault: Path) -> None:
     page = _write_page(vault, "alpha.md", "Alpha is enabled.")
     snapshot = collect_corpus(vault)
     chunk = next(
         item for item in snapshot.chunks if item.source_path == page.relative_to(vault).as_posix()
     )
     context = build_grounded_context(snapshot, (chunk,), vault=vault, profile="BASE")
-    valid = json.loads(_answer_for_prompt(context.prompt_context))
+    candidate = json.loads(_answer_for_prompt(context.prompt_context))
+    candidate["citations"][0]["citation_id"] = "E999"
 
-    for field, bad in (
-        ("citation_id", "E999"),
+    assert _nothing_reaches_the_reader(candidate, context, vault)
+
+
+@pytest.mark.parametrize(
+    "field,bad",
+    (
         ("relative_path", "../outside.md"),
         ("source_sha256", "0" * 64),
         ("revision", "wrong"),
-        ("byte_start", -1),
-        ("byte_end", 999999),
         ("span_sha256", "f" * 64),
-    ):
-        candidate = json.loads(json.dumps(valid))
-        candidate["citations"][0][field] = bad
-        with pytest.raises(EvidenceResolutionError):
-            verify_grounded_answer(candidate, context, vault=vault)
+        ("byte_end", 999999),
+    ),
+    ids=("path", "source-hash", "revision", "span-hash", "byte-end"),
+)
+def test_a_tampered_locator_cannot_be_believed_because_it_is_not_read(
+    vault: Path, field: str, bad: object
+) -> None:
+    """The published citation comes from our manifest, never from the reply.
+
+    Until 2026-09-03 the reply had to reproduce nine fields of the manifest
+    byte for byte, and a mistyped one destroyed the answer — the largest single
+    failure this stand has measured, eighteen answers in 200. The model now
+    supplies the identifier and nothing else, so writing a lie into a locator
+    field changes neither what is verified nor what is published.
+    """
+    page = _write_page(vault, "alpha.md", "Alpha is enabled.")
+    snapshot = collect_corpus(vault)
+    chunk = next(
+        item for item in snapshot.chunks if item.source_path == page.relative_to(vault).as_posix()
+    )
+    context = build_grounded_context(snapshot, (chunk,), vault=vault, profile="BASE")
+    candidate = json.loads(_answer_for_prompt(context.prompt_context))
+    candidate["citations"][0][field] = bad
+
+    verified = verify_grounded_answer(candidate, context, vault=vault)
+
+    published = verified["citations"][0]
+    supplied = next(item for item in context.evidence if item.citation_id == published["citation_id"])
+    assert published[field] == getattr(supplied, field)
+    assert published[field] != bad
 
 
 def test_verifier_enforces_cited_atomic_claims_and_abstention() -> None:
@@ -350,8 +393,13 @@ def test_verifier_rejects_source_changed_after_generation(vault: Path) -> None:
     answer = json.loads(_answer_for_prompt(context.prompt_context))
     page.write_text(page.read_text(encoding="utf-8") + "Changed.\n", encoding="utf-8")
 
-    with pytest.raises(EvidenceResolutionError, match="hash"):
-        verify_grounded_answer(answer, context, vault=vault)
+    verified = verify_grounded_answer(answer, context, vault=vault)
+
+    # The span no longer hashes to what generation was shown, so the citation
+    # is dropped and nothing it supported survives.
+    assert verified["status"] != "answered"
+    assert verified["claims"] == []
+    assert verified["citations"] == []
 
 
 def test_generation_receives_the_closed_schema_inside_the_bounded_prompt(vault: Path) -> None:
@@ -413,8 +461,40 @@ def test_a_citation_about_something_else_is_rejected(vault: Path) -> None:
         }
     ]
 
-    with pytest.raises(GroundedQAError, match="shares no content"):
-        verify_grounded_answer(answer, context, vault=vault)
+    # The claim does not reach the reader, which is the property OPEN-017 asked
+    # for. Since 2026-09-02 a failing claim is dropped rather than made to
+    # destroy the answer around it, so an answer whose only claim fails becomes
+    # an abstention instead of an exception.
+    verdict = verify_grounded_answer(answer, context, vault=vault)
+
+    assert verdict["status"] == "insufficient_evidence"
+    assert verdict["claims"] == []
+    assert verdict["citations"] == []
+
+
+def test_a_good_claim_survives_a_bad_one_beside_it(vault: Path) -> None:
+    """Seven of eleven answers the gates destroyed carried the right answer.
+
+    Measured 2026-09-02, once the discarded replies were recorded. One claim
+    citing a span too far used to take its neighbours with it.
+    """
+    page = _write_page(vault, "alpha.md", "Alpha is enabled.")
+    snapshot = collect_corpus(vault)
+    chunk = next(
+        item for item in snapshot.chunks if item.source_path == page.relative_to(vault).as_posix()
+    )
+    context = build_grounded_context(snapshot, (chunk,), vault=vault, profile="BASE")
+    answer = json.loads(_answer_for_prompt(context.prompt_context))
+    citation_ids = answer["claims"][0]["citation_ids"]
+    answer["claims"] = [
+        {"text": "Alpha is enabled.", "citation_ids": citation_ids},
+        {"text": "Restic снимки шифруются перед отправкой.", "citation_ids": citation_ids},
+    ]
+
+    verdict = verify_grounded_answer(answer, context, vault=vault)
+
+    assert verdict["status"] == "answered"
+    assert [claim["text"] for claim in verdict["claims"]] == ["Alpha is enabled."]
 
 
 def test_a_claim_that_shares_a_term_with_its_citation_is_kept(vault: Path) -> None:

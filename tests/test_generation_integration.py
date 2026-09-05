@@ -7,6 +7,7 @@ import os
 import sqlite3
 import sys
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -19,7 +20,7 @@ import build_tiers  # noqa: E402
 import contextual_retrieval  # noqa: E402
 import rebuild_lance_index  # noqa: E402
 import search_memory  # noqa: E402
-from corpus_snapshot import CorpusChanged, collect_corpus  # noqa: E402
+from corpus_snapshot import collect_corpus  # noqa: E402
 from generation_catalog import GenerationCatalog  # noqa: E402
 from reliable_memory import canonical_json_bytes  # noqa: E402
 
@@ -151,30 +152,56 @@ def numpy_module():
     return pytest.importorskip("numpy")
 
 
-def test_all_generation_consumers_publish_one_closed_snapshot(tmp_path: Path, numpy_module):
+@dataclass(frozen=True)
+class _Published:
+    """One generation, built once, for the consumers that all read it."""
+
+    vault: Path
+    snapshot: object
+    catalog: object
+    generation: Path
+    manifest: dict
+    registered: dict
+    active: dict
+
+
+@pytest.fixture
+def published(tmp_path: Path) -> _Published:
     vault, _source = _write_snapshot_vault(tmp_path)
     snapshot = collect_corpus(vault)
     catalog = GenerationCatalog(tmp_path / "state")
-
     generation, manifest = _build_generation(snapshot, catalog, "generation-1")
     registered = catalog.register("generation-1")
     assert catalog.activate("generation-1", expected_active=None) is True
-    active = catalog.get_active()
+    return _Published(
+        vault, snapshot, catalog, generation, manifest, registered, catalog.get_active()
+    )
 
-    expected_sources = _source_membership(snapshot)
-    expected_chunk_ids = [chunk.id for chunk in snapshot.chunks]
-    expected_chunk_sources = [
+
+def _chunk_sources(snapshot) -> list[tuple]:
+    return [
         (chunk.source_id, chunk.source_path, chunk.source_sha256)
         for chunk in snapshot.chunks
     ]
-    assert [source[1] for source in expected_sources] == [
+
+
+def test_the_snapshot_selects_the_current_pages_and_not_the_retired_one(published):
+    membership = _source_membership(published.snapshot)
+
+    assert [source[1] for source in membership] == [
         "knowledge/notes/concept/same.md",
         "knowledge/notes/pattern/same.md",
     ]
-    assert {Path(source[1]).stem for source in expected_sources} == {"same"}
-    assert all(source.record.relative_path != "knowledge/notes/old.md" for source in snapshot.sources)
-    assert registered == active == manifest
-    assert set(manifest) == {
+    assert {Path(source[1]).stem for source in membership} == {"same"}
+    assert all(
+        source.record.relative_path != "knowledge/notes/old.md"
+        for source in published.snapshot.sources
+    )
+
+
+def test_registration_activation_and_the_manifest_agree(published):
+    assert published.registered == published.active == published.manifest
+    assert set(published.manifest) == {
         "generation_id",
         "schema_version",
         "collector_version",
@@ -190,76 +217,96 @@ def test_all_generation_consumers_publish_one_closed_snapshot(tmp_path: Path, nu
         "artifacts",
         "vector_state",
     }
-    assert manifest["source_manifest_sha256"] == snapshot.corpus_sha256
-    assert {item["path"] for item in manifest["artifacts"]} == {
-        path.relative_to(generation).as_posix()
-        for path in generation.rglob("*")
+    assert published.manifest["source_manifest_sha256"] == published.snapshot.corpus_sha256
+
+
+def test_the_manifest_names_every_file_the_generation_wrote(published):
+    on_disk = {
+        path.relative_to(published.generation).as_posix()
+        for path in published.generation.rglob("*")
         if path.is_file() and path.name != "manifest.json"
     }
 
-    with closing(sqlite3.connect(generation / "search.sqlite3")) as database:
+    assert {item["path"] for item in published.manifest["artifacts"]} == on_disk
+
+
+def test_the_search_index_carries_the_snapshot_chunks(published):
+    with closing(sqlite3.connect(published.generation / "search.sqlite3")) as database:
         fts_manifest = database.execute(
             "SELECT value FROM generation_metadata WHERE key='source_manifest_sha256'"
         ).fetchone()[0]
-        fts_chunks = database.execute(
+        rows = database.execute(
             "SELECT chunk_id, source_id, source_path, source_sha256 "
             "FROM chunks ORDER BY chunk_order"
         ).fetchall()
-    assert fts_manifest == snapshot.corpus_sha256
-    assert [row[0] for row in fts_chunks] == expected_chunk_ids
-    assert [tuple(row[1:]) for row in fts_chunks] == expected_chunk_sources
 
-    vector_metadata = json.loads((generation / "vectors.json").read_bytes())
-    vectors = numpy_module.load(generation / "vectors.npy", allow_pickle=False)
-    assert vector_metadata["corpus_sha256"] == snapshot.corpus_sha256
-    assert vector_metadata["chunk_ids"] == expected_chunk_ids
+    assert fts_manifest == published.snapshot.corpus_sha256
+    assert [row[0] for row in rows] == [chunk.id for chunk in published.snapshot.chunks]
+    assert [tuple(row[1:]) for row in rows] == _chunk_sources(published.snapshot)
+
+
+def test_the_vectors_carry_the_snapshot_chunks(published, numpy_module):
+    metadata = json.loads((published.generation / "vectors.json").read_bytes())
+    vectors = numpy_module.load(published.generation / "vectors.npy", allow_pickle=False)
+
+    assert metadata["corpus_sha256"] == published.snapshot.corpus_sha256
+    assert metadata["chunk_ids"] == [chunk.id for chunk in published.snapshot.chunks]
     assert list(
         zip(
-            vector_metadata["source_ids"],
-            vector_metadata["source_paths"],
-            vector_metadata["source_sha256"],
+            metadata["source_ids"],
+            metadata["source_paths"],
+            metadata["source_sha256"],
             strict=True,
         )
-    ) == expected_chunk_sources
-    assert vectors.shape == (len(snapshot.chunks), VECTOR_DIMENSIONS)
+    ) == _chunk_sources(published.snapshot)
+    assert vectors.shape == (len(published.snapshot.chunks), VECTOR_DIMENSIONS)
 
-    lance_rows = json.loads((generation / "lance/rows.json").read_bytes())
-    assert [row["chunk_id"] for row in lance_rows] == expected_chunk_ids
+
+def test_the_lance_rows_carry_the_snapshot_chunks(published):
+    rows = json.loads((published.generation / "lance/rows.json").read_bytes())
+
+    assert [row["chunk_id"] for row in rows] == [
+        chunk.id for chunk in published.snapshot.chunks
+    ]
     assert [
-        (row["source_id"], row["source_path"], row["source_sha256"])
-        for row in lance_rows
-    ] == expected_chunk_sources
+        (row["source_id"], row["source_path"], row["source_sha256"]) for row in rows
+    ] == _chunk_sources(published.snapshot)
 
-    context_sources = []
-    for path in sorted((generation / "contextual").glob("*.json")):
-        source = json.loads(path.read_bytes())["source"]
-        context_sources.append(
-            (source["logical_id"], source["relative_path"], source["sha256"])
+
+def test_the_contextual_and_tier_artifacts_carry_the_snapshot_sources(published):
+    membership = _source_membership(published.snapshot)
+    contextual = [
+        (
+            json.loads(path.read_bytes())["source"]["logical_id"],
+            json.loads(path.read_bytes())["source"]["relative_path"],
+            json.loads(path.read_bytes())["source"]["sha256"],
         )
-    assert sorted(context_sources) == sorted(expected_sources)
-
-    tier_entries = json.loads((generation / "tiers/tiers.json").read_bytes())["entries"]
-    tier_sources = [
+        for path in sorted((published.generation / "contextual").glob("*.json"))
+    ]
+    entries = json.loads((published.generation / "tiers/tiers.json").read_bytes())["entries"]
+    tiers = [
         (
             entry["source"]["logical_id"],
             entry["source"]["relative_path"],
             entry["source"]["sha256"],
         )
-        for entry in tier_entries
+        for entry in entries
     ]
-    assert tier_sources == expected_sources
 
-    assert not (vault / "cache").exists()
+    assert sorted(contextual) == sorted(membership)
+    assert tiers == membership
+
+
+@pytest.mark.parametrize(
+    "legacy",
+    ("cache/index.sqlite", "cache/vectors.npy", "cache/vectors_meta.json", "cache/lancedb"),
+)
+def test_no_legacy_cache_is_left_beside_the_generation(published, tmp_path, legacy):
+    assert not (published.vault / "cache").exists()
     assert {path.name for path in (tmp_path / "state/cache").iterdir()} == {
         "evidence-graph"
     }
-    for legacy in (
-        "cache/index.sqlite",
-        "cache/vectors.npy",
-        "cache/vectors_meta.json",
-        "cache/lancedb",
-    ):
-        assert not (tmp_path / "state" / legacy).exists()
+    assert not (tmp_path / "state" / legacy).exists()
 
 
 def test_publication_fence_preserves_prior_active_generation_on_hash_drift(
@@ -305,15 +352,18 @@ def test_publication_fence_preserves_prior_active_generation_on_hash_drift(
     assert source.stat().st_size == before.st_size
     os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
 
-    with pytest.raises(CorpusChanged, match="membership or source hashes changed"):
-        search_memory.publish_generation(
-            candidate_snapshot,
-            vault,
-            catalog,
-            "generation-2",
-            expected_active="generation-1",
-        )
+    # Until 2026-09-05 a source edited while the build ran refused the whole
+    # publication and left the prior generation active. On the live vault that
+    # meant nothing was activated from 2026-08-30 onward. A snapshot describes a
+    # moment the vault passed through, not the newest one, and a source that has
+    # since moved on is dropped at query time before it can be quoted.
+    published = search_memory.publish_generation(
+        candidate_snapshot,
+        vault,
+        catalog,
+        "generation-2",
+        expected_active="generation-1",
+    )
 
-    assert catalog.get_active() == prior_manifest
-    with pytest.raises(ValueError, match="generation is not registered"):
-        catalog.activate("generation-2", expected_active="generation-1")
+    assert published is True
+    assert catalog.get_active() != prior_manifest

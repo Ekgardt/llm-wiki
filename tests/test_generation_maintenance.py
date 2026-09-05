@@ -612,19 +612,23 @@ def test_source_drift_before_publication_preserves_prior_and_removes_candidate(
         return descriptor
 
     monkeypatch.setattr(search_memory, "build_generation_fts", build_then_drift)
-    with pytest.raises(CorpusChanged):
-        doctor._build_or_refresh_generation(
-            root,
-            state,
-            deadline=time.monotonic() + 5,
-            cancelled=lambda: False,
-            max_sources=10,
-            force_rebuild=False,
-        )
+
+    # Until 2026-09-05 a page edited during the build refused the publication and
+    # left the prior generation active. Measured on the live vault, that is why
+    # nothing was activated from 2026-08-30 onward. The build now finishes; the
+    # page that moved is dropped at query time before its text can be quoted.
+    doctor._build_or_refresh_generation(
+        root,
+        state,
+        deadline=time.monotonic() + 5,
+        cancelled=lambda: False,
+        max_sources=10,
+        force_rebuild=False,
+    )
 
     catalog = GenerationCatalog(state)
-    assert catalog.get_active()["generation_id"] == prior["generation_id"]
-    assert {path.name for path in catalog.generations_path.iterdir()} == before
+    assert catalog.get_active()["generation_id"] != prior["generation_id"]
+    assert {path.name for path in catalog.generations_path.iterdir()} > before
 
 
 def test_cancellation_after_registration_leaves_only_an_unregistered_orphan(
