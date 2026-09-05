@@ -611,7 +611,13 @@ def _anchor_tokens(tokens: set[str]) -> set[str]:
 # are dense with paths and function names, and a supporting span routinely
 # names different ones than the claim does. For memory, refusing a correct
 # answer costs more than accepting a weak citation.
-_FIGURE = re.compile(r"(?<![\w.])\d+(?:[.,]\d+)*(?![\w.])|--[a-z][a-z0-9-]{2,}")
+# The trailing guard used to be `(?![\w.])`, which made a figure at the end of a
+# sentence invisible: in "the necklace cost $200." the match for `200` is
+# followed by a full stop and the lookahead refused it, so the span read as
+# carrying no figure at all and the gate stayed quiet about every claim offered
+# for it. Found 2026-09-05 while testing something else. The guard now refuses
+# only what actually continues the number.
+_FIGURE = re.compile(r"(?<![\w.])\d+(?:[.,]\d+)*(?!\w)(?!\.\d)|--[a-z][a-z0-9-]{2,}")
 
 
 def _hard_tokens(text: str) -> set[str]:
@@ -640,7 +646,9 @@ def _require_figures_agree(claim_text: str, span_text: str) -> None:
     )
 
 
-def _require_citation_touches_claim(claim_text: str, span_text: str) -> None:
+def _require_citation_touches_claim(
+    claim_text: str, span_text: str, *, derived: bool = False
+) -> None:
     """Reject a citation that shares nothing with the claim it is offered for.
 
     This is a necessary condition, not proof of entailment: a span from the
@@ -649,7 +657,8 @@ def _require_citation_touches_claim(claim_text: str, span_text: str) -> None:
     and, since 2026-08-25, the narrower case where both sides state figures and
     none of them agree.
     """
-    _require_figures_agree(claim_text, span_text)
+    if not derived:
+        _require_figures_agree(claim_text, span_text)
     claim_tokens = _content_tokens(claim_text)
     if not claim_tokens:
         return
@@ -770,21 +779,78 @@ def _verified_citations(
     return cited
 
 
+DERIVATIONS = ("sum", "count", "difference", "latest")
+
+# A derivation over one span is not a derivation. Requiring two is what keeps
+# the exemption from becoming a way to assert any figure at all beside one
+# unrelated citation.
+MINIMUM_DERIVATION_INPUTS = 2
+
+
+def _declared_derivation(claim: Mapping[str, object]) -> str | None:
+    value = claim.get("derivation")
+    return str(value) if value in DERIVATIONS else None
+
+
+def _require_derivation_inputs(claim: Mapping[str, object], ids: Sequence[object]) -> None:
+    if len(ids) >= MINIMUM_DERIVATION_INPUTS:
+        return
+    raise GroundedQAError(
+        "a derived claim must cite the spans its inputs came from, and there is only one"
+    )
+
+
+def _check_one_citation(
+    claim: Mapping[str, object],
+    citation_id: object,
+    cited: Mapping[str, Mapping[str, object]],
+    supplied: Mapping[str, Mapping[str, object]],
+    *,
+    derived: bool,
+) -> None:
+    from evidence_resolver import EvidenceResolutionError
+
+    if citation_id not in cited:
+        raise EvidenceResolutionError("claim cites evidence not supplied to generation")
+    _require_citation_touches_claim(
+        str(claim["text"]), str(supplied[citation_id]["text"]), derived=derived
+    )
+
+
 def _cited_ids_of_claim(
     claim: Mapping[str, object],
     cited: Mapping[str, Mapping[str, object]],
     supplied: Mapping[str, Mapping[str, object]],
 ) -> set[str]:
-    from evidence_resolver import EvidenceResolutionError
+    """The citations a claim rests on, once every gate it faces has passed.
 
+    A claim may declare that it was *derived* from the spans it cites — a sum, a
+    count, a difference between two dates, the latest of several values. Such a
+    claim states a figure that appears in no span, by construction, so the
+    figure-agreement gate does not apply to it. Everything else does: each input
+    must resolve, and each must share words with the claim.
+
+    Measured 2026-09-05 on 50 questions: of eight answers judged wrong, seven
+    needed exactly this and the model reported an input instead — "a necklace
+    that cost around $200" for a question whose answer was $300, both dates for
+    a question whose answer was the gap between them. The contract left no other
+    move.
+
+    We do not verify the arithmetic. We require its inputs to be present and
+    verified, require the derivation to be declared, and let the answer show its
+    working — the same honesty the overlap gate practises when it says it checks
+    that a span touches a claim and not that it entails it.
+    See `docs/research/2026-09-05-a-claim-no-single-span-can-carry.md`.
+    """
     ids = claim["citation_ids"]
     if not ids:
         raise GroundedQAError("every atomic factual claim requires an adjacent citation")
+    derivation = _declared_derivation(claim)
+    if derivation is not None:
+        _require_derivation_inputs(claim, ids)
     for citation_id in ids:
-        if citation_id not in cited:
-            raise EvidenceResolutionError("claim cites evidence not supplied to generation")
-        _require_citation_touches_claim(
-            str(claim["text"]), str(supplied[citation_id]["text"])
+        _check_one_citation(
+            claim, citation_id, cited, supplied, derived=derivation is not None
         )
     return {str(item) for item in ids}
 
@@ -1083,7 +1149,10 @@ def _qa_system_prompt() -> str:
         "requested time scope. Do not abstain because the answer must be assembled from "
         "several spans, because it must be derived from dates the evidence states, or "
         "because the evidence is narrower than the question: that is what answering from "
-        "evidence means. To abstain, set status accordingly, put the whole explanation in "
+        "evidence means. When the answer is a total, a count, a gap between two dates or "
+        "the latest of several values, give that answer and not its inputs: set derivation "
+        "to sum, count, difference or latest, cite every span an input came from, and show "
+        "the working in the claim text. To abstain, set status accordingly, put the whole explanation in "
         "reason, and leave claims and citations empty: an abstention that carries claims is "
         "refused outright and nothing you wrote reaches the reader. "
         "Generated summaries and the cached full index are orientation only and "
