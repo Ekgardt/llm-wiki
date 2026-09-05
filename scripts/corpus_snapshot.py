@@ -1873,14 +1873,41 @@ def _append_heading_span(
 MAX_SPAN_BYTES = 4096
 
 
+def _character_boundary(content: bytes, index: int) -> int:
+    """The largest index at or below `index` that begins a UTF-8 character.
+
+    A continuation byte is `10xxxxxx`, and a character is at most four bytes,
+    so walking back at most three is enough to land on a start byte.
+    """
+    if index >= len(content):
+        return index
+    floor = max(index - 3, 0)
+    while index > floor and content[index] & 0xC0 == 0x80:
+        index -= 1
+    return index
+
+
 def _paragraph_cut(content: bytes, start: int, ceiling: int) -> int:
-    """The last paragraph break at or before the ceiling, then the last line."""
+    """The last paragraph break at or before the ceiling, then the last line.
+
+    When a span carries neither, it is cut at the ceiling — and the ceiling is a
+    byte count, so on any text that is not ASCII it lands inside a character
+    about three times in four. Measured on this vault 2026-09-05: the cut fell
+    at byte 4095 of a Russian paragraph, `_chunks` decoded the span strictly and
+    raised, and the exception travelled all the way up through the corpus
+    collector to abort the nightly generation build. Nothing was published from
+    2026-08-30 onward, retrieval fell back to its lexical leg, and the only
+    trace was a per-row `fallback_reason` field and one line in `doctor`.
+
+    The two markers are ASCII and therefore already safe. It is the fallback
+    that has to be walked back onto a character boundary.
+    """
     window = content[start:ceiling]
     for marker in (b"\n\n", b"\n"):
         cut = window.rfind(marker)
         if cut > 0:
             return start + cut + len(marker)
-    return ceiling
+    return _character_boundary(content, ceiling)
 
 
 def _split_span(content: bytes, span: tuple) -> list[tuple[int, int, tuple[str, ...]]]:
@@ -2364,6 +2391,40 @@ def _capture(
     )
 
 
+# A capture reads every source, then re-reads every source and refuses the
+# snapshot if anything moved. That fence is right and stays: it is what proves a
+# published generation describes a moment the vault really passed through.
+#
+# What was wrong was surrendering the first time it fired. Measured 2026-09-05: a
+# pass costs 3.5-3.6 seconds and never fails on a quiet vault, but a session
+# appends to today's daily log on every tool call, so under maintenance the pass
+# loses the race and the whole nightly build died with it — every night from
+# 2026-08-30, leaving no active generation and retrieval on its lexical leg
+# alone. Nothing about the fence changed; the vault outgrew it.
+#
+# Snapshot isolation, in every MVCC engine, means a consistent view from the
+# point a transaction started — not a world that holds still until it commits.
+# So: take another pass. Fail only if the vault never holds still for one.
+MAX_CAPTURE_PASSES = 4
+
+
+def _captured_after_retries(
+    root: Path,
+    policy: SnapshotPolicy,
+    deadline: float,
+    cancelled: Callable[[], bool] | None,
+) -> CorpusSnapshot:
+    """One capture that describes a real instant, retried while the vault moves."""
+    last: CorpusChanged | None = None
+    for _ in range(MAX_CAPTURE_PASSES):
+        _check_processing_stop(deadline, cancelled)
+        try:
+            return _capture(root, policy, deadline, cancelled)
+        except CorpusChanged as exc:
+            last = exc
+    raise CorpusChanged(f"corpus never held still for one pass: {last}")
+
+
 def collect_corpus(
     vault: Path,
     *,
@@ -2409,7 +2470,9 @@ def collect_corpus(
         gate = contextlib.nullcontext()
     with gate:
         _check_processing_stop(selected_deadline, cancelled)
-        return _capture(root, selected_policy, selected_deadline, cancelled)
+        return _captured_after_retries(
+            root, selected_policy, selected_deadline, cancelled
+        )
 
 
 @dataclass(frozen=True, slots=True)
