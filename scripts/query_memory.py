@@ -1070,7 +1070,67 @@ def grounded_qa(
     prompt = question_block + context.prompt_context
     _require_prompt_fits(system_prompt + prompt, total_budget)
     raw = _provider_response(generator, prompt, system_prompt, selected_deadline)
-    return verify_grounded_answer(_parsed_answer(raw), context, vault=Path(vault))
+    answer = verify_grounded_answer(_parsed_answer(raw), context, vault=Path(vault))
+    _record_cited_evidence(question, context, answer)
+    return answer
+
+
+def _cited_paths(context: GroundedContext, answer: Mapping[str, object]) -> list[str]:
+    """The pages whose spans survived every gate and reached the reader."""
+    published = {
+        str(citation.get("citation_id")) for citation in answer.get("citations") or []
+    }
+    paths = [
+        item.relative_path for item in context.evidence if item.citation_id in published
+    ]
+    return sorted(dict.fromkeys(paths))
+
+
+def _record_cited_evidence(
+    question: str, context: GroundedContext, answer: Mapping[str, object]
+) -> None:
+    """Record which pages actually carried the answer. Best effort, never fatal.
+
+    The telemetry has logged 14 806 impressions — what was *shown* — and its
+    `outcome` column has been null on every one of them. The RAG literature
+    treats this missing half as the hard problem and corrects biased clicks with
+    propensity estimation; we need none of that, because a grounded answer names
+    its evidence and a published citation is a verified statement, by the system
+    that used it, that this page did the work.
+
+    Recorded at page granularity rather than span, because "this page has carried
+    answers before" is the standing disposition worth having, and it is what
+    trained immunity is: not a memory of the encounter, a readiness afterwards.
+
+    Nothing is written for a page that was shown and not cited. *Not cited* is
+    not *not useful*, and saying otherwise would be a claim we cannot support.
+    See `docs/research/2026-09-06-a-signal-stronger-than-a-click.md`.
+    """
+    paths = _cited_paths(context, answer)
+    if not paths:
+        return
+    try:
+        _write_cited_events(question, context.profile, paths)
+    except Exception:  # noqa: BLE001 - telemetry must never break an answer
+        pass
+
+
+def _write_cited_events(question: str, profile: str, paths: Sequence[str]) -> None:
+    from retrieval_telemetry import best_effort_make_event, best_effort_record_events
+
+    events = [
+        best_effort_make_event(
+            event_kind="evidence_read",
+            query=question,
+            retrieval_mode=profile.casefold(),
+            candidate_id=path,
+            generation="grounded-answer",
+            source_tool="grounded_qa",
+            outcome="cited",
+        )
+        for path in paths
+    ]
+    best_effort_record_events([event for event in events if event is not None])
 
 
 def _require_bounded_question(question: object) -> None:
