@@ -4587,6 +4587,47 @@ def _matching_page(pages: list[Path], normalized_stem: str) -> Path | None:
     return None
 
 
+def _retired_page_named(normalized_stem: str) -> Path | None:
+    """An archived or superseded page whose filename *is* the query.
+
+    Archiving drops a page from every leg of retrieval, which is right for a
+    general question and wrong for one case: asking for the page by name. Until
+    2026-09-06 such a question returned nothing at all, and there was no way to
+    learn from the system that the page existed.
+
+    Forgotten memories in *Drosophila* persist as silent traces that a reminder
+    cue recovers — and the same work shows a permissive cue reconstructs things
+    that were never there, which is why this cue is the narrowest available: the
+    normalised query must equal the filename stem exactly. Never similarity,
+    never a topic, never a title. Deprecated documentation elsewhere is handled
+    the same way: kept, labelled, out of default results, reachable when named.
+    See `docs/research/2026-09-06-forgotten-not-gone.md`.
+    """
+    if not normalized_stem:
+        return None
+    try:
+        entries = sorted(KNOWLEDGE_DIR.glob("*.md"))
+    except OSError:
+        return None
+    for candidate in entries[:MAX_SEARCHABLE_PAGES]:
+        if _normalized_filename_stem(candidate.name) == normalized_stem:
+            return candidate
+    return None
+
+
+def _recalled_retired_hit(
+    normalized_stem: str, *, project: str | None, since: str | None, as_of: str | None
+) -> dict | None:
+    page = _retired_page_named(normalized_stem)
+    if page is None:
+        return None
+    hit = _exact_page_hit(page, project=project, since=since, as_of=as_of)
+    if hit is None:
+        return None
+    hit["retired"] = True
+    return hit
+
+
 def _with_exact_page(
     hits: list[dict],
     pages: list[Path],
@@ -4598,12 +4639,29 @@ def _with_exact_page(
 ) -> list[dict]:
     page = _matching_page(pages, normalized_stem)
     if page is None:
-        return hits
+        return _with_recalled_page(
+            hits, normalized_stem, project=project, since=since, as_of=as_of
+        )
     relative = page.relative_to(ROOT).as_posix()
     if any(hit["path"] == relative for hit in hits):
         return hits
     extra = _exact_page_hit(page, project=project, since=since, as_of=as_of)
     return hits if extra is None else [*hits, extra]
+
+
+def _with_recalled_page(
+    hits: list[dict],
+    normalized_stem: str,
+    *,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+) -> list[dict]:
+    """Nothing active bears this name; an archived page of that name may."""
+    recalled = _recalled_retired_hit(
+        normalized_stem, project=project, since=since, as_of=as_of
+    )
+    return hits if recalled is None else [*hits, recalled]
 
 
 def _filename_matches(hits: list[dict], normalized_stem: str) -> list[dict]:
