@@ -212,7 +212,7 @@ def _judged_verdicts(path: Path) -> dict[str, object]:
 def _print_summary(report: dict) -> None:
     columns = (
         "category n scored accuracy em judge f1 prov_fail est_tokens total_tokens "
-        "retrieve_s answer_s"
+        "per_1M_tok retrieve_s answer_s"
     )
     print(columns)
     for name, row in report.items():
@@ -221,6 +221,7 @@ def _print_summary(report: dict) -> None:
             f"{row.get('judge_accuracy')} "
             f"{row['f1']} {row['provider_failures']} {row['mean_est_prompt_tokens']} "
             f"{row.get('mean_est_total_prompt_tokens')} "
+            f"{row.get('correct_per_million_tokens')} "
             f"{row['mean_retrieve_seconds']} {row['mean_answer_seconds']}"
         )
 

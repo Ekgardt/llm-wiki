@@ -210,7 +210,37 @@ def _cost_metrics(rows: list[dict]) -> dict:
         "mean_retrieve_seconds": _mean(_metric_values(rows, "retrieve_seconds")),
         "mean_answer_seconds": _mean(_metric_values(rows, "answer_seconds")),
         "mean_total_seconds": _mean(_metric_values(rows, "total_seconds")),
+        "correct_per_million_tokens": _correct_per_million_tokens(rows),
     }
+
+
+def _correct_per_million_tokens(rows: list[dict]) -> float | None:
+    """Right answers bought per million prompt tokens spent.
+
+    Accuracy alone chose the widest window this stand has measured; economy
+    alone would have chosen the narrowest and weakest. Neither is the quantity
+    that matters, and until 2026-09-06 nobody computed the one that is.
+
+    On the 2026-09-03 sweep it reads 86.8, 52.7, 20.4 and 15.3 for answer
+    budgets of 12 288, 32 768, 122 880 and 262 144 — monotone, and it reverses
+    the reading taken from accuracy alone: the peak by accuracy is four times
+    worse per token than the narrowest window.
+
+    `None` where the judge never spoke, because a ratio without a numerator is
+    not a small number, it is no number.
+    """
+    if not _judge_verdicts(rows):
+        return None
+    spent = _tokens_spent(rows)
+    if not spent:
+        return None
+    correct = sum(1 for row in rows if row.get("judge_correct") is True)
+    return round(correct / spent * 1_000_000, 2)
+
+
+def _tokens_spent(rows: list[dict]) -> float:
+    values = _metric_values(rows, "est_total_prompt_tokens")
+    return float(sum(values))
 
 
 # An abstention means two opposite things and the report has never said which.
