@@ -101,3 +101,8 @@ day this vault holds millions of chunks the trade reverses.
 cosine 0.767 to 0.923, median 0.842 — so every similarity threshold in this
 system has to be relative rather than absolute. That applies to the novelty use
 as well, which is why it is not being built to a fixed cut either.
+
+
+## Отменено 2026-09-06
+
+`scripts/sparse_code.py` удалён: у примитива не осталось вызывающих. Оба применения сняты по замерам — см. `docs/research/2026-09-06-the-detector-and-the-blindness.md`.
