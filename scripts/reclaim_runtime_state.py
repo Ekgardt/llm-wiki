@@ -115,12 +115,30 @@ def snapshot_memory() -> dict[str, object]:
         return {"status": f"failed: {type(error).__name__}", "commit": None}
 
 
+def rebuild_co_activation() -> dict[str, object]:
+    """Rebuild what was mentioned together, from the entries the vault holds.
+
+    Derived and disposable: the table is read at query time when it is there and
+    ignored when it is not, so a failure here costs a signal and never an answer.
+    See `docs/research/2026-09-06-what-was-mentioned-together.md`.
+    """
+    try:
+        from co_activation import build, save
+
+        table = build()
+        save(table)
+        return {"co_activation_pages": len(table)}
+    except Exception as error:  # noqa: BLE001 - a derived table is never fatal
+        return {"co_activation_error": type(error).__name__}
+
+
 def reclaim(budget_seconds: float) -> dict[str, object]:
     return {
         "backlog": drain_pending_backlog(budget_seconds),
         "transactions": prune_settled_transactions(),
         "temporaries": sweep_orphan_temporaries(),
         "snapshot": snapshot_memory(),
+        "co_activation": rebuild_co_activation(),
     }
 
 

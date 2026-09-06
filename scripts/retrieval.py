@@ -1267,6 +1267,41 @@ def _standing_disposition(query: str | None) -> dict[str, float]:
         return {}
 
 
+def _co_activation_table() -> dict[str, dict[str, float]]:
+    try:
+        from co_activation import load
+
+        return load()
+    except Exception:  # noqa: BLE001 - a missing table must not fail a search
+        return {}
+
+
+def _page_name(relative_path: object) -> str:
+    return Path(str(relative_path)).stem.casefold()
+
+
+def _neighbour_boosts(
+    scores: Mapping[str, float], meta: Mapping[str, Mapping[str, Any]]
+) -> dict[str, float]:
+    """What the best-ranked page was mentioned alongside, as a multiplier.
+
+    Gated on purpose: only the neighbours of the page that already ranks first
+    are raised. Spreading from every candidate to everything it was ever
+    mentioned with is the failure the whole spreading-activation literature is
+    written about — activation without a gate reaches the graph and means
+    nothing. See `docs/research/2026-09-06-what-was-mentioned-together.md`.
+    """
+    if not scores:
+        return {}
+    from co_activation import neighbours
+
+    table = _co_activation_table()
+    if not table:
+        return {}
+    leader = max(scores, key=lambda key: (scores[key], key))
+    return neighbours(_page_name(meta[leader].get("relative_path")), table)
+
+
 def _weigh_by_trust(
     scores: Mapping[str, float],
     meta: dict[str, dict[str, Any]],
@@ -1282,6 +1317,7 @@ def _weigh_by_trust(
     curated-knowledge prior off, and everything else keeps it.
     """
     standing = _standing_disposition(query)
+    alongside = _neighbour_boosts(scores, meta)
     weighted: dict[str, float] = {}
     for key, value in scores.items():
         authority = authority_weight(meta[key].get("authority"))
@@ -1291,10 +1327,12 @@ def _weigh_by_trust(
             curated_first=curated_first,
         )
         carried = standing.get(str(meta[key].get("relative_path")), 1.0)
+        near = alongside.get(_page_name(meta[key].get("relative_path")), 1.0)
         meta[key]["authority_weight"] = authority
         meta[key]["type_weight"] = page
         meta[key]["carried_weight"] = carried
-        weighted[key] = value * authority * page * carried
+        meta[key]["alongside_weight"] = near
+        weighted[key] = value * authority * page * carried * near
     return weighted
 
 
