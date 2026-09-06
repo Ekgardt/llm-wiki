@@ -53,3 +53,53 @@ def test_an_empty_candidate_list_scores_to_nothing(monkeypatch):
     )
 
     assert reranker._cross_encoder_scores({}, []) == []
+
+
+def test_a_rerank_past_its_budget_leaves_the_fused_order(monkeypatch):
+    """Half-reranked is not an order: the stage is abandoned whole."""
+    documents = [
+        {"content": "x" * length, "summary": "s", "score": 1.0}
+        for length in (500, 60, 400)
+    ]
+    monkeypatch.setattr(
+        reranker, "_get_reranker_bundle", lambda: {"model_id": "m", "model_revision": "r"}
+    )
+    monkeypatch.setattr(
+        reranker, "_batch_logits", lambda bundle, chosen: [0.0] * len(chosen)
+    )
+
+    ranked = reranker.rerank(
+        "query", documents, limit=3, text_field="content", deadline=0.0
+    )
+
+    assert [item["reranker_applied"] for item in ranked] == [False, False, False]
+    assert {item["reranker_fallback_reason"] for item in ranked} == {
+        "reranker_deadline"
+    }
+
+
+def test_a_rerank_inside_its_budget_still_applies(monkeypatch):
+    import time
+
+    documents = [
+        {"content": "x" * length, "summary": "s", "score": 1.0}
+        for length in (500, 60, 400)
+    ]
+    monkeypatch.setattr(
+        reranker, "_get_reranker_bundle", lambda: {"model_id": "m", "model_revision": "r"}
+    )
+    monkeypatch.setattr(
+        reranker,
+        "_batch_logits",
+        lambda bundle, chosen: [float(len(pair[1])) for pair in chosen],
+    )
+
+    ranked = reranker.rerank(
+        "query",
+        documents,
+        limit=3,
+        text_field="content",
+        deadline=time.monotonic() + 60,
+    )
+
+    assert all(item["reranker_applied"] for item in ranked)

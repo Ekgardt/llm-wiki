@@ -2127,14 +2127,25 @@ def _run_reranker(
 ) -> Sequence[Mapping[str, Any]]:
     from reranker import rerank as _rerank
 
-    def call() -> Sequence[Mapping[str, Any]]:
-        return _rerank(query, rows[:pool_limit], limit=pool_limit, text_field="content")
+    def call(deadline: float | None = None) -> Sequence[Mapping[str, Any]]:
+        return _rerank(
+            query,
+            rows[:pool_limit],
+            limit=pool_limit,
+            text_field="content",
+            deadline=deadline,
+        )
 
     if deadline_monotonic is None:
         return call()
+    # The same instant the bound abandons this stage at, handed to the stage
+    # itself. Abandoning only stops the caller waiting: the thread keeps
+    # scoring, on the same four cores as the answer that is now being built
+    # without it. Told when to stop, it stops between batches instead.
+    stage_deadline = _optional_stage_deadline(deadline_monotonic)
     return _run_optional_bounded(
-        call,
-        deadline=_optional_stage_deadline(deadline_monotonic),
+        lambda: call(stage_deadline),
+        deadline=stage_deadline,
         cancelled=cancelled,
         kind="rerank",
     )

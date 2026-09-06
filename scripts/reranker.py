@@ -254,6 +254,15 @@ def _score_with_scorer(
     )
 
 
+class _OutOfTime(Exception):
+    """The rerank budget ran out; the fused order stands unchanged."""
+
+
+def _require_time(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise _OutOfTime("rerank budget exhausted")
+
+
 def _batch_logits(bundle: Mapping[str, Any], pairs: list) -> list[float]:
     """Raw logits for one batch, padded to the longest passage it contains."""
     import torch
@@ -284,7 +293,9 @@ def _batches_by_length(pairs: list) -> list[list[int]]:
     ]
 
 
-def _cross_encoder_scores(bundle: Mapping[str, Any], pairs: list) -> list[float]:
+def _cross_encoder_scores(
+    bundle: Mapping[str, Any], pairs: list, *, deadline: float | None = None
+) -> list[float]:
     """Raw logits for (query, passage) pairs; the caller squashes them.
 
     One batch of twenty pairs pads every pair to the longest of them, and the
@@ -297,6 +308,7 @@ def _cross_encoder_scores(bundle: Mapping[str, Any], pairs: list) -> list[float]
     """
     scores = [0.0] * len(pairs)
     for batch in _batches_by_length(pairs):
+        _require_time(deadline)
         chosen = [pairs[index] for index in batch]
         for index, score in zip(batch, _batch_logits(bundle, chosen)):
             scores[index] = score
@@ -308,16 +320,28 @@ def _score_with_bundle(
     head: Sequence[Mapping[str, Any]],
     query: str,
     text_field: str,
+    deadline: float | None = None,
 ) -> _Scoring:
+    """Scores for the head, or a named reason the fused order should stand.
+
+    Half-reranked is not an order: a score from the cross-encoder and a fused
+    score do not live on the same scale, so a budget that runs out mid-way
+    abandons the whole stage rather than mixing them. Losing the reranker
+    costs some precision. Losing the answer, which is what a raised deadline
+    did to `mcp.recall` 67 times on this vault, costs all of it.
+    """
     model_id = bundle["model_id"]
     revision = bundle["model_revision"]
     pairs = _query_pairs(head, query, text_field)
     if not pairs:
         return _Scoring([], model_id, revision, None)
     try:
-        return _Scoring(_cross_encoder_scores(bundle, pairs), model_id, revision, None)
+        scores = _cross_encoder_scores(bundle, pairs, deadline=deadline)
+    except _OutOfTime:
+        return _Scoring(None, model_id, revision, "reranker_deadline")
     except Exception:  # noqa: BLE001 - a failed reranker keeps the fused order
         return _Scoring(None, model_id, revision, "reranker_error")
+    return _Scoring(scores, model_id, revision, None)
 
 
 def _mark_not_applied(documents: list[dict], reason: str) -> None:
@@ -412,6 +436,7 @@ def _scoring_for(
     scorer: Any | None,
     model_id: str | None,
     model_revision: str | None,
+    deadline: float | None = None,
 ) -> _Scoring | None:
     """None means there is no reranker at all, which is not a failure."""
     if scorer is not None:
@@ -421,7 +446,7 @@ def _scoring_for(
     bundle = _get_reranker_bundle()
     if bundle is None:
         return None
-    return _score_with_bundle(bundle, head, query, text_field)
+    return _score_with_bundle(bundle, head, query, text_field, deadline)
 
 
 def rerank(
@@ -434,18 +459,24 @@ def rerank(
     scorer: Any | None = None,
     model_id: str | None = None,
     model_revision: str | None = None,
+    deadline: float | None = None,
 ) -> list[dict]:
     """Re-rank documents; preserve tail beyond depth; blend into final_score.
 
     ``scorer`` is an optional callable(list[tuple[str,str]]) -> list[float]
     used by tests as a deterministic fake cross-encoder.
+
+    ``deadline`` is a `time.monotonic` instant. Past it the stage is abandoned
+    and every document keeps its fused order, marked `reranker_deadline`.
     """
     if not documents or not query.strip():
         return _limited(documents, limit)
     started = time.perf_counter()
     depth = max(1, int(depth))
     head, tail = documents[:depth], documents[depth:]
-    scoring = _scoring_for(head, query, text_field, scorer, model_id, model_revision)
+    scoring = _scoring_for(
+        head, query, text_field, scorer, model_id, model_revision, deadline
+    )
     if scoring is None:
         _mark_not_applied(documents, "reranker_unavailable")
         return _limited(documents, limit)
