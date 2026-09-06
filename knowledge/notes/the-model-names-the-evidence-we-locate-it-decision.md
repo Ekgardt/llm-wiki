@@ -79,3 +79,4 @@ failure mode, not that number.
   the blast-radius half of the same problem.
 - [[knowledge/notes/citation-relevance-gate-decision]]
 - [[knowledge/notes/part-scoped-evidence-decision]]
+- [[knowledge/notes/an-index-may-lag-decision]] — links to this page.

@@ -1144,9 +1144,15 @@ def test_repeated_legacy_sqlite_failure_returns_degraded_markdown_result(
         def close(self):
             pass
 
-    def connect(*_args, **_kwargs):
+    def connect(*args, **_kwargs):
+        # Only the legacy index counts. `sqlite3.connect` is patched on the
+        # shared module object, so every database anything opens during the
+        # search arrives here — including the retrieval telemetry that carries
+        # what past answers cited, added 2026-09-06. Counting those too would
+        # make this test assert something it does not mean.
         nonlocal connections
-        connections += 1
+        if "index.sqlite" in str(args[0] if args else ""):
+            connections += 1
         return Connection()
 
     def rebuild(_pages, **_kwargs):

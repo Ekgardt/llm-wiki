@@ -49,6 +49,14 @@ BOOST_SATURATION = 3
 
 
 def _read_only(path: Path) -> sqlite3.Connection | None:
+    """A read-only handle, or None when there is nothing to read.
+
+    The existence check is not an optimisation: a vault that has never answered
+    a question has no telemetry, and opening a connection to say so is a
+    connection nobody asked for.
+    """
+    if not path.is_file():
+        return None
     try:
         return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     except sqlite3.Error:

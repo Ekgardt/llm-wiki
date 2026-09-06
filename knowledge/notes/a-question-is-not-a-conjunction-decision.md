@@ -65,3 +65,4 @@ The effect on answer quality is being measured and is not claimed here.
 - [[knowledge/notes/one-trust-weight-across-retrieval-paths-decision]]
 - [[knowledge/notes/derived-evidence-generation-decision]]
 - [[knowledge/notes/a-fact-is-stored-with-its-date-decision]] — links to this page.
+- [[knowledge/notes/an-index-may-lag-decision]] — links to this page.

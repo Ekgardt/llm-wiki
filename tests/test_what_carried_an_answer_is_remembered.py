@@ -197,3 +197,43 @@ def test_an_ordinary_abstention_is_not_a_gate_refusal() -> None:
 
     assert query_memory._refused_gates({"reason": "The evidence does not say."}) == []
     assert query_memory._refused_gates({"reason": None}) == []
+
+
+def test_the_disposition_multiplies_the_fused_score(monkeypatch) -> None:
+    """Ranking reads the signal now; before 2026-09-06 nothing did.
+
+    A page that carried answers before is raised, bounded and recorded by name
+    on the candidate, so an ordering can still be explained factor by factor.
+    """
+    import retrieval
+
+    monkeypatch.setattr(
+        retrieval,
+        "_standing_disposition",
+        lambda query: {"knowledge/notes/alpha.md": 1.25},
+    )
+    scores = {"a": 1.0, "b": 1.0}
+    meta = {
+        "a": {"relative_path": "knowledge/notes/alpha.md"},
+        "b": {"relative_path": "knowledge/notes/beta.md"},
+    }
+
+    weighted = retrieval._weigh_by_trust(scores, meta, curated_first=False, query="q")
+
+    assert weighted["a"] > weighted["b"]
+    assert meta["a"]["carried_weight"] == 1.25
+    assert meta["b"]["carried_weight"] == 1.0
+
+
+def test_a_search_still_works_when_there_is_no_history(monkeypatch) -> None:
+    """A vault that has never answered anything must rank exactly as before."""
+    import retrieval
+
+    monkeypatch.setattr(retrieval, "_standing_disposition", lambda query: {})
+    scores = {"a": 2.0}
+    meta = {"a": {"relative_path": "knowledge/notes/alpha.md"}}
+
+    weighted = retrieval._weigh_by_trust(scores, meta, curated_first=False, query="q")
+
+    assert weighted["a"] == 2.0
+    assert meta["a"]["carried_weight"] == 1.0
