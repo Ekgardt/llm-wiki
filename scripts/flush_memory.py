@@ -507,12 +507,22 @@ def maybe_trigger_compile(state: dict, daily_path: Path, tier: str) -> None:
 
 
 def _flush_summary(args: argparse.Namespace) -> str | None:
+    """Classify the conversation in the transcript, not the JSON around it.
+
+    The whole file, then rendered, then bounded — in that order. Reading a
+    60 000-character tail of raw JSONL first can land inside a single
+    bookkeeping entry and hand the classifier no conversation at all; the
+    rendered conversation of a real session is 2 KB to 32 KB and fits the
+    window whole. Same reasoning as the durable record a few hundred lines
+    down, and the same reasoning as `_readable_evidence`.
+    """
     if not args.transcript:
         return ""
-    transcript = read_transcript_tail(Path(args.transcript))
+    transcript = read_transcript_tail(Path(args.transcript), max_chars=MAX_RECORD_CHARS)
     if not transcript:
         return ""
-    return summarize_with_llm(transcript, args.event, args.session_id)
+    readable = _bounded_classifier_evidence(_readable_evidence(transcript))
+    return summarize_with_llm(readable, args.event, args.session_id)
 
 
 def _capture_binding_intent_id(binding: object) -> str:
@@ -622,6 +632,31 @@ def _read_capture_intent(
     return record
 
 
+def _readable_evidence(evidence: object) -> str:
+    """The conversation this evidence carries, not the JSON that carries it.
+
+    The classifier used to read `canonical_json_bytes(evidence)`: the host's
+    raw JSONL, every bookkeeping line included, and only the last 60 000
+    characters of it. Measured on the 187 ready intents on this vault, a
+    session's evidence is 143 KB to 942 KB of that, and the conversation
+    inside it renders to 2 KB to 32 KB. So the window held about six per cent
+    of the bytes, taken from the end, and on the intents inspected on
+    2026-09-06 it was file-backup manifests and token-cost accounting from
+    edge to edge — not one line of anyone speaking.
+
+    That is the whole explanation of `flush_tier_counts: {"ok": 65}`. Sixty-five
+    sessions in a row were classified as having nothing worth saving, and each
+    verdict was right about the bytes it was shown. Rendered, the same
+    conversation fits the window whole with room to spare, and it is the same
+    rendering the durable session record already keeps.
+    """
+    from session_evidence import evidence_text, render_transcript
+
+    if isinstance(evidence, str):
+        return render_transcript(evidence)
+    return render_transcript(evidence_text(evidence))
+
+
 def _bounded_classifier_evidence(evidence: str) -> str:
     """The tail the classifier reads; the durable record still keeps every byte.
 
@@ -642,9 +677,7 @@ def _bounded_classifier_evidence(evidence: str) -> str:
 
 
 def _capture_prompt(record: Mapping[str, object]) -> str:
-    from reliable_memory import canonical_json_bytes
-
-    evidence = canonical_json_bytes(record["evidence"]).decode("utf-8")
+    evidence = _readable_evidence(record["evidence"])
     return (
         "Classify this role-preserved session evidence using the closed flush grammar.\n"
         f"Event: {record['event']}\n"
