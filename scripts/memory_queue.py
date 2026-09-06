@@ -4504,13 +4504,23 @@ def _record_failed_attempt(
 
 
 def _failure_state(
-    row: sqlite3.Row, failure: QueueFailure
+    row: sqlite3.Row, failure: QueueFailure, attempt_limit: int
 ) -> tuple[str, int]:
-    """Where a failed task goes, and what its attempt count becomes."""
+    """Where a failed task goes, and what its attempt count becomes.
+
+    A task that has used every attempt it is allowed is dead, not ready. This
+    path used to check only whether the failure was permanent, so an ordinary
+    failure on the last attempt left the task `ready` with `attempts` at the
+    limit — which the worker will not claim, because the budget is spent, and
+    `redrive` will not take, because it requires a dead task. Twenty-three
+    session classifications sat in that gap on this vault, each one eight
+    failed attempts old and reachable by nothing. The lease-expiry path had
+    the rule from the start; this one did not.
+    """
     attempts = int(row["attempts"])
     if failure.blocked_capability:
         return "blocked", attempts - 1
-    if failure.permanent or failure.error_code in _PERMANENT_CODES:
+    if _failure_is_terminal(row, failure, attempt_limit):
         return "dead", attempts
     return "ready", attempts
 
@@ -4521,9 +4531,10 @@ def _apply_failure_state(
     row: sqlite3.Row,
     failure: QueueFailure,
     now: datetime,
+    attempt_limit: int = DEFAULTS.queue_max_attempts,
 ) -> None:
     """Move the task out of its lease, under the lease's own fence."""
-    state, attempts = _failure_state(row, failure)
+    state, attempts = _failure_state(row, failure, attempt_limit)
     changed = database.execute(
         """UPDATE tasks SET state=?,attempts=?,error_code=?,
                blocked_capability=?,updated_at=?,available_at=?,
@@ -11188,7 +11199,9 @@ class _QueueV3CandidateReader:
             )
             if not mismatch:
                 _record_failed_attempt(database, lease, row, failure, now)
-                _apply_failure_state(database, lease, row, failure, now)
+                _apply_failure_state(
+                    database, lease, row, failure, now, max_attempts
+                )
         if mismatch:
             self._raise_payload_mismatch()
 
