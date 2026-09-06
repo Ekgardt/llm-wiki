@@ -1072,6 +1072,7 @@ def grounded_qa(
     raw = _provider_response(generator, prompt, system_prompt, selected_deadline)
     answer = verify_grounded_answer(_parsed_answer(raw), context, vault=Path(vault))
     _record_cited_evidence(question, context, answer)
+    _record_refused_evidence(question, context, answer)
     return answer
 
 
@@ -1084,6 +1085,65 @@ def _cited_paths(context: GroundedContext, answer: Mapping[str, object]) -> list
         item.relative_path for item in context.evidence if item.citation_id in published
     ]
     return sorted(dict.fromkeys(paths))
+
+
+def _refused_gates(answer: Mapping[str, object]) -> list[str]:
+    """The gates that refused, from the reason a total refusal carries."""
+    reason = str(answer.get("reason") or "")
+    marker = "no claim survived its citation gates: "
+    if not reason.startswith(marker):
+        return []
+    return sorted({part.strip() for part in reason[len(marker):].split(";") if part.strip()})
+
+
+def _record_refused_evidence(
+    question: str, context: GroundedContext, answer: Mapping[str, object]
+) -> None:
+    """Record what the gates threw away, and which gate threw it.
+
+    Bacteria keep a record of what was hostile, not of what was true, and act on
+    it before the same thing happens again. We had no such record: a claim the
+    gates refused vanished, and the only reason we ever learned that **seven of
+    eleven destroyed answers had been correct** is that one afternoon in
+    September 2026 somebody wrote the discarded replies down by hand.
+
+    Written per page that was in front of the model when the refusal happened,
+    with the gate named in the outcome, so the question "are we still throwing
+    away right answers, and where" is answerable from the log rather than from
+    an afternoon of manual work.
+
+    Only totals refusals are recorded. A claim dropped from an answer that still
+    published something is a different event and is not this one.
+    """
+    gates = _refused_gates(answer)
+    if not gates:
+        return
+    try:
+        _write_refused_events(question, context, gates)
+    except Exception:  # noqa: BLE001 - telemetry must never break a refusal
+        pass
+
+
+def _write_refused_events(
+    question: str, context: GroundedContext, gates: Sequence[str]
+) -> None:
+    from retrieval_telemetry import best_effort_make_event, best_effort_record_events
+
+    outcome = "refused: " + "; ".join(gates)
+    paths = sorted({item.relative_path for item in context.evidence})
+    events = [
+        best_effort_make_event(
+            event_kind="evidence_read",
+            query=question,
+            retrieval_mode=context.profile.casefold(),
+            candidate_id=path,
+            generation="grounded-answer",
+            source_tool="grounded_qa",
+            outcome=outcome[:200],
+        )
+        for path in paths
+    ]
+    best_effort_record_events([event for event in events if event is not None])
 
 
 def _record_cited_evidence(

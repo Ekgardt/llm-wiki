@@ -128,3 +128,72 @@ def test_a_page_nothing_knows_about_gets_nothing_rather_than_a_penalty(tmp_path:
 def test_an_absent_database_is_silence_not_a_failure(tmp_path: Path) -> None:
     assert disposition.cited_counts(db_path=tmp_path / "missing.sqlite3") == {}
     assert disposition.disposition(db_path=tmp_path / "missing.sqlite3") == {}
+
+
+def _refused(db: Path, page: str, query: str, gate: str) -> None:
+    telemetry.record_events(
+        [
+            telemetry.make_event(
+                event_kind="evidence_read",
+                query=query,
+                retrieval_mode="base",
+                candidate_id=page,
+                rank=None,
+                generation="grounded-answer",
+                source_tool="grounded_qa",
+                outcome=f"refused: {gate}",
+            )
+        ],
+        db_path=db,
+    )
+
+
+def test_a_refusal_names_the_page_that_was_in_front_of_the_model(tmp_path: Path) -> None:
+    """Until this was logged, the only way to know was to write it down by hand.
+
+    That was done once, on 2026-09-02, and seven of eleven destroyed answers
+    turned out to be correct — which is why the gates now apply per claim.
+    """
+    db = tmp_path / "t.sqlite3"
+    _refused(db, "knowledge/notes/alpha.md", "q", "cited span states different figures")
+
+    assert disposition.refused_counts(db_path=db) == {"knowledge/notes/alpha.md": 1}
+
+
+def test_the_gate_that_refused_is_countable(tmp_path: Path) -> None:
+    db = tmp_path / "t.sqlite3"
+    _refused(db, "knowledge/notes/alpha.md", "q", "cited span states different figures")
+    _refused(db, "knowledge/notes/beta.md", "q2", "claim cites evidence not supplied")
+
+    gates = disposition.refusal_gates(db_path=db)
+
+    assert set(gates) == {
+        "cited span states different figures",
+        "claim cites evidence not supplied",
+    }
+
+
+def test_a_refusal_is_not_a_citation_and_earns_no_boost(tmp_path: Path) -> None:
+    """Being present when nothing survived is a place to look, not a merit."""
+    db = tmp_path / "t.sqlite3"
+    _refused(db, "knowledge/notes/alpha.md", "q", "some gate")
+
+    assert disposition.cited_counts(db_path=db) == {}
+    assert disposition.disposition(db_path=db) == {}
+
+
+def test_the_reason_of_a_total_refusal_is_parsed_into_gates() -> None:
+    import query_memory
+
+    answer = {
+        "reason": "no claim survived its citation gates: gate one; gate two; gate one"
+    }
+
+    assert query_memory._refused_gates(answer) == ["gate one", "gate two"]
+
+
+def test_an_ordinary_abstention_is_not_a_gate_refusal() -> None:
+    import query_memory
+
+    assert query_memory._refused_gates({"reason": "The evidence does not say."}) == []
+    assert query_memory._refused_gates({"reason": None}) == []

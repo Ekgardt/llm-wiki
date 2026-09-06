@@ -109,3 +109,63 @@ def disposition(query: str | None = None, *, db_path: Path | None = None) -> dic
     """
     counts = cited_counts(query, db_path=db_path)
     return {page: 1.0 + _boost_for(count) for page, count in counts.items()}
+
+
+def refused_counts(*, db_path: Path | None = None) -> dict[str, int]:
+    """How often each page was in front of the model when every claim was refused.
+
+    The counterpart to `cited_counts`, and the reason it exists: until this was
+    logged, the only way to know whether the gates were destroying correct
+    answers was to write the discarded replies down by hand. That was done once,
+    on 2026-09-02, and **seven of eleven destroyed answers turned out to be
+    correct** — which is how the gates came to be applied per claim instead of
+    per answer.
+
+    A refusal is not a verdict on the page. It says the page was present when
+    nothing survived, which is a place to look, not a fact about the page. It is
+    deliberately not fed into any ranking.
+    """
+    database = _read_only(Path(db_path or TELEMETRY_DB))
+    if database is None:
+        return {}
+    try:
+        return _counted_refusals(database)
+    finally:
+        database.close()
+
+
+def _counted_refusals(database: sqlite3.Connection) -> dict[str, int]:
+    statement = (
+        "SELECT candidate_id, COUNT(*) FROM retrieval_events "
+        "WHERE outcome LIKE 'refused:%' GROUP BY candidate_id "
+        "ORDER BY COUNT(*) DESC LIMIT ?"
+    )
+    try:
+        rows = database.execute(statement, (MAX_DISPOSITION_PAGES,)).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {str(row[0]): int(row[1]) for row in rows}
+
+
+def refusal_gates(*, db_path: Path | None = None) -> dict[str, int]:
+    """Which gate refused, and how often. The question the manual count answered."""
+    database = _read_only(Path(db_path or TELEMETRY_DB))
+    if database is None:
+        return {}
+    try:
+        return _counted_gates(database)
+    finally:
+        database.close()
+
+
+def _counted_gates(database: sqlite3.Connection) -> dict[str, int]:
+    statement = (
+        "SELECT outcome, COUNT(*) FROM retrieval_events "
+        "WHERE outcome LIKE 'refused:%' GROUP BY outcome "
+        "ORDER BY COUNT(*) DESC LIMIT ?"
+    )
+    try:
+        rows = database.execute(statement, (MAX_DISPOSITION_PAGES,)).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {str(row[0])[len("refused: "):]: int(row[1]) for row in rows}
