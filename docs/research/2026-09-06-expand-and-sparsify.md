@@ -73,3 +73,31 @@ measured defect waiting for it — not because the retrieval gain is expected.
   sparse randomised embeddings
 - https://arxiv.org/pdf/1907.11959 — modelling winner-take-all competition in
   sparse binary projections
+
+---
+
+## Verdict on the retrieval use, 2026-09-06: not worth building
+
+Checked before building it, and the premise does not hold.
+
+**FlyHash is measured against classical LSH, and we do not use LSH.** LanceDB is
+not installed on this machine (`have_lancedb()` is False), so the dense leg falls
+through to `_numpy_dense_hits`, which is one matrix multiply against every vector
+and an exact top-k. Measured: **0.29 ms per query over 10 531 vectors of 384
+dimensions.**
+
+So the comparison is not "sparse code versus classical LSH" — where the fly wins
+— but "sparse code versus the exact answer", where an approximation can only
+lose accuracy. Its gain is speed at a scale we are three orders of magnitude
+away from.
+
+Building it would replace a correct, fast computation with an approximate one,
+and the honest thing is to say that rather than ship it because it was on a list.
+The primitive stays: it cost little, its properties are pinned by tests, and the
+day this vault holds millions of chunks the trade reverses.
+
+**What the check also produced** is the more useful finding, recorded in
+`scripts/sparse_code.py`: the embedding space is narrow — unrelated notes at
+cosine 0.767 to 0.923, median 0.842 — so every similarity threshold in this
+system has to be relative rather than absolute. That applies to the novelty use
+as well, which is why it is not being built to a fixed cut either.
