@@ -685,11 +685,25 @@ def _capture_prompt(record: Mapping[str, object]) -> str:
     )
 
 
+# Emphasis a model puts around the tier it is declaring. The grammar is closed
+# on the token, not on the punctuation a Markdown-speaking model wraps it in:
+# on the first five real intents classified with a readable window, two came
+# back as `**FLUSH_MAJOR**`, and under the literal rule both sessions would
+# have been destroyed as invalid output.
+_TIER_EMPHASIS = "*_`# "
+
+
+def _declared_tier_line(raw: str) -> tuple[str, str]:
+    """The tier the first line declares, and everything after that line."""
+    head, _, rest = raw.partition("\n")
+    return head.strip().strip(_TIER_EMPHASIS).strip(), rest
+
+
 def _capture_wire_body(raw: str, token: str) -> str | None:
-    prefix = f"{token}\n"
-    if not raw.startswith(prefix):
+    head, rest = _declared_tier_line(raw)
+    if head != token:
         return None
-    return _require_canonical_body(raw[len(prefix) :])
+    return _require_canonical_body(rest)
 
 
 def _require_canonical_body(body: str) -> str:
@@ -725,7 +739,8 @@ def _capture_wire_tier(raw: str) -> tuple[str, str] | None:
 def _parse_capture_wire_output(raw: object) -> tuple[str, str]:
     if not isinstance(raw, str):
         raise RuntimeError("capture provider returned no flush output")
-    if raw == "FLUSH_OK":
+    head, rest = _declared_tier_line(raw)
+    if head == "FLUSH_OK" and not rest.strip():
         return "ok", ""
     return _require_declared_tier(_capture_wire_tier(raw))
 
