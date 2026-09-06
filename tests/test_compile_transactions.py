@@ -843,6 +843,53 @@ def test_new_claim_page_inserted_after_assessment_fails_tree_manifest_preconditi
     monkeypatch.setattr(coordinator, "apply", insert_phantom_then_apply)
     monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args: [])
 
+    # The first attempt is refused — the assessment really was computed against
+    # a tree that no longer exists. The second reads the tree that does, and
+    # commits. Before the retry existed this raised, and the pages the compile
+    # had already produced were never written.
+    result = compile_memory.apply_compile_plan(
+        inputs, plan, action_key="5" * 64, trigger="manual",
+        coordinator=coordinator, completed_at="2026-07-14T12:00:00Z",
+    )
+
+    assert result.state == "committed"
+    assert (root / "knowledge/notes/exact-byte-pattern.md").is_file()
+
+
+def test_a_tree_that_never_stops_moving_still_refuses_the_compile(vault, monkeypatch):
+    """The retry is bounded: a vault under a continuous writer still fails."""
+    root, state_root = vault
+    daily = _daily(root)
+    import compile_memory
+    from markdown_transaction import TransactionFailure
+
+    new = _claim_record(
+        root, claim_id="new", value="red",
+        text="A durable exact-byte observation.", authority="user",
+    )
+    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operation["claims"] = [new]
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    plan = {
+        "schema_version": "compile-plan/v2",
+        "operations": [{
+            "kind": "create", "path": "knowledge/notes/exact-byte-pattern.md",
+            "content": canonical_json_bytes(operation).decode(),
+        }],
+    }
+    coordinator = MarkdownCoordinator(root, state_root)
+    original_apply = coordinator.apply
+    written = iter(range(compile_memory.COMPILE_PUBLICATION_ATTEMPTS + 1))
+
+    def insert_a_new_page_then_apply(transaction_id, **kwargs):
+        (root / f"knowledge/notes/phantom-{next(written)}.md").write_bytes(
+            b"---\ntype: concept\n---\n# Phantom\n"
+        )
+        return original_apply(transaction_id, **kwargs)
+
+    monkeypatch.setattr(coordinator, "apply", insert_a_new_page_then_apply)
+    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args: [])
+
     with pytest.raises(TransactionFailure, match="claim tree manifest"):
         compile_memory.apply_compile_plan(
             inputs, plan, action_key="5" * 64, trigger="manual",
