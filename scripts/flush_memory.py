@@ -660,12 +660,21 @@ def _capture_wire_body(raw: str, token: str) -> str | None:
 
 
 def _require_canonical_body(body: str) -> str:
-    """A flush body is present and carries no surrounding whitespace."""
-    if not body:
+    """The flush body, with the whitespace around it removed.
+
+    This used to refuse a body that was not already stripped, and the refusal
+    lost the whole capture: nine sessions on this vault were recorded under
+    `noncanonical flush output`, and every one of them was a model that ended
+    its answer with a newline. Whitespace around a Markdown body carries
+    nothing a reader or a later grep can use, so refusing it protects nothing
+    and costs a session. Output that is not a flush body at all is still
+    refused — a body that is only whitespace here, and anything trailing
+    `FLUSH_OK` in `_parse_capture_wire_output`.
+    """
+    stripped = body.strip()
+    if not stripped:
         raise RuntimeError("capture provider returned an empty flush body")
-    if body != body.strip():
-        raise RuntimeError("capture provider returned noncanonical flush output")
-    return body
+    return stripped
 
 
 _CAPTURE_WIRE_TIERS = (("major", "FLUSH_MAJOR"), ("minor", "FLUSH_MINOR"))

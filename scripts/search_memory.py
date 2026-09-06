@@ -226,6 +226,14 @@ def _get_embedder():
     treats an unusable query vector as "no dense signal" by contract and that
     is exactly what an unavailable model means. What changed is that the
     reason is recorded and named — see `embedder_unavailable_reason`.
+
+    The load is local-only. Without that flag every cold search opened a
+    connection to huggingface.co before it read a single local byte — the
+    reranker and the retrieval benchmark had both been local-only from the
+    start, and only the runtime query path still reached out. A vault that
+    does not have the weights now says `model_unavailable` and degrades to
+    lexical, which is the same answer it already gave for weights it could
+    not read.
     """
     global _embedder_cache, _embedder_unavailable_reason
     if _embedder_cache is not None:
@@ -233,7 +241,10 @@ def _get_embedder():
     try:
         from sentence_transformers import SentenceTransformer
         _embedder_cache = SentenceTransformer(
-            EMBEDDING_MODEL, revision=EMBEDDING_MODEL_REVISION
+            EMBEDDING_MODEL,
+            revision=EMBEDDING_MODEL_REVISION,
+            local_files_only=True,
+            trust_remote_code=False,
         )
     except Exception as exc:  # noqa: BLE001 - no dense signal is not an error
         _note_embedder_unavailable(

@@ -24,6 +24,10 @@ IMMUTABLE_REVISION = re.compile(r"^[0-9a-f]{40}$")
 DEFAULT_RERANK_DEPTH = 20
 # The approved matrix entry for BAAI/bge-reranker-v2-m3 declares 512 tokens.
 RERANK_MAX_TOKENS = 512
+# Pairs scored together. Small enough that a short passage does not pay for
+# a long one, large enough to keep the four cores of the slowest supported
+# machine busy. See `_cross_encoder_scores`.
+RERANK_BATCH_PAIRS = 2
 RERANK_BLEND_RERANK = 0.6
 RERANK_BLEND_RRF = 0.4
 
@@ -250,8 +254,8 @@ def _score_with_scorer(
     )
 
 
-def _cross_encoder_scores(bundle: Mapping[str, Any], pairs: list) -> list[float]:
-    """Raw logits for (query, passage) pairs; the caller squashes them."""
+def _batch_logits(bundle: Mapping[str, Any], pairs: list) -> list[float]:
+    """Raw logits for one batch, padded to the longest passage it contains."""
     import torch
 
     queries = [pair[0] for pair in pairs]
@@ -269,6 +273,34 @@ def _cross_encoder_scores(bundle: Mapping[str, Any], pairs: list) -> list[float]
     if isinstance(logits, float):
         return [float(logits)]
     return [float(value) for value in logits]
+
+
+def _batches_by_length(pairs: list) -> list[list[int]]:
+    """Positions grouped so each batch pads only to its own longest passage."""
+    order = sorted(range(len(pairs)), key=lambda index: len(pairs[index][1]))
+    return [
+        order[start : start + RERANK_BATCH_PAIRS]
+        for start in range(0, len(order), RERANK_BATCH_PAIRS)
+    ]
+
+
+def _cross_encoder_scores(bundle: Mapping[str, Any], pairs: list) -> list[float]:
+    """Raw logits for (query, passage) pairs; the caller squashes them.
+
+    One batch of twenty pairs pads every pair to the longest of them, and the
+    longest is nearly always the 512-token ceiling. Measured on this vault on
+    2026-09-06, the twenty candidates of a real query tokenize to 61…512
+    tokens: half the arithmetic of a single batch was padding. Sorting by
+    length first and scoring in small batches pays for the padding inside each
+    batch only, and the scores are the same — padding is masked, so the two
+    orders agree to 1e-5, which is float noise and not a rank.
+    """
+    scores = [0.0] * len(pairs)
+    for batch in _batches_by_length(pairs):
+        chosen = [pairs[index] for index in batch]
+        for index, score in zip(batch, _batch_logits(bundle, chosen)):
+            scores[index] = score
+    return scores
 
 
 def _score_with_bundle(
