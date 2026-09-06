@@ -110,3 +110,15 @@ def test_the_depth_is_bounded_at_both_ends(monkeypatch):
 
     monkeypatch.setenv("LLMWIKI_BENCH_QA_CANDIDATES", "100000")
     assert longmemeval_vault._qa_candidates() == 200
+
+
+def test_the_default_window_is_the_one_the_sweep_chose():
+    """A run that sets nothing must measure what the research settled on.
+
+    Every n=200 figure this stand published was produced at 122 880 through
+    the environment variable while the constant still said 28 672, so a run
+    that forgot the variable silently measured a different arm and read as a
+    regression. The narrower Mem0-comparable envelope stays reachable by name.
+    """
+    assert longmemeval_vault.ANSWER_INPUT_BUDGET == 122_880
+    assert longmemeval_vault.MEM0_COMPARABLE_ANSWER_BUDGET == 28_672

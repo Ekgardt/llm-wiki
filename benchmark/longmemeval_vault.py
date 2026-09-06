@@ -58,21 +58,31 @@ def _qa_candidates() -> int:
 # The product's stock grounded-answer budget is 8192 byte-counted tokens; one
 # LongMemEval session entry is ~10 KB, so under the stock budget every span is
 # shed and the answer refuses itself (measured on question 25e5aa4f). The
-# budget is a first-party `grounded_qa` parameter; this value keeps the whole
-# prompt under ~28 KB ≈ ~7k estimated tokens — the same retrieval envelope
-# Mem0's "<7000 tokens" claim describes, so the cost comparison stays fair.
-ANSWER_INPUT_BUDGET = 28_672
+# budget is a first-party `grounded_qa` parameter.
+#
+# 28 672 keeps the whole prompt under ~28 KB ≈ ~7k estimated tokens — the same
+# retrieval envelope Mem0's "<7000 tokens" claim describes, so a cost
+# comparison against that claim is fair. It is not the default, because it is
+# not what the sweep chose: measured on 2026-09-02, n=50, the same questions
+# score 0.3400 at 12 288, 0.4400 at 32 768 and 0.5400 at 122 880, and 262 144
+# buys nothing more. See
+# `docs/research/2026-09-02-how-much-evidence-is-too-much.md`.
+#
+# The default is the setting that decision named, so a run that sets nothing
+# measures what the research settled on. Every n=200 figure this stand has
+# published was produced at 122 880 through the environment variable below
+# while this constant still said 28 672 — a run that forgot the variable
+# silently measured a different arm and looked like a regression.
+MEM0_COMPARABLE_ANSWER_BUDGET = 28_672
+ANSWER_INPUT_BUDGET = 122_880
 
 
 def _answer_budget() -> int:
     """The answer window for this arm, so a sweep needs no code edit.
 
-    The stock value keeps the whole prompt near 7 000 estimated tokens to match
-    the envelope Mem0's cost claim describes. Whether that ceiling is costing
-    accuracy has never been measured — the reader accepts two hundred thousand,
-    and 2026 work reports that a fixed compression budget applied regardless of
-    context breaks the scaling a stronger reader should give. This makes the
-    ceiling an arm of the stand instead of a constant.
+    The default is the measured one. `MEM0_COMPARABLE_ANSWER_BUDGET` is the
+    narrower envelope a cost comparison against Mem0's published claim needs,
+    and a sweep asks for it — or for anything else — through the variable.
     """
     raw = os.environ.get("LLMWIKI_BENCH_ANSWER_BUDGET", "").strip()
     if not raw.isdigit():
