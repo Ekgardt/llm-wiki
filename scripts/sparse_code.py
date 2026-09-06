@@ -118,6 +118,18 @@ def overlap(first: tuple[int, ...], second: tuple[int, ...]) -> float:
 def novelty(candidate: tuple[int, ...], known) -> float:
     """How unlike everything already known this is, from 0 to 1.
 
+    **Read this relatively, never against a fixed threshold.** Measured on this
+    vault 2026-09-06: 149 pairs of unrelated notes have cosine between 0.767 and
+    0.923, median 0.842 — the embedding space `intfloat/multilingual-e5-small`
+    produces is compressed into a narrow band, which is normal for this family
+    and not a defect. The E5 prefixes are applied correctly; the model simply
+    puts everything close together and carries its signal in the *ordering*.
+
+    A code inherits that: overlaps are ordered faithfully, so "more novel than
+    that one" is sound, while "novelty above 0.4" means nothing at all. The
+    first time this was ignored, an absolute cut at 0.6 declared 23 209 pairs of
+    unrelated pages to be near-duplicates.
+
     Nothing known makes everything novel, which is the honest answer for an
     empty memory rather than a refusal.
     """

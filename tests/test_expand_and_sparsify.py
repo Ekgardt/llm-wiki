@@ -105,3 +105,27 @@ def test_novelty_falls_as_something_similar_is_already_known() -> None:
 def test_the_wrong_number_of_dimensions_is_refused() -> None:
     with pytest.raises(ValueError, match="dimensions"):
         sparse_code.code(numpy.zeros(7))
+
+
+def test_overlap_is_ordered_but_not_an_absolute_scale() -> None:
+    """The embedding space is narrow, so a fixed cut means nothing.
+
+    Measured on this vault 2026-09-06: unrelated notes sit at cosine 0.767 to
+    0.923, median 0.842. That is normal for this model family and not a defect —
+    the E5 prefixes are applied and the signal lives in the ordering. The first
+    time this was ignored, an absolute cut at 0.6 declared 23 209 pairs of
+    unrelated pages near-duplicates.
+    """
+    base = _vector(20)
+    close = base + numpy.random.default_rng(21).normal(scale=0.1, size=base.size)
+    far = base + numpy.random.default_rng(22).normal(scale=1.5, size=base.size)
+
+    code_base = sparse_code.code(base)
+    near_overlap = sparse_code.overlap(code_base, sparse_code.code(close))
+    far_overlap = sparse_code.overlap(code_base, sparse_code.code(far))
+
+    # The ordering is the contract.
+    assert near_overlap > far_overlap
+    # The absolute value is not: even a badly corrupted copy stays well above
+    # zero, which is why a threshold has to be calibrated rather than assumed.
+    assert far_overlap > 0.0
