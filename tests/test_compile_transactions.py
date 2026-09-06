@@ -807,7 +807,6 @@ def test_new_claim_page_inserted_after_assessment_fails_tree_manifest_preconditi
     root, state_root = vault
     daily = _daily(root)
     import compile_memory
-    from markdown_transaction import TransactionFailure
 
     new = _claim_record(
         root, claim_id="new", value="red",
