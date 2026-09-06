@@ -963,15 +963,41 @@ def _daily_part_bounds(content: bytes) -> list[tuple[int, int]]:
     return bounds
 
 
+def _entry_ends(content: bytes, offset: int) -> range:
+    """Where a slice that stops before this entry could have ended.
+
+    An appender writes its own separator, so the newlines between the last
+    entry of the old file and the first byte of the new one were added with the
+    new entry and were not there before. A slice that ended at the old file's
+    end therefore ends somewhere inside that run, not at the entry offset.
+
+    Measured on this vault: `knowledge/daily/2026-09-02.md` was 2294 bytes when
+    it was compiled, ending `session close.\n`; the next append wrote `\n`
+    before its own block, so the entry that follows starts at 2295. Only 2295
+    was ever tried, and four claims on two pages read `evidence_unresolved`
+    for one byte of separator.
+    """
+    cursor = offset
+    while cursor > 0 and content[cursor - 1 : cursor] == b"\n":
+        cursor -= 1
+    return range(cursor, offset + 1)
+
+
 def _slice_boundaries(content: bytes, start: int) -> list[int]:
     """Where a historical slice beginning at `start` could have ended.
 
     The end of the file is always a candidate, even when a day carries more
     entries than the scan is allowed to try: the whole tail is the one slice a
     compile part is most likely to have been.
+
+    Sorted and deduplicated because `_slice_from` hashes forward from one
+    candidate to the next and needs them ascending.
     """
-    ends = [offset for offset in _daily_entry_offsets(content) if offset > start]
-    return [*ends[: MAX_EVIDENCE_SLICE_CANDIDATES - 1], len(content)]
+    ends: set[int] = set()
+    for offset in _daily_entry_offsets(content):
+        if offset > start:
+            ends.update(end for end in _entry_ends(content, offset) if end > start)
+    return [*sorted(ends)[: MAX_EVIDENCE_SLICE_CANDIDATES - 1], len(content)]
 
 
 def _slice_from(content: bytes, start: int, digest: str) -> bytes | None:
