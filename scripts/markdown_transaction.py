@@ -9097,11 +9097,22 @@ def _parse_cli_args() -> argparse.Namespace:
 
 
 def _cli_coordinator() -> MarkdownCoordinator:
+    """The coordinator the vault actually has, v3 or the legacy pair.
+
+    Constructing `MarkdownCoordinator` on the raw paths has been dead since
+    Reliability V3 adoption: adoption replaces the pre-adoption database with
+    a JSON tombstone, so opening that path directly raises `file is not a
+    database`. Every command here went with it — `prune`, so the undo trail
+    grew to 5.5 GB with nothing enforcing the two-day retention that already
+    existed, and `undo` and `recover`, which are the operator's only hands on
+    a transaction. `reclaim_runtime_state.py` learned this on 2026-09-02 and
+    the CLI never did.
+    """
     vault = Path(
         os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent)
     ).resolve()
     state_root = Path(os.environ.get("LLM_WIKI_STATE_ROOT", vault)).resolve()
-    return MarkdownCoordinator(vault, state_root)
+    return active_or_legacy_coordinator(vault, state_root)
 
 
 def _run_cli_command(
