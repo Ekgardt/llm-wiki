@@ -116,3 +116,38 @@ def test_a_directory_is_not_a_transcript(tmp_path):
     import integration_adapter
 
     assert not integration_adapter._transcript_present({"transcript_path": str(tmp_path)})
+
+
+def test_a_vanished_transcript_does_not_lose_the_session(tmp_path, monkeypatch) -> None:
+    """Five sessions were lost in four seconds because a file had gone.
+
+    `_transcript_present` guards the session-end branch. This is the other path
+    to the same file and had no guard: `resolve(strict=True)` raised
+    `FileNotFoundError` and the whole capture was recorded as lost. Measured
+    2026-09-05, all of them sessions started outside any project, whose
+    transcripts live under `-home-user`.
+    """
+    import integration_adapter
+
+    missing = tmp_path / "projects" / "-home-user" / "gone.jsonl"
+
+    assert integration_adapter._capture_path_evidence(str(missing)) is None
+
+
+def test_a_transcript_outside_the_allowed_roots_is_still_refused(tmp_path) -> None:
+    """An absence is tolerated; a refusal is not."""
+    import integration_adapter
+    import pytest as _pytest
+
+    outside = tmp_path / "elsewhere.jsonl"
+    outside.write_text("{}\n", encoding="utf-8")
+
+    with _pytest.raises(PermissionError):
+        integration_adapter._capture_path_evidence(str(outside))
+
+
+def test_an_empty_path_is_no_transcript_at_all() -> None:
+    import integration_adapter
+
+    assert integration_adapter._capture_path_evidence("") is None
+    assert integration_adapter._capture_path_evidence(None) is None

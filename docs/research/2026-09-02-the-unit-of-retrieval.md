@@ -21,7 +21,7 @@ row in forty-five — and temporal reasoning **0.0988 ±0.0416**.
 
 ## What I was going to do, and why the sources say not to
 
-`docs/BACKLOG-2026-08-30.md` item Q1 says: split captured sessions at their
+`docs/BACKLOG-2026-09-05.md` item Q1 says: split captured sessions at their
 timestamped entries — that is, at every turn. The current work says that is the
 wrong end of the trade.
 

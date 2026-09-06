@@ -2425,9 +2425,27 @@ def _capture_transcript_text(path: Path) -> str:
 
 
 def _capture_path_evidence(value: object) -> str | None:
+    """The transcript's text, or None when there is no transcript to read.
+
+    `_transcript_present` already handles a vanished transcript on the
+    session-end branch. This is the other path to the same file, and it had no
+    such guard: `resolve(strict=True)` raised `FileNotFoundError` and the whole
+    capture was recorded as lost. Measured on this vault — five losses in four
+    seconds on 2026-09-05, all sessions started outside any project, whose
+    transcripts live under `-home-user`.
+
+    Nothing is recovered by raising: if the file is gone, its contents are gone
+    with it, and the session record itself is still worth keeping. Only the
+    missing file is tolerated — a path outside the allowed roots or with a
+    disallowed extension still raises `PermissionError`, because that is a
+    refusal and not an absence.
+    """
     if not isinstance(value, str) or not value:
         return None
-    path = _validated_capture_transcript_path(value)
+    try:
+        path = _validated_capture_transcript_path(value)
+    except FileNotFoundError:
+        return None
     redacted = redact_secrets(_capture_transcript_text(path))
     if not redacted:
         return None
