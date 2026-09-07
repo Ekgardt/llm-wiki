@@ -704,10 +704,25 @@ def _validated_answer_document(document: object) -> dict:
 
 
 def _require_answered_shape(document: Mapping[str, object]) -> None:
-    populated = bool(document["claims"]) and bool(document["citations"])
-    if not populated or document["reason"] is not None:
+    """An answer carries claims and citations. A note beside them is not a refusal.
+
+    `reason` is where an abstention states itself, and this used to refuse any
+    answered reply that filled it. Measured over 200 questions on 2026-09-07:
+    twenty complete answers — claims, citations and all — were destroyed for
+    writing a note there, of the form "The 2023-09-30 entry states the count
+    directly. Note that other entries mention an Alex in unrelated contexts."
+    Six of the twenty had the gold answer in the prompt. That is the same
+    mistake as the two this file already stopped making: refusing the whole
+    answer over something beside it.
+
+    The empty case still refuses, because a reply with no claim or no citation
+    has grounded nothing. A note next to a grounded answer is dropped instead,
+    by `_answer_of_surviving_claims`, so it never reaches a reader as though it
+    were a reason to doubt.
+    """
+    if not (document["claims"] and document["citations"]):
         raise GroundedQAError(
-            "answered status requires claims with citations and no abstention reason"
+            "answered status requires claims with citations"
         )
 
 
@@ -959,6 +974,10 @@ def _answer_of_surviving_claims(
         **validated,
         "claims": kept,
         "citations": [cited[name] for name in cited if name in used],
+        # An answer has no abstention reason. Whatever the model wrote beside
+        # its claims is a note, and a note must not reach a reader in the field
+        # that means "this was refused". See `_require_answered_shape`.
+        "reason": None,
     }
 
 
