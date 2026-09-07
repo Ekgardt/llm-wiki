@@ -4796,6 +4796,24 @@ def _index_check(
     )
 
 
+def state_size_hint(state_root: Path) -> str:
+    """Why the state file could not be read, in the numbers that say it.
+
+    Two checks report "could not be read within safety bounds" and neither says
+    what the bound was or how far past it the file is. On this vault on
+    2026-09-07 the answer was 2.8 MB against a 256 KiB bound, all of it one
+    project's undrained checkpoint queue — a diagnosis the operator had to
+    reach with a Python one-liner. The reader stays bounded; only the sentence
+    changes.
+    """
+    path = Path(state_root) / "run" / "state.json"
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return ""
+    return f" run/state.json is {size} bytes against a {MAX_STATE_BYTES}-byte bound."
+
+
 def _read_state(state_root: Path, deadline: float) -> tuple[dict, str | None]:
     path = state_root / "run" / "state.json"
     if _safe_kind(path, state_root)[0] == "missing":
@@ -4847,7 +4865,8 @@ def _capture_check(state_root: Path, deadline: float) -> dict:
         return _result(
             "capture",
             "degraded",
-            "Capture diagnostics could not be read within safety bounds.",
+            "Capture diagnostics could not be read within safety bounds."
+            + state_size_hint(state_root),
             details,
         )
     return _capture_loss_result(lost, live, details)
@@ -5111,7 +5130,8 @@ def _scheduler_check(root: Path, state_root: Path, now: datetime, deadline: floa
         return _result(
             "scheduler",
             "degraded",
-            "Maintenance state could not be fully checked within safety bounds.",
+            "Maintenance state could not be fully checked within safety bounds."
+            + state_size_hint(state_root),
             details,
         )
     if not all(scripts.values()) or state_error:
