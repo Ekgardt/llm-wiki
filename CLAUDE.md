@@ -171,10 +171,13 @@ regenerable and does not change the existing `run/` deletion contract.
 No generation database belongs under `run/`; it remains operational state only.
 The design requires no persistent daemon.
 
-Legacy `cache/index.sqlite`, `cache/vectors.npy`, `cache/vectors_meta.json`, and
-`cache/lancedb/` remain readable during migration. They are disposable derived
-caches, not members of a generation. They must not be removed until installed-vault
-migration evidence makes that safe.
+Legacy `cache/index.sqlite`, `cache/vectors.npy`, and `cache/vectors_meta.json`
+remain readable during migration. They are disposable derived caches, not members
+of a generation. They must not be removed until installed-vault migration evidence
+makes that safe. LanceDB was retired on 2026-09-07: its table was never built on
+the installed vault, its path was reachable only from the deadline-less legacy
+search, and its index was keyed to a different embedder than the product's — see
+`knowledge/notes/retire-lancedb-decision.md`.
 
 **Implemented code-navigation slice:** The current authoritative corpus checkpoint
 remains `corpus-generation/v2` with `evidence-graph/v2`. Foundation Tasks 1-5 of the

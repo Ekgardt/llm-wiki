@@ -79,6 +79,7 @@ from llm_client import (  # noqa: E402
 from markdown_transaction import (  # noqa: E402
     MarkdownChange,
     MarkdownCoordinator,
+    TransactionFailure,
     active_or_legacy_coordinator,
 )
 from memory_queue import active_or_legacy_memory_queue  # noqa: E402
@@ -108,6 +109,11 @@ AGENTS = next((p for p in _AGENTS_CANDIDATES if p.exists()), _AGENTS_CANDIDATES[
 INDEX = MEMORY / "index.md"
 LOG = MEMORY / "log.md"
 COMPILE_PLAN_SCHEMA = Path(__file__).with_name("schemas") / "compile-plan-v2.json"
+# How many times a compile re-reads the notes tree after another writer moved
+# it under the assessment. Four, because the window is one model call wide and
+# a vault that loses four in a row has a busier problem than a retry. See
+# `_published`.
+COMPILE_PUBLICATION_ATTEMPTS = 4
 COMPILE_RECEIPT_SCHEMA = Path(__file__).with_name("schemas") / "compile-receipt-v2.json"
 COMPILE_RECEIPT_V3_SCHEMA = Path(__file__).with_name("schemas") / "compile-receipt-v3.json"
 # One malformed generation used to lose a whole compile. Current practice caps
@@ -2668,22 +2674,79 @@ def apply_compile_plan(
             provider_budget=provider_budget,
             completed_at=completed_at,
         )
-    publication = _ApplyPlan(
-        inputs,
-        plan,
-        action_key=action_key,
-        trigger=trigger,
-        coordinator=coordinator,
-        batch=batch,
-        provider_budget=provider_budget,
-        completed_at=completed_at,
+    def _publication() -> _ApplyPlan:
+        return _ApplyPlan(
+            inputs,
+            plan,
+            action_key=action_key,
+            trigger=trigger,
+            coordinator=coordinator,
+            batch=batch,
+            provider_budget=provider_budget,
+            completed_at=completed_at,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+
+    return _published(
+        _publication,
+        coordinator,
+        owner=owner,
         deadline=deadline,
         cancelled=cancelled,
     )
+
+
+def _published_once(
+    publication: _ApplyPlan,
+    coordinator: MarkdownCoordinator,
+    owner: OwnerLease | None,
+    deadline: float,
+    cancelled: Callable[[], bool] | None,
+) -> CompileApplyResult:
     publication.assess_claims()
     with coordinator.writer_gate(owner=owner):
         coordinator.recover(owner=owner, deadline=deadline, cancelled=cancelled)
         return publication.publish()
+
+
+def _published(
+    publication: Callable[[], _ApplyPlan],
+    coordinator: MarkdownCoordinator,
+    *,
+    owner: OwnerLease | None,
+    deadline: float,
+    cancelled: Callable[[], bool] | None,
+) -> CompileApplyResult:
+    """A compile refused because the notes tree moved under it is tried again.
+
+    A compile carries the whole notes tree as one precondition, because its
+    contradiction assessment was computed against exactly that tree, and the
+    assessment happens before the writer gate is taken — it reads every page
+    and calls a model, which is not work to hold a gate for. So any other
+    writer touching any note in that window refuses the entire transaction,
+    and the pages the compile had already produced are never written. That
+    is not hypothetical: a compile on 2026-09-02 lost two notes this way, and
+    it never ran again because the dailies it read were already marked
+    compiled.
+
+    Refusal is the correct outcome for that attempt — the assessment really
+    was stale. What was missing is the next attempt. Each one re-reads the
+    tree, re-assesses against it, and takes the next attempt ordinal, which is
+    the same lineage the append path has always used. A plan whose receipts
+    already committed returns from `_existing_receipts` without writing twice.
+    """
+    refusal: TransactionFailure | None = None
+    for _ in range(COMPILE_PUBLICATION_ATTEMPTS):
+        try:
+            return _published_once(
+                publication(), coordinator, owner, deadline, cancelled
+            )
+        except TransactionFailure as exc:
+            if exc.code != "precondition_failed":
+                raise
+            refusal = exc
+    raise refusal
 
 
 def _utc_now() -> str:

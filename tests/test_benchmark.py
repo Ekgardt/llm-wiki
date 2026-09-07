@@ -55,24 +55,29 @@ def test_search_runtime_isolates_indexes_vectors_lancedb_and_model_caches(
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(installed))
 
     with benchmark._isolated_search_runtime(runtime) as search_memory:
-        import lance_store
+        assert all(path.is_relative_to(runtime) for path in _runtime_paths(search_memory))
+        assert (search_memory.ROOT, search_memory.KNOWLEDGE_DIR) == (
+            benchmark.ROOT,
+            benchmark.KNOWLEDGE,
+        )
+        assert all(
+            Path(os.environ[name]).is_relative_to(runtime) for name in benchmark.MODEL_CACHE_ENV
+        )
 
-        runtime_paths = [
-            search_memory.INDEX_DIR,
-            search_memory.INDEX_FILE,
-            search_memory.INDEX_MANIFEST,
-            search_memory.VECTOR_NPY,
-            search_memory.VECTOR_META,
-            lance_store.LANCEDB_DIR,
-        ]
-        assert all(path.is_relative_to(runtime) for path in runtime_paths)
-        assert search_memory.ROOT == benchmark.ROOT
-        assert search_memory.KNOWLEDGE_DIR == benchmark.KNOWLEDGE
-        for name in benchmark.MODEL_CACHE_ENV:
-            assert Path(os.environ[name]).is_relative_to(runtime)
+    assert (sentinel.read_text(encoding="utf-8"), list(installed.iterdir())) == (
+        "unchanged",
+        [sentinel],
+    )
 
-    assert sentinel.read_text(encoding="utf-8") == "unchanged"
-    assert list(installed.iterdir()) == [sentinel]
+
+def _runtime_paths(search_memory) -> list[Path]:
+    return [
+        search_memory.INDEX_DIR,
+        search_memory.INDEX_FILE,
+        search_memory.INDEX_MANIFEST,
+        search_memory.VECTOR_NPY,
+        search_memory.VECTOR_META,
+    ]
 
 
 def test_legacy_only_command_returns_nonzero_below_gate(monkeypatch):

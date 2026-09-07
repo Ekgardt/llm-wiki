@@ -89,7 +89,10 @@ TRANSACTION_STATES = (
     "quarantined",
 )
 QUEUE_STATES = ("ready", "leased", "blocked", "succeeded", "dead", "cancelled")
-UNDO_RETENTION_DAYS = 30
+# One source of truth for the window; it was 30 in four files. See
+# `docs/research/2026-09-02-where-undo-belongs-and-for-how-long.md`.
+from markdown_transaction import UNDO_RETENTION_DAYS  # noqa: E402
+
 MAINTENANCE_LEASE_SECONDS = 120
 MAINTENANCE_HEARTBEAT_SECONDS = 40.0
 # Two missed beats still leave the 120-second lease alive; the third would not.
@@ -1539,6 +1542,45 @@ def _append_live_deletion_codes(details: dict) -> None:
             details["deletion_codes"].append(code)
 
 
+def _unsettled_count(states: dict[str, int]) -> int:
+    return (
+        sum(states[state] for state in ("preparing", "prepared", "applying"))
+        + states["conflicted"]
+    )
+
+
+def _attention_parts(states: dict[str, int], invalid_state: bool, details: dict) -> list[str]:
+    parts = []
+    unsettled = _unsettled_count(states)
+    if unsettled:
+        parts.append(f"{unsettled} transaction(s) still unsettled")
+    if details["quarantined_unresolved"]:
+        parts.append(
+            f"{details['quarantined_unresolved']} refused attempt(s) whose work "
+            "never happened"
+        )
+    if invalid_state:
+        parts.append("a transaction in a state this runtime does not define")
+    return parts
+
+
+def _transaction_message(
+    states: dict[str, int], problem: int, invalid_state: bool, details: dict
+) -> str:
+    """Say which thing needs attention, because "attention" is not an instruction.
+
+    The line a person reads said only that something wanted looking at, and the
+    counts were in the details nobody opens. Nine of the nine refused attempts
+    on this vault are a breadcrumb line and one blocked compile — worth naming,
+    because an operator who reads "requires attention" every day and finds the
+    same nine stops reading the line at all.
+    """
+    if not (problem or invalid_state):
+        return "Transaction state is healthy."
+    parts = _attention_parts(states, invalid_state, details)
+    return "Transaction state requires operator attention: " + "; ".join(parts) + "."
+
+
 def _transaction_result(details: dict, states: dict[str, int]) -> dict:
     details["codes"] = sorted(set(details["codes"]))
     details["deletion_codes"] = list(dict.fromkeys(details["deletion_codes"]))
@@ -1550,9 +1592,7 @@ def _transaction_result(details: dict, states: dict[str, int]) -> dict:
     invalid_state = bool(details["state_invalid"])
     _append_state_deletion_codes(details, states)
     _append_live_deletion_codes(details)
-    message = "Transaction state is healthy."
-    if problem or invalid_state:
-        message = "Transaction state requires operator attention."
+    message = _transaction_message(states, problem, invalid_state, details)
     return _result(
         "transactions",
         _transaction_status(
@@ -4756,6 +4796,24 @@ def _index_check(
     )
 
 
+def state_size_hint(state_root: Path) -> str:
+    """Why the state file could not be read, in the numbers that say it.
+
+    Two checks report "could not be read within safety bounds" and neither says
+    what the bound was or how far past it the file is. On this vault on
+    2026-09-07 the answer was 2.8 MB against a 256 KiB bound, all of it one
+    project's undrained checkpoint queue — a diagnosis the operator had to
+    reach with a Python one-liner. The reader stays bounded; only the sentence
+    changes.
+    """
+    path = Path(state_root) / "run" / "state.json"
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return ""
+    return f" run/state.json is {size} bytes against a {MAX_STATE_BYTES}-byte bound."
+
+
 def _read_state(state_root: Path, deadline: float) -> tuple[dict, str | None]:
     path = state_root / "run" / "state.json"
     if _safe_kind(path, state_root)[0] == "missing":
@@ -4807,7 +4865,8 @@ def _capture_check(state_root: Path, deadline: float) -> dict:
         return _result(
             "capture",
             "degraded",
-            "Capture diagnostics could not be read within safety bounds.",
+            "Capture diagnostics could not be read within safety bounds."
+            + state_size_hint(state_root),
             details,
         )
     return _capture_loss_result(lost, live, details)
@@ -4828,7 +4887,29 @@ HOOK_ERROR_TAIL_BYTES = 64 * 1024
 # heartbeat, far busier than a nightly pass.
 HOOK_ERROR_LIVE_SECONDS = 3600.0
 
-_HOOK_ERROR_LINE = re.compile(r"^\[(?P<at>[^\]]+)\]\s+(?P<kind>[^:]+):")
+_HOOK_ERROR_LINE = re.compile(r"^\[(?P<at>[^\]]+)\]\s+(?P<kind>[^:]+):(?P<rest>.*)$")
+# A lost race, by what the line says rather than by what wrote it. Reading the
+# message means the six hundred lines already in the trail are classified too,
+# instead of the fix only taking effect once the log rotates.
+# A kind whose name says the writer lost a race. The event is carried by the
+# next session end, so it is retried work and not lost work, and counting it as
+# a failure made this check permanently red on a machine that runs several
+# agents. Measured on this vault 2026-09-07: `no-hands` logged four of these in
+# four minutes while its committed sequence advanced from 836 to 838.
+CONTENTION_KIND_MARKER = "contention"
+CONTENTION_MESSAGES = (
+    "owner_busy",
+    "ProjectPendingPriorError",
+    "operation_id is already bound to a different request",
+    "writer is busy",
+    "database is locked",
+    # The state lock is held by another writer; the event is queued in
+    # `project_checkpoint_pending` and the next drain carries it. Measured
+    # 2026-09-07: the only two lines in the recent trail that were not already
+    # contention were this, three seconds apart, while checkpoints kept
+    # committing.
+    "Could not acquire state lock",
+)
 
 
 def _hook_error_lines(path: Path) -> list[str]:
@@ -4847,9 +4928,22 @@ def _hook_error_lines(path: Path) -> list[str]:
     return [line for line in lines[1 if start else 0 :] if line.startswith("[")]
 
 
+def _recorded_kind(kind: str, rest: str) -> str:
+    """The kind this line belongs to, contention named apart from failure."""
+    if CONTENTION_KIND_MARKER in kind:
+        return kind
+    if any(marker in rest for marker in CONTENTION_MESSAGES):
+        return f"{kind} contention"
+    return kind
+
+
 def _hook_error_records(lines: list[str]) -> list[tuple[str, str]]:
     matches = (_HOOK_ERROR_LINE.match(line) for line in lines)
-    return [(match["at"], match["kind"].strip()) for match in matches if match]
+    return [
+        (match["at"], _recorded_kind(match["kind"].strip(), match["rest"]))
+        for match in matches
+        if match
+    ]
 
 
 def _hook_error_kinds(records: list[tuple[str, str]]) -> dict[str, int]:
@@ -4869,19 +4963,38 @@ def _hook_error_is_live(last_at: str, now: datetime) -> bool:
     return (now - seen).total_seconds() <= HOOK_ERROR_LIVE_SECONDS
 
 
+def _is_contention_kind(kind: str) -> bool:
+    return CONTENTION_KIND_MARKER in kind
+
+
+def _failure_count(kinds: dict[str, int]) -> int:
+    return sum(count for kind, count in kinds.items() if not _is_contention_kind(kind))
+
+
 def _hook_error_result(live: bool, count: int, details: dict) -> dict:
-    if live:
+    """Retried contention is reported and does not degrade the check.
+
+    `count` is every line in the trail and stays in the details, because a
+    vault drowning in contention is worth seeing. What decides the status is
+    how many of them were something a retry will not fix.
+    """
+    failures = _failure_count(details.get("kinds") or {})
+    if live and failures:
         return _result(
             "hooks",
             "degraded",
-            f"{count} hook failure(s) in the recent trail, still happening.",
+            f"{failures} hook failure(s) in the recent trail, still happening.",
             details,
         )
-    if count:
-        return _result(
-            "hooks", "ok", f"{count} hook failure(s) recorded, none recently.", details
-        )
-    return _result("hooks", "ok", "No hook failure is recorded.", details)
+    return _result("hooks", "ok", _quiet_hook_message(failures, count - failures), details)
+
+
+def _quiet_hook_message(failures: int, contended: int) -> str:
+    if failures:
+        return f"{failures} hook failure(s) recorded, none recently."
+    if contended:
+        return f"No hook failure; {contended} lost race(s) the next session retries."
+    return "No hook failure is recorded."
 
 
 # A project's checkpoints are ordered, so one sequence that cannot finish holds
@@ -5017,7 +5130,8 @@ def _scheduler_check(root: Path, state_root: Path, now: datetime, deadline: floa
         return _result(
             "scheduler",
             "degraded",
-            "Maintenance state could not be fully checked within safety bounds.",
+            "Maintenance state could not be fully checked within safety bounds."
+            + state_size_hint(state_root),
             details,
         )
     if not all(scripts.values()) or state_error:
@@ -7960,7 +8074,7 @@ def _migrated_legacy_queue(
 
 def _repair_queue_action(guard: Any, context: _RepairContext) -> bool:
     """Repair the legacy queue and report whether the v2 queue is usable."""
-    from memory_queue import MemoryQueue, migrate_legacy_queue
+    from memory_queue import active_or_legacy_memory_queue, migrate_legacy_queue
 
     legacy_available = guard.run(
         _repair_leases, context.state_path, context.generated_at, context.repaired
@@ -7976,7 +8090,14 @@ def _repair_queue_action(guard: Any, context: _RepairContext) -> bool:
     marker_valid = _safe_kind(marker, context.state_path)[0] == "regular"
     if migration is None and not marker_valid:
         return False
-    guard.run(MemoryQueue, context.state_path)
+    # Not `MemoryQueue(state_path)`. Adoption replaces the pre-adoption
+    # `run/queue.sqlite3` with a JSON tombstone, so constructing the legacy queue
+    # directly raises `queue_tombstoned_by_adoption` — and because this is the
+    # first action in the repair chain, the whole runtime repair aborted on it.
+    # Found in an audit 2026-09-05: `doctor --repair` had been reporting
+    # "Runtime repair failed" with nothing repaired, on a vault where adoption
+    # is in force, and the message named the fix.
+    guard.run(active_or_legacy_memory_queue, context.root_path, context.state_path)
     return True
 
 

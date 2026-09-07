@@ -372,11 +372,37 @@ def summarize_with_llm(
     return text.strip()
 
 
+def _anchor_date(day: str):
+    from datetime import date
+
+    try:
+        return date.fromisoformat(day)
+    except (TypeError, ValueError):
+        return None
+
+
+def _dated_block(day: str, block: str) -> str:
+    """The entry, followed by the dates it mentions, resolved against its day.
+
+    A session says "last Thursday" and the entry records the day it was
+    captured; nothing joined the two, so a question about that Thursday found
+    both halves and no sentence stating the answer. Measured 2026-09-03, four of
+    nine substantive refusals on the stand were exactly this. Resolving here
+    makes the date ordinary citable text, and every gate downstream is unchanged.
+    """
+    from temporal_anchor import annotation
+
+    anchor = _anchor_date(day)
+    if anchor is None:
+        return block
+    return block + annotation(block, anchor)
+
+
 def append_daily(day: str, block: str, operation_id: str | None = None) -> Path:
     from daily_log_append import locked_append
 
     out = DAILY_DIR / f"{day}.md"
-    locked_append(out, block, operation_id=operation_id)
+    locked_append(out, _dated_block(day, block), operation_id=operation_id)
     return out
 
 
@@ -481,12 +507,22 @@ def maybe_trigger_compile(state: dict, daily_path: Path, tier: str) -> None:
 
 
 def _flush_summary(args: argparse.Namespace) -> str | None:
+    """Classify the conversation in the transcript, not the JSON around it.
+
+    The whole file, then rendered, then bounded — in that order. Reading a
+    60 000-character tail of raw JSONL first can land inside a single
+    bookkeeping entry and hand the classifier no conversation at all; the
+    rendered conversation of a real session is 2 KB to 32 KB and fits the
+    window whole. Same reasoning as the durable record a few hundred lines
+    down, and the same reasoning as `_readable_evidence`.
+    """
     if not args.transcript:
         return ""
-    transcript = read_transcript_tail(Path(args.transcript))
+    transcript = read_transcript_tail(Path(args.transcript), max_chars=MAX_RECORD_CHARS)
     if not transcript:
         return ""
-    return summarize_with_llm(transcript, args.event, args.session_id)
+    readable = _bounded_classifier_evidence(_readable_evidence(transcript))
+    return summarize_with_llm(readable, args.event, args.session_id)
 
 
 def _capture_binding_intent_id(binding: object) -> str:
@@ -596,6 +632,31 @@ def _read_capture_intent(
     return record
 
 
+def _readable_evidence(evidence: object) -> str:
+    """The conversation this evidence carries, not the JSON that carries it.
+
+    The classifier used to read `canonical_json_bytes(evidence)`: the host's
+    raw JSONL, every bookkeeping line included, and only the last 60 000
+    characters of it. Measured on the 187 ready intents on this vault, a
+    session's evidence is 143 KB to 942 KB of that, and the conversation
+    inside it renders to 2 KB to 32 KB. So the window held about six per cent
+    of the bytes, taken from the end, and on the intents inspected on
+    2026-09-06 it was file-backup manifests and token-cost accounting from
+    edge to edge — not one line of anyone speaking.
+
+    That is the whole explanation of `flush_tier_counts: {"ok": 65}`. Sixty-five
+    sessions in a row were classified as having nothing worth saving, and each
+    verdict was right about the bytes it was shown. Rendered, the same
+    conversation fits the window whole with room to spare, and it is the same
+    rendering the durable session record already keeps.
+    """
+    from session_evidence import evidence_text, render_transcript
+
+    if isinstance(evidence, str):
+        return render_transcript(evidence)
+    return render_transcript(evidence_text(evidence))
+
+
 def _bounded_classifier_evidence(evidence: str) -> str:
     """The tail the classifier reads; the durable record still keeps every byte.
 
@@ -616,9 +677,7 @@ def _bounded_classifier_evidence(evidence: str) -> str:
 
 
 def _capture_prompt(record: Mapping[str, object]) -> str:
-    from reliable_memory import canonical_json_bytes
-
-    evidence = canonical_json_bytes(record["evidence"]).decode("utf-8")
+    evidence = _readable_evidence(record["evidence"])
     return (
         "Classify this role-preserved session evidence using the closed flush grammar.\n"
         f"Event: {record['event']}\n"
@@ -626,20 +685,43 @@ def _capture_prompt(record: Mapping[str, object]) -> str:
     )
 
 
+# Emphasis a model puts around the tier it is declaring. The grammar is closed
+# on the token, not on the punctuation a Markdown-speaking model wraps it in:
+# on the first five real intents classified with a readable window, two came
+# back as `**FLUSH_MAJOR**`, and under the literal rule both sessions would
+# have been destroyed as invalid output.
+_TIER_EMPHASIS = "*_`# "
+
+
+def _declared_tier_line(raw: str) -> tuple[str, str]:
+    """The tier the first line declares, and everything after that line."""
+    head, _, rest = raw.partition("\n")
+    return head.strip().strip(_TIER_EMPHASIS).strip(), rest
+
+
 def _capture_wire_body(raw: str, token: str) -> str | None:
-    prefix = f"{token}\n"
-    if not raw.startswith(prefix):
+    head, rest = _declared_tier_line(raw)
+    if head != token:
         return None
-    return _require_canonical_body(raw[len(prefix) :])
+    return _require_canonical_body(rest)
 
 
 def _require_canonical_body(body: str) -> str:
-    """A flush body is present and carries no surrounding whitespace."""
-    if not body:
+    """The flush body, with the whitespace around it removed.
+
+    This used to refuse a body that was not already stripped, and the refusal
+    lost the whole capture: nine sessions on this vault were recorded under
+    `noncanonical flush output`, and every one of them was a model that ended
+    its answer with a newline. Whitespace around a Markdown body carries
+    nothing a reader or a later grep can use, so refusing it protects nothing
+    and costs a session. Output that is not a flush body at all is still
+    refused — a body that is only whitespace here, and anything trailing
+    `FLUSH_OK` in `_parse_capture_wire_output`.
+    """
+    stripped = body.strip()
+    if not stripped:
         raise RuntimeError("capture provider returned an empty flush body")
-    if body != body.strip():
-        raise RuntimeError("capture provider returned noncanonical flush output")
-    return body
+    return stripped
 
 
 _CAPTURE_WIRE_TIERS = (("major", "FLUSH_MAJOR"), ("minor", "FLUSH_MINOR"))
@@ -657,7 +739,8 @@ def _capture_wire_tier(raw: str) -> tuple[str, str] | None:
 def _parse_capture_wire_output(raw: object) -> tuple[str, str]:
     if not isinstance(raw, str):
         raise RuntimeError("capture provider returned no flush output")
-    if raw == "FLUSH_OK":
+    head, rest = _declared_tier_line(raw)
+    if head == "FLUSH_OK" and not rest.strip():
         return "ok", ""
     return _require_declared_tier(_capture_wire_tier(raw))
 

@@ -1,0 +1,34 @@
+{
+  "abstention": {
+    "n": 11,
+    "judge_accuracy": 1.0
+  },
+  "knowledge-update": {
+    "n": 27,
+    "judge_accuracy": 0.4074
+  },
+  "multi-session": {
+    "n": 47,
+    "judge_accuracy": 0.0213
+  },
+  "single-session-assistant": {
+    "n": 22,
+    "judge_accuracy": 0.5909
+  },
+  "single-session-preference": {
+    "n": 12,
+    "judge_accuracy": 0.1667
+  },
+  "single-session-user": {
+    "n": 25,
+    "judge_accuracy": 0.4
+  },
+  "temporal-reasoning": {
+    "n": 51,
+    "judge_accuracy": 0.098
+  },
+  "overall": {
+    "n": 195,
+    "judge_accuracy": 0.2718
+  }
+}

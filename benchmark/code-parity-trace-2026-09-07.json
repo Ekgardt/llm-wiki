@@ -1,0 +1,218 @@
+{
+  "version": "code-parity-v1",
+  "directory": "/home/user/llm-wiki",
+  "budget_seconds": 60.0,
+  "tasks": [
+    {
+      "id": "T01",
+      "kind": "who-calls",
+      "question": "Which production functions call fuse_rrf?",
+      "trace_mcp": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 1.513,
+        "tokens": 252,
+        "answer_excerpt": "{\"target\":{\"symbol_id\":\"scripts/retrieval.py::fuse_rrf#function\",\"fqn\":\"scripts.retrieval.fuse_rrf\",\"file\":\"scripts/retrieval.py\"},\"references\":[{\"edge_type\":\"calls\",\"resolution_tier\":\"ast_resolved\",\"symbol\":{\"symbol_id\":\"scripts/retrieval.py::_fused_candidates#function\",\"name\":\"_fused_candidates\",\"kind\":\"function\",\"fqn\":\"scripts.retrieval._fused_candidates\",\"signature\":\"def _fused_candidates(\",\"line_start\":3099},\"file\":\"scripts/retrieval.py\",\"_freshness\":\"fresh\"}],\"total\":1,\"resolution_tiers\":{\"scip_resolved\":0,\"lsp_resolved\":0,\"ast_resolved\":1,\"ast_inferred\":0,\"text_matched\":0},\"_meta\":{\"freshness\":{\"fresh\":1,\"edited_uncommitted\":0,\"stale_index\":0,\"repo_is_stale\":false},\"confidence\":0.8,\"confidence_signals\":{\"top1_strength\":1,\"top_gap\":1,\"identity_match\":0,\"freshness\":1}},\"_hints\":[{\"tool\":\"get_change_impact\",\"args\":{\"symbol_id\":\"<symbol>\"},\"why\":\"See transitive impact beyond direct references\"},{\"tool\":\"get_tests_for\",\"args\":{\"symbol_id\":\"<symbol>\"},\"why\":\"Find tests covering this symbol\"}]}"
+      }
+    },
+    {
+      "id": "T02",
+      "kind": "who-calls",
+      "question": "Which functions call write_session_evidence?",
+      "trace_mcp": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 1.357,
+        "tokens": 548,
+        "answer_excerpt": "{\"target\":{\"symbol_id\":\"scripts/session_evidence.py::write_session_evidence#function\",\"fqn\":\"scripts.session_evidence.write_session_evidence\",\"file\":\"scripts/session_evidence.py\"},\"references\":[{\"edge_type\":\"calls\",\"resolution_tier\":\"ast_resolved\",\"symbol\":{\"symbol_id\":\"benchmark/longmemeval_vault.py::_ingest_one#function\",\"name\":\"_ingest_one\",\"kind\":\"function\",\"fqn\":\"benchmark.longmemeval_vault._ingest_one\",\"signature\":\"def _ingest_one(\",\"line_start\":179},\"file\":\"benchmark/longmemeval_vault.py\",\"_freshness\":\"fresh\"},{\"edge_type\":\"calls\",\"resolution_tier\":\"ast_resolved\",\"symbol\":{\"symbol_id\":\"scripts/backfill_sessions.py::_write_one#function\",\"name\":\"_write_one\",\"kind\":\"function\",\"fqn\":\"scripts.backfill_sessions._write_one\",\"signature\":\"def _write_one(vault: Path, path: Path, day: str, transcript: str, outcome: Outcome) -> None\",\"line_start\":131},\"file\":\"scripts/backfill_sessions.py\",\"_freshness\":\"fresh\"},{\"edge_type\":\"calls\",\"resolution_tier\":\"ast_resolved\",\"symbol\":{\"symbol_id\":\"scripts/flush_memory.py::_keep_session_record#function\",\"name\":\"_keep_session_record\",\"kind\":\"function\",\"fqn\":\"scripts.flush_memory._keep_session_record\",\"signature\":\"def _keep_session_record(\",\"line_start\":1285},\"file\":\"scripts/flush_memory.py\",\"_freshness\":\"fresh\"},{\"edge_type\":\"calls\",\"resolution_tier\":\"ast_resolved\",\"symbol\":{\"symbol_id\":\"scripts/flush_memory.py::_keep_transcript_record#function\",\"name\":\"_keep_transcript_record\",\"kind\":\"function\",\"fqn\":\"scripts.flush_memory._keep_transcript_record\",\"signature\":\"def _keep_transcript_record(args: argparse.Namespace) -> None\",\"line_start\":1320},\"file\":\"scripts/flush_memory.py\",\"_freshness\":\"fresh\"}],\"total\":4,\"resolution_tiers\":{\"scip_resolved\":0,\"lsp_resolved\":0,\"ast_resolved\":4,\"ast_inferred\":0,\"text_matched\":0},\"_meta\":{\"freshness\":{\"fresh\":4,\"edited_uncommitted\":0,\"stale_index\":0,\"repo_is_stale\":false},\"confidence\":0.55,\"confidence_signals\":{\"top1_strength\":1,\"top_gap\":0,\"identity_match\":0,\"freshness\":1}},\"_hints\":[{\"tool\":\"get_change_impact\",\"args\":{\"symbol_id\":\"<symbol>\"},\"why\":\"See transitive impact beyond direct references\"},{\"tool\":\"get_tests_for\",\"args\":{\"symbol_id\":\"<symbol>\"},\"why\":\"Find tests covering this symbol\"}]}"
+      }
+    },
+    {
+      "id": "T03",
+      "kind": "what-does-x-call",
+      "question": "Which project functions does fuse_rrf call?",
+      "trace_mcp": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 1.355,
+        "tokens": 481,
+        "answer_excerpt": "{\"root\":{\"symbol_id\":\"scripts/retrieval.py::fuse_rrf#function\",\"name\":\"fuse_rrf\",\"kind\":\"function\",\"file\":\"scripts/retrieval.py\",\"line\":1569,\"calls\":[{\"symbol_id\":\"scripts/provenance.py::curated_pages_first#function\",\"name\":\"curated_pages_first\",\"kind\":\"function\",\"file\":\"scripts/provenance.py\",\"line\":79,\"edge\":{\"resolution\":\"ast_resolved\",\"edge_type\":\"calls\"}},{\"symbol_id\":\"scripts/retrieval.py::RetrievalCandidate#class\",\"name\":\"RetrievalCandidate\",\"kind\":\"class\",\"file\":\"scripts/retrieval.py\",\"line\":527,\"edge\":{\"resolution\":\"ast_resolved\",\"edge_type\":\"references\"}},{\"symbol_id\":\"scripts/retrieval.py::_weigh_by_trust#function\",\"name\":\"_weigh_by_trust\",\"kind\":\"function\",\"file\":\"scripts/retrieval.py\",\"line\":1305,\"edge\":{\"resolution\":\"ast_resolved\",\"edge_type\":\"calls\"}},{\"symbol_id\":\"scripts/retrieval.py::_fusion_weights#function\",\"name\":\"_fusion_weights\",\"kind\":\"function\",\"file\":\"scripts/retrieval.py\",\"line\":1504,\"edge\":{\"resolution\":\"ast_resolved\",\"edge_type\":\"calls\"}},{\"symbol_id\":\"scripts/retrieval.py::_accumulate_backend#function\",\"name\":\"_accumulate_backend\",\"kind\":\"function\",\"file\":\"scripts/retrieval.py\",\"line\":1515,\"edge\":{\"resolution\":\"ast_resolved\",\"edge_type\":\"calls\"}},{\"symbol_id\":\"scripts/retrieval.py::_fused_candidate#function\",\"name\":\"_fused_candidate\",\"kind\":\"function\",\"file\":\"scripts/retrieval.py\",\"line\":1542,\"edge\":{\"resolution\":\"ast_resolved\",\"edge_type\":\"calls\"}}],\"called_by\":[{\"symbol_id\":\"scripts/retrieval.py::_fused_candidates#function\",\"name\":\"_fused_candidates\",\"kind\":\"function\",\"file\":\"scripts/retrieval.py\",\"line\":3099,\"edge\":{\"resolution\":\"ast_resolved\",\"edge_type\":\"calls\"}}]},\"edge_types_used\":[\"calls\",\"references\"],\"max_depth\":1,\"resolution_tiers\":{\"scip_resolved\":0,\"lsp_resolved\":0,\"ast_resolved\":7,\"ast_inferred\":0,\"text_matched\":0},\"_hints\":[{\"tool\":\"get_change_impact\",\"args\":{\"symbol_id\":\"<symbol>\"},\"why\":\"See full reverse dependency chain beyond direct callers\"}]}"
+      }
+    },
+    {
+      "id": "T04",
+      "kind": "find-symbol-definition",
+      "question": "Where is _page_diverse defined?",
+      "trace_mcp": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "partial",
+        "seconds": 1.517,
+        "tokens": 387,
+        "answer_excerpt": "{\"items\":[{\"symbol_id\":\"scripts/retrieval.py::_page_diverse#function\",\"name\":\"_page_diverse\",\"kind\":\"function\",\"fqn\":\"scripts.retrieval._page_diverse\",\"signature\":\"def _page_diverse(\",\"file\":\"scripts/retrieval.py\",\"line\":3022,\"score\":0.835,\"_freshness\":\"fresh\"},{\"symbol_id\":\"scripts/search_memory.py::_page_diverse_order#function\",\"name\":\"_page_diverse_order\",\"kind\":\"function\",\"fqn\":\"scripts.search_memory._page_diverse_order\",\"signature\":\"def _page_diverse_order(\",\"file\":\"scripts/search_memory.py\",\"line\":4130,\"score\":0.643,\"_freshness\":\"fresh\"},{\"symbol_id\":\"tests/test_retrieval.py::test_page_diverse_order_drops_nothing#function\",\"name\":\"test_page_diverse_order_drops_nothing\",\"kind\":\"function\",\"signature\":\"def test_page_diverse_order_drops_nothing(...)\",\"file\":\"tests/test_retrieval.py\",\"line\":652,\"score\":0.255,\"_freshness\":\"fresh\"}],\"total\":3,\"search_mode\":\"fts\",\"mode\":\"single\",\"_meta\":{\"freshness\":{\"fresh\":3,\"edited_uncommitted\":0,\"stale_index\":0,\"repo_is_stale\":false},\"repo_freshness\":{\"index_head_sha\":\"d4b4479ab83bb217df2850c9b697f8198a7b6a7c\",\"current_head_sha\":\"d4b4479ab83bb217df2850c9b697f8198a7b6a7c\",\"repo_is_stale\":false},\"confidence\":0.807,\"confidence_signals\":{\"top1_strength\":1,\"top_gap\":0.23,\"identity_match\":1,\"freshness\":1}},\"_hints\":[{\"tool\":\"get_symbol\",\"args\":{\"symbol_id\":\"scripts/retrieval.py::_page_diverse#function\"},\"why\":\"Read the full source of the top result\"},{\"tool\":\"get_context_bundle\",\"args\":{\"symbol_id\":\"scripts/retrieval.py::_page_diverse#function\"},\"why\":\"Get the symbol + its imports in one call\"}]}"
+      }
+    },
+    {
+      "id": "T05",
+      "kind": "find-symbol-definition",
+      "question": "Where is the constant EDITORIAL_NAMES defined?",
+      "trace_mcp": {
+        "status": "answered",
+        "call_statuses": [
+          "answered",
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 3.699,
+        "tokens": 994,
+        "answer_excerpt": "{\"items\":[{\"symbol_id\":\"scripts/vault_editorial.py::EDITORIAL_NAMES#constant\",\"name\":\"EDITORIAL_NAMES\",\"kind\":\"constant\",\"fqn\":\"scripts.vault_editorial.EDITORIAL_NAMES\",\"signature\":\"EDITORIAL_NAMES: frozenset[str] = frozenset({\",\"file\":\"scripts/vault_editorial.py\",\"line\":43,\"score\":0.82,\"_freshness\":\"fresh\"}],\"total\":1,\"search_mode\":\"fts\",\"mode\":\"single\",\"_meta\":{\"freshness\":{\"fresh\":1,\"edited_uncommitted\":0,\"stale_index\":0,\"repo_is_stale\":false},\"repo_freshness\":{\"index_head_sha\":\"d4b4479ab83bb217df2850c9b697f8198a7b6a7c\",\"current_head_sha\":\"d4b4479ab83bb217df2850c9b697f8198a7b6a7c\",\"repo_is_stale\":false},\"confidence\":1,\"confidence_signals\":{\"top1_strength\":1,\"top_gap\":1,\"identity_match\":1,\"freshness\":1}},\"_hints\":[{\"tool\":\"get_symbol\",\"args\":{\"symbol_id\":\"scripts/vault_editorial.py::EDITORIAL_NAMES#constant\"},\"why\":\"Read the full source of the top result\"},{\"tool\":\"get_context_bundle\",\"args\":{\"symbol_id\":\"scripts/vault_editorial.py::EDITORIAL_NAMES#constant\"},\"why\":\"Get the symbol + its imports in one call\"}]}\n{\"files\":[{\"file\":\"scripts/corpus_snapshot.py\",\"language\":\"python\",\"hits\":[{\"line\":23,\"column\":29,\"match\":\"EDITORIAL_NAMES\",\"context\":[\"> 23: from vault_editorial import EDITORIAL_NAMES\"]},{\"line\":1430,\"column\":73,\"match\":\"EDITORIAL_NAMES\",\"context\":[\"> 1430:             return path.suffix.casefold() == \\\".md\\\" and path.name not in EDITORIAL_NAMES\"]}]},{\"file\":\"scripts/lint_memory.py\",\"language\":\"python\",\"hits\":[{\"line\":66,\"column\":5,\"match\":\"EDITORIAL_NAMES\",\"context\":[\"> 66:     EDITORIAL_NAMES,\"]},{\"line\":82,\"column\":24,\"match\":\"EDITORIAL_NAMES\",\"context\":[\"> 82: # Editorial page sets (EDITORIAL_NAMES, BACKLINK_EXEMPT_NAMES,\"]},{\"line\":332,\"column\":19,\"match\":\"EDITORIAL_NAMES\",\"context\":[\"> 332:     if md.name in EDITORIAL_NAMES:\"]},{\"line\":384,\"column\":23,\"match\":\"EDITORIAL_NAMES\",\"context\":[\"> 384:     return md.name in EDITORIAL_NAMES or md.name in BACKLINK_EXEMPT_NAMES\"]},{\"line\":460,\"column\":23,\"match\":\"EDITORIAL_NAMES\",\"context\":[\"> 460:         if md.name in EDITORIAL_NAMES:\"]},{\"line\":521,\"column\":23,\"match\":\"EDITORIAL_NAMES\",\"context\":[\"> 521:         if md.name in EDITORIAL_NAMES:\"]},{\"line\":534,\"column\":19,\"match\":\"EDITORIAL_NAMES\",\"context\":[\"> 534:     if md.name in EDITORIAL_NAMES:\"]},{\"line\":686,\"column\":19,\"match\":\"EDITORIAL_NAMES\",\"context\":[\"> 686:     if md.name in EDITORIAL_NAMES:\"]},{\"line\":842,\"column\":20,\"match\":\"EDITORIAL_NAMES\",\"context\":[\"> 842:     if gap.name in EDITORIAL_NAMES:\"]},{\"line\":971,\"column\":63,\"match\":\"EDITORIAL_NAMES\",\"context\":[\"> 971:     pages = [p for p in _iter_tree_md(NOTES) if p.name not in EDITORIAL_NAMES]\"]}]},{\"file\":\"scripts/lookup_mode.py\",\"language\":\"python\",\"hits\":[{\"line\":31,\"column\":29,\"match\":\"EDITORIAL_NAMES\",\"context\":[\"> 31: from vault_editorial import EDITORIAL_NAMES, editorial_parents_to_skip  # noqa: E402\"]},{\"line\":46,\"column\":22,\"match\":\"EDITORIAL_NAMES\",\"context\":[\"> 46:     `vault_editorial.EDITORIAL_NAMES`) and skeleton directories like\"]},{\"line\":56,\"column\":27,\"match\":\"EDITORIAL_NAMES\",\"context\":[\"> 56:         and p.name not in EDITORIAL_NAMES\"]}]},{\"file\":\"scripts/migrate_to_okf.py\",\"language\":\"python\",\"hits\":[{\"line\":43,\"column\":29,\"match\":\"EDITORIAL_NAMES\",\"context\":[\"> 43: from vault_editorial import EDITORIAL_NAMES  # noqa: E402\"]},{\"line\":51,\"column\":4,\"match\":\"EDITORIAL_NAMES\",\"context\":[\"> 51: # `EDITORIAL_NAMES` (imported above) covers the ones that are editorial wherever\"]},{\"line\":213,\"column\":21,\"match\":\"EDITORIAL_NAMES\",\"context\":[\"> 213:     if path.name in EDITORIAL_NAMES:\"]}]},{\"file\":\"scripts/repair_backlinks.py\",\"language\":\"python\",\"hits\":[{\"line\":36,\"column\":29,\"match\":\"EDITORIAL_NAMES\",\"context\":[\"> 36: from vault_editorial import EDITORIAL_NAMES  # noqa: E402\"]},{\"line\":49,\"column\":29,\"match\":\"EDITORIAL_NAMES\",\"context\":[\"> 49:         if page.name not in EDITORIAL_NAMES and \\\"archive\\\" not in page.parts\"]}]}],\"total_matches\":20,\"files_searched\":504,\"files_matched\":5,\"truncated\":true,\"timed_out\":false}"
+      }
+    },
+    {
+      "id": "T06",
+      "kind": "find-dead-code",
+      "question": "Is _flush_started (scripts/integration_adapter.py) dead code?",
+      "trace_mcp": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 1.838,
+        "tokens": 172,
+        "answer_excerpt": "{\"target\":{\"symbol_id\":\"scripts/integration_adapter.py::_flush_started#function\",\"fqn\":\"scripts.integration_adapter._flush_started\",\"file\":\"scripts/integration_adapter.py\"},\"references\":[],\"total\":0,\"resolution_tiers\":{\"scip_resolved\":0,\"lsp_resolved\":0,\"ast_resolved\":0,\"ast_inferred\":0,\"text_matched\":0},\"evidence\":{\"scope\":\"full_index\",\"indexed_files\":504,\"indexed_symbols\":29356,\"query_expanded\":false,\"verdict\":\"resolver_gap_suspected\",\"suggestion\":\"Symbol indexed but edges incomplete. search_text finds 5 occurrences of \\\"_flush_started\\\" — the resolver likely missed parametric / dynamic call sites. Confirm with search_text or grep.\",\"symbol\":\"_flush_started\",\"text_occurrences\":5}}"
+      }
+    },
+    {
+      "id": "T07",
+      "kind": "find-dead-code",
+      "question": "Is _search_backends (scripts/search_memory.py) dead code?",
+      "trace_mcp": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 2.005,
+        "tokens": 170,
+        "answer_excerpt": "{\"target\":{\"symbol_id\":\"scripts/search_memory.py::_search_backends#function\",\"fqn\":\"scripts.search_memory._search_backends\",\"file\":\"scripts/search_memory.py\"},\"references\":[],\"total\":0,\"resolution_tiers\":{\"scip_resolved\":0,\"lsp_resolved\":0,\"ast_resolved\":0,\"ast_inferred\":0,\"text_matched\":0},\"evidence\":{\"scope\":\"full_index\",\"indexed_files\":504,\"indexed_symbols\":29356,\"query_expanded\":false,\"verdict\":\"resolver_gap_suspected\",\"suggestion\":\"Symbol indexed but edges incomplete. search_text finds 3 occurrences of \\\"_search_backends\\\" — the resolver likely missed parametric / dynamic call sites. Confirm with search_text or grep.\",\"symbol\":\"_search_backends\",\"text_occurrences\":3}}"
+      }
+    },
+    {
+      "id": "T08",
+      "kind": "impact-of-changing-x",
+      "question": "Which modules import page_status (and are therefore touched by changing it)?",
+      "trace_mcp": {
+        "status": "tool_error",
+        "call_statuses": [
+          "tool_error"
+        ],
+        "grade": "wrong",
+        "seconds": 1.355,
+        "tokens": 65,
+        "answer_excerpt": "{\"error\":{\"code\":\"NOT_FOUND\",\"message\":\"'page_status' is not in the index\",\"help\":\"If this is a file path, it may not match the configured include globs — check `include`/`exclude` in .trace-mcp.json and reindex. Otherwise use search() to locate the symbol.\"}}"
+      }
+    },
+    {
+      "id": "T09",
+      "kind": "architecture-of-module",
+      "question": "Which project modules does scripts/retrieval.py depend on?",
+      "trace_mcp": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "wrong",
+        "seconds": 2.131,
+        "tokens": 3570,
+        "answer_excerpt": "{\"target\":{\"path\":\"scripts/retrieval.py\",\"symbolId\":\"scripts/retrieval.py::OptionalStageTimeout#class\",\"symbolName\":\"OptionalStageTimeout\",\"kind\":\"class\"},\"summary\":{\"totalFiles\":153,\"totalSymbols\":47,\"maxDepth\":3,\"crossBoundary\":true,\"publicApiAffected\":14,\"untestedDependents\":152,\"highComplexityDependents\":3,\"sentence\":\"Impact: 153 file(s) across 3 module(s), 14 public API, 152 untested, 3 high-complexity, 2 breaking risk(s). Risk: critical.\"},\"risk\":{\"score\":0.86,\"level\":\"critical\",\"publicApiBreaking\":true,\"untestedRatio\":0.99,\"maxComplexity\":83,\"mitigations\":[\"Add test coverage for the target before modifying\",\"High blast radius (153 files) — consider incremental rollout\",\"High complexity in dependents — review carefully for regressions\",\"152/153 dependents lack tests — add integration tests\",\"14 public API symbol(s) affected — check for breaking changes\",\"High churn (42 commits/180d) — review recent history\",\"2 exported symbol(s) with 7 consumer(s) — signature change = breaking\"]},\"affectedTests\":{\"total\":0,\"files\":[],\"truncated\":false},\"dependents\":[{\"path\":\"benchmark/longmemeval_vault.py\",\"edgeTypes\":[\"imports\",\"calls\"],\"depth\":1,\"hasTests\":false,\"symbols\":[{\"symbolId\":\"benchmark/longmemeval_vault.py::profile_for#function\",\"symbolName\":\"profile_for\",\"symbolKind\":\"function\",\"resolutionTier\":\"ast_resolved\",\"complexity\":1,\"isExported\":true},{\"symbolId\":\"benchmark/longmemeval_vault.py::_retrieved_rows#function\",\"symbolName\":\"_retrieved_rows\",\"symbolKind\":\"function\",\"resolutionTier\":\"ast_resolved\",\"complexity\":1,\"isExported\":false},{\"symbolId\":\"benchmark/longmemeval_vault.py::run_question#function\",\"symbolName\":\"run_question\",\"symbolKind\":\"function\",\"resolutionTier\":\"ast_resolved\",\"complexity\":1,\"isExported\":true},{\"symbolId\":\"benchmark/longmemeval_vault.py::main#function\",\"symbolName\":\"main\",\"symbolKind\":\"function\",\"resolutionTier\":\"ast_resolved\",\"complexity\":3,\"isExported\":true}]},{\"path\":\"scripts/query_memory.py\",\"edgeTypes\":[\"imports\",\"calls\"],\"depth\":1,\"hasTests\":false,\"symbols\":[{\"symbolId\":\"scripts/query_memory.py::_resolved_profile#function\",\"symbolName\":\"_resolved_profile\",\"symbolKind\":\"function\",\"resolutionTier\":\"ast_resolved\",\"complexity\":2,\"isExported\":false},{\"symbolId\":\"scripts/query_memory.py::_default_candidates#function\",\"symbolName\":\"_default_candidates\",\"symbolKind\":\"function\",\"resolutionTier\":\"ast_resolved\",\"complexity\":1,\"isExported\":false},{\"symbolId\":\"scripts/query_memory.py::_resolved_candidates#function\",\"symbolName\":\"_resolved_candidates\",\"symbolKind\":\"function\",\"resolutionTier\":\"ast_resolved\",\"complexity\":2,\"isExported\":false},{\"symbolId\":\"scripts/query_memory.py::grounded_qa#function\",\"symbolName\":\"grounded_qa\",\"symbolKind\":\"function\",\"resolutionTier\":\"ast_resolved\",\"complexity\":3,\"isExported\":true}]},{\"path\":\"benchmark/selective_forgetting_vault.py\",\"edgeTypes\":[\"imports\",\"calls\"],\"depth\":1,\"hasTests\":false,\"symbols\":[{\"symbolId\":\"benchmark/selective_forgetting_vault.py::probe#function\",\"symbolName\":\"probe\",\"symbolKind\":\"function\",\"resolutionTier\":\"ast_resolved\",\"complexity\":3,\"isExported\":true},{\"symbolId\":\"benchmark/selective_forgetting_vault.py::probe_result#function\",\"symbolName\":\"probe_result\",\"symbolKind\":\"function\",\"resolutionTier\":\"ast_resolved\",\"complexity\":2,\"isExported\":true},{\"symbolId\":\"benchmark/selective_forgetting_vault.py::_probe_of#function\",\"symbolName\":\"_probe_of\",\"symbolKind\":\"function\",\"resolutionTier\":\"ast_resolved\",\"complexity\":2,\"isExported\":false},{\"symbolId\":\"benchmark/selective_forgetting_vault.py::_one_ask#function\",\"symbolName\":\"_one_ask\",\"symbolKind\":\"function\",\"resolutionTier\":\"ast_resolved\",\"complexity\":1,\"isExported\":false}]},{\"path\":\"scripts/mcp_server.py\",\"edgeTypes\":[\"imports\",\"calls\"],\"depth\":1,\"hasTests\":false,\"symbols\":[{\"symbolId\":\"scripts/mcp_server.py::_retrieval_trace#function\",\"symbolName\":\"_retrieval_trace\",\"symbolKind\":\"function\",\"resolutionTier\":\"ast_resolved\",\"complexity\":4,\"isExported\":false},{\"symbolId\":\"scripts/mcp_server.py::_tool_recall#functi"
+      }
+    },
+    {
+      "id": "T10",
+      "kind": "multi-hop",
+      "question": "Which functions reach fuse_rrf within two caller hops (callers, and callers of callers)?",
+      "trace_mcp": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "partial",
+        "seconds": 1.355,
+        "tokens": 961,
+        "answer_excerpt": "{\"root\":{\"symbol_id\":\"scripts/retrieval.py::fuse_rrf#function\",\"name\":\"fuse_rrf\",\"kind\":\"function\",\"file\":\"scripts/retrieval.py\",\"line\":1569,\"calls\":[{\"symbol_id\":\"scripts/provenance.py::curated_pages_first#function\",\"name\":\"curated_pages_first\",\"kind\":\"function\",\"file\":\"scripts/provenance.py\",\"line\":79,\"edge\":{\"resolution\":\"ast_resolved\",\"edge_type\":\"calls\"}},{\"symbol_id\":\"scripts/retrieval.py::RetrievalCandidate#class\",\"name\":\"RetrievalCandidate\",\"kind\":\"class\",\"file\":\"scripts/retrieval.py\",\"line\":527,\"edge\":{\"resolution\":\"ast_resolved\",\"edge_type\":\"references\"}},{\"symbol_id\":\"scripts/retrieval.py::_weigh_by_trust#function\",\"name\":\"_weigh_by_trust\",\"kind\":\"function\",\"file\":\"scripts/retrieval.py\",\"line\":1305,\"calls\":[{\"symbol_id\":\"scripts/retrieval.py::_standing_disposition#function\",\"name\":\"_standing_disposition\",\"kind\":\"function\",\"file\":\"scripts/retrieval.py\",\"line\":1248,\"edge\":{\"resolution\":\"ast_resolved\",\"edge_type\":\"calls\"}},{\"symbol_id\":\"scripts/retrieval.py::_neighbour_boosts#function\",\"name\":\"_neighbour_boosts\",\"kind\":\"function\",\"file\":\"scripts/retrieval.py\",\"line\":1283,\"edge\":{\"resolution\":\"ast_resolved\",\"edge_type\":\"calls\"}},{\"symbol_id\":\"scripts/provenance.py::authority_weight#function\",\"name\":\"authority_weight\",\"kind\":\"function\",\"file\":\"scripts/provenance.py\",\"line\":123,\"edge\":{\"resolution\":\"ast_resolved\",\"edge_type\":\"calls\"}},{\"symbol_id\":\"scripts/provenance.py::source_type_weight#function\",\"name\":\"source_type_weight\",\"kind\":\"function\",\"file\":\"scripts/provenance.py\",\"line\":106,\"edge\":{\"resolution\":\"ast_resolved\",\"edge_type\":\"calls\"}},{\"symbol_id\":\"scripts/retrieval.py::_page_name#function\",\"name\":\"_page_name\",\"kind\":\"function\",\"file\":\"scripts/retrieval.py\",\"line\":1279,\"edge\":{\"resolution\":\"ast_resolved\",\"edge_type\":\"calls\"}}],\"edge\":{\"resolution\":\"ast_resolved\",\"edge_type\":\"calls\"}},{\"symbol_id\":\"scripts/retrieval.py::_fusion_weights#function\",\"name\":\"_fusion_weights\",\"kind\":\"function\",\"file\":\"scripts/retrieval.py\",\"line\":1504,\"edge\":{\"resolution\":\"ast_resolved\",\"edge_type\":\"calls\"}},{\"symbol_id\":\"scripts/retrieval.py::_accumulate_backend#function\",\"name\":\"_accumulate_backend\",\"kind\":\"function\",\"file\":\"scripts/retrieval.py\",\"line\":1515,\"calls\":[{\"symbol_id\":\"scripts/retrieval.py::_ensure_candidate_meta#function\",\"name\":\"_ensure_candidate_meta\",\"kind\":\"function\",\"file\":\"scripts/retrieval.py\",\"line\":1533,\"edge\":{\"resolution\":\"ast_resolved\",\"edge_type\":\"calls\"}},{\"symbol_id\":\"scripts/retrieval.py::_raw_backend_score#function\",\"name\":\"_raw_backend_score\",\"kind\":\"function\",\"file\":\"scripts/retrieval.py\",\"line\":1508,\"edge\":{\"resolution\":\"ast_resolved\",\"edge_type\":\"calls\"}}],\"edge\":{\"resolution\":\"ast_resolved\",\"edge_type\":\"calls\"}},{\"symbol_id\":\"scripts/retrieval.py::_fused_candidate#function\",\"name\":\"_fused_candidate\",\"kind\":\"function\",\"file\":\"scripts/retrieval.py\",\"line\":1542,\"edge\":{\"resolution\":\"ast_resolved\",\"edge_type\":\"calls\"}}],\"called_by\":[{\"symbol_id\":\"scripts/retrieval.py::_fused_candidates#function\",\"name\":\"_fused_candidates\",\"kind\":\"function\",\"file\":\"scripts/retrieval.py\",\"line\":3099,\"called_by\":[{\"symbol_id\":\"scripts/retrieval.py::_partial_candidates#function\",\"name\":\"_partial_candidates\",\"kind\":\"function\",\"file\":\"scripts/retrieval.py\",\"line\":3221,\"edge\":{\"resolution\":\"ast_resolved\",\"edge_type\":\"calls\"}},{\"symbol_id\":\"scripts/retrieval.py::_executed_plan#function\",\"name\":\"_executed_plan\",\"kind\":\"function\",\"file\":\"scripts/retrieval.py\",\"line\":3287,\"edge\":{\"resolution\":\"ast_resolved\",\"edge_type\":\"calls\"}}],\"edge\":{\"resolution\":\"ast_resolved\",\"edge_type\":\"calls\"}}]},\"edge_types_used\":[\"calls\",\"references\"],\"max_depth\":2,\"resolution_tiers\":{\"scip_resolved\":0,\"lsp_resolved\":0,\"ast_resolved\":56,\"ast_inferred\":0,\"text_matched\":0},\"_hints\":[{\"tool\":\"get_change_impact\",\"args\":{\"symbol_id\":\"<symbol>\"},\"why\":\"See full reverse dependency chain beyond direct callers\"}]}"
+      }
+    },
+    {
+      "id": "T11",
+      "kind": "who-calls",
+      "question": "Which retrieval-path function calls source_type_weight?",
+      "trace_mcp": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 1.318,
+        "tokens": 256,
+        "answer_excerpt": "{\"target\":{\"symbol_id\":\"scripts/provenance.py::source_type_weight#function\",\"fqn\":\"scripts.provenance.source_type_weight\",\"file\":\"scripts/provenance.py\"},\"references\":[{\"edge_type\":\"calls\",\"resolution_tier\":\"ast_resolved\",\"symbol\":{\"symbol_id\":\"scripts/retrieval.py::_weigh_by_trust#function\",\"name\":\"_weigh_by_trust\",\"kind\":\"function\",\"fqn\":\"scripts.retrieval._weigh_by_trust\",\"signature\":\"def _weigh_by_trust(\",\"line_start\":1305},\"file\":\"scripts/retrieval.py\",\"_freshness\":\"fresh\"}],\"total\":1,\"resolution_tiers\":{\"scip_resolved\":0,\"lsp_resolved\":0,\"ast_resolved\":1,\"ast_inferred\":0,\"text_matched\":0},\"_meta\":{\"freshness\":{\"fresh\":1,\"edited_uncommitted\":0,\"stale_index\":0,\"repo_is_stale\":false},\"confidence\":0.8,\"confidence_signals\":{\"top1_strength\":1,\"top_gap\":1,\"identity_match\":0,\"freshness\":1}},\"_hints\":[{\"tool\":\"get_change_impact\",\"args\":{\"symbol_id\":\"<symbol>\"},\"why\":\"See transitive impact beyond direct references\"},{\"tool\":\"get_tests_for\",\"args\":{\"symbol_id\":\"<symbol>\"},\"why\":\"Find tests covering this symbol\"}]}"
+      }
+    },
+    {
+      "id": "T12",
+      "kind": "architecture-summary",
+      "question": "Summarize the repository architecture: what are its main modules and entry points?",
+      "trace_mcp": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "wrong",
+        "seconds": 1.328,
+        "tokens": 171,
+        "answer_excerpt": "{\"frameworks\":[\"github-actions\",\"python-ml\",\"python-scientific\",\"pytest\"],\"stats\":{\"totalFiles\":504,\"totalSymbols\":29356,\"totalEdges\":35712,\"totalNodes\":29860,\"totalRoutes\":0,\"totalResourceRoutes\":0,\"totalTestFixtureRoutes\":0,\"totalComponents\":0,\"totalMigrations\":0,\"partialFiles\":0,\"errorFiles\":0},\"languages\":[{\"language\":\"python\",\"count\":504}],\"detectedVersions\":[{\"runtime\":\"python\",\"version\":\">=3.10\",\"source\":\"pyproject.toml#requires-python\"}],\"dependencySummary\":{\"total\":2,\"dev\":0,\"byEcosystem\":{\"pypi\":2}},\"_hints\":[{\"tool\":\"suggest_queries\",\"why\":\"Get example queries tailored to this project\"},{\"tool\":\"get_project_health\",\"why\":\"Check code quality metrics and hotspots\"}]}"
+      }
+    },
+    {
+      "id": "T13",
+      "kind": "community-naming",
+      "question": "Which module community does fuse_rrf belong to?",
+      "trace_mcp": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 1.475,
+        "tokens": 233,
+        "answer_excerpt": "{\"items\":[{\"symbol_id\":\"scripts/retrieval.py::fuse_rrf#function\",\"name\":\"fuse_rrf\",\"kind\":\"function\",\"fqn\":\"scripts.retrieval.fuse_rrf\",\"signature\":\"def fuse_rrf(\",\"file\":\"scripts/retrieval.py\",\"line\":1569,\"score\":0.835,\"_freshness\":\"fresh\"}],\"total\":1,\"search_mode\":\"fts\",\"mode\":\"single\",\"_meta\":{\"freshness\":{\"fresh\":1,\"edited_uncommitted\":0,\"stale_index\":0,\"repo_is_stale\":false},\"repo_freshness\":{\"index_head_sha\":\"d4b4479ab83bb217df2850c9b697f8198a7b6a7c\",\"current_head_sha\":\"d4b4479ab83bb217df2850c9b697f8198a7b6a7c\",\"repo_is_stale\":false},\"confidence\":1,\"confidence_signals\":{\"top1_strength\":1,\"top_gap\":1,\"identity_match\":1,\"freshness\":1}},\"_hints\":[{\"tool\":\"get_symbol\",\"args\":{\"symbol_id\":\"scripts/retrieval.py::fuse_rrf#function\"},\"why\":\"Read the full source of the top result\"},{\"tool\":\"get_context_bundle\",\"args\":{\"symbol_id\":\"scripts/retrieval.py::fuse_rrf#function\"},\"why\":\"Get the symbol + its imports in one call\"}]}"
+      }
+    }
+  ],
+  "summary": {
+    "trace_mcp": {
+      "correct": 8,
+      "partial": 2,
+      "wrong": 3,
+      "statuses": {
+        "answered": 12,
+        "tool_error": 1
+      },
+      "total_seconds": 22.25,
+      "total_tokens": 8260,
+      "wrong_but_confident": 2,
+      "operator_attention_events": 1
+    }
+  }
+}

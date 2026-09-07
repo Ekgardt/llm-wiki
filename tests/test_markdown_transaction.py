@@ -352,8 +352,11 @@ def test_prepare_captures_before_images_and_fsyncs_every_artifact(
     )
 
     artifact_root = state_root / "run/transactions" / transaction.id
-    assert (artifact_root / "before/000000.bin").read_bytes() == b"before\n"
-    assert (artifact_root / "after/000000.bin").read_bytes() == b"after\n"
+    # Stored compressed since 2026-09-05 — the trail had reached 5.3 GB of
+    # near-identical copies of append-only journals — and read back through the
+    # helper every restore path uses, so what an image stands for is unchanged.
+    assert markdown_transaction._image_bytes(artifact_root / "before/000000.bin") == b"before\n"
+    assert markdown_transaction._image_bytes(artifact_root / "after/000000.bin") == b"after\n"
     assert (artifact_root / "plan.json").is_file()
     assert {path.relative_to(artifact_root).as_posix() for path in synced} == {
         "before/000000.bin",
@@ -725,54 +728,78 @@ def test_create_does_not_clobber_file_created_after_prepare(vault: Path, state_r
     assert target.read_bytes() == b"external"
 
 
+def _recording_windows_replace(monkeypatch, replacements: list):
+    real_replace = markdown_transaction.durable_publish_file
+
+    def recording(staged, destination, **options):
+        replacements.append((Path(staged), Path(destination), options))
+        return real_replace(staged, destination, **options)
+
+    monkeypatch.setattr(markdown_transaction, "durable_publish_file", recording)
+
+
+def _recording_posix_replace(monkeypatch, replacements: list):
+    real_replace = os.replace
+
+    def recording(source, destination, *args, **kwargs):
+        replacements.append((Path(source), Path(destination)))
+        real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(markdown_transaction.os, "replace", recording)
+
+
+def _record_replacements(monkeypatch, replacements: list) -> None:
+    if os.name == "nt":
+        _recording_windows_replace(monkeypatch, replacements)
+        return
+    _recording_posix_replace(monkeypatch, replacements)
+
+
+def _assert_windows_replacements(replacements: list, target: Path) -> None:
+    assert all(destination == target for _staged, destination, _options in replacements)
+    assert all(options["replace"] is True for _staged, _destination, options in replacements)
+    assert replacements[0][0] != replacements[1][0]
+
+
+def _expected_posix_replacement(target: Path) -> tuple[Path, Path]:
+    """Where a staged file sits and what it becomes, per replace strategy."""
+    if markdown_transaction._use_posix_dir_fd():
+        return Path(), Path(target.name)
+    return target.parent, target
+
+
+def _assert_posix_replacements(replacements: list, target: Path) -> None:
+    parent, destination = _expected_posix_replacement(target)
+
+    assert all(item[0].parent == parent for item in replacements)
+    assert all(item[1] == destination for item in replacements)
+    assert replacements[0][0].name != replacements[1][0].name
+
+
+def _replace_twice(coordinator) -> None:
+    for tag, content in (("one", b"after-one"), ("two", b"after-two")):
+        prepared = coordinator.prepare(
+            [MarkdownChange.replace("knowledge/notes/page.md", content)],
+            operation_id=f"replace:{tag}",
+        )
+        coordinator.apply(prepared.id)
+
+
 def test_replace_uses_random_same_directory_temp_and_os_replace(
     vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
     target = vault / "knowledge/notes/page.md"
     target.write_bytes(b"before")
-    replacements = []
-    if os.name == "nt":
-        real_replace = markdown_transaction.durable_publish_file
+    replacements: list = []
+    _record_replacements(monkeypatch, replacements)
 
-        def recording_replace(staged, destination, **options):
-            replacements.append((Path(staged), Path(destination), options))
-            return real_replace(staged, destination, **options)
-
-        monkeypatch.setattr(markdown_transaction, "durable_publish_file", recording_replace)
-    else:
-        real_replace = os.replace
-
-        def recording_replace(source, destination, *args, **kwargs):
-            replacements.append((Path(source), Path(destination)))
-            real_replace(source, destination, *args, **kwargs)
-
-        monkeypatch.setattr(markdown_transaction.os, "replace", recording_replace)
-    coordinator = MarkdownCoordinator(vault, state_root)
-    first = coordinator.prepare(
-        [MarkdownChange.replace("knowledge/notes/page.md", b"after-one")],
-        operation_id="replace:one",
-    )
-    coordinator.apply(first.id)
-    second = coordinator.prepare(
-        [MarkdownChange.replace("knowledge/notes/page.md", b"after-two")],
-        operation_id="replace:two",
-    )
-    coordinator.apply(second.id)
+    _replace_twice(MarkdownCoordinator(vault, state_root))
 
     assert len(replacements) == 2
     if os.name == "nt":
-        assert all(destination == target for _staged, destination, _options in replacements)
-        assert all(options["replace"] is True for _staged, _destination, options in replacements)
-        assert replacements[0][0] != replacements[1][0]
-    elif markdown_transaction._use_posix_dir_fd():
-        assert all(source.parent == Path() and destination == Path(target.name) for source, destination in replacements)
+        _assert_windows_replacements(replacements, target)
     else:
-        assert all(
-            source.parent == target.parent and destination == target
-            for source, destination in replacements
-        )
-    if os.name != "nt":
-        assert replacements[0][0].name != replacements[1][0].name
+        _assert_posix_replacements(replacements, target)
     assert not list(target.parent.glob(".*.tmp"))
 
 
@@ -1682,3 +1709,46 @@ def test_schema_migration_validates_and_recaptures_prepared_parent_identity(
         metadata.st_dev,
         metadata.st_ino,
     )
+
+
+def test_an_image_written_before_compression_is_still_readable(tmp_path: Path) -> None:
+    """Nothing is migrated, so a vault written by an older build must restore.
+
+    `run/transactions` had reached 5.3 GB of near-identical copies of append-only
+    journals on 2026-09-05, all of it inside the two-day undo window and none of
+    it prunable. Images are compressed from that day; the ones already on disk
+    are not, and only a file beginning with the lzma magic is decompressed.
+    """
+    plain = tmp_path / "000000.bin"
+    plain.write_bytes(b"written by an older build\n")
+
+    assert markdown_transaction._image_bytes(plain) == b"written by an older build\n"
+
+
+def test_a_compressed_image_reads_back_as_what_it_stands_for(tmp_path: Path) -> None:
+    packed = tmp_path / "000000.bin"
+    packed.write_bytes(markdown_transaction._compressed_image(b"journal line\n" * 500))
+
+    assert markdown_transaction._image_bytes(packed) == b"journal line\n" * 500
+    assert packed.stat().st_size < 500 * len(b"journal line\n") // 10
+
+
+def test_the_recorded_hash_is_of_the_plaintext(vault: Path, state_root: Path) -> None:
+    """Every verification path checks the hash, so it must not become the hash
+    of the compressed form — otherwise nothing that reads an image agrees."""
+    import hashlib
+
+    target = vault / "knowledge/notes/page.md"
+    target.write_bytes(b"before\n")
+    coordinator = MarkdownCoordinator(vault, state_root)
+
+    transaction = coordinator.prepare(
+        [MarkdownChange.replace("knowledge/notes/page.md", b"after\n")],
+        operation_id="replace:hash",
+    )
+
+    plan = json.loads(
+        (state_root / "run/transactions" / transaction.id / "plan.json").read_bytes()
+    )
+    before = plan["operations"][0]["before"]
+    assert before["sha256"] == hashlib.sha256(b"before\n").hexdigest()

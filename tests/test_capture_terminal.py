@@ -1071,3 +1071,50 @@ def test_ordinary_purge_resumes_partial_cleanup_after_database_commit(
         intent_path, decision_path, terminal_path
     )
     assert (export / "purge-receipt.json").is_file()
+
+
+def test_a_flush_body_that_ends_in_a_newline_is_kept(tmp_path: Path) -> None:
+    """A trailing newline used to destroy the capture it was attached to.
+
+    Nine sessions on the live vault were lost under `noncanonical flush
+    output`. The wire grammar is still closed: the tier token must open the
+    output, and a body that is only whitespace is still refused.
+    """
+    assert flush_memory._parse_capture_wire_output("FLUSH_MAJOR\nkept\n") == (
+        "major",
+        "kept",
+    )
+    assert flush_memory._parse_capture_wire_output(
+        "FLUSH_MINOR\n  spaced out  "
+    ) == ("minor", "spaced out")
+
+    with pytest.raises(RuntimeError, match="empty flush body"):
+        flush_memory._parse_capture_wire_output("FLUSH_MAJOR\n   \n  ")
+
+    with pytest.raises(RuntimeError, match="invalid flush output"):
+        flush_memory._parse_capture_wire_output("here you go\nFLUSH_MAJOR\nbody")
+
+
+def test_a_tier_a_model_put_in_bold_is_still_that_tier() -> None:
+    """Two of the first five real classifications came back `**FLUSH_MAJOR**`.
+
+    The grammar is closed on the token, not on the Markdown a model wraps it
+    in. Under the literal rule both of those sessions would have been
+    destroyed as invalid output.
+    """
+    assert flush_memory._parse_capture_wire_output("**FLUSH_MAJOR**\nkept") == (
+        "major",
+        "kept",
+    )
+    assert flush_memory._parse_capture_wire_output("`FLUSH_MINOR`\nkept") == (
+        "minor",
+        "kept",
+    )
+    assert flush_memory._parse_capture_wire_output("**FLUSH_OK**") == ("ok", "")
+    assert flush_memory._parse_capture_wire_output("FLUSH_OK\n  ") == ("ok", "")
+
+    with pytest.raises(RuntimeError, match="invalid flush output"):
+        flush_memory._parse_capture_wire_output("FLUSH_OK\ntrailing content")
+
+    with pytest.raises(RuntimeError, match="invalid flush output"):
+        flush_memory._parse_capture_wire_output("Sure! Here is my answer\nFLUSH_MAJOR")

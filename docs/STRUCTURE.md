@@ -38,7 +38,6 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── code_navigation_renderer.py   deterministic compact result windows
 │   ├── windows_workspace.py          Windows handle-relative filesystem boundary
 │   ├── schemas/                      transaction/queue/compile/archive/claim schemas
-│   ├── lance_store.py               v4.0: LanceDB embedded vector backend (HNSW)
 │   ├── reranker.py                  v4.0: cross-encoder reranker (ONNX)
 │   ├── access_tracking.py           explicit telemetry promotion + decay stats
 │   ├── retrieval_telemetry.py       private bounded retrieval event cache
@@ -84,7 +83,6 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   │       ├── search.sqlite3
 │   │       ├── vectors.npy             optional
 │   │       └── vectors.json            optional
-│   ├── lancedb/                     v4.0: LanceDB vector store (optional, --extra hybrid)
 │   ├── models/                      v4.0: ML model cache (reranker, embeddings)
 │   ├── compile/                     validated content-addressed compile plans
 │   ├── claims.sqlite3               derived claim candidate index
@@ -546,7 +544,7 @@ or nonzero active state remains fail-closed.
   `cache/code-tools/pyright/1.1.411/` is the managed Pyright artifact root;
   `scripts/install_pyright.py` is the only supported download/publish path and
   `scripts/lsp_paths.py` derives it without directory creation.
-  v4.0: `lancedb/` (LanceDB vector store, optional), `models/` (ML model cache),
+  v4.0: `models/` (ML model cache),
   legacy bounded read-only `access_log.jsonl`, `cache/compile/` (validated compile-plan
   action cache), and `cache/claims.sqlite3` (derived claim index).
 - `cache/evidence-graph/` — disposable derived graph, FTS, vector, tier, and
@@ -591,8 +589,9 @@ cache/evidence-graph/generations/<generation-id>/
   active generation. Recovery may register complete orphan generations without
   activating them. A corrupt active generation is replaced only by a revalidated
   same-scope prior generation from activation history/parent lineage.
-- Legacy `cache/index.sqlite`, `cache/vectors.npy`, `cache/vectors_meta.json`, and
-  `cache/lancedb/` remain readable during migration. They are disposable derived
+- Legacy `cache/index.sqlite`, `cache/vectors.npy`, and `cache/vectors_meta.json`
+  remain readable during migration. LanceDB was retired on 2026-09-07
+  (`knowledge/notes/retire-lancedb-decision.md`). They are disposable derived
   caches retained as fallback, not members of a generation. They must not be removed
   until installed-vault migration evidence makes that safe. The new reader switches
   only after a validated generation is active.

@@ -39,8 +39,43 @@ JUDGE_SYSTEM_PROMPT = (
     "Reply with exactly one word: yes or no."
 )
 
+# One category is not graded on facts, and grading it on facts is why it read
+# 0.0000 with zero spread across three runs of 200 on 2026-09-01. LongMemEval's
+# preference questions evaluate personalised generation against a rubric: the
+# gold is a description of what a good answer would take into account, not a
+# value to match. Token-overlap metrics are reported as inapplicable there for
+# the same reason.
+# See `docs/research/2026-09-01-a-category-graded-by-the-wrong-question.md`.
+RUBRIC_CATEGORY = "single-session-preference"
 
-def judge_prompt(row: dict) -> str:
+RUBRIC_SYSTEM_PROMPT = (
+    "You grade personalised answers against a rubric. The gold text describes "
+    "what the user would prefer an answer to take into account; it is not a "
+    "fact to match. Decide whether the model answer respects that preference: "
+    "it counts as correct when it takes those things into account, in its own "
+    "words and in any order, even without naming every one of them. An empty "
+    "answer, a refusal, or advice that ignores what the gold describes counts "
+    "as wrong. Reply with exactly one word: yes or no."
+)
+
+
+def system_prompt_for(row: dict) -> str:
+    """The fact prompt, except where the category is graded against a rubric."""
+    if str(row.get("category")) == RUBRIC_CATEGORY:
+        return RUBRIC_SYSTEM_PROMPT
+    return JUDGE_SYSTEM_PROMPT
+
+
+def _rubric_prompt(row: dict) -> str:
+    return (
+        f"Question: {row.get('question', '')}\n"
+        f"What the user would prefer: {row.get('gold', '')}\n"
+        f"Model answer: {row.get('hypothesis', '')}\n"
+        "Does the model answer respect that preference? Answer yes or no."
+    )
+
+
+def _fact_prompt(row: dict) -> str:
     return (
         f"Question: {row.get('question', '')}\n"
         f"Gold answer: {row.get('gold', '')}\n"
@@ -48,6 +83,12 @@ def judge_prompt(row: dict) -> str:
         "Does the model answer state the same fact as the gold answer? "
         "Answer yes or no."
     )
+
+
+def judge_prompt(row: dict) -> str:
+    if str(row.get("category")) == RUBRIC_CATEGORY:
+        return _rubric_prompt(row)
+    return _fact_prompt(row)
 
 
 def _verdict_of(text: str | None) -> bool | None:
@@ -70,7 +111,7 @@ def _judged_row(row: dict, call) -> dict:
     if not needs_judging(row):
         return {**row, "judge_correct": None, "judge_seconds": None}
     started = time.monotonic()
-    raw = call(judge_prompt(row), JUDGE_SYSTEM_PROMPT, 10)
+    raw = call(judge_prompt(row), system_prompt_for(row), 10)
     return {
         **row,
         "judge_correct": _verdict_of(raw),

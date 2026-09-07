@@ -136,3 +136,56 @@ def test_a_stuck_project_cannot_hang_the_pass(monkeypatch) -> None:
 def test_the_hook_path_keeps_its_own_impatience() -> None:
     """A session hook must not block; that budget is not what changed here."""
     assert integration_adapter.PENDING_STATE_LOCK_SECONDS == 0.5
+
+
+def test_settled_transactions_are_pruned_by_the_pass(monkeypatch) -> None:
+    """The machinery existed and nothing called it: 4.9 GB on 2026-09-02."""
+    called: list[str] = []
+
+    class _Coordinator:
+        def __init__(self, *args):
+            called.append("built")
+
+        def prune(self):
+            return 7
+
+    import markdown_transaction
+
+    monkeypatch.setattr(
+        markdown_transaction, "active_or_legacy_coordinator", lambda *a: _Coordinator()
+    )
+
+    assert reclaim.prune_settled_transactions() == {"pruned": 7, "failed": 0}
+    assert called == ["built"]
+
+
+def test_a_failed_prune_does_not_stop_the_rest(monkeypatch) -> None:
+    """A pass that cannot tidy up must still drain the queue and sweep."""
+
+    def _Broken(*args):
+        raise RuntimeError("database is locked")
+
+    import markdown_transaction
+
+    monkeypatch.setattr(
+        markdown_transaction, "active_or_legacy_coordinator", _Broken
+    )
+    result = reclaim.prune_settled_transactions()
+
+    assert result["pruned"] == 0
+    assert result["failed"] == 1
+    assert "locked" in result["reason"]
+
+
+def test_the_undo_window_is_one_number_in_one_place() -> None:
+    """It was thirty in four files, and the drift is how it went unpruned."""
+    import archive_daily
+    import doctor
+    import installed_memory_repair
+    import markdown_transaction
+
+    window = markdown_transaction.UNDO_RETENTION_DAYS
+
+    assert doctor.UNDO_RETENTION_DAYS == window
+    assert archive_daily.DEFAULT_TRANSACTION_RETENTION_DAYS == window
+    assert installed_memory_repair._UNDO_RETENTION_DAYS == window

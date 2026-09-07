@@ -88,3 +88,4 @@ change the splitter, the receipts, or the digest binding.
 - [[knowledge/notes/citation-relevance-gate-decision]] — the other half of what a citation must satisfy.
 - [[knowledge/notes/part-scoped-evidence-decision]] — which slice of the day a citation is checked against.
 - [[knowledge/notes/daily-heading-tolerant-reader-decision]] — the same split of address from proof, applied to the heading that names the day.
+- [[knowledge/notes/a-fact-is-stored-with-its-date-decision]] — links to this page.

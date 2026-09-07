@@ -29,6 +29,7 @@ import io
 import json
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -224,6 +225,16 @@ def _complete_tool_operation(
     )
 
 
+# The parent kills this delegate at `integration_adapter.DELEGATE_TIMEOUT_SECONDS`.
+# Without a deadline of its own the append retried its compare-and-swap until
+# that kill arrived, so the breadcrumb was lost and a refused attempt was left
+# behind with nothing saying why — 250 losses on this vault, every one of them
+# while a benchmark had all four cores. Giving up a little earlier means the
+# child records its own reason instead of vanishing. See
+# `tests/test_the_breadcrumb_gives_up_before_it_is_killed.py`.
+APPEND_BUDGET_SECONDS = 7.0
+
+
 def _append_tool_tag(
     slug: str,
     session_id: str,
@@ -243,7 +254,13 @@ def _append_tool_tag(
             f"- `[{ts}] tool | {source} | {session_id[:8]} | "
             f"{slug} | {tool}` {preview}"
         )
-        append_daily(slug, session_id, block, operation_id=operation_id)
+        append_daily(
+            slug,
+            session_id,
+            block,
+            operation_id=operation_id,
+            deadline=time.monotonic() + APPEND_BUDGET_SECONDS,
+        )
         return True
     except Exception as error:  # noqa: BLE001
         record_capture_failure(

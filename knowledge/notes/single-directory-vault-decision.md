@@ -85,3 +85,4 @@ shell out to git.
 - [[knowledge/notes/hook-scripts-defense-in-depth]] — the same defence-in-depth
   reasoning applied to hook state roots.
 - [[knowledge/notes/automatic-code-update-decision]] — links to this page.
+- [[knowledge/notes/memory-keeps-a-second-copy-decision]] — links to this page.

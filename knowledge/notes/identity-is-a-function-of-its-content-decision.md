@@ -17,7 +17,7 @@ forever.
 
 On 2026-08-30 the project-checkpoint path had been stopped for two days and
 nothing said so. `run/state.json` held 4.8 MB of pending checkpoints — 2 537 for
-`llm-wiki`, 744 for `fix-pip` — and `logs/hook-errors.log` had 1 603 lock
+`llm-wiki`, 744 for a second project — and `logs/hook-errors.log` had 1 603 lock
 timeouts and 366 refusals reading `operation_id is already bound to a different
 request`.
 
@@ -35,7 +35,7 @@ the refusal is permanent because the reservation never expires.
 transaction ended `discarded` was answered `duplicate=True` — a claim that the
 checkpoint had been written when nothing had. The caller re-derived the same
 `operation_id`, the plan no longer matched the recorded one, and the write was
-refused. `fix-pip` sequence 320 had been doing this since 08-28.
+refused. A second project's sequence 320 had been doing this since 08-28.
 
 **A drain whose cost was the backlog.** One cycle claimed and replayed the whole
 queue and rewrote `state.json` three times while asking for the lock for 0.5 s.

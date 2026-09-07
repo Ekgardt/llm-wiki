@@ -223,6 +223,32 @@ def _compile_step() -> _Step:
     )
 
 
+def _checkpoint_step() -> _Step:
+    """Clear a checkpoint sequence whose own request is never coming back.
+
+    The design clears a quarantined or reserved sequence the right way: the
+    original request arrives again, re-derives the same name, and is given a
+    fresh attempt. A session-end checkpoint has no such second arrival — the
+    session is over — so a sequence that loses its race stays unsettled and
+    blocks every sequence behind it for that project.
+
+    Measured on this vault on 2026-09-07: `llm-wiki` 2214 lost a precondition
+    during the benchmark runs and 2215 sat reserved behind it, `no-hands` 830
+    likewise. Six hundred hook failures accumulated over a day, one per
+    session end, and clearing it took a person running a repair script by
+    hand — which is the thing this pass exists to stop needing.
+
+    Safe to run every night: it takes only rows no live lease owns, and does
+    nothing on a vault that has none.
+    """
+    return _Step(
+        "Step 3c: clearing checkpoints nothing will settle...",
+        "checkpoints",
+        _script("repair_orphaned_checkpoint_names.py"),
+        120,
+    )
+
+
 def _post_compile_steps() -> list[_Step]:
     return [
         _Step(
@@ -243,6 +269,7 @@ def _post_compile_steps() -> list[_Step]:
             _script("search_memory.py") + ["--rebuild"],
             60,
         ),
+        _checkpoint_step(),
     ]
 
 

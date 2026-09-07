@@ -4504,13 +4504,23 @@ def _record_failed_attempt(
 
 
 def _failure_state(
-    row: sqlite3.Row, failure: QueueFailure
+    row: sqlite3.Row, failure: QueueFailure, attempt_limit: int
 ) -> tuple[str, int]:
-    """Where a failed task goes, and what its attempt count becomes."""
+    """Where a failed task goes, and what its attempt count becomes.
+
+    A task that has used every attempt it is allowed is dead, not ready. This
+    path used to check only whether the failure was permanent, so an ordinary
+    failure on the last attempt left the task `ready` with `attempts` at the
+    limit — which the worker will not claim, because the budget is spent, and
+    `redrive` will not take, because it requires a dead task. Twenty-three
+    session classifications sat in that gap on this vault, each one eight
+    failed attempts old and reachable by nothing. The lease-expiry path had
+    the rule from the start; this one did not.
+    """
     attempts = int(row["attempts"])
     if failure.blocked_capability:
         return "blocked", attempts - 1
-    if failure.permanent or failure.error_code in _PERMANENT_CODES:
+    if _failure_is_terminal(row, failure, attempt_limit):
         return "dead", attempts
     return "ready", attempts
 
@@ -4521,9 +4531,10 @@ def _apply_failure_state(
     row: sqlite3.Row,
     failure: QueueFailure,
     now: datetime,
+    attempt_limit: int = DEFAULTS.queue_max_attempts,
 ) -> None:
     """Move the task out of its lease, under the lease's own fence."""
-    state, attempts = _failure_state(row, failure)
+    state, attempts = _failure_state(row, failure, attempt_limit)
     changed = database.execute(
         """UPDATE tasks SET state=?,attempts=?,error_code=?,
                blocked_capability=?,updated_at=?,available_at=?,
@@ -5067,6 +5078,16 @@ def _valid_source_failure_fields(error_code: object, producer: object) -> bool:
     return producer in {"compile", "queue"}
 
 
+# How many times one task may be redriven. Current practice bounds nothing here
+# because a redrive is everywhere an operator's decision, and an operator does
+# not redrive the same message forever. Nobody here is that operator, so the
+# bound has to exist, and it has to be small: a task that died with its eight
+# attempts spent is already saying the trouble is not bad luck. One more round
+# of eight is sixteen; there is no third.
+# See `docs/research/2026-09-07-how-many-second-chances-an-intent-gets.md`.
+MAX_REDRIVE_GENERATIONS = 1
+
+
 def _require_dead_task(database: sqlite3.Connection, task_id: str) -> sqlite3.Row:
     """The dead task row this redrive is allowed to copy."""
     row = database.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
@@ -5074,6 +5095,8 @@ def _require_dead_task(database: sqlite3.Connection, task_id: str) -> sqlite3.Ro
         raise KeyError(task_id)
     if row["state"] != "dead":
         raise QueueOperationError("redrive_requires_dead")
+    if int(row["lineage_generation"] or 0) >= MAX_REDRIVE_GENERATIONS:
+        raise QueueOperationError("redrive_generations_exhausted")
     return row
 
 
@@ -11188,7 +11211,9 @@ class _QueueV3CandidateReader:
             )
             if not mismatch:
                 _record_failed_attempt(database, lease, row, failure, now)
-                _apply_failure_state(database, lease, row, failure, now)
+                _apply_failure_state(
+                    database, lease, row, failure, now, max_attempts
+                )
         if mismatch:
             self._raise_payload_mismatch()
 
@@ -11293,6 +11318,61 @@ class _QueueV3CandidateReader:
         ).rowcount
         if inserted != 1:
             raise QueueOperationError("redrive_failed")
+        self._carry_capture_link(database, task_id, replacement, now)
+
+    @staticmethod
+    def _parent_capture_link(
+        database: sqlite3.Connection, task_id: str
+    ) -> sqlite3.Row | None:
+        return database.execute(
+            "SELECT intent_id, intent_sha256, handler_version "
+            "FROM capture_task_links WHERE task_id=?",
+            (task_id,),
+        ).fetchone()
+
+    def _carry_capture_link(
+        self,
+        database: sqlite3.Connection,
+        task_id: str,
+        replacement: str,
+        now: datetime,
+    ) -> None:
+        """A redriven capture task keeps its intent, or it reaches no worker.
+
+        `claim_capture` selects only tasks that have a row in
+        `capture_task_links`, and a redrive used to copy the task without it,
+        so a redriven capture task was invisible to the capture worker for
+        good — and the sweeper that hands a task to an intent looks for
+        intents with *no* task, so an intent whose only task was dead could be
+        neither adopted nor redriven. Twenty-three session classifications sat
+        in that gap on this vault.
+
+        This is not a way around the admission fence. The fence exists so a
+        task cannot appear for an intent nobody holds; this intent passed it
+        once, and its signed link already exists. What travels is the same
+        record — intent, its digest, the handler version — re-signed for the
+        child's id, which is what current practice calls carrying the
+        idempotency key across a redrive. See
+        `docs/research/2026-09-07-how-many-second-chances-an-intent-gets.md`.
+        """
+        parent = self._parent_capture_link(database, task_id)
+        if parent is None:
+            return
+        record = _capture_link_record(
+            replacement,
+            str(parent["intent_id"]),
+            str(parent["intent_sha256"]),
+            int(parent["handler_version"]),
+        )
+        self._insert_capture_link(
+            database,
+            task_id=replacement,
+            intent_id=str(parent["intent_id"]),
+            intent_sha256=str(parent["intent_sha256"]),
+            handler_version=int(parent["handler_version"]),
+            link_digest=sha256_bytes(canonical_json_bytes(record)),
+            created_at=_timestamp(now),
+        )
 
     def redrive(
         self,

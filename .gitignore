@@ -24,6 +24,10 @@ state/
 
 # === Personal session data (private, NOT in git) ===
 knowledge/daily/*.md
+# A writer that died mid-write leaves its atomic-write temp beside the
+# page, holding the page's private bytes under a name the rule above
+# does not match. Seen 2026-09-07: `.2026-09-07.md.<hex>.tmp`, 91 KB.
+knowledge/**/.*.tmp
 # Public Evidence fixtures (synthetic; no personal content)
 !knowledge/daily/2026-04-13.md
 !knowledge/daily/2026-04-19.md
@@ -62,6 +66,11 @@ knowledge/notes/*
 !knowledge/notes/one-trust-weight-across-retrieval-paths-decision.md
 !knowledge/notes/rerank-tier-ordering-decision.md
 !knowledge/notes/dead-task-retirement-and-restore-decision.md
+!knowledge/notes/an-index-may-lag-decision.md
+!knowledge/notes/a-fact-is-stored-with-its-date-decision.md
+!knowledge/notes/the-model-names-the-evidence-we-locate-it-decision.md
+!knowledge/notes/a-question-is-not-a-conjunction-decision.md
+!knowledge/notes/a-failing-claim-does-not-destroy-the-answer-decision.md
 !knowledge/notes/citation-relevance-gate-decision.md
 !knowledge/notes/daily-entry-boundary-decision.md
 !knowledge/notes/daily-entry-quote-anchor-decision.md
@@ -70,6 +79,7 @@ knowledge/notes/*
 !knowledge/notes/classification-measurement-stand-decision.md
 !knowledge/notes/idempotent-retry-after-quarantine-decision.md
 !knowledge/notes/identity-is-a-function-of-its-content-decision.md
+!knowledge/notes/memory-keeps-a-second-copy-decision.md
 !knowledge/notes/self-resolving-health-findings-decision.md
 !knowledge/notes/bounded-read-is-not-corruption-decision.md
 !knowledge/notes/bounded-capture-excerpt-decision.md
@@ -83,6 +93,7 @@ knowledge/notes/*
 !knowledge/notes/blackboard-fenced-resource-claims-decision.md
 !knowledge/notes/managed-ide-hooks-install-update-decision.md
 !knowledge/notes/retire-cursor-and-antigravity-decision.md
+!knowledge/notes/retire-lancedb-decision.md
 !knowledge/notes/audit-closure-security-recovery-control-plane-decision.md
 !knowledge/notes/derived-evidence-generation-decision.md
 !knowledge/notes/dependency-answers-one-hop-decision.md
@@ -183,3 +194,8 @@ benchmark/flush-classification-live*.json
 
 # Agent worktrees are throwaway checkouts, never repository content.
 .claude/worktrees/
+
+# Third-party code-intelligence tools measured by benchmark/code-parity.
+# Their indexes and configuration are theirs, not ours, and never ship.
+.trace-mcp/
+.serena/

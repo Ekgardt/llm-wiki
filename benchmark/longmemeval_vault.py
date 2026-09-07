@@ -39,13 +39,55 @@ BUILD_DEADLINE_SECONDS = 900.0
 RETRIEVE_DEADLINE_SECONDS = 180.0
 ANSWER_DEADLINE_SECONDS = 420.0
 QA_CANDIDATES = 12
+
+
+def _qa_candidates() -> int:
+    """How many candidates the answer sees, so retrieval depth is an arm too.
+
+    Measured 2026-09-02: widening the answer window four-fold left the prompt at
+    4 727 estimated tokens against 4 500 — unchanged, because after the chunking
+    fix all twelve candidates already fit. The window had stopped being the
+    binding constraint and nobody had noticed; the count is. Retrieval depth is
+    also the largest single lever in MemMachine's published ablation, at +4.2%
+    against +0.8% for chunking.
+    """
+    raw = os.environ.get("LLMWIKI_BENCH_QA_CANDIDATES", "").strip()
+    if not raw.isdigit():
+        return QA_CANDIDATES
+    return max(1, min(200, int(raw)))
 # The product's stock grounded-answer budget is 8192 byte-counted tokens; one
 # LongMemEval session entry is ~10 KB, so under the stock budget every span is
 # shed and the answer refuses itself (measured on question 25e5aa4f). The
-# budget is a first-party `grounded_qa` parameter; this value keeps the whole
-# prompt under ~28 KB ≈ ~7k estimated tokens — the same retrieval envelope
-# Mem0's "<7000 tokens" claim describes, so the cost comparison stays fair.
-ANSWER_INPUT_BUDGET = 28_672
+# budget is a first-party `grounded_qa` parameter.
+#
+# 28 672 keeps the whole prompt under ~28 KB ≈ ~7k estimated tokens — the same
+# retrieval envelope Mem0's "<7000 tokens" claim describes, so a cost
+# comparison against that claim is fair. It is not the default, because it is
+# not what the sweep chose: measured on 2026-09-02, n=50, the same questions
+# score 0.3400 at 12 288, 0.4400 at 32 768 and 0.5400 at 122 880, and 262 144
+# buys nothing more. See
+# `docs/research/2026-09-02-how-much-evidence-is-too-much.md`.
+#
+# The default is the setting that decision named, so a run that sets nothing
+# measures what the research settled on. Every n=200 figure this stand has
+# published was produced at 122 880 through the environment variable below
+# while this constant still said 28 672 — a run that forgot the variable
+# silently measured a different arm and looked like a regression.
+MEM0_COMPARABLE_ANSWER_BUDGET = 28_672
+ANSWER_INPUT_BUDGET = 122_880
+
+
+def _answer_budget() -> int:
+    """The answer window for this arm, so a sweep needs no code edit.
+
+    The default is the measured one. `MEM0_COMPARABLE_ANSWER_BUDGET` is the
+    narrower envelope a cost comparison against Mem0's published claim needs,
+    and a sweep asks for it — or for anything else — through the variable.
+    """
+    raw = os.environ.get("LLMWIKI_BENCH_ANSWER_BUDGET", "").strip()
+    if not raw.isdigit():
+        return ANSWER_INPUT_BUDGET
+    return max(4096, int(raw))
 
 _ERROR_KINDS = (
     ("provider returned no response", "provider_no_response"),
@@ -199,6 +241,22 @@ def _reuse_config(snapshot: object) -> object:
     )
 
 
+def _warm_reranker() -> None:
+    """Load the cross-encoder before retrieval is timed, as a live process has.
+
+    The build stage already loads the embedder, so at query time only the
+    reranker is cold — and its load was being paid *inside* the 12-second
+    optional stage. Each question here is a fresh process; a running server
+    loads the model once and every later query finds it warm, which is the
+    condition the stage bound was set for. Measured 2026-09-07: the stage was
+    abandoned on 483 of 600 questions and the reranker scored nothing.
+    See `docs/research/2026-09-07-a-reranker-that-never-finished.md`.
+    """
+    from reranker import _get_reranker_bundle
+
+    _get_reranker_bundle()
+
+
 def build_generation(root: Path, state: Path, daily_files: list[str]) -> tuple[object, dict]:
     """Build and activate one generation over the ingested daily evidence."""
     from corpus_snapshot import collect_corpus
@@ -252,13 +310,28 @@ def profile_for(question_text: str) -> str:
     return analyze_query(question_text).recommended_profile.upper()
 
 
-def _retrieved_rows(question_text: str, profile: str) -> list[dict]:
+def _searchable(question_text: str, question_date: str) -> str:
+    """The question, plus the dates it only implies, anchored on the day asked.
+
+    "Which book did I finish a week ago" carries no date, so nothing the vault
+    dates can match it. The product resolves the question's own expressions
+    against today; here the day the question is asked is part of the dataset,
+    so it is the anchor and today is irrelevant.
+    """
+    from datetime import date
+
+    from query_memory import searchable_question
+
+    return searchable_question(question_text, date.fromisoformat(day_of(question_date)))
+
+
+def _retrieved_rows(question_text: str, profile: str, limit: int | None = None) -> list[dict]:
     from retrieval import retrieve_via_search_memory
 
     return list(
         retrieve_via_search_memory(
             question_text,
-            limit=QA_CANDIDATES,
+            limit=limit or _qa_candidates(),
             semantic=True,
             profile=profile,
             deadline_monotonic=time.monotonic() + RETRIEVE_DEADLINE_SECONDS,
@@ -369,6 +442,7 @@ def _instrumented_generator(metrics: dict, gold: str = ""):
     needle = " ".join(str(gold).split()).casefold()
 
     def generate(prompt: str, system_prompt: str, max_tokens: int) -> str | None:
+        _count_call(metrics, system_prompt)
         metrics["prompt_chars"] = len(prompt)
         metrics["prompt_bytes"] = len(prompt.encode("utf-8"))
         metrics["system_chars"] = len(system_prompt)
@@ -380,17 +454,42 @@ def _instrumented_generator(metrics: dict, gold: str = ""):
         # context numbers. The old field stays so earlier reports remain
         # readable next to new ones. Both are `chars / 4`, not a tokenizer:
         # a real count needs a network round trip, which this path will not make.
-        metrics["est_total_prompt_tokens"] = round(
+        # Cumulative over every call the question made, since 2026-09-07: a
+        # second look pays for its answer prompt again, and a per-call figure
+        # would hide exactly the cost the second look must justify.
+        metrics["est_total_prompt_tokens"] = metrics.get("est_total_prompt_tokens", 0) + round(
             (len(prompt) + len(system_prompt)) / 4
         )
-        metrics["gold_in_prompt"] = bool(needle) and needle in prompt.casefold()
+        metrics["gold_in_prompt"] = metrics.get("gold_in_prompt", False) or (
+            bool(needle) and needle in prompt.casefold()
+        )
         started = time.monotonic()
         try:
-            return call_llm(prompt, system_prompt, max_tokens)
+            reply = call_llm(prompt, system_prompt, max_tokens)
+            # What the citation gates may be about to destroy. Measured
+            # 2026-09-01: 28 of 200 answers were produced and then thrown away
+            # by `verify_grounded_answer`, and the row kept only the gate's
+            # message — so the accuracy of what the strictest rule discards
+            # could only be bounded, 0 to +0.14, never priced. Recording the
+            # reply changes no answer and no verdict; it lets the discarded
+            # ones be judged on their own.
+            metrics["raw_reply"] = (reply or "")[:8000]
+            return reply
         finally:
             metrics["provider_seconds"] = round(time.monotonic() - started, 2)
 
     return generate
+
+
+def _count_call(metrics: dict, system_prompt: str) -> None:
+    """Which kind of call this was, so a second look is visible in the row."""
+    from aggregation_pass import CLUSTER_SYSTEM_PROMPT
+
+    metrics["provider_calls"] = metrics.get("provider_calls", 0) + 1
+    if system_prompt == CLUSTER_SYSTEM_PROMPT:
+        metrics["cluster_calls"] = metrics.get("cluster_calls", 0) + 1
+        return
+    metrics["answer_calls"] = metrics.get("answer_calls", 0) + 1
 
 
 def dated_question(question: dict) -> str:
@@ -450,7 +549,7 @@ def _measured_compile(root: Path, snapshot: object, rows: list[dict], profile: s
             rows,
             vault=root,
             profile=profile,
-            budget=ContextBudget(None, ANSWER_INPUT_BUDGET, QA_MAX_OUTPUT_TOKENS, 512),
+            budget=ContextBudget(None, _answer_budget(), QA_MAX_OUTPUT_TOKENS, 512),
         )
     except Exception:  # noqa: BLE001 - a measurement never fails the question
         return {}
@@ -465,6 +564,7 @@ def _answer_outcome(
     metrics: dict,
     profile: str,
     gold: str = "",
+    retrieve=None,
 ) -> dict:
     from context_budget import ContextBudget
     from query_memory import QA_MAX_OUTPUT_TOKENS, grounded_qa
@@ -475,9 +575,10 @@ def _answer_outcome(
             vault=root,
             snapshot=snapshot,
             candidates=rows,
+            retrieve=retrieve,
             generator=_instrumented_generator(metrics, gold),
             profile=profile,
-            budget=ContextBudget(None, ANSWER_INPUT_BUDGET, QA_MAX_OUTPUT_TOKENS, 512),
+            budget=ContextBudget(None, _answer_budget(), QA_MAX_OUTPUT_TOKENS, 512),
             deadline=time.monotonic() + ANSWER_DEADLINE_SECONDS,
         )
     except Exception as exc:  # noqa: BLE001 - every failure is a scored outcome
@@ -509,15 +610,19 @@ def run_question(question: dict, work: Path) -> dict:
     daily_files, ingested = ingest_sessions(root, question)
     build_started = time.monotonic()
     snapshot, build_info = build_generation(root, state, daily_files)
+    _warm_reranker()
     plain = str(question["question"])
     profile = profile_for(plain)
     retrieve_started = time.monotonic()
-    rows = _retrieved_rows(plain, profile)
+    searchable = _searchable(plain, str(question["question_date"]))
+    rows = _retrieved_rows(searchable, profile)
     answer_started = time.monotonic()
     metrics: dict = {}
     outcome = _answer_outcome(
         dated_question(question), root, snapshot, rows, metrics, profile,
         str(question.get("answer", "")),
+        # The second look's way of asking for more than the first twelve.
+        retrieve=lambda limit: _retrieved_rows(searchable, profile, limit),
     )
     finished = time.monotonic()
     return {

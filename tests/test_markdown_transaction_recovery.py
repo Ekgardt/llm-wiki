@@ -14,7 +14,12 @@ from pathlib import Path
 
 import markdown_transaction
 import pytest
-from markdown_transaction import ABSENT, MarkdownChange, MarkdownCoordinator
+from markdown_transaction import (
+    ABSENT,
+    UNDO_RETENTION_DAYS,
+    MarkdownChange,
+    MarkdownCoordinator,
+)
 from project_journal import ProjectStore
 from reliable_memory import OperationalDatabaseContractError, sha256_bytes
 
@@ -79,6 +84,56 @@ def _crash_process(
     )
 
 
+def _v2_parent(position: int) -> str | None:
+    return "tx-preparing" if position else None
+
+
+def _v2_error(state: str) -> str | None:
+    if state in {"conflicted", "quarantined"}:
+        return f"error-{state}"
+    return None
+
+
+def _v2_pruned_at(position: int, state: str) -> str | None:
+    return f"pruned-{position}" if state == "committed" else None
+
+
+def _v2_owner_pid(position: int, state: str) -> int | None:
+    return 1000 + position if state == "preparing" else None
+
+
+def _v2_transaction_row(position: int, state: str) -> tuple:
+    """One legacy transaction row, built outside the test that inserts it."""
+    return (
+        f"tx-{state}",
+        f"operation-{state}",
+        f"request-{state}",
+        state,
+        f'{{"state":"{state}"}}',
+        f"plan-{state}",
+        f"created-{position}",
+        f"updated-{position}",
+        _v2_parent(position),
+        _v2_error(state),
+        _v2_pruned_at(position, state),
+        _v2_owner_pid(position, state),
+    )
+
+
+def _v2_operation_row(position: int, kind: str, states: tuple) -> tuple:
+    return (
+        f"tx-{states[position]}",
+        position,
+        kind,
+        f"knowledge/notes/{kind}.md",
+        f"before-{kind}",
+        f"after-{kind}",
+        10 + position,
+        20 + position,
+        position % 2,
+    )
+
+
 def test_coordinator_v2_rows_survive_candidate_migration_exactly(
     vault: Path, state_root: Path
 ) -> None:
@@ -124,37 +179,14 @@ def test_coordinator_v2_rows_survive_candidate_migration_exactly(
                 "(id, operation_id, request_hash, state, preconditions_json, plan_hash, "
                 "created_at, updated_at, parent_transaction_id, error_code, "
                 "artifacts_pruned_at, owner_pid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    f"tx-{state}",
-                    f"operation-{state}",
-                    f"request-{state}",
-                    state,
-                    f'{{"state":"{state}"}}',
-                    f"plan-{state}",
-                    f"created-{position}",
-                    f"updated-{position}",
-                    "tx-preparing" if position else None,
-                    f"error-{state}" if state in {"conflicted", "quarantined"} else None,
-                    f"pruned-{position}" if state == "committed" else None,
-                    1000 + position if state == "preparing" else None,
-                ),
+                _v2_transaction_row(position, state),
             )
         for position, kind in enumerate(("create", "replace", "delete")):
             database.execute(
                 'INSERT INTO "operation" '
                 "(transaction_id, position, kind, path, before_hash, after_hash, "
                 "parent_device, parent_inode, applied) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    f"tx-{states[position]}",
-                    position,
-                    kind,
-                    f"knowledge/notes/{kind}.md",
-                    f"before-{kind}",
-                    f"after-{kind}",
-                    10 + position,
-                    20 + position,
-                    position % 2,
-                ),
+                _v2_operation_row(position, kind, states),
             )
         database.execute(
             "INSERT INTO project_checkpoints "
@@ -1767,6 +1799,15 @@ def test_undo_expired_deadline_does_not_prepare_inverse(vault: Path, state_root:
     assert target.read_bytes() == b"after"
 
 
+def _inserts_a_transaction(statements: list) -> bool:
+    return any('INSERT INTO "transaction"' in statement for statement in statements)
+
+
+def _run_if_given(hook) -> None:
+    if hook is not None:
+        hook()
+
+
 def test_undo_rolls_back_prepare_when_cancelled_at_sql_commit(
     vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -1792,16 +1833,11 @@ def test_undo_rolls_back_prepare_when_cancelled_at_sql_commit(
         database.execute("BEGIN IMMEDIATE")
         try:
             yield database
-            expires_here = any(
-                'INSERT INTO "transaction"' in statement for statement in statements
-            )
-            if expires_here:
-                expired = True
-            if before_commit is not None:
-                before_commit()
+            expires_here = _inserts_a_transaction(statements)
+            expired = expired or expires_here
+            _run_if_given(before_commit)
             database.commit()
-            if expires_here:
-                commits += 1
+            commits += int(expires_here)
         except BaseException:
             database.rollback()
             raise
@@ -1897,7 +1933,7 @@ def test_undo_rejects_transaction_outside_thirty_day_window(
         coordinator.undo(original.id)
 
 
-def test_prune_retains_artifacts_for_thirty_days_then_removes_them(
+def test_prune_retains_artifacts_for_the_window_then_removes_them(
     vault: Path, state_root: Path
 ):
     coordinator = MarkdownCoordinator(vault, state_root)
@@ -1914,9 +1950,10 @@ def test_prune_retains_artifacts_for_thirty_days_then_removes_them(
         )
         database.commit()
 
-    assert coordinator.prune(now=created + timedelta(days=30)) == 0
+    window = timedelta(days=UNDO_RETENTION_DAYS)
+    assert coordinator.prune(now=created + window) == 0
     assert (state_root / "run/transactions" / transaction.id).is_dir()
-    assert coordinator.prune(now=created + timedelta(days=30, seconds=1)) == 1
+    assert coordinator.prune(now=created + window + timedelta(seconds=1)) == 1
     assert not (state_root / "run/transactions" / transaction.id).exists()
 
 
@@ -1979,12 +2016,22 @@ def test_prune_rolls_back_marker_when_cancelled_at_sql_commit(
     assert (state_root / "run/transactions" / transaction.id).is_dir()
 
 
-@pytest.mark.parametrize("retention_days", [-1, 0, 29])
+@pytest.mark.parametrize("retention_days", [-1, 0])
 def test_prune_rejects_retention_shorter_than_fixed_undo_window(
     vault: Path, state_root: Path, retention_days: int
 ):
+    """The floor is the undo window itself, not the literal 30 it used to be.
+
+    The month-long window was exchanged on 2026-09-02 for a daily snapshot and a
+    copy off the machine, after measuring that nothing ever called `prune` and
+    the trail had reached 4.9 GB — half of it exact duplicates of a journal that
+    grows one line at a time. What the floor still refuses is a window shorter
+    than the one the contract states.
+    """
+    from markdown_transaction import UNDO_RETENTION_DAYS
+
     coordinator = MarkdownCoordinator(vault, state_root)
-    with pytest.raises(ValueError, match="at least 30"):
+    with pytest.raises(ValueError, match=f"at least {UNDO_RETENTION_DAYS}"):
         coordinator.prune(retention_days=retention_days)
 
 
@@ -2184,7 +2231,13 @@ def test_cli_rejects_short_prune_window_as_redacted_json(
         "LLM_WIKI_STATE_ROOT": str(state_root),
     }
     failed = subprocess.run(
-        [sys.executable, str(script), "prune", "--retention-days", "29"],
+        [
+            sys.executable,
+            str(script),
+            "prune",
+            "--retention-days",
+            str(UNDO_RETENTION_DAYS - 1),
+        ],
         check=False,
         capture_output=True,
         text=True,

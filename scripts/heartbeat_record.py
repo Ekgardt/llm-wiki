@@ -26,54 +26,73 @@ if hasattr(sys.stdout, "reconfigure"):
         pass
 
 
-def main() -> int:
+# Bound the heartbeat map (same as codex_memory.py).
+MAX_HEARTBEATS = 50
+
+
+def _payload() -> dict | None:
+    """The JSON object on stdin, or None when there is nothing to act on."""
     try:
         raw = sys.stdin.read()
-        payload = json.loads(raw) if raw.strip() else {}
-    except (json.JSONDecodeError, OSError):
-        return 0
-
+    except OSError:
+        return None
+    if not raw.strip():
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
     if not isinstance(payload, dict):
-        return 0
+        return None
+    return payload
 
-    slug = payload.get("slug")
-    if not isinstance(slug, str) or not slug:
-        return 0
-    reason = payload.get("reason") or "opencode-heartbeat"
-    session_id = payload.get("sessionId")
-    project_root = payload.get("projectRoot")
 
+def _heartbeat(payload: dict, now_iso: str) -> dict:
+    return {
+        "at": now_iso,
+        "reason": payload.get("reason") or "opencode-heartbeat",
+        "session_id": payload.get("sessionId"),
+        "project_root": payload.get("projectRoot"),
+        "source": "opencode",
+    }
+
+
+def _bounded(heartbeats: dict) -> dict:
+    """The newest entries within the bound, the rest dropped."""
+    if len(heartbeats) <= MAX_HEARTBEATS:
+        return heartbeats
+    newest = sorted(heartbeats.items(), key=lambda kv: kv[1].get("at", ""), reverse=True)
+    return dict(newest[:MAX_HEARTBEATS])
+
+
+def _recorded(slug: str, heartbeat: dict) -> int:
     try:
         from memory_state import update_state  # type: ignore
     except ImportError:
         return 0
 
-    now_iso = datetime.now().isoformat(timespec="seconds")
-
-    def _mutate(state: dict) -> None:
-        state.setdefault("codex_heartbeats", {})
-        state["codex_heartbeats"][slug] = {
-            "at": now_iso,
-            "reason": reason,
-            "session_id": session_id,
-            "project_root": project_root,
-            "source": "opencode",
-        }
-        # Bound the heartbeat map (same as codex_memory.py).
-        if len(state["codex_heartbeats"]) > 50:
-            items = sorted(
-                state["codex_heartbeats"].items(),
-                key=lambda kv: kv[1].get("at", ""),
-                reverse=True,
-            )[:50]
-            state["codex_heartbeats"] = dict(items)
+    def mutate(state: dict) -> None:
+        heartbeats = state.setdefault("codex_heartbeats", {})
+        heartbeats[slug] = heartbeat
+        state["codex_heartbeats"] = _bounded(heartbeats)
 
     try:
-        update_state(_mutate)
+        update_state(mutate)
     except Exception as e:  # noqa: BLE001
         print(f"heartbeat_record: state write failed: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
     return 0
+
+
+def main() -> int:
+    payload = _payload()
+    if payload is None:
+        return 0
+    slug = payload.get("slug")
+    if not isinstance(slug, str) or not slug:
+        return 0
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    return _recorded(slug, _heartbeat(payload, now_iso))
 
 
 if __name__ == "__main__":

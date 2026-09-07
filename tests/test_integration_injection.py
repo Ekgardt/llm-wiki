@@ -38,6 +38,20 @@ SESSION_START_BUDGET_SECONDS = 5.0
 WRITER_HOLD_SECONDS = 30.0
 
 
+def _existing_transcript(tmp_path) -> str:
+    """A transcript the adapter can actually find.
+
+    The fixture used to name `C:/tmp/session.jsonl`, which exists on no machine
+    this suite runs on, so these tests only ever exercised the branch by having
+    the key present. Since 2026-09-02 a path that names nothing is treated as no
+    transcript — which is what production does when a session leaves no file —
+    so the fixture has to be a real one.
+    """
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    return str(transcript)
+
+
 def require_tool(name: str) -> str:
     """Resolve an optional external runtime or skip the calling test.
 
@@ -399,7 +413,9 @@ def test_host_tool_call_id_separates_repeated_mutations():
     assert first.event_id != second.event_id
 
 
-def test_adapter_observes_same_envelope_once_before_durable_capture(monkeypatch):
+def test_adapter_observes_same_envelope_once_before_durable_capture(
+    monkeypatch, tmp_path
+):
     import io
     import sys
 
@@ -430,7 +446,7 @@ def test_adapter_observes_same_envelope_once_before_durable_capture(monkeypatch)
                     "session_id": "s1",
                     "cwd": "C:/project",
                     "reason": "done",
-                    "transcript_path": "C:/tmp/session.jsonl",
+                    "transcript_path": _existing_transcript(tmp_path),
                 }
             )
         ),
@@ -542,7 +558,9 @@ def test_same_normalized_occurrence_is_checkpointed_once(monkeypatch):
     )
 
 
-def test_durable_capture_runs_when_checkpoint_observation_fails(monkeypatch, capsys):
+def test_durable_capture_runs_when_checkpoint_observation_fails(
+    monkeypatch, capsys, tmp_path
+):
     import io
     import sys
 
@@ -582,7 +600,7 @@ def test_durable_capture_runs_when_checkpoint_observation_fails(monkeypatch, cap
                 {
                     "session_id": "s1",
                     "cwd": "C:/project",
-                    "transcript_path": "C:/tmp/session.jsonl",
+                    "transcript_path": _existing_transcript(tmp_path),
                 }
             )
         ),
@@ -1084,7 +1102,15 @@ def test_debounced_deltas_flush_in_order_on_later_observation_exactly_once(monke
     integration_adapter._observe_project_checkpoint(timer)
     assert len(checkpoints) == 1
     merged = checkpoints[0]
-    assert merged["delta"]["current_task"]["value"] == "Latest"
+    # The timer is a later observation of a real tool, and since 2026-09-05 an
+    # observation reaches the journal without the agent narrating a delta for
+    # it. So the newest current task is what the timer saw, not the last
+    # narrated value — while the order of everything narrated before it, and
+    # the exactly-once flush this test exists for, are unchanged.
+    assert merged["delta"]["current_task"]["value"].startswith("Read src/app.py")
+    assert [
+        operation["value"] for operation in merged["delta"]["current_task_operations"]
+    ][:2] == ["First", "Latest"]
     assert merged["delta"]["blockers"] == [
         {"id": "blocker-1", "action": "close", "value": "Resolved"}
     ]
@@ -1856,7 +1882,9 @@ def test_claude_outer_session_start_preserves_hook_output_contract(monkeypatch, 
     }
 
 
-def test_claude_session_end_uses_one_adapter_occurrence_for_both_side_effects(monkeypatch):
+def test_claude_session_end_uses_one_adapter_occurrence_for_both_side_effects(
+    monkeypatch, tmp_path
+):
     import io
     import sys
 
@@ -1910,7 +1938,7 @@ def test_claude_session_end_uses_one_adapter_occurrence_for_both_side_effects(mo
                 {
                     "session_id": "s1",
                     "cwd": "C:/project",
-                    "transcript_path": "session.jsonl",
+                    "transcript_path": _existing_transcript(tmp_path),
                 }
             )
         ),

@@ -78,3 +78,5 @@ rule below is still the one that runs within one language.
 - [[daily-entry-boundary-decision]]
 - [[part-scoped-evidence-decision]]
 - [[knowledge/notes/daily-entry-quote-anchor-decision]] — links to this page.
+- [[knowledge/notes/a-failing-claim-does-not-destroy-the-answer-decision]] — links to this page.
+- [[knowledge/notes/the-model-names-the-evidence-we-locate-it-decision]] — links to this page.

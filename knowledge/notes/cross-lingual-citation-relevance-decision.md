@@ -76,3 +76,4 @@ figures, versions, counts and code identifiers are relied on.
 
 - [[knowledge/notes/citation-relevance-gate-decision|Citation Relevance Gate]] — the decision this narrows.
 - [[knowledge/notes/one-trust-weight-across-retrieval-paths-decision|One Trust Weight Across Retrieval Paths]] — the other gate that decides what retrieval returns.
+- [[knowledge/notes/a-failing-claim-does-not-destroy-the-answer-decision]] — links to this page.

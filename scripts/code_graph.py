@@ -1513,7 +1513,19 @@ def _stored_communities(graph_reader, edges: list[dict[str, object]]) -> list[li
 # (~9 000 tokens measured). The counts below state everything the bound left
 # out, so the answer is short, never quietly partial.
 COMMUNITY_LIMIT = 30
-COMMUNITY_MEMBER_LIMIT = 10
+
+# Three, not ten. A community is identified by its size and a few of its names;
+# the rest of the roster answers a question nobody asked in a summary. Measured
+# 2026-09-06 on this repository: the summary cost 17 149 tokens, of which
+# **13 331 were community members** — 30 communities of 10 rows, each row a
+# qualified name, an absolute path and a line. At three the same answer costs
+# about a third of that, and `members_truncated` and `members_omitted` still say
+# exactly what was left out, so the answer is shorter and never quietly partial.
+#
+# The metric this serves is the owner's, stated 2026-09-06: not tokens saved but
+# right answers bought per token spent. At identical correctness we were buying
+# 1.20 per thousand against codebase-memory-mcp's 5.20.
+COMMUNITY_MEMBER_LIMIT = 3
 
 
 def _community_order_key(community: list[str]) -> tuple[int, str]:

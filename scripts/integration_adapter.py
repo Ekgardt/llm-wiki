@@ -909,11 +909,26 @@ def _checkpoint_carries_delta(checkpoint: Mapping[str, object]) -> bool:
 
 
 def _has_pending_delta(item: Mapping[str, object]) -> bool:
-    if "has_project_delta" in item:
-        return item.get("has_project_delta") is True
+    """Whether this pending item carries anything worth journalling.
+
+    `has_project_delta` answers a narrower question than its name suggests: it
+    records whether the *agent* supplied a `project_delta` in the payload. No
+    hook ever does, so it is False on every event this system has ever seen —
+    and asking it first threw away the delta `_checkpoint_delta` had already
+    derived from the observation itself.
+
+    Measured 2026-09-05 on this vault: **3713 journal events across 71 projects,
+    every one of them with an empty delta.** The tool, the file it changed, the
+    command it ran and the failure it hit were all computed and then discarded
+    here, which is why the layer meant to hand work between agents held nothing
+    but timestamps. An outside reviewer found it before we did.
+
+    The content decides. The flag is consulted only when there is no checkpoint
+    event to look at.
+    """
     checkpoint = item.get("checkpoint_event")
     if not isinstance(checkpoint, Mapping):
-        return False
+        return item.get("has_project_delta") is True
     return _checkpoint_carries_delta(checkpoint)
 
 
@@ -1660,6 +1675,43 @@ def _bounded_checkpoint_error(error: BaseException) -> str:
     return " ".join(message.split())[:MAX_CHECKPOINT_ERROR_CHARS]
 
 
+# What a lost race says on its way out. Every one of these means another writer
+# holds the project right now and the next session end carries the same event —
+# not that a checkpoint was lost. Measured on this vault on 2026-09-07:
+# `no-hands` logged four of these in four minutes while its committed sequence
+# advanced from 836 to 838, so nothing was missing; only the log said so.
+CHECKPOINT_CONTENTION_MARKERS = (
+    "owner_busy",
+    "ProjectPendingPriorError",
+    "operation_id is already bound to a different request",
+    "writer is busy",
+    "database is locked",
+    # The state lock is held by another writer; the event is queued in
+    # `project_checkpoint_pending` and the next drain carries it. Measured
+    # 2026-09-07: the only two lines in the recent trail that were not already
+    # contention were this, three seconds apart, while checkpoints kept
+    # committing.
+    "Could not acquire state lock",
+)
+
+
+def _is_contention(message: str) -> bool:
+    return any(marker in message for marker in CHECKPOINT_CONTENTION_MARKERS)
+
+
+def _checkpoint_log_kind(message: str) -> str:
+    """A lost race is retried by the next session; a failure is not.
+
+    Both used to be written as `project checkpoint:` and counted together, so
+    the health check read six hundred retries as six hundred failures and said
+    "still happening" on a vault where nothing was going wrong. Naming them
+    apart costs one word and makes the count mean something again.
+    """
+    if _is_contention(message):
+        return "project checkpoint contention"
+    return "project checkpoint"
+
+
 def _log_checkpoint_error(error: BaseException) -> None:
     """Best-effort bounded diagnostics for fail-open lifecycle capture."""
     try:
@@ -1668,7 +1720,7 @@ def _log_checkpoint_error(error: BaseException) -> None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().isoformat(timespec="seconds")
         with log_path.open("a", encoding="utf-8") as stream:
-            stream.write(f"[{timestamp}] project checkpoint: {message}\n")
+            stream.write(f"[{timestamp}] {_checkpoint_log_kind(message)}: {message}\n")
     except Exception:  # noqa: BLE001
         pass
 
@@ -2410,9 +2462,27 @@ def _capture_transcript_text(path: Path) -> str:
 
 
 def _capture_path_evidence(value: object) -> str | None:
+    """The transcript's text, or None when there is no transcript to read.
+
+    `_transcript_present` already handles a vanished transcript on the
+    session-end branch. This is the other path to the same file, and it had no
+    such guard: `resolve(strict=True)` raised `FileNotFoundError` and the whole
+    capture was recorded as lost. Measured on this vault — five losses in four
+    seconds on 2026-09-05, all sessions started outside any project, whose
+    transcripts live under `-home-user`.
+
+    Nothing is recovered by raising: if the file is gone, its contents are gone
+    with it, and the session record itself is still worth keeping. Only the
+    missing file is tolerated — a path outside the allowed roots or with a
+    disallowed extension still raises `PermissionError`, because that is a
+    refusal and not an absence.
+    """
     if not isinstance(value, str) or not value:
         return None
-    path = _validated_capture_transcript_path(value)
+    try:
+        path = _validated_capture_transcript_path(value)
+    except FileNotFoundError:
+        return None
     redacted = redact_secrets(_capture_transcript_text(path))
     if not redacted:
         return None
@@ -2799,6 +2869,29 @@ def _capture_session_end_without_transcript(
     return False
 
 
+def _transcript_present(payload: Mapping[str, Any]) -> bool:
+    """A path that names nothing is not a transcript; the session left no file.
+
+    The branch used to turn on the path being *set*, so a session whose
+    transcript had already gone took the reading route and died on
+    `resolve(strict=True)`. Measured on this vault 2026-09-02: 27 of the 452
+    recorded capture losses were that `FileNotFoundError`, and it was the only
+    kind still happening — four of them that morning, all from sessions started
+    outside any project, whose transcripts live under `-home-user` and `-tmp`.
+
+    Nothing is recovered by crashing there: if the file is gone, its contents
+    are gone with it. What changes is that the session is handled by the route
+    written for exactly this case instead of being reported as a failed capture.
+    """
+    raw = payload.get("transcript_path")
+    if not isinstance(raw, str) or not raw:
+        return False
+    try:
+        return Path(raw).is_file()
+    except OSError:
+        return False
+
+
 def _capture_session_end(
     envelope: EventEnvelope,
     payload: dict[str, Any],
@@ -2808,7 +2901,7 @@ def _capture_session_end(
     force_stub: bool,
     intent_id: str | None,
 ) -> bool:
-    if payload.get("transcript_path"):
+    if _transcript_present(payload):
         _tag_session_end(payload, project_dir, result)
         return _wake_capture_worker(result, intent_id)
     return _capture_session_end_without_transcript(

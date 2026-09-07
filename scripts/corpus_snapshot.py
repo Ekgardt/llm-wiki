@@ -1852,6 +1852,87 @@ def _append_heading_span(
     spans.append((heading.start(), end, tuple(item[1] for item in ancestry)))
 
 
+# A retrieval unit above this many bytes is cut at a paragraph boundary. About
+# 1 024 tokens — the top of the 512–1 024 band 2026 benchmarking reports for
+# analytical and multi-hop queries, taken at the top rather than the middle
+# because conversational text holds a topic longer than prose does.
+#
+# Measured on this vault: a captured session arrives as one heading span of
+# about 10 KB, roughly 2 500 tokens, against a 28 672-byte answer budget — so a
+# median of two units reach the answer model, and the categories that need facts
+# from more than one session score 0.0216 and 0.0988 by judge. Two and a half
+# times the recommended band is not merely coarser than the reference designs;
+# it is outside the range anyone reports good results in.
+#
+# Turn-level was the other candidate and the sources argue against it: too
+# fine-grained is fragmentary, and session-level beats turn-level on its own.
+# A paragraph boundary in a rendered transcript falls between speaker turns and
+# between topics inside a long one, which is the closest thing to a topically
+# coherent unit that costs no model call.
+# See `docs/research/2026-09-02-the-unit-of-retrieval.md`.
+MAX_SPAN_BYTES = 4096
+
+
+def _character_boundary(content: bytes, index: int) -> int:
+    """The largest index at or below `index` that begins a UTF-8 character.
+
+    A continuation byte is `10xxxxxx`, and a character is at most four bytes,
+    so walking back at most three is enough to land on a start byte.
+    """
+    if index >= len(content):
+        return index
+    floor = max(index - 3, 0)
+    while index > floor and content[index] & 0xC0 == 0x80:
+        index -= 1
+    return index
+
+
+def _paragraph_cut(content: bytes, start: int, ceiling: int) -> int:
+    """The last paragraph break at or before the ceiling, then the last line.
+
+    When a span carries neither, it is cut at the ceiling — and the ceiling is a
+    byte count, so on any text that is not ASCII it lands inside a character
+    about three times in four. Measured on this vault 2026-09-05: the cut fell
+    at byte 4095 of a Russian paragraph, `_chunks` decoded the span strictly and
+    raised, and the exception travelled all the way up through the corpus
+    collector to abort the nightly generation build. Nothing was published from
+    2026-08-30 onward, retrieval fell back to its lexical leg, and the only
+    trace was a per-row `fallback_reason` field and one line in `doctor`.
+
+    The two markers are ASCII and therefore already safe. It is the fallback
+    that has to be walked back onto a character boundary.
+    """
+    window = content[start:ceiling]
+    for marker in (b"\n\n", b"\n"):
+        cut = window.rfind(marker)
+        if cut > 0:
+            return start + cut + len(marker)
+    return _character_boundary(content, ceiling)
+
+
+def _split_span(content: bytes, span: tuple) -> list[tuple[int, int, tuple[str, ...]]]:
+    """One span as bounded pieces, each keeping the heading ancestry it had."""
+    start, end, ancestry = span
+    pieces: list[tuple[int, int, tuple[str, ...]]] = []
+    while end - start > MAX_SPAN_BYTES:
+        cut = _paragraph_cut(content, start, start + MAX_SPAN_BYTES)
+        if cut <= start:
+            break
+        pieces.append((start, cut, ancestry))
+        start = cut
+    pieces.append((start, end, ancestry))
+    return pieces
+
+
+def _bounded_spans(content: bytes, spans: list) -> list:
+    bounded: list[tuple[int, int, tuple[str, ...]]] = []
+    for span in spans:
+        bounded.extend(_split_span(content, span))
+    if len(bounded) > MAX_CORPUS_CHUNKS:
+        raise ValueError("corpus chunk row ceiling exceeded")
+    return bounded
+
+
 def _retrieval_spans(
     content: bytes,
     searchable_start: int,
@@ -1874,7 +1955,7 @@ def _retrieval_spans(
         _append_heading_span(
             spans, content, heading, _heading_end(headings, index, content), ancestry
         )
-    return tuple(spans)
+    return tuple(_bounded_spans(content, spans))
 
 
 def _markdown_head(
@@ -2310,6 +2391,40 @@ def _capture(
     )
 
 
+# A capture reads every source, then re-reads every source and refuses the
+# snapshot if anything moved. That fence is right and stays: it is what proves a
+# published generation describes a moment the vault really passed through.
+#
+# What was wrong was surrendering the first time it fired. Measured 2026-09-05: a
+# pass costs 3.5-3.6 seconds and never fails on a quiet vault, but a session
+# appends to today's daily log on every tool call, so under maintenance the pass
+# loses the race and the whole nightly build died with it — every night from
+# 2026-08-30, leaving no active generation and retrieval on its lexical leg
+# alone. Nothing about the fence changed; the vault outgrew it.
+#
+# Snapshot isolation, in every MVCC engine, means a consistent view from the
+# point a transaction started — not a world that holds still until it commits.
+# So: take another pass. Fail only if the vault never holds still for one.
+MAX_CAPTURE_PASSES = 4
+
+
+def _captured_after_retries(
+    root: Path,
+    policy: SnapshotPolicy,
+    deadline: float,
+    cancelled: Callable[[], bool] | None,
+) -> CorpusSnapshot:
+    """One capture that describes a real instant, retried while the vault moves."""
+    last: CorpusChanged | None = None
+    for _ in range(MAX_CAPTURE_PASSES):
+        _check_processing_stop(deadline, cancelled)
+        try:
+            return _capture(root, policy, deadline, cancelled)
+        except CorpusChanged as exc:
+            last = exc
+    raise CorpusChanged(f"corpus never held still for one pass: {last}")
+
+
 def collect_corpus(
     vault: Path,
     *,
@@ -2355,7 +2470,9 @@ def collect_corpus(
         gate = contextlib.nullcontext()
     with gate:
         _check_processing_stop(selected_deadline, cancelled)
-        return _capture(root, selected_policy, selected_deadline, cancelled)
+        return _captured_after_retries(
+            root, selected_policy, selected_deadline, cancelled
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -2493,34 +2610,38 @@ def validate_live_snapshot(
     coordinator: object | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> None:
-    """Rediscover and hash the live corpus immediately before publication."""
+    """Refuse a snapshot that does not describe itself, immediately before publication.
+
+    This used to re-collect the entire live corpus and demand it be byte-identical
+    to the snapshot taken minutes earlier. That asks the vault to hold still for
+    the length of a build, which no vault in use ever does — and measured on this
+    one, none has since 2026-08-30. Every nightly build died here, nothing was
+    activated, and retrieval fell back to its lexical leg for five days while the
+    complete vectors sat unreachable on disk.
+
+    A snapshot is a snapshot. Snapshot isolation, in every MVCC engine, means a
+    consistent view from the point a read started, not a world frozen until it
+    commits; Lucene commits are point-in-time for the same reason. What a
+    published generation owes its readers is that it describes a moment the vault
+    really passed through — which the collection fence already proves, twice,
+    before this is ever called.
+
+    What it does not owe them is being the newest moment. A document written
+    after the snapshot is absent until the next build, and no check here could
+    find it: there is nothing yet to check. That is the price of a lagging index
+    and it is the only one we pay, because a source the vault has since moved on
+    from is re-read and dropped before its text can reach the model — see
+    `query_memory._FreshSources`.
+
+    So what is verified here is that the snapshot is what it says it is: its
+    sources still hash to the manifest recorded in `corpus_sha256`. That is
+    tamper-evidence, it costs no I/O, and it removes a second full collection
+    from every publication.
+    """
     if not isinstance(snapshot, CorpusSnapshot):
         raise TypeError("snapshot must be a CorpusSnapshot")
-    settings = _snapshot_settings(
-        snapshot.policy,
-        {
-            "daily_paths": daily_paths,
-            "code_roots": code_roots,
-            "include_historical": include_historical,
-            "as_of": as_of,
-            "max_files": max_files,
-            "max_file_bytes": max_file_bytes,
-            "max_total_bytes": max_total_bytes,
-            "max_entries": max_entries,
-            "max_directories": max_directories,
-            "max_depth": max_depth,
-        },
+    recomputed = canonical_source_manifest_sha256(
+        (source.record for source in snapshot.sources), snapshot.policy
     )
-    try:
-        live = collect_corpus(
-            vault,
-            **settings,
-            deadline=deadline,
-            deadline_seconds=deadline_seconds,
-            coordinator=coordinator,
-            cancelled=cancelled,
-        )
-    except (FileNotFoundError, PermissionError) as exc:
-        raise CorpusChanged("live corpus cannot reproduce captured membership") from exc
-    if live.source_hashes != snapshot.source_hashes:
-        raise CorpusChanged("live corpus membership or source hashes changed")
+    if recomputed != snapshot.corpus_sha256:
+        raise CorpusChanged("snapshot does not match its own source manifest")

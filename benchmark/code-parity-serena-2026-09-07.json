@@ -1,0 +1,217 @@
+{
+  "version": "code-parity-v1",
+  "directory": "/home/user/llm-wiki",
+  "budget_seconds": 60.0,
+  "tasks": [
+    {
+      "id": "T01",
+      "kind": "who-calls",
+      "question": "Which production functions call fuse_rrf?",
+      "serena": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 14.188,
+        "tokens": 89,
+        "answer_excerpt": "{\"scripts/retrieval.py\": {\"Function\": [{\"name_path\": \"_fused_candidates\", \"body_location\": {\"start_line\": 3098, \"end_line\": 3110}, \"content_around_reference\": \"...3103:) -> tuple[tuple[RetrievalCandidate, ...], dict[str, dict[str, Any]]]:\\n  >3104:    return fuse_rrf(\\n...3105:        lexical=_fusion_input(backends.lexical_hits, \\\"lexical\\\", signals),\"}]}}"
+      }
+    },
+    {
+      "id": "T02",
+      "kind": "who-calls",
+      "question": "Which functions call write_session_evidence?",
+      "serena": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 4.91,
+        "tokens": 412,
+        "answer_excerpt": "{\"scripts/backfill_sessions.py\": {\"File\": [{\"name_path\": \"backfill_sessions\", \"body_location\": {\"start_line\": 0, \"end_line\": 196}, \"content_around_reference\": \"...  30:    render_transcript,\\n  >  31:    write_session_evidence,\\n...  32:)\"}], \"Variable\": [{\"name_path\": \"_write_one/written\", \"body_location\": {\"start_line\": 131, \"end_line\": 131}, \"content_around_reference\": \"... 130:def _write_one(vault: Path, path: Path, day: str, transcript: str, outcome: Outcome) -> None:\\n  > 131:    written = write_session_evidence(vault, _fields(path, day), transcript)\\n... 132:    if written is None:\"}]}, \"scripts/flush_memory.py\": {\"Function\": [{\"name_path\": \"_keep_session_record\", \"body_location\": {\"start_line\": 1284, \"end_line\": 1309}, \"content_around_reference\": \"...1296:    \\\"\\\"\\\"\\n  >1297:    from session_evidence import evidence_text, intent_fields, write_session_evidence\\n...1298:\"}, {\"name_path\": \"_keep_session_record\", \"body_location\": {\"start_line\": 1284, \"end_line\": 1309}, \"content_around_reference\": \"...1302:    captured_at = _capture_time_text(now)\\n  >1303:    write_session_evidence(\\n...1304:        ROOT,\"}, {\"name_path\": \"_keep_transcript_record\", \"body_location\": {\"start_line\": 1319, \"end_line\": 1339}, \"content_around_reference\": \"...1320:    \\\"\\\"\\\"The same record for the detached flush path, which reads the file itself.\\\"\\\"\\\"\\n  >1321:    from session_evidence import write_session_evidence\\n...1322:\"}, {\"name_path\": \"_keep_transcript_record\", \"body_location\": {\"start_line\": 1319, \"end_line\": 1339}, \"content_around_reference\": \"...1338:    }\\n  >1339:    write_session_evidence(ROOT, fields, transcript)\\n...1340:\"}]}}"
+      }
+    },
+    {
+      "id": "T03",
+      "kind": "what-does-x-call",
+      "question": "Which project functions does fuse_rrf call?",
+      "serena": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 13.232,
+        "tokens": 522,
+        "answer_excerpt": "[{\"name_path\": \"fuse_rrf\", \"kind\": \"Function\", \"relative_path\": \"scripts/retrieval.py\", \"body_location\": {\"start_line\": 1568, \"end_line\": 1612}, \"body\": \"def fuse_rrf(\\n    *,\\n    lexical: Sequence[Mapping[str, Any]] | None,\\n    dense: Sequence[Mapping[str, Any]] | None,\\n    graph: Sequence[Mapping[str, Any]] | None,\\n    k: int = RRF_K,\\n    intents: Sequence[str] | None = None,\\n    query: str | None = None,\\n) -> tuple[tuple[RetrievalCandidate, ...], dict[str, dict[str, Any]]]:\\n    \\\"\\\"\\\"Fuse independent ranked lists with weighted rank-only RRF.\\n\\n    Larger final_score wins. Raw backend magnitudes are preserved on the\\n    candidate but never enter the fusion formula. Equal RRF ties break by\\n    candidate_id ascending.\\n\\n    `intents` is what the query analysis read. `None` means the caller did not\\n    analyse the query at all, and then this ranks exactly as it did before the\\n    trust weight became conditional; an analysed query — including one whose\\n    analysis found no intent — is answered under the vault's own rule.\\n    \\\"\\\"\\\"\\n    scores: dict[str, float] = {}\\n    meta: dict[str, dict[str, Any]] = {}\\n    supplied = {\\\"lexical\\\": lexical, \\\"dense\\\": dense, \\\"graph\\\": graph}\\n    weights = _fusion_weights()\\n    for name, rank_field, score_field, raw_field in _FUSION_BACKENDS:\\n        rows = supplied[name]\\n        if rows:\\n            _accumulate_backend(\\n                rows,\\n                weight=weights[name],\\n                rank_field=rank_field,\\n                score_field=score_field,\\n                raw_field=raw_field,\\n                k=k,\\n                scores=scores,\\n                meta=meta,\\n            )\\n    analysed = intents is not None and curated_pages_first(intents)\\n    weighted = _weigh_by_trust(scores, meta, curated_first=analysed, query=query)\\n    ordered = sorted(weighted, key=lambda item: (-weighted[item], item))\\n    candidates = [\\n        _fused_candidate(key, meta[key], round(scores[key], 6), round(weighted[key], 6))\\n        for key in ordered\\n    ]\\n    return tuple(candidates), meta\"}]"
+      }
+    },
+    {
+      "id": "T04",
+      "kind": "find-symbol-definition",
+      "question": "Where is _page_diverse defined?",
+      "serena": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "partial",
+        "seconds": 3.929,
+        "tokens": 37,
+        "answer_excerpt": "[{\"name_path\": \"_page_diverse\", \"kind\": \"Function\", \"relative_path\": \"scripts/retrieval.py\", \"body_location\": {\"start_line\": 3021, \"end_line\": 3041}}]"
+      }
+    },
+    {
+      "id": "T05",
+      "kind": "find-symbol-definition",
+      "question": "Where is the constant EDITORIAL_NAMES defined?",
+      "serena": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 3.823,
+        "tokens": 500,
+        "answer_excerpt": "{\"tests/test_migrate_to_okf_exemptions.py\": [\"  >  16:from vault_editorial import EDITORIAL_NAMES  # noqa: E402\", \"  >  48:    for name in EDITORIAL_NAMES:\"], \"scripts/repair_backlinks.py\": [\"  >  35:from vault_editorial import EDITORIAL_NAMES  # noqa: E402\", \"  >  48:        if page.name not in EDITORIAL_NAMES and \\\"archive\\\" not in page.parts\"], \"scripts/corpus_snapshot.py\": [\"  >  22:from vault_editorial import EDITORIAL_NAMES\", \"  >1429:            return path.suffix.casefold() == \\\".md\\\" and path.name not in EDITORIAL_NAMES\"], \"scripts/vault_editorial.py\": [\"  >  16:`EDITORIAL_NAMES` — filenames whose presence in *any* path under the\", \"  >  42:EDITORIAL_NAMES: frozenset[str] = frozenset({\", \"  >  94:    \\\"\\\"\\\"True if *filename* is in EDITORIAL_NAMES.\\\"\\\"\\\"\", \"  >  95:    return filename in EDITORIAL_NAMES\", \"  > 104:    return filename in EDITORIAL_NAMES or filename in BACKLINK_EXEMPT_NAMES\"], \"scripts/migrate_to_okf.py\": [\"  >  42:from vault_editorial import EDITORIAL_NAMES  # noqa: E402\", \"  >  50:# `EDITORIAL_NAMES` (imported above) covers the ones that are editorial wherever\", \"  > 212:    if path.name in EDITORIAL_NAMES:\"], \"scripts/lookup_mode.py\": [\"  >  30:from vault_editorial import EDITORIAL_NAMES, editorial_parents_to_skip  # noqa: E402\", \"  >  45:    `vault_editorial.EDITORIAL_NAMES`) and skeleton directories like\", \"  >  55:        and p.name not in EDITORIAL_NAMES\"], \"scripts/lint_memory.py\": [\"  >  65:    EDITORIAL_NAMES,\", \"  >  81:# Editorial page sets (EDITORIAL_NAMES, BACKLINK_EXEMPT_NAMES,\", \"  > 331:    if md.name in EDITORIAL_NAMES:\", \"  > 383:    return md.name in EDITORIAL_NAMES or md.name in BACKLINK_EXEMPT_NAMES\", \"  > 459:        if md.name in EDITORIAL_NAMES:\", \"  > 520:        if md.name in EDITORIAL_NAMES:\", \"  > 533:    if md.name in EDITORIAL_NAMES:\", \"  > 685:    if md.name in EDITORIAL_NAMES:\", \"  > 841:    if gap.name in EDITORIAL_NAMES:\", \"  > 970:    pages = [p for p in _iter_tree_md(NOTES) if p.name not in EDITORIAL_NAMES]\"]}"
+      }
+    },
+    {
+      "id": "T06",
+      "kind": "find-dead-code",
+      "question": "Is _flush_started (scripts/integration_adapter.py) dead code?",
+      "serena": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "wrong",
+        "seconds": 5.684,
+        "tokens": 0,
+        "answer_excerpt": "{}"
+      }
+    },
+    {
+      "id": "T07",
+      "kind": "find-dead-code",
+      "question": "Is _search_backends (scripts/search_memory.py) dead code?",
+      "serena": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "wrong",
+        "seconds": 5.541,
+        "tokens": 0,
+        "answer_excerpt": "{}"
+      }
+    },
+    {
+      "id": "T08",
+      "kind": "impact-of-changing-x",
+      "question": "Which modules import page_status (and are therefore touched by changing it)?",
+      "serena": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 4.063,
+        "tokens": 427,
+        "answer_excerpt": "{\"benchmark/selective_forgetting_vault.py\": [\"  > 363:    from page_status import is_retired\", \"  > 390:    from page_status import is_retired\", \"  > 584:    from page_status import is_retired\"], \"tests/test_archive_recency_signal.py\": [\"  > 239:    from page_status import is_retired\"], \"tests/test_page_status.py\": [\"  >  13:from page_status import current_status_sql, is_retired  # noqa: E402\"], \"tests/test_answer_budget.py\": [\"  > 402:    rows = [_module_row(\\\"scripts.page_status\\\", \\\"scripts/page_status.py\\\")]\", \"  > 402:    rows = [_module_row(\\\"scripts.page_status\\\", \\\"scripts/page_status.py\\\")]\", \"  > 407:        \\\"name\\\": \\\"scripts.page_status\\\",\", \"  > 408:        \\\"path\\\": \\\"scripts/page_status.py\\\",\", \"  > 416:    rows = [_module_row(\\\"scripts.page_status\\\", \\\"scripts/page_status.py\\\", key=unstated)]\", \"  > 416:    rows = [_module_row(\\\"scripts.page_status\\\", \\\"scripts/page_status.py\\\", key=unstated)]\"], \"scripts/rebuild_memory_index.py\": [\"  >  23:from page_status import is_retired  # noqa: E402\"], \"scripts/corpus_snapshot.py\": [\"  >  21:from page_status import is_retired\"], \"scripts/search_memory.py\": [\"  >  54:from page_status import current_status_sql, is_retired  # noqa: E402\", \"  >5783:def _page_status(path: str) -> str:\", \"  >5802:    return is_retired(_page_status(path))\"], \"scripts/archive_stale.py\": [\"  >  41:from page_status import is_retired, normalized_status  # noqa: E402\"], \"scripts/page_facts.py\": [\"  >  21:from page_status import normalized_status\"], \"scripts/lint_memory.py\": [\"  >  60:from page_status import is_retired  # noqa: E402\"], \"scripts/evidence_graph.py\": [\"  >4177:        reverse import closure of `scripts/page_status.py`, the recursive form\"]}"
+      }
+    },
+    {
+      "id": "T09",
+      "kind": "architecture-of-module",
+      "question": "Which project modules does scripts/retrieval.py depend on?",
+      "serena": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 3.549,
+        "tokens": 145,
+        "answer_excerpt": "{\"scripts/retrieval.py\": [\"  >   1:from __future__ import annotations\", \"  >   3:import hashlib\", \"  >   4:import json\", \"  >   5:import os\", \"  >   6:import queue\", \"  >   7:import re\", \"  >   8:import threading\", \"  >   9:import time\", \"  >  10:from collections.abc import Callable, Mapping, Sequence\", \"  >  11:from dataclasses import dataclass, replace\", \"  >  12:from dataclasses import field as dataclass_field\", \"  >  13:from pathlib import Path\", \"  >  14:from typing import Any\", \"  >  16:from provenance import authority_weight, curated_pages_first, source_type_weight\"]}"
+      }
+    },
+    {
+      "id": "T10",
+      "kind": "multi-hop",
+      "question": "Which functions reach fuse_rrf within two caller hops (callers, and callers of callers)?",
+      "serena": {
+        "status": "answered",
+        "call_statuses": [
+          "answered",
+          "answered"
+        ],
+        "grade": "partial",
+        "seconds": 11.409,
+        "tokens": 258,
+        "answer_excerpt": "{\"scripts/retrieval.py\": {\"Function\": [{\"name_path\": \"_fused_candidates\", \"body_location\": {\"start_line\": 3098, \"end_line\": 3110}, \"content_around_reference\": \"...3103:) -> tuple[tuple[RetrievalCandidate, ...], dict[str, dict[str, Any]]]:\\n  >3104:    return fuse_rrf(\\n...3105:        lexical=_fusion_input(backends.lexical_hits, \\\"lexical\\\", signals),\"}]}}\n{\"scripts/retrieval.py\": {\"Function\": [{\"name_path\": \"_partial_candidates\", \"body_location\": {\"start_line\": 3220, \"end_line\": 3228}, \"content_around_reference\": \"...3225:        return progress.candidates, progress.display_meta or {}\\n  >3226:    return _fused_candidates(\\n...3227:        progress.backends, signals, progress.analysis.intents, progress.analysis.query\"}], \"Variable\": [{\"name_path\": \"_executed_plan/candidates\", \"body_location\": {\"start_line\": 3335, \"end_line\": 3335}, \"content_around_reference\": \"...3334:\\n  >3335:    candidates, display_meta = _fused_candidates(\\n...3336:        backends, signals, progress.analysis.intents, progress.analysis.query\"}]}}"
+      }
+    },
+    {
+      "id": "T11",
+      "kind": "who-calls",
+      "question": "Which retrieval-path function calls source_type_weight?",
+      "serena": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 6.71,
+        "tokens": 141,
+        "answer_excerpt": "{\"scripts/retrieval.py\": {\"File\": [{\"name_path\": \"retrieval\", \"body_location\": {\"start_line\": 0, \"end_line\": 4249}, \"content_around_reference\": \"...  15:\\n  >  16:from provenance import authority_weight, curated_pages_first, source_type_weight\\n...  17:\"}], \"Variable\": [{\"name_path\": \"_weigh_by_trust/page\", \"body_location\": {\"start_line\": 1323, \"end_line\": 1323}, \"content_around_reference\": \"...1322:        authority = authority_weight(meta[key].get(\\\"authority\\\"))\\n  >1323:        page = source_type_weight(\\n...1324:            meta[key].get(\\\"type\\\"),\"}]}}"
+      }
+    },
+    {
+      "id": "T12",
+      "kind": "architecture-summary",
+      "question": "Summarize the repository architecture: what are its main modules and entry points?",
+      "serena": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 3.414,
+        "tokens": 1218,
+        "answer_excerpt": "{\"dirs\": [\"scripts/schemas\", \"scripts/__pycache__\", \"scripts/queries\"], \"files\": [\"scripts/retrieval_telemetry.py\", \"scripts/reliable_memory.py\", \"scripts/session_start_context.py\", \"scripts/repair_orphaned_checkpoint_names.py\", \"scripts/lsp_profiles.py\", \"scripts/generation_catalog.py\", \"scripts/session_end_capture.py\", \"scripts/rebuild_memory_index.py\", \"scripts/session_evidence.py\", \"scripts/query_memory.py\", \"scripts/co_activation.py\", \"scripts/windows_workspace.py\", \"scripts/repair_backlinks.py\", \"scripts/archive_sessions.py\", \"scripts/post_tool_capture.py\", \"scripts/workspace_revision.py\", \"scripts/loop_detector.py\", \"scripts/install_pyright.py\", \"scripts/lsp_security.py\", \"scripts/flush_memory.py\", \"scripts/integration_hook_config.py\", \"scripts/integration_config_backup.py\", \"scripts/contextual_retrieval.py\", \"scripts/code_navigation_renderer.py\", \"scripts/repository_scope.py\", \"scripts/export_vault.py\", \"scripts/corpus_snapshot.py\", \"scripts/scheduled_nightly.py\", \"scripts/reranker.py\", \"scripts/precompact_capture.py\", \"scripts/install_smoke.py\", \"scripts/graph_query.py\", \"scripts/project_extractor.py\", \"scripts/session_end_project_tag.py\", \"scripts/import_resolver.py\", \"scripts/search_memory.py\", \"scripts/feedback_capture.py\", \"scripts/project_journal.py\", \"scripts/trace_ingest.py\", \"scripts/freshness_watch.py\", \"scripts/mcp_http.py\", \"scripts/archive_daily.py\", \"scripts/tool_breadcrumb_append.py\", \"scripts/lance_store.py\", \"scripts/evidence_resolver.py\", \"scripts/contradiction_pipeline.py\", \"scripts/code_navigation.py\", \"scripts/okf_types.py\", \"scripts/provenance.py\", \"scripts/install_language_server.py\", \"scripts/provenance_join.py\", \"scripts/lsp_process.py\", \"scripts/mcp_contract.py\", \"scripts/archive_stale.py\", \"scripts/repository_index.py\", \"scripts/self_update.py\", \"scripts/page_facts.py\", \"scripts/knowledge_extractor.py\", \"scripts/reclaim_runtime_state.py\", \"scripts/repair_installed_memory.py\", \"scripts/lsp_identity.py\", \"scripts/install_control.py\", \"scripts/compile_memory.py\", \"scripts/graph_neighbors.py\", \"scripts/vault_editorial.py\", \"scripts/cleanup_worktrees.py\", \"scripts/retrieval.py\", \"scripts/context_budget.py\", \"scripts/bitemporal_claims.py\", \"scripts/repair_exhausted_queue_tasks.py\", \"scripts/installed_memory_repair.py\", \"scripts/answer_cost.py\", \"scripts/answer_budget.py\", \"scripts/evidence_graph_builder.py\", \"scripts/trace_collect.py\", \"scripts/release_manifest.py\", \"scripts/migrate_to_okf.py\", \"scripts/pyright_session.py\", \"scripts/operational_ownership.py\", \"scripts/bounded_io.py\", \"scripts/pyright_profile.py\", \"scripts/build_context.py\", \"scripts/secret_redact.py\", \"scripts/capture_adoption.py\", \"scripts/lookup_mode.py\", \"scripts/context_compiler.py\", \"scripts/interruption.py\", \"scripts/reflection.py\", \"scripts/access_tracking.py\", \"scripts/claim_tree_manifest.py\", \"scripts/code_workspace.py\", \"scripts/installer_config.py\", \"scripts/lint_memory.py\", \"scripts/llm_client.py\", \"scripts/retrieval_disposition.py\", \"scripts/prune_generations.py\", \"scripts/code_intelligence.py\", \"scripts/snapshot_knowledge.py\", \"scripts/repair_journal_gap.py\", \"scripts/maintenance_helpers.py\", \"scripts/build_guardrails.py\", \"scripts/heartbeat_record.py\", \"scripts/integration_adapter.py\", \"scripts/bootstrap_project.py\", \"scripts/lsp_protocol.py\", \"scripts/codex_memory.py\", \"scripts/lsp_process_tree.py\", \"scripts/blackboard.py\", \"scripts/evidence_graph.py\", \"scripts/build_tiers.py\", \"scripts/session_feedback.py\", \"scripts/user_prompt_capture.py\", \"scripts/scheduled_weekly.py\", \"scripts/claims.py\", \"scripts/path_coverage.py\", \"scripts/merge_claude_settings.py\", \"scripts/backfill_sessions.py\", \"scripts/repair_refused_page_creation.py\", \"scripts/embedding_model.py\", \"scripts/lsp_launch_package.py\", \"scripts/event_envelope.py\", \"scripts/run-scheduled-task.ps1\", \"scripts/install-scheduled-tasks.ps1\", \"scripts/build_advisory.py\", \"scripts/value_references.py\", \"scripts/lsp_positions.py\", \"scripts/compile_cache.py\", \"scripts/me"
+      }
+    },
+    {
+      "id": "T13",
+      "kind": "community-naming",
+      "question": "Which module community does fuse_rrf belong to?",
+      "serena": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 3.86,
+        "tokens": 36,
+        "answer_excerpt": "[{\"name_path\": \"fuse_rrf\", \"kind\": \"Function\", \"relative_path\": \"scripts/retrieval.py\", \"body_location\": {\"start_line\": 1568, \"end_line\": 1612}}]"
+      }
+    }
+  ],
+  "summary": {
+    "serena": {
+      "correct": 9,
+      "partial": 2,
+      "wrong": 2,
+      "statuses": {
+        "answered": 13
+      },
+      "total_seconds": 84.31,
+      "total_tokens": 3785,
+      "wrong_but_confident": 2,
+      "operator_attention_events": 0
+    }
+  }
+}

@@ -146,11 +146,28 @@ def test_a_fenced_answer_is_still_an_answer() -> None:
     assert parsed == {"status": "answered"}
 
 
-def test_prose_wrapped_around_a_fence_is_still_refused() -> None:
+def test_prose_wrapped_around_a_fence_no_longer_throws_the_answer_away() -> None:
+    """Refusing these cost fifteen complete answers in 200 questions.
+
+    Measured 2026-09-02. Every one of the fifteen carried a valid document
+    inside a fence and a sentence of commentary outside it. The fence is now
+    taken wherever it sits; what protects the reader is the schema validation
+    and the citation gates that run afterwards, not the shape of the wrapper.
+    """
+    import query_memory
+
+    parsed = query_memory._parsed_answer(
+        'here you go:\n```json\n{"a": 1}\n```\nhope that helps'
+    )
+
+    assert parsed == {"a": 1}
+
+
+def test_a_reply_that_is_only_prose_is_still_refused() -> None:
     import query_memory
 
     with pytest.raises(query_memory.GroundedQAError):
-        query_memory._parsed_answer('here you go:\n```json\n{"a": 1}\n```\nhope that helps')
+        query_memory._parsed_answer("here you go: the answer is 600 followers")
 
 
 def test_an_agent_worktree_belongs_to_the_checkout_that_owns_it() -> None:
