@@ -1362,6 +1362,12 @@ def _legacy_probe_event(project_root: Path | str) -> dict[str, object]:
     }
 
 
+# What `prepare` says when an attempt's id is bound to the request it was first
+# prepared with and the request has since changed. See
+# `ProjectStore._replayed_as_a_new_attempt`.
+REBOUND_REQUEST = "operation_id is already bound to a different request"
+
+
 def _project_lease_precondition(slug: str, lease: ProjectLease) -> dict[str, object]:
     return {
         "project": slug,
@@ -2342,11 +2348,63 @@ class ProjectStore:
             )
         except ProjectPendingPriorError:
             return None
+        except ValueError as exc:
+            return self._replayed_after_rebinding(exc, row, lease, writer_wait_seconds)
         except TransactionFailure as exc:
-            if exc.code != "precondition_failed":
-                raise
-            self._set_checkpoint_state(row.project, row.sequence, "quarantined")
+            return self._quarantined_or_raised(exc, row)
+
+    def _quarantined_or_raised(
+        self, exc: TransactionFailure, row: ProjectCheckpointReservation
+    ) -> None:
+        if exc.code != "precondition_failed":
+            raise exc
+        self._set_checkpoint_state(row.project, row.sequence, "quarantined")
+        return None
+
+    def _replayed_after_rebinding(
+        self,
+        exc: ValueError,
+        row: ProjectCheckpointReservation,
+        lease: ProjectLease,
+        writer_wait_seconds: float | None,
+    ) -> CheckpointReceipt | None:
+        if REBOUND_REQUEST not in str(exc):
+            raise exc
+        return self._replayed_as_a_new_attempt(row, lease, writer_wait_seconds)
+
+    def _replayed_as_a_new_attempt(
+        self,
+        row: ProjectCheckpointReservation,
+        lease: ProjectLease,
+        writer_wait_seconds: float | None,
+    ) -> CheckpointReceipt | None:
+        """The files moved since this attempt was named, so name the next one.
+
+        A reservation carries the operation id of attempt 1, and that id is
+        bound to the request it was first prepared with — the journal and the
+        state file as they were then. Replay it after either has moved and
+        `prepare` refuses: same id, different request. The row can never settle
+        and every event behind it queues forever.
+
+        Measured on this vault on 2026-09-07: `no-hands` sequence 839 refused
+        this way, 1 127 events queued behind it over five hours, `run/state.json`
+        grew to 2.8 MB — eleven times the bound doctor is allowed to read — and
+        two of its checks went blind while the state lock started timing out
+        under the size.
+
+        `retry_unsettled_sequence` is the move the design already has for this:
+        the same sequence, the next attempt ordinal, a new id for the new
+        request. It is what a returning request would have been given, and what
+        `repair_orphaned_checkpoint_names` gives a row by hand.
+        """
+        fresh = self.coordinator.retry_unsettled_sequence(
+            row.project, row.sequence, _project_lease_precondition(row.project, lease)
+        )
+        if fresh is None:
             return None
+        return self._project_reserved(
+            fresh, lease, writer_wait_seconds=writer_wait_seconds
+        )
 
     def read_journal(self, slug: str) -> str:
         content = self._read_journal_bytes(slug)
