@@ -60,7 +60,41 @@ ANSWER_EXCERPT_CHARS = 4000
 # neither speaks anything but MCP over stdio. Pinned by version: a benchmark
 # whose competitor changes under it measures the weather.
 TRACE_COMMAND = ["npx", "-y", "trace-mcp@3.22.0", "serve"]
-SIDES = ("llm_wiki", "llm_wiki_best", "cbm", "trace_mcp")
+# Serena is started read-only-ish by configuration, not by hope: the dashboard,
+# the log window and the browser are all off, and every call the task file
+# makes is one of its read tools. It also ships `replace_content`,
+# `rename_symbol` and `safe_delete_symbol`; a benchmark that called one of
+# those would be editing the repository it is measuring.
+SERENA_COMMAND = [
+    "uvx",
+    "--from",
+    "git+https://github.com/oraios/serena",
+    "serena",
+    "start-mcp-server",
+    "--project",
+    str(ROOT),
+    "--transport",
+    "stdio",
+    "--enable-web-dashboard",
+    "false",
+    "--enable-gui-log-window",
+    "false",
+    "--log-level",
+    "ERROR",
+]
+SERENA_READ_TOOLS = frozenset(
+    {
+        "find_referencing_symbols",
+        "find_symbol",
+        "find_declaration",
+        "get_symbols_overview",
+        "search_for_pattern",
+        "list_dir",
+        "find_file",
+        "read_file",
+    }
+)
+SIDES = ("llm_wiki", "llm_wiki_best", "cbm", "trace_mcp", "serena")
 
 
 def load_tasks(path: Path) -> dict:
@@ -212,11 +246,27 @@ def run_trace_mcp_call(call: dict, directory: str) -> dict:
     )
 
 
+def run_serena_call(call: dict, directory: str) -> dict:
+    """One call against a freshly started Serena, refusing anything that writes."""
+    from mcp_stdio_client import call_tool
+
+    if call["tool"] not in SERENA_READ_TOOLS:
+        return _error_row(0.0, f"refused: {call['tool']} is not a read tool")
+    return call_tool(
+        SERENA_COMMAND,
+        call["tool"],
+        call["arguments"],
+        timeout=CALL_BUDGET_SECONDS,
+        cwd=directory,
+    )
+
+
 _RUNNERS = {
     "llm_wiki": run_llm_wiki_call,
     "llm_wiki_best": run_llm_wiki_call,
     "cbm": run_cbm_call,
     "trace_mcp": run_trace_mcp_call,
+    "serena": run_serena_call,
 }
 
 
