@@ -80,11 +80,14 @@ Usable») добавляют важное для нас: жёсткое прин
 
 ## Источники
 
-- dev.to/pockit_tools/llm-structured-output-in-2026 — три слоя, отклонение
-  последним.
-- eastondev.com/blog/en/posts/ai/20260506-llm-structured-output — то же,
-  май 2026.
-- arXiv:2604.06066 и arXiv:2605.02363 — цена жёсткого принуждения к схеме.
+- https://dev.to/pockit_tools/llm-structured-output-in-2026-stop-parsing-json-with-regex-and-do-it-right-34pk
+  — три слоя, отклонение последним.
+- https://eastondev.com/blog/en/posts/ai/20260506-llm-structured-output/ — то
+  же, май 2026.
+- https://arxiv.org/pdf/2604.06066 — «From Hallucination to Structure
+  Snowballing: The Alignment Tax of Constrained Decoding in LLM Reflection».
+- https://arxiv.org/pdf/2605.02363 — «When Correct Isn't Usable: Improving
+  Structured Output Reliability in Small Language Models».
 - `cache/benchmarks/longmemeval/after-n200-seed101-r1.judged.jsonl`,
   прогон 2026-09-06/07, разбор поля `raw_reply` у 21 строки с ошибкой.
 - `knowledge/notes/a-failing-claim-does-not-destroy-the-answer-decision.md`.
