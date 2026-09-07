@@ -289,12 +289,23 @@ def test_a_tool_call_over_http_returns_the_stdio_envelope(monkeypatch):
     over_stdio = json.loads(
         mcp_server._execute_tool_call("wiki_overview", {}, time.monotonic() + 30.0)
     )
+    assert _without_clocks(over_http) == _without_clocks(over_stdio)
+    assert (over_http["data"]["pages"], over_http["data"]["tier"]) == (7, "HYBRID")
+
+
+def _without_clocks(envelope: dict) -> dict:
+    """The envelope minus every field that is a clock.
+
+    `data._meta.timestamp` is stamped to the second by each call; on a slow
+    Windows runner the two calls straddled a second boundary (2026-09-07,
+    22:51:29 against 22:51:30) and the transport was blamed for the clock.
+    """
     volatile = {"generated_at", "answer_cost"}
-    assert {key: value for key, value in over_http.items() if key not in volatile} == {
-        key: value for key, value in over_stdio.items() if key not in volatile
-    }
-    assert over_http["data"]["pages"] == 7
-    assert over_http["data"]["tier"] == "HYBRID"
+    kept = {key: value for key, value in envelope.items() if key not in volatile}
+    meta = dict(kept.get("data", {}).get("_meta") or {})
+    meta.pop("timestamp", None)
+    kept["data"] = {**kept["data"], "_meta": meta}
+    return kept
 
 
 def test_argument_validation_is_the_same_over_http():

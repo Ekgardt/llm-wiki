@@ -22,6 +22,29 @@ import operational_ownership  # noqa: E402
 from memory_queue import LeaseFenceError, MemoryQueue  # noqa: E402
 
 
+def _heartbeat_thread_alive(task_id: str) -> bool:
+    name = f"memory-queue-heartbeat-{task_id}"
+    return any(t.name == name and t.is_alive() for t in threading.enumerate())
+
+
+class _SeventhBeatWait:
+    """A heartbeat wait that advances the clock seven times, then really waits."""
+
+    def __init__(self, clock: LockedClock, completed: threading.Event, waits: list[float]) -> None:
+        self.clock = clock
+        self.completed = completed
+        self.waits = waits
+
+    def __call__(self, stop: threading.Event, interval: float) -> bool:
+        self.waits.append(interval)
+        if len(self.waits) > 7:
+            return stop.wait(60)
+        self.clock.advance(40)
+        if len(self.waits) == 7:
+            self.completed.set()
+        return False
+
+
 class LockedClock:
     def __init__(self) -> None:
         self._now = datetime(2026, 7, 14, tzinfo=timezone.utc)
@@ -36,30 +59,48 @@ class LockedClock:
             self._now += timedelta(seconds=seconds)
 
 
+class _Claimants:
+    """Eight workers that start together and claim until the queue is empty."""
+
+    def __init__(self, root: Path, clock: LockedClock) -> None:
+        self.root = root
+        self.clock = clock
+        self.barrier = threading.Barrier(8)
+        self.claimed: list[str] = []
+        self.lock = threading.Lock()
+
+    def work(self, index: int) -> None:
+        queue = MemoryQueue(self.root, clock=self.clock, rng=random.Random(index + 10))
+        self.barrier.wait()
+        while lease := queue.claim(f"worker-{index}"):
+            with self.lock:
+                self.claimed.append(lease.id)
+
+    def run(self) -> list[str]:
+        threads = [threading.Thread(target=self.work, args=(index,)) for index in range(8)]
+        for thread in threads:
+            thread.start()
+        _join_all(threads)
+        return self.claimed
+
+
+def _join_all(threads: list[threading.Thread]) -> None:
+    # Forty claims by eight workers through one SQLite file took 19.8 s on a
+    # Windows runner on 2026-09-07; a ten-second join per thread called that a
+    # hang. The bound is for a real deadlock, so it is generous.
+    for thread in threads:
+        thread.join(timeout=120)
+        assert not thread.is_alive()
+
+
 def test_concurrent_workers_claim_each_row_once_per_lease(tmp_path: Path) -> None:
     clock = LockedClock()
     seed = MemoryQueue(tmp_path, clock=clock, rng=random.Random(1))
     expected = {seed.enqueue("query", 1, {"n": number}) for number in range(40)}
-    barrier = threading.Barrier(8)
-    claimed: list[str] = []
-    lock = threading.Lock()
 
-    def worker(index: int) -> None:
-        queue = MemoryQueue(tmp_path, clock=clock, rng=random.Random(index + 10))
-        barrier.wait()
-        while lease := queue.claim(f"worker-{index}"):
-            with lock:
-                claimed.append(lease.id)
+    claimed = _Claimants(tmp_path, clock).run()
 
-    threads = [threading.Thread(target=worker, args=(index,)) for index in range(8)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(timeout=10)
-        assert not thread.is_alive()
-
-    assert set(claimed) == expected
-    assert len(claimed) == len(expected)
+    assert (set(claimed), len(claimed)) == (expected, len(expected))
 
 
 def test_expired_lease_is_delivered_again_and_old_worker_is_fenced(tmp_path: Path) -> None:
@@ -70,10 +111,10 @@ def test_expired_lease_is_delivered_again_and_old_worker_is_fenced(tmp_path: Pat
     assert first is not None
     clock.advance(6)
     second = queue.claim("second", lease_seconds=5)
-    assert second is not None and second.id == task_id
-    assert second.token != first.token
-    assert queue.get(task_id).attempts == 2
-    assert queue.get(task_id).attempt_history[0].outcome == "lease_expired"
+    assert second is not None
+    assert (second.id, second.token != first.token) == (task_id, True)
+    task = queue.get(task_id)
+    assert (task.attempts, task.attempt_history[0].outcome) == (2, "lease_expired")
 
     with pytest.raises(LeaseFenceError):
         queue.publish_result(first, operation_id=task_id, result=b"stale")
@@ -244,15 +285,7 @@ def test_drain_heartbeats_long_handler_past_270_seconds(
     clock = LockedClock()
     completed = threading.Event()
     waits: list[float] = []
-
-    def wait(stop: threading.Event, interval: float) -> bool:
-        waits.append(interval)
-        if len(waits) <= 7:
-            clock.advance(40)
-            if len(waits) == 7:
-                completed.set()
-            return False
-        return stop.wait(60)
+    wait = _SeventhBeatWait(clock, completed, waits)
 
     queue = MemoryQueue(
         tmp_path,
@@ -279,13 +312,12 @@ def test_drain_heartbeats_long_handler_past_270_seconds(
         max_tasks=1,
     )
     assert counts == {"ok": 1, "failed": 0, "dead": 0, "skipped": 0}
-    assert heartbeat_calls == [120] * 7
-    assert waits[:7] == [40] * 7
-    assert queue.get(task_id).state == "succeeded"
-    assert not any(
-        thread.name == f"memory-queue-heartbeat-{task_id}" and thread.is_alive()
-        for thread in threading.enumerate()
+    assert (heartbeat_calls, waits[:7], queue.get(task_id).state) == (
+        [120] * 7,
+        [40] * 7,
+        "succeeded",
     )
+    assert not _heartbeat_thread_alive(task_id)
 
 
 def test_drain_reports_failure_when_heartbeat_loses_fence(
@@ -329,13 +361,12 @@ def test_drain_reports_failure_when_heartbeat_loses_fence(
     assert counts == {"ok": 0, "failed": 1, "dead": 0, "skipped": 0}
     task = primary.get(task_id)
     assert replacement[0] is not None
-    assert task.state == "leased"
-    assert task.lease_owner == "replacement"
-    assert task.result_reference is None
-    assert not any(
-        thread.name == f"memory-queue-heartbeat-{task_id}" and thread.is_alive()
-        for thread in threading.enumerate()
+    assert (task.state, task.lease_owner, task.result_reference) == (
+        "leased",
+        "replacement",
+        None,
     )
+    assert not _heartbeat_thread_alive(task_id)
 
 
 def test_a_busy_database_makes_the_worker_wait_instead_of_dying(tmp_path, monkeypatch):
