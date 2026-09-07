@@ -617,6 +617,11 @@ def _anchor_tokens(tokens: set[str]) -> set[str]:
 # carrying no figure at all and the gate stayed quiet about every claim offered
 # for it. Found 2026-09-05 while testing something else. The guard now refuses
 # only what actually continues the number.
+# Where a partially refused answer carries the gates that dropped a claim, so
+# telemetry can record them. `grounded_qa` removes it before returning: it is a
+# channel between the verifier and the recorder, not a field of an answer.
+DROPPED_GATES_KEY = "dropped_gates"
+
 _FIGURE = re.compile(r"(?<![\w.])\d+(?:[.,]\d+)*(?!\w)(?!\.\d)|--[a-z][a-z0-9-]{2,}")
 
 
@@ -624,7 +629,28 @@ def _hard_tokens(text: str) -> set[str]:
     return {match.casefold() for match in _FIGURE.findall(str(text))}
 
 
-def _require_figures_agree(claim_text: str, span_text: str) -> None:
+def supplied_figures(entry: Mapping[str, object]) -> str:
+    """The figures we ourselves told the model about this span.
+
+    Only the path, and that is the whole point. A daily log is named
+    `knowledge/daily/2023-11-03.md`, so the manifest hands the model the date
+    of the session and the model writes "in a session captured on 2023-11-03".
+    The date is nowhere in the quoted bytes — it is in the file name — so the
+    figure gate saw a claim stating figures the span does not state, and
+    dropped the claim. On this vault, over 399 answered questions, a gate
+    dropped at least one claim in 176 of them; those answers are wrong 23.3%
+    of the time against 3.1% where nothing was dropped.
+
+    Byte offsets, line numbers and hashes are deliberately not included. They
+    are small integers and long hex strings that would match almost any figure
+    a claim states, which would not narrow the gate — it would end it.
+    """
+    return str(entry.get("relative_path") or "")
+
+
+def _require_figures_agree(
+    claim_text: str, span_text: str, supplied_text: str = ""
+) -> None:
     """When both sides name figures, at least one has to be the same figure.
 
     A span that carries no figure at all may still support a numeric claim —
@@ -633,10 +659,14 @@ def _require_figures_agree(claim_text: str, span_text: str) -> None:
     from the right page and the wrong sentence, which reads as support and is
     the shape an operator acts on.
 
+    `supplied_text` is what the manifest states about this very span, and its
+    figures count as the span's own: a number we handed the model for this
+    citation is not a number the model made up. See `supplied_figures`.
+
     This is still not entailment, and entailment is still not claimed.
     """
     claim_figures = _hard_tokens(claim_text)
-    span_figures = _hard_tokens(span_text)
+    span_figures = _hard_tokens(span_text) | _hard_tokens(supplied_text)
     if not claim_figures or not span_figures:
         return
     if claim_figures & span_figures:
@@ -647,7 +677,7 @@ def _require_figures_agree(claim_text: str, span_text: str) -> None:
 
 
 def _require_citation_touches_claim(
-    claim_text: str, span_text: str, *, derived: bool = False
+    claim_text: str, span_text: str, *, derived: bool = False, supplied_text: str = ""
 ) -> None:
     """Reject a citation that shares nothing with the claim it is offered for.
 
@@ -658,7 +688,10 @@ def _require_citation_touches_claim(
     none of them agree.
     """
     if not derived:
-        _require_figures_agree(claim_text, span_text)
+        _require_figures_agree(claim_text, span_text, supplied_text)
+    # The word-overlap gate below reads the span only. A claim that shares
+    # nothing with the span but repeats its file name has still cited a page
+    # and not a sentence.
     claim_tokens = _content_tokens(claim_text)
     if not claim_tokens:
         return
@@ -828,7 +861,10 @@ def _check_one_citation(
     if citation_id not in cited:
         raise EvidenceResolutionError("claim cites evidence not supplied to generation")
     _require_citation_touches_claim(
-        str(claim["text"]), str(supplied[citation_id]["text"]), derived=derived
+        str(claim["text"]),
+        str(supplied[citation_id]["text"]),
+        derived=derived,
+        supplied_text=supplied_figures(supplied[citation_id]),
     )
 
 
@@ -978,6 +1014,10 @@ def _answer_of_surviving_claims(
         # its claims is a note, and a note must not reach a reader in the field
         # that means "this was refused". See `_require_answered_shape`.
         "reason": None,
+        # The gates that dropped a claim while the answer still went out.
+        # `grounded_qa` records these and removes the key, so it never reaches
+        # a reader. See `DROPPED_GATES_KEY`.
+        DROPPED_GATES_KEY: sorted(dict.fromkeys(refused)),
     }
 
 
@@ -1092,6 +1132,7 @@ def grounded_qa(
     answer = verify_grounded_answer(_parsed_answer(raw), context, vault=Path(vault))
     _record_cited_evidence(question, context, answer)
     _record_refused_evidence(question, context, answer)
+    answer.pop(DROPPED_GATES_KEY, None)
     return answer
 
 
@@ -1107,12 +1148,38 @@ def _cited_paths(context: GroundedContext, answer: Mapping[str, object]) -> list
 
 
 def _refused_gates(answer: Mapping[str, object]) -> list[str]:
-    """The gates that refused, from the reason a total refusal carries."""
+    """Every gate that refused a claim, whether or not the answer survived.
+
+    A total refusal states its gates in the reason. A partial one states them
+    under `DROPPED_GATES_KEY`, and until 2026-09-07 stated them nowhere: the
+    telemetry recorded total refusals only and said so in its own docstring.
+
+    That blind spot hid the largest measured defect of the week. Of 399
+    answered questions across three runs, 176 had a claim dropped and the
+    answer published anyway; those are wrong 23.3% of the time against 3.1%
+    where nothing was dropped. Finding it took an afternoon of reading raw
+    replies by hand — which is the exact cost this telemetry exists to remove.
+    """
+    gates = _partly_refused_gates(answer) | _wholly_refused_gates(answer)
+    return sorted(gate for gate in gates if gate)
+
+
+def _partly_refused_gates(answer: Mapping[str, object]) -> set[str]:
+    partial = answer.get(DROPPED_GATES_KEY)
+    if not isinstance(partial, list):
+        return set()
+    return {str(gate).strip() for gate in partial}
+
+
+_WHOLE_REFUSAL_MARKER = "no claim survived its citation gates: "
+
+
+def _wholly_refused_gates(answer: Mapping[str, object]) -> set[str]:
     reason = str(answer.get("reason") or "")
-    marker = "no claim survived its citation gates: "
-    if not reason.startswith(marker):
-        return []
-    return sorted({part.strip() for part in reason[len(marker):].split(";") if part.strip()})
+    if not reason.startswith(_WHOLE_REFUSAL_MARKER):
+        return set()
+    stated = reason[len(_WHOLE_REFUSAL_MARKER) :].split(";")
+    return {part.strip() for part in stated}
 
 
 def _record_refused_evidence(
@@ -1131,8 +1198,8 @@ def _record_refused_evidence(
     away right answers, and where" is answerable from the log rather than from
     an afternoon of manual work.
 
-    Only totals refusals are recorded. A claim dropped from an answer that still
-    published something is a different event and is not this one.
+    A claim dropped from an answer that still published something is recorded
+    too, and used not to be. `_refused_gates` says what that cost.
     """
     gates = _refused_gates(answer)
     if not gates:
