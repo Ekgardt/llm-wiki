@@ -88,6 +88,10 @@ class GroundedContext:
     # difference between "the index lags" and "the answer quoted stale text"
     # visible to whoever is reading the run.
     stale_sources: tuple[str, ...] = ()
+    # The kept pages in retrieval's own order, best first. `parent_paths` is
+    # sorted for stability; this is what says which page was the last one
+    # retrieval still reached. See `aggregation_pass.reaches_the_edge`.
+    ranked_paths: tuple[str, ...] = ()
 
     @classmethod
     def empty(cls, *, profile: str) -> GroundedContext:
@@ -306,6 +310,7 @@ def build_grounded_context(
         packed_tokens,
         getattr(compiled, "trace", None),
         stale,
+        ranked_paths=_ranked_paths(selected, parent_paths),
     )
 
 
@@ -345,6 +350,13 @@ def _profile_selection(
 def _parent_paths(selected: tuple) -> tuple[str, ...]:
     """The pages the selected chunks came from, in a stable order."""
     return tuple(sorted({chunk.parent_page for chunk in selected}))
+
+
+def _ranked_paths(selected: tuple, kept: tuple[str, ...]) -> tuple[str, ...]:
+    """The kept pages in the order retrieval ranked them, each once."""
+    present = set(kept)
+    ranked = (chunk.parent_page for chunk in selected)
+    return tuple(dict.fromkeys(page for page in ranked if page in present))
 
 
 def _fitted_selection(
@@ -1041,7 +1053,9 @@ def _answer_corpus(vault: Path, deadline: float) -> object:
     return collect_corpus(vault, code_roots=roots, deadline=deadline)
 
 
-def _default_candidates(question: str, *, profile: str, deadline: float) -> tuple[object, ...]:
+def _default_candidates(
+    question: str, *, profile: str, deadline: float, limit: int = QA_MAX_CANDIDATES
+) -> tuple[object, ...]:
     from retrieval import retrieve_via_search_memory
 
     # `limit` is how many candidates to return; `max_candidates` is a resource
@@ -1054,7 +1068,7 @@ def _default_candidates(question: str, *, profile: str, deadline: float) -> tupl
     # without the cap the decision page is first.
     rows = retrieve_via_search_memory(
         searchable_question(question),
-        limit=QA_MAX_CANDIDATES,
+        limit=limit,
         semantic=True,
         profile=profile,
         deadline_monotonic=deadline,
@@ -1092,6 +1106,42 @@ def searchable_question(question: str, anchor=None) -> str:
     return query_with_dates(question, anchor or _asked_on(question))
 
 
+# How many candidates the second look asks for when a count reached the edge
+# of the first twelve. Twice, once: every published stopping rule bounds its
+# steps, and one wider pass is the whole budget of this one.
+WIDENED_CANDIDATES = QA_MAX_CANDIDATES * 2
+
+
+@dataclass(frozen=True)
+class _AnswerPass:
+    """Everything one generate-and-verify pass needs, so it can run twice."""
+
+    question: str
+    vault: Path
+    captured: object
+    profile: str
+    budget: object
+    generator: Callable[[str, str, int], str | None] | None
+    deadline: float
+
+    def run(self, candidates: tuple, note: str = "") -> tuple[dict[str, object], GroundedContext]:
+        _check_deadline(self.deadline)
+        system_prompt = _qa_system_prompt()
+        question_block = "<question>\n" + self.question.strip() + "\n</question>\n" + note
+        fixed_tokens = len((system_prompt + question_block).encode("utf-8"))
+        context = build_grounded_context(
+            self.captured,
+            candidates,
+            vault=self.vault,
+            profile=self.profile,
+            budget=_evidence_budget(self.budget, fixed_tokens),
+        )
+        prompt = question_block + context.prompt_context
+        _require_prompt_fits(system_prompt + prompt, self.budget)
+        raw = _provider_response(self.generator, prompt, system_prompt, self.deadline)
+        return verify_grounded_answer(_parsed_answer(raw), context, vault=self.vault), context
+
+
 def grounded_qa(
     question: str,
     *,
@@ -1102,38 +1152,123 @@ def grounded_qa(
     profile: str | None = None,
     budget: object | None = None,
     deadline: float | None = None,
+    retrieve: Callable[[int], Iterable[object]] | None = None,
 ) -> dict[str, object]:
-    """Generate and verify one read-only, evidence-grounded answer."""
+    """Generate and verify one read-only, evidence-grounded answer.
+
+    `retrieve(limit)` is how the answer asks for more evidence than it was
+    first given; see `_second_look`. A caller that supplies only `candidates`
+    cannot be asked, and the second look is then limited to entity clustering.
+    """
     from context_budget import ContextBudget
 
     _require_bounded_question(question)
     selected_deadline = _resolved_deadline(deadline)
     _check_deadline(selected_deadline)
     selected_profile = _resolved_profile(profile, question)
-    captured = snapshot or _answer_corpus(Path(vault), selected_deadline)
-    selected_candidates = _resolved_candidates(
-        candidates, question, selected_profile, selected_deadline
+    fetch = _resolved_retriever(retrieve, candidates, question, selected_profile, selected_deadline)
+    single = _AnswerPass(
+        question,
+        Path(vault),
+        snapshot or _answer_corpus(Path(vault), selected_deadline),
+        selected_profile,
+        budget or ContextBudget(None, 8192, QA_MAX_OUTPUT_TOKENS, 512),
+        generator,
+        selected_deadline,
     )
-    _check_deadline(selected_deadline)
-    system_prompt = _qa_system_prompt()
-    question_block = "<question>\n" + question.strip() + "\n</question>\n"
-    total_budget = budget or ContextBudget(None, 8192, QA_MAX_OUTPUT_TOKENS, 512)
-    fixed_tokens = len((system_prompt + question_block).encode("utf-8"))
-    context = build_grounded_context(
-        captured,
-        selected_candidates,
-        vault=Path(vault),
-        profile=selected_profile,
-        budget=_evidence_budget(total_budget, fixed_tokens),
-    )
-    prompt = question_block + context.prompt_context
-    _require_prompt_fits(system_prompt + prompt, total_budget)
-    raw = _provider_response(generator, prompt, system_prompt, selected_deadline)
-    answer = verify_grounded_answer(_parsed_answer(raw), context, vault=Path(vault))
+    first_candidates = _resolved_candidates(candidates, fetch)
+    answer, context = _second_look(single, first_candidates, single.run(first_candidates), fetch)
     _record_cited_evidence(question, context, answer)
     _record_refused_evidence(question, context, answer)
     answer.pop(DROPPED_GATES_KEY, None)
     return answer
+
+
+def _second_look(
+    single: _AnswerPass,
+    candidates: tuple,
+    first: tuple[dict[str, object], GroundedContext],
+    fetch: Callable[[int], Iterable[object]] | None,
+) -> tuple[dict[str, object], GroundedContext]:
+    """One more pass when the answer counted or summed. See `aggregation_pass`.
+
+    Two things can make it: the count reached the last page retrieval still
+    held, so retrieval is asked once more and wider; or the items it counted
+    include two names for one thing, found by one clustering call and placed
+    beside the question as data. Either way the answer is generated at most
+    once more, and the second answer is adopted only when it answered.
+    """
+    answer, context = first
+    if not _aggregated(answer):
+        return first
+    widened = _widened(answer, context, len(candidates), fetch)
+    note = _entity_note(answer, single)
+    if widened is None and not note:
+        return first
+    second = single.run(widened or candidates, note)
+    _record_second_look(single.question, context, widened is not None, bool(note))
+    return _adopted(first, second)
+
+
+def _aggregated(answer: Mapping[str, object]) -> bool:
+    """An answer that went out and declared a count or a sum somewhere in it."""
+    from aggregation_pass import aggregating_claims
+
+    if answer.get("status") != "answered":
+        return False
+    return bool(aggregating_claims(answer))
+
+
+def _widened(
+    answer: Mapping[str, object],
+    context: GroundedContext,
+    first_count: int,
+    fetch: Callable[[int], Iterable[object]] | None,
+) -> tuple | None:
+    """More candidates when the count reached the edge of retrieval, else None."""
+    from aggregation_pass import reaches_the_edge
+
+    if fetch is None or not reaches_the_edge(answer, context.ranked_paths):
+        return None
+    rows = tuple(fetch(WIDENED_CANDIDATES))
+    if len(rows) <= first_count:
+        return None
+    return rows
+
+
+def _entity_note(answer: Mapping[str, object], single: _AnswerPass) -> str:
+    from aggregation_pass import (
+        CLUSTER_SYSTEM_PROMPT,
+        counted_inputs,
+        duplicate_groups,
+        entity_note,
+    )
+
+    def cluster(prompt: str) -> str | None:
+        return _provider_response(single.generator, prompt, CLUSTER_SYSTEM_PROMPT, single.deadline)
+
+    return entity_note(duplicate_groups(counted_inputs(answer), cluster))
+
+
+def _adopted(
+    first: tuple[dict[str, object], GroundedContext],
+    second: tuple[dict[str, object], GroundedContext],
+) -> tuple[dict[str, object], GroundedContext]:
+    """The second answer when it answered; a second look never turns an answer into silence."""
+    if second[0].get("status") == "answered":
+        return second
+    return first
+
+
+def _record_second_look(
+    question: str, context: GroundedContext, widened: bool, clustered: bool
+) -> None:
+    """Best effort, never fatal: that a second look happened, and what made it."""
+    causes = [name for name, fired in (("widened", widened), ("clustered", clustered)) if fired]
+    try:
+        _write_outcome_events(question, context, "second look: " + ", ".join(causes))
+    except Exception:  # noqa: BLE001 - telemetry must never break an answer
+        pass
 
 
 def _cited_paths(context: GroundedContext, answer: Mapping[str, object]) -> list[str]:
@@ -1213,9 +1348,12 @@ def _record_refused_evidence(
 def _write_refused_events(
     question: str, context: GroundedContext, gates: Sequence[str]
 ) -> None:
+    _write_outcome_events(question, context, "refused: " + "; ".join(gates))
+
+
+def _write_outcome_events(question: str, context: GroundedContext, outcome: str) -> None:
     from retrieval_telemetry import best_effort_make_event, best_effort_record_events
 
-    outcome = "refused: " + "; ".join(gates)
     paths = sorted({item.relative_path for item in context.evidence})
     events = [
         best_effort_make_event(
@@ -1299,11 +1437,29 @@ def _resolved_profile(profile: str | None, question: str) -> str:
 
 
 def _resolved_candidates(
-    candidates: Iterable[object] | None, question: str, profile: str, deadline: float
+    candidates: Iterable[object] | None, fetch: Callable[[int], Iterable[object]] | None
 ) -> tuple:
     if candidates is not None:
         return tuple(candidates)
-    return _default_candidates(question, profile=profile, deadline=deadline)
+    assert fetch is not None
+    return tuple(fetch(QA_MAX_CANDIDATES))
+
+
+def _resolved_retriever(
+    retrieve: Callable[[int], Iterable[object]] | None,
+    candidates: Iterable[object] | None,
+    question: str,
+    profile: str,
+    deadline: float,
+) -> Callable[[int], Iterable[object]] | None:
+    """How to ask retrieval for more; None when the caller fixed the candidates."""
+    if retrieve is not None:
+        return retrieve
+    if candidates is not None:
+        return None
+    return lambda limit: _default_candidates(
+        question, profile=profile, deadline=deadline, limit=limit
+    )
 
 
 def _qa_system_prompt() -> str:
@@ -1357,8 +1513,9 @@ def _qa_system_prompt() -> str:
         "because the evidence is narrower than the question: that is what answering from "
         "evidence means. When the answer is a total, a count, a gap between two dates or "
         "the latest of several values, give that answer and not its inputs: set derivation "
-        "to sum, count, difference or latest, cite every span an input came from, and show "
-        "the working in the claim text. To abstain, set status accordingly, put the whole explanation in "
+        "to sum, count, difference or latest, cite every span an input came from, show "
+        "the working in the claim text, and for a count or a sum list each counted item "
+        "or summed figure in inputs, one per entry, as the evidence names it. To abstain, set status accordingly, put the whole explanation in "
         "reason, and leave claims and citations empty: an abstention that carries claims is "
         "refused outright and nothing you wrote reaches the reader. "
         "Generated summaries and the cached full index are orientation only and "

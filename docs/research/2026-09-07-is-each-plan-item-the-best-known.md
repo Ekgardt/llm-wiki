@@ -157,3 +157,28 @@ or an independent judge. Not known: whether the combined plan reaches them —
 the multi-session ceiling (~87%) binds everyone, and items 1–3 are unmeasured.
 No source can prove "best in the world"; only the runs can, and the runs are
 item 1.
+
+## Addendum, same evening — what was built, and one proxy that must be said
+
+Items 2, 3 and 4 are implemented (`scripts/aggregation_pass.py`, the second
+look in `query_memory.grounded_qa`, `reliability` in
+`bitemporal_claims._successor`). Two things the implementation had to decide
+that the research above did not:
+
+- **The runtime signal for "zero slack".** The measured signal used the
+  dataset's own labels (answer sessions retrieved minus answer sessions
+  labelled), which no live question has. The runtime proxy is: an aggregating
+  claim cites the lowest-ranked page the model was still shown — the useful
+  evidence reached the edge of retrieval. It is an inference, and it is
+  unmeasured until the runs; the benchmark row now carries `provider_calls`,
+  `answer_calls` and `cluster_calls`, and `est_total_prompt_tokens` is
+  cumulative, so the runs will price it.
+- **Clustering set order.** The SIGMOD study's "records of one entity
+  adjacent" is approximated by a case-folded sort before cutting into nines.
+  Cheap, and wrong for names that differ at the first letter; a duplicate the
+  sort separates across two nines is simply not found, which loses nothing
+  the system had before.
+
+Items 5 (profile the warm path) and 6 (forced-HYBRID run against the intent
+patterns) are measurements, not code, and wait for the measurement phase the
+owner set.

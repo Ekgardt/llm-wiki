@@ -309,13 +309,13 @@ def _searchable(question_text: str, question_date: str) -> str:
     return searchable_question(question_text, date.fromisoformat(day_of(question_date)))
 
 
-def _retrieved_rows(question_text: str, profile: str) -> list[dict]:
+def _retrieved_rows(question_text: str, profile: str, limit: int | None = None) -> list[dict]:
     from retrieval import retrieve_via_search_memory
 
     return list(
         retrieve_via_search_memory(
             question_text,
-            limit=_qa_candidates(),
+            limit=limit or _qa_candidates(),
             semantic=True,
             profile=profile,
             deadline_monotonic=time.monotonic() + RETRIEVE_DEADLINE_SECONDS,
@@ -426,6 +426,7 @@ def _instrumented_generator(metrics: dict, gold: str = ""):
     needle = " ".join(str(gold).split()).casefold()
 
     def generate(prompt: str, system_prompt: str, max_tokens: int) -> str | None:
+        _count_call(metrics, system_prompt)
         metrics["prompt_chars"] = len(prompt)
         metrics["prompt_bytes"] = len(prompt.encode("utf-8"))
         metrics["system_chars"] = len(system_prompt)
@@ -437,10 +438,15 @@ def _instrumented_generator(metrics: dict, gold: str = ""):
         # context numbers. The old field stays so earlier reports remain
         # readable next to new ones. Both are `chars / 4`, not a tokenizer:
         # a real count needs a network round trip, which this path will not make.
-        metrics["est_total_prompt_tokens"] = round(
+        # Cumulative over every call the question made, since 2026-09-07: a
+        # second look pays for its answer prompt again, and a per-call figure
+        # would hide exactly the cost the second look must justify.
+        metrics["est_total_prompt_tokens"] = metrics.get("est_total_prompt_tokens", 0) + round(
             (len(prompt) + len(system_prompt)) / 4
         )
-        metrics["gold_in_prompt"] = bool(needle) and needle in prompt.casefold()
+        metrics["gold_in_prompt"] = metrics.get("gold_in_prompt", False) or (
+            bool(needle) and needle in prompt.casefold()
+        )
         started = time.monotonic()
         try:
             reply = call_llm(prompt, system_prompt, max_tokens)
@@ -457,6 +463,17 @@ def _instrumented_generator(metrics: dict, gold: str = ""):
             metrics["provider_seconds"] = round(time.monotonic() - started, 2)
 
     return generate
+
+
+def _count_call(metrics: dict, system_prompt: str) -> None:
+    """Which kind of call this was, so a second look is visible in the row."""
+    from aggregation_pass import CLUSTER_SYSTEM_PROMPT
+
+    metrics["provider_calls"] = metrics.get("provider_calls", 0) + 1
+    if system_prompt == CLUSTER_SYSTEM_PROMPT:
+        metrics["cluster_calls"] = metrics.get("cluster_calls", 0) + 1
+        return
+    metrics["answer_calls"] = metrics.get("answer_calls", 0) + 1
 
 
 def dated_question(question: dict) -> str:
@@ -531,6 +548,7 @@ def _answer_outcome(
     metrics: dict,
     profile: str,
     gold: str = "",
+    retrieve=None,
 ) -> dict:
     from context_budget import ContextBudget
     from query_memory import QA_MAX_OUTPUT_TOKENS, grounded_qa
@@ -541,6 +559,7 @@ def _answer_outcome(
             vault=root,
             snapshot=snapshot,
             candidates=rows,
+            retrieve=retrieve,
             generator=_instrumented_generator(metrics, gold),
             profile=profile,
             budget=ContextBudget(None, _answer_budget(), QA_MAX_OUTPUT_TOKENS, 512),
@@ -578,12 +597,15 @@ def run_question(question: dict, work: Path) -> dict:
     plain = str(question["question"])
     profile = profile_for(plain)
     retrieve_started = time.monotonic()
-    rows = _retrieved_rows(_searchable(plain, str(question["question_date"])), profile)
+    searchable = _searchable(plain, str(question["question_date"]))
+    rows = _retrieved_rows(searchable, profile)
     answer_started = time.monotonic()
     metrics: dict = {}
     outcome = _answer_outcome(
         dated_question(question), root, snapshot, rows, metrics, profile,
         str(question.get("answer", "")),
+        # The second look's way of asking for more than the first twelve.
+        retrieve=lambda limit: _retrieved_rows(searchable, profile, limit),
     )
     finished = time.monotonic()
     return {

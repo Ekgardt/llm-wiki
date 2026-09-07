@@ -286,11 +286,41 @@ def _expired(ordered: list[Belief], index: int) -> Belief:
     )
 
 
+# Who said it, then how sure they were: the same order the wiki's own
+# provenance rule states (user > web > ai-derived > inferred). A claim from a
+# lower rung does not close one from a higher rung — both stay open, and the
+# reader sees the conflict rather than a silent replacement.
+AUTHORITY_RANK = {"user": 3, "web": 2, "ai-derived": 1, "inferred": 0}
+CONFIDENCE_RANK = {"high": 2, "medium": 1, "low": 0}
+
+
+def reliability(record: Mapping[str, object]) -> tuple[int, int]:
+    """How far a claim's word carries: its authority, then its confidence."""
+    return (
+        AUTHORITY_RANK.get(str(record.get("authority")), 0),
+        CONFIDENCE_RANK.get(str(record.get("confidence")), 0),
+    )
+
+
 def _successor(ordered: list[Belief], index: int) -> Belief | None:
-    """The first later claim that says something else about the same fact."""
-    value = _value_bytes(ordered[index].record)
+    """The first later claim that says something else and is at least as reliable.
+
+    Recency alone is not the rule. Measured in the field on 2026-09-07: a
+    deterministic newest-wins picker ties the model on LongMemEval knowledge
+    updates and loses off freshness questions (arXiv:2606.01435); explicit
+    supersession beats passive recency (arXiv:2605.20926); and a reliability-
+    weighted update scored 100 against 67 for last-writer-wins
+    (arXiv:2606.22030). Write-time closing by key stays deterministic — it is
+    what took stale-fact errors to ~0% in arXiv:2606.26511 — but a later
+    claim of lesser standing leaves the earlier one open instead of ending it.
+    See `docs/research/2026-09-07-is-each-plan-item-the-best-known.md`.
+    """
+    current = ordered[index]
+    value = _value_bytes(current.record)
     for candidate in ordered[index + 1 :]:
-        if _value_bytes(candidate.record) != value:
+        if _value_bytes(candidate.record) == value:
+            continue
+        if reliability(candidate.record) >= reliability(current.record):
             return candidate
     return None
 

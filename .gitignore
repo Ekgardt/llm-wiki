@@ -24,6 +24,10 @@ state/
 
 # === Personal session data (private, NOT in git) ===
 knowledge/daily/*.md
+# A writer that died mid-write leaves its atomic-write temp beside the
+# page, holding the page's private bytes under a name the rule above
+# does not match. Seen 2026-09-07: `.2026-09-07.md.<hex>.tmp`, 91 KB.
+knowledge/**/.*.tmp
 # Public Evidence fixtures (synthetic; no personal content)
 !knowledge/daily/2026-04-13.md
 !knowledge/daily/2026-04-19.md

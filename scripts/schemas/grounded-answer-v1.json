@@ -63,6 +63,16 @@
                 ]
               }
             ]
+          },
+          "inputs": {
+            "description": "For a count or a sum: each counted item or summed figure as the evidence names it, one per entry. Omitted otherwise.",
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
           }
         },
         "additionalProperties": false
