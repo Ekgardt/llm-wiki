@@ -74,15 +74,53 @@ def _loaded_bundle(model_name: str, revision: str) -> dict[str, Any]:
     }
     tokenizer = AutoTokenizer.from_pretrained(model_name, **common)
     model = AutoModelForSequenceClassification.from_pretrained(
-        model_name, torch_dtype=torch.float32, **common
+        model_name, dtype=torch.float32, **common
     )
     model.eval()
+    model, precision = _cpu_precision(model)
     return {
         "model": model,
         "tokenizer": tokenizer,
         "model_id": model_name,
         "model_revision": revision,
+        "precision": precision,
     }
+
+
+# The reranker's Linear layers at int8, decided at load time. Measured
+# 2026-09-07 on four cores: twelve pairs at 512 tokens took 10.0 s in fp32
+# with the machine quiet and 18–21 s beside other work, against a 12 s stage
+# bound — so on 483 of 600 benchmark questions the stage was abandoned and
+# the reranker scored nothing. Int8 takes 4.2 s and keeps Spearman 0.81–0.95
+# with the fp32 order. Same weights, same revision, no new files.
+# See `docs/research/2026-09-07-a-reranker-that-never-finished.md`.
+PRECISION_ENV = "LLMWIKI_RERANKER_PRECISION"
+FP32 = "fp32"
+INT8_DYNAMIC = "int8-dynamic"
+
+
+def requested_precision() -> str:
+    """What the operator asked for: int8 unless told fp32 by name."""
+    if os.environ.get(PRECISION_ENV, "").strip().lower() == FP32:
+        return FP32
+    return INT8_DYNAMIC
+
+
+def _cpu_precision(model: Any) -> tuple[Any, str]:
+    """The model at the requested precision, and the name of what it got."""
+    import torch
+
+    # A stand-in `torch` in tests has no `nn`; nothing that is not a real
+    # module is quantised, and nothing about it is assumed.
+    module_type = getattr(getattr(torch, "nn", None), "Module", ())
+    if requested_precision() == FP32 or not isinstance(model, module_type):
+        return model, FP32
+    # Deprecated in torch 2.13 in favour of torchao, which is not installed;
+    # the call still works and the replacement is one line when it is.
+    quantized = torch.ao.quantization.quantize_dynamic(
+        model, {torch.nn.Linear}, dtype=torch.qint8
+    )
+    return quantized, INT8_DYNAMIC
 
 
 def _get_reranker_bundle() -> dict[str, Any] | None:
@@ -131,13 +169,12 @@ def _fused_score(item: Mapping[str, Any]) -> float:
 def _unavailable_reason(
     rerank_enabled: bool, profile: str, candidates: Sequence[Any]
 ) -> str | None:
-    if not rerank_enabled:
-        return "rerank_disabled"
-    if profile not in RERANK_PROFILES:
-        return "profile_bypass"
-    if len(candidates) <= 1:
-        return "tiny_result_set"
-    return None
+    checks = (
+        (not rerank_enabled, "rerank_disabled"),
+        (profile not in RERANK_PROFILES, "profile_bypass"),
+        (len(candidates) <= 1, "tiny_result_set"),
+    )
+    return next((reason for failed, reason in checks if failed), None)
 
 
 def _exact_bypass_reason(profile: str, intents: set[str]) -> str | None:
@@ -473,21 +510,27 @@ def rerank(
         return _limited(documents, limit)
     started = time.perf_counter()
     depth = max(1, int(depth))
-    head, tail = documents[:depth], documents[depth:]
     scoring = _scoring_for(
-        head, query, text_field, scorer, model_id, model_revision, deadline
+        documents[:depth], query, text_field, scorer, model_id, model_revision, deadline
     )
     if scoring is None:
         _mark_not_applied(documents, "reranker_unavailable")
         return _limited(documents, limit)
     duration_ms = int((time.perf_counter() - started) * 1000)
+    return _limited(_reranked(documents, scoring, depth, duration_ms), limit)
+
+
+def _reranked(
+    documents: list[dict], scoring: _Scoring, depth: int, duration_ms: int
+) -> list[dict]:
+    """The head in the reranker's order and the tail behind it, or the fused order marked."""
     if scoring.scores is None:
         _mark_failed(documents, scoring, depth, duration_ms)
-        return _limited(documents, limit)
-    merged = _scored_head(head, scoring, depth, duration_ms) + _kept_tail(
+        return documents
+    head, tail = documents[:depth], documents[depth:]
+    return _scored_head(head, scoring, depth, duration_ms) + _kept_tail(
         tail, scoring, depth, duration_ms
     )
-    return _limited(merged, limit)
 
 def reranker_available() -> bool:
     """Quick probe: is the reranker model loaded and ready?"""

@@ -241,6 +241,22 @@ def _reuse_config(snapshot: object) -> object:
     )
 
 
+def _warm_reranker() -> None:
+    """Load the cross-encoder before retrieval is timed, as a live process has.
+
+    The build stage already loads the embedder, so at query time only the
+    reranker is cold — and its load was being paid *inside* the 12-second
+    optional stage. Each question here is a fresh process; a running server
+    loads the model once and every later query finds it warm, which is the
+    condition the stage bound was set for. Measured 2026-09-07: the stage was
+    abandoned on 483 of 600 questions and the reranker scored nothing.
+    See `docs/research/2026-09-07-a-reranker-that-never-finished.md`.
+    """
+    from reranker import _get_reranker_bundle
+
+    _get_reranker_bundle()
+
+
 def build_generation(root: Path, state: Path, daily_files: list[str]) -> tuple[object, dict]:
     """Build and activate one generation over the ingested daily evidence."""
     from corpus_snapshot import collect_corpus
@@ -594,6 +610,7 @@ def run_question(question: dict, work: Path) -> dict:
     daily_files, ingested = ingest_sessions(root, question)
     build_started = time.monotonic()
     snapshot, build_info = build_generation(root, state, daily_files)
+    _warm_reranker()
     plain = str(question["question"])
     profile = profile_for(plain)
     retrieve_started = time.monotonic()

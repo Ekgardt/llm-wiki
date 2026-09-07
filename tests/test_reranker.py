@@ -118,12 +118,14 @@ def test_explicit_immutable_model_load_is_local_only(
     }
 
     assert bundle is not None
-    assert bundle["model_id"] == "org/model"
-    assert bundle["model_revision"] == revision
-    assert bundle["model"].evaluated is True
+    assert (bundle["model_id"], bundle["model_revision"], bundle["model"].evaluated) == (
+        "org/model",
+        revision,
+        True,
+    )
     assert calls == [
         ("tokenizer", "org/model", pinned),
-        ("model", "org/model", {**pinned, "torch_dtype": "float32"}),
+        ("model", "org/model", {**pinned, "dtype": "float32"}),
     ]
 
 
@@ -198,12 +200,14 @@ class TestFakeCrossEncoder:
             assert len(pairs) == 2
             return [0.1, 5.0]
 
-        result = rerank("query", docs, limit=10, scorer=fake_scorer)
-        assert result[0]["slug"] == "high"
-        assert result[0]["reranker_applied"] is True
-        assert result[0]["reranker_model_id"] == "fake-cross-encoder"
-        assert result[0]["final_score"] >= result[1]["final_score"]
-        assert result[0]["score"] == result[0]["final_score"]
+        first, second = rerank("query", docs, limit=10, scorer=fake_scorer)
+        assert (first["slug"], first["reranker_applied"], first["reranker_model_id"]) == (
+            "high",
+            True,
+            "fake-cross-encoder",
+        )
+        assert first["final_score"] >= second["final_score"]
+        assert first["score"] == first["final_score"]
 
     def test_rerank_preserves_tail_beyond_depth(self):
         docs = [
@@ -223,10 +227,9 @@ class TestFakeCrossEncoder:
             return list(range(len(pairs), 0, -1))
 
         result = rerank("query", docs, limit=8, depth=3, scorer=fake_scorer)
-        assert len(result) == 8
         # Prefix of 3 was reranked; remaining 5 keep original order after prefix.
         tail_slugs = [d["slug"] for d in result[3:]]
-        assert tail_slugs == ["p3", "p4", "p5", "p6", "p7"]
+        assert (len(result), tail_slugs) == (8, ["p3", "p4", "p5", "p6", "p7"])
         assert all(d.get("reranker_applied") for d in result)
 
     def test_rerank_blends_normalized_score_with_rrf(self):
