@@ -1144,9 +1144,15 @@ def test_repeated_legacy_sqlite_failure_returns_degraded_markdown_result(
         def close(self):
             pass
 
-    def connect(*_args, **_kwargs):
+    def connect(*args, **_kwargs):
+        # Only the legacy index counts. `sqlite3.connect` is patched on the
+        # shared module object, so every database anything opens during the
+        # search arrives here — including the retrieval telemetry that carries
+        # what past answers cited, added 2026-09-06. Counting those too would
+        # make this test assert something it does not mean.
         nonlocal connections
-        connections += 1
+        if "index.sqlite" in str(args[0] if args else ""):
+            connections += 1
         return Connection()
 
     def rebuild(_pages, **_kwargs):
@@ -2511,9 +2517,17 @@ def test_generation_hybrid_discarded_after_same_byte_vector_replacement(
     _assert_orchestrated_legacy_fallback(results, {"generation_seal_changed"})
 
 
-def test_publication_fence_rejects_preserved_mtime_drift_before_catalog_calls(tmp_path):
+def test_publication_survives_a_vault_that_moved_while_the_build_ran(tmp_path):
+    """The build has to finish on a vault that is in use, or it never finishes.
+
+    This asserted the opposite until 2026-09-05: any drift, even an edit with a
+    preserved mtime, refused the publication before the catalog was touched. On
+    the live vault that meant every nightly build from 2026-08-30 died here and
+    nothing was ever activated. A snapshot describes a moment the vault passed
+    through; it does not have to be the newest moment, and a source that has
+    since moved on is dropped before its text can reach the model.
+    """
     import search_memory
-    from corpus_snapshot import CorpusChanged
 
     vault, snapshot = _generation_snapshot(
         tmp_path, {"knowledge/notes/page.md": "# Page\nBefore.\n"}
@@ -2535,16 +2549,14 @@ def test_publication_fence_rejects_preserved_mtime_drift_before_catalog_calls(tm
             return True
 
     catalog = Catalog()
-    with pytest.raises(CorpusChanged):
-        search_memory.publish_generation(
-            snapshot,
-            vault,
-            catalog,
-            "gen-search",
-            expected_active=None,
-        )
-    assert catalog.registered is False
-    assert catalog.activated is False
+
+    published = search_memory.publish_generation(
+        snapshot, vault, catalog, "gen-search", expected_active=None
+    )
+
+    assert published is True
+    assert catalog.registered is True
+    assert catalog.activated is True
 
 
 def test_publication_holds_one_writer_gate_through_validate_register_and_activate(

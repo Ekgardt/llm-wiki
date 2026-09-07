@@ -138,3 +138,47 @@ def test_an_observation_with_no_tool_records_nothing_but_a_close() -> None:
 
     assert delta["current_task"]["action"] == "close"
     assert delta["changed_files"] == []
+
+
+def test_an_observed_tool_reaches_the_journal_without_being_narrated() -> None:
+    """3713 journal events held nothing because of one flag read in one place.
+
+    `has_project_delta` records whether the *agent* supplied a `project_delta`.
+    No hook ever does, so it is False on every event this system has seen — and
+    `_has_pending_delta` asked it first and returned, discarding the delta that
+    had already been derived from the observation itself.
+
+    Measured 2026-09-05: 3713 events across 71 projects, every delta empty. The
+    tool, the file it changed, the command it ran and the failure it hit were
+    all computed and then dropped, which is why the layer meant to hand work
+    between agents held nothing but timestamps.
+    """
+    import integration_adapter
+
+    checkpoint = {
+        "delta": {
+            **integration_adapter._empty_delta(),
+            "current_task": {"id": "observed", "action": "upsert", "value": "Edit alpha.py"},
+        }
+    }
+
+    assert integration_adapter._has_pending_delta(
+        {"has_project_delta": False, "checkpoint_event": checkpoint}
+    )
+
+
+def test_an_item_carrying_nothing_is_still_nothing() -> None:
+    import integration_adapter
+
+    empty = {"delta": integration_adapter._empty_delta()}
+
+    assert not integration_adapter._has_pending_delta(
+        {"has_project_delta": False, "checkpoint_event": empty}
+    )
+
+
+def test_without_a_checkpoint_event_the_flag_still_decides() -> None:
+    import integration_adapter
+
+    assert integration_adapter._has_pending_delta({"has_project_delta": True})
+    assert not integration_adapter._has_pending_delta({"has_project_delta": False})

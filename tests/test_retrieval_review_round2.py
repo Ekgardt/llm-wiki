@@ -915,7 +915,10 @@ def test_reranker_receives_full_chunk_content(monkeypatch):
         corpus_generation="g",
     )
     assert any(body in (c or "") for c in seen)
-    assert options == [{"text_field": "content"}]
+    # The stage is told its own budget, so an abandoned rerank stops scoring
+    # instead of finishing on the cores the answer is being built with. No
+    # deadline was given to this call, so there is none to pass on.
+    assert options == [{"text_field": "content", "deadline": None}]
 
 
 def test_lance_distance_kept_separate_from_similarity():

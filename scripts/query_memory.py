@@ -83,6 +83,11 @@ class GroundedContext:
     # Optional so no existing caller changes, and diagnostic only: nothing
     # reads it to make a decision.
     compile_trace: object | None = None
+    # Sources the index still held but the vault has moved on from, dropped
+    # before their text could reach the model. Diagnostic: it is what makes the
+    # difference between "the index lags" and "the answer quoted stale text"
+    # visible to whoever is reading the run.
+    stale_sources: tuple[str, ...] = ()
 
     @classmethod
     def empty(cls, *, profile: str) -> GroundedContext:
@@ -286,7 +291,9 @@ def build_grounded_context(
     parent_paths, sources, compiled = _fitted_selection(
         snapshot, selected, active_budget
     )
-    evidence = _authoritative_evidence(compiled, sources, snapshot.corpus_sha256)
+    evidence, stale = _authoritative_evidence(
+        compiled, sources, snapshot.corpus_sha256, vault
+    )
     prompt_context = _packed_context(evidence, index_text, active_budget)
     packed_tokens = len(prompt_context.encode("utf-8"))
     if packed_tokens > active_budget.available_input_tokens:
@@ -298,6 +305,7 @@ def build_grounded_context(
         parent_paths,
         packed_tokens,
         getattr(compiled, "trace", None),
+        stale,
     )
 
 
@@ -469,20 +477,59 @@ def _evidence_for(item: object, source: object, index: int, revision: str) -> Gr
     )
 
 
+def _source_is_unchanged(source: object, vault: Path) -> bool:
+    """Whether the file still holds the bytes the snapshot captured."""
+    try:
+        live = (Path(vault) / source.record.relative_path).read_bytes()
+    except OSError:
+        return False
+    return hashlib.sha256(live).hexdigest() == source.record.sha256
+
+
+class _FreshSources:
+    """Remembers, per path, whether the file still matches the snapshot.
+
+    An index is allowed to lag — a document written a minute ago is simply not
+    in it yet, and no amount of checking finds what was never captured. What is
+    not allowed is quoting a span whose file has moved on: that reaches the
+    model as current text, and verifying the citation afterwards is too late to
+    stop it being read.
+
+    So the sources actually about to be quoted are re-read here, and only here.
+    That is a handful of files rather than the whole corpus, which is what makes
+    it affordable at query time.
+    """
+
+    def __init__(self, vault: Path) -> None:
+        self.vault = vault
+        self.verdicts: dict[str, bool] = {}
+
+    def holds(self, source: object) -> bool:
+        path = source.record.relative_path
+        if path not in self.verdicts:
+            self.verdicts[path] = _source_is_unchanged(source, self.vault)
+        return self.verdicts[path]
+
+    @property
+    def stale_paths(self) -> tuple[str, ...]:
+        return tuple(sorted(path for path, ok in self.verdicts.items() if not ok))
+
+
 def _authoritative_evidence(
-    compiled: object, sources: tuple, revision: str
-) -> list[GroundedEvidence]:
-    """One entry per distinct authoritative span, in the order compile chose."""
+    compiled: object, sources: tuple, revision: str, vault: Path
+) -> tuple[list[GroundedEvidence], tuple[str, ...]]:
+    """One entry per distinct authoritative span whose file still says the same."""
     source_by_path = {source.record.relative_path: source for source in sources}
+    fresh = _FreshSources(vault)
     found: list[GroundedEvidence] = []
     seen: set[tuple[str, int, int]] = set()
     for item in compiled.items:
         source = source_by_path[item.source]
-        if not _is_quotable(item, source, seen):
+        if not _is_quotable(item, source, seen) or not fresh.holds(source):
             continue
         seen.add((item.source, item.byte_start, item.byte_end))
         found.append(_evidence_for(item, source, len(found) + 1, revision))
-    return found
+    return found, fresh.stale_paths
 
 
 def _rendered_context(evidence: list[GroundedEvidence], index_text: str) -> str:
@@ -564,7 +611,13 @@ def _anchor_tokens(tokens: set[str]) -> set[str]:
 # are dense with paths and function names, and a supporting span routinely
 # names different ones than the claim does. For memory, refusing a correct
 # answer costs more than accepting a weak citation.
-_FIGURE = re.compile(r"(?<![\w.])\d+(?:[.,]\d+)*(?![\w.])|--[a-z][a-z0-9-]{2,}")
+# The trailing guard used to be `(?![\w.])`, which made a figure at the end of a
+# sentence invisible: in "the necklace cost $200." the match for `200` is
+# followed by a full stop and the lookahead refused it, so the span read as
+# carrying no figure at all and the gate stayed quiet about every claim offered
+# for it. Found 2026-09-05 while testing something else. The guard now refuses
+# only what actually continues the number.
+_FIGURE = re.compile(r"(?<![\w.])\d+(?:[.,]\d+)*(?!\w)(?!\.\d)|--[a-z][a-z0-9-]{2,}")
 
 
 def _hard_tokens(text: str) -> set[str]:
@@ -593,7 +646,9 @@ def _require_figures_agree(claim_text: str, span_text: str) -> None:
     )
 
 
-def _require_citation_touches_claim(claim_text: str, span_text: str) -> None:
+def _require_citation_touches_claim(
+    claim_text: str, span_text: str, *, derived: bool = False
+) -> None:
     """Reject a citation that shares nothing with the claim it is offered for.
 
     This is a necessary condition, not proof of entailment: a span from the
@@ -602,7 +657,8 @@ def _require_citation_touches_claim(claim_text: str, span_text: str) -> None:
     and, since 2026-08-25, the narrower case where both sides state figures and
     none of them agree.
     """
-    _require_figures_agree(claim_text, span_text)
+    if not derived:
+        _require_figures_agree(claim_text, span_text)
     claim_tokens = _content_tokens(claim_text)
     if not claim_tokens:
         return
@@ -648,10 +704,25 @@ def _validated_answer_document(document: object) -> dict:
 
 
 def _require_answered_shape(document: Mapping[str, object]) -> None:
-    populated = bool(document["claims"]) and bool(document["citations"])
-    if not populated or document["reason"] is not None:
+    """An answer carries claims and citations. A note beside them is not a refusal.
+
+    `reason` is where an abstention states itself, and this used to refuse any
+    answered reply that filled it. Measured over 200 questions on 2026-09-07:
+    twenty complete answers — claims, citations and all — were destroyed for
+    writing a note there, of the form "The 2023-09-30 entry states the count
+    directly. Note that other entries mention an Alex in unrelated contexts."
+    Six of the twenty had the gold answer in the prompt. That is the same
+    mistake as the two this file already stopped making: refusing the whole
+    answer over something beside it.
+
+    The empty case still refuses, because a reply with no claim or no citation
+    has grounded nothing. A note next to a grounded answer is dropped instead,
+    by `_answer_of_surviving_claims`, so it never reaches a reader as though it
+    were a reason to doubt.
+    """
+    if not (document["claims"] and document["citations"]):
         raise GroundedQAError(
-            "answered status requires claims with citations and no abstention reason"
+            "answered status requires claims with citations"
         )
 
 
@@ -670,22 +741,95 @@ def _require_status_shape(document: Mapping[str, object]) -> None:
     _require_abstention_shape(document)
 
 
+def _span_still_holds(supplied: Mapping[str, object], *, vault: Path) -> bool:
+    from evidence_resolver import EvidenceResolutionError, verify_evidence_span
+
+    try:
+        verify_evidence_span(supplied, vault=vault)
+    except EvidenceResolutionError:
+        return False
+    return True
+
+
+def _published_citation(supplied: Mapping[str, object]) -> dict[str, object]:
+    """The manifest entry as a citation: everything but the span text itself."""
+    return {key: value for key, value in supplied.items() if key != "text"}
+
+
 def _verified_citations(
     citations: Sequence[Mapping[str, object]],
     supplied: Mapping[str, Mapping[str, object]],
     *,
     vault: Path,
 ) -> dict[str, Mapping[str, object]]:
-    from evidence_resolver import EvidenceResolutionError, verify_supplied_citation
+    """The cited spans that still hold, named by the identifiers generation used.
 
+    **The model is trusted for the identifier and nothing else.** The path,
+    revision, byte range and both hashes are taken from the manifest this
+    process built and handed to generation; what the reply says about them is
+    not read. That is strictly stronger than comparing the two, because a
+    citation can no longer be believed on the model's word — and it removes the
+    largest single failure this stand has measured. Over 200 questions on
+    2026-09-02, "citation does not match supplied evidence" destroyed eighteen
+    answers: the model had found the right span and mistyped a hash or an offset
+    while transcribing nine fields of it.
+
+    It also matches the current guidance for grounded generation, which is that
+    the model emits the source identifier and the system resolves the locator,
+    because mixing the two increases formatting errors rather than catching them.
+
+    Verification did not move. Every published citation is still checked against
+    the vault — the path resolves inside it, the file still hashes to what
+    generation was shown, and the byte range still holds the recorded span — and
+    a span that fails is dropped, taking with it every claim that cites it.
+    """
     cited: dict[str, Mapping[str, object]] = {}
     for citation in citations:
-        citation_id = citation["citation_id"]
-        if citation_id in cited or citation_id not in supplied:
-            raise EvidenceResolutionError("citation ID is duplicate or was not supplied")
-        verify_supplied_citation(citation, supplied[citation_id], vault=vault)
-        cited[str(citation_id)] = citation
+        name = str(citation.get("citation_id"))
+        if name in cited or name not in supplied:
+            continue
+        if not _span_still_holds(supplied[name], vault=vault):
+            continue
+        cited[name] = _published_citation(supplied[name])
     return cited
+
+
+DERIVATIONS = ("sum", "count", "difference", "latest")
+
+# A derivation over one span is not a derivation. Requiring two is what keeps
+# the exemption from becoming a way to assert any figure at all beside one
+# unrelated citation.
+MINIMUM_DERIVATION_INPUTS = 2
+
+
+def _declared_derivation(claim: Mapping[str, object]) -> str | None:
+    value = claim.get("derivation")
+    return str(value) if value in DERIVATIONS else None
+
+
+def _require_derivation_inputs(claim: Mapping[str, object], ids: Sequence[object]) -> None:
+    if len(ids) >= MINIMUM_DERIVATION_INPUTS:
+        return
+    raise GroundedQAError(
+        "a derived claim must cite the spans its inputs came from, and there is only one"
+    )
+
+
+def _check_one_citation(
+    claim: Mapping[str, object],
+    citation_id: object,
+    cited: Mapping[str, Mapping[str, object]],
+    supplied: Mapping[str, Mapping[str, object]],
+    *,
+    derived: bool,
+) -> None:
+    from evidence_resolver import EvidenceResolutionError
+
+    if citation_id not in cited:
+        raise EvidenceResolutionError("claim cites evidence not supplied to generation")
+    _require_citation_touches_claim(
+        str(claim["text"]), str(supplied[citation_id]["text"]), derived=derived
+    )
 
 
 def _cited_ids_of_claim(
@@ -693,18 +837,94 @@ def _cited_ids_of_claim(
     cited: Mapping[str, Mapping[str, object]],
     supplied: Mapping[str, Mapping[str, object]],
 ) -> set[str]:
-    from evidence_resolver import EvidenceResolutionError
+    """The citations a claim rests on, once every gate it faces has passed.
 
+    A claim may declare that it was *derived* from the spans it cites — a sum, a
+    count, a difference between two dates, the latest of several values. Such a
+    claim states a figure that appears in no span, by construction, so the
+    figure-agreement gate does not apply to it. Everything else does: each input
+    must resolve, and each must share words with the claim.
+
+    Measured 2026-09-05 on 50 questions: of eight answers judged wrong, seven
+    needed exactly this and the model reported an input instead — "a necklace
+    that cost around $200" for a question whose answer was $300, both dates for
+    a question whose answer was the gap between them. The contract left no other
+    move.
+
+    We do not verify the arithmetic. We require its inputs to be present and
+    verified, require the derivation to be declared, and let the answer show its
+    working — the same honesty the overlap gate practises when it says it checks
+    that a span touches a claim and not that it entails it.
+    See `docs/research/2026-09-05-a-claim-no-single-span-can-carry.md`.
+    """
     ids = claim["citation_ids"]
     if not ids:
         raise GroundedQAError("every atomic factual claim requires an adjacent citation")
+    derivation = _declared_derivation(claim)
+    if derivation is not None:
+        _require_derivation_inputs(claim, ids)
     for citation_id in ids:
-        if citation_id not in cited:
-            raise EvidenceResolutionError("claim cites evidence not supplied to generation")
-        _require_citation_touches_claim(
-            str(claim["text"]), str(supplied[citation_id]["text"])
+        _check_one_citation(
+            claim, citation_id, cited, supplied, derived=derivation is not None
         )
     return {str(item) for item in ids}
+
+
+def _claim_survives(
+    claim: Mapping[str, object],
+    cited: Mapping[str, Mapping[str, object]],
+    supplied: Mapping[str, Mapping[str, object]],
+) -> set[str] | None:
+    """The claim's citations when every gate passes, else the gate that refused it."""
+    from evidence_resolver import EvidenceResolutionError
+
+    try:
+        return _cited_ids_of_claim(claim, cited, supplied)
+    except (GroundedQAError, EvidenceResolutionError) as exc:
+        return str(exc)
+
+
+def _kept_claims(
+    claims: Sequence[Mapping[str, object]],
+    cited: Mapping[str, Mapping[str, object]],
+    supplied: Mapping[str, Mapping[str, object]],
+) -> tuple[list[Mapping[str, object]], set[str], list[str]]:
+    kept: list[Mapping[str, object]] = []
+    used: set[str] = set()
+    refused: list[str] = []
+    for claim in claims:
+        ids = _claim_survives(claim, cited, supplied)
+        if isinstance(ids, str):
+            refused.append(ids)
+            continue
+        kept.append(claim)
+        used |= ids
+    return kept, used, refused
+
+
+def _refusal_reason(refused: Sequence[str]) -> str:
+    """Name the gates that refused, not merely that something did.
+
+    Measured 2026-09-03: four of eight refusals that held the answer session
+    read "no claim survived its citation gates", which says nothing about which
+    gate fired. Without the name there is nothing to fix but a guess.
+    """
+    if not refused:
+        return "the answer carried no claim"
+    return "no claim survived its citation gates: " + "; ".join(dict.fromkeys(refused))
+
+
+def _nothing_survived(
+    document: dict[str, object], refused: Sequence[str] = ()
+) -> dict[str, object]:
+    """No claim held up: an abstention, which is what the evidence supports."""
+    return {
+        **document,
+        "status": "insufficient_evidence",
+        "claims": [],
+        "citations": [],
+        "reason": _refusal_reason(refused),
+    }
 
 
 def verify_grounded_answer(
@@ -713,17 +933,52 @@ def verify_grounded_answer(
     *,
     vault: Path,
 ) -> dict[str, object]:
-    """Apply citation, abstention, relevance, and supplied-span hard gates."""
+    """Apply the gates per claim, and keep the claims that pass them.
+
+    They used to be applied per claim and enforced per answer: one claim whose
+    citation pointed a span too far destroyed the whole answer, the good claims
+    with it. Measured on this vault 2026-09-02, with the discarded replies
+    recorded for the first time: of eleven answers the gates destroyed, **seven
+    carried the correct answer**. The rule was not mostly catching fabrication,
+    it was mostly destroying correct work.
+
+    This is not a loosening, and that is the point. Every claim that reaches the
+    reader still carries a citation that resolves, touches the claim, and agrees
+    with it on figures; the citation set still matches exactly what the kept
+    claims use. What changes is that a claim which fails is dropped instead of
+    taking its neighbours with it — the claim-level verdict the 2026 attribution
+    work uses, rather than answer-level rejection, which no source proposes.
+
+    When nothing survives, the result is an abstention rather than an error:
+    that is what "no cited span supports the answer" means.
+    See `docs/research/2026-09-02-throwing-away-right-answers-and-whether-the-shape-is-wrong.md`.
+    """
     validated = _validated_answer_document(document)
     _require_status_shape(validated)
     supplied = {item.citation_id: asdict(item) for item in context.evidence}
     cited = _verified_citations(validated["citations"], supplied, vault=vault)
-    claim_ids: set[str] = set()
-    for claim in validated["claims"]:
-        claim_ids |= _cited_ids_of_claim(claim, cited, supplied)
-    if claim_ids != set(cited):
-        raise GroundedQAError("citation precision and recall gates require exact citation use")
-    return validated
+    if validated["status"] != "answered":
+        return validated
+    return _answer_of_surviving_claims(validated, cited, supplied)
+
+
+def _answer_of_surviving_claims(
+    validated: dict[str, object],
+    cited: Mapping[str, Mapping[str, object]],
+    supplied: Mapping[str, Mapping[str, object]],
+) -> dict[str, object]:
+    kept, used, refused = _kept_claims(validated["claims"], cited, supplied)
+    if not kept:
+        return _nothing_survived(validated, refused)
+    return {
+        **validated,
+        "claims": kept,
+        "citations": [cited[name] for name in cited if name in used],
+        # An answer has no abstention reason. Whatever the model wrote beside
+        # its claims is a note, and a note must not reach a reader in the field
+        # that means "this was refused". See `_require_answered_shape`.
+        "reason": None,
+    }
 
 
 def _answer_corpus(vault: Path, deadline: float) -> object:
@@ -758,13 +1013,43 @@ def _default_candidates(question: str, *, profile: str, deadline: float) -> tupl
     # were chunks of one status document and none was the decision page;
     # without the cap the decision page is first.
     rows = retrieve_via_search_memory(
-        question,
+        searchable_question(question),
         limit=QA_MAX_CANDIDATES,
         semantic=True,
         profile=profile,
         deadline_monotonic=deadline,
     )
     return tuple(rows)
+
+
+def _asked_on(question: str):
+    """The date the question is asked from, stated in it or else today."""
+    from datetime import date
+
+    match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", question)
+    if not match:
+        return date.today()
+    try:
+        return date.fromisoformat(match.group(1))
+    except ValueError:
+        return date.today()
+
+
+def searchable_question(question: str, anchor=None) -> str:
+    """The question, plus the dates its own relative expressions resolve to.
+
+    "Which book did I finish a week ago" carries no date, so nothing dated can
+    match it however well the memory is dated. Resolving the question's own
+    expressions against the day it is asked is what makes the calendar written
+    into each entry reachable at all.
+
+    A date written in the question itself is the anchor when there is one —
+    which is how a question about a past moment stays answerable — and today
+    otherwise.
+    """
+    from temporal_anchor import query_with_dates
+
+    return query_with_dates(question, anchor or _asked_on(question))
 
 
 def grounded_qa(
@@ -804,7 +1089,127 @@ def grounded_qa(
     prompt = question_block + context.prompt_context
     _require_prompt_fits(system_prompt + prompt, total_budget)
     raw = _provider_response(generator, prompt, system_prompt, selected_deadline)
-    return verify_grounded_answer(_parsed_answer(raw), context, vault=Path(vault))
+    answer = verify_grounded_answer(_parsed_answer(raw), context, vault=Path(vault))
+    _record_cited_evidence(question, context, answer)
+    _record_refused_evidence(question, context, answer)
+    return answer
+
+
+def _cited_paths(context: GroundedContext, answer: Mapping[str, object]) -> list[str]:
+    """The pages whose spans survived every gate and reached the reader."""
+    published = {
+        str(citation.get("citation_id")) for citation in answer.get("citations") or []
+    }
+    paths = [
+        item.relative_path for item in context.evidence if item.citation_id in published
+    ]
+    return sorted(dict.fromkeys(paths))
+
+
+def _refused_gates(answer: Mapping[str, object]) -> list[str]:
+    """The gates that refused, from the reason a total refusal carries."""
+    reason = str(answer.get("reason") or "")
+    marker = "no claim survived its citation gates: "
+    if not reason.startswith(marker):
+        return []
+    return sorted({part.strip() for part in reason[len(marker):].split(";") if part.strip()})
+
+
+def _record_refused_evidence(
+    question: str, context: GroundedContext, answer: Mapping[str, object]
+) -> None:
+    """Record what the gates threw away, and which gate threw it.
+
+    Bacteria keep a record of what was hostile, not of what was true, and act on
+    it before the same thing happens again. We had no such record: a claim the
+    gates refused vanished, and the only reason we ever learned that **seven of
+    eleven destroyed answers had been correct** is that one afternoon in
+    September 2026 somebody wrote the discarded replies down by hand.
+
+    Written per page that was in front of the model when the refusal happened,
+    with the gate named in the outcome, so the question "are we still throwing
+    away right answers, and where" is answerable from the log rather than from
+    an afternoon of manual work.
+
+    Only totals refusals are recorded. A claim dropped from an answer that still
+    published something is a different event and is not this one.
+    """
+    gates = _refused_gates(answer)
+    if not gates:
+        return
+    try:
+        _write_refused_events(question, context, gates)
+    except Exception:  # noqa: BLE001 - telemetry must never break a refusal
+        pass
+
+
+def _write_refused_events(
+    question: str, context: GroundedContext, gates: Sequence[str]
+) -> None:
+    from retrieval_telemetry import best_effort_make_event, best_effort_record_events
+
+    outcome = "refused: " + "; ".join(gates)
+    paths = sorted({item.relative_path for item in context.evidence})
+    events = [
+        best_effort_make_event(
+            event_kind="evidence_read",
+            query=question,
+            retrieval_mode=context.profile.casefold(),
+            candidate_id=path,
+            generation="grounded-answer",
+            source_tool="grounded_qa",
+            outcome=outcome[:200],
+        )
+        for path in paths
+    ]
+    best_effort_record_events([event for event in events if event is not None])
+
+
+def _record_cited_evidence(
+    question: str, context: GroundedContext, answer: Mapping[str, object]
+) -> None:
+    """Record which pages actually carried the answer. Best effort, never fatal.
+
+    The telemetry has logged 14 806 impressions — what was *shown* — and its
+    `outcome` column has been null on every one of them. The RAG literature
+    treats this missing half as the hard problem and corrects biased clicks with
+    propensity estimation; we need none of that, because a grounded answer names
+    its evidence and a published citation is a verified statement, by the system
+    that used it, that this page did the work.
+
+    Recorded at page granularity rather than span, because "this page has carried
+    answers before" is the standing disposition worth having, and it is what
+    trained immunity is: not a memory of the encounter, a readiness afterwards.
+
+    Nothing is written for a page that was shown and not cited. *Not cited* is
+    not *not useful*, and saying otherwise would be a claim we cannot support.
+    See `docs/research/2026-09-06-a-signal-stronger-than-a-click.md`.
+    """
+    paths = _cited_paths(context, answer)
+    if not paths:
+        return
+    try:
+        _write_cited_events(question, context.profile, paths)
+    except Exception:  # noqa: BLE001 - telemetry must never break an answer
+        pass
+
+
+def _write_cited_events(question: str, profile: str, paths: Sequence[str]) -> None:
+    from retrieval_telemetry import best_effort_make_event, best_effort_record_events
+
+    events = [
+        best_effort_make_event(
+            event_kind="evidence_read",
+            query=question,
+            retrieval_mode=profile.casefold(),
+            candidate_id=path,
+            generation="grounded-answer",
+            source_tool="grounded_qa",
+            outcome="cited",
+        )
+        for path in paths
+    ]
+    best_effort_record_events([event for event in events if event is not None])
 
 
 def _require_bounded_question(question: object) -> None:
@@ -861,6 +1266,16 @@ def _qa_system_prompt() -> str:
     The abstention path itself is unchanged: an abstention that carries claims
     is still refused outright, because a refusal that smuggles an answer past
     the citation gates is worse than either error.
+
+    An advice clause was tried here on 2026-09-01 and removed the same day.
+    The reasoning was sound — an advice question has no span that "states" the
+    answer, so the old wording made abstaining the only correct move — but the
+    measurement refused it: three baseline runs of 200 against one candidate run
+    gave 0.2750 ±0.0074 against 0.2667 by judge accuracy, a loss under the rule
+    stated before the run, and the count of answered preference questions did not
+    move at all, three either way. Whatever keeps those questions unanswered, it
+    is not this wording.
+    See `docs/research/2026-09-01-a-category-graded-by-the-wrong-question.md`.
     """
     schema = json.loads(ANSWER_SCHEMA.read_text(encoding="utf-8"))
     schema_json = json.dumps(schema, sort_keys=True, separators=(",", ":"))
@@ -873,7 +1288,10 @@ def _qa_system_prompt() -> str:
         "requested time scope. Do not abstain because the answer must be assembled from "
         "several spans, because it must be derived from dates the evidence states, or "
         "because the evidence is narrower than the question: that is what answering from "
-        "evidence means. To abstain, set status accordingly, put the whole explanation in "
+        "evidence means. When the answer is a total, a count, a gap between two dates or "
+        "the latest of several values, give that answer and not its inputs: set derivation "
+        "to sum, count, difference or latest, cite every span an input came from, and show "
+        "the working in the claim text. To abstain, set status accordingly, put the whole explanation in "
         "reason, and leave claims and citations empty: an abstention that carries claims is "
         "refused outright and nothing you wrote reaches the reader. "
         "Generated summaries and the cached full index are orientation only and "
@@ -918,23 +1336,31 @@ def _provider_response(
     return raw
 
 
-_FENCED_JSON_RE = re.compile(
-    r"\A\s*```[^\n]*\n(?P<body>.*?)\n?\s*```\s*\Z", re.DOTALL
-)
+_FENCED_JSON_RE = re.compile(r"```[^\n]*\n(?P<body>.*?)\n?\s*```", re.DOTALL)
 
 
 def _unfenced(raw: str) -> str:
-    """The JSON inside a Markdown code fence, or the text unchanged.
+    """The first fenced block in the reply, or the text unchanged.
 
     Providers answer a "reply with JSON" instruction either bare or wrapped in
     a ```json fence, and which one they pick varies with the answer. Measured
     on this vault: the abstention came back bare and parsed, and the first real
     answer this path ever produced came back fenced and was thrown away as
-    invalid JSON — a correct answer lost to three backticks. Only a whole
-    response that is exactly one fence is unwrapped; anything else still has to
-    be JSON on its own, so prose around a fence is refused as before.
+    invalid JSON — a correct answer lost to three backticks.
+
+    Unwrapping only a response that was *exactly* one fence turned out to cost
+    the same way. Measured over 200 questions on 2026-09-02, fifteen replies
+    were discarded as invalid JSON; every one of them carried a complete
+    document inside a fence, and what disqualified it was a sentence of
+    commentary before or after the backticks. Thirteen parse once the first
+    fence is taken wherever it sits.
+
+    Taking the fence is not taking the provider's word for anything. The
+    document still has to validate against the closed schema, and every claim
+    still has to survive its citation gates. The prose around it is discarded,
+    never shown.
     """
-    match = _FENCED_JSON_RE.match(raw)
+    match = _FENCED_JSON_RE.search(raw)
     if not match:
         return raw
     return match.group("body")

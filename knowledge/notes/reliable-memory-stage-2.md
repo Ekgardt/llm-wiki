@@ -56,3 +56,4 @@ Routine low-risk recovery remains automatic and agent-readable.
 - [[knowledge/notes/idempotent-retry-after-quarantine-decision]]
 - [[knowledge/notes/bounded-read-is-not-corruption-decision]]
 - [[knowledge/notes/identity-is-a-function-of-its-content-decision]] — links to this page.
+- [[knowledge/notes/memory-keeps-a-second-copy-decision]] — links to this page.

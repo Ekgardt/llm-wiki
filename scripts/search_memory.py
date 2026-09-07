@@ -226,6 +226,14 @@ def _get_embedder():
     treats an unusable query vector as "no dense signal" by contract and that
     is exactly what an unavailable model means. What changed is that the
     reason is recorded and named — see `embedder_unavailable_reason`.
+
+    The load is local-only. Without that flag every cold search opened a
+    connection to huggingface.co before it read a single local byte — the
+    reranker and the retrieval benchmark had both been local-only from the
+    start, and only the runtime query path still reached out. A vault that
+    does not have the weights now says `model_unavailable` and degrades to
+    lexical, which is the same answer it already gave for weights it could
+    not read.
     """
     global _embedder_cache, _embedder_unavailable_reason
     if _embedder_cache is not None:
@@ -233,7 +241,10 @@ def _get_embedder():
     try:
         from sentence_transformers import SentenceTransformer
         _embedder_cache = SentenceTransformer(
-            EMBEDDING_MODEL, revision=EMBEDDING_MODEL_REVISION
+            EMBEDDING_MODEL,
+            revision=EMBEDDING_MODEL_REVISION,
+            local_files_only=True,
+            trust_remote_code=False,
         )
     except Exception as exc:  # noqa: BLE001 - no dense signal is not an error
         _note_embedder_unavailable(
@@ -3348,8 +3359,60 @@ def _fts_counts_and_chunks_match(
     )
 
 
+# Words that carry no evidence and, under an implicit AND, single-handedly
+# reduce a natural question to no matches at all.
+_QUERY_STOPWORDS = frozenset(
+    {
+        "a", "об", "об", "am", "an", "and", "are", "as", "at", "be", "been",
+        "but", "by", "did", "do", "does", "for", "from", "had", "has", "have",
+        "how", "i", "in", "is", "it", "many", "me", "much", "my", "of", "on",
+        "or", "the", "их", "that", "their", "them", "there", "these", "they",
+        "this", "to", "was", "we", "were", "what", "when", "where", "which",
+        "who", "why", "will", "with", "you", "your",
+        "в", "во", "для", "до", "за", "и", "из", "или", "как", "какой", "когда",
+        "мне", "мой", "моя", "на", "не", "о", "от", "по", "при", "с", "у",
+        "что", "чтобы", "это", "я",
+    }
+)
+
+
+def _carries_evidence(word: str) -> bool:
+    return word.casefold() not in _QUERY_STOPWORDS
+
+
+def _query_terms(query: str) -> list[str]:
+    """The words worth matching on, and every word when none of them is.
+
+    A question is mostly function words. Dropping them is what makes an OR
+    query rank on evidence rather than on how often "the" occurs.
+    """
+    words = query.split()
+    content = list(filter(_carries_evidence, words))
+    return content or words
+
+
 def _fts_query(query: str) -> str:
-    return " ".join(f'"{word.replace(chr(34), chr(34) * 2)}"' for word in query.split() if word)
+    """One FTS5 expression for a natural-language question.
+
+    FTS5 puts an implicit **AND** between bare terms: `MATCH 'one two three'`
+    is `one AND two AND three`, and the documentation says so in as many words.
+    So a ten-word question only matched a chunk that contained all ten words,
+    and questions phrased as questions matched nothing at all.
+
+    Measured on this stand 2026-09-03: "What day of the week do I take a
+    cocktail-making class?" retrieved **zero** candidates, while "cocktail
+    class" against the same vault retrieved three. Three of fifty questions
+    reached the model with an empty evidence manifest for exactly this reason,
+    and the model duly said it had nothing to work with.
+
+    Joining with OR is not a loosening of relevance, because bm25 separates a
+    query into its component phrases and scores a row by how many it carries:
+    a chunk holding every term still outranks one holding a single term. What
+    changes is that the one-term chunk is now reachable instead of discarded.
+    """
+    words = _query_terms(query)
+    quoted = [f'"{word.replace(chr(34), chr(34) * 2)}"' for word in words]
+    return " OR ".join(quoted)
 
 
 def _normalized_filename_stem(value: str) -> str:
@@ -4535,6 +4598,47 @@ def _matching_page(pages: list[Path], normalized_stem: str) -> Path | None:
     return None
 
 
+def _retired_page_named(normalized_stem: str) -> Path | None:
+    """An archived or superseded page whose filename *is* the query.
+
+    Archiving drops a page from every leg of retrieval, which is right for a
+    general question and wrong for one case: asking for the page by name. Until
+    2026-09-06 such a question returned nothing at all, and there was no way to
+    learn from the system that the page existed.
+
+    Forgotten memories in *Drosophila* persist as silent traces that a reminder
+    cue recovers — and the same work shows a permissive cue reconstructs things
+    that were never there, which is why this cue is the narrowest available: the
+    normalised query must equal the filename stem exactly. Never similarity,
+    never a topic, never a title. Deprecated documentation elsewhere is handled
+    the same way: kept, labelled, out of default results, reachable when named.
+    See `docs/research/2026-09-06-forgotten-not-gone.md`.
+    """
+    if not normalized_stem:
+        return None
+    try:
+        entries = sorted(KNOWLEDGE_DIR.glob("*.md"))
+    except OSError:
+        return None
+    for candidate in entries[:MAX_SEARCHABLE_PAGES]:
+        if _normalized_filename_stem(candidate.name) == normalized_stem:
+            return candidate
+    return None
+
+
+def _recalled_retired_hit(
+    normalized_stem: str, *, project: str | None, since: str | None, as_of: str | None
+) -> dict | None:
+    page = _retired_page_named(normalized_stem)
+    if page is None:
+        return None
+    hit = _exact_page_hit(page, project=project, since=since, as_of=as_of)
+    if hit is None:
+        return None
+    hit["retired"] = True
+    return hit
+
+
 def _with_exact_page(
     hits: list[dict],
     pages: list[Path],
@@ -4546,12 +4650,29 @@ def _with_exact_page(
 ) -> list[dict]:
     page = _matching_page(pages, normalized_stem)
     if page is None:
-        return hits
+        return _with_recalled_page(
+            hits, normalized_stem, project=project, since=since, as_of=as_of
+        )
     relative = page.relative_to(ROOT).as_posix()
     if any(hit["path"] == relative for hit in hits):
         return hits
     extra = _exact_page_hit(page, project=project, since=since, as_of=as_of)
     return hits if extra is None else [*hits, extra]
+
+
+def _with_recalled_page(
+    hits: list[dict],
+    normalized_stem: str,
+    *,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+) -> list[dict]:
+    """Nothing active bears this name; an archived page of that name may."""
+    recalled = _recalled_retired_hit(
+        normalized_stem, project=project, since=since, as_of=as_of
+    )
+    return hits if recalled is None else [*hits, recalled]
 
 
 def _filename_matches(hits: list[dict], normalized_stem: str) -> list[dict]:
@@ -5262,8 +5383,8 @@ def _legacy_bm25_rows(
     conn: sqlite3.Connection, query: str, limit: int
 ) -> list[tuple[object, ...]]:
     """Adaptive fetch: short queries match more pages, so ask for more."""
-    words = [word for word in query.split() if word]
-    fts_query = " ".join(f'"{word.replace(chr(34), chr(34) * 2)}"' for word in words)
+    words = _query_terms(query)
+    fts_query = _fts_query(query)
     multiplier = 5 if len(words) <= 3 else 3
     return conn.execute(
         """

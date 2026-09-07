@@ -603,6 +603,27 @@ def _coordinator_v3_statements() -> tuple[MigrationStatement, ...]:
 
 # A quarantined attempt may be followed by another, but a hundred of them is an
 # operator's problem rather than something to keep numbering.
+# How long a settled transaction keeps its before and after images.
+#
+# It was thirty days in four separate places, and nothing called `prune`, so on
+# this vault it had never run: 11 369 transactions, 4.9 GB, half of it exact
+# duplicates, for a journal that grows one line at a time. Measured 2026-09-02.
+#
+# Databases keep undo data only until the write settles — Oracle's
+# `UNDO_RETENTION` is a minimum in seconds and its segments are reusable, and
+# PostgreSQL's autovacuum drops old row versions as soon as no transaction needs
+# them. Thirty days of images was not crash safety, it was an ad-hoc backup, and
+# a backup is what replaces it: the owner accepted that trade on 2026-09-02,
+# exchanging point-undo of any committed write within a month for a daily
+# snapshot plus a copy off this machine.
+#
+# Two days rather than zero, for two reasons. A crash that spans midnight can
+# still be unwound before the first snapshot exists; and a floor of one makes
+# "shorter than the window" indistinguishable from "not a valid number of days",
+# which collapses two different refusals into one message.
+# See `docs/research/2026-09-02-where-undo-belongs-and-for-how-long.md`.
+UNDO_RETENTION_DAYS = 2
+
 MAX_ATTEMPT_ORDINAL = 100
 
 # Transaction states a reserved checkpoint can never recover from: the write it
@@ -2260,6 +2281,42 @@ def _preparing_owner_alive(selected_state: str, owner_pid: object) -> bool:
     return _pid_alive(owner_pid)
 
 
+# Every write stores a full copy of the target before and a full copy after, and
+# the targets are append-only journals — so appending 1 KB to a 500 KB journal
+# costs 1 MB. Measured 2026-09-05: `run/transactions` had reached **5.3 GB** in
+# 6904 records of median 700 KB, none of it prunable, because retention was
+# already narrowed to two days and the size of a record had never been touched.
+#
+# Sampling 1412 images: 95% distinct, so deduplication no longer pays; the bytes
+# compress to 9.7% with `lzma` at preset 1, 0.21 s for 7.7 MB. `compression.zstd`
+# would be the modern default but arrives in Python 3.14 and this project
+# supports 3.10 upward.
+#
+# The recorded `sha256` is always the hash of the **plaintext**, so every
+# verification, rollback and abort path checks exactly what it checked before.
+# Images written by an older build stay readable: only a file that begins with
+# the lzma magic is decompressed, so nothing has to be migrated.
+# See `docs/research/2026-09-05-an-undo-trail-that-outgrew-its-purpose.md`.
+_LZMA_MAGIC = b"\xfd7zXZ\x00"
+IMAGE_COMPRESSION_PRESET = 1
+
+
+def _compressed_image(content: bytes) -> bytes:
+    import lzma
+
+    return lzma.compress(content, preset=IMAGE_COMPRESSION_PRESET)
+
+
+def _image_bytes(path: Path) -> bytes:
+    """One staged image as the bytes it stands for, compressed or not."""
+    import lzma
+
+    raw = path.read_bytes()
+    if not raw.startswith(_LZMA_MAGIC):
+        return raw
+    return lzma.decompress(raw)
+
+
 class _ArtifactRoots(NamedTuple):
     artifact: Path
     before: Path
@@ -2533,7 +2590,7 @@ def _before_state(root: Path, transaction_id: str, row: sqlite3.Row) -> object:
     """The undo image for one operation; ABSENT when there was nothing there."""
     if row["before_hash"] == ABSENT:
         return ABSENT
-    content = _before_artifact(root, transaction_id, row["position"]).read_bytes()
+    content = _image_bytes(_before_artifact(root, transaction_id, row["position"]))
     if sha256_bytes(content) != row["before_hash"]:
         raise RuntimeError(
             f"transaction before-image is corrupt for {row['path']}"
@@ -3184,8 +3241,15 @@ def _promotion_plan(
 
 
 def _prune_cutoff(retention_days: int, now: datetime | None) -> datetime:
-    if retention_days < 30:
-        raise ValueError("retention_days must be at least 30")
+    # The floor is the undo window itself, not a literal. It was 30 because the
+    # contract promised point-undo of any committed write for a month; the owner
+    # exchanged that on 2026-09-02 for a daily snapshot and a copy off this
+    # machine, which is what every database does with undo data and what no
+    # database does is keep it for a month.
+    if retention_days < UNDO_RETENTION_DAYS:
+        raise ValueError(
+            f"retention_days must be at least {UNDO_RETENTION_DAYS}"
+        )
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
         raise ValueError("now must be timezone-aware")
@@ -3878,7 +3942,7 @@ def _append_after_bytes(
     after = plan["operations"][0]["after"]
     if not isinstance(after, dict):
         return None
-    return (coordinator.transaction_root / record.id / after["artifact"]).read_bytes()
+    return _image_bytes(coordinator.transaction_root / record.id / after["artifact"])
 
 
 def _append_before_hash(record: TransactionRecord, prefix: bytes) -> str:
@@ -6224,7 +6288,7 @@ class MarkdownCoordinator:
         artifact = (
             self.transaction_root / transaction_id / "before" / f"{position:06d}.bin"
         )
-        content = artifact.read_bytes()
+        content = _image_bytes(artifact)
         if sha256_bytes(content) != operation["before_hash"]:
             raise TransactionFailure(
                 "abort before-image is corrupt",
@@ -7170,7 +7234,7 @@ class MarkdownCoordinator:
     def prune(
         self,
         *,
-        retention_days: int = 30,
+        retention_days: int = UNDO_RETENTION_DAYS,
         now: datetime | None = None,
         deadline: float = float("inf"),
         cancelled: Callable[[], bool] | None = None,
@@ -7883,7 +7947,7 @@ class MarkdownCoordinator:
         if content is None:
             return ABSENT
         name = f"{position:06d}.bin"
-        self._write_new_file(root / name, content)
+        self._write_new_file(root / name, _compressed_image(content))
         return {"sha256": sha256_bytes(content), "artifact": f"{root.name}/{name}"}
 
     def _verify_plan_artifacts(self, plan: Mapping[str, object], artifact_root: Path) -> None:
@@ -7910,7 +7974,7 @@ class MarkdownCoordinator:
         assert isinstance(state, dict)
         relative = restricted_relative_path(str(state["artifact"]), (state_name,))
         artifact = artifact_root.joinpath(*relative.parts)
-        if sha256_bytes(artifact.read_bytes()) != state["sha256"]:
+        if sha256_bytes(_image_bytes(artifact)) != state["sha256"]:
             raise RuntimeError(f"transaction artifact hash mismatch: {relative}")
 
     def _write_new_file(self, path: Path, content: bytes, *, owner_only: bool = True) -> None:
@@ -8253,7 +8317,8 @@ class MarkdownCoordinator:
             / transaction_id
             / "before"
             / f"{row['position']:06d}.bin"
-        ).read_bytes()
+        )
+        before = _image_bytes(before)
         if sha256_bytes(before) != row["before_hash"]:
             raise RuntimeError("transaction before-image is corrupt")
         return (
@@ -8701,7 +8766,7 @@ class MarkdownCoordinator:
         artifact = (
             self.transaction_root / row["transaction_id"] / str(after["artifact"])
         )
-        content = artifact.read_bytes()
+        content = _image_bytes(artifact)
         if sha256_bytes(content) != row["after_hash"]:
             raise RuntimeError(
                 f"transaction after-image is corrupt for {row['path']}"
@@ -8945,7 +9010,10 @@ def _relax_legacy_state_constraint(database: sqlite3.Connection) -> None:
 
 
 _CLI_MESSAGE_CODES = (
-    ("at least 30", "retention_too_short"),
+    # Keyed on the window, not on the literal 30 it used to be: when the window
+    # changed, this table silently stopped matching and a too-short retention
+    # started reporting itself as an invalid argument instead.
+    (f"at least {UNDO_RETENTION_DAYS}", "retention_too_short"),
     ("undo precondition", "undo_precondition_failed"),
     ("undo window", "undo_window_expired"),
     ("only a committed transaction", "transaction_not_committed"),
@@ -9022,16 +9090,29 @@ def _parse_cli_args() -> argparse.Namespace:
     prune_parser = subparsers.add_parser(
         "prune", help="prune expired transaction images"
     )
-    prune_parser.add_argument("--retention-days", type=int, default=30)
+    prune_parser.add_argument(
+        "--retention-days", type=int, default=UNDO_RETENTION_DAYS
+    )
     return parser.parse_args()
 
 
 def _cli_coordinator() -> MarkdownCoordinator:
+    """The coordinator the vault actually has, v3 or the legacy pair.
+
+    Constructing `MarkdownCoordinator` on the raw paths has been dead since
+    Reliability V3 adoption: adoption replaces the pre-adoption database with
+    a JSON tombstone, so opening that path directly raises `file is not a
+    database`. Every command here went with it — `prune`, so the undo trail
+    grew to 5.5 GB with nothing enforcing the two-day retention that already
+    existed, and `undo` and `recover`, which are the operator's only hands on
+    a transaction. `reclaim_runtime_state.py` learned this on 2026-09-02 and
+    the CLI never did.
+    """
     vault = Path(
         os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent)
     ).resolve()
     state_root = Path(os.environ.get("LLM_WIKI_STATE_ROOT", vault)).resolve()
-    return MarkdownCoordinator(vault, state_root)
+    return active_or_legacy_coordinator(vault, state_root)
 
 
 def _run_cli_command(

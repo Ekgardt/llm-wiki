@@ -38,18 +38,52 @@ from project_journal import ProjectLeaseBusy, ProjectStore, _timestamp  # noqa: 
 # Anything else on an unsettled row predates it and can never be re-requested.
 BATCH_NAME_PREFIX = "batch:"
 
+# A batch name was assumed re-requestable, because the request that made it would
+# arrive again. On 2026-09-05 that assumption failed on this vault: a batch
+# checkpoint hit `precondition_failed` — the journal had simply moved between
+# planning and applying — and its `occurrence_id` is a digest of the exact events
+# in that batch, which were consumed and will never be assembled again. One
+# project sat quarantined with 335 events queued behind it, and every subsequent
+# attempt logged `ProjectPendingPriorError` instead.
+#
+# Whether a name will arrive again cannot be read off the row. Age can: a request
+# that was going to return has returned within this window, and after it the door
+# is walled up whatever the name looks like.
+STALE_CHECKPOINT_SECONDS = 30 * 60
+
+
+def _age_seconds(created_at: object, now: float) -> float:
+    from datetime import datetime
+
+    try:
+        started = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return float("inf")
+    return now - started.timestamp()
+
+
+def _is_orphaned(row: object, now: float) -> bool:
+    if not str(row["occurrence_id"]).startswith(BATCH_NAME_PREFIX):
+        return True
+    return _age_seconds(row["created_at"], now) >= STALE_CHECKPOINT_SECONDS
+
 
 def orphaned_rows(store: ProjectStore) -> list[tuple[str, int, str, str]]:
-    """Unsettled sequences whose name no request will ever produce again."""
+    """Unsettled sequences no request is going to settle on its own."""
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).timestamp()
     with store.coordinator._connect() as database:  # noqa: SLF001
         rows = database.execute(
-            "SELECT project, sequence, state, occurrence_id FROM project_checkpoints "
-            "WHERE state != 'committed' ORDER BY project, sequence"
+            "SELECT c.project, c.sequence, c.state, c.occurrence_id, t.created_at "
+            "FROM project_checkpoints AS c "
+            'LEFT JOIN "transaction" AS t ON t.id = c.transaction_id '
+            "WHERE c.state != 'committed' ORDER BY c.project, c.sequence"
         ).fetchall()
     return [
         (row["project"], row["sequence"], row["state"], row["occurrence_id"])
         for row in rows
-        if not str(row["occurrence_id"]).startswith(BATCH_NAME_PREFIX)
+        if _is_orphaned(row, now)
     ]
 
 

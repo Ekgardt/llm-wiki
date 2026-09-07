@@ -1245,19 +1245,79 @@ def expand_evidence_graph(
     return tuple(results[:global_limit])
 
 
+def _standing_disposition(query: str | None) -> dict[str, float]:
+    """What past answers say about each page, as a bounded multiplier.
+
+    A grounded answer names its evidence, so a published citation is a verified
+    statement that the page carried a claim past every gate. That is a stronger
+    signal than a click and needs no propensity model — and until 2026-09-06 it
+    was recorded nowhere at all, while 14 806 impressions of what was merely
+    *shown* piled up.
+
+    A page nothing knows about gets 1.0 rather than a penalty: absence of
+    evidence is not evidence. The boost is capped, because the failure mode is a
+    page useful once becoming permanently privileged.
+    See `docs/research/2026-09-06-a-signal-stronger-than-a-click.md`.
+    """
+    try:
+        from retrieval_disposition import disposition
+
+        return disposition(query)
+    except Exception:  # noqa: BLE001 - a missing history must not fail a search
+        return {}
+
+
+def _co_activation_table() -> dict[str, dict[str, float]]:
+    try:
+        from co_activation import load
+
+        return load()
+    except Exception:  # noqa: BLE001 - a missing table must not fail a search
+        return {}
+
+
+def _page_name(relative_path: object) -> str:
+    return Path(str(relative_path)).stem.casefold()
+
+
+def _neighbour_boosts(
+    scores: Mapping[str, float], meta: Mapping[str, Mapping[str, Any]]
+) -> dict[str, float]:
+    """What the best-ranked page was mentioned alongside, as a multiplier.
+
+    Gated on purpose: only the neighbours of the page that already ranks first
+    are raised. Spreading from every candidate to everything it was ever
+    mentioned with is the failure the whole spreading-activation literature is
+    written about — activation without a gate reaches the graph and means
+    nothing. See `docs/research/2026-09-06-what-was-mentioned-together.md`.
+    """
+    if not scores:
+        return {}
+    from co_activation import neighbours
+
+    table = _co_activation_table()
+    if not table:
+        return {}
+    leader = max(scores, key=lambda key: (scores[key], key))
+    return neighbours(_page_name(meta[leader].get("relative_path")), table)
+
+
 def _weigh_by_trust(
     scores: Mapping[str, float],
     meta: dict[str, dict[str, Any]],
     *,
     curated_first: bool,
+    query: str | None = None,
 ) -> dict[str, float]:
-    """Multiply each fused score by who said it and by what the page is.
+    """Multiply each fused score by who said it, what the page is, and what it did.
 
-    Both factors are recorded on the candidate, separately, so the ordering can
-    be explained by name rather than by one opaque number. `curated_first` is
-    what the query analysis decided: a code-shaped question turns the
+    Every factor is recorded on the candidate separately, so the ordering can be
+    explained by name rather than by one opaque number. `curated_first` is what
+    the query analysis decided: a code-shaped question turns the
     curated-knowledge prior off, and everything else keeps it.
     """
+    standing = _standing_disposition(query)
+    alongside = _neighbour_boosts(scores, meta)
     weighted: dict[str, float] = {}
     for key, value in scores.items():
         authority = authority_weight(meta[key].get("authority"))
@@ -1266,9 +1326,13 @@ def _weigh_by_trust(
             meta[key].get("relative_path"),
             curated_first=curated_first,
         )
+        carried = standing.get(str(meta[key].get("relative_path")), 1.0)
+        near = alongside.get(_page_name(meta[key].get("relative_path")), 1.0)
         meta[key]["authority_weight"] = authority
         meta[key]["type_weight"] = page
-        weighted[key] = value * authority * page
+        meta[key]["carried_weight"] = carried
+        meta[key]["alongside_weight"] = near
+        weighted[key] = value * authority * page * carried * near
     return weighted
 
 
@@ -1509,6 +1573,7 @@ def fuse_rrf(
     graph: Sequence[Mapping[str, Any]] | None,
     k: int = RRF_K,
     intents: Sequence[str] | None = None,
+    query: str | None = None,
 ) -> tuple[tuple[RetrievalCandidate, ...], dict[str, dict[str, Any]]]:
     """Fuse independent ranked lists with weighted rank-only RRF.
 
@@ -1539,7 +1604,7 @@ def fuse_rrf(
                 meta=meta,
             )
     analysed = intents is not None and curated_pages_first(intents)
-    weighted = _weigh_by_trust(scores, meta, curated_first=analysed)
+    weighted = _weigh_by_trust(scores, meta, curated_first=analysed, query=query)
     ordered = sorted(weighted, key=lambda item: (-weighted[item], item))
     candidates = [
         _fused_candidate(key, meta[key], round(scores[key], 6), round(weighted[key], 6))
@@ -2062,14 +2127,25 @@ def _run_reranker(
 ) -> Sequence[Mapping[str, Any]]:
     from reranker import rerank as _rerank
 
-    def call() -> Sequence[Mapping[str, Any]]:
-        return _rerank(query, rows[:pool_limit], limit=pool_limit, text_field="content")
+    def call(deadline: float | None = None) -> Sequence[Mapping[str, Any]]:
+        return _rerank(
+            query,
+            rows[:pool_limit],
+            limit=pool_limit,
+            text_field="content",
+            deadline=deadline,
+        )
 
     if deadline_monotonic is None:
         return call()
+    # The same instant the bound abandons this stage at, handed to the stage
+    # itself. Abandoning only stops the caller waiting: the thread keeps
+    # scoring, on the same four cores as the answer that is now being built
+    # without it. Told when to stop, it stops between batches instead.
+    stage_deadline = _optional_stage_deadline(deadline_monotonic)
     return _run_optional_bounded(
-        call,
-        deadline=_optional_stage_deadline(deadline_monotonic),
+        lambda: call(stage_deadline),
+        deadline=stage_deadline,
         cancelled=cancelled,
         kind="rerank",
     )
@@ -3021,13 +3097,17 @@ def _require_bounded_int(value: object, low: int, high: int, name: str) -> None:
 
 
 def _fused_candidates(
-    backends: _BackendRun, signals: Sequence[str], intents: Sequence[str] | None = None
+    backends: _BackendRun,
+    signals: Sequence[str],
+    intents: Sequence[str] | None = None,
+    query: str | None = None,
 ) -> tuple[tuple[RetrievalCandidate, ...], dict[str, dict[str, Any]]]:
     return fuse_rrf(
         lexical=_fusion_input(backends.lexical_hits, "lexical", signals),
         dense=_fusion_input(backends.dense_hits, "dense", signals),
         graph=_fusion_input(backends.graph_hits, "graph", signals),
         intents=intents,
+        query=query,
     )
 
 
@@ -3144,7 +3224,9 @@ def _partial_candidates(
     """Fusion already done is reused; otherwise the rows in hand are fused now."""
     if progress.candidates is not None:
         return progress.candidates, progress.display_meta or {}
-    return _fused_candidates(progress.backends, signals, progress.analysis.intents)
+    return _fused_candidates(
+        progress.backends, signals, progress.analysis.intents, progress.analysis.query
+    )
 
 
 def _assembled_partial(progress: _PlanProgress, reason: str) -> RetrievalResult:
@@ -3252,7 +3334,7 @@ def _executed_plan(
     fallback = _first_reason(backends.graph_failure, fallback)
 
     candidates, display_meta = _fused_candidates(
-        backends, signals, progress.analysis.intents
+        backends, signals, progress.analysis.intents, progress.analysis.query
     )
     exact_query = _exact_query(progress.analysis)
     candidates = _promote_exact_filename(candidates, exact_query)

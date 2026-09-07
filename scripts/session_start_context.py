@@ -770,14 +770,54 @@ def health_block() -> str:
     except Exception:  # noqa: BLE001
         return ""
     if deferred:
-        return (
-            "## Health\n\n"
-            f"Health was not measured: {deferred} of "
-            f"{len(report.get('checks', []))} checks did not run inside the "
-            f"{HEALTH_BUDGET_SECONDS}s budget. Run "
-            "`uv run python scripts/doctor.py` for the real state.\n\n"
-        )
+        return _unmeasured_health_block(deferred, len(report.get("checks", [])))
     return f"## Health\n\n{summary}\n\n" if summary else ""
+
+
+def _nightly_state() -> dict:
+    import json
+
+    try:
+        raw = (STATE_ROOT / "run" / "state.json").read_text(encoding="utf-8")
+        state = json.loads(raw)
+    except (OSError, ValueError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def _nightly_line() -> str:
+    """One line about the nightly pass, read rather than measured.
+
+    The health checks want 1.77 seconds and this block allows 0.1, so every
+    session start reports only that nothing was measured. That is deliberate —
+    session start must not wait on the doctor — but it left the one place a
+    degraded vault could surface saying nothing at all.
+
+    Measured 2026-09-05: the nightly had failed every night since 2026-08-30, no
+    evidence generation was ever activated, and every answer for five days came
+    from the lexical leg alone. `run/state.json` had said `last_nightly_status:
+    failed` the whole time. Reading one field costs microseconds and is the
+    difference between a blind block and a block that names the outage.
+    """
+    state = _nightly_state()
+    status = state.get("last_nightly_status")
+    if status != "failed":
+        return ""
+    date = state.get("last_nightly_date") or "never"
+    return (
+        f"**The nightly maintenance is failing.** Last success: {date}. "
+        "Search, compile and pruning all depend on it.\n"
+    )
+
+
+def _unmeasured_health_block(deferred: int, total: int) -> str:
+    return (
+        "## Health\n\n"
+        + _nightly_line()
+        + f"Health was not measured: {deferred} of {total} checks did not run "
+        f"inside the {HEALTH_BUDGET_SECONDS}s budget. Run "
+        "`uv run python scripts/doctor.py` for the real state.\n\n"
+    )
 
 
 def _recover_transactions() -> None:

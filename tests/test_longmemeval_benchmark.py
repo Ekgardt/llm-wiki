@@ -134,6 +134,7 @@ def _aggregated_report() -> dict:
             "status": "answered",
             "est_prompt_tokens": 1500,
             "est_total_prompt_tokens": 1720,
+            "judge_correct": True,
             "retrieve_seconds": 2.0,
             "answer_seconds": 50.0,
         },
@@ -218,6 +219,10 @@ def test_aggregate_carries_cost_columns_and_an_overall_row() -> None:
     # figure this stand produced before 2026-08-31 was short by the system
     # prompt, while the numbers the field publishes are whole-context.
     assert report["multi-session"]["mean_est_total_prompt_tokens"] == 1720
+    # `accuracy` is a substring test and cannot match a free-text answer; every
+    # figure the backlog compares against is a judge score, so the report has to
+    # carry one when the judged rows exist.
+    assert report["multi-session"]["judge_accuracy"] == 1.0
 
 
 def test_haystack_dates_become_day_and_time() -> None:

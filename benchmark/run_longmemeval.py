@@ -48,6 +48,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workdir", default=None)
     parser.add_argument("--keep-vaults", action="store_true")
     parser.add_argument("--list-only", action="store_true", help="print the sample and exit")
+    parser.add_argument(
+        "--dataset",
+        default=None,
+        help=(
+            "a JSON file of questions in this shape instead of LongMemEval. "
+            "`benchmark/locomo_data.py` writes one for LoCoMo; the sampler, "
+            "the worker and the scorer all read the shape, not the source."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -55,6 +64,22 @@ def _run_tag(args: argparse.Namespace) -> str:
     if args.full:
         return "full"
     return f"n{args.sample}-seed{args.seed}"
+
+
+def _dataset(args: argparse.Namespace) -> list[dict]:
+    """The questions this run scores, from LongMemEval or a named file.
+
+    A LoCoMo question converted by `locomo_data.py` carries the same keys, so
+    everything downstream — stratified sampling, the disposable-vault worker,
+    the abstention split the scorer makes on the `_abs` suffix — works without
+    knowing which benchmark it is looking at.
+    """
+    if not args.dataset:
+        return longmemeval_data.load_dataset()
+    path = Path(args.dataset)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    longmemeval_data.require_dataset_shape(data)
+    return data
 
 
 def _results_path(args: argparse.Namespace) -> Path:
@@ -177,17 +202,51 @@ def _worker_result(out_file: Path, returncode: int) -> dict:
     return row
 
 
+def _with_judgements(rows: list[dict], results_path: Path) -> list[dict]:
+    """Fold in any judged rows sitting beside the results, keyed by question id.
+
+    The report's `accuracy` is `contains_answer`, a substring test that cannot
+    match a free-text answer and never matches a preference gold — measured
+    2026-09-01, `single-session-preference` read 0.0000 by containment and 0.25
+    by the judge on the same rows. Every figure the backlog compares against is
+    a judge score, so the report has to carry one when it exists.
+    """
+    judged_path = results_path.with_suffix(".judged.jsonl")
+    if not judged_path.is_file():
+        return rows
+    verdicts = _judged_verdicts(judged_path)
+    return [
+        {**row, "judge_correct": verdicts.get(str(row.get("question_id")))}
+        if str(row.get("question_id")) in verdicts
+        else row
+        for row in rows
+    ]
+
+
+def _judged_verdicts(path: Path) -> dict[str, object]:
+    verdicts: dict[str, object] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if isinstance(row.get("judge_correct"), bool):
+            verdicts[str(row.get("question_id"))] = row["judge_correct"]
+    return verdicts
+
+
 def _print_summary(report: dict) -> None:
     columns = (
-        "category n scored accuracy em f1 prov_fail est_tokens total_tokens "
-        "retrieve_s answer_s"
+        "category n scored accuracy em judge f1 prov_fail est_tokens total_tokens "
+        "per_1M_tok retrieve_s answer_s"
     )
     print(columns)
     for name, row in report.items():
         print(
             f"{name} {row['n']} {row['scored']} {row['accuracy']} {row['em']} "
+            f"{row.get('judge_accuracy')} "
             f"{row['f1']} {row['provider_failures']} {row['mean_est_prompt_tokens']} "
             f"{row.get('mean_est_total_prompt_tokens')} "
+            f"{row.get('correct_per_million_tokens')} "
             f"{row['mean_retrieve_seconds']} {row['mean_answer_seconds']}"
         )
 
@@ -228,7 +287,7 @@ def _execute(pending: list[dict], staging: Path, results_path: Path, args) -> No
 
 def main() -> int:
     args = parse_args()
-    data = longmemeval_data.load_dataset()
+    data = _dataset(args)
     sample = _sampled(args, data)
     if args.list_only:
         _list_sample(sample)
@@ -244,6 +303,7 @@ def main() -> int:
     rows = list(_existing_results(results_path).values())
     sample_ids = {str(question["question_id"]) for question in sample}
     scoped = [row for row in rows if str(row.get("question_id")) in sample_ids]
+    scoped = _with_judgements(scoped, results_path)
     report = longmemeval_score.aggregate(scoped)
     _report_path(args).write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
