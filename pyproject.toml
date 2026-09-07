@@ -16,7 +16,7 @@ retrieval-benchmark = [
     "jieba==0.42.1",
 ]
 semantic = ["sentence-transformers>=2.7,<6"]
-hybrid = ["numpy>=2.2.6,<3", "lancedb>=0.20", "sentence-transformers>=2.7,<6"]
+hybrid = ["numpy>=2.2.6,<3", "sentence-transformers>=2.7,<6"]
 # v4.0: tree-sitter code graph (12 languages; grammars remain optional as a group).
 code-graph = [
     "jedi>=0.19,<1",

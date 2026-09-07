@@ -537,11 +537,17 @@ def test_deadline_allows_hybrid_signals_when_dense_finishes_in_budget(monkeypatc
     )
 
     assert {row["candidate_id"] for row in rows} == {"local", "dense"}
-    assert rows[0]["requested_mode"] == "HYBRID"
-    assert rows[0]["effective_mode"] == "HYBRID"
-    assert rows[0]["signals_used"] == ["lexical", "dense"]
-    assert rows[0]["fallback_reason"] is None
-    assert rows[0]["partial"] is False
+    assert _mode_of(rows[0]) == ("HYBRID", "HYBRID", ["lexical", "dense"], None, False)
+
+
+def _mode_of(row: dict) -> tuple:
+    return (
+        row["requested_mode"],
+        row["effective_mode"],
+        row["signals_used"],
+        row["fallback_reason"],
+        row["partial"],
+    )
 
 
 def test_hanging_dense_backend_falls_back_to_partial_base(monkeypatch):
@@ -582,9 +588,11 @@ def test_hanging_dense_backend_falls_back_to_partial_base(monkeypatch):
 
         assert started.is_set()
         assert [row["candidate_id"] for row in rows] == ["local"]
-        assert rows[0]["effective_mode"] == "BASE"
-        assert rows[0]["fallback_reason"] == "optional_stage_timeout"
-        assert rows[0]["partial"] is True
+        assert (rows[0]["effective_mode"], rows[0]["fallback_reason"], rows[0]["partial"]) == (
+            "BASE",
+            "optional_stage_timeout",
+            True,
+        )
     finally:
         release.set()
 
@@ -735,10 +743,8 @@ def test_explicit_base_under_deadline_is_not_reported_as_fallback(monkeypatch):
     assert rows[0]["partial"] is False
 
 
-def test_hard_filter_candidate_id_parity_across_backends():
-    from search_memory import apply_hard_filters
-
-    rows = [
+def _parity_rows() -> list[dict]:
+    return [
         _hit("keep", "a.md", 1.0, project="demo", status="active", timestamp="2025-06-01", valid_from="2025-01-01", valid_to="", authority="user"),
         _hit("drop-proj", "b.md", 1.0, project="other", status="active", timestamp="2025-06-01", valid_from="2025-01-01", valid_to=""),
         _hit("drop-status", "c.md", 1.0, project="demo", status="superseded", timestamp="2025-06-01", valid_from="2025-01-01", valid_to=""),
@@ -746,28 +752,35 @@ def test_hard_filter_candidate_id_parity_across_backends():
         _hit("drop-asof", "e.md", 1.0, project="demo", status="active", timestamp="2026-12-01", valid_from="2026-12-01", valid_to=""),
         _hit("drop-validity", "f.md", 1.0, project="demo", status="active", timestamp="2025-03-01", valid_from="2025-01-01", valid_to="2025-02-01"),
     ]
-    # Status filter applies when as_of is absent (superseded dropped).
+
+
+def _ids(rows) -> set[str]:
+    return {r["candidate_id"] for r in rows}
+
+
+def test_hard_filter_status_applies_without_as_of():
+    """Status filter applies when as_of is absent (superseded dropped)."""
+    from search_memory import apply_hard_filters
+
     status_filt = {"project": "demo", "since": "2024-01-01", "scope": "all"}
-    status_ids = {r["candidate_id"] for r in apply_hard_filters(rows, **status_filt)}
-    assert "keep" in status_ids
-    assert "drop-status" not in status_ids
-    assert "drop-proj" not in status_ids
-    assert "drop-since" not in status_ids
-    # as_of uses validity window; future/expired validity dropped.
-    asof_filt = {
-        "project": "demo",
-        "since": "2024-01-01",
-        "as_of": "2025-07-01",
-        "scope": "all",
-    }
-    lexical = apply_hard_filters(rows, **asof_filt)
-    dense = apply_hard_filters(list(reversed(rows)), **asof_filt)
-    assert {r["candidate_id"] for r in lexical} == {r["candidate_id"] for r in dense}
-    ids = {r["candidate_id"] for r in lexical}
-    assert "keep" in ids
-    assert "drop-proj" not in ids
-    assert "drop-asof" not in ids
-    assert "drop-validity" not in ids
+
+    status_ids = _ids(apply_hard_filters(_parity_rows(), **status_filt))
+
+    assert status_ids == {"keep", "drop-asof", "drop-validity"}
+
+
+def test_hard_filter_candidate_id_parity_across_backends():
+    """as_of uses the validity window; future and expired validity are dropped."""
+    from search_memory import apply_hard_filters
+
+    rows = _parity_rows()
+    asof_filt = {"project": "demo", "since": "2024-01-01", "as_of": "2025-07-01", "scope": "all"}
+
+    lexical = _ids(apply_hard_filters(rows, **asof_filt))
+    dense = _ids(apply_hard_filters(list(reversed(rows)), **asof_filt))
+
+    assert lexical == dense
+    assert lexical == {"keep", "drop-status"}
 
 
 def test_exact_title_bypass_before_rerank(monkeypatch):
@@ -919,27 +932,6 @@ def test_reranker_receives_full_chunk_content(monkeypatch):
     # instead of finishing on the cores the answer is being built with. No
     # deadline was given to this call, so there is none to pass on.
     assert options == [{"text_field": "content", "deadline": None}]
-
-
-def test_lance_distance_kept_separate_from_similarity():
-    import lance_store
-
-    rows = lance_store._rows_from_lance_hits(
-        [{"path": "a.md", "title": "A", "summary": "s", "project": "", "timestamp": "", "_distance": 0.5}]
-    )
-    assert rows[0]["lance_distance"] == 0.5
-    assert rows[0]["vector_score"] == pytest.approx(1.0 / 1.5)
-    assert rows[0]["score"] == rows[0]["vector_score"]
-    assert rows[0]["lance_distance"] != rows[0]["vector_score"]
-
-
-def test_upsert_vectors_refuses_destructive_live_drop():
-    import lance_store
-
-    with pytest.raises(RuntimeError, match="immutable generation"):
-        lance_store.upsert_vectors(
-            ["a.md"], ["A"], ["s"], [""], [""], [[0.1] * lance_store.EMBEDDING_DIM]
-        )
 
 
 def _paths_of(result) -> list[str]:
@@ -1330,17 +1322,18 @@ def test_legacy_numpy_writer_and_loader_share_closed_contract(tmp_path, monkeypa
     metadata = json.loads((cache / "vectors_meta.json").read_text(encoding="utf-8"))
 
     assert isinstance(built["vectors"], np.ndarray)
-    assert metadata["model_id"] == search_memory.EMBEDDING_MODEL
-    assert metadata["model_revision"] == "revision-1"
-    assert metadata["dimensions"] == 2
-    assert metadata["source_paths"] == ["knowledge/notes/p.md"]
-    assert metadata["source_sha256"] == [hashlib.sha256(page.read_bytes()).hexdigest()]
-    assert metadata["dtype"] == "float32"
-    assert metadata["shape"] == [1, 2]
-    assert metadata["finite"] is True
-    assert metadata["artifact_sha256"] == hashlib.sha256(
-        (cache / "vectors.npy").read_bytes()
-    ).hexdigest()
+    expected = {
+        "model_id": search_memory.EMBEDDING_MODEL,
+        "model_revision": "revision-1",
+        "dimensions": 2,
+        "source_paths": ["knowledge/notes/p.md"],
+        "source_sha256": [hashlib.sha256(page.read_bytes()).hexdigest()],
+        "dtype": "float32",
+        "shape": [1, 2],
+        "finite": True,
+        "artifact_sha256": hashlib.sha256((cache / "vectors.npy").read_bytes()).hexdigest(),
+    }
+    assert {key: metadata[key] for key in expected} == expected
 
     loaded = search_memory._load_or_build_vectors([page])
     assert isinstance(loaded["vectors"], np.memmap)

@@ -16,6 +16,12 @@ still take back a fragment written by an older install, so an existing user is n
 left with a hook pointing at a vault nothing maintains. See
 `knowledge/notes/retire-cursor-and-antigravity-decision.md`.
 
+The OpenCode plugin is installed from outside this repository (it lives with
+OpenCode on the owner's other machine); this directory holds no copy of it. Its
+one helper here is `scripts/heartbeat_record.py`, which records a no-content
+heartbeat in `run/state.json` and is exercised by `tests/test_plugin_helpers.py`.
+Nothing in the product calls it — that is by design, not an orphan.
+
 ## What works differently from CLI agents
 
 The vault is **shared infrastructure**. All agents write to the same

@@ -84,7 +84,7 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 - **Title + filename boost** — exact filename match short-circuits to rank 1
 - **Typed-provenance ranking** — one weight table (`user` 1.35, `web` 1.1, `ai-derived` 1.0, `inferred` 0.8) multiplies the score that decides the order on every path: BM25, fused RRF, and reranked
 - **Temporal queries** — `--as-of YYYY-MM-DD` filters by `valid_to` frontmatter
-- **Local retrieval modes** — direct page reads at small scale, SQLite FTS5 BM25 as the always-available base, and optional vectors/LanceDB + graph + reranker for hybrid retrieval
+- **Local retrieval modes** — direct page reads at small scale, SQLite FTS5 BM25 as the always-available base, and optional vectors + graph + reranker for hybrid retrieval
 - **Grounded QA** — retrieved source spans carry citation IDs, paths, source/span hashes, revisions, and byte/line ranges; unsupported, conflicting, or out-of-scope answers abstain
 
 ### Proactive intelligence
@@ -281,7 +281,7 @@ For the canonical structure reference (what lives where, env contracts, forbidde
 
 `cache/evidence-graph/catalog.sqlite3` selects one immutable active generation under `cache/evidence-graph/generations/<generation-id>/`. A candidate is registered only after its manifest, source membership, artifact hashes, database integrity, and evidence spans validate. Activation is a compare-and-swap pointer update. A failed or interrupted pre-activation build leaves the previous generation active; a corrupt active generation is skipped in favor of the newest validated prior generation. Complete orphan generations may be registered during recovery but are not activated automatically.
 
-Deleting `cache/evidence-graph/` deletes only derived state. Stop active commands first, keep `run/`, and rebuild before expecting generation-backed retrieval. Until installed-vault migration evidence proves removal safe, keep legacy `cache/index.sqlite`, `cache/vectors.npy`, `cache/vectors_meta.json`, and `cache/lancedb/`. If no validated generation can be opened, retrieval falls back to those legacy paths or lexical/live extraction and reports the fallback. Safe rollback never deletes `knowledge/`, Git history, project journals, or `run/`.
+Deleting `cache/evidence-graph/` deletes only derived state. Stop active commands first, keep `run/`, and rebuild before expecting generation-backed retrieval. Until installed-vault migration evidence proves removal safe, keep legacy `cache/index.sqlite`, `cache/vectors.npy`, and `cache/vectors_meta.json`. If no validated generation can be opened, retrieval falls back to those legacy paths or lexical/live extraction and reports the fallback. Safe rollback never deletes `knowledge/`, Git history, project journals, or `run/`.
 
 The model matrix pins candidate revisions and requires EN/RU/ZH quality, resource, license, and Pareto gates before selecting defaults. No new embedding model or reranker is selected yet: **evidence pending**. Existing optional vector compatibility still uses its pinned legacy model. Token counts are labelled `reported`, `tokenizer`, `estimated`, `mixed`, or `unknown`; monetary cost is separately `reported`, `estimated`, or `unknown`. A UTF-8 byte estimate is conservative planning data, not a tokenizer-independent guarantee.
 

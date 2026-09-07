@@ -18,7 +18,6 @@ if str(SCRIPTS) not in sys.path:
 
 import build_tiers  # noqa: E402
 import contextual_retrieval  # noqa: E402
-import rebuild_lance_index  # noqa: E402
 import search_memory  # noqa: E402
 from corpus_snapshot import collect_corpus  # noqa: E402
 from generation_catalog import GenerationCatalog  # noqa: E402
@@ -35,20 +34,6 @@ class _DeterministicEmbedder:
             [float(index), float(len(text)), float(sum(text.encode("utf-8")) % 997)]
             for index, text in enumerate(texts)
         ]
-
-
-class _DeterministicLanceAdapter:
-    def write(self, output_dir: Path, rows: list[dict], *, vector_dimension: int):
-        assert vector_dimension == VECTOR_DIMENSIONS
-        output_dir.mkdir(parents=True)
-        (output_dir / "rows.json").write_bytes(
-            json.dumps(
-                rows,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        )
 
 
 def _page(title: str, body: str, **metadata: str) -> str:
@@ -104,18 +89,6 @@ def _build_generation(snapshot, catalog: GenerationCatalog, generation_id: str):
     )
     descriptors.extend(contextual_retrieval.build_snapshot_contexts(snapshot, generation))
     descriptors.extend(build_tiers.build_snapshot_tiers(snapshot, generation))
-    descriptors.extend(
-        rebuild_lance_index.build_lance_generation(
-            snapshot,
-            generation,
-            generation_root=catalog.generations_path,
-            embedder=_DeterministicEmbedder(),
-            embedding_model_id=MODEL_ID,
-            embedding_model_revision=MODEL_REVISION,
-            embedding_dimensions=VECTOR_DIMENSIONS,
-            lance_adapter=_DeterministicLanceAdapter(),
-        )
-    )
     manifest = {
         "generation_id": generation_id,
         "schema_version": "corpus-generation/v1",
@@ -260,17 +233,6 @@ def test_the_vectors_carry_the_snapshot_chunks(published, numpy_module):
         )
     ) == _chunk_sources(published.snapshot)
     assert vectors.shape == (len(published.snapshot.chunks), VECTOR_DIMENSIONS)
-
-
-def test_the_lance_rows_carry_the_snapshot_chunks(published):
-    rows = json.loads((published.generation / "lance/rows.json").read_bytes())
-
-    assert [row["chunk_id"] for row in rows] == [
-        chunk.id for chunk in published.snapshot.chunks
-    ]
-    assert [
-        (row["source_id"], row["source_path"], row["source_sha256"]) for row in rows
-    ] == _chunk_sources(published.snapshot)
 
 
 def test_the_contextual_and_tier_artifacts_carry_the_snapshot_sources(published):

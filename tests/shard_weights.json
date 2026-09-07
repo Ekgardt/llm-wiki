@@ -68,7 +68,6 @@
   "test_integration_hook_config.py": 0.5,
   "test_integration_injection.py": 7.61,
   "test_knowledge_extractor.py": 0.5,
-  "test_lance_store.py": 0.5,
   "test_lint_evidence.py": 0.5,
   "test_llm_descriptors.py": 0.5,
   "test_lsp_paths.py": 0.5,

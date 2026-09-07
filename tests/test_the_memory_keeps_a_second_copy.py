@@ -16,9 +16,12 @@ See `knowledge/notes/memory-keeps-a-second-copy-decision.md`.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
@@ -120,6 +123,7 @@ def test_a_vault_without_memory_is_not_an_error(tmp_path: Path) -> None:
     assert result["status"] == "no memory to snapshot"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows has no owner-only mode bits")
 def test_the_copy_is_owner_only(tmp_path: Path) -> None:
     vault = _vault(tmp_path, alpha="private")
     root = tmp_path / "snapshots"

@@ -72,9 +72,12 @@ def test_notes_keep_full_paths_and_exclude_historical_and_internals(vault: Path)
         "knowledge/notes/concept/same.md",
         "knowledge/notes/pattern/same.md",
     ]
-    assert snapshot.sources[0].record.logical_id != snapshot.sources[1].record.logical_id
-    assert snapshot.sources[0].content.startswith(b"---\n")
-    assert snapshot.code_capture is None
+    first, second = snapshot.sources
+    assert (
+        first.record.logical_id != second.record.logical_id,
+        first.content.startswith(b"---\n"),
+        snapshot.code_capture,
+    ) == (True, True, None)
 
     historical = collect_corpus(vault, include_historical=True)
     assert "knowledge/notes/old.md" in {
@@ -99,19 +102,20 @@ def test_source_record_contract_and_logical_identity_survive_content_edits(vault
         "language",
         "git_oid",
     ]
-    assert before.logical_id == after.logical_id == "source:knowledge/notes/page.md"
-    assert before.sha256 != after.sha256
-    assert before.size != after.size
-    assert before.media_type == "text/markdown"
-    assert before.language == "en"
-    assert before.git_oid is None
+    assert (before.logical_id, after.logical_id) == ("source:knowledge/notes/page.md",) * 2
+    assert (before.sha256 != after.sha256, before.size != after.size) == (True, True)
+    assert (before.media_type, before.language, before.git_oid) == ("text/markdown", "en", None)
 
 
-def test_canonical_source_manifest_is_shared_ordered_and_invalidates_contract(vault: Path):
+def _two_page_snapshot(vault: Path):
     write(vault / "knowledge/notes/z.md", page("# Z\nZulu.\n", type="concept"))
     write(vault / "knowledge/notes/a.md", page("# A\nAlpha.\n", type="concept"))
     snapshot = collect_corpus(vault)
-    records = [source.record for source in snapshot.sources]
+    return snapshot, [source.record for source in snapshot.sources]
+
+
+def test_canonical_source_manifest_is_shared_and_ordered(vault: Path):
+    snapshot, records = _two_page_snapshot(vault)
 
     manifest = corpus_snapshot.canonical_source_manifest(
         reversed(records), snapshot.policy
@@ -120,11 +124,18 @@ def test_canonical_source_manifest_is_shared_ordered_and_invalidates_contract(va
         reversed(records), snapshot.policy
     )
 
-    assert digest == snapshot.corpus_sha256
-    assert corpus_snapshot.validate_canonical_source_manifest(manifest) == manifest
+    assert (digest, corpus_snapshot.validate_canonical_source_manifest(manifest)) == (
+        snapshot.corpus_sha256,
+        manifest,
+    )
     assert [item["relative_path"] for item in manifest["sources"]] == sorted(
         item.record.relative_path for item in snapshot.sources
     )
+
+
+def test_canonical_source_manifest_invalidates_on_every_field(vault: Path):
+    snapshot, records = _two_page_snapshot(vault)
+    digest = snapshot.corpus_sha256
 
     first = records[0]
     changed_hash = dataclasses.replace(first, sha256="f" * 64)
@@ -366,17 +377,21 @@ def test_chunks_have_exact_utf8_spans_hashes_and_language(
     source = snapshot.sources[0]
     chunk = snapshot.chunks[0]
 
-    assert source.record.sha256 == hashlib.sha256(raw).hexdigest()
-    assert chunk.source_hash == source.record.sha256
-    assert raw[chunk.byte_start : chunk.byte_end].decode("utf-8") == chunk.text
-    assert chunk.span_sha256 == hashlib.sha256(raw[chunk.byte_start : chunk.byte_end]).hexdigest()
-    assert chunk.language == language
-    assert chunk.line_start == 4
-    assert chunk.line_end == 6
-    assert source.record.language == language
+    span = raw[chunk.byte_start : chunk.byte_end]
+    assert (source.record.sha256, chunk.source_hash) == (hashlib.sha256(raw).hexdigest(),) * 2
+    assert (span.decode("utf-8"), chunk.span_sha256) == (
+        chunk.text,
+        hashlib.sha256(span).hexdigest(),
+    )
+    assert (chunk.language, source.record.language, chunk.line_start, chunk.line_end) == (
+        language,
+        language,
+        4,
+        6,
+    )
 
 
-def test_frontmatter_is_not_searchable_and_heading_ancestry_is_preserved(vault: Path):
+def _tree_snapshot(vault: Path):
     raw = page(
         "Intro text.\n# Parent\nParent text.\n## Child\nChild text.\n### Leaf\nLeaf text.\n",
         type="concept",
@@ -385,20 +400,27 @@ def test_frontmatter_is_not_searchable_and_heading_ancestry_is_preserved(vault: 
         confidence="high",
     )
     write(vault / "knowledge/notes/tree.md", raw)
+    return collect_corpus(vault)
 
-    snapshot = collect_corpus(vault)
-    chunks = snapshot.chunks
 
-    assert [chunk.heading_ancestry for chunk in chunks] == [
+def test_heading_ancestry_is_preserved_and_frontmatter_is_read(vault: Path):
+    snapshot = _tree_snapshot(vault)
+
+    assert [chunk.heading_ancestry for chunk in snapshot.chunks] == [
         (),
         ("Parent",),
         ("Parent", "Child"),
         ("Parent", "Child", "Leaf"),
     ]
-    assert all("source_authority" not in chunk.text for chunk in chunks)
-    assert all(chunk.language == "ru" for chunk in chunks)
-    assert snapshot.sources[0].metadata.authority == "user"
-    assert snapshot.sources[0].metadata.confidence == "high"
+    metadata = snapshot.sources[0].metadata
+    assert (metadata.authority, metadata.confidence) == ("user", "high")
+
+
+def test_frontmatter_is_not_searchable_and_language_reaches_every_chunk(vault: Path):
+    chunks = _tree_snapshot(vault).chunks
+
+    assert not any("source_authority" in chunk.text for chunk in chunks)
+    assert [chunk.language for chunk in chunks] == ["ru"] * len(chunks)
 
 
 def test_chunk_ids_are_stable_and_use_full_parent_identity(vault: Path):
@@ -588,15 +610,16 @@ def test_collection_uses_writer_gate_and_rejects_external_edit_race(vault: Path,
     reads = 0
 
     def racing_read(path: Path, limit: int, *, label: str):
+        # An edit lands after every read, so no pass ever holds still: the
+        # fence has to fire on each of them, not only the first.
         nonlocal reads
         content = real_read(path, limit, label=label)
         reads += 1
-        if reads == 1:
-            target.write_bytes(b"# Page\nAfter!\n")
+        target.write_bytes(b"# Page\nAfter %d!\n" % reads)
         return content
 
     monkeypatch.setattr(corpus_snapshot, "read_stable_bytes", racing_read)
-    with pytest.raises(CorpusChanged):
+    with pytest.raises(CorpusChanged, match="never held still"):
         collect_corpus(vault, coordinator=coordinator)
     assert coordinator.entered is True
 
@@ -732,23 +755,23 @@ def test_directory_replacement_during_scandir_is_rejected(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ):
     target = vault / "knowledge/notes/safe"
-    moved = vault / "knowledge/notes/safe-original"
     write(target / "page.md", "# Before\n")
     real_scandir = corpus_snapshot.os.scandir
-    swapped = False
+    swaps = 0
 
     def swapping_scandir(path: object):
-        nonlocal swapped
-        if Path(path) == target and not swapped:
-            target.rename(moved)
-            write(target / "page.md", "# After\n")
-            swapped = True
+        # The directory is replaced under every pass, so none holds still.
+        nonlocal swaps
+        if Path(path) == target:
+            swaps += 1
+            target.rename(vault / f"knowledge/notes/safe-original-{swaps}")
+            write(target / "page.md", f"# After {swaps}\n")
         return real_scandir(path)
 
     monkeypatch.setattr(corpus_snapshot.os, "scandir", swapping_scandir)
     with pytest.raises(CorpusChanged, match="ancestor.*changed|directory.*changed"):
         collect_corpus(vault)
-    assert swapped is True
+    assert swaps >= 2
 
 
 @pytest.mark.skipif(os.name == "posix", reason="Windows pathname fallback only")
@@ -756,28 +779,29 @@ def test_source_parent_same_byte_replacement_after_read_is_rejected(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ):
     parent = vault / "knowledge/notes/safe"
-    moved = vault / "knowledge/notes/safe-original"
     target = parent / "page.md"
     content = b"# Stable\nSame bytes.\n"
     target.parent.mkdir()
     target.write_bytes(content)
     real_read = corpus_snapshot.read_stable_bytes
-    swapped = False
+    swaps = 0
 
     def swapping_read(path: Path, limit: int, *, label: str):
-        nonlocal swapped
+        # The parent is replaced by a same-byte twin after every read of the
+        # page, so no pass holds still and the identity check must fire each time.
+        nonlocal swaps
         result = real_read(path, limit, label=label)
-        if Path(path) == target and not swapped:
-            parent.rename(moved)
+        if Path(path) == target:
+            swaps += 1
+            parent.rename(vault / f"knowledge/notes/safe-original-{swaps}")
             parent.mkdir()
             (parent / "page.md").write_bytes(content)
-            swapped = True
         return result
 
     monkeypatch.setattr(corpus_snapshot, "read_stable_bytes", swapping_read)
     with pytest.raises(CorpusChanged, match="ancestor.*changed"):
         collect_corpus(vault)
-    assert swapped is True
+    assert swaps >= 2
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor traversal only")

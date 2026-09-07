@@ -85,7 +85,7 @@ LLM Wiki даёт каждому AI-агенту, которым вы польз
 - **Title + filename boost** — точное совпадение имени файла даёт rank 1 сразу
 - **Typed-provenance ранжирование** — одна таблица весов (`user` 1.35, `web` 1.1, `ai-derived` 1.0, `inferred` 0.8) умножает балл, который определяет порядок, на каждом пути: BM25, слитый RRF и после реранкера
 - **Темпоральные запросы** — `--as-of YYYY-MM-DD` фильтрует по `valid_to` frontmatter
-- **Локальные режимы retrieval** — прямое чтение страниц на малом масштабе, всегда доступный SQLite FTS5 BM25 и опциональный hybrid с vectors/LanceDB + graph + reranker
+- **Локальные режимы retrieval** — прямое чтение страниц на малом масштабе, всегда доступный SQLite FTS5 BM25 и опциональный hybrid с vectors + graph + reranker
 - **Grounded QA** — извлечённые source spans содержат citation ID, пути, хеши source/span, revision и byte/line ranges; при недостаточных, конфликтующих или не соответствующих времени данных система воздерживается от ответа
 
 ### Проактивный интеллект
@@ -285,7 +285,7 @@ RUNTIME       cache/  logs/  run/   (gitignored, внутри vault)
 
 `cache/evidence-graph/catalog.sqlite3` выбирает одно неизменяемое активное поколение в `cache/evidence-graph/generations/<generation-id>/`. Candidate регистрируется только после проверки manifest, состава source, хешей artifacts, целостности базы и evidence spans. Активация меняет указатель через compare-and-swap. Сбой или прерывание до активации оставляет предыдущее поколение активным; повреждённое активное поколение пропускается в пользу последнего проверенного предыдущего. Полные orphan generations могут быть зарегистрированы при recovery, но автоматически не активируются.
 
-Удаление `cache/evidence-graph/` удаляет только производное состояние. Сначала остановите активные команды, сохраните `run/` и перестройте cache прежде, чем ожидать generation-backed retrieval. Пока evidence миграции установленных vault отсутствует, сохраняйте legacy `cache/index.sqlite`, `cache/vectors.npy`, `cache/vectors_meta.json` и `cache/lancedb/`. Если проверенное поколение открыть нельзя, retrieval откатывается к этим legacy-путям либо к lexical/live extraction и сообщает fallback. Безопасный rollback никогда не удаляет `knowledge/`, Git history, project journals или `run/`.
+Удаление `cache/evidence-graph/` удаляет только производное состояние. Сначала остановите активные команды, сохраните `run/` и перестройте cache прежде, чем ожидать generation-backed retrieval. Пока evidence миграции установленных vault отсутствует, сохраняйте legacy `cache/index.sqlite`, `cache/vectors.npy` и `cache/vectors_meta.json`. Если проверенное поколение открыть нельзя, retrieval откатывается к этим legacy-путям либо к lexical/live extraction и сообщает fallback. Безопасный rollback никогда не удаляет `knowledge/`, Git history, project journals или `run/`.
 
 Model matrix фиксирует revisions кандидатов и требует EN/RU/ZH quality, resource, license и Pareto gates перед выбором defaults. Новая embedding model или reranker пока не выбраны: **evidence pending**. Существующая опциональная vector-совместимость продолжает использовать закреплённую legacy model. Token counts помечаются как `reported`, `tokenizer`, `estimated`, `mixed` или `unknown`; денежная стоимость отдельно помечается как `reported`, `estimated` или `unknown`. Оценка по UTF-8 bytes предназначена для консервативного планирования и не является независимой от tokenizer гарантией.
 

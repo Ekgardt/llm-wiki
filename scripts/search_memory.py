@@ -4874,75 +4874,6 @@ def _as_legacy_dense_row(item: Mapping[str, object], score_key: str) -> dict:
     return row
 
 
-def _lance_dense_hits(
-    query: str,
-    pages: list[Path],
-    *,
-    limit: int,
-    project: str | None,
-    since: str | None,
-    as_of: str | None,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> list[dict] | None:
-    """LanceDB results bound to this model and this source membership."""
-    results = _lance_results(
-        query,
-        pages,
-        limit=limit,
-        project=project,
-        since=since,
-        as_of=as_of,
-        deadline=deadline,
-        cancelled=cancelled,
-    )
-    if not results:
-        return None
-    return [_as_legacy_dense_row(item, "score") for item in results]
-
-
-def _lance_results(
-    query: str,
-    pages: list[Path],
-    *,
-    limit: int,
-    project: str | None,
-    since: str | None,
-    as_of: str | None,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> list | None:
-    """None when the optional backend is absent or cannot answer in time."""
-    try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from lance_store import have_lancedb
-        from lance_store import vector_search as _lance_search
-
-        if not have_lancedb():
-            return None
-        vectors = _embed_texts([query], is_query=True, deadline=deadline, cancelled=cancelled)
-        if not vectors:
-            return None
-        results = _lance_search(
-            vectors[0],
-            limit * 3,
-            project,
-            since=since,
-            as_of=as_of,
-            expected_model_id=EMBEDDING_MODEL,
-            expected_model_revision=EMBEDDING_MODEL_REVISION,
-            expected_sources=_legacy_vector_source_membership(
-                pages, deadline=deadline, cancelled=cancelled
-            ),
-        )
-        _check_legacy_stop(deadline, cancelled)
-    except TimeoutError:
-        raise
-    except Exception:  # noqa: BLE001 - an optional backend that cannot answer
-        return None
-    return results
-
-
 def _numpy_dense_hits(
     query: str,
     pages: list[Path],
@@ -5007,17 +4938,7 @@ def _legacy_dense_hits(
     pages = _resolved_pages(page_paths, scope, deadline)
     if not pages:
         return None
-    hits = _lance_dense_hits(
-        query,
-        pages,
-        limit=limit,
-        project=project,
-        since=since,
-        as_of=as_of,
-        deadline=deadline,
-        cancelled=cancelled,
-    )
-    return hits if hits is not None else _numpy_dense_hits(
+    return _numpy_dense_hits(
         query,
         pages,
         limit=limit,
@@ -5502,36 +5423,17 @@ def _legacy_vector_results(
     since: str | None,
     as_of: str | None,
 ) -> list[dict] | None:
-    """LanceDB when it is there, brute-force NumPy otherwise, None on failure."""
-    results = _lance_vector_results(query, limit, project, since, as_of)
-    if results is not None:
-        return results
+    """Brute-force NumPy over the legacy vectors, None on failure.
+
+    LanceDB stood in front of this until 2026-09-07. It was reachable only
+    from this deadline-less legacy path, its table had never been built on
+    the installed vault, and its index was keyed to a different embedder than
+    the product's. See `docs/research/2026-09-07-lancedb-was-never-reached.md`.
+    """
     try:
         return _vector_search(query, pages, limit * 3, project, since, as_of)
     except Exception as error:  # noqa: BLE001 - a failed optional signal is reported
         print(f"  (vector search failed: {error})", file=sys.stderr)
-        return None
-
-
-def _lance_vector_results(
-    query: str,
-    limit: int,
-    project: str | None,
-    since: str | None,
-    as_of: str | None,
-) -> list[dict] | None:
-    try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from lance_store import have_lancedb
-        from lance_store import vector_search as _lance_search
-
-        if not have_lancedb():
-            return None
-        vectors = _embed_texts([query], is_query=True)
-        if not vectors:
-            return None
-        return _lance_search(vectors[0], limit * 3, project, since=since, as_of=as_of) or None
-    except Exception:  # noqa: BLE001 - optional backend
         return None
 
 

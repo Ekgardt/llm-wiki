@@ -1360,7 +1360,6 @@ _MERGEABLE_META_FIELDS = (
     "valid_to",
     "language",
     "source_id",
-    "lance_distance",
     *_GRAPH_META_FIELDS,
 )
 
@@ -1452,7 +1451,7 @@ def _new_candidate_meta(key: str, row: Mapping[str, Any]) -> dict[str, Any]:
             field: row.get(field)
             for field in ("title", "summary", "project", "timestamp", "authority",
                           "confidence", "status", "type", "valid_from", "valid_to",
-                          "language", "source_id", "lance_distance")
+                          "language", "source_id")
         }
     )
     meta["content"] = row.get("content") or row.get("summary")
@@ -2024,7 +2023,6 @@ def _rerank_row(
         "byte_start": candidate.byte_start,
         "byte_end": candidate.byte_end,
         "evidence_ids": candidate.evidence_ids,
-        "lance_distance": info.get("lance_distance"),
         "authority": info.get("authority"),
         "authority_weight": candidate.authority_weight,
         "type_weight": candidate.type_weight,
@@ -3493,7 +3491,6 @@ _LEGACY_DISPLAY_FIELDS = (
     "language",
     "source_id",
     "content",
-    "lance_distance",
     "graph_seed_id",
     "graph_direction",
     "graph_edge_type",
@@ -3660,7 +3657,6 @@ _PASSTHROUGH_HIT_FIELDS = (
     "source_id",
     "generation",
     "content",
-    "lance_distance",
     "seed_id",
     "hop",
     "direction",

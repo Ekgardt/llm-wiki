@@ -11,89 +11,6 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 
-def test_lance_distance_converted_to_named_distance_and_similarity() -> None:
-    import lance_store
-
-    rows = lance_store._rows_from_lance_hits(
-        [
-            {
-                "path": "a.md",
-                "title": "A",
-                "summary": "s",
-                "project": "demo",
-                "timestamp": "2026-01-01",
-                "_distance": 0.25,
-            },
-            {
-                "path": "b.md",
-                "title": "B",
-                "summary": "t",
-                "project": "other",
-                "timestamp": "2025-01-01",
-                "_distance": 1.0,
-            },
-        ]
-    )
-    assert rows[0]["lance_distance"] == 0.25
-    assert rows[0]["vector_score"] == pytest.approx(1.0 / (1.0 + 0.25))
-    assert rows[0]["score"] == rows[0]["vector_score"]
-    assert rows[0]["vector_score"] > rows[1]["vector_score"]
-    assert "distance" not in rows[0] or rows[0].get("lance_distance") == 0.25
-
-
-def test_lance_and_numpy_apply_identical_hard_filters() -> None:
-    import lance_store
-
-    rows = [
-        {
-            "path": "a.md",
-            "title": "A",
-            "summary": "s",
-            "project": "demo",
-            "timestamp": "2026-06-01",
-            "status": "active",
-            "valid_from": "2026-01-01",
-            "valid_to": "",
-            "score": 0.9,
-            "lance_distance": 0.1,
-            "vector_score": 0.9,
-        },
-        {
-            "path": "b.md",
-            "title": "B",
-            "summary": "t",
-            "project": "other",
-            "timestamp": "2024-01-01",
-            "status": "superseded",
-            "valid_from": "2020-01-01",
-            "valid_to": "2025-01-01",
-            "score": 0.95,
-            "lance_distance": 0.05,
-            "vector_score": 0.95,
-        },
-        {
-            "path": "c.md",
-            "title": "C",
-            "summary": "u",
-            "project": "demo",
-            "timestamp": "2026-03-01",
-            "status": "active",
-            "valid_from": "2026-01-01",
-            "valid_to": "",
-            "score": 0.8,
-            "lance_distance": 0.2,
-            "vector_score": 0.8,
-        },
-    ]
-    filtered = lance_store.apply_vector_filters(
-        rows,
-        project="demo",
-        since="2026-01-01",
-        as_of="2026-07-01",
-    )
-    assert [r["path"] for r in filtered] == ["a.md", "c.md"]
-
-
 def test_stale_vector_state_refuses_dense_with_base_fallback(tmp_path, monkeypatch) -> None:
     np = pytest.importorskip("numpy")
     import search_memory
@@ -172,11 +89,3 @@ def test_stale_vector_state_refuses_dense_with_base_fallback(tmp_path, monkeypat
     assert all(r["fallback_reason"] == "generation_vectors_unavailable" for r in results)
 
 
-def test_lance_module_docs_match_ivf_pq_not_hnsw() -> None:
-    import lance_store
-
-    src = Path(lance_store.__file__).read_text(encoding="utf-8")
-    assert "IVF_PQ" in src
-    # Module docs must not claim HNSW is the selected default index.
-    assert "vector IVF_PQ" in src or "IVF_PQ" in src.split("Architecture", 1)[-1]
-    assert "HNSW" not in src.split('"""', 2)[1]

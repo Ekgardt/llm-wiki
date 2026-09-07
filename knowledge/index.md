@@ -59,6 +59,7 @@ This index catalogs durable memory distilled from AI agent sessions
 - [[knowledge/notes/reliable-memory-stage-2]] — Stage 2 keeps Markdown authoritative while adding recoverable transactions, durable checkpoints, safe archives, versioned compile caching, a fenced priority queue, and evidence-backed claims.
 - [[knowledge/notes/rerank-tier-ordering-decision]] — when the reranker reads only a bounded prefix of the
 - [[knowledge/notes/retire-cursor-and-antigravity-decision]] — Cursor and Antigravity stop being supported hosts of LLM Wiki;
+- [[knowledge/notes/retire-lancedb-decision]] — LanceDB is removed from the product — its table was never built on the installed vault, its only path was the deadline-less legacy search, and its index was keyed to a different embedder than the product's.
 - [[knowledge/notes/secret-shape-not-secret-name-decision]] — A key named `token` proves nothing about what follows it,
 - [[knowledge/notes/self-resolving-health-findings-decision]] — a health finding describes a live condition and returns to
 - [[knowledge/notes/session-evidence-retention-decision]] — every session leaves a redacted, searchable copy of itself

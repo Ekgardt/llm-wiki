@@ -290,9 +290,10 @@ def normalized_with_relationship(claim_range: PositionRange) -> NormalizedAnalys
 
 
 def normalized_with_diagnostic(
-    claim_range: PositionRange = PositionRange(0, 4),
+    claim_range: PositionRange | None = None,
     related: tuple[RelatedLocation, ...] = (),
 ) -> NormalizedAnalysis:
+    claim_range = claim_range or PositionRange(0, 4)
     current_run = run(
         declared_capabilities=(Capability.DEFINITIONS, Capability.DIAGNOSTICS)
     )
@@ -359,14 +360,19 @@ def test_closed_enums_have_exact_values() -> None:
 
 def test_expected_source_is_frozen_bounded_graph_membership() -> None:
     item = ExpectedSource("source:a", SOURCE_RECORDS[0].sha256, "included")
-    assert item.source_id == "source:a"
-    assert item.source_sha256 == SOURCE_RECORDS[0].sha256
-    assert item.disposition == "included"
+    assert (item.source_id, item.source_sha256, item.disposition) == (
+        "source:a",
+        SOURCE_RECORDS[0].sha256,
+        "included",
+    )
     assert scope().expected_source_ids == ("source:a", "source:b")
     assert "expected_source_ids" not in {item.name for item in fields(AnalysisScope)}
     assert "__dict__" not in dir(item)
     with pytest.raises(FrozenInstanceError):
         item.disposition = "excluded"  # type: ignore[misc]
+
+
+def test_expected_source_refuses_a_bad_digest_or_disposition() -> None:
     with pytest.raises(ValueError, match="sha256"):
         ExpectedSource("source:a", "bad", "included")
     with pytest.raises(ValueError, match="disposition"):
@@ -389,6 +395,10 @@ def test_analysis_identity_has_exact_fields_and_is_change_sensitive() -> None:
         "environment_sha256", "dependency_state_sha256", "position_encoding", "analysis_sha256",
     )
     assert base.recompute_analysis_sha256() == base.analysis_sha256
+
+
+def test_analysis_identity_changes_with_every_field() -> None:
+    base = identity()
     for name in tuple(base.as_dict())[:-2]:
         assert replace(base, **{name: SHA[15]}).recompute_analysis_sha256() != base.analysis_sha256
     changed_encoding = replace(base, position_encoding=PositionEncoding.UTF16)
@@ -436,17 +446,31 @@ def test_incomplete_duplicate_or_wrong_coverage_is_not_closed_world(damage: str)
         Coverage(current.scope_id, "source:a", Capability.REFERENCES, CoverageStatus.COMPLETE, True, None),
         Coverage(current.scope_id, "source:b", Capability.REFERENCES, CoverageStatus.COMPLETE, True, None),
     ]
-    if damage == "missing":
-        rows.pop()
-    elif damage == "duplicate":
-        rows.append(rows[0])
-    elif damage == "extra":
-        rows.append(Coverage(current.scope_id, "source:c", Capability.REFERENCES, CoverageStatus.COMPLETE, True, None))
-    elif damage == "partial":
-        rows[0] = replace(rows[0], status=CoverageStatus.PARTIAL, closed_world_eligible=False, reason="partial")
-    else:
-        rows[0] = replace(rows[0], closed_world_eligible=False)
+    _DAMAGE[damage](rows, current)
     assert closed_world(current, tuple(rows), Capability.REFERENCES) is False
+
+
+def _extra_row(rows: list, current) -> None:
+    rows.append(
+        Coverage(current.scope_id, "source:c", Capability.REFERENCES, CoverageStatus.COMPLETE, True, None)
+    )
+
+
+def _partial_row(rows: list, current) -> None:
+    rows[0] = replace(rows[0], status=CoverageStatus.PARTIAL, closed_world_eligible=False, reason="partial")
+
+
+def _ineligible_row(rows: list, current) -> None:
+    rows[0] = replace(rows[0], closed_world_eligible=False)
+
+
+_DAMAGE = {
+    "missing": lambda rows, current: rows.pop(),
+    "duplicate": lambda rows, current: rows.append(rows[0]),
+    "extra": _extra_row,
+    "partial": _partial_row,
+    "ineligible": _ineligible_row,
+}
 
 
 def test_closed_world_ignores_neither_wrong_scope_nor_capability() -> None:
@@ -762,6 +786,9 @@ def test_helper_round_trips(snapshot: CorpusSnapshot) -> None:
     assert current_identity.source_manifest_sha256 == snapshot.corpus_sha256
     assert current_run.identity.source_manifest_sha256 == snapshot.corpus_sha256
     assert analysis.run.run_id == current_scope.run_id
+
+
+def test_helper_run_carries_the_requested_outcome(snapshot: CorpusSnapshot) -> None:
     assert make_run(snapshot, outcome="partial").outcome is AnalysisOutcome.PARTIAL
 
 
@@ -781,9 +808,11 @@ def test_verify_native_analysis_accepts_valid_fixture(snapshot: CorpusSnapshot) 
     analysis = make_normalized_analysis(snapshot, make_analysis_scope(snapshot))
     batch = verify_native_analysis(snapshot, analysis)
     assert batch.analysis is analysis
-    assert batch.analysis_mode == "native-syntax"
-    assert batch.source_manifest_sha256 == snapshot.corpus_sha256
-    assert batch.analysis_sha256 == analysis.run.identity.analysis_sha256
+    assert (batch.analysis_mode, batch.source_manifest_sha256, batch.analysis_sha256) == (
+        "native-syntax",
+        snapshot.corpus_sha256,
+        analysis.run.identity.analysis_sha256,
+    )
     assert batch.receipt_sha256 is batch.consent_grant_id is batch.consent_revision is batch.lease_id is None
 
 

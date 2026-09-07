@@ -482,33 +482,3 @@ def test_legacy_numpy_validation_rejects_bad_meta(tmp_path, monkeypatch):
     assert hits is None
 
 
-def test_lance_upsert_does_not_drop_live_when_generation_mode(monkeypatch, tmp_path):
-    import lance_store
-
-    dropped = []
-
-    class FakeDB:
-        def drop_table(self, name):
-            dropped.append(name)
-            raise AssertionError(f"must not drop live table {name}")
-
-        def create_table(self, *_a, **_k):
-            raise AssertionError("legacy upsert path disabled for generation mode")
-
-        def table_names(self):
-            return [lance_store.TABLE_NAME]
-
-    monkeypatch.setattr(lance_store, "_get_db", lambda: FakeDB())
-    # Generation-oriented publish API must not drop live TABLE_NAME.
-    result = lance_store.publish_generation_vectors(
-        generation_dir=tmp_path / "gen",
-        paths=["a.md"],
-        titles=["A"],
-        summaries=["s"],
-        projects=[""],
-        timestamps=[""],
-        vectors=[[0.1] * lance_store.EMBEDDING_DIM],
-        model="m",
-    )
-    assert result["status"] in {"ok", "skipped"}
-    assert lance_store.TABLE_NAME not in dropped
