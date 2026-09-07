@@ -56,7 +56,11 @@ CBM_PROJECT = "home-user-llm-wiki"
 CALL_BUDGET_SECONDS = 60.0
 KILL_GRACE_SECONDS = 10.0
 ANSWER_EXCERPT_CHARS = 4000
-SIDES = ("llm_wiki", "llm_wiki_best", "cbm")
+# Third-party servers are addressed by the command that starts them, because
+# neither speaks anything but MCP over stdio. Pinned by version: a benchmark
+# whose competitor changes under it measures the weather.
+TRACE_COMMAND = ["npx", "-y", "trace-mcp@3.22.0", "serve"]
+SIDES = ("llm_wiki", "llm_wiki_best", "cbm", "trace_mcp")
 
 
 def load_tasks(path: Path) -> dict:
@@ -190,10 +194,29 @@ def run_cbm_call(call: dict, directory: str) -> dict:
     return _timed_subprocess(cmd, _cbm_outcome)
 
 
+def run_trace_mcp_call(call: dict, directory: str) -> dict:
+    """One call against a freshly started trace-mcp, cost and all.
+
+    Started per call, like every other side: the stand measures what a caller
+    pays, and a caller that keeps a server warm is a different measurement
+    which nobody here is making.
+    """
+    from mcp_stdio_client import call_tool
+
+    return call_tool(
+        TRACE_COMMAND,
+        call["tool"],
+        call["arguments"],
+        timeout=CALL_BUDGET_SECONDS,
+        cwd=directory,
+    )
+
+
 _RUNNERS = {
     "llm_wiki": run_llm_wiki_call,
     "llm_wiki_best": run_llm_wiki_call,
     "cbm": run_cbm_call,
+    "trace_mcp": run_trace_mcp_call,
 }
 
 

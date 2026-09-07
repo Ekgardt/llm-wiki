@@ -189,3 +189,8 @@ benchmark/flush-classification-live*.json
 
 # Agent worktrees are throwaway checkouts, never repository content.
 .claude/worktrees/
+
+# Third-party code-intelligence tools measured by benchmark/code-parity.
+# Their indexes and configuration are theirs, not ours, and never ship.
+.trace-mcp/
+.serena/

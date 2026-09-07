@@ -17,7 +17,7 @@ import argparse
 import json
 from pathlib import Path
 
-SIDES = ("llm_wiki", "llm_wiki_best", "cbm")
+SIDES = ("llm_wiki", "llm_wiki_best", "cbm", "trace_mcp")
 PAIR = ("llm_wiki_best", "cbm")
 COLUMNS = (
     "correct",
