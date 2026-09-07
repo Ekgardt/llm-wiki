@@ -62,10 +62,32 @@ def _age_seconds(created_at: object, now: float) -> float:
     return now - started.timestamp()
 
 
-def _is_orphaned(row: object, now: float) -> bool:
+def _is_orphaned(row: object, now: float, live_tokens: frozenset[str]) -> bool:
+    """Nobody is coming back for this row.
+
+    A reserved row has no transaction, so the age of its transaction is the
+    age of nothing and used to read as infinite — which made every reservation
+    orphaned the instant it was taken, including one a live writer was in the
+    middle of. The lease answers it exactly: a reservation whose lease is still
+    in `project_leases` and has not expired belongs to a writer that is alive,
+    whatever its age, and this must not touch it.
+    """
+    if str(row["lease_token"] or "") in live_tokens:
+        return False
     if not str(row["occurrence_id"]).startswith(BATCH_NAME_PREFIX):
         return True
     return _age_seconds(row["created_at"], now) >= STALE_CHECKPOINT_SECONDS
+
+
+def live_lease_tokens(database) -> frozenset[str]:
+    """The lease tokens a project writer still holds, by the coordinator's clock."""
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    rows = database.execute(
+        "SELECT lease_token FROM project_leases WHERE expires_at > ?", (now,)
+    ).fetchall()
+    return frozenset(str(row[0]) for row in rows if row[0])
 
 
 def orphaned_rows(store: ProjectStore) -> list[tuple[str, int, str, str]]:
@@ -75,15 +97,17 @@ def orphaned_rows(store: ProjectStore) -> list[tuple[str, int, str, str]]:
     now = datetime.now(timezone.utc).timestamp()
     with store.coordinator._connect() as database:  # noqa: SLF001
         rows = database.execute(
-            "SELECT c.project, c.sequence, c.state, c.occurrence_id, t.created_at "
+            "SELECT c.project, c.sequence, c.state, c.occurrence_id, "
+            "c.lease_token, t.created_at "
             "FROM project_checkpoints AS c "
             'LEFT JOIN "transaction" AS t ON t.id = c.transaction_id '
             "WHERE c.state != 'committed' ORDER BY c.project, c.sequence"
         ).fetchall()
+        live = live_lease_tokens(database)
     return [
         (row["project"], row["sequence"], row["state"], row["occurrence_id"])
         for row in rows
-        if _is_orphaned(row, now)
+        if _is_orphaned(row, now, live)
     ]
 
 

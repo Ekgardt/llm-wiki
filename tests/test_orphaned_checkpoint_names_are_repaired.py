@@ -193,10 +193,14 @@ def test_a_batch_name_that_will_never_return_is_repaired_once_it_is_old(monkeypa
     fresh = (now - timedelta(seconds=60)).isoformat()
 
     assert repair._is_orphaned(
-        {"occurrence_id": "batch:abc", "created_at": old}, now.timestamp()
+        {"occurrence_id": "batch:abc", "created_at": old, "lease_token": ""},
+        now.timestamp(),
+        frozenset(),
     )
     assert not repair._is_orphaned(
-        {"occurrence_id": "batch:abc", "created_at": fresh}, now.timestamp()
+        {"occurrence_id": "batch:abc", "created_at": fresh, "lease_token": ""},
+        now.timestamp(),
+        frozenset(),
     )
 
 
@@ -208,12 +212,22 @@ def test_a_name_from_before_the_batch_scheme_is_repaired_at_any_age() -> None:
     now = datetime.now(timezone.utc)
 
     assert repair._is_orphaned(
-        {"occurrence_id": "event-1", "created_at": now.isoformat()}, now.timestamp()
+        {"occurrence_id": "event-1", "created_at": now.isoformat(), "lease_token": ""},
+        now.timestamp(),
+        frozenset(),
     )
 
 
 def test_a_row_with_no_transaction_time_is_treated_as_walled_up() -> None:
-    """No timestamp is not evidence that a request is still coming."""
+    """No timestamp is not evidence that a request is still coming.
+
+    Narrowed on 2026-09-07: no timestamp and no live lease. A reserved row has
+    no transaction, so its transaction has no age, and reading that as "old
+    enough to take" made every reservation orphaned the instant it was taken.
+    """
     import repair_orphaned_checkpoint_names as repair
 
-    assert repair._is_orphaned({"occurrence_id": "batch:abc", "created_at": None}, 0.0)
+    walled = {"occurrence_id": "batch:abc", "created_at": None, "lease_token": "gone"}
+
+    assert repair._is_orphaned(walled, 0.0, frozenset())
+    assert not repair._is_orphaned(walled, 0.0, frozenset({"gone"}))
