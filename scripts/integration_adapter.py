@@ -1675,6 +1675,43 @@ def _bounded_checkpoint_error(error: BaseException) -> str:
     return " ".join(message.split())[:MAX_CHECKPOINT_ERROR_CHARS]
 
 
+# What a lost race says on its way out. Every one of these means another writer
+# holds the project right now and the next session end carries the same event —
+# not that a checkpoint was lost. Measured on this vault on 2026-09-07:
+# `no-hands` logged four of these in four minutes while its committed sequence
+# advanced from 836 to 838, so nothing was missing; only the log said so.
+CHECKPOINT_CONTENTION_MARKERS = (
+    "owner_busy",
+    "ProjectPendingPriorError",
+    "operation_id is already bound to a different request",
+    "writer is busy",
+    "database is locked",
+    # The state lock is held by another writer; the event is queued in
+    # `project_checkpoint_pending` and the next drain carries it. Measured
+    # 2026-09-07: the only two lines in the recent trail that were not already
+    # contention were this, three seconds apart, while checkpoints kept
+    # committing.
+    "Could not acquire state lock",
+)
+
+
+def _is_contention(message: str) -> bool:
+    return any(marker in message for marker in CHECKPOINT_CONTENTION_MARKERS)
+
+
+def _checkpoint_log_kind(message: str) -> str:
+    """A lost race is retried by the next session; a failure is not.
+
+    Both used to be written as `project checkpoint:` and counted together, so
+    the health check read six hundred retries as six hundred failures and said
+    "still happening" on a vault where nothing was going wrong. Naming them
+    apart costs one word and makes the count mean something again.
+    """
+    if _is_contention(message):
+        return "project checkpoint contention"
+    return "project checkpoint"
+
+
 def _log_checkpoint_error(error: BaseException) -> None:
     """Best-effort bounded diagnostics for fail-open lifecycle capture."""
     try:
@@ -1683,7 +1720,7 @@ def _log_checkpoint_error(error: BaseException) -> None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().isoformat(timespec="seconds")
         with log_path.open("a", encoding="utf-8") as stream:
-            stream.write(f"[{timestamp}] project checkpoint: {message}\n")
+            stream.write(f"[{timestamp}] {_checkpoint_log_kind(message)}: {message}\n")
     except Exception:  # noqa: BLE001
         pass
 
