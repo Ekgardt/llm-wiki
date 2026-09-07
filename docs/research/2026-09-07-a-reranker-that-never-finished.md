@@ -106,6 +106,18 @@ numbers are inflated and proportions are what count):
   scripts import"), so one process cannot serve two disposable vaults. Not
   done; would need the product to take its root at call time.
 
+## Two workers, four cores, eight threads
+
+Each worker's torch opened four intra-op threads, so the two workers ran
+eight on four cores. Measured with the machine quiet, two workers embedding
+131 chunks side by side: 28.5 s each at four threads, **15.6 s each at
+two**. PyTorch's tuning guide says the same: with M processes on N cores
+set each to `floor(N/M)` threads to avoid oversubscription
+(https://docs.pytorch.org/tutorials/recipes/recipes/tuning_guide.html). The
+stand now sets `OMP_NUM_THREADS` to that share for each worker unless the
+operator set one. Expected on the runs: embedding and reranking in roughly
+half the time per question; unmeasured on a full run until the next one.
+
 ## What this changes for the measurements
 
 Every run from here has a reranker in it. The next three runs are therefore

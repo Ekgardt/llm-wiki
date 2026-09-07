@@ -136,7 +136,25 @@ def _worker_environment(args: argparse.Namespace) -> dict[str, str]:
     environment.pop("LLM_WIKI_STATE_ROOT", None)
     environment["MEMORY_LLM_PROVIDER"] = args.provider
     environment["MEMORY_LLM_TIMEOUT_S"] = str(args.provider_timeout)
+    environment.setdefault("OMP_NUM_THREADS", str(worker_threads(args.concurrency)))
     return environment
+
+
+def worker_threads(concurrency: int, cores: int | None = None) -> int:
+    """The cores one worker may use, so two workers do not each claim all four.
+
+    Every worker's torch opened as many threads as the machine has cores, so
+    two workers ran eight threads on four cores. Measured 2026-09-07 on 131
+    chunks of this vault, two workers side by side: 28.5 s each at four
+    threads, 15.6 s each at two — the same work in 55% of the time, because
+    the threads stopped fighting for the cores. An operator who sets
+    OMP_NUM_THREADS keeps their value.
+    See `docs/research/2026-09-07-a-reranker-that-never-finished.md`.
+    """
+    import os
+
+    available = cores or os.cpu_count() or 1
+    return max(1, available // max(1, concurrency))
 
 
 def _subprocess_failure(question: dict, detail: str) -> dict:
