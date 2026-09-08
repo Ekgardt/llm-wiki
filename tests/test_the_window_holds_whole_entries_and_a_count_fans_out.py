@@ -261,9 +261,9 @@ def test_a_reply_that_is_not_queries_fans_out_to_nothing() -> None:
     assert aggregation_pass.fan_out_queries("How many?", [], lambda prompt: replies) == ["one", "two"]
 
 
-def test_at_most_five_queries_are_run() -> None:
-    reply = json.dumps({"queries": [f"query {index}" for index in range(9)]})
-    assert len(aggregation_pass.fan_out_queries("How many?", [], lambda prompt: reply)) == 5
+def test_at_most_twelve_queries_are_run() -> None:
+    reply = json.dumps({"queries": [f"query {index}" for index in range(20)]})
+    assert len(aggregation_pass.fan_out_queries("How many?", [], lambda prompt: reply)) == 12
 
 
 def test_a_piece_more_searches_agree_on_moves_ahead_of_a_piece_one_search_found() -> None:

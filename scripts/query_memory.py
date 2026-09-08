@@ -343,21 +343,26 @@ def _entry_pieces(snapshot: object) -> dict[tuple, list]:
     return pieces
 
 
-def _with_entry_siblings(snapshot: object, selected: tuple, whole: int | None = None) -> tuple:
+def _with_entry_siblings(
+    snapshot: object, selected: tuple, whole: int | None = None, partner: bool = True
+) -> tuple:
     """Every piece of the top entries, in byte order, where each entry first ranked.
 
-    The pieces of an entry past the limit stay as retrieval chose them.
+    The pieces of an entry past the limit stay as retrieval chose them, each
+    with its partner turn unless `partner` is off — a count reads what the
+    user said, not what the assistant replied.
     """
     limit = _whole_entry_limit(whole)
     pieces = _entry_pieces(snapshot)
     kept: list = []
-    whole: set[tuple] = set()
+    admitted: set[tuple] = set()
     for chunk in selected:
         key = _entry_key(chunk)
-        _admit(key, whole, limit)
+        _admit(key, admitted, limit)
+        siblings = _pieces_of(chunk, key, admitted, pieces, partner)
         # The retrieved piece leads its entry, so shedding reaches the siblings
         # first; the reader still gets the entry in byte order.
-        kept.extend(piece for piece in (chunk, *_pieces_of(chunk, key, whole, pieces)) if piece not in kept)
+        kept.extend(piece for piece in (chunk, *siblings) if piece not in kept)
     return tuple(kept)
 
 
@@ -369,10 +374,14 @@ def _admit(key: tuple, whole: set[tuple], limit: int | None) -> None:
         whole.add(key)
 
 
-def _pieces_of(chunk: object, key: tuple, whole: set[tuple], pieces: Mapping[tuple, list]) -> list:
+def _pieces_of(
+    chunk: object, key: tuple, whole: set[tuple], pieces: Mapping[tuple, list], partner: bool
+) -> list:
     """The whole entry for an admitted one; the turn with its partner otherwise."""
     if key in whole:
         return pieces[key]
+    if not partner:
+        return [chunk]
     return _with_partner(chunk, pieces[key])
 
 
@@ -483,6 +492,7 @@ def build_grounded_context(
     budget: object | None = None,
     whole: int | None = None,
     question: str | None = None,
+    partner: bool = True,
 ) -> GroundedContext:
     """Group retrieved children by parent and expose only captured source spans.
 
@@ -499,7 +509,7 @@ def build_grounded_context(
     index_text, chosen = _profile_selection(
         snapshot, candidates, vault=vault, profile=normalized_profile
     )
-    selected = _with_entry_siblings(snapshot, chosen, whole)
+    selected = _with_entry_siblings(snapshot, chosen, whole, partner)
     parent_paths, sources, compiled = _fitted_selection(
         snapshot,
         selected,
@@ -1475,7 +1485,7 @@ class _AnswerPass:
         return len(self.passes) > 1
 
     def run(
-        self, candidates: tuple, note: str = "", whole: int | None = None
+        self, candidates: tuple, note: str = "", whole: int | None = None, partner: bool = True
     ) -> tuple[dict[str, object], GroundedContext]:
         _check_deadline(self.deadline)
         self.passes.append(note)
@@ -1490,6 +1500,7 @@ class _AnswerPass:
             budget=_evidence_budget(self.budget, fixed_tokens),
             whole=whole,
             question=self.question,
+            partner=partner,
         )
         prompt = question_block + context.prompt_context
         _require_prompt_fits(system_prompt + prompt, self.budget)
@@ -1680,7 +1691,8 @@ def _count_step(
     if more is None and not note:
         return current, pool, False
     cited = _cited_candidates(context, answer)
-    second = single.run(_beyond(more or pool, pool, cited), note + COUNTING_RULE)
+    # A count reads the turns retrieval found, not the replies beside them.
+    second = single.run(_beyond(more or pool, pool, cited), note + COUNTING_RULE, partner=False)
     _record_second_look(single.question, context, widened is not None, bool(note), more is not None)
     return _adopted(current, second), more or pool, more is not None
 

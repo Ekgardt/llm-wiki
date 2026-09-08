@@ -501,8 +501,13 @@ def _instrumented_generator(metrics: dict, gold: str = ""):
 
 def _call_kinds() -> dict[str, str]:
     from aggregation_pass import CLUSTER_SYSTEM_PROMPT, FANOUT_SYSTEM_PROMPT
+    from refusal_pass import MISSING_SYSTEM_PROMPT
 
-    return {CLUSTER_SYSTEM_PROMPT: "cluster_calls", FANOUT_SYSTEM_PROMPT: "fanout_calls"}
+    return {
+        CLUSTER_SYSTEM_PROMPT: "cluster_calls",
+        FANOUT_SYSTEM_PROMPT: "fanout_calls",
+        MISSING_SYSTEM_PROMPT: "search_calls",
+    }
 
 
 def _count_call(metrics: dict, system_prompt: str) -> None:
