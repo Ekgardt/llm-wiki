@@ -115,10 +115,8 @@ axes where the field is weak or absent.
     1k tokens" and "seconds per correct answer". Round-level values put us
     near 4k tokens; at 0.95 that is 2× Mem0, 7× Mastra, and every correct
     answer carries a checkable citation, which none of theirs do.
-13. **Fully offline arm.** Every >0.94 result uses a paid GPT reader. An
-    Ollama-only run (local reader, local embedder, local reranker) at
-    0.90 would be a number nobody else has at all. Cost: zero. Rule 4 in
-    one line.
+13. **Fully offline arm — parked.** The owner said on 2026-09-08: no
+    Ollama for now; aim at 1.0 first.
 14. **Reproducibility as a feature.** Seeded, per-question answers,
     hypothesis file, open stand, three seeds, 500 questions, two judges'
     protocols. The competitor numbers are single runs on private stands;
@@ -127,7 +125,26 @@ axes where the field is weak or absent.
 
 Targets after 1–14, stated as targets, not promises: official ≥ 0.96,
 multi-session ≥ 0.90, knowledge-update ≥ 0.95, BEAM-10M ≥ 0.70, refusal
-≥ 0.90 with over-refusal ≤ 0.05, tokens ≤ 4k, search ≤ 1 s, offline arm
-≥ 0.90. Each lever gets its own dated research note before code, and its
+≥ 0.90 with over-refusal ≤ 0.05, tokens ≤ 4k, search ≤ 1 s. Each lever gets its own dated research note before code, and its
 own run against the spread. Levers 8 and 9 are the ones I would build
 first after runs 2–3: they use what only we have.
+
+## Part 3 — the road to one (2026-09-08, later the same day)
+
+The owner's direction: aim at 1.0. `docs/research/2026-09-08-the-road-to-one.md`
+reads run 1's errors by question shape and finds four classes with cures:
+
+15. **Enumerate-then-count with saturation retrieval.** Counts are 76 of
+    186 questions and our worst class (0.70): every wrong count is one
+    instance short. Gather every session about the entity, deliver whole
+    sessions, list each instance with date and citation, then count.
+16. **Deterministic date arithmetic.** The model names the event date with
+    its citation; code computes days/weeks; relative windows widened.
+    Date questions: 0.67 today.
+17. **Persona-grounded preference.** Never refuse a preference question;
+    answer from what the user said about themselves.
+18. **Latest-wins and previous-value for knowledge-update.** Conflicts
+    resolve by date; "before X" returns what X superseded.
+
+The ceiling is ~0.97 (judge noise ~3%); 15–18 plus 1–2 are the shortest
+path there. Order after runs 2–3: 15, 16, 1, 5, 17, 18, 2, 9, 8.
