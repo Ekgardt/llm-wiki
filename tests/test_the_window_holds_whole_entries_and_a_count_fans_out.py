@@ -31,6 +31,7 @@ from context_budget import ContextBudget  # noqa: E402
 from corpus_snapshot import collect_corpus  # noqa: E402
 from longmemeval_vault import daily_block  # noqa: E402
 from query_memory import (  # noqa: E402
+    FANOUT_CANDIDATES,
     QA_MAX_CANDIDATES,
     WHOLE_ENTRIES_ENV,
     build_grounded_context,
@@ -227,7 +228,7 @@ def test_a_count_fans_out_and_is_answered_again_under_the_counting_rule(vault: P
     # Step one found Tribeca, so step two fanned out again, found nothing new
     # and stopped without another answer: two fan-outs, two answers.
     assert [query for query, _ in stand.queries] == ["film festival attended", "documentary screenings"] * 2
-    assert all(limit == QA_MAX_CANDIDATES for _, limit in stand.queries)
+    assert all(limit == FANOUT_CANDIDATES for _, limit in stand.queries)
     assert len(stand.fanout_prompts) == 2
     assert "- Austin Film Festival" in stand.fanout_prompts[0]
     assert len(stand.answer_prompts) == 2

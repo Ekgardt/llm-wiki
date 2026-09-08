@@ -2993,15 +2993,18 @@ def _backend_limit(limit: int, max_candidates: int | None) -> int:
 
 def _place_by_page(
     candidate: RetrievalCandidate,
-    seen: set[str],
+    seen: set[tuple],
     first: list[RetrievalCandidate],
     extras: list[RetrievalCandidate],
 ) -> None:
-    page = candidate.relative_path
-    if page in seen:
+    # The unit of a repeat is the entry — the page and the heading the chunk
+    # sits under — since 2026-09-08: a daily file holds every session of its
+    # day, and by page two sessions of one day took one slot between them.
+    entry = (candidate.relative_path, tuple(candidate.heading_path))
+    if entry in seen:
         extras.append(candidate)
         return
-    seen.add(page)
+    seen.add(entry)
     first.append(candidate)
 
 
@@ -3034,7 +3037,7 @@ def _page_diverse(
     """
     first: list[RetrievalCandidate] = []
     extras: list[RetrievalCandidate] = []
-    seen: set[str] = set()
+    seen: set[tuple] = set()
     for group in _diversity_groups(candidates):
         _place_group(group, seen, first, extras)
     return tuple(first + extras)
@@ -3042,7 +3045,7 @@ def _page_diverse(
 
 def _place_group(
     group: Sequence[RetrievalCandidate],
-    seen: set[str],
+    seen: set[tuple],
     first: list[RetrievalCandidate],
     extras: list[RetrievalCandidate],
 ) -> None:

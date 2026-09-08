@@ -94,3 +94,15 @@ One run of 200, seed 101, judged on both protocols, against the run-1
 baseline and the tasks 1–6 arm: kept if accuracy is within the spread of
 the better of the two and prompt tokens per question fall below 8k; the
 owner's metric, verified-correct per thousand tokens, is reported first.
+
+## Addendum, first live questions
+
+Single-hop questions came in at 5.9k and 8.3k prompt tokens, right, against
+run 1's 13.4k. The two counts fell: instruments 3 of 4, dinner parties 1 of
+3. The cause is coverage, not the key: twelve turn candidates reach fewer
+entries than twelve 4 KB pieces did, and the retrieval's visible-slot rule
+took one slot per *page*, so three sessions of one day competed for a slot.
+Two changes, both from the same design: the slot rule keys on the entry
+(page and heading), and the candidate count is twenty-four — for a fixed
+reading budget, finer units and more of them, which is Dense X Retrieval's
+result restated.

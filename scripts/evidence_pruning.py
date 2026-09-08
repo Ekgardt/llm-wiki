@@ -5,12 +5,14 @@ sentences of retrieved text gives up to 10x compression with minimal loss,
 and beats token pruning. Provence (arXiv:2501.16214, ICLR 2025): a
 sentence-level pruner that keeps from none to all of a passage's sentences.
 
-On captured conversations the reply is 80% of the bytes and the fact is in
-the user's turn, so a user turn is delivered whole and an assistant turn is
+A turn of more than a few sentences — a reply, or a long user message — is
 delivered as its sentences that score highest against the question, by the
-dual encoder retrieval already runs — RECOMP's extractive compressor is a
-dual encoder too. Every kept sentence keeps its byte range, so the citation
-gates hash and check it exactly as they did the whole turn.
+dual encoder retrieval already runs; RECOMP's extractive compressor is a
+dual encoder too. A short turn is delivered whole. Measured 2026-09-08 on
+a LongMemEval count with replies alone pruned: 65 KB of prompt, because the
+user's turns there run to a kilobyte each. Every kept sentence keeps its
+byte range, so the citation gates hash and check it exactly as they did the
+whole turn.
 See `docs/research/2026-09-08-small-keys-large-values-and-a-loop-that-stops.md`.
 """
 
@@ -21,7 +23,7 @@ from collections.abc import Callable, Sequence
 
 import numpy as np
 
-PRUNED_PREFIX = b"**assistant:**"
+TURN_PREFIXES = (b"**user:**", b"**assistant:**")
 # A reply with this many sentences or fewer is delivered whole; pruning a short
 # reply saves nothing and risks the one sentence that mattered.
 PRUNE_ABOVE_SENTENCES = 4
@@ -47,8 +49,8 @@ def sentence_spans(content: bytes, start: int, end: int) -> list[tuple[int, int]
 
 
 def prunes(content: bytes, start: int, end: int) -> bool:
-    """Only a reply long enough to be worth pruning."""
-    if not content[start:end].lstrip().startswith(PRUNED_PREFIX):
+    """Only a turn of a conversation, and only one long enough to be worth pruning."""
+    if not content[start:end].lstrip().startswith(TURN_PREFIXES):
         return False
     return len(sentence_spans(content, start, end)) > PRUNE_ABOVE_SENTENCES
 

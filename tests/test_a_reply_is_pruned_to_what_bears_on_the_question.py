@@ -67,14 +67,17 @@ def test_a_long_reply_keeps_its_marker_and_the_sentences_that_score(monkeypatch)
     assert "Pianos should be tuned" not in kept
 
 
-def test_a_short_reply_and_a_user_turn_are_not_pruned() -> None:
-    user_start = CONTENT.index(b"**user:**")
+def test_a_short_turn_is_not_pruned_and_a_long_one_of_either_side_is() -> None:
+    user_start = CONTENT.index(b"**user:** How do I care")
     reply_start = CONTENT.index(b"**assistant:**")
     short = CONTENT[:reply_start] + b"**assistant:** Yes. No. Maybe.\n"
+    long_user = b"**user:** One. Two. Three. Four. Five. Six.\n"
 
     assert not evidence_pruning.prunes(CONTENT, user_start, reply_start)
     assert not evidence_pruning.prunes(short, reply_start, len(short))
     assert evidence_pruning.prunes(CONTENT, reply_start, len(CONTENT))
+    assert evidence_pruning.prunes(long_user, 0, len(long_user))
+    assert not evidence_pruning.prunes(b"Plain note text. " * 9, 0, 153)
 
 
 def _vault_with(tmp_path: Path) -> tuple[Path, str]:
