@@ -113,3 +113,22 @@ def test_the_switch_at_zero_leaves_only_the_round(vault: Path, monkeypatch) -> N
     context = _context(vault, snapshot, (a_pieces[0],))
 
     assert [item.byte_start for item in context.evidence] == [a_pieces[0].byte_start]
+
+
+def test_a_pass_may_ask_for_more_entries_whole(vault: Path, monkeypatch) -> None:
+    monkeypatch.delenv(WHOLE_ENTRIES_ENV, raising=False)
+    snapshot = collect_corpus(vault, code_roots=(), daily_paths=[DAILY])
+    a_pieces, b_pieces = _pieces(snapshot, "sess_a"), _pieces(snapshot, "sess_b")
+
+    context = build_grounded_context(
+        snapshot,
+        (b_pieces[0], a_pieces[3]),
+        vault=vault,
+        profile="BASE",
+        budget=ContextBudget(None, 122_880, 1200, 512),
+        whole=2,
+    )
+
+    assert [item.byte_start for item in context.evidence] == [
+        piece.byte_start for piece in (*b_pieces, *a_pieces)
+    ]

@@ -302,10 +302,20 @@ def _matching_chunks(snapshot: object, candidates: Iterable[object]) -> tuple[ob
 # or `all`.
 WHOLE_ENTRIES_ENV = "LLMWIKI_QA_WHOLE_ENTRIES"
 WHOLE_ENTRIES_DEFAULT = 1
+# A second pass reads wider: the first fell short by an instance or a span,
+# and the entries the first answer cited or the new search found come whole.
+# Measured 2026-09-08 with one whole entry: a count of dinner parties fell from
+# 3 (right) to 2, the third party sitting in a round retrieval never named.
+SECOND_PASS_WHOLE_ENTRIES = 3
 
 
-def _whole_entry_limit() -> int | None:
-    """How many entries to bring in whole; None means every one."""
+def _whole_entry_limit(requested: int | None = None) -> int | None:
+    """How many entries to bring in whole; None means every one.
+
+    A pass may ask for its own width; the operator's variable otherwise.
+    """
+    if requested is not None:
+        return requested
     raw = os.environ.get(WHOLE_ENTRIES_ENV, "").strip().casefold()
     if raw == "all":
         return None
@@ -328,12 +338,12 @@ def _entry_pieces(snapshot: object) -> dict[tuple, list]:
     return pieces
 
 
-def _with_entry_siblings(snapshot: object, selected: tuple) -> tuple:
+def _with_entry_siblings(snapshot: object, selected: tuple, whole: int | None = None) -> tuple:
     """Every piece of the top entries, in byte order, where each entry first ranked.
 
     The pieces of an entry past the limit stay as retrieval chose them.
     """
-    limit = _whole_entry_limit()
+    limit = _whole_entry_limit(whole)
     pieces = _entry_pieces(snapshot)
     kept: list = []
     whole: set[tuple] = set()
@@ -426,8 +436,13 @@ def build_grounded_context(
     vault: Path,
     profile: str,
     budget: object | None = None,
+    whole: int | None = None,
 ) -> GroundedContext:
-    """Group retrieved children by parent and expose only captured source spans."""
+    """Group retrieved children by parent and expose only captured source spans.
+
+    `whole` is how many top entries come in whole for this call; a second pass
+    asks for more than the first.
+    """
     from context_budget import ContextBudget
 
     normalized_profile = profile.upper()
@@ -437,7 +452,7 @@ def build_grounded_context(
     index_text, chosen = _profile_selection(
         snapshot, candidates, vault=vault, profile=normalized_profile
     )
-    selected = _with_entry_siblings(snapshot, chosen)
+    selected = _with_entry_siblings(snapshot, chosen, whole)
     parent_paths, sources, compiled = _fitted_selection(
         snapshot,
         selected,
@@ -1347,7 +1362,9 @@ class _AnswerPass:
     def regenerated(self) -> bool:
         return len(self.passes) > 1
 
-    def run(self, candidates: tuple, note: str = "") -> tuple[dict[str, object], GroundedContext]:
+    def run(
+        self, candidates: tuple, note: str = "", whole: int | None = None
+    ) -> tuple[dict[str, object], GroundedContext]:
         _check_deadline(self.deadline)
         self.passes.append(note)
         system_prompt = _qa_system_prompt()
@@ -1359,6 +1376,7 @@ class _AnswerPass:
             vault=self.vault,
             profile=self.profile,
             budget=_evidence_budget(self.budget, fixed_tokens),
+            whole=whole,
         )
         prompt = question_block + context.prompt_context
         _require_prompt_fits(system_prompt + prompt, self.budget)
@@ -1453,7 +1471,7 @@ def _refusal_look(
     more = _merged(candidates, None, _searched_for_the_gap(answer, single, search))
     if more is None:
         return first
-    second = single.run(more)
+    second = single.run(more, whole=SECOND_PASS_WHOLE_ENTRIES)
     _record_second_look(single.question, context, False, False, searched=True)
     return _adopted(first, second)
 
@@ -1508,7 +1526,11 @@ def _second_look(
     # The second pass reads what the first answer cited and what is new, not
     # the whole first window again: the count's inputs are in the cited spans.
     cited = _cited_candidates(context, answer)
-    second = single.run(_beyond(more or candidates, candidates, cited), note + COUNTING_RULE)
+    second = single.run(
+        _beyond(more or candidates, candidates, cited),
+        note + COUNTING_RULE,
+        whole=SECOND_PASS_WHOLE_ENTRIES,
+    )
     _record_second_look(
         single.question, context, widened is not None, bool(note), bool(gathered)
     )

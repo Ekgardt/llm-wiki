@@ -421,6 +421,20 @@ def gold_in_candidates(question: Mapping[str, object], rows: list[dict]) -> bool
 #
 # One-based, and 0 when no candidate comes from a labelled answer session, so
 # the value is directly comparable with how many candidates the budget kept.
+def _reranker_fields(rows: list[dict]) -> dict[str, object]:
+    """Whether the cross-encoder scored this question's candidates, and why not.
+
+    Run 2 retrieved in 0.13 s a question because the stage never ran; without
+    these three fields the row could not say so.
+    """
+    head = rows[0] if rows else {}
+    return {
+        "reranker_applied": bool(head.get("reranker_applied")),
+        "reranker_fallback_reason": head.get("reranker_fallback_reason"),
+        "reranker_duration_ms": head.get("reranker_duration_ms"),
+    }
+
+
 def answer_session_rank(question: Mapping[str, object], rows: list[dict]) -> int:
     """The position of the first candidate drawn from a labelled answer session."""
     labelled = _labelled_sessions(question)
@@ -690,6 +704,7 @@ def run_question(question: dict, work: Path) -> dict:
         "answer_sessions_labelled": len(_labelled_sessions(question)),
         "gold_in_candidates": gold_in_candidates(question, rows),
         "answer_session_rank": answer_session_rank(question, rows),
+        **_reranker_fields(rows),
         **_measured_compile(root, snapshot, rows, profile),
         **build_info,
         **outcome,
