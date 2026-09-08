@@ -193,10 +193,9 @@ def test_retrieved_attacks_are_delimiter_safe_untrusted_data(tmp_path: Path, att
     )[0]
     assert "<" not in encoded_manifest and ">" not in encoded_manifest
     decoded = json.loads(encoded_manifest)
-    assert all(set(item) == {
-        "byte_end", "byte_start", "citation_id", "line_end", "line_start",
-        "relative_path", "revision", "source_sha256", "span_sha256", "text",
-    } for item in decoded)
+    # Since 2026-09-08 the manifest carries what the model reads and nothing it
+    # could mistype: the hashes and offsets stay with this process.
+    assert all(set(item) == {"citation_id", "relative_path", "text"} for item in decoded)
 
 
 def test_cached_full_orientation_cannot_spoof_its_data_boundary(tmp_path: Path) -> None:
