@@ -326,9 +326,15 @@ def _searchable(question_text: str, question_date: str) -> str:
 
 
 def _retrieved_rows(
-    question_text: str, profile: str, limit: int | None = None, *, rerank: bool = True
+    question_text: str,
+    profile: str,
+    limit: int | None = None,
+    *,
+    rerank: bool = True,
+    since: str | None = None,
+    as_of: str | None = None,
 ) -> list[dict]:
-    """The candidates for one query; a fan-out sub-query skips the cross-encoder."""
+    """The candidates for one query; a sub-query skips the cross-encoder; a dated leg bounds the days."""
     from retrieval import retrieve_via_search_memory
 
     return list(
@@ -338,6 +344,8 @@ def _retrieved_rows(
             semantic=True,
             profile=profile,
             rerank=rerank,
+            since=since,
+            as_of=as_of,
             deadline_monotonic=time.monotonic() + RETRIEVE_DEADLINE_SECONDS,
         )
     )
@@ -689,7 +697,9 @@ def run_question(question: dict, work: Path) -> dict:
         # The second look's way of asking for more than the first twelve, and
         # for what a fanned-out sub-query finds, without the cross-encoder.
         retrieve=lambda limit: _retrieved_rows(searchable, profile, limit),
-        search=lambda query, limit: _retrieved_rows(query, profile, limit, rerank=False),
+        search=lambda query, limit, **window: _retrieved_rows(
+            query, profile, limit, rerank=False, **window
+        ),
         chosen=policy(),
     )
     finished = time.monotonic()

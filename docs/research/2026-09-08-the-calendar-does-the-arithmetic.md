@@ -73,3 +73,17 @@ difference and did not state the computed figure; nothing on the rest.
 
 One run of 200, seed 101, judged; kept if the gain over the second-look
 baseline exceeds 0.035, with the temporal category reported beside it.
+
+## Addendum 2026-09-09: the dated leg (task 8)
+
+LongMemEval's time-aware query expansion — extract the time range the
+question asks about and retrieve inside it — is worth +6.8 to +11.3 points
+on temporal questions (arXiv:2410.10813, §5). Until now a daily entry
+carried no `valid_from`, so the index's own `since`/`as_of` window could
+not see it, and a question's dates reached retrieval only as words.
+
+Decision: a daily entry's `valid_from` is the date in its file name (the
+one date about an entry that is certain); a question whose expressions
+resolve to dates runs one more search inside [earliest − 3, latest + 3]
+days, and its rows join the first candidates by vote. No dates, no leg.
+The neighbourhood stays, so "four weeks ago" is still about four weeks.

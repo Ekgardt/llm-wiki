@@ -287,3 +287,19 @@ def _neighbourhood(text: str, anchor: date) -> list[str]:
         offsets = range(-NEIGHBOURHOOD_DAYS, NEIGHBOURHOOD_DAYS + 1)
         around.extend((resolved + timedelta(days=offset)).isoformat() for offset in offsets)
     return around
+
+
+def window(text: str, anchor: date) -> tuple[str, str] | None:
+    """The span of days a question's relative expressions cover, widened by the neighbourhood.
+
+    None when the text resolves no date; otherwise the earliest and latest
+    ISO days, the ends three days out, so "last weekend" reaches the entries
+    of that weekend and "four weeks ago" the week around it.
+    """
+    found = resolutions(text, anchor)
+    if not found:
+        return None
+    days = sorted(date.fromisoformat(value) for value in found.values())
+    first = days[0] - timedelta(days=NEIGHBOURHOOD_DAYS)
+    last = days[-1] + timedelta(days=NEIGHBOURHOOD_DAYS)
+    return first.isoformat(), last.isoformat()

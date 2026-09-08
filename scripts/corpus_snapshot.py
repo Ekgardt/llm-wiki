@@ -1637,6 +1637,24 @@ def _metadata_language(frontmatter: Mapping[str, object]) -> str | None:
     return language.casefold()
 
 
+_DAILY_DATE = re.compile(r"(\d{4}-\d{2}-\d{2})\.md$")
+
+
+def _dated_by_name(candidate: _Candidate) -> str | None:
+    """A daily entry's date is the one in its file name — the one certain date about it.
+
+    Since 2026-09-09 that date is its `valid_from`, so the index's own
+    since/as-of window reaches daily entries and a question's dates can bound
+    a search. See `docs/research/2026-09-08-the-calendar-does-the-arithmetic.md`.
+    """
+    if candidate.kind != "daily":
+        return None
+    match = _DAILY_DATE.search(candidate.relative)
+    if match is None:
+        return None
+    return match.group(1)
+
+
 def _metadata(frontmatter: Mapping[str, object], candidate: _Candidate) -> SourceMetadata:
     validity = _validity_mapping(frontmatter)
     return SourceMetadata(
@@ -1647,9 +1665,8 @@ def _metadata(frontmatter: Mapping[str, object], candidate: _Candidate) -> Sourc
         ),
         confidence=_metadata_value(frontmatter.get("confidence")),
         status=_metadata_status(frontmatter),
-        valid_from=_metadata_value(
-            frontmatter.get("valid_from", validity.get("from"))
-        ),
+        valid_from=_metadata_value(frontmatter.get("valid_from", validity.get("from")))
+        or _dated_by_name(candidate),
         valid_to=_metadata_value(frontmatter.get("valid_to", validity.get("to"))),
         language=_metadata_language(frontmatter),
     )

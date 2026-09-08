@@ -1410,7 +1410,13 @@ def _answer_corpus(vault: Path, deadline: float) -> object:
 
 
 def _default_candidates(
-    question: str, *, profile: str, deadline: float, limit: int = QA_MAX_CANDIDATES
+    question: str,
+    *,
+    profile: str,
+    deadline: float,
+    limit: int = QA_MAX_CANDIDATES,
+    since: str | None = None,
+    as_of: str | None = None,
 ) -> tuple[object, ...]:
     from retrieval import retrieve_via_search_memory
 
@@ -1428,6 +1434,8 @@ def _default_candidates(
         semantic=True,
         profile=profile,
         deadline_monotonic=deadline,
+        since=since,
+        as_of=as_of,
     )
     return tuple(rows)
 
@@ -1562,7 +1570,7 @@ def grounded_qa(
         generator,
         selected_deadline,
     )
-    first_candidates = _resolved_candidates(candidates, fetch)
+    first_candidates = _with_dated_leg(question, _resolved_candidates(candidates, fetch), seek)
     answer, context = _second_look(
         single, first_candidates, single.run(first_candidates), fetch, seek
     )
@@ -1572,6 +1580,25 @@ def grounded_qa(
     _record_refused_evidence(question, context, answer)
     answer.pop(DROPPED_GATES_KEY, None)
     return _published(answer, keep_unverified)
+
+
+def _with_dated_leg(
+    question: str, candidates: tuple, search: Callable[..., Iterable[object]] | None
+) -> tuple:
+    """The first candidates joined by what a search inside the question's own dates finds.
+
+    LongMemEval's time-aware expansion, +6.8 to +11.3 points on temporal
+    questions: retrieve inside the span the question asks about. The span
+    comes from the question's resolved expressions, three days out either
+    side; a question with no date runs no extra search.
+    """
+    from temporal_anchor import window
+
+    span = window(question, _asked_on(question))
+    if search is None or span is None:
+        return candidates
+    dated = tuple(search(question, QA_MAX_CANDIDATES, since=span[0], as_of=span[1]))
+    return _merged(candidates, None, dated) or candidates
 
 
 def _published(answer: dict[str, object], keep_unverified: bool) -> dict[str, object]:
@@ -2083,8 +2110,8 @@ def _resolved_search(
         return search
     if fixed:
         return None
-    return lambda query, limit: _default_candidates(
-        query, profile=profile, deadline=deadline, limit=limit
+    return lambda query, limit, **window: _default_candidates(
+        query, profile=profile, deadline=deadline, limit=limit, **window
     )
 
 
