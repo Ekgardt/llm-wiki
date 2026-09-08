@@ -90,3 +90,32 @@ measurements.
   answer mode, claim-guided loop, both layers on the stand.
 - Each lever: its own dated note if it changes design, one run of 200,
   keep if gain > 0.035.
+
+## 5. The search engines, revisited (owner's question, same day)
+
+`docs/research/2026-09-07-what-the-search-engines-do.md` found four things
+and then shelved three of them on one measurement: "the answer was in the
+prompt equally often for right and wrong answers (57% vs 58%), so retrieval
+is not the discriminator". Section 2 above shows that measurement was too
+coarse: for counts, *one* instance being in the prompt reads as "gold in
+prompt", while the missing instance is exactly what makes the count wrong.
+Retrieval of the *set* is the discriminator for 41% of the questions. So:
+
+- **Google's fan-out** (one question → 5–11 concrete sub-queries, run in
+  parallel, merged) is the saturation retrieval of lever 15. For "how many
+  festivals": queries for each festival named so far, "film festival",
+  "attended", by month. Adopted, as the retrieval half of lever 15.
+- **Perplexity's plan-then-execute, first layer tuned for recall** is the
+  reading half of lever 15: enumerate, then count; and widen the first
+  layer (24 candidates) before the cross-encoder narrows. Adopted.
+- **Yandex Spectrum, serve several readings instead of choosing** is the
+  answer to "what if the shape detector is wrong": run the plain prompt and
+  the enumerate prompt both, adopt the one whose claims verify. Also the
+  model for stand answer mode beside product refusal. Adopted as the
+  fallback rule inside lever 15.
+- **Baidu, the graph as a reasoning step before the prompt** — "how many
+  different X" is a query to structure. Our graph leg never fires today;
+  fact keys (lever 2) give it entities to fire on. Adopted with lever 2.
+
+What stays unadopted: Baidu's ERNIE-style retriever training (needs
+labelled pairs we do not have) and a learned router.

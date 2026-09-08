@@ -138,6 +138,11 @@ reads run 1's errors by question shape and finds four classes with cures:
     186 questions and our worst class (0.70): every wrong count is one
     instance short. Gather every session about the entity, deliver whole
     sessions, list each instance with date and citation, then count.
+    This is Google's fan-out (5–11 sub-queries merged) for the gathering,
+    Perplexity's plan-then-execute with a recall-first first layer for the
+    reading, and Yandex's "serve both readings" as the fallback when the
+    shape detector is wrong — the three search-engine findings shelved on
+    2026-09-07, revived by the error classes (research note §5).
 16. **Deterministic date arithmetic.** The model names the event date with
     its citation; code computes days/weeks; relative windows widened.
     Date questions: 0.67 today.
