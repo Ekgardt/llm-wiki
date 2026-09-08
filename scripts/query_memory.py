@@ -1484,7 +1484,12 @@ class _AnswerPass:
         return len(self.passes) > 1
 
     def run(
-        self, candidates: tuple, note: str = "", whole: int | None = None, partner: bool = True
+        self,
+        candidates: tuple,
+        note: str = "",
+        whole: int | None = None,
+        partner: bool = True,
+        prune: bool = True,
     ) -> tuple[dict[str, object], GroundedContext]:
         _check_deadline(self.deadline)
         self.passes.append(note)
@@ -1498,7 +1503,7 @@ class _AnswerPass:
             profile=self.profile,
             budget=_evidence_budget(self.budget, fixed_tokens),
             whole=whole,
-            question=self.question,
+            question=_question_for_pruning(self.question, prune),
             partner=partner,
         )
         prompt = question_block + context.prompt_context
@@ -1690,8 +1695,12 @@ def _count_step(
     if more is None and not note:
         return current, pool, False
     cited = _cited_candidates(context, answer)
-    # A count reads the turns retrieval found, not the replies beside them.
-    second = single.run(_beyond(more or pool, pool, cited), note + COUNTING_RULE, partner=False)
+    # A count reads the turns retrieval found, whole and without the replies
+    # beside them: the instances are the user's own sentences, and measured
+    # 2026-09-08 a pruned turn lost "my acoustic guitar" to the budget.
+    second = single.run(
+        _beyond(more or pool, pool, cited), note + COUNTING_RULE, partner=False, prune=False
+    )
     _record_second_look(single.question, context, widened is not None, bool(note), more is not None)
     return _adopted(current, second), more or pool, more is not None
 
@@ -2164,6 +2173,13 @@ def _qa_system_prompt() -> str:
         "bears on the question and its date; then the claims. "
         "Output only JSON matching this closed schema: " + schema_json
     )
+
+
+def _question_for_pruning(question: str, prune: bool) -> str | None:
+    """The question the pruner scores against, or None to deliver turns whole."""
+    if prune:
+        return question
+    return None
 
 
 def _evidence_budget(total_budget: object, fixed_tokens: int) -> object:
