@@ -503,9 +503,43 @@ def dated_question(question: dict) -> str:
     return f"{question['question']}\n(Current date: {question['question_date']})"
 
 
-def hypothesis_of(document: dict) -> str:
-    claims = document.get("claims") or []
-    return " ".join(str(claim.get("text", "")) for claim in claims).strip()
+POLICY_ENV = "LLMWIKI_BENCH_POLICY"
+POLICIES = ("refuse", "answer")
+UNCITED = "(uncited) "
+
+
+def policy() -> str:
+    """`refuse` keeps the product's contract; `answer` reports a dropped claim as the answer."""
+    chosen = os.environ.get(POLICY_ENV, "refuse").strip().casefold()
+    if chosen in POLICIES:
+        return chosen
+    return "refuse"
+
+
+def _joined(texts) -> str:
+    return " ".join(str(text) for text in texts).strip()
+
+
+def _uncited_hypothesis(document: dict) -> str:
+    unverified = _joined(document.get("unverified_claims") or [])
+    if not unverified:
+        return ""
+    return UNCITED + unverified
+
+
+def hypothesis_of(document: dict, chosen: str = "refuse") -> str:
+    text = _joined(claim.get("text", "") for claim in document.get("claims") or [])
+    if text or chosen != "answer":
+        return text
+    return _uncited_hypothesis(document)
+
+
+def _status_under(document: dict, hypothesis: str, chosen: str) -> dict:
+    """The row's status: the product's, or `answered` where answer mode spoke uncited."""
+    status = str(document.get("status"))
+    if not hypothesis.startswith(UNCITED):
+        return {"status": status, "uncited": False, "refusal_status": None}
+    return {"status": "answered", "uncited": True, "refusal_status": status}
 
 
 def error_kind(exc: BaseException) -> str:
@@ -572,6 +606,7 @@ def _answer_outcome(
     gold: str = "",
     retrieve=None,
     search=None,
+    chosen: str = "refuse",
 ) -> dict:
     from context_budget import ContextBudget
     from query_memory import QA_MAX_OUTPUT_TOKENS, grounded_qa
@@ -584,6 +619,7 @@ def _answer_outcome(
             candidates=rows,
             retrieve=retrieve,
             search=search,
+            keep_unverified=chosen == "answer",
             generator=_instrumented_generator(metrics, gold),
             profile=profile,
             budget=ContextBudget(None, _answer_budget(), QA_MAX_OUTPUT_TOKENS, 512),
@@ -596,9 +632,11 @@ def _answer_outcome(
             "error": f"{type(exc).__name__}: {exc}"[:500],
             "error_kind": error_kind(exc),
         }
+    hypothesis = hypothesis_of(document, chosen)
     return {
-        "status": str(document.get("status")),
-        "hypothesis": hypothesis_of(document),
+        **_status_under(document, hypothesis, chosen),
+        "hypothesis": hypothesis,
+        "policy": chosen,
         "reason": document.get("reason"),
         "claims": len(document.get("claims") or []),
         "citations": len(document.get("citations") or []),
@@ -633,6 +671,7 @@ def run_question(question: dict, work: Path) -> dict:
         # for what a fanned-out sub-query finds, without the cross-encoder.
         retrieve=lambda limit: _retrieved_rows(searchable, profile, limit),
         search=lambda query, limit: _retrieved_rows(query, profile, limit, rerank=False),
+        chosen=policy(),
     )
     finished = time.monotonic()
     return {

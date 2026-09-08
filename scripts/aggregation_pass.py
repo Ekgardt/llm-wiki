@@ -183,7 +183,7 @@ def fan_out_queries(
     question: str, inputs: Sequence[str], ask: Callable[[str], str | None]
 ) -> list[str]:
     """Up to five concrete sub-queries about the kind of thing being counted."""
-    return _parsed_queries(ask(_fanout_prompt(question, inputs)), question)[:MAX_FANOUT]
+    return parsed_queries(ask(_fanout_prompt(question, inputs)), question)[:MAX_FANOUT]
 
 
 def _fanout_prompt(question: str, inputs: Sequence[str]) -> str:
@@ -191,7 +191,7 @@ def _fanout_prompt(question: str, inputs: Sequence[str]) -> str:
     return "<question>\n" + question.strip() + "\n</question>\n<found>\n" + listed + "\n</found>"
 
 
-def _parsed_queries(raw: str | None, question: str) -> list[str]:
+def parsed_queries(raw: str | None, question: str) -> list[str]:
     """The distinct non-empty queries in the reply, the question itself excluded."""
     asked = question.strip().casefold()
     strings = (str(item).strip() for item in _queries_field(_loaded(raw)) if isinstance(item, str))

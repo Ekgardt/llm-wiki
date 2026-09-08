@@ -90,3 +90,30 @@ One run of 200, seed 101, each lever separately against the second-look
 baseline (runs 1–3). Kept if judge accuracy rises by more than 0.035;
 whole entries also has to keep tokens per question under twice the
 baseline.
+
+## Addendum, same day: what the first live question showed
+
+`gpt4_194be4b3`, "How many musical instruments do I currently own?", gold
+4, run 1 answered 2. With the fan-out and every entry whole the answer was
+3: the drum set was still missing. The diagnostic run showed why.
+
+- The drum session was retrieved — at rank twelve in the first pass, at rank
+  one for the fan-out query "selling my old amp and instrument". It never
+  reached the model: the window (122 880 bytes) filled at 115 789 bytes and
+  the packer shed it.
+- The packer shed it as a *repeat*. Its unit of a repeat was the page, and a
+  daily file holds every session of its day; three of the five labelled
+  sessions live in `2023-05-22.md`, so two of them were "repeats" of the
+  third and went before entries from other days. This rule has been in place
+  since 2026-08-30 and has been cutting same-day sessions for every
+  multi-session question since.
+- With whole entries the shedding also removed the retrieved piece of an
+  entry while keeping its siblings, because it took the last repeat.
+
+Changed accordingly: the unit of a repeat is the entry (source and heading);
+the retrieved piece leads its entry so a sibling retrieval never chose goes
+first; the manifest's per-span overhead (320 bytes) is reserved before the
+compiler packs so the tail is not cut a second time by the manifest; whole
+entries are capped at six by default; and the default window for callers
+that set none rises from 8 192 bytes, which held one piece beside the
+prompt, to 65 536.

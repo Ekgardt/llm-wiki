@@ -20,7 +20,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -44,6 +44,15 @@ ANSWER_SCHEMA = Path(__file__).with_name("schemas") / "grounded-answer-v1.json"
 QA_DEADLINE_SECONDS = 120.0
 QA_MAX_CANDIDATES = 12
 QA_MAX_OUTPUT_TOKENS = 1200
+# The default window, in bytes: the system prompt (about 4.6 KB) and the twelve
+# candidates' pieces of up to 4 KB each, with room for the entries that come in
+# whole. 8 192 held one piece beside the prompt. See
+# `docs/research/2026-09-08-whole-entries-and-a-fan-out-for-counts.md`.
+QA_DEFAULT_INPUT_BYTES = 65_536
+# What the evidence manifest adds around each span: the identity, hashes and
+# positions the citation gates verify. Reserved before the compiler packs, so
+# the packer and the manifest agree on what fits and the tail is not cut twice.
+MANIFEST_OVERHEAD_BYTES = 320
 CACHED_FULL_MAX_SOURCES = 32
 CACHED_FULL_MAX_BYTES = 64 * 1024
 class GroundedQAError(ValueError):
@@ -299,7 +308,9 @@ def _with_entry_siblings(snapshot: object, selected: tuple) -> tuple:
     for chunk in selected:
         key = _entry_key(chunk)
         _admit(key, whole, limit)
-        kept.extend(piece for piece in _pieces_of(chunk, key, whole, pieces) if piece not in kept)
+        # The retrieved piece leads its entry, so shedding reaches the siblings
+        # first; the reader still gets the entry in byte order.
+        kept.extend(piece for piece in (chunk, *_pieces_of(chunk, key, whole, pieces)) if piece not in kept)
     return tuple(kept)
 
 
@@ -384,12 +395,16 @@ def build_grounded_context(
     normalized_profile = profile.upper()
     if normalized_profile not in QA_PROFILES:
         raise GroundedQAError("unsupported grounded QA profile")
-    active_budget = budget or ContextBudget(None, 8192, QA_MAX_OUTPUT_TOKENS, 512)
-    index_text, selected = _profile_selection(
+    active_budget = budget or ContextBudget(None, QA_DEFAULT_INPUT_BYTES, QA_MAX_OUTPUT_TOKENS, 512)
+    index_text, chosen = _profile_selection(
         snapshot, candidates, vault=vault, profile=normalized_profile
     )
+    selected = _with_entry_siblings(snapshot, chosen)
     parent_paths, sources, compiled = _fitted_selection(
-        snapshot, selected, active_budget
+        snapshot,
+        selected,
+        _evidence_budget(active_budget, MANIFEST_OVERHEAD_BYTES * len(selected)),
+        frozenset(chunk.id for chunk in chosen),
     )
     evidence, stale = _authoritative_evidence(
         compiled, sources, snapshot.corpus_sha256, vault, _ReadingOrder.of(selected)
@@ -439,7 +454,7 @@ def _profile_selection(
 ) -> tuple[str, tuple]:
     """The chunks this profile exposes, and any cached index text alongside."""
     if profile != "CACHED_FULL":
-        return "", _with_entry_siblings(snapshot, _matching_chunks(snapshot, candidates))
+        return "", _matching_chunks(snapshot, candidates)
     return _cached_full_selection(snapshot, vault)
 
 
@@ -456,7 +471,7 @@ def _ranked_paths(selected: tuple, kept: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def _fitted_selection(
-    snapshot: object, selected: tuple, budget: object
+    snapshot: object, selected: tuple, budget: object, retrieved: frozenset = frozenset()
 ) -> tuple[tuple[str, ...], tuple, object]:
     """The most relevant spans that fit, dropping the weakest first.
 
@@ -476,22 +491,41 @@ def _fitted_selection(
         try:
             return _compiled_for(snapshot, tuple(kept), budget)
         except BudgetExceededError:
-            _shed_one(kept)
+            _shed_one(kept, retrieved)
     raise GroundedQAError("no retrieved span fits the grounded answer budget")
 
 
-def _redundant_index(kept: list) -> int | None:
-    """The last chunk whose page is already represented earlier in the list."""
-    seen: set[str] = set()
-    redundant: int | None = None
+def _repeats(kept: list) -> list[int]:
+    """Positions of pieces whose entry is already represented earlier in the list.
+
+    The unit is the entry, not the page. A daily file holds every session of
+    its day, and by page two sessions of one day were repeats of each other:
+    measured 2026-09-08 on LongMemEval question gpt4_194be4b3, the drum set
+    the count was missing sat in a session retrieved at rank twelve and shed
+    as a repeat of the file that also held two other sessions.
+    """
+    seen: set[tuple] = set()
+    repeats: list[int] = []
     for position, chunk in enumerate(kept):
-        if chunk.parent_page in seen:
-            redundant = position
-        seen.add(chunk.parent_page)
-    return redundant
+        key = _entry_key(chunk)
+        if key in seen:
+            repeats.append(position)
+        seen.add(key)
+    return repeats
 
 
-def _shed_one(kept: list) -> None:
+def _redundant_index(kept: list, retrieved: frozenset = frozenset()) -> int | None:
+    """The piece to shed: a sibling retrieval never chose, else a repeated retrieved piece."""
+    repeats = _repeats(kept)
+    siblings = [position for position in repeats if kept[position].id not in retrieved]
+    if siblings:
+        return siblings[-1]
+    if repeats:
+        return repeats[-1]
+    return None
+
+
+def _shed_one(kept: list, retrieved: frozenset = frozenset()) -> None:
     """Drop a repeat of a page already present before dropping the last page.
 
     Plain tail-shedding drops by rank alone, which is the baseline the 2026
@@ -514,7 +548,7 @@ def _shed_one(kept: list) -> None:
     dropped is the last one, and where nothing is a repeat this is tail-shedding
     exactly as before.
     """
-    position = _redundant_index(kept)
+    position = _redundant_index(kept, retrieved)
     if position is None:
         kept.pop()
         return
@@ -1066,18 +1100,20 @@ def _kept_claims(
     claims: Sequence[Mapping[str, object]],
     cited: Mapping[str, Mapping[str, object]],
     supplied: Mapping[str, Mapping[str, object]],
-) -> tuple[list[Mapping[str, object]], set[str], list[str]]:
+) -> tuple[list[Mapping[str, object]], set[str], list[str], list[Mapping[str, object]]]:
     kept: list[Mapping[str, object]] = []
     used: set[str] = set()
     refused: list[str] = []
+    dropped: list[Mapping[str, object]] = []
     for claim in claims:
         ids = _claim_survives(claim, cited, supplied)
         if isinstance(ids, str):
             refused.append(ids)
+            dropped.append(claim)
             continue
         kept.append(claim)
         used |= ids
-    return kept, used, refused
+    return kept, used, refused, dropped
 
 
 def _refusal_reason(refused: Sequence[str]) -> str:
@@ -1093,15 +1129,24 @@ def _refusal_reason(refused: Sequence[str]) -> str:
 
 
 def _nothing_survived(
-    document: dict[str, object], refused: Sequence[str] = ()
+    document: dict[str, object],
+    refused: Sequence[str] = (),
+    dropped: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
-    """No claim held up: an abstention, which is what the evidence supports."""
+    """No claim held up: an abstention, which is what the evidence supports.
+
+    The dropped claims travel under `DROPPED_CLAIMS_KEY` for one purpose: a
+    second search for what they needed. `grounded_qa` removes the key.
+    """
+    from refusal_pass import DROPPED_CLAIMS_KEY
+
     return {
         **document,
         "status": "insufficient_evidence",
         "claims": [],
         "citations": [],
         "reason": _refusal_reason(refused),
+        DROPPED_CLAIMS_KEY: list(dropped),
     }
 
 
@@ -1145,10 +1190,13 @@ def _answer_of_surviving_claims(
     cited: Mapping[str, Mapping[str, object]],
     supplied: Mapping[str, Mapping[str, object]],
 ) -> dict[str, object]:
-    kept, used, refused = _kept_claims(validated["claims"], cited, supplied)
+    from refusal_pass import DROPPED_CLAIMS_KEY
+
+    kept, used, refused, dropped = _kept_claims(validated["claims"], cited, supplied)
     if not kept:
-        return _nothing_survived(validated, refused)
+        return _nothing_survived(validated, refused, dropped)
     return {
+        DROPPED_CLAIMS_KEY: dropped,
         **validated,
         "claims": kept,
         "citations": [cited[name] for name in cited if name in used],
@@ -1253,9 +1301,17 @@ class _AnswerPass:
     budget: object
     generator: Callable[[str, str, int], str | None] | None
     deadline: float
+    # One entry per generation, so every look can see whether a regeneration
+    # has already been spent: one per question, whichever look fires first.
+    passes: list[str] = field(default_factory=list)
+
+    @property
+    def regenerated(self) -> bool:
+        return len(self.passes) > 1
 
     def run(self, candidates: tuple, note: str = "") -> tuple[dict[str, object], GroundedContext]:
         _check_deadline(self.deadline)
+        self.passes.append(note)
         system_prompt = _qa_system_prompt()
         question_block = "<question>\n" + self.question.strip() + "\n</question>\n" + note
         fixed_tokens = len((system_prompt + question_block).encode("utf-8"))
@@ -1284,6 +1340,7 @@ def grounded_qa(
     deadline: float | None = None,
     retrieve: Callable[[int], Iterable[object]] | None = None,
     search: Callable[[str, int], Iterable[object]] | None = None,
+    keep_unverified: bool = False,
 ) -> dict[str, object]:
     """Generate and verify one read-only, evidence-grounded answer.
 
@@ -1291,7 +1348,9 @@ def grounded_qa(
     first given, and `search(query, limit)` how it asks for evidence about
     something the question did not say in those words; see `_second_look`.
     A caller that supplies only `candidates` cannot ask either, and the
-    second look is then limited to entity clustering.
+    second look is then limited to entity clustering. `keep_unverified` is for
+    a stand: it returns the text of claims the gates dropped, labelled, so an
+    answer policy can be measured; the product never asks for it.
     """
     from context_budget import ContextBudget
 
@@ -1308,7 +1367,7 @@ def grounded_qa(
         Path(vault),
         snapshot or _answer_corpus(Path(vault), selected_deadline),
         selected_profile,
-        budget or ContextBudget(None, 8192, QA_MAX_OUTPUT_TOKENS, 512),
+        budget or ContextBudget(None, QA_DEFAULT_INPUT_BYTES, QA_MAX_OUTPUT_TOKENS, 512),
         generator,
         selected_deadline,
     )
@@ -1317,10 +1376,66 @@ def grounded_qa(
         single, first_candidates, single.run(first_candidates), fetch, seek
     )
     answer, context = _calendar_look(single, first_candidates, (answer, context))
+    answer, context = _refusal_look(single, first_candidates, (answer, context), seek)
     _record_cited_evidence(question, context, answer)
     _record_refused_evidence(question, context, answer)
     answer.pop(DROPPED_GATES_KEY, None)
+    return _published(answer, keep_unverified)
+
+
+def _published(answer: dict[str, object], keep_unverified: bool) -> dict[str, object]:
+    """The answer a reader gets: dropped claims removed, or kept under a label."""
+    from refusal_pass import DROPPED_CLAIMS_KEY, dropped_texts
+
+    unverified = dropped_texts(answer)
+    answer.pop(DROPPED_CLAIMS_KEY, None)
+    if keep_unverified:
+        answer["unverified_claims"] = unverified
     return answer
+
+
+def _refusal_look(
+    single: _AnswerPass,
+    candidates: tuple,
+    first: tuple[dict[str, object], GroundedContext],
+    search: Callable[[str, int], Iterable[object]] | None,
+) -> tuple[dict[str, object], GroundedContext]:
+    """One more pass when the answer refused, or lost a claim, and said why.
+
+    The reason and the dropped claims name the missing evidence; one short
+    call turns them into queries, what they find joins the candidates, and the
+    answer is generated once more. Never when a regeneration was already
+    spent. See `refusal_pass`.
+    """
+    from refusal_pass import needs_a_second_search
+
+    answer, context = first
+    if search is None or single.regenerated or not needs_a_second_search(answer):
+        return first
+    more = _merged(candidates, None, _searched_for_the_gap(answer, single, search))
+    if more is None:
+        return first
+    second = single.run(more)
+    _record_second_look(single.question, context, False, False, searched=True)
+    return _adopted(first, second)
+
+
+def _searched_for_the_gap(
+    answer: Mapping[str, object],
+    single: _AnswerPass,
+    search: Callable[[str, int], Iterable[object]],
+) -> tuple:
+    from refusal_pass import MISSING_SYSTEM_PROMPT, dropped_texts, missing_queries
+
+    def ask(prompt: str) -> str | None:
+        return _provider_response(single.generator, prompt, MISSING_SYSTEM_PROMPT, single.deadline)
+
+    reason = str(answer.get("reason") or "")
+    rows: list = []
+    for query in missing_queries(single.question, reason, dropped_texts(answer), ask):
+        _check_deadline(single.deadline)
+        rows.extend(search(query, QA_MAX_CANDIDATES))
+    return tuple(rows)
 
 
 def _second_look(
@@ -1374,7 +1489,7 @@ def _calendar_look(
     from calendar_pass import calendar_note, unstated_gaps
 
     answer, context = first
-    if answer.get("status") != "answered" or _aggregated(answer):
+    if answer.get("status") != "answered" or single.regenerated:
         return first
     note = calendar_note(unstated_gaps(answer, _asked_on(single.question)))
     if not note:
@@ -1481,6 +1596,7 @@ def _record_second_look(
     clustered: bool,
     gathered: bool = False,
     computed: bool = False,
+    searched: bool = False,
 ) -> None:
     """Best effort, never fatal: that a second look happened, and what made it."""
     fired = (
@@ -1488,6 +1604,7 @@ def _record_second_look(
         ("clustered", clustered),
         ("gathered", gathered),
         ("computed", computed),
+        ("searched", searched),
     )
     causes = [name for name, flag in fired if flag]
     try:
@@ -1765,7 +1882,14 @@ def _qa_system_prompt() -> str:
         "asks how long ago, the current date is one of them, and the claim states the number "
         "of days or weeks, not only the dates. A relative time in the question, such as four "
         "weeks ago or last month, is approximate: evidence within a few days of the resolved "
-        "day is inside the requested scope unless the question says exactly. "
+        "day is inside the requested scope unless the question says exactly. When spans give "
+        "different values for the same thing at different dates, the later one is the current "
+        "value and the earlier is superseded: answer with the current value and name the earlier "
+        "one as previous; conflicting_evidence is only for spans of the same date or no date. "
+        "When the question asks for the value before a change, the earlier one is the answer. "
+        "A question that asks for suggestions, tips or a judgement is answered by citing what "
+        "the evidence says about the user's own situation, preferences and possessions and "
+        "building on it, marked as advice; it is not refused because no span states the advice. "
         "To abstain, set status accordingly, put the whole explanation in "
         "reason, and leave claims and citations empty: an abstention that carries claims is "
         "refused outright and nothing you wrote reaches the reader. "
