@@ -64,7 +64,7 @@ def test_a_surviving_answer_carries_the_gates_that_dropped_a_claim(monkeypatch):
     monkeypatch.setattr(
         query_memory,
         "_kept_claims",
-        lambda claims, cited, supplied: ([claims[0]], {"E1"}, ["a gate that refused"]),
+        lambda claims, cited, supplied: ([claims[0]], {"E1"}, ["a gate that refused"], [claims[1]]),
     )
     validated = {
         "status": "answered",

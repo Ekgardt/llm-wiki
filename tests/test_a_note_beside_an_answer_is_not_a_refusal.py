@@ -78,7 +78,7 @@ def test_the_note_does_not_reach_the_reader_as_a_reason(monkeypatch):
     monkeypatch.setattr(
         query_memory,
         "_kept_claims",
-        lambda claims, cited, supplied: (list(claims), {"E1"}, []),
+        lambda claims, cited, supplied: (list(claims), {"E1"}, [], []),
     )
 
     answer = query_memory._answer_of_surviving_claims(
@@ -94,7 +94,7 @@ def test_when_no_claim_survives_it_is_still_an_abstention(monkeypatch):
     monkeypatch.setattr(
         query_memory,
         "_kept_claims",
-        lambda claims, cited, supplied: ([], set(), ["gate"]),
+        lambda claims, cited, supplied: ([], set(), ["gate"], list(claims)),
     )
 
     answer = query_memory._answer_of_surviving_claims(_answered(), {}, {})

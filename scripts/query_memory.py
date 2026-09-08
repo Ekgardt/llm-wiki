@@ -1555,12 +1555,24 @@ def _candidate_key(candidate: object) -> object:
 
 
 def _merged(candidates: tuple, widened: tuple | None, gathered: tuple) -> tuple | None:
-    """The first candidates, then whatever is new, capped; None when nothing is new."""
-    merged: dict[object, object] = {}
+    """Every candidate once, the ones more searches agreed on first; None when nothing is new.
+
+    A piece that the question and a sub-query both found outranks one that a
+    single search found, and among equals the first search's order holds —
+    reciprocal rank fusion's judgement, with one vote per search. Measured
+    2026-09-08 on gpt4_194be4b3: the drum session sat at rank twelve for the
+    question and at rank one for "selling my old amp and instrument", and by
+    rank alone it stayed twelfth, past the entries that come in whole.
+    """
+    votes: dict[object, int] = {}
+    first_seen: dict[object, object] = {}
     for candidate in (*candidates, *(widened or ()), *gathered):
-        merged.setdefault(_candidate_key(candidate), candidate)
-    rows = tuple(merged.values())[:WIDENED_CANDIDATES]
-    if len(rows) <= len(candidates):
+        key = _candidate_key(candidate)
+        votes[key] = votes.get(key, 0) + 1
+        first_seen.setdefault(key, candidate)
+    order = sorted(first_seen, key=lambda key: (-votes[key], list(first_seen).index(key)))
+    rows = tuple(first_seen[key] for key in order)[:WIDENED_CANDIDATES]
+    if len(first_seen) <= len(candidates):
         return None
     return rows
 
