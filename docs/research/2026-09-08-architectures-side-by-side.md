@@ -188,3 +188,42 @@ Adopt, in this order, each measured against the 0.035 spread:
 Not adopting: LLM extraction at capture (cost on every message, silent
 loss), whole-history-in-context (30k tokens per turn), a graph database, a
 daemon, any paid API.
+
+## 7. Each approach on a real question — where it wins, where it loses
+
+**LLM Wiki.** *Wins:* "Which port did we pick for the MCP server in March,
+and why?" — the answer cites the bytes of the daily entry; the owner opens
+the file and sees the sentence. "Do I use Redis?" when nothing was ever
+said — a named refusal, not a guess. *Loses:* "How many times did I go to
+the gym?" — the gym sessions sit in five entries, the packer sheds the
+fifth, the count is short; or a gate rejects the only claim and we are
+silent where any guess would have scored.
+
+**Mem0.** *Wins:* "What is my favourite coffee?" — one stored fact, 0.2 s,
+7k tokens. *Loses:* "I moved to Berlin" then "I'm in Berlin for a week" —
+the ingest LLM may UPDATE or DELETE the wrong fact and nobody can check;
+the library version mentioned in passing was not "salient" and is gone.
+
+**Zep.** *Wins:* "Where did I work in 2024?" — an edge with valid-from and
+valid-to; "who worked with whom on project X" — graph hops. *Loses:*
+"What did the assistant recommend for my recipe?" — assistant-side text is
+poorly extracted (−9 to −18 points); every message costs several LLM calls
+and a Neo4j.
+
+**Mastra.** *Wins:* a long day with one agent — "what did we decide an hour
+ago" is always in the window, cached, nothing was ever missed. *Loses:*
+79 projects — 30k tokens on every turn of every one; after a reflector pass
+the detail is condensed away with no undo and no citation.
+
+**OMEGA.** *Wins:* "How many weeks between my two trips?" — temporal
+expansion and a temporal prompt; local and <50 ms. *Loses:* asked about
+something never said, it answers anyway; no citation to check; nobody can
+re-run its stand.
+
+**Supermemory.** *Wins:* thousands of cheap questions — 720 tokens each.
+*Loses:* the number fell ten points with a stronger reader, which says the
+reader was compensating for recall; the pipeline is a cloud box.
+
+**Letta.** *Wins:* an agent that keeps its own persona and working notes and
+edits them. *Loses:* the agent must decide what to save; on LongMemEval it
+could not be made to answer at all.
