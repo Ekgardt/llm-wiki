@@ -105,7 +105,8 @@ def test_entries_keep_retrieval_order_and_read_top_to_bottom(vault: Path) -> Non
 
     context = _context(vault, snapshot, (b_pieces[-1], a_pieces[1]))
 
-    assert _starts(context) == [piece.byte_start for piece in (*b_pieces, *a_pieces)]
+    # The top-ranked entry comes whole; the other keeps the piece that matched.
+    assert _starts(context) == [piece.byte_start for piece in (*b_pieces, a_pieces[1])]
 
 
 def test_the_switch_leaves_only_the_selected_piece(vault: Path, monkeypatch) -> None:

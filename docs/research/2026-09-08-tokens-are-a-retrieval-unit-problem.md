@@ -43,6 +43,19 @@ the researched answer is.
 - MemReranker-4B (arXiv:2605.06132): reranking memory items beats
   bge-reranker; the items are small.
 
+## Against the 2026-09-02 decision, read again
+
+`docs/research/2026-09-02-the-unit-of-retrieval.md` chose 4 KB paragraph
+pieces over turns, quoting sources that turn-level context is fragmentary
+and session-level retrieval outperforms turn-level "due to richer
+contexts". Both statements are about what the model *reads*. The
+LongMemEval authors' result is about what retrieval *finds*: rounds are
+found better than sessions, and the value handed to the reader can be
+larger than the key. The two decisions are compatible once the unit of
+finding and the unit of reading are separated, which the 09-02 note did
+not do and this one does: find rounds, read the round with its neighbours,
+and the whole entry for the one that ranked first.
+
 ## The design that follows the rules
 
 1. **Retrieval unit: the round.** Split a session entry at turn boundaries

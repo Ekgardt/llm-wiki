@@ -23,7 +23,7 @@ from page_status import is_retired
 from vault_editorial import EDITORIAL_NAMES
 
 COLLECTOR_VERSION = "corpus-collector/v1"
-EXTRACTOR_VERSION = "markdown-heading-extractor/v2"
+EXTRACTOR_VERSION = "markdown-heading-extractor/v3"
 
 MAX_CORPUS_FILES = 10_000
 MAX_CORPUS_FILE_BYTES = 8 * 1024 * 1024
@@ -1910,8 +1910,64 @@ def _paragraph_cut(content: bytes, start: int, ceiling: int) -> int:
     return _character_boundary(content, ceiling)
 
 
+# A rendered conversation starts every user turn with this marker at the start
+# of a line, and a round — the user's turn and what the assistant answered — is
+# the unit LongMemEval's authors found retrieves best (arXiv:2410.10813, CP1).
+# The 2026-09-02 decision took 4 KB paragraph pieces over turns because turns
+# alone read as fragments; the round is found here and read with its
+# neighbours and, for the top entry, the whole session — small keys, larger
+# values. See `docs/research/2026-09-08-tokens-are-a-retrieval-unit-problem.md`.
+ROUND_MARKER = b"**user:**"
+# A round shorter than this stays with the round before it: a bare "thanks"
+# is not a unit worth finding on its own.
+MIN_ROUND_BYTES = 160
+
+
+def _round_starts(content: bytes, start: int, end: int) -> list[int]:
+    """Offsets inside the span where a user turn begins a line, the first excluded."""
+    starts: list[int] = []
+    offset = content.find(ROUND_MARKER, start, end)
+    while offset != -1:
+        at_line_start = offset == start or content[offset - 1 : offset] == b"\n"
+        if at_line_start and offset > start:
+            starts.append(offset)
+        offset = content.find(ROUND_MARKER, offset + len(ROUND_MARKER), end)
+    return starts
+
+
+def _long_enough_cuts(cuts: list[int], start: int, end: int) -> list[int]:
+    """Only the cuts that begin a round of at least MIN_ROUND_BYTES.
+
+    A short round folds into the one before it, and a short preamble — the
+    heading and its stamp — folds into the first round after it.
+    """
+    if cuts and cuts[0] - start < MIN_ROUND_BYTES:
+        cuts = cuts[1:]
+    bounds = [*cuts, end]
+    return [cut for cut, following in zip(cuts, bounds[1:]) if following - cut >= MIN_ROUND_BYTES]
+
+
+def _round_spans(content: bytes, span: tuple) -> list[tuple[int, int, tuple[str, ...]]]:
+    """The span cut at every user turn, short rounds folded into the one before."""
+    start, end, ancestry = span
+    rounds: list[tuple[int, int, tuple[str, ...]]] = []
+    for cut in _long_enough_cuts(_round_starts(content, start, end), start, end):
+        rounds.append((start, cut, ancestry))
+        start = cut
+    rounds.append((start, end, ancestry))
+    return rounds
+
+
 def _split_span(content: bytes, span: tuple) -> list[tuple[int, int, tuple[str, ...]]]:
-    """One span as bounded pieces, each keeping the heading ancestry it had."""
+    """One span as rounds, then as bounded pieces, each keeping its heading ancestry."""
+    pieces: list[tuple[int, int, tuple[str, ...]]] = []
+    for round_span in _round_spans(content, span):
+        pieces.extend(_bounded_pieces(content, round_span))
+    return pieces
+
+
+def _bounded_pieces(content: bytes, span: tuple) -> list[tuple[int, int, tuple[str, ...]]]:
+    """One span as pieces of at most MAX_SPAN_BYTES, cut at paragraph boundaries."""
     start, end, ancestry = span
     pieces: list[tuple[int, int, tuple[str, ...]]] = []
     while end - start > MAX_SPAN_BYTES:

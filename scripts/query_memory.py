@@ -301,7 +301,7 @@ def _matching_chunks(snapshot: object, candidates: Iterable[object]) -> tuple[ob
 # as the pieces that matched. The sweep sets the variable to `0`, a number,
 # or `all`.
 WHOLE_ENTRIES_ENV = "LLMWIKI_QA_WHOLE_ENTRIES"
-WHOLE_ENTRIES_DEFAULT = 3
+WHOLE_ENTRIES_DEFAULT = 1
 
 
 def _whole_entry_limit() -> int | None:
@@ -355,6 +355,12 @@ def _admit(key: tuple, whole: set[tuple], limit: int | None) -> None:
 
 
 def _pieces_of(chunk: object, key: tuple, whole: set[tuple], pieces: Mapping[tuple, list]) -> list:
+    """The whole entry for an admitted one; the round itself otherwise.
+
+    A round is the user's turn and the reply it got, about 2.5 KB on captured
+    conversations, so it stands on its own; its neighbours would triple the
+    window for the pronoun case the whole top entry already covers.
+    """
     if key in whole:
         return pieces[key]
     return [chunk]
