@@ -149,3 +149,17 @@ def test_the_report_names_the_protocol_and_the_judge(monkeypatch):
     assert report["protocol"].startswith("longmemeval/evaluate_qa.py")
     assert report["judge"] == "claude"
     assert report["accuracy"] == 1.0
+
+
+def test_the_report_says_what_the_tokens_bought():
+    rows = [
+        _row(question_id="a", official_label=True, est_total_prompt_tokens=8000, total_seconds=40),
+        _row(question_id="b", official_label=False, est_total_prompt_tokens=12000, total_seconds=60),
+    ]
+
+    figures = longmemeval_judge.efficiency(rows, "official")
+
+    assert figures["prompt_tokens_mean"] == 10000.0
+    assert figures["correct_per_1k_tokens"] == 0.05
+    assert figures["seconds_per_correct"] == 100.0
+    assert longmemeval_judge.efficiency([], "official")["correct_per_1k_tokens"] is None

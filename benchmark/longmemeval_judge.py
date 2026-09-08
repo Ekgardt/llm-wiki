@@ -209,6 +209,54 @@ def _judge_accuracy(rows: list[dict]) -> dict:
     return report
 
 
+# The owner's metric (2026-09-08): not tokens saved but what the tokens bought.
+# Reported beside every accuracy, on both protocols, from the rows' own
+# estimated prompt tokens and wall seconds. See `docs/TASKS-to-100-2026-09-08.md`, task 14.
+def _correct_flags(rows: list[dict], protocol: str) -> list[bool]:
+    if protocol == "ours":
+        return [bool(_row_verdict(row)) for row in _gradable(rows)]
+    return [bool(row.get("official_label")) for row in rows if isinstance(row.get("official_label"), bool)]
+
+
+def _mean_of(rows: list[dict], key: str) -> float | None:
+    values = [float(row[key]) for row in rows if isinstance(row.get(key), (int, float))]
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def efficiency(rows: list[dict], protocol: str) -> dict[str, float | None]:
+    """Correct answers per thousand prompt tokens, and seconds per correct answer."""
+    correct = sum(_correct_flags(rows, protocol))
+    tokens = _mean_of(rows, "est_total_prompt_tokens")
+    seconds = _mean_of(rows, "total_seconds")
+    per_question = _share(correct, len(rows))
+    return {
+        "prompt_tokens_mean": _rounded(tokens, 1),
+        "seconds_mean": _rounded(seconds, 1),
+        "correct_per_1k_tokens": _ratio(per_question * 1000, tokens, 4),
+        "seconds_per_correct": _ratio(seconds, per_question, 1),
+    }
+
+
+def _share(part: int, whole: int) -> float:
+    if not whole:
+        return 0.0
+    return part / whole
+
+
+def _rounded(value: float | None, digits: int) -> float | None:
+    if value is None:
+        return None
+    return round(value, digits)
+
+
+def _ratio(numerator: float | None, denominator: float | None, digits: int) -> float | None:
+    if not numerator or not denominator:
+        return None
+    return round(numerator / denominator, digits)
+
+
 def _resolved(given: str | None, results_path: Path, suffix: str) -> Path:
     """An absolute output path, fixed before the provider call moves the cwd.
 
@@ -251,13 +299,14 @@ def _judge_pending(rows: list[dict], out_path: Path, call, judge=_judged_row) ->
 def _report_for(protocol: str, rows: list[dict]) -> dict:
     """The stand's report, or the authors' figures with the judge named."""
     if protocol == "ours":
-        return _judge_accuracy(rows)
+        return {**_judge_accuracy(rows), "efficiency": efficiency(rows, protocol)}
     from longmemeval_official import official_accuracy
 
     return {
         "protocol": "longmemeval/evaluate_qa.py templates",
         "judge": os.environ.get("MEMORY_LLM_PROVIDER", "claude"),
         **official_accuracy(rows),
+        "efficiency": efficiency(rows, protocol),
     }
 
 
