@@ -120,6 +120,31 @@ def _judged_row(row: dict, call) -> dict:
     }
 
 
+def _officially_judged_row(row: dict, call) -> dict:
+    """The authors' protocol: every row with an answer or a refusal is graded.
+
+    Their `evaluate_qa.py` grades each hypothesis with a per-type template,
+    treats `_abs` questions as a check that the model said it could not
+    answer, and takes `'yes' in reply.lower()` as the label. Rows the provider
+    never reached carry no label. See `longmemeval_official.py`.
+    """
+    from longmemeval_official import MAX_JUDGE_TOKENS, official_label, official_prompt
+
+    if longmemeval_score.is_ungraded(row):
+        return {**row, "official_label": None, "judge_seconds": None}
+    started = time.monotonic()
+    raw = call(official_prompt(row), "", MAX_JUDGE_TOKENS)
+    return {
+        **row,
+        "official_label": official_label(raw),
+        "official_raw": (raw or "").strip()[:80],
+        "judge_seconds": round(time.monotonic() - started, 2),
+    }
+
+
+PROTOCOLS = {"ours": _judged_row, "official": _officially_judged_row}
+
+
 def _provider_call():
     """The shared provider client, called from outside this repository.
 
@@ -201,32 +226,55 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--results", required=True)
     parser.add_argument("--out", default=None, help="judged JSONL (default: <results>.judged.jsonl)")
     parser.add_argument("--report", default=None, help="judge report JSON")
+    parser.add_argument(
+        "--protocol",
+        choices=sorted(PROTOCOLS),
+        default="ours",
+        help="ours: this stand's judge; official: LongMemEval's evaluate_qa.py templates",
+    )
     return parser.parse_args()
 
 
-def _judge_pending(rows: list[dict], out_path: Path, call) -> None:
+def _judge_pending(rows: list[dict], out_path: Path, call, judge=_judged_row) -> None:
     done = _judged_ids(out_path)
     pending = [row for row in rows if str(row.get("question_id")) not in done]
     print(f"rows={len(rows)} judged={len(done)} pending={len(pending)}")
     with out_path.open("a", encoding="utf-8") as stream:
         for index, row in enumerate(pending, start=1):
-            judged = _judged_row(row, call)
+            judged = judge(row, call)
             stream.write(json.dumps(judged, ensure_ascii=False) + "\n")
             stream.flush()
-            print(
-                f"[{index}/{len(pending)}] {judged.get('question_id')} "
-                f"judge={judged.get('judge_correct')}",
-                flush=True,
-            )
+            verdict = judged.get("official_label", judged.get("judge_correct"))
+            print(f"[{index}/{len(pending)}] {judged.get('question_id')} judge={verdict}", flush=True)
+
+
+def _report_for(protocol: str, rows: list[dict]) -> dict:
+    """The stand's report, or the authors' figures with the judge named."""
+    if protocol == "ours":
+        return _judge_accuracy(rows)
+    from longmemeval_official import official_accuracy
+
+    return {
+        "protocol": "longmemeval/evaluate_qa.py templates",
+        "judge": os.environ.get("MEMORY_LLM_PROVIDER", "claude"),
+        **official_accuracy(rows),
+    }
+
+
+def _suffixes(protocol: str) -> tuple[str, str]:
+    if protocol == "ours":
+        return ".judged.jsonl", ".judge-report.json"
+    return ".official.jsonl", ".official-report.json"
 
 
 def main() -> int:
     args = parse_args()
     results_path = Path(args.results).resolve()
-    out_path = _resolved(args.out, results_path, ".judged.jsonl")
-    report_path = _resolved(args.report, results_path, ".judge-report.json")
-    _judge_pending(_loaded_rows(results_path), out_path, _provider_call())
-    report = _judge_accuracy(_loaded_rows(out_path))
+    out_suffix, report_suffix = _suffixes(args.protocol)
+    out_path = _resolved(args.out, results_path, out_suffix)
+    report_path = _resolved(args.report, results_path, report_suffix)
+    _judge_pending(_loaded_rows(results_path), out_path, _provider_call(), PROTOCOLS[args.protocol])
+    report = _report_for(args.protocol, _loaded_rows(out_path))
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"report: {report_path}")
     print(json.dumps(report, indent=2))
