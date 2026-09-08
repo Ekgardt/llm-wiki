@@ -254,11 +254,23 @@ def _matching_chunks(snapshot: object, candidates: Iterable[object]) -> tuple[ob
 # "matches on individual conversation turns but retrieves entire sessions" —
 # and it is the LongMemEval authors' rule of small keys and larger values.
 # See `docs/research/2026-09-08-whole-entries-and-a-fan-out-for-counts.md`.
+# How many of the top-ranked entries come in whole; the rest stay pieces.
+# Measured 2026-09-08 on one LongMemEval question with every entry whole: the
+# window filled to 116 KB and the question cost 60k prompt tokens against 13k
+# before. Six is half the candidates; the sweep sets the variable to `0`,
+# a number, or `all`.
 WHOLE_ENTRIES_ENV = "LLMWIKI_QA_WHOLE_ENTRIES"
+WHOLE_ENTRIES_DEFAULT = 6
 
 
-def _whole_entries_enabled() -> bool:
-    return os.environ.get(WHOLE_ENTRIES_ENV, "1").strip() != "0"
+def _whole_entry_limit() -> int | None:
+    """How many entries to bring in whole; None means every one."""
+    raw = os.environ.get(WHOLE_ENTRIES_ENV, "").strip().casefold()
+    if raw == "all":
+        return None
+    if raw.isdigit():
+        return int(raw)
+    return WHOLE_ENTRIES_DEFAULT
 
 
 def _entry_key(chunk: object) -> tuple[object, tuple]:
@@ -276,14 +288,33 @@ def _entry_pieces(snapshot: object) -> dict[tuple, list]:
 
 
 def _with_entry_siblings(snapshot: object, selected: tuple) -> tuple:
-    """Every piece of each selected entry, in byte order, where the entry first ranked."""
-    if not _whole_entries_enabled():
-        return selected
+    """Every piece of the top entries, in byte order, where each entry first ranked.
+
+    The pieces of an entry past the limit stay as retrieval chose them.
+    """
+    limit = _whole_entry_limit()
     pieces = _entry_pieces(snapshot)
     kept: list = []
+    whole: set[tuple] = set()
     for chunk in selected:
-        kept.extend(piece for piece in pieces[_entry_key(chunk)] if piece not in kept)
+        key = _entry_key(chunk)
+        _admit(key, whole, limit)
+        kept.extend(piece for piece in _pieces_of(chunk, key, whole, pieces) if piece not in kept)
     return tuple(kept)
+
+
+def _admit(key: tuple, whole: set[tuple], limit: int | None) -> None:
+    """Admit the entry to the whole set while there is room."""
+    if key in whole:
+        return
+    if limit is None or len(whole) < limit:
+        whole.add(key)
+
+
+def _pieces_of(chunk: object, key: tuple, whole: set[tuple], pieces: Mapping[tuple, list]) -> list:
+    if key in whole:
+        return pieces[key]
+    return [chunk]
 
 
 @dataclass(frozen=True)
@@ -939,8 +970,20 @@ def _declared_derivation(claim: Mapping[str, object]) -> str | None:
     return str(value) if value in DERIVATIONS else None
 
 
+def _minimum_inputs(claim: Mapping[str, object]) -> int:
+    """Two spans for a count or a sum; one for a gap, whose other end may be today.
+
+    "How many weeks ago did I attend the sale" has one span — the sale — and
+    the day the question is asked, which is no span. Measured 2026-09-08: that
+    question was refused with `there is only one`. See `calendar_pass`.
+    """
+    if _declared_derivation(claim) == "difference":
+        return 1
+    return MINIMUM_DERIVATION_INPUTS
+
+
 def _require_derivation_inputs(claim: Mapping[str, object], ids: Sequence[object]) -> None:
-    if len(ids) >= MINIMUM_DERIVATION_INPUTS:
+    if len(ids) >= _minimum_inputs(claim):
         return
     raise GroundedQAError(
         "a derived claim must cite the spans its inputs came from, and there is only one"
@@ -1167,11 +1210,11 @@ def _asked_on(question: str):
     """The date the question is asked from, stated in it or else today."""
     from datetime import date
 
-    match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", question)
+    match = re.search(r"\b(\d{4})[-/](\d{2})[-/](\d{2})\b", question)
     if not match:
         return date.today()
     try:
-        return date.fromisoformat(match.group(1))
+        return date.fromisoformat("-".join(match.groups()))
     except ValueError:
         return date.today()
 
@@ -1273,6 +1316,7 @@ def grounded_qa(
     answer, context = _second_look(
         single, first_candidates, single.run(first_candidates), fetch, seek
     )
+    answer, context = _calendar_look(single, first_candidates, (answer, context))
     _record_cited_evidence(question, context, answer)
     _record_refused_evidence(question, context, answer)
     answer.pop(DROPPED_GATES_KEY, None)
@@ -1312,6 +1356,31 @@ def _second_look(
     _record_second_look(
         single.question, context, widened is not None, bool(note), bool(gathered)
     )
+    return _adopted(first, second)
+
+
+def _calendar_look(
+    single: _AnswerPass,
+    candidates: tuple,
+    first: tuple[dict[str, object], GroundedContext],
+) -> tuple[dict[str, object], GroundedContext]:
+    """One more pass when a gap between dates was declared and never stated.
+
+    The calendar computes the gap from the claim's own dates, against the day
+    the question is asked when only one is given, and the answer is generated
+    once more with the figures beside the question. Never after a second look
+    for counts: one regeneration per question. See `calendar_pass`.
+    """
+    from calendar_pass import calendar_note, unstated_gaps
+
+    answer, context = first
+    if answer.get("status") != "answered" or _aggregated(answer):
+        return first
+    note = calendar_note(unstated_gaps(answer, _asked_on(single.question)))
+    if not note:
+        return first
+    second = single.run(candidates, note)
+    _record_second_look(single.question, context, False, False, computed=True)
     return _adopted(first, second)
 
 
@@ -1411,9 +1480,15 @@ def _record_second_look(
     widened: bool,
     clustered: bool,
     gathered: bool = False,
+    computed: bool = False,
 ) -> None:
     """Best effort, never fatal: that a second look happened, and what made it."""
-    fired = (("widened", widened), ("clustered", clustered), ("gathered", gathered))
+    fired = (
+        ("widened", widened),
+        ("clustered", clustered),
+        ("gathered", gathered),
+        ("computed", computed),
+    )
     causes = [name for name, flag in fired if flag]
     try:
         _write_outcome_events(question, context, "second look: " + ", ".join(causes))
@@ -1685,7 +1760,13 @@ def _qa_system_prompt() -> str:
         "the latest of several values, give that answer and not its inputs: set derivation "
         "to sum, count, difference or latest, cite every span an input came from, show "
         "the working in the claim text, and for a count or a sum list each counted item "
-        "or summed figure in inputs, one per entry, as the evidence names it. To abstain, set status accordingly, put the whole explanation in "
+        "or summed figure in inputs, one per entry, as the evidence names it. For a "
+        "difference between dates put the dates in inputs as YYYY-MM-DD; when the question "
+        "asks how long ago, the current date is one of them, and the claim states the number "
+        "of days or weeks, not only the dates. A relative time in the question, such as four "
+        "weeks ago or last month, is approximate: evidence within a few days of the resolved "
+        "day is inside the requested scope unless the question says exactly. "
+        "To abstain, set status accordingly, put the whole explanation in "
         "reason, and leave claims and citations empty: an abstention that carries claims is "
         "refused outright and nothing you wrote reaches the reader. "
         "Generated summaries and the cached full index are orientation only and "

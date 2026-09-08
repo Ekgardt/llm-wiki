@@ -268,4 +268,22 @@ def query_with_dates(query: str, anchor: date) -> str:
     found = resolutions(query, anchor)
     if not found:
         return query
-    return query + " " + " ".join(dict.fromkeys(found.values()))
+    dates = [*found.values(), *_neighbourhood(query, anchor)]
+    return query + " " + " ".join(dict.fromkeys(dates))
+
+
+# "Four weeks ago" in a question means about four weeks; the day it resolves to
+# is the centre of a neighbourhood, and the days around it join the query so
+# the lexical leg reaches an entry three days off. Days stay exact.
+NEIGHBOURHOOD_DAYS = 3
+
+
+def _neighbourhood(text: str, anchor: date) -> list[str]:
+    """The days around every "N weeks ago" the text resolves to."""
+    around: list[str] = []
+    for phrase, resolved in _ago_hits(text, anchor):
+        if "week" not in phrase:
+            continue
+        offsets = range(-NEIGHBOURHOOD_DAYS, NEIGHBOURHOOD_DAYS + 1)
+        around.extend((resolved + timedelta(days=offset)).isoformat() for offset in offsets)
+    return around

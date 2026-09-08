@@ -121,7 +121,11 @@ def test_a_question_carries_the_dates_it_only_implies() -> None:
     """"A week ago" contains no date, so nothing dated can match it."""
     expanded = temporal_anchor.query_with_dates("Which book did I finish a week ago?", ANCHOR)
 
-    assert expanded == "Which book did I finish a week ago? 2023-05-24"
+    # The resolved day first, then the days around it: a week in a question
+    # is about a week. See `docs/research/2026-09-08-the-calendar-does-the-arithmetic.md`.
+    assert expanded.startswith("Which book did I finish a week ago? 2023-05-24")
+    assert "2023-05-21" in expanded and "2023-05-27" in expanded
+    assert "2023-05-20" not in expanded
 
 
 def test_a_question_with_no_relative_date_is_left_alone() -> None:
