@@ -1419,6 +1419,13 @@ def _appended_journal(current_journal: bytes, event: object, records: list) -> b
 # of everything sealed, so the same projection comes back from the live segment
 # alone.
 _ROTATION_ID = "journal-rotation"
+# A journal also rolls by size, as every append-only log does (Kafka rolls a
+# segment at `segment.bytes` or `segment.ms`, whichever comes first). Rolling
+# by count alone let the no-hands journal reach 4.2 MB at 981 events, past
+# the claim tree's 4 MB page cap, and the nightly compile failed for two
+# nights. Two megabytes keeps a live journal at half that cap.
+# See `docs/research/2026-09-09-a-journal-rolls-by-size-too.md`.
+ROTATE_ABOVE_BYTES = 2 * 1024 * 1024
 
 
 def _sealed_segment_path(slug: str, records: list) -> str:
@@ -1501,9 +1508,16 @@ def _snapshot_event(slug: str, records: list, segment: str) -> dict[str, object]
     }
 
 
+def _journal_is_full(records: list, current_journal: bytes) -> bool:
+    """Full by count, or full by size — whichever comes first."""
+    if not records:
+        return False
+    return len(records) >= MAX_JOURNAL_EVENTS or len(current_journal) >= ROTATE_ABOVE_BYTES
+
+
 def _rotated_journal(slug: str, records: list, current_journal: bytes):
     """Seal a full journal and open a fresh one. None when it is not full."""
-    if len(records) < MAX_JOURNAL_EVENTS:
+    if not _journal_is_full(records, current_journal):
         return None
     segment = _sealed_segment_path(slug, records)
     snapshot = _snapshot_event(slug, records, segment)

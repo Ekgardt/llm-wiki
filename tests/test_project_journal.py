@@ -817,6 +817,29 @@ def test_rotation_does_not_change_the_projection(
     assert _state_body(rolled) == _state_body(expected)
 
 
+def test_a_journal_rolls_by_size_before_it_rolls_by_count(
+    vault: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Two events in, the third finds the journal past the byte bound and seals it."""
+    monkeypatch.setattr(project_journal, "MAX_JOURNAL_EVENTS", 1000)
+    store = ProjectStore(vault, state_root)
+    for index in range(1, 3):
+        store.checkpoint("demo", checkpoint_event(f"evt-{index}", f"size:event-{index}"), "agent-a")
+    journal = vault / "knowledge/projects/demo/journal.md"
+    whole = project_journal.parse_journal_events("demo", journal.read_bytes())
+    expected = store.render_state(whole, _validated=True)
+
+    monkeypatch.setattr(project_journal, "ROTATE_ABOVE_BYTES", 1)
+    store.checkpoint("demo", checkpoint_event("evt-3", "size:event-3"), "agent-a")
+
+    live = project_journal.parse_journal_events("demo", journal.read_bytes())
+    assert live[0]["trigger"] == "journal_rotation"
+    assert (vault / "knowledge/projects/demo/journal.000001-000002.md").exists()
+    assert _state_body(store.render_state(live[:1], _validated=True)) == _state_body(expected)
+
+
 def _state_body(state: bytes) -> list[str]:
     """The rendered sections, without the sequence line that legitimately moves."""
     return [
