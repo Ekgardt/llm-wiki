@@ -24,11 +24,13 @@ from collections.abc import Callable, Sequence
 import numpy as np
 
 TURN_PREFIXES = (b"**user:**", b"**assistant:**")
-# A reply with this many sentences or fewer is delivered whole; pruning a short
-# reply saves nothing and risks the one sentence that mattered.
-PRUNE_ABOVE_SENTENCES = 4
-# How many sentences of a long reply reach the model.
-KEEP_SENTENCES = 3
+# A turn no longer than this is delivered whole; pruning a short turn saves
+# nothing and risks the one sentence that mattered.
+PRUNE_ABOVE_BYTES = 800
+# How much of a long turn reaches the model: its first sentence, then the
+# best-scoring sentences until this many bytes are spent. RECOMP's extractive
+# compressor works to a length budget too.
+KEEP_BYTES = 600
 # Sentence ends are ASCII, so a cut never lands inside a UTF-8 character.
 _BOUNDARY = re.compile(rb"(?<=[.!?])[ \t]+|\n+")
 
@@ -52,7 +54,9 @@ def prunes(content: bytes, start: int, end: int) -> bool:
     """Only a turn of a conversation, and only one long enough to be worth pruning."""
     if not content[start:end].lstrip().startswith(TURN_PREFIXES):
         return False
-    return len(sentence_spans(content, start, end)) > PRUNE_ABOVE_SENTENCES
+    if end - start <= PRUNE_ABOVE_BYTES:
+        return False
+    return len(sentence_spans(content, start, end)) > 1
 
 
 def _scores(question: str, sentences: Sequence[str], encode: Encoder) -> np.ndarray:
@@ -83,6 +87,20 @@ def pruned_spans(
     """
     spans = sentence_spans(content, start, end)
     texts = [content[s:e].decode("utf-8", errors="replace") for s, e in spans]
-    ranked = np.argsort(-_scores(question, texts, encode), kind="stable")
-    chosen = {0, *(int(index) for index in ranked[:KEEP_SENTENCES])}
+    ranked = [int(index) for index in np.argsort(-_scores(question, texts, encode), kind="stable")]
+    chosen = _within_budget(spans, [0, *ranked])
     return _merged([spans[index] for index in sorted(chosen)])
+
+
+def _within_budget(spans: Sequence[tuple[int, int]], order: Sequence[int]) -> set[int]:
+    """The first sentence and then the best ones, until KEEP_BYTES are spent."""
+    chosen: set[int] = set()
+    spent = 0
+    for index in order:
+        if index in chosen:
+            continue
+        chosen.add(index)
+        spent += spans[index][1] - spans[index][0]
+        if spent >= KEEP_BYTES:
+            break
+    return chosen

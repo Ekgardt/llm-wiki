@@ -114,15 +114,7 @@
     "citation": {
       "type": "object",
       "required": [
-        "citation_id",
-        "relative_path",
-        "source_sha256",
-        "revision",
-        "byte_start",
-        "byte_end",
-        "line_start",
-        "line_end",
-        "span_sha256"
+        "citation_id"
       ],
       "properties": {
         "citation_id": {
@@ -164,7 +156,8 @@
           "pattern": "^[0-9a-f]{64}$"
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "description": "The model names the evidence by citation_id; every other field is filled from the manifest this process built and is optional in the reply."
     }
   },
   "additionalProperties": false

@@ -85,3 +85,25 @@ def test_the_working_is_removed_before_a_reader_sees_the_answer(tmp_path: Path) 
 
     assert document["status"] == "answered"
     assert "working" not in document
+
+
+def test_a_citation_is_its_identifier_and_the_manifest_carries_no_hashes(tmp_path: Path) -> None:
+    from query_memory import build_grounded_context
+
+    document = _document(None)
+    document["status"] = "answered"
+    document["reason"] = None
+    document["claims"] = [{"text": "x", "citation_ids": ["E1"]}]
+    document["citations"] = [{"citation_id": "E1"}]
+    validate_schema(document, ANSWER_SCHEMA)
+
+    vault = tmp_path / "vault"
+    (vault / "knowledge" / "notes").mkdir(parents=True)
+    (vault / "knowledge" / "daily").mkdir(parents=True)
+    (vault / "knowledge" / "notes" / "a.md").write_text("---\ntype: concept\n---\n\n# A\n\nAlpha.\n", encoding="utf-8")
+    snapshot = collect_corpus(vault)
+    context = build_grounded_context(snapshot, tuple(snapshot.chunks), vault=vault, profile="BASE")
+
+    assert "span_sha256" not in context.prompt_context
+    assert "source_sha256" not in context.prompt_context
+    assert context.evidence[0].span_sha256
