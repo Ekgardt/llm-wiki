@@ -99,10 +99,12 @@ def test_ordinary_qa_sends_only_retrieved_parent_evidence_not_entire_index(vault
     index = vault / "knowledge" / "index.md"
     index.write_text("ENTIRE INDEX SENTINEL\n" + "x" * 20_000, encoding="utf-8")
     snapshot = collect_corpus(vault)
+    # The chunk that carries the sentence: since 2026-09-08 a chunk is
+    # delivered as itself, not widened to its page.
     alpha_chunk = next(
         chunk
         for chunk in snapshot.chunks
-        if chunk.source_path == alpha.relative_to(vault).as_posix()
+        if chunk.source_path == alpha.relative_to(vault).as_posix() and "enabled" in chunk.text
     )
     seen: dict[str, object] = {}
 

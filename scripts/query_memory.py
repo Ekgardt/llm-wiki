@@ -301,12 +301,12 @@ def _matching_chunks(snapshot: object, candidates: Iterable[object]) -> tuple[ob
 # as the pieces that matched. The sweep sets the variable to `0`, a number,
 # or `all`.
 WHOLE_ENTRIES_ENV = "LLMWIKI_QA_WHOLE_ENTRIES"
-WHOLE_ENTRIES_DEFAULT = 1
-# A second pass reads wider: the first fell short by an instance or a span,
-# and the entries the first answer cited or the new search found come whole.
-# Measured 2026-09-08 with one whole entry: a count of dinner parties fell from
-# 3 (right) to 2, the third party sitting in a round retrieval never named.
-SECOND_PASS_WHOLE_ENTRIES = 3
+WHOLE_ENTRIES_DEFAULT = 0
+# A retrieved turn is delivered with its partner: the reply after a user turn,
+# the question before an assistant turn. That pair is the round, the unit a
+# reader needs; the turn is the unit retrieval finds.
+# See `docs/research/2026-09-08-small-keys-large-values-and-a-loop-that-stops.md`.
+USER_TURN = "**user:**"
 
 
 def _whole_entry_limit(requested: int | None = None) -> int | None:
@@ -365,14 +365,41 @@ def _admit(key: tuple, whole: set[tuple], limit: int | None) -> None:
 
 
 def _pieces_of(chunk: object, key: tuple, whole: set[tuple], pieces: Mapping[tuple, list]) -> list:
-    """The whole entry for an admitted one; the round itself otherwise.
-
-    A round is the user's turn and the reply it got, about 2.5 KB on captured
-    conversations, so it stands on its own; its neighbours would triple the
-    window for the pronoun case the whole top entry already covers.
-    """
+    """The whole entry for an admitted one; the turn with its partner otherwise."""
     if key in whole:
         return pieces[key]
+    return _with_partner(chunk, pieces[key])
+
+
+ASSISTANT_TURN = "**assistant:**"
+
+
+def _turn_of(chunk: object) -> str:
+    """Which side of a conversation the piece is, or nothing for ordinary text.
+
+    The first turn of an entry carries the heading and its stamp before the
+    marker, so the side is the first marker the text holds.
+    """
+    text = chunk.text
+    positions = {side: text.find(marker) for side, marker in (("user", USER_TURN), ("assistant", ASSISTANT_TURN))}
+    present = {side: at for side, at in positions.items() if at >= 0}
+    if not present:
+        return ""
+    return min(present, key=present.get)
+
+
+def _with_partner(chunk: object, siblings: list) -> list:
+    """A user turn and the reply after it; an assistant turn and the question before it.
+
+    A piece of ordinary text — a note, a paragraph cut of a long turn — stays
+    on its own.
+    """
+    at = siblings.index(chunk)
+    turn = _turn_of(chunk)
+    if turn == "user":
+        return siblings[at : at + 2]
+    if turn == "assistant":
+        return siblings[max(at - 1, 0) : at + 1]
     return [chunk]
 
 
@@ -437,11 +464,13 @@ def build_grounded_context(
     profile: str,
     budget: object | None = None,
     whole: int | None = None,
+    question: str | None = None,
 ) -> GroundedContext:
     """Group retrieved children by parent and expose only captured source spans.
 
     `whole` is how many top entries come in whole for this call; a second pass
-    asks for more than the first.
+    asks for more than the first. With `question`, a long reply is pruned to
+    the sentences that bear on it. See `evidence_pruning`.
     """
     from context_budget import ContextBudget
 
@@ -460,7 +489,7 @@ def build_grounded_context(
         frozenset(chunk.id for chunk in chosen),
     )
     evidence, stale = _authoritative_evidence(
-        compiled, sources, snapshot.corpus_sha256, vault, _ReadingOrder.of(selected)
+        compiled, sources, snapshot.corpus_sha256, vault, _ReadingOrder.of(selected), _pruner(question)
     )
     prompt_context = _packed_context(evidence, index_text, active_budget)
     packed_tokens = len(prompt_context.encode("utf-8"))
@@ -619,11 +648,18 @@ def _compiled_for(
 def _compiled_context(narrow: object, sources: tuple, selected: tuple, budget: object) -> object:
     from context_compiler import compile_context
 
+    # A selected chunk is delivered as itself. The compiler used to widen a
+    # chunk that starts at a heading to its subtree (up to 2 000 characters)
+    # and a small page to its whole body, which put the reply back beside the
+    # user turn that was delivered on its own, and undid the pruning of the
+    # reply. The unit of reading is decided here, not by page size.
     return compile_context(
         narrow,
         shortlist=(source.record.logical_id for source in sources),
         evidence_chunk_ids={chunk.id for chunk in selected},
         budget=budget,
+        small_parent_chars=0,
+        large_parent_subtree_chars=0,
     )
 
 
@@ -655,21 +691,67 @@ def _is_quotable(item: object, source: object, seen: set) -> bool:
     return (item.source, item.byte_start, item.byte_end) not in seen
 
 
-def _evidence_for(item: object, source: object, index: int, revision: str) -> GroundedEvidence:
-    span = source.content[item.byte_start : item.byte_end]
-    line_start, line_end = _line_span(source.content, item.byte_start, item.byte_end)
+def _evidence_for(
+    item: object, source: object, index: int, revision: str, span: tuple[int, int] | None = None
+) -> GroundedEvidence:
+    start, end = span or (item.byte_start, item.byte_end)
+    bytes_ = source.content[start:end]
+    line_start, line_end = _line_span(source.content, start, end)
     return GroundedEvidence(
         citation_id=f"E{index}",
         relative_path=item.source,
         source_sha256=source.record.sha256,
         revision=source.record.git_oid or revision,
-        byte_start=item.byte_start,
-        byte_end=item.byte_end,
+        byte_start=start,
+        byte_end=end,
         line_start=line_start,
         line_end=line_end,
-        span_sha256=hashlib.sha256(span).hexdigest(),
-        text=span.decode("utf-8", errors="strict"),
+        span_sha256=hashlib.sha256(bytes_).hexdigest(),
+        text=bytes_.decode("utf-8", errors="strict"),
     )
+
+
+@dataclass(frozen=True)
+class _Pruner:
+    """What a reader needs of each span: the whole of it, or its sentences that bear on the question."""
+
+    question: str
+    encode: object | None
+
+    def spans_of(self, item: object, source: object) -> list[tuple[int, int]]:
+        from evidence_pruning import pruned_spans, prunes
+
+        whole = [(item.byte_start, item.byte_end)]
+        if self.encode is None or not prunes(source.content, item.byte_start, item.byte_end):
+            return whole
+        return pruned_spans(source.content, item.byte_start, item.byte_end, self.question, self.encode)
+
+
+def _spans_for(pruner: _Pruner | None, item: object, source: object) -> list[tuple[int, int]]:
+    if pruner is None:
+        return [(item.byte_start, item.byte_end)]
+    return pruner.spans_of(item, source)
+
+
+def _sentence_encoder():
+    """The retrieval dual encoder, or None when it is not available here."""
+    from embedding_model import prefixed_texts
+    from search_memory import _get_embedder
+
+    embedder = _get_embedder()
+    if embedder is None:
+        return None
+
+    def encode(texts, is_query):
+        return embedder.encode(prefixed_texts(list(texts), is_query), show_progress_bar=False, convert_to_numpy=True)
+
+    return encode
+
+
+def _pruner(question: str | None):
+    if not question:
+        return None
+    return _Pruner(question, _sentence_encoder())
 
 
 def _source_is_unchanged(source: object, vault: Path) -> bool:
@@ -730,6 +812,7 @@ def _authoritative_evidence(
     revision: str,
     vault: Path,
     order: _ReadingOrder | None = None,
+    pruner: _Pruner | None = None,
 ) -> tuple[list[GroundedEvidence], tuple[str, ...]]:
     """One entry per distinct authoritative span, numbered in reading order.
 
@@ -742,9 +825,14 @@ def _authoritative_evidence(
     pairs = _quotable_pairs(compiled, sources, fresh)
     if order is not None:
         pairs.sort(key=lambda pair: order.rank(pair[0]))
+    spans = [
+        (item, source, span)
+        for item, source in pairs
+        for span in _spans_for(pruner, item, source)
+    ]
     found = [
-        _evidence_for(item, source, index, revision)
-        for index, (item, source) in enumerate(pairs, start=1)
+        _evidence_for(item, source, index, revision, span)
+        for index, (item, source, span) in enumerate(spans, start=1)
     ]
     return found, fresh.stale_paths
 
@@ -1380,6 +1468,7 @@ class _AnswerPass:
             profile=self.profile,
             budget=_evidence_budget(self.budget, fixed_tokens),
             whole=whole,
+            question=self.question,
         )
         prompt = question_block + context.prompt_context
         _require_prompt_fits(system_prompt + prompt, self.budget)
@@ -1475,7 +1564,7 @@ def _refusal_look(
     more = _merged(candidates, None, _searched_for_the_gap(answer, single, search))
     if more is None:
         return first
-    second = single.run(more, whole=SECOND_PASS_WHOLE_ENTRIES)
+    second = single.run(more)
     _record_second_look(single.question, context, False, False, searched=True)
     return _adopted(first, second)
 
@@ -1498,6 +1587,13 @@ def _searched_for_the_gap(
     return tuple(rows)
 
 
+# A count or a sum is searched for until a step adds no instance, the searches
+# return nothing new, or this many steps have run. Every published loop bounds
+# its steps (arXiv:2601.19827); the stop on "no new instance" is PAR2-RAG's
+# sufficiency control (arXiv:2603.29085) reduced to what a count can observe.
+MAX_COUNT_STEPS = 3
+
+
 def _second_look(
     single: _AnswerPass,
     candidates: tuple,
@@ -1505,40 +1601,67 @@ def _second_look(
     fetch: Callable[[int], Iterable[object]] | None,
     search: Callable[[str, int], Iterable[object]] | None = None,
 ) -> tuple[dict[str, object], GroundedContext]:
-    """One more pass when the answer counted or summed. See `aggregation_pass`.
+    """More passes when the answer counted or summed, until nothing new appears.
 
-    Three things can make it: the count reached the last page retrieval still
-    held, so retrieval is asked once more and wider; the question is fanned out
-    into a few concrete sub-queries about the kind of thing being counted, and
-    what they find joins the candidates; or the items it counted include two
-    names for one thing, found by one clustering call and placed beside the
-    question as data. Either way the answer is generated at most once more,
-    under a rule to list every instance before counting, and the second answer
-    is adopted only when it answered.
+    Each step fans the question out into a few concrete sub-queries about the
+    kind of thing counted, merges what they find with what the answer cited,
+    clusters two names for one thing, and generates the answer again under a
+    rule to list every instance before counting. The loop stops when a step
+    adds no instance, when the searches find nothing new, or after
+    `MAX_COUNT_STEPS`. A step's answer is adopted only when it answered.
+    See `aggregation_pass` and the research note it cites.
     """
+    current = first
+    if not _aggregated(current[0]):
+        return first
+    seen = _instances(current[0])
+    pool = candidates
+    for step in range(MAX_COUNT_STEPS):
+        current, pool, grew = _count_step(single, current, pool, _first_step_only(fetch, step), search)
+        if _nothing_new(grew, _instances(current[0]), seen):
+            break
+        seen |= _instances(current[0])
+    return current
+
+
+def _first_step_only(fetch: Callable[[int], Iterable[object]] | None, step: int):
+    """The edge rule asks retrieval wider once, on the first step."""
+    if step == 0:
+        return fetch
+    return None
+
+
+def _nothing_new(grew: bool, found: frozenset[str], seen: frozenset[str]) -> bool:
+    return not grew or found <= seen
+
+
+def _instances(answer: Mapping[str, object]) -> frozenset[str]:
+    """What the count enumerated, folded so two spellings compare as one."""
+    from aggregation_pass import counted_inputs
+
+    return frozenset(" ".join(item.casefold().split()) for item in counted_inputs(answer))
+
+
+def _count_step(
+    single: _AnswerPass,
+    current: tuple[dict[str, object], GroundedContext],
+    pool: tuple,
+    fetch: Callable[[int], Iterable[object]] | None,
+    search: Callable[[str, int], Iterable[object]] | None,
+) -> tuple[tuple[dict[str, object], GroundedContext], tuple, bool]:
+    """One step: search wider, answer again; whether anything new was read."""
     from aggregation_pass import COUNTING_RULE
 
-    answer, context = first
-    if not _aggregated(answer):
-        return first
-    widened = _widened(answer, context, len(candidates), fetch)
-    gathered = _gathered(answer, single, search)
+    answer, context = current
+    widened = _widened(answer, context, len(pool), fetch)
+    more = _merged(pool, widened, _gathered(answer, single, search))
     note = _entity_note(answer, single)
-    more = _merged(candidates, widened, gathered)
     if more is None and not note:
-        return first
-    # The second pass reads what the first answer cited and what is new, not
-    # the whole first window again: the count's inputs are in the cited spans.
+        return current, pool, False
     cited = _cited_candidates(context, answer)
-    second = single.run(
-        _beyond(more or candidates, candidates, cited),
-        note + COUNTING_RULE,
-        whole=SECOND_PASS_WHOLE_ENTRIES,
-    )
-    _record_second_look(
-        single.question, context, widened is not None, bool(note), bool(gathered)
-    )
-    return _adopted(first, second)
+    second = single.run(_beyond(more or pool, pool, cited), note + COUNTING_RULE)
+    _record_second_look(single.question, context, widened is not None, bool(note), more is not None)
+    return _adopted(current, second), more or pool, more is not None
 
 
 def _calendar_look(

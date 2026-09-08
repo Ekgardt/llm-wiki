@@ -87,7 +87,8 @@ def _texts(context) -> str:
     return " ".join(item.text for item in context.evidence)
 
 
-def test_a_middle_piece_brings_the_whole_session_in_byte_order(vault: Path) -> None:
+def test_a_middle_piece_brings_the_whole_session_in_byte_order(vault: Path, monkeypatch) -> None:
+    monkeypatch.setenv(WHOLE_ENTRIES_ENV, "1")
     snapshot = collect_corpus(vault, code_roots=(), daily_paths=[DAILY])
     pieces = _pieces(snapshot, "sess_a")
     assert len(pieces) >= 3
@@ -99,18 +100,18 @@ def test_a_middle_piece_brings_the_whole_session_in_byte_order(vault: Path) -> N
     assert "Portland" not in _texts(context)
 
 
-def test_entries_keep_retrieval_order_and_read_top_to_bottom(vault: Path) -> None:
+def test_entries_keep_retrieval_order_and_read_top_to_bottom(vault: Path, monkeypatch) -> None:
+    monkeypatch.setenv(WHOLE_ENTRIES_ENV, "all")
     snapshot = collect_corpus(vault, code_roots=(), daily_paths=[DAILY])
     a_pieces, b_pieces = _pieces(snapshot, "sess_a"), _pieces(snapshot, "sess_b")
 
     context = _context(vault, snapshot, (b_pieces[-1], a_pieces[1]))
 
-    # The top-ranked entry comes whole; the other keeps the piece that matched.
-    assert _starts(context) == [piece.byte_start for piece in (*b_pieces, a_pieces[1])]
+    assert _starts(context) == [piece.byte_start for piece in (*b_pieces, *a_pieces)]
 
 
-def test_the_switch_leaves_only_the_selected_piece(vault: Path, monkeypatch) -> None:
-    monkeypatch.setenv(WHOLE_ENTRIES_ENV, "0")
+def test_by_default_a_piece_of_plain_text_is_delivered_alone(vault: Path, monkeypatch) -> None:
+    monkeypatch.delenv(WHOLE_ENTRIES_ENV, raising=False)
     snapshot = collect_corpus(vault, code_roots=(), daily_paths=[DAILY])
     pieces = _pieces(snapshot, "sess_a")
 
@@ -119,7 +120,8 @@ def test_the_switch_leaves_only_the_selected_piece(vault: Path, monkeypatch) -> 
     assert _starts(context) == [pieces[1].byte_start]
 
 
-def test_a_budget_sheds_the_lowest_ranked_entry_first(vault: Path) -> None:
+def test_a_budget_sheds_the_lowest_ranked_entry_first(vault: Path, monkeypatch) -> None:
+    monkeypatch.setenv(WHOLE_ENTRIES_ENV, "all")
     snapshot = collect_corpus(vault, code_roots=(), daily_paths=[DAILY])
     a_pieces, b_pieces = _pieces(snapshot, "sess_a"), _pieces(snapshot, "sess_b")
     budget = ContextBudget(None, 14_000, 500, 200)
@@ -222,9 +224,11 @@ def test_a_count_fans_out_and_is_answered_again_under_the_counting_rule(vault: P
         profile="BASE",
     )
 
-    assert [query for query, _ in stand.queries] == ["film festival attended", "documentary screenings"]
+    # Step one found Tribeca, so step two fanned out again, found nothing new
+    # and stopped without another answer: two fan-outs, two answers.
+    assert [query for query, _ in stand.queries] == ["film festival attended", "documentary screenings"] * 2
     assert all(limit == QA_MAX_CANDIDATES for _, limit in stand.queries)
-    assert len(stand.fanout_prompts) == 1
+    assert len(stand.fanout_prompts) == 2
     assert "- Austin Film Festival" in stand.fanout_prompts[0]
     assert len(stand.answer_prompts) == 2
     assert "gamma.md" in stand.answer_prompts[1]
@@ -292,3 +296,41 @@ def test_the_second_pass_reads_the_cited_spans_and_the_new_pieces_only(vault: Pa
     # The cited alpha and beta, and the new gamma; nothing read twice for nothing.
     assert second.count("relative_path") == 3
     assert "gamma.md" in second
+
+
+def test_the_count_loop_stops_when_a_step_adds_no_instance(vault: Path) -> None:
+    from query_memory import MAX_COUNT_STEPS
+
+    stand = _Stand(vault)
+    # Every answer after the first names the same two festivals: nothing new.
+    stand.generate = _same_count_every_time(stand)
+
+    grounded_qa(
+        "How many film festivals did I attend?",
+        vault=vault,
+        snapshot=stand.snapshot,
+        retrieve=stand.retrieve,
+        search=stand.search,
+        generator=stand.generate,
+        profile="BASE",
+    )
+
+    assert len(stand.answer_prompts) == 2
+    assert len(stand.fanout_prompts) == 1 < MAX_COUNT_STEPS
+
+
+def _same_count_every_time(stand: _Stand):
+    def generate(prompt: str, system_prompt: str, max_tokens: int) -> str:
+        if system_prompt == aggregation_pass.FANOUT_SYSTEM_PROMPT:
+            stand.fanout_prompts.append(prompt)
+            return '{"queries": ["film festival attended"]}'
+        if system_prompt == aggregation_pass.CLUSTER_SYSTEM_PROMPT:
+            return '{"groups": [[0], [1]]}'
+        stand.answer_prompts.append(prompt)
+        return _count_answer(
+            prompt,
+            "Two: the Austin Film Festival and the Portland Film Festival.",
+            ["Austin Film Festival", "Portland Film Festival"],
+        )
+
+    return generate

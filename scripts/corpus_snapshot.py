@@ -1910,29 +1910,38 @@ def _paragraph_cut(content: bytes, start: int, ceiling: int) -> int:
     return _character_boundary(content, ceiling)
 
 
-# A rendered conversation starts every user turn with this marker at the start
-# of a line, and a round — the user's turn and what the assistant answered — is
-# the unit LongMemEval's authors found retrieves best (arXiv:2410.10813, CP1).
-# The 2026-09-02 decision took 4 KB paragraph pieces over turns because turns
-# alone read as fragments; the round is found here and read with its
-# neighbours and, for the top entry, the whole session — small keys, larger
-# values. See `docs/research/2026-09-08-tokens-are-a-retrieval-unit-problem.md`.
-ROUND_MARKER = b"**user:**"
-# A round shorter than this stays with the round before it: a bare "thanks"
-# is not a unit worth finding on its own.
+# A rendered conversation starts every turn with one of these markers at the
+# start of a line. Each turn is a chunk: the user's turn is a 300-byte key that
+# states the fact, and the reply it got is the value delivered beside it
+# (Dense X Retrieval, arXiv:2312.06648; small-to-big retrieval). The 2026-09-02
+# decision took 4 KB paragraph pieces over turns because a turn alone reads as
+# a fragment; a turn is found here and read with its partner.
+# See `docs/research/2026-09-08-small-keys-large-values-and-a-loop-that-stops.md`.
+TURN_MARKERS = (b"**user:**", b"**assistant:**")
+# A turn shorter than this stays with the turn before it: a bare "thanks" is
+# not a unit worth finding on its own.
 MIN_ROUND_BYTES = 160
 
 
-def _round_starts(content: bytes, start: int, end: int) -> list[int]:
-    """Offsets inside the span where a user turn begins a line, the first excluded."""
-    starts: list[int] = []
-    offset = content.find(ROUND_MARKER, start, end)
+def _marker_offsets(content: bytes, marker: bytes, start: int, end: int) -> list[int]:
+    found: list[int] = []
+    offset = content.find(marker, start, end)
     while offset != -1:
-        at_line_start = offset == start or content[offset - 1 : offset] == b"\n"
-        if at_line_start and offset > start:
-            starts.append(offset)
-        offset = content.find(ROUND_MARKER, offset + len(ROUND_MARKER), end)
-    return starts
+        found.append(offset)
+        offset = content.find(marker, offset + len(marker), end)
+    return found
+
+
+def _begins_a_line(content: bytes, offset: int, start: int) -> bool:
+    return offset > start and content[offset - 1 : offset] == b"\n"
+
+
+def _round_starts(content: bytes, start: int, end: int) -> list[int]:
+    """Offsets inside the span where a turn begins a line, the span's own start excluded."""
+    offsets: list[int] = []
+    for marker in TURN_MARKERS:
+        offsets.extend(_marker_offsets(content, marker, start, end))
+    return sorted(offset for offset in offsets if _begins_a_line(content, offset, start))
 
 
 def _long_enough_cuts(cuts: list[int], start: int, end: int) -> list[int]:

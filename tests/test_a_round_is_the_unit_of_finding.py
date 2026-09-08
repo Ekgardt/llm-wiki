@@ -59,13 +59,14 @@ def _pieces(snapshot, session: str) -> list:
     )
 
 
-def test_a_conversation_splits_at_every_user_turn(vault: Path) -> None:
+def test_a_conversation_splits_at_every_turn(vault: Path) -> None:
     snapshot = collect_corpus(vault, code_roots=(), daily_paths=[DAILY])
 
     pieces = _pieces(snapshot, "sess_a")
 
-    assert len(pieces) == 6
-    assert all(piece.text.lstrip().startswith(("## ", "**user:**")) for piece in pieces)
+    assert len(pieces) == 12
+    sides = [piece.text.lstrip().startswith(("## ", "**user:**")) for piece in pieces]
+    assert sides == [True, False] * 6
     assert all(piece.byte_end - piece.byte_start <= MAX_SPAN_BYTES for piece in pieces)
     assert pieces[0].text.startswith("## [10:00:00] session_end | sess_a")
 
@@ -82,7 +83,8 @@ def test_a_short_round_stays_with_the_round_before_it(tmp_path: Path) -> None:
 
     snapshot = collect_corpus(root, code_roots=(), daily_paths=[DAILY])
 
-    assert len([chunk for chunk in snapshot.chunks if len(chunk.heading_ancestry) == 2]) == 1
+    # The bare "thanks" and its reply fold into the turns before them.
+    assert len([chunk for chunk in snapshot.chunks if len(chunk.heading_ancestry) == 2]) == 2
 
 
 def _context(vault: Path, snapshot, candidates: tuple):
@@ -91,28 +93,28 @@ def _context(vault: Path, snapshot, candidates: tuple):
     )
 
 
-def test_a_retrieved_round_stands_alone_and_the_top_entry_comes_whole(
-    vault: Path, monkeypatch
-) -> None:
+def test_a_retrieved_turn_comes_with_its_partner(vault: Path, monkeypatch) -> None:
     monkeypatch.delenv(WHOLE_ENTRIES_ENV, raising=False)
     snapshot = collect_corpus(vault, code_roots=(), daily_paths=[DAILY])
     a_pieces, b_pieces = _pieces(snapshot, "sess_a"), _pieces(snapshot, "sess_b")
 
+    # b[0] is a user turn: it brings the reply after it. a[3] is a reply: it
+    # brings the question before it. Entries keep retrieval's order.
     context = _context(vault, snapshot, (b_pieces[0], a_pieces[3]))
 
-    starts = [item.byte_start for item in context.evidence]
-    assert starts[: len(b_pieces)] == [piece.byte_start for piece in b_pieces]
-    assert starts[len(b_pieces) :] == [a_pieces[3].byte_start]
+    expected = [piece.byte_start for piece in (b_pieces[0], b_pieces[1], a_pieces[2], a_pieces[3])]
+    assert [item.byte_start for item in context.evidence] == expected
 
 
-def test_the_switch_at_zero_leaves_only_the_round(vault: Path, monkeypatch) -> None:
-    monkeypatch.setenv(WHOLE_ENTRIES_ENV, "0")
+def test_the_switch_at_one_brings_the_top_entry_whole(vault: Path, monkeypatch) -> None:
+    monkeypatch.setenv(WHOLE_ENTRIES_ENV, "1")
     snapshot = collect_corpus(vault, code_roots=(), daily_paths=[DAILY])
-    a_pieces = _pieces(snapshot, "sess_a")
+    a_pieces, b_pieces = _pieces(snapshot, "sess_a"), _pieces(snapshot, "sess_b")
 
-    context = _context(vault, snapshot, (a_pieces[0],))
+    context = _context(vault, snapshot, (a_pieces[5], b_pieces[2]))
 
-    assert [item.byte_start for item in context.evidence] == [a_pieces[0].byte_start]
+    expected = [piece.byte_start for piece in (*a_pieces, b_pieces[2], b_pieces[3])]
+    assert [item.byte_start for item in context.evidence] == expected
 
 
 def test_a_pass_may_ask_for_more_entries_whole(vault: Path, monkeypatch) -> None:
