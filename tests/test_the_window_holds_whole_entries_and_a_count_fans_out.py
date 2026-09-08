@@ -271,3 +271,23 @@ def test_a_piece_more_searches_agree_on_moves_ahead_of_a_piece_one_search_found(
 
     assert [row["id"] for row in rows] == ["a", "drum", "b", "w", "g"]
     assert _merged(first, None, ({"id": "a"},)) is None
+
+
+def test_the_second_pass_reads_the_cited_spans_and_the_new_pieces_only(vault: Path) -> None:
+    stand = _Stand(vault)
+
+    grounded_qa(
+        "How many film festivals did I attend?",
+        vault=vault,
+        snapshot=stand.snapshot,
+        retrieve=stand.retrieve,
+        search=stand.search,
+        generator=stand.generate,
+        profile="BASE",
+    )
+
+    first, second = stand.answer_prompts
+    assert first.count("relative_path") == 2
+    # The cited alpha and beta, and the new gamma; nothing read twice for nothing.
+    assert second.count("relative_path") == 3
+    assert "gamma.md" in second

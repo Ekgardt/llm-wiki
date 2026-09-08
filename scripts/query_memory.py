@@ -239,10 +239,40 @@ def _resolved_chunk(candidate: object, chunks: tuple, by_id: dict) -> object | N
     match = by_id.get(_first_present(candidate, _CANDIDATE_ID_KEYS))
     if match is not None:
         return match
+    exact = _chunk_at_span(candidate, chunks)
+    if exact is not None:
+        return exact
+    return _chunk_of_cited(candidate, chunks)
+
+
+def _chunk_at_span(candidate: object, chunks: tuple) -> object | None:
     path = _first_present(candidate, _CANDIDATE_PATH_KEYS)
     start = _candidate_field(candidate, "byte_start")
     end = _candidate_field(candidate, "byte_end")
     return next((chunk for chunk in chunks if _span_matches(chunk, path, start, end)), None)
+
+
+def _chunk_of_cited(candidate: object, chunks: tuple) -> object | None:
+    """For a cited span only: the chunk of that page holding its first byte, else the page's first.
+
+    A cited span is a compiled item, and for a small page the compiler emits the
+    whole body from byte zero while its one chunk starts after the frontmatter;
+    the span still names the page, and the page is the evidence.
+    """
+    if not _candidate_field(candidate, "cited"):
+        return None
+    path = _first_present(candidate, _CANDIDATE_PATH_KEYS)
+    on_page = [chunk for chunk in chunks if chunk.source_path == path]
+    return _holding(on_page, _candidate_field(candidate, "byte_start") or 0)
+
+
+def _holds(chunk: object, byte: int) -> bool:
+    return chunk.byte_start <= byte < chunk.byte_end
+
+
+def _holding(on_page: list, byte: int) -> object | None:
+    holding = [chunk for chunk in on_page if _holds(chunk, byte)]
+    return next(iter(holding or on_page), None)
 
 
 def _matching_chunks(snapshot: object, candidates: Iterable[object]) -> tuple[object, ...]:
@@ -266,10 +296,12 @@ def _matching_chunks(snapshot: object, candidates: Iterable[object]) -> tuple[ob
 # How many of the top-ranked entries come in whole; the rest stay pieces.
 # Measured 2026-09-08 on one LongMemEval question with every entry whole: the
 # window filled to 116 KB and the question cost 60k prompt tokens against 13k
-# before. Six is half the candidates; the sweep sets the variable to `0`,
-# a number, or `all`.
+# before; at six, 19k–58k over seven questions, which the owner called
+# unacceptable. Three: the entries retrieval ranked highest, whole; the rest
+# as the pieces that matched. The sweep sets the variable to `0`, a number,
+# or `all`.
 WHOLE_ENTRIES_ENV = "LLMWIKI_QA_WHOLE_ENTRIES"
-WHOLE_ENTRIES_DEFAULT = 6
+WHOLE_ENTRIES_DEFAULT = 3
 
 
 def _whole_entry_limit() -> int | None:
@@ -1467,7 +1499,10 @@ def _second_look(
     more = _merged(candidates, widened, gathered)
     if more is None and not note:
         return first
-    second = single.run(more or candidates, note + COUNTING_RULE)
+    # The second pass reads what the first answer cited and what is new, not
+    # the whole first window again: the count's inputs are in the cited spans.
+    cited = _cited_candidates(context, answer)
+    second = single.run(_beyond(more or candidates, candidates, cited), note + COUNTING_RULE)
     _record_second_look(
         single.question, context, widened is not None, bool(note), bool(gathered)
     )
@@ -1494,7 +1529,8 @@ def _calendar_look(
     note = calendar_note(unstated_gaps(answer, _asked_on(single.question)))
     if not note:
         return first
-    second = single.run(candidates, note)
+    # The gap is between dates the cited spans carry; nothing else is needed.
+    second = single.run(_cited_candidates(context, answer) or candidates, note)
     _record_second_look(single.question, context, False, False, computed=True)
     return _adopted(first, second)
 
@@ -1575,6 +1611,36 @@ def _merged(candidates: tuple, widened: tuple | None, gathered: tuple) -> tuple 
     if len(first_seen) <= len(candidates):
         return None
     return rows
+
+
+def _cited_candidates(context: GroundedContext, answer: Mapping[str, object]) -> tuple:
+    """The spans the surviving claims cited, as candidates a second pass can resolve.
+
+    A second pass used to be handed the whole first window again, and on the
+    stand that was 28k tokens to re-read what the first answer had already
+    read. What it needs is the spans it cited — the inputs it counted, the
+    dates it named — and whatever is new.
+    """
+    published = {str(citation.get("citation_id")) for citation in answer.get("citations") or []}
+    return tuple(
+        {
+            "path": item.relative_path,
+            "byte_start": item.byte_start,
+            "byte_end": item.byte_end,
+            "cited": True,
+        }
+        for item in context.evidence
+        if item.citation_id in published
+    )
+
+
+def _beyond(merged: tuple, first: tuple, cited: tuple) -> tuple:
+    """The cited spans, then every merged candidate the first pass did not have."""
+    seen = {_candidate_key(candidate) for candidate in first}
+    fresh = tuple(candidate for candidate in merged if _candidate_key(candidate) not in seen)
+    if not cited:
+        return merged
+    return (*cited, *fresh)
 
 
 def _entity_note(answer: Mapping[str, object], single: _AnswerPass) -> str:
