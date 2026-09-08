@@ -42,12 +42,11 @@ ANSWER_SCHEMA = Path(__file__).with_name("schemas") / "grounded-answer-v1.json"
 # provider. Callers that need a tighter bound pass their own deadline, and the
 # MCP tool always does.
 QA_DEADLINE_SECONDS = 120.0
-# Twenty-four since 2026-09-08, when the unit retrieval finds became the turn:
-# a 300-byte key with a pruned reply beside it reads at about 0.9 KB, so
-# twenty-four of them cost what twelve 4 KB pieces did and cover twice the
-# entries. Dense X Retrieval's finding: for a fixed reading budget, finer
-# units, more of them.
-QA_MAX_CANDIDATES = 24
+# Twelve turns for the first pass. Twenty-four was tried on 2026-09-08 when
+# the unit became the turn: it doubled a single-hop question's prompt (8.3k
+# to 13.8k tokens) for coverage only a count needs, and a count gets its
+# coverage from the fan-out loop instead.
+QA_MAX_CANDIDATES = 12
 QA_MAX_OUTPUT_TOKENS = 1200
 # The default window, in bytes: the system prompt (about 4.6 KB) and the twelve
 # candidates' pieces of up to 4 KB each, with room for the entries that come in

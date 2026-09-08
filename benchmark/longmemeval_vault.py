@@ -38,7 +38,7 @@ REPO = Path(__file__).resolve().parent.parent
 BUILD_DEADLINE_SECONDS = 900.0
 RETRIEVE_DEADLINE_SECONDS = 180.0
 ANSWER_DEADLINE_SECONDS = 420.0
-QA_CANDIDATES = 24
+QA_CANDIDATES = 12
 
 
 def _qa_candidates() -> int:

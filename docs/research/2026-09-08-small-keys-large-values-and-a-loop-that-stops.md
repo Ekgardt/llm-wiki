@@ -106,3 +106,12 @@ Two changes, both from the same design: the slot rule keys on the entry
 (page and heading), and the candidate count is twenty-four — for a fixed
 reading budget, finer units and more of them, which is Dense X Retrieval's
 result restated.
+
+Measured next: twenty-four candidates put the single-hop tennis-racket
+question at 13.8k tokens against 8.3k with twelve. Breadth is what a
+count needs and what the loop provides, so the first pass stays at twelve
+and the fan-out asks for up to twelve kind-names ("guitar, piano, drum set,
+violin" for "musical instruments") instead of five phrasings; a count step
+reads the user's turns retrieval found and not the replies beside them.
+The manifest also shrank to what the model reads — name, path, text — under
+the 2026-09-03 decision that the model names the evidence and we locate it.
