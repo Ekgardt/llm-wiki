@@ -641,7 +641,9 @@ def test_blocking_index_builder_is_killed_before_timeout_is_reported(
     builder.write_text(
         "import os, time\n"
         "from pathlib import Path\n"
-        "time.sleep(0.6)\n"
+        # Three seconds, not 0.6: on a loaded Windows runner killing the tree
+        # took longer than the builder's nap, and the marker got written.
+        "time.sleep(3.0)\n"
         "Path(os.environ['SYNC_TEST_MARKER']).write_text('alive')\n",
         encoding="utf-8",
     )
