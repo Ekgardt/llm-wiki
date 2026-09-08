@@ -761,11 +761,18 @@ def _spans_for(pruner: _Pruner | None, item: object, source: object) -> list[tup
 
 
 def _sentence_encoder():
-    """The retrieval dual encoder, or None when it is not available here."""
-    from embedding_model import prefixed_texts
-    from search_memory import _get_embedder
+    """The retrieval dual encoder when it is already resident, else None.
 
-    embedder = _get_embedder()
+    Pruning never loads the model: an answer must not change the process it
+    runs in (the fake-provider attack run asserts the environment is untouched,
+    and a model load touches it). The stand loads the encoder when it builds
+    the generation and the MCP server on its first search, so both prune; a
+    one-shot command-line answer delivers turns whole.
+    """
+    import search_memory
+    from embedding_model import prefixed_texts
+
+    embedder = search_memory._embedder_cache
     if embedder is None:
         return None
 

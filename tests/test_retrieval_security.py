@@ -104,10 +104,7 @@ def _direct_attack_succeeded(document: dict[str, object], expected_status: str) 
     )
 
 
-def test_frozen_contract_is_canonical_closed_bounded_and_complete() -> None:
-    raw = CORPUS.read_bytes()
-    contract = json.loads(raw)
-
+def _assert_contract_shape(contract: dict, raw: bytes) -> None:
     canonical = json.dumps(
         contract, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
@@ -123,35 +120,56 @@ def test_frozen_contract_is_canonical_closed_bounded_and_complete() -> None:
         "security_invariants",
     }
     assert contract["schema_version"] == "adversarial-retrieval/v1"
-    limits = contract["limits"]
-    assert set(limits) == {
+    assert set(contract["limits"]) == {
         "max_attack_count",
         "max_document_bytes",
         "max_documents_per_attack",
         "max_question_bytes",
         "root_prefix",
     }
-    attacks = contract["attacks"]
+
+
+def _assert_attacks_cover_every_form(attacks: list, limits: dict) -> None:
     assert 1 <= len(attacks) <= limits["max_attack_count"]
     assert {(item["language"], item["form"]) for item in attacks} == {
         (language, form) for language in LANGUAGES for form in FORMS
     }
     assert len({item["attack_id"] for item in attacks}) == len(attacks)
-    for attack in attacks:
-        assert set(attack) == ATTACK_KEYS
-        assert attack["expected_status"] in {
-            "insufficient_evidence",
-            "conflicting_evidence",
-        }
-        assert len(attack["question"].encode("utf-8")) <= limits["max_question_bytes"]
-        assert 1 <= len(attack["documents"]) <= limits["max_documents_per_attack"]
-        assert len(attack["documents"]) == (2 if attack["form"] in {"split-documents", "conflicting-parents"} else 1)
+
+
+def _expected_documents(form: str) -> int:
+    if form in {"split-documents", "conflicting-parents"}:
+        return 2
+    return 1
+
+
+def _assert_attack_bounded(attack: dict, limits: dict) -> None:
+    assert set(attack) == ATTACK_KEYS
+    assert attack["expected_status"] in {"insufficient_evidence", "conflicting_evidence"}
+    assert len(attack["question"].encode("utf-8")) <= limits["max_question_bytes"]
+    assert 1 <= len(attack["documents"]) <= limits["max_documents_per_attack"]
+    assert len(attack["documents"]) == _expected_documents(attack["form"])
+
+
+def _assert_document_bounded(document: dict, limits: dict) -> None:
+    assert set(document) == DOCUMENT_KEYS
+    relative = PurePosixPath(document["relative_path"])
+    assert relative.as_posix().startswith(limits["root_prefix"])
+    assert relative.is_absolute() is False and ".." not in relative.parts
+    assert len(document["content"].encode("utf-8")) <= limits["max_document_bytes"]
+
+
+def test_frozen_contract_is_canonical_closed_bounded_and_complete() -> None:
+    raw = CORPUS.read_bytes()
+    contract = json.loads(raw)
+    limits = contract["limits"]
+
+    _assert_contract_shape(contract, raw)
+    _assert_attacks_cover_every_form(contract["attacks"], limits)
+    for attack in contract["attacks"]:
+        _assert_attack_bounded(attack, limits)
         for document in attack["documents"]:
-            assert set(document) == DOCUMENT_KEYS
-            relative = PurePosixPath(document["relative_path"])
-            assert relative.as_posix().startswith(limits["root_prefix"])
-            assert relative.is_absolute() is False and ".." not in relative.parts
-            assert len(document["content"].encode("utf-8")) <= limits["max_document_bytes"]
+            _assert_document_bounded(document, limits)
 
 
 def test_measurement_contract_separates_fake_ci_from_real_quality_claims() -> None:
