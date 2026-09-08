@@ -82,11 +82,21 @@ def test_a_quantized_model_still_scores_the_same_order(monkeypatch):
     monkeypatch.delenv(reranker.PRECISION_ENV, raising=False)
     torch.manual_seed(3)
     original = _Tiny().eval()
-    quantized, _ = reranker._cpu_precision(original)
     x = torch.randn(16, 4)
-
     with torch.inference_mode():
         before = original(x).view(-1).tolist()
-        after = quantized(x).view(-1).tolist()
 
+    quantized, _ = reranker._cpu_precision(original)
+
+    with torch.inference_mode():
+        after = quantized(x).view(-1).tolist()
     assert _top3(before) == _top3(after)
+
+
+def test_quantisation_happens_in_place_so_no_second_copy_of_the_weights_exists(monkeypatch):
+    monkeypatch.delenv(reranker.PRECISION_ENV, raising=False)
+    original = _Tiny().eval()
+
+    quantized, _ = reranker._cpu_precision(original)
+
+    assert quantized is original
