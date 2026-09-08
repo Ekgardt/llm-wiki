@@ -149,3 +149,19 @@ two MCP servers on 16 GB, so the runs go one worker at a time.
 Every run from here has a reranker in it. The next three runs are therefore
 not comparable to the 0.6983 baseline on retrieval alone; the comparison must
 say so.
+
+## Addendum 2026-09-08, evening: it still never finishes
+
+Run 2 (`second-look-n200-seed101-r2.jsonl`): `retrieve_seconds` median
+0.13 s, p90 0.15 s. Checked directly on a stand vault: every row carries
+`reranker_applied: false, reranker_fallback_reason: optional_stage_timeout`,
+on the cold call and on the warm one. Warmed first as the stand does
+(7.5 s), the first retrieval still waited the whole 12-second bound and
+gave up: twenty pairs of 4 KB pieces at two threads do not fit. After that
+the recorded cost is the ceiling and the stage is never awaited again in
+the process. So runs 1–3 and both arms of the tasks 1–6 measurement rank
+by reciprocal rank fusion alone; the cross-encoder has scored nothing on
+this stand at any point, and the 98% session recall was reached without
+it. Task 10 is therefore a measured question with two arms — the stage
+bound raised so the reranker actually runs, against no reranker at all —
+and the loser is deleted.

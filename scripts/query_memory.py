@@ -838,6 +838,9 @@ def _anchor_tokens(tokens: set[str]) -> set[str]:
 # telemetry can record them. `grounded_qa` removes it before returning: it is a
 # channel between the verifier and the recorder, not a field of an answer.
 DROPPED_GATES_KEY = "dropped_gates"
+# The model's reading notes, written before the claims and removed before a
+# reader sees the answer. See `docs/research/2026-09-08-working-before-the-claims.md`.
+WORKING_KEY = "working"
 
 _FIGURE = re.compile(r"(?<![\w.])\d+(?:[.,]\d+)*(?!\w)(?!\.\d)|--[a-z][a-z0-9-]{2,}")
 
@@ -1445,6 +1448,7 @@ def _published(answer: dict[str, object], keep_unverified: bool) -> dict[str, ob
 
     unverified = dropped_texts(answer)
     answer.pop(DROPPED_CLAIMS_KEY, None)
+    answer.pop(WORKING_KEY, None)
     if keep_unverified:
         answer["unverified_claims"] = unverified
     return answer
@@ -2001,6 +2005,8 @@ def _qa_system_prompt() -> str:
         "refused outright and nothing you wrote reaches the reader. "
         "Generated summaries and the cached full index are orientation only and "
         "never authoritative. You have no shell, network, mutation, or arbitrary-file tools. "
+        "Write working first: one line per evidence span you will use, what it states that "
+        "bears on the question and its date; then the claims. "
         "Output only JSON matching this closed schema: " + schema_json
     )
 

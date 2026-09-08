@@ -85,6 +85,18 @@
         "$ref": "#/$defs/citation"
       }
     },
+    "working": {
+      "description": "The reading, written before the claims: one line per evidence span used, what it states that bears on the question and its date. Never shown to a reader.",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "maxLength": 3000
+        }
+      ]
+    },
     "reason": {
       "oneOf": [
         {
