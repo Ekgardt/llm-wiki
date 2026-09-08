@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import queue
 import re
 import subprocess
@@ -246,6 +247,70 @@ def _matching_chunks(snapshot: object, candidates: Iterable[object]) -> tuple[ob
     return tuple(selected)
 
 
+# A selected piece brings the rest of its entry along. A session is written as
+# one daily entry and cut into pieces of at most 4 096 bytes; retrieval ranks
+# the pieces, and the model used to read the one piece that matched while the
+# sentence it needed sat in the next. Emergence AI's stand does the same —
+# "matches on individual conversation turns but retrieves entire sessions" —
+# and it is the LongMemEval authors' rule of small keys and larger values.
+# See `docs/research/2026-09-08-whole-entries-and-a-fan-out-for-counts.md`.
+WHOLE_ENTRIES_ENV = "LLMWIKI_QA_WHOLE_ENTRIES"
+
+
+def _whole_entries_enabled() -> bool:
+    return os.environ.get(WHOLE_ENTRIES_ENV, "1").strip() != "0"
+
+
+def _entry_key(chunk: object) -> tuple[object, tuple]:
+    """The entry a piece belongs to: its source and the heading it sits under."""
+    return (chunk.source_path, tuple(chunk.heading_ancestry or ()))
+
+
+def _entry_pieces(snapshot: object) -> dict[tuple, list]:
+    pieces: dict[tuple, list] = {}
+    for chunk in snapshot.chunks:
+        pieces.setdefault(_entry_key(chunk), []).append(chunk)
+    for group in pieces.values():
+        group.sort(key=lambda chunk: chunk.byte_start)
+    return pieces
+
+
+def _with_entry_siblings(snapshot: object, selected: tuple) -> tuple:
+    """Every piece of each selected entry, in byte order, where the entry first ranked."""
+    if not _whole_entries_enabled():
+        return selected
+    pieces = _entry_pieces(snapshot)
+    kept: list = []
+    for chunk in selected:
+        kept.extend(piece for piece in pieces[_entry_key(chunk)] if piece not in kept)
+    return tuple(kept)
+
+
+@dataclass(frozen=True)
+class _ReadingOrder:
+    """Where each compiled span belongs when the model reads: entry by rank, then bytes."""
+
+    by_span: Mapping[tuple[str, int], tuple[int, int]]
+    by_source: Mapping[str, int]
+
+    @classmethod
+    def of(cls, selected: tuple) -> _ReadingOrder:
+        entry_rank: dict[tuple, int] = {}
+        by_span: dict[tuple[str, int], tuple[int, int]] = {}
+        by_source: dict[str, int] = {}
+        for chunk in selected:
+            rank = entry_rank.setdefault(_entry_key(chunk), len(entry_rank))
+            by_span[(chunk.source_path, chunk.byte_start)] = (rank, chunk.byte_start)
+            by_source.setdefault(chunk.source_path, rank)
+        return cls(by_span, by_source)
+
+    def rank(self, item: object) -> tuple[int, int]:
+        exact = self.by_span.get((item.source, item.byte_start))
+        if exact is not None:
+            return exact
+        return (self.by_source.get(item.source, len(self.by_source)), item.byte_start)
+
+
 def _render_evidence(evidence: Iterable[GroundedEvidence]) -> str:
     manifest = [asdict(item) for item in evidence]
     return (
@@ -296,7 +361,7 @@ def build_grounded_context(
         snapshot, selected, active_budget
     )
     evidence, stale = _authoritative_evidence(
-        compiled, sources, snapshot.corpus_sha256, vault
+        compiled, sources, snapshot.corpus_sha256, vault, _ReadingOrder.of(selected)
     )
     prompt_context = _packed_context(evidence, index_text, active_budget)
     packed_tokens = len(prompt_context.encode("utf-8"))
@@ -343,7 +408,7 @@ def _profile_selection(
 ) -> tuple[str, tuple]:
     """The chunks this profile exposes, and any cached index text alongside."""
     if profile != "CACHED_FULL":
-        return "", _matching_chunks(snapshot, candidates)
+        return "", _with_entry_siblings(snapshot, _matching_chunks(snapshot, candidates))
     return _cached_full_selection(snapshot, vault)
 
 
@@ -527,20 +592,42 @@ class _FreshSources:
         return tuple(sorted(path for path, ok in self.verdicts.items() if not ok))
 
 
-def _authoritative_evidence(
-    compiled: object, sources: tuple, revision: str, vault: Path
-) -> tuple[list[GroundedEvidence], tuple[str, ...]]:
-    """One entry per distinct authoritative span whose file still says the same."""
+def _quotable_pairs(compiled: object, sources: tuple, fresh: _FreshSources) -> list[tuple]:
+    """Each distinct authoritative span whose file still says the same, with its source."""
     source_by_path = {source.record.relative_path: source for source in sources}
-    fresh = _FreshSources(vault)
-    found: list[GroundedEvidence] = []
+    pairs: list[tuple] = []
     seen: set[tuple[str, int, int]] = set()
     for item in compiled.items:
         source = source_by_path[item.source]
         if not _is_quotable(item, source, seen) or not fresh.holds(source):
             continue
         seen.add((item.source, item.byte_start, item.byte_end))
-        found.append(_evidence_for(item, source, len(found) + 1, revision))
+        pairs.append((item, source))
+    return pairs
+
+
+def _authoritative_evidence(
+    compiled: object,
+    sources: tuple,
+    revision: str,
+    vault: Path,
+    order: _ReadingOrder | None = None,
+) -> tuple[list[GroundedEvidence], tuple[str, ...]]:
+    """One entry per distinct authoritative span, numbered in reading order.
+
+    The packer orders mandatory items by their ids, which puts the pieces of
+    one entry in hash order. With whole entries in the window that would hand
+    the model a session shuffled; `order` puts each entry's pieces back in byte
+    order behind the entry retrieval ranked before it.
+    """
+    fresh = _FreshSources(vault)
+    pairs = _quotable_pairs(compiled, sources, fresh)
+    if order is not None:
+        pairs.sort(key=lambda pair: order.rank(pair[0]))
+    found = [
+        _evidence_for(item, source, index, revision)
+        for index, (item, source) in enumerate(pairs, start=1)
+    ]
     return found, fresh.stale_paths
 
 
@@ -1153,12 +1240,15 @@ def grounded_qa(
     budget: object | None = None,
     deadline: float | None = None,
     retrieve: Callable[[int], Iterable[object]] | None = None,
+    search: Callable[[str, int], Iterable[object]] | None = None,
 ) -> dict[str, object]:
     """Generate and verify one read-only, evidence-grounded answer.
 
     `retrieve(limit)` is how the answer asks for more evidence than it was
-    first given; see `_second_look`. A caller that supplies only `candidates`
-    cannot be asked, and the second look is then limited to entity clustering.
+    first given, and `search(query, limit)` how it asks for evidence about
+    something the question did not say in those words; see `_second_look`.
+    A caller that supplies only `candidates` cannot ask either, and the
+    second look is then limited to entity clustering.
     """
     from context_budget import ContextBudget
 
@@ -1167,6 +1257,9 @@ def grounded_qa(
     _check_deadline(selected_deadline)
     selected_profile = _resolved_profile(profile, question)
     fetch = _resolved_retriever(retrieve, candidates, question, selected_profile, selected_deadline)
+    seek = _resolved_search(
+        search, candidates is not None or retrieve is not None, selected_profile, selected_deadline
+    )
     single = _AnswerPass(
         question,
         Path(vault),
@@ -1177,7 +1270,9 @@ def grounded_qa(
         selected_deadline,
     )
     first_candidates = _resolved_candidates(candidates, fetch)
-    answer, context = _second_look(single, first_candidates, single.run(first_candidates), fetch)
+    answer, context = _second_look(
+        single, first_candidates, single.run(first_candidates), fetch, seek
+    )
     _record_cited_evidence(question, context, answer)
     _record_refused_evidence(question, context, answer)
     answer.pop(DROPPED_GATES_KEY, None)
@@ -1189,24 +1284,34 @@ def _second_look(
     candidates: tuple,
     first: tuple[dict[str, object], GroundedContext],
     fetch: Callable[[int], Iterable[object]] | None,
+    search: Callable[[str, int], Iterable[object]] | None = None,
 ) -> tuple[dict[str, object], GroundedContext]:
     """One more pass when the answer counted or summed. See `aggregation_pass`.
 
-    Two things can make it: the count reached the last page retrieval still
-    held, so retrieval is asked once more and wider; or the items it counted
-    include two names for one thing, found by one clustering call and placed
-    beside the question as data. Either way the answer is generated at most
-    once more, and the second answer is adopted only when it answered.
+    Three things can make it: the count reached the last page retrieval still
+    held, so retrieval is asked once more and wider; the question is fanned out
+    into a few concrete sub-queries about the kind of thing being counted, and
+    what they find joins the candidates; or the items it counted include two
+    names for one thing, found by one clustering call and placed beside the
+    question as data. Either way the answer is generated at most once more,
+    under a rule to list every instance before counting, and the second answer
+    is adopted only when it answered.
     """
+    from aggregation_pass import COUNTING_RULE
+
     answer, context = first
     if not _aggregated(answer):
         return first
     widened = _widened(answer, context, len(candidates), fetch)
+    gathered = _gathered(answer, single, search)
     note = _entity_note(answer, single)
-    if widened is None and not note:
+    more = _merged(candidates, widened, gathered)
+    if more is None and not note:
         return first
-    second = single.run(widened or candidates, note)
-    _record_second_look(single.question, context, widened is not None, bool(note))
+    second = single.run(more or candidates, note + COUNTING_RULE)
+    _record_second_look(
+        single.question, context, widened is not None, bool(note), bool(gathered)
+    )
     return _adopted(first, second)
 
 
@@ -1236,6 +1341,46 @@ def _widened(
     return rows
 
 
+def _gathered(
+    answer: Mapping[str, object],
+    single: _AnswerPass,
+    search: Callable[[str, int], Iterable[object]] | None,
+) -> tuple:
+    """What a fan-out of sub-queries finds about the kind of thing counted."""
+    from aggregation_pass import FANOUT_SYSTEM_PROMPT, counted_inputs, fan_out_queries
+
+    if search is None:
+        return ()
+
+    def ask(prompt: str) -> str | None:
+        return _provider_response(single.generator, prompt, FANOUT_SYSTEM_PROMPT, single.deadline)
+
+    rows: list = []
+    for query in fan_out_queries(single.question, counted_inputs(answer), ask):
+        _check_deadline(single.deadline)
+        rows.extend(search(query, QA_MAX_CANDIDATES))
+    return tuple(rows)
+
+
+def _candidate_key(candidate: object) -> object:
+    """What makes two candidates the same piece, by id or else by position."""
+    identity = _first_present(candidate, _CANDIDATE_ID_KEYS)
+    if identity:
+        return identity
+    return (_first_present(candidate, _CANDIDATE_PATH_KEYS), _candidate_field(candidate, "byte_start"))
+
+
+def _merged(candidates: tuple, widened: tuple | None, gathered: tuple) -> tuple | None:
+    """The first candidates, then whatever is new, capped; None when nothing is new."""
+    merged: dict[object, object] = {}
+    for candidate in (*candidates, *(widened or ()), *gathered):
+        merged.setdefault(_candidate_key(candidate), candidate)
+    rows = tuple(merged.values())[:WIDENED_CANDIDATES]
+    if len(rows) <= len(candidates):
+        return None
+    return rows
+
+
 def _entity_note(answer: Mapping[str, object], single: _AnswerPass) -> str:
     from aggregation_pass import (
         CLUSTER_SYSTEM_PROMPT,
@@ -1261,10 +1406,15 @@ def _adopted(
 
 
 def _record_second_look(
-    question: str, context: GroundedContext, widened: bool, clustered: bool
+    question: str,
+    context: GroundedContext,
+    widened: bool,
+    clustered: bool,
+    gathered: bool = False,
 ) -> None:
     """Best effort, never fatal: that a second look happened, and what made it."""
-    causes = [name for name, fired in (("widened", widened), ("clustered", clustered)) if fired]
+    fired = (("widened", widened), ("clustered", clustered), ("gathered", gathered))
+    causes = [name for name, flag in fired if flag]
     try:
         _write_outcome_events(question, context, "second look: " + ", ".join(causes))
     except Exception:  # noqa: BLE001 - telemetry must never break an answer
@@ -1443,6 +1593,26 @@ def _resolved_candidates(
         return tuple(candidates)
     assert fetch is not None
     return tuple(fetch(QA_MAX_CANDIDATES))
+
+
+def _resolved_search(
+    search: Callable[[str, int], Iterable[object]] | None,
+    fixed: bool,
+    profile: str,
+    deadline: float,
+) -> Callable[[str, int], Iterable[object]] | None:
+    """How to search for something else; None when the caller decided retrieval.
+
+    A caller that fixed the candidates or supplied its own retriever has said
+    how evidence is found, and a search it did not offer is not invented.
+    """
+    if search is not None:
+        return search
+    if fixed:
+        return None
+    return lambda query, limit: _default_candidates(
+        query, profile=profile, deadline=deadline, limit=limit
+    )
 
 
 def _resolved_retriever(

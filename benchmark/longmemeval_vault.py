@@ -325,7 +325,10 @@ def _searchable(question_text: str, question_date: str) -> str:
     return searchable_question(question_text, date.fromisoformat(day_of(question_date)))
 
 
-def _retrieved_rows(question_text: str, profile: str, limit: int | None = None) -> list[dict]:
+def _retrieved_rows(
+    question_text: str, profile: str, limit: int | None = None, *, rerank: bool = True
+) -> list[dict]:
+    """The candidates for one query; a fan-out sub-query skips the cross-encoder."""
     from retrieval import retrieve_via_search_memory
 
     return list(
@@ -334,6 +337,7 @@ def _retrieved_rows(question_text: str, profile: str, limit: int | None = None) 
             limit=limit or _qa_candidates(),
             semantic=True,
             profile=profile,
+            rerank=rerank,
             deadline_monotonic=time.monotonic() + RETRIEVE_DEADLINE_SECONDS,
         )
     )
@@ -481,15 +485,17 @@ def _instrumented_generator(metrics: dict, gold: str = ""):
     return generate
 
 
+def _call_kinds() -> dict[str, str]:
+    from aggregation_pass import CLUSTER_SYSTEM_PROMPT, FANOUT_SYSTEM_PROMPT
+
+    return {CLUSTER_SYSTEM_PROMPT: "cluster_calls", FANOUT_SYSTEM_PROMPT: "fanout_calls"}
+
+
 def _count_call(metrics: dict, system_prompt: str) -> None:
     """Which kind of call this was, so a second look is visible in the row."""
-    from aggregation_pass import CLUSTER_SYSTEM_PROMPT
-
     metrics["provider_calls"] = metrics.get("provider_calls", 0) + 1
-    if system_prompt == CLUSTER_SYSTEM_PROMPT:
-        metrics["cluster_calls"] = metrics.get("cluster_calls", 0) + 1
-        return
-    metrics["answer_calls"] = metrics.get("answer_calls", 0) + 1
+    kind = _call_kinds().get(system_prompt, "answer_calls")
+    metrics[kind] = metrics.get(kind, 0) + 1
 
 
 def dated_question(question: dict) -> str:
@@ -565,6 +571,7 @@ def _answer_outcome(
     profile: str,
     gold: str = "",
     retrieve=None,
+    search=None,
 ) -> dict:
     from context_budget import ContextBudget
     from query_memory import QA_MAX_OUTPUT_TOKENS, grounded_qa
@@ -576,6 +583,7 @@ def _answer_outcome(
             snapshot=snapshot,
             candidates=rows,
             retrieve=retrieve,
+            search=search,
             generator=_instrumented_generator(metrics, gold),
             profile=profile,
             budget=ContextBudget(None, _answer_budget(), QA_MAX_OUTPUT_TOKENS, 512),
@@ -621,8 +629,10 @@ def run_question(question: dict, work: Path) -> dict:
     outcome = _answer_outcome(
         dated_question(question), root, snapshot, rows, metrics, profile,
         str(question.get("answer", "")),
-        # The second look's way of asking for more than the first twelve.
+        # The second look's way of asking for more than the first twelve, and
+        # for what a fanned-out sub-query finds, without the cross-encoder.
         retrieve=lambda limit: _retrieved_rows(searchable, profile, limit),
+        search=lambda query, limit: _retrieved_rows(query, profile, limit, rerank=False),
     )
     finished = time.monotonic()
     return {
