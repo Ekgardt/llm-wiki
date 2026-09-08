@@ -304,6 +304,34 @@ def build_generation(root: Path, state: Path, daily_files: list[str]) -> tuple[o
     return snapshot, info
 
 
+FACT_KEYS_ENV = "LLMWIKI_BENCH_FACT_KEYS"
+
+
+def _key_the_haystack(state: Path, snapshot: object) -> int | None:
+    """Extract fact keys for this question's turns when the arm asks for it.
+
+    About ten batched provider calls a question; off by default because it is
+    the stand's cost, not the product's, where the nightly step pays it once.
+    """
+    if os.environ.get(FACT_KEYS_ENV, "").strip() != "1":
+        return None
+    import fact_keys
+    from llm_client import call_llm
+    from query_memory import _sentence_encoder
+
+    store = fact_keys.KeyStore(fact_keys.store_path(state))
+    try:
+        return fact_keys.key_turns(
+            store,
+            snapshot.chunks,
+            lambda prompt, system_prompt: call_llm(prompt, system_prompt, 1500),
+            _sentence_encoder(),
+            time.monotonic() + BUILD_DEADLINE_SECONDS,
+        )
+    finally:
+        store.close()
+
+
 def profile_for(question_text: str) -> str:
     from retrieval import analyze_query
 
@@ -684,6 +712,7 @@ def run_question(question: dict, work: Path) -> dict:
     build_started = time.monotonic()
     snapshot, build_info = build_generation(root, state, daily_files)
     _warm_reranker()
+    keyed = _key_the_haystack(state, snapshot)
     plain = str(question["question"])
     profile = profile_for(plain)
     retrieve_started = time.monotonic()
@@ -722,6 +751,7 @@ def run_question(question: dict, work: Path) -> dict:
         **_reranker_fields(rows),
         **_measured_compile(root, snapshot, rows, profile),
         **build_info,
+        "keyed_turns": keyed,
         **outcome,
         **metrics,
         "ingest_seconds": round(build_started - ingest_started, 2),

@@ -223,6 +223,20 @@ def _compile_step() -> _Step:
     )
 
 
+def _fact_keys_step() -> _Step:
+    """Key the user turns of new daily entries, so retrieval can find a fact by its statement.
+
+    One provider call per twenty-five turns, in this window where nobody is
+    waiting; a turn is keyed once. See `fact_keys`.
+    """
+    return _Step(
+        "Step 2a: keying new user turns...",
+        "fact_keys",
+        _script("fact_keys.py"),
+        660,
+    )
+
+
 def _checkpoint_step() -> _Step:
     """Clear a checkpoint sequence whose own request is never coming back.
 
@@ -383,7 +397,7 @@ def _nightly_steps(run_step, log, ownership: OwnerLease | None) -> int:
     # Step 2 must not skip compile just because a hook-triggered one runs.
     _wait_for_compile_idle(log)
     before = _last_compile_finished()
-    failures += _run_steps(run_step, log, [_compile_step()])
+    failures += _run_steps(run_step, log, [_compile_step(), _fact_keys_step()])
 
     log("Step 2b: waiting for compile to finish...")
     if not _wait_compile_finished():
