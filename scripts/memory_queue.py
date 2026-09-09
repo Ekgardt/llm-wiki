@@ -10798,6 +10798,10 @@ class _QueueV3CandidateReader:
                 """SELECT * FROM tasks
                    WHERE state='ready' AND attempts < ? AND available_at <= ?
                      AND NOT EXISTS (
+                         SELECT 1 FROM capture_task_links link
+                         WHERE link.task_id=tasks.id
+                     )
+                     AND NOT EXISTS (
                          SELECT 1 FROM source_fences fence
                          WHERE instr(
                                    CAST(tasks.payload_blob AS TEXT),

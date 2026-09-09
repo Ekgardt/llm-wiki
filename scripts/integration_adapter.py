@@ -34,6 +34,8 @@ from session_start_project_state import _compute_slug
 SCRIPTS_DIR = Path(__file__).resolve().parent
 DELEGATE_TIMEOUT_SECONDS = 10
 MAINTENANCE_DRAIN_TIMEOUT_SECONDS = 600
+CAPTURE_DRAIN_MAX_TASKS = 20
+CAPTURE_DRAIN_SECONDS = 450
 MAX_TRANSCRIPT_TEXT_CHARS = 8000
 MAX_CHECKPOINT_ERROR_CHARS = 500
 # One host event, not one tool result. Claude Code sends `tool_response` in the
@@ -2142,10 +2144,10 @@ def _cleanup_runtime_transient(path: Path) -> None:
         pass
 
 
-def _run_session_start_maintenance() -> int:
+def _run_maintenance_command(script: str, argument: str) -> None:
     try:
         subprocess.run(
-            [sys.executable, str(ROOT / "scripts" / "memory_queue.py"), "work"],
+            [sys.executable, str(ROOT / "scripts" / script), argument],
             cwd=str(ROOT),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -2155,6 +2157,11 @@ def _run_session_start_maintenance() -> int:
         )
     except (OSError, subprocess.SubprocessError):
         pass
+
+
+def _run_session_start_maintenance() -> int:
+    _run_maintenance_command("integration_adapter.py", "--capture-worker")
+    _run_maintenance_command("memory_queue.py", "work")
     try:
         spawn_compile_if_idle()
     except Exception:  # noqa: BLE001
@@ -2978,12 +2985,26 @@ def _run_active_capture_worker_once() -> int:
     queue = active_memory_queue(vault, state_root)
     coordinator = active_markdown_coordinator(vault, state_root)
     process_missing = partial(process_new_capture, queue, coordinator)
-    run_capture_worker_once(
-        queue,
-        coordinator,
-        process_missing=process_missing,
+    work = partial(
+        run_capture_worker_once, queue, coordinator, process_missing=process_missing
     )
+    _drain_capture_work(work)
     return 0
+
+
+def _drain_capture_work(work) -> None:
+    """Drain successful captures in bounded turns; failures keep their retry policy."""
+    deadline = time.monotonic() + CAPTURE_DRAIN_SECONDS
+    for _ in range(CAPTURE_DRAIN_MAX_TASKS):
+        if work() is None:
+            return
+        if time.monotonic() >= deadline:
+            break
+    # Every completed work() has released its owner. One successor checks for
+    # any remainder, including intents whose event wake met our live owner.
+    spawn_detached(
+        [sys.executable, str(SCRIPTS_DIR / "integration_adapter.py"), "--capture-worker"]
+    )
 
 
 def _oversize_stdin() -> ValueError:

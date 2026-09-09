@@ -505,7 +505,7 @@ def test_terminal_file_is_bound_before_task_success(tmp_path: Path) -> None:
         intent_id="1" * 64,
         intent_sha256="2" * 64,
     )
-    lease = _require_value(queue.claim("capture-worker"))
+    lease = _require_value(queue.claim_capture("capture-worker"))
     owner = registry.acquire("queue-worker", scope="worker:capture-terminal")
     queue.results_dir.mkdir()
 
@@ -555,7 +555,7 @@ def test_terminal_completion_rejects_lost_intent_fence(tmp_path: Path) -> None:
         intent_id="3" * 64,
         intent_sha256="4" * 64,
     )
-    lease = queue.claim("capture-worker")
+    lease = queue.claim_capture("capture-worker")
     assert lease is not None
     owner = registry.acquire("queue-worker", scope="worker:capture-terminal")
     queue.results_dir.mkdir()
@@ -616,7 +616,7 @@ def test_preexisting_terminal_completes_before_provider_call(tmp_path: Path) -> 
         intent_id="5" * 64,
         intent_sha256="6" * 64,
     )
-    lease = queue.claim("capture-worker")
+    lease = queue.claim_capture("capture-worker")
     assert lease is not None
     owner = registry.acquire("queue-worker", scope="worker:capture-terminal")
     queue.results_dir.mkdir()
@@ -657,7 +657,7 @@ def test_capture_worker_claims_v3_terminal_without_provider_call(tmp_path: Path)
         intent_id="7" * 64,
         intent_sha256="8" * 64,
     )
-    lease = queue.claim("crashed-worker")
+    lease = queue.claim_capture("crashed-worker")
     assert lease is not None
     owner = registry.acquire("queue-worker", scope="worker:stage-terminal")
     queue.results_dir.mkdir()
