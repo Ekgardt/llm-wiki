@@ -491,18 +491,23 @@ except mq.MigrationBusy as exc:
     # first one spent.
     _await_file(entered, LONG_TIMEOUT)
     _await_first_exit(processes, LONG_TIMEOUT)
-    assert sum(process.poll() is not None for process in processes) == 1
+    assert _finished(processes) == 1
     release.write_text("go", encoding="ascii")
-    outputs = []
-    for process in processes:
-        stdout, stderr = process.communicate(timeout=PAUSE_TIMEOUT)
-        assert process.returncode == 0, stderr
-        outputs.append(json.loads(stdout))
+    outputs = [_contender_output(process) for process in processes]
 
-    assert sum(item["state"] == "migrated" for item in outputs) == 1
-    assert sum(item["state"] == "busy" for item in outputs) == 1
+    assert sorted(item["state"] for item in outputs) == ["busy", "migrated"]
     assert not list((tmp_path / "run").glob("queue-*.lock"))
     assert stale.epoch >= 1
+
+
+def _finished(processes: list[subprocess.Popen]) -> int:
+    return sum(process.poll() is not None for process in processes)
+
+
+def _contender_output(process: subprocess.Popen) -> dict:
+    stdout, stderr = process.communicate(timeout=PAUSE_TIMEOUT)
+    assert process.returncode == 0, stderr
+    return json.loads(stdout)
 
 
 def test_late_upgraded_legacy_write_cannot_recreate_queue_during_migration(
@@ -779,10 +784,15 @@ def test_redrive_insert_and_link_commit_in_one_transaction(tmp_path: Path) -> No
     replacement = queue.redrive(original)
 
     assert queue.get(replacement).redrive_of == original
-    assert sum(item == "BEGIN IMMEDIATE" for item in statements) == 1
-    inserts = [item for item in statements if item.startswith("INSERT INTO tasks")]
-    assert len(inserts) == 1 and original in inserts[0]
-    assert not any(item.startswith("UPDATE tasks SET redrive_of") for item in statements)
+    assert _statements_starting("BEGIN IMMEDIATE", statements) == ["BEGIN IMMEDIATE"]
+    inserts = _statements_starting("INSERT INTO tasks", statements)
+    assert len(inserts) == 1
+    assert original in inserts[0]
+    assert _statements_starting("UPDATE tasks SET redrive_of", statements) == []
+
+
+def _statements_starting(prefix: str, statements: list[str]) -> list[str]:
+    return [item for item in statements if item.startswith(prefix)]
 
 
 def test_purge_requires_cutoff_and_export_then_verifies_before_deleting(
