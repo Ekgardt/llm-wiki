@@ -315,7 +315,9 @@ def main() -> int:
 
     spawned, skipped, reason = _spawn_outcome(args.force)
     print(f"maybe_compile: {reason}")
-    return 0 if spawned or skipped else 1
+    if spawned or skipped:
+        return 0
+    return 1
 
 
 if __name__ == "__main__":
