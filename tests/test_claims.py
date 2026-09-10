@@ -329,7 +329,7 @@ def test_claim_index_excludes_ambiguous_active_evidence_with_stable_diagnostic(
 def test_claim_index_rejects_escape_symlink_oversize_and_unbounded_limit(
     pipeline, tmp_path: Path
 ) -> None:
-    from claims import ClaimIndex
+    from claims import MAX_CLAIM_PAGE_BYTES, ClaimIndex
 
     index = ClaimIndex(tmp_path / "state")
     outside = tmp_path / "outside.md"
@@ -342,7 +342,7 @@ def test_claim_index_rejects_escape_symlink_oversize_and_unbounded_limit(
         index.candidates(None, limit=51)
     huge = tmp_path / "knowledge/notes/huge.md"
     huge.parent.mkdir(parents=True)
-    huge.write_bytes(b"x" * (4 * 1024 * 1024 + 1))
+    huge.write_bytes(b"x" * (MAX_CLAIM_PAGE_BYTES + 1))
     with pytest.raises(ValueError, match="exceeds"):
         index.rebuild(lambda: [huge])
     if hasattr(os, "symlink"):

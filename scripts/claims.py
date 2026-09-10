@@ -17,6 +17,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from bounded_io import read_stable_bytes
+from claim_tree_manifest import MAX_CLAIM_TREE_FILE_BYTES
 from compile_cache import _restrict_owner_only, _verify_owner_only
 from evidence_resolver import (
     EvidenceRef,
@@ -36,7 +37,12 @@ SCHEMA_DIR = Path(__file__).with_name("schemas")
 LEDGER_SCHEMA = SCHEMA_DIR / "claim-ledger-v1.json"
 CANDIDATE_SCHEMA = SCHEMA_DIR / "claim-candidate-v1.json"
 RELATION_SCHEMA = SCHEMA_DIR / "claim-relations-v1.json"
-MAX_CLAIM_PAGE_BYTES = 4 * 1024 * 1024
+# The claim tree's ceiling, which is the journal's: a project journal is one of
+# the pages this index reads, and a page the journal accepts must never be one
+# the index refuses. Measured 2026-09-10: a 4.2 MB journal refused every compile
+# for three days after the claim tree's own cap had already been raised. See
+# `docs/research/2026-09-10-one-ceiling-for-every-reader-of-a-journal.md`.
+MAX_CLAIM_PAGE_BYTES = MAX_CLAIM_TREE_FILE_BYTES
 MAX_CANDIDATES = 50
 MAX_ACTIVE_RECORDS = 10_000
 MAX_DECIMAL_CHARS = 128

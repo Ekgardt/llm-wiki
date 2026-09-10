@@ -41,6 +41,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import read_stable_bytes  # noqa: E402
+from claim_tree_manifest import MAX_CLAIM_TREE_FILE_BYTES  # noqa: E402
 from claims import (  # noqa: E402
     CANDIDATE_SCHEMA,
     MAX_CLAIM_PAGE_BYTES,
@@ -77,7 +78,10 @@ WIKILINK_RE = re.compile(r"\[\[([^\]|#]+?)(?:\|[^\]]+)?\]\]")
 WORD_RE = re.compile(r"\b\w+\b")
 
 DEFAULT_SPARSE_WORDS = 200
-MAX_LINT_PAGE_BYTES = 4 * 1024 * 1024
+# The claim tree's ceiling: lint reads the same project journals the claim
+# index does, so it accepts what the journal may be. See
+# `docs/research/2026-09-10-one-ceiling-for-every-reader-of-a-journal.md`.
+MAX_LINT_PAGE_BYTES = MAX_CLAIM_TREE_FILE_BYTES
 
 # Editorial page sets (EDITORIAL_NAMES, BACKLINK_EXEMPT_NAMES,
 # BROKEN_LINK_SKIP_NAMES) come from `vault_editorial` — shared with
