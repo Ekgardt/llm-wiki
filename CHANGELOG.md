@@ -84,7 +84,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   trail and counters with its reason and session (audit H5). Research:
   `docs/research/2026-09-10-a-lost-session-record-is-written-down.md`.
 - **Every hang bound in the tests comes from one place.** 330 literal
-  bounds on `join`, `result`, `get` and `wait` across 26 test files now
+  bounds on `join`, `result`, `get` and `wait` in 26 files under `tests/` now
   name `SHORT_TIMEOUT` or `LONG_TIMEOUT` from `tests/slow_machine.py`; a
   bound the test expects to elapse, or a pause whose result the test
   discards, stays literal by design, and
