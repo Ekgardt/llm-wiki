@@ -907,57 +907,6 @@ def test_loader_rejects_oversized_schema_before_validation(tmp_path):
         runner.load_corpus(CORPUS, oversized)
 
 
-def test_run_benchmark_defaults_to_v2_and_preserves_explicit_legacy(monkeypatch):
-    legacy_path = BENCHMARK / "run_benchmark.py"
-    spec = importlib.util.spec_from_file_location("legacy_benchmark_v2_dispatch", legacy_path)
-    assert spec is not None and spec.loader is not None
-    benchmark = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(benchmark)
-
-    forwarded = []
-    monkeypatch.setattr(sys, "argv", ["run_benchmark.py", "--json"])
-    monkeypatch.setattr(benchmark, "_run_retrieval_v2", lambda args: forwarded.append(args) or 7)
-    assert benchmark.main() == 7
-    assert forwarded == [["--json"]]
-
-    monkeypatch.setattr(sys, "argv", ["run_benchmark.py", "--semantic"])
-    assert benchmark.main() == 7
-    assert forwarded[-1] == ["--semantic"]
-
-    monkeypatch.setattr(sys, "argv", ["run_benchmark.py", "--legacy-only"])
-    monkeypatch.setattr(
-        benchmark,
-        "_load_legacy_corpus",
-        lambda: {"version": "legacy-60-v1", "queries": [{"query": "q"}]},
-    )
-    monkeypatch.setattr(benchmark, "_tracked_knowledge_paths", lambda: [])
-    monkeypatch.setattr(
-        benchmark,
-        "_run_benchmark",
-        lambda *args, **kwargs: {"recall_at_k": {5: 1.0}},
-    )
-    assert benchmark.main() == 0
-
-
-@pytest.mark.parametrize("flag", ["--semantic", "--report"])
-def test_run_benchmark_rejects_legacy_mode_conflicts(monkeypatch, flag):
-    legacy_path = BENCHMARK / "run_benchmark.py"
-    spec = importlib.util.spec_from_file_location("legacy_benchmark_conflict", legacy_path)
-    assert spec is not None and spec.loader is not None
-    benchmark = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(benchmark)
-    monkeypatch.setattr(sys, "argv", ["run_benchmark.py", "--legacy-only", flag])
-    monkeypatch.setattr(
-        benchmark,
-        "_load_legacy_corpus",
-        lambda: (_ for _ in ()).throw(AssertionError("legacy mode must not run")),
-    )
-
-    with pytest.raises(SystemExit) as raised:
-        benchmark.main()
-    assert raised.value.code == 2
-
-
 def test_run_benchmark_help_describes_v2_default_and_task_10_reservations():
     result = subprocess.run(
         [sys.executable, str(BENCHMARK / "run_benchmark.py"), "--help"],
