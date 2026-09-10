@@ -228,7 +228,9 @@ def write_session_evidence(
     """Write the session record; returns the path, or None when there is nothing.
 
     Never raises: losing the record is bad, but breaking capture is worse, and the
-    tier decision that follows must not depend on this write.
+    tier decision that follows must not depend on this write. A lost record is
+    written to the capture-failure trail, so it is never silent (audit H5,
+    `docs/research/2026-09-10-a-lost-session-record-is-written-down.md`).
     """
     from markdown_transaction import stable_operation_id
 
@@ -245,9 +247,21 @@ def write_session_evidence(
             coordinator,
             owner,
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - recorded, never raised
+        _record_lost_record(exc, str(fields.get("session") or ""))
         return None
     return path
+
+
+def _record_lost_record(error: BaseException, session_id: str) -> None:
+    from capture_diagnostics import record_capture_failure
+
+    record_capture_failure(
+        "session_evidence",
+        f"{type(error).__name__}: {error}",
+        error=error,
+        session_id=session_id or None,
+    )
 
 
 def _write_record(
