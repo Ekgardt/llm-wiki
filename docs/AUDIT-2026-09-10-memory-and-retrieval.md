@@ -146,6 +146,7 @@ disposable, fail-closed, bounded reads, no silent fallback).
   generation leg does, or report a distinct reason (`legacy_dense_disabled`).
 
 ### M2 — `docs/USER-GUIDE.md` describes a `--semantic` opt-in that no longer exists [defect]
+- Status: fixed 2026-09-10 (`docs/research/2026-09-10-the-status-names-what-the-search-reads.md`).
 - Rule: R3.
 - Evidence: `docs/USER-GUIDE.md:295, 300-303` ("Plain `search_memory.py`
   always runs BM25. `--semantic` enables vectors"); `scripts/search_memory.py:6118-6127`
@@ -155,6 +156,7 @@ disposable, fail-closed, bounded reads, no silent fallback).
   example.
 
 ### M3 — `--status`, `--rebuild` and the troubleshooting page act on the legacy index the product no longer reads first [defect]
+- Status: fixed 2026-09-10 (`docs/research/2026-09-10-the-status-names-what-the-search-reads.md`).
 - Rule: R3.
 - Evidence: `scripts/search_memory.py:6189-6211` (`_print_index_status`
   opens `cache/index.sqlite` only; `_rebuild_index_cli` builds the legacy

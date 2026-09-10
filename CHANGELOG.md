@@ -56,6 +56,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **The status names what the search reads.** `search_memory.py --status`
+  reports the active generation (id, extractor, vector state, model) before
+  the legacy index, `--rebuild` says it rebuilds the legacy index only, and
+  the user guide documents the on-by-default vectors with `--no-semantic`
+  and points an empty search at `doctor.py` (audit M2, M3). Research:
+  `docs/research/2026-09-10-the-status-names-what-the-search-reads.md`.
 - **One page ceiling for every reader of `knowledge/`.** The guardrails
   snapshot, the compile after-image, the index rebuild and access telemetry
   refused a page at 4 MiB, backlink repair at 512 KiB, while the journal,

@@ -2817,3 +2817,44 @@ def test_the_vector_path_boosts_a_project_match_by_one_and_a_half(monkeypatch, t
     by_id = {item["chunk_id"]: item["score"] for item in scored}
     assert by_id["a"] == round(0.4 * 1.5, 4)
     assert by_id["b"] == round(0.4, 4)
+
+
+def test_status_names_the_active_generation_before_the_legacy_index(monkeypatch, capsys):
+    """Audit M3: the status says what an answer reads first."""
+    import search_memory
+
+    class _Catalog:
+        def get_active(self):
+            return {
+                "generation_id": "generation-1",
+                "extractor_version": "markdown-heading-extractor/v3",
+                "vector_state": "complete",
+                "embedding_model_id": "intfloat/multilingual-e5-small",
+            }
+
+    monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: _Catalog())
+    monkeypatch.setattr(search_memory, "_collect_pages", lambda _scope: [])
+    monkeypatch.setattr(search_memory, "INDEX_FILE", Path("/nonexistent/index.sqlite"))
+
+    assert search_memory._print_index_status() == 0
+    lines = capsys.readouterr().out.splitlines()
+
+    assert lines[0] == (
+        "Active generation: generation-1 (markdown-heading-extractor/v3, "
+        "vectors complete, model intfloat/multilingual-e5-small)"
+    )
+    assert lines[1] == "Index: not built (0 pages would be indexed)"
+
+
+def test_status_says_when_there_is_no_generation(monkeypatch, capsys):
+    import search_memory
+
+    monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: None)
+    monkeypatch.setattr(search_memory, "_collect_pages", lambda _scope: [])
+    monkeypatch.setattr(search_memory, "INDEX_FILE", Path("/nonexistent/index.sqlite"))
+
+    search_memory._print_index_status()
+
+    assert capsys.readouterr().out.splitlines()[0] == (
+        "Active generation: none (search falls back to the legacy index)"
+    )

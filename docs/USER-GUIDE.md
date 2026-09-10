@@ -292,15 +292,16 @@ in `run/queue.sqlite3` and drained by a short-lived worker at the next session.
 
 ```bash
 uv run python scripts/search_memory.py "how do we handle auth?"
-uv run python scripts/search_memory.py "database performance" --semantic
+uv run python scripts/search_memory.py "database performance" --no-semantic
 uv run python scripts/search_memory.py --project my-app "decisions"
 uv run python scripts/query_memory.py "why did we choose Postgres?" --file-back
 ```
 
-Plain `search_memory.py` always runs BM25. `--semantic` enables vectors when the
-optional model is available; graph-neighbor fusion applies only when graph evidence
-is available. If optional signals are unavailable, search returns the BM25 result
-instead of claiming triple-fusion.
+`search_memory.py` reads the active evidence generation first and falls back
+to the legacy BM25 index. Vectors are on by default when the optional model is
+available; `--no-semantic` turns them off. Graph-neighbor fusion applies only
+when graph evidence is available. If optional signals are unavailable, search
+returns the lexical result instead of claiming triple-fusion.
 `query_memory.py` asks the LLM to answer from the knowledge index and
 optionally files the answer as a Q&A page.
 
@@ -643,8 +644,11 @@ at most 0.04 (`docs/research/2026-09-10-cross-lingual-memory-world-practice.md`)
 - Check `run/state.json` for `compiled_daily_hashes` and `last_compile_status`
 
 ### "Search returns nothing"
-- Rebuild the index: `uv run python scripts/search_memory.py --rebuild`
-- Check `cache/index.sqlite` exists and is non-empty
+- See what the search reads: `uv run python scripts/search_memory.py --status`
+  (the active generation, then the legacy index)
+- Check health and rebuild the generation: `uv run python scripts/doctor.py`,
+  then `uv run python scripts/doctor.py --repair`
+- `search_memory.py --rebuild` rebuilds only the legacy `cache/index.sqlite`
 
 ### "Hook errors"
 - Check `logs/hook-errors.log` for captured exceptions

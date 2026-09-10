@@ -5288,7 +5288,23 @@ def _print_cli_usage() -> int:
     return 1
 
 
+def _active_generation_line() -> str:
+    """What the search reads first: the active generation, or the legacy fallback."""
+    catalog = _active_generation_catalog()
+    manifest = None if catalog is None else catalog.get_active()
+    if not isinstance(manifest, dict):
+        return "Active generation: none (search falls back to the legacy index)"
+    return (
+        f"Active generation: {manifest.get('generation_id')} "
+        f"({manifest.get('extractor_version')}, vectors {manifest.get('vector_state')}, "
+        f"model {manifest.get('embedding_model_id')})"
+    )
+
+
 def _print_index_status() -> int:
+    # The generation is what an answer reads first; the legacy index is the
+    # fallback. Research: docs/research/2026-09-10-the-status-names-what-the-search-reads.md
+    print(_active_generation_line())
     pages = _collect_pages("all")
     if not INDEX_FILE.exists():
         print(f"Index: not built ({len(pages)} pages would be indexed)")
@@ -5306,6 +5322,7 @@ def _print_index_status() -> int:
 
 def _rebuild_index_cli(scope: str) -> int:
     pages = _collect_pages(scope)
+    print("Rebuilding the legacy index only; the generation is built by doctor.py --repair")
     print(f"Rebuilding index with {len(pages)} pages...")
     t0 = time.time()
     _build_index(pages)
