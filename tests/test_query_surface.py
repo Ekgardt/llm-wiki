@@ -40,6 +40,12 @@ CORE = (
     "        return top(1)\n"
 )
 BROKEN_JS = "function ok() { return 1; }\nfunction bad( {\n  return 2\n"
+
+
+def _write(path: Path, text: str) -> None:
+    """Exact bytes with LF: `write_text` would give a Windows runner CRLF, and
+    the byte offsets and diff lines the tests assert are those of these bytes."""
+    path.write_bytes(text.encode("utf-8"))
 BAD_PY = "def f(:\n    pass\n"
 EMPTY_AFFECTED = {"decisions": [], "pages": [], "tests": [], "checkpoints": []}
 
@@ -54,10 +60,10 @@ def _make_repository(root: Path) -> Path:
     _git(root, "config", "user.email", "test@example.invalid")
     _git(root, "config", "user.name", "test")
     (root / "pkg").mkdir()
-    (root / "pkg/__init__.py").write_text("", encoding="utf-8")
-    (root / "pkg/core.py").write_text(CORE, encoding="utf-8")
-    (root / "pkg/broken.js").write_text(BROKEN_JS, encoding="utf-8")
-    (root / "pkg/bad.py").write_text(BAD_PY, encoding="utf-8")
+    _write(root / "pkg/__init__.py", "")
+    _write(root / "pkg/core.py", CORE)
+    _write(root / "pkg/broken.js", BROKEN_JS)
+    _write(root / "pkg/bad.py", BAD_PY)
     _git(root, "add", "-A")
     _git(root, "commit", "-qm", "initial")
     return root
@@ -115,11 +121,11 @@ def _values(rows: list, key: str) -> list:
 def _with_edited_core(repository: Path, call, *arguments):
     """Run `call` while `pkg/core.py` differs from the indexed bytes."""
     target = repository / "pkg/core.py"
-    target.write_text(CORE.replace("value + 1", "value + 2"), encoding="utf-8")
+    _write(target, CORE.replace("value + 1", "value + 2"))
     try:
         return call(*arguments)
     finally:
-        target.write_text(CORE, encoding="utf-8")
+        _write(target, CORE)
 
 
 # --------------------------------------------------------------------------
@@ -340,7 +346,7 @@ def test_callers_with_depth_walk_the_calls_closure_and_report_the_reach(indexed)
     expected = {"depth_applied": 3, "depth_frontier_open": True, "symbol_resolved": True}
     assert _picked(answer, expected) == expected
     first = answer["callers"][0]
-    assert (first["file"].endswith("pkg/core.py"), first["line"]) == (True, 5)
+    assert (Path(first["file"]).as_posix().endswith("pkg/core.py"), first["line"]) == (True, 5)
 
 
 def test_a_deep_enough_walk_closes_its_frontier(indexed):
