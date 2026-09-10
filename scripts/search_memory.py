@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bounded_io import read_stable_bytes  # noqa: E402
+from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes  # noqa: E402
 from corpus_snapshot import (  # noqa: E402
     MAX_CORPUS_FILE_BYTES,
     MAX_CORPUS_FILES,
@@ -76,7 +76,7 @@ MAX_SEARCH_ENTRIES = 20_000
 MAX_SEARCH_DIRECTORIES = 2_000
 MAX_SEARCH_DEPTH = 32
 MAX_SEARCH_LIMIT = 1_000
-MAX_PAGE_BYTES = 8 * 1024 * 1024
+MAX_PAGE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 SEARCH_INDEX_COLUMNS = (
     "path", "title", "summary", "body", "project", "timestamp", "slug",
 )

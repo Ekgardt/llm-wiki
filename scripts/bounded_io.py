@@ -9,6 +9,15 @@ from pathlib import Path
 
 _READ_CHUNK_BYTES = 64 * 1024
 
+# The ceiling for one Markdown page under `knowledge/`, declared once: every
+# reader of a page (journal, claim tree, guardrails snapshot, corpus, search,
+# compile after-image, index rebuild, backlink repair, access telemetry)
+# aliases this, so a page one of them accepts is never one another refuses.
+# Measured 2026-09-09: a 4.2 MB journal over a 4 MiB reader cap stopped every
+# compile for three days. Research:
+# docs/research/2026-09-10-one-page-ceiling-for-every-reader-of-knowledge.md
+MAX_KNOWLEDGE_PAGE_BYTES = 8 * 1024 * 1024
+
 
 def _validated_deadline(deadline: float | None) -> float | None:
     if deadline is None:

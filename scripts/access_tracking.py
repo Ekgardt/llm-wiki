@@ -24,14 +24,14 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bounded_io import read_stable_bytes  # noqa: E402
+from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes  # noqa: E402
 from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
 from memory_state import ROOT, STATE_ROOT  # noqa: E402
 from reliable_memory import read_runtime_bytes, sha256_bytes  # noqa: E402
 
 KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
 ACCESS_LOG_FILE = STATE_ROOT / "cache" / "access_log.jsonl"
-MAX_ACCESS_PAGE_BYTES = 4 * 1024 * 1024
+MAX_ACCESS_PAGE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 MAX_LEGACY_ACCESS_LOG_BYTES = 16 * 1024 * 1024
 MAX_LEGACY_ACCESS_LOG_LINES = 100_000
 MAX_PAGES_PER_EXPORT = 100

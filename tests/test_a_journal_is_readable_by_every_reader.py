@@ -55,3 +55,31 @@ def test_a_journal_past_every_cap_no_longer_stops_a_claim_rebuild(tmp_path: Path
     index = claims.ClaimIndex(tmp_path / "state", vault=vault)
     index.rebuild()
     assert index.path.is_file()
+
+
+def test_every_reader_of_a_knowledge_page_shares_one_ceiling() -> None:
+    """Audit M4: the family, not the pair — one ceiling declared in bounded_io."""
+    import access_tracking
+    import bounded_io
+    import compile_memory
+    import corpus_snapshot
+    import rebuild_memory_index
+    import repair_backlinks
+    import search_memory
+
+    ceilings = {
+        "journal": project_journal.MAX_JOURNAL_BYTES,
+        "claim_tree": claim_tree_manifest.MAX_CLAIM_TREE_FILE_BYTES,
+        "guardrails": claim_tree_manifest.MAX_GUARDRAIL_SOURCE_FILE_BYTES,
+        "claims": claims.MAX_CLAIM_PAGE_BYTES,
+        "lint": lint_memory.MAX_LINT_PAGE_BYTES,
+        "corpus": corpus_snapshot.MAX_CORPUS_FILE_BYTES,
+        "search": search_memory.MAX_PAGE_BYTES,
+        "after_image": compile_memory.MAX_AFTER_IMAGE_BYTES,
+        "index": rebuild_memory_index.MAX_PAGE_BYTES,
+        "backlinks": repair_backlinks.MAX_PAGE_BYTES,
+        "access": access_tracking.MAX_ACCESS_PAGE_BYTES,
+    }
+
+    assert set(ceilings.values()) == {bounded_io.MAX_KNOWLEDGE_PAGE_BYTES}
+    assert bounded_io.MAX_KNOWLEDGE_PAGE_BYTES == 8 * 1024 * 1024

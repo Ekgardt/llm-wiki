@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bounded_io import read_stable_bytes  # noqa: E402
+from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes  # noqa: E402
 from claim_tree_manifest import snapshot_claim_tree  # noqa: E402
 from claims import (  # noqa: E402
     LEDGER_SCHEMA,
@@ -130,7 +130,7 @@ MAX_PROVIDER_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_OPERATIONS = 100
 MAX_EVIDENCE_PER_OPERATION = 32
 MAX_RELATED = 64
-MAX_AFTER_IMAGE_BYTES = 4 * 1024 * 1024
+MAX_AFTER_IMAGE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 MAX_RECEIPT_BYTES = 1024 * 1024
 MAX_LOG_BYTES = 4 * 1024 * 1024
 MAX_INDEX_BYTES = 4 * 1024 * 1024

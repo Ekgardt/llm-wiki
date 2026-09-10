@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from context_budget import ContextItem
     from operational_ownership import OwnerLease
 
+from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES
 from markdown_transaction import (
     ABSENT,
     MarkdownChange,
@@ -48,7 +49,7 @@ schema_version: project-checkpoint/v1
 
 _SCHEMA = Path(__file__).with_name("schemas") / "project-checkpoint-v1.json"
 _HEARTBEAT_SECONDS = 10
-MAX_JOURNAL_BYTES = 8 * 1024 * 1024
+MAX_JOURNAL_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 MAX_PROJECTION_BYTES = 1024 * 1024
 MAX_JOURNAL_EVENTS = 1000
 SESSION_START_RECOVERY_SECONDS = 0.25

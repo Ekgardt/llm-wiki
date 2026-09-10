@@ -17,7 +17,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import yaml
-from bounded_io import read_stable_bytes
+from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes
 from code_languages import language_for_path
 from page_status import is_retired
 from vault_editorial import EDITORIAL_NAMES
@@ -26,7 +26,7 @@ COLLECTOR_VERSION = "corpus-collector/v1"
 EXTRACTOR_VERSION = "markdown-heading-extractor/v3"
 
 MAX_CORPUS_FILES = 10_000
-MAX_CORPUS_FILE_BYTES = 8 * 1024 * 1024
+MAX_CORPUS_FILE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 MAX_CORPUS_TOTAL_BYTES = 64 * 1024 * 1024
 MAX_CORPUS_INSPECTED_ENTRIES = 50_000
 MAX_CORPUS_DIRECTORIES = 5_000
